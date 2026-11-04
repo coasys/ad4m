@@ -12,7 +12,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `verdict.rs` | `LinkVerdict` (`Valid`, `Invalid(reason)`, `CantCheck`, `Flagged`) and `judge`, a pure function of the signature, the anchor, the signer's log and the space order; `KeyVerdict`, `VerdictChange`, `key_verdict` |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
-| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages; one fetch per log at a time, and a waiter takes the answer of a fetch that began after it called), `ingest`, `accept` (a lower store head: `Behind` or `Conflict`, a fork only with a valid rival), `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh); `KeyMap` (every trusted log by signing key, and the store's "no log" answers for 15 minutes; `global_key_map`), `subscribe` (a `VerdictChange` when an accepted head changes a key's verdict) |
+| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages; one fetch per log at a time, and a waiter takes the answer of a fetch that began after it called), `ingest`, `accept` (a lower store head: `Behind` or `Conflict`, a fork only with a valid rival), `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh), `store_behind`; fork checks `rival_signer`, `holding_rival` (one fork per signing master, `identity_fork_signers`); `KeyMap` (every trusted log by signing key, and the store's "no log" answers for 15 minutes; `global_key_map`), `subscribe` (a `VerdictChange` when an accepted head changes a key's verdict) |
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
@@ -23,8 +23,10 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `service.rs` | `IdentityService`: status, log, resetLog, cosignIncept, publish, openOffer, offers, devices; error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity`; the key session contracts (`KeyStatement`, `SignedKeyStatement`, `SessionChallenge`, `KeySessionResult`, `SessionInfo`, ...) |
 
-Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` → SCID),
-`identity_joins` (claims to follow).
+Rows in `db/identity.rs`, reached through `db_backend()` (`service::db`): `operator_record`, `identity_agents` (agent `did:key` → SCID),
+`identity_joins` (claims to follow; written before the store call, so a claim the store
+committed whose answer was lost is still followed by `joinStatus`, and a refused one reports
+the offer's state).
 
 ## Invariants
 
@@ -44,11 +46,17 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
     recorded, nobody alerted, the cached log and its accepted head stay (the trusted seq does
     not move back). Callers treat it as a soft miss: `refreshed_or_cached` and the resolver
     answer from the cache (`identity.resolve` lists the store in `coasys:skipped`, "the store
-    is behind"), and the next refresh window reads the store again.
+    is behind"), and the next refresh window reads the store again. `KelCache::refresh`
+    notes it per log (`store_behind`, in memory): `identity.status` answers
+    `storeBehind: { since, seq }` (the first refresh that saw it, the store's head seq or
+    `null` for no log) until a refresh succeeds, or `resetLog`.
   - another hash: a signed head names a hash, not an event, so it is no fork either. The
     store's events at or below that seq go through the same import as `ingest`; `fetch`
-    re-reads the store's log from seq 0 once for them, since the page from the cached head
-    holds none. A competing event that holds (`rival_holds`) records the fork, evidence at
+    re-reads the store's log from seq 0 up to the head's seq once for them (page after page,
+    at most `MAX_PAGES` and `MAX_STORE_LOG_BYTES` (32 MiB, one `httpFetch` reply) of events served, copies included:
+    `store_events_to`; past it the store is `Unavailable`), since the page from the cached
+    head holds none.
+    A competing event that holds (`holding_rival`) records the fork, evidence at
     that event's seq (ours vs theirs there). Without one: `CacheError::Conflict`, evidence at
     the head's seq (our hash there vs `head.hash`), nothing recorded, nobody alerted, the
     cache answers (`coasys:skipped` with the conflict).
@@ -60,16 +68,30 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   no log.
 - **A different event counts only when it is valid.** `import` compares hashes at a held seq
   and checks no proof there, so before a fork is recorded (or a `src` conflict reported as
-  `coasys:fork`) the competing event goes through `cache::rival_holds`: the core's `fold` of the
-  held prefix below it and the event, every rule and proof. One that does not hold records
-  nothing and alerts nobody: `ingest` refuses it as `CacheError::Fold`, and a foreign `src`
-  serving it is skipped (`coasys:skipped`, "does not hold"). Without this a store or host with
-  no key could raise a persistent fork alert per body it makes up.
+  `coasys:fork`) the competing event goes through `cache::holding_rival`: first
+  `rival_signer`, one proof check against the master of the log current before its seq (for a
+  `rotate`, the key it names): the event must carry exactly that one proof (a later event has
+  one signer, and `KelPolicy` refuses any other proof), so a body no master signed alone is
+  refused before the prefix is read; then the event steps on the core's `fold` of the held
+  prefix below it (`KelChain::appended`), every rule and proof. Every distinct copy with the
+  rival's hash is tried, as `import` tries them (a copy with its proofs stripped hashes the
+  same); exact repeats are dropped, the prefix folds once and each remaining copy steps on a
+  copy of it, so a host serving many copies (repeats, or each with another junk proof) costs
+  one fold and no copy of it per junk copy. One that does not hold records nothing and alerts nobody:
+  `ingest` refuses it as `CacheError::Fold`, and a foreign `src` serving it is skipped
+  (`coasys:skipped`, "does not hold") and not read again for `MISS_TTL`. Without this a store
+  or host with no key could raise a persistent fork alert per body it makes up.
+- **One fork per signing master**, as the identity store keeps: the cache records the rival's
+  signer beside the fork (`identity_fork_signers`), and a further rival by a master with a
+  recorded fork adds no row and no alert and is not read or folded again. A leaked retired
+  master raises one alert, however many bodies it signs.
 - **An event that names a member twice is refused where its text is.** A `Value` keeps only
   the last of the two, so `Event::from_json` cannot see it. A foreign `src` page is read as
   `Vec<Event>` by `Event`'s `Deserialize` (`src_fetch::HostPage`); the events of an
-  `identity.publish` or `identity.cosignIncept` frame are read from the frame's text before
-  dispatch (`identity_ws::duplicate_member_refusal`, `invalid: DuplicateMember`); a store's
+  `identity.publish` or `identity.cosignIncept` frame are read from the frame's text, and a
+  frame that repeats `params`, `events` or `event` is refused too
+  (`identity_ws::duplicate_member_refusal`, `invalid: DuplicateMember`), after the method's
+  guard admits the caller (a caller it refuses gets the access answer); a store's
   page reaches the executor as values through the language runtime, so the agent language's
   `identityLog` refuses it (`invalid`, `DuplicateMember`).
 - **A signed head proves authenticity, not freshness.** `verify_head` checks the store's
@@ -80,9 +102,10 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   the store showed its latest head.
 - **A fork has one way out: `identity.resetLog { did }`** (`Guard::Operator`). It drops this
   executor's copy of that log (its `coasys:kel` events, its `identity_heads` row, its
-  `chain_forks` rows, the log in memory, the resolver's confirmed keys and failed fetches of
-  it), logs a warning naming the DID and answers `true`; the next read refreshes from the
-  configured store and takes the store's branch. Bindings in `identity_agents` stay.
+  `chain_forks` and `identity_fork_signers` rows, the log in memory, the resolver's confirmed
+  keys and failed fetches of it), logs a warning naming the DID and answers `true`; the next
+  read refreshes from the configured store and takes the store's branch. Bindings in
+  `identity_agents` stay.
 - A head from the agent language counts only under `identity.storeKeys`; `ingest` takes the
   configured store's events with no head (a store head no key of `identity.storeKeys` signed).
 - **Authorship reads a log only up to its trusted seq.** A log listing a key does not prove its
@@ -102,7 +125,7 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   Without `identity.storeKeys` no `did:scid` author verifies, and `identity.publish` and
   `identity.claimOffer` refuse with `no-store-keys` before the store commits anything: a log
   the executor can never accept would still take the agent's key for every identity. No
-  production store key ships with the executor, so the default config (no `identity.storeUrl`:
+  store key ships with the executor, so the default config (no `identity.storeUrl`:
   the language's default store) is in this state; `init` logs
   `missing_store_keys_warning` at start, naming the store and the consequence.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
@@ -123,7 +146,7 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   `storeKeys` settings, on every start: an unset key removes the setting, so an earlier run's
   store never stays in force. The language keeps a `did:scid` log only under a head signed by
   a key of `storeKeys`. `"storeUrl": ""` stops startup (`check_store_url`: the language would
-  read it as the production store). When the write fails, `LanguageController::install_agent_language`
+  read it as its default store, `https://store.ad4m.dev`). When the write fails, `LanguageController::install_agent_language`
   does not load the agent language, so no profile or identity call goes to an older or the
   default store; identity calls answer `unavailable`.
 - **A `did:scid` author counts only on the agent language's profile.** An expression's author
@@ -195,7 +218,8 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 - **After unlock every profile is published again**: the main agent's, then each managed
   user's with a stored profile (`AgentService::publish_managed_profiles`, from
   `unlock_main_agent`), so profiles an earlier agent language held reach the configured store.
-  A failure is logged and the next user is tried.
+  A failure is logged and the next user is tried; so is a publish that takes longer than
+  `MANAGED_PROFILE_PUBLISH_TIMEOUT` (60 s), which is dropped and so frees the publish lock.
 
 ## Links: anchor, verdict, person
 
@@ -210,6 +234,14 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   the API and perspectives) and on each binding (`KelCache::keep_local`), and are pinned
   (`KeyMap::pin`), so the map's bound never drops them; a link signed after a newer head is
   accepted carries the new anchor.
+- **The key map follows the trusted seq only.** `KelCache` puts a log in it from `trusted` and
+  from `accept` when a head is accepted (`publish_trusted`), and nowhere else. A store
+  `Behind`, a `Conflict` or a fork leaves the accepted head, so the map keeps answering the
+  cached trusted log: `lookup_signer` reads the cache after a failed refresh (only
+  `Unavailable` answers `Unknown` and trips `BREAKER`). A fork is decided only by the cache's
+  and the resolver's `holding_rival`; the key lookups never judge a rival themselves.
+  `resetLog` drops the log from the map (`KeyMap::forget`) with the rest of the copy, and the
+  store-behind note with it.
 - **One check.** `signatures::verify`, `LinkExpression::check` and
   `DecoratedLinkExpression::check` all go to `identity::check_signed`: the signature over the
   bytes the proof names, then `verdict::judge` on what the key map holds. The check does no
@@ -267,7 +299,9 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   `versionId`. Then: the URL's `src`, then the configured store. A `src` naming the configured
   store (same host, port, path; scheme ignored) is the configured store. The configured store
   goes through `KelCache::refresh` (its head counts; a head no key of `identity.storeKeys`
-  signed: `fetch_store_unsigned`, events via `ingest`). A foreign `src` goes through
+  signed: `fetch_store_unsigned`, events via `ingest`; a log past `MAX_PAGES` pages there is
+  unavailable, as on the signed path, so a prefix never answers as the store's log). A foreign
+  `src` goes through
   `fetch_foreign` and `SrcFetch` (`GET https://<src>/v1/logs/<scid>?from=<n>`, from the cached
   head, at most `MAX_PAGES` pages and `MAX_SRC_LOG_BYTES` (1 MiB) in all; head only a paging
   hint, read as `{events, head: {seq}}` since a foreign host's head need not be signed). Its
@@ -277,8 +311,9 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   prefix cannot hide an event the store holds (a revocation): the answer is the `src`'s events
   on the cache's log, `coasys:source` the `src`. When the two differ at a seq both hold, the
   cache's log answers with the conflict as `coasys:fork` when the `src`'s event holds on the
-  prefix (`Resolver::verified_conflict`, `rival_holds`), and no fork is recorded; when it does
-  not, the `src` is skipped with why and no `coasys:fork` is set. The cache
+  prefix (`Resolver::verified_conflict`, `holding_rival`), and no fork is recorded; when it does
+  not, the `src` is skipped with why, no `coasys:fork` is set, and the (host, SCID) is skipped
+  for `MISS_TTL` whether the conflict showed while fetching or while merging. The cache
   only extends; a fork with the configured store is recorded and the held log answers. A
   failed foreign fetch is remembered per (host, SCID) for 5 minutes (`MISS_TTL`), `fresh` or
   not.

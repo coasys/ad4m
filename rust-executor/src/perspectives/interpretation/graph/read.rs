@@ -204,9 +204,10 @@ pub fn build_speaker_name_map(
         turns.iter().map(|t| t.speaker.as_str()).collect();
     let mut map = std::collections::HashMap::new();
     for did in unique_dids {
-        let resolved = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.get_username_by_did(did).ok().flatten()
-        });
+        let resolved = crate::db_backend::db_backend()
+            .get_username_by_did(did)
+            .ok()
+            .flatten();
         if let Some(name) = resolved {
             if !name.trim().is_empty() {
                 map.insert(did.to_string(), name);

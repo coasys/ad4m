@@ -62,7 +62,7 @@ pub fn check_store_keys(keys: &[String]) -> Result<(), String> {
 
 /// `identity.storeUrl` as the executor can use it: unset (the language's default store) or a
 /// URL. The agent language reads an empty `storeUrl` as unset, so `""` would send every
-/// profile and identity call to the production store while the executor's resolver names no
+/// profile and identity call to the default store while the executor's resolver names no
 /// store: the executor refuses to start with it.
 pub fn check_store_url(url: Option<&str>) -> Result<(), String> {
     match url {
@@ -79,7 +79,7 @@ pub fn check_store_url(url: Option<&str>) -> Result<(), String> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IdentitySettings {
     /// The store's base URL; the agent language's `storeUrl` setting. Unset: the language's
-    /// default (the production store).
+    /// default, `https://store.ad4m.dev`.
     pub store_url: Option<String>,
     /// The store keys (multikeys) a head must be signed by. Empty: no head is accepted.
     pub store_keys: Vec<String>,
@@ -89,7 +89,7 @@ pub struct IdentitySettings {
 }
 
 /// The warning logged at start when `identity.storeKeys` is empty, naming the store it leaves
-/// untrusted and what that costs; `None` with keys. No production store key ships with the
+/// untrusted and what that costs; `None` with keys. No store key ships with the
 /// executor, so the default config (no `identity.storeUrl`: the agent language's default store)
 /// verifies no `did:scid` record until the operator sets the store's key.
 pub fn missing_store_keys_warning(settings: &IdentitySettings) -> Option<String> {
@@ -265,7 +265,7 @@ pub async fn load_local_identities() {
     let Some(service) = SERVICE.get() else {
         return;
     };
-    let scids = match crate::db::Ad4mDb::with_global_instance(|db| db.local_identities()) {
+    let scids = match crate::db_backend::db_backend().local_identities() {
         Ok(scids) => scids,
         Err(e) => {
             log::warn!("identity: could not read the local identities: {e}");
@@ -301,7 +301,8 @@ pub fn service() -> Result<Arc<IdentityService>, WsRpcError> {
 /// logs for one identity.
 fn publish_fork(did: &str, fork: &ad4m_identity_core::ForkEvidence) {
     let scid = cache::scid_from(did).to_string();
-    let agents = crate::db::Ad4mDb::with_global_instance(|db| db.agents_of_identity(&scid))
+    let agents = crate::db_backend::db_backend()
+        .agents_of_identity(&scid)
         .unwrap_or_else(|e| {
             log::error!("identity-fork: could not read the identity's agents: {e}");
             vec![]

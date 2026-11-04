@@ -20,7 +20,7 @@ use super::types::{
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
-use crate::db::Ad4mDb;
+use crate::db_backend::{db_backend, DbBackend};
 
 pub(super) fn now() -> u64 {
     std::time::SystemTime::now()
@@ -100,10 +100,11 @@ pub fn cache_error(e: CacheError) -> WsRpcError {
     }
 }
 
+/// Runs `f` on the executor's database, a database error as a 500.
 pub(super) fn db<T>(
-    f: impl FnOnce(&Ad4mDb) -> crate::db::Ad4mDbResult<T>,
+    f: impl FnOnce(&dyn DbBackend) -> crate::db::Ad4mDbResult<T>,
 ) -> Result<T, WsRpcError> {
-    Ad4mDb::with_global_instance(f).map_err(|e| WsRpcError::internal(e.to_string()))
+    f(db_backend()).map_err(|e| WsRpcError::internal(e.to_string()))
 }
 
 /// The identity a local agent (`did:key`) speaks for, or `None` (also before the database and
@@ -115,10 +116,7 @@ pub async fn identity_of_agent(agent_did: &str) -> Option<String> {
 
 /// The SCID `identity_agents` binds `agent_did` to (`None` also without an open database).
 fn bound_identity(agent_did: &str) -> Option<String> {
-    let instance = Ad4mDb::global_instance();
-    let guard = instance.lock().ok()?;
-    let db = guard.as_ref()?;
-    db.agent_identity(agent_did).ok().flatten()
+    db_backend().agent_identity(agent_did).ok().flatten()
 }
 
 fn first_fork(forks: &[ad4m_identity_core::ForkEvidence]) -> Option<ForkRecord> {
@@ -198,6 +196,7 @@ impl IdentityService {
             revoked: None,
             head: None,
             fork: None,
+            store_behind: None,
         };
         let Some(scid) = db(|db| db.agent_identity(&agent_did))? else {
             return Ok(status);
@@ -216,6 +215,7 @@ impl IdentityService {
             status.head = Some(mirror_head(&head)?);
         }
         status.fork = first_fork(&self.cache.forks(&scid).await.map_err(cache_error)?);
+        status.store_behind = self.cache.store_behind(&scid);
         Ok(status)
     }
 
@@ -571,7 +571,7 @@ pub(super) fn first_link_error(refusal: FirstLinkRefusal) -> WsRpcError {
     WsRpcError::forbidden(refusal.to_string())
 }
 
-/// An offer string (`coasys:offer:1:…`) or link (`https://coasys.id/o#…`).
+/// An offer string (`coasys:offer:1:…`) or link (`https://id.coasys.org/o#…`).
 pub fn parse_offer(text: &str) -> Result<OfferString, WsRpcError> {
     let text = text.trim();
     let parsed = if text.starts_with(link::OFFER_STRING_PREFIX) {
@@ -585,6 +585,7 @@ pub fn parse_offer(text: &str) -> Result<OfferString, WsRpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Ad4mDb;
     use crate::identity::cache::tests::TestLog;
 
     #[test]
@@ -692,6 +693,56 @@ mod tests {
             store_url: None,
             challenges: Default::default(),
         }
+    }
+
+    /// `identity.status` shows a configured store that answers the log behind the cache, from
+    /// the first such answer, until it catches up.
+    #[tokio::test]
+    async fn status_shows_a_store_that_stays_behind_until_it_catches_up() {
+        use crate::identity::cache::tests::{trusting, FakeStore};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let user = crate::test_utils::create_test_user(&format!(
+            "behind-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let agent = AgentContext::managed(user);
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let mut log = TestLog::new(81);
+        log.revoke_d1();
+        let scid = log.scid();
+        db(|db| db.set_agent_identity(&agent_did, &scid, now())).unwrap();
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let backend: Arc<dyn IdentityBackend> = store.clone();
+        let cache = Arc::new(trusting());
+        let service = IdentityService {
+            resolver: Arc::new(crate::identity::resolver::Resolver::new(
+                cache.clone(),
+                backend.clone(),
+                None,
+                false,
+            )),
+            backend,
+            cache,
+            store_url: None,
+            challenges: Default::default(),
+        };
+        assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
+
+        // The store loses the last event: it answers seq 0, the cache holds seq 1.
+        store.events.lock().unwrap().truncate(1);
+        let status = service.status(&agent).await.unwrap();
+        let behind = status.store_behind.expect("the store shows as behind");
+        assert_eq!(behind.seq, Some(0));
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["storeBehind"]["seq"],
+            0
+        );
+        let again = service.status(&agent).await.unwrap().store_behind.unwrap();
+        assert_eq!(again.since, behind.since, "since the first answer behind");
+
+        *store.events.lock().unwrap() = log.events.clone();
+        assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
     }
 
     /// The first-link rule runs inside `claim_for_main`: while the main key is in no log, an
@@ -962,6 +1013,12 @@ mod tests {
         appends: std::sync::atomic::AtomicUsize,
         /// Answers every append `409` with the head of the log it holds, appending nothing.
         conflict: bool,
+        /// Claims taken (each counts, whether or not its answer arrives).
+        claims: std::sync::atomic::AtomicUsize,
+        /// When set, a claim fails with this error, after it counted.
+        claim_error: std::sync::Mutex<Option<IdentityError>>,
+        /// What `offer_state` answers for every offer.
+        offer: std::sync::Mutex<String>,
     }
 
     impl RecordingStore {
@@ -970,6 +1027,9 @@ mod tests {
                 inner: crate::identity::cache::tests::FakeStore::new(events),
                 appends: std::sync::atomic::AtomicUsize::new(0),
                 conflict,
+                claims: std::sync::atomic::AtomicUsize::new(0),
+                claim_error: std::sync::Mutex::new(None),
+                offer: std::sync::Mutex::new("claimed".into()),
             }
         }
     }
@@ -1066,20 +1126,39 @@ mod tests {
         }
         async fn claim_offer(
             &self,
-            did: &str,
-            offer_id: &str,
-            claim: &ad4m_ldk::identity::Claim,
+            _did: &str,
+            _offer_id: &str,
+            _claim: &ad4m_ldk::identity::Claim,
         ) -> Result<ad4m_ldk::identity::ClaimReceipt, IdentityError> {
-            self.inner.claim_offer(did, offer_id, claim).await
+            self.claims
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(error) = self.claim_error.lock().unwrap().clone() {
+                return Err(error);
+            }
+            Ok(ad4m_ldk::identity::ClaimReceipt {
+                state: "claimed".into(),
+                kind: ad4m_ldk::identity::OfferKind::Device,
+                expires: u64::MAX,
+            })
         }
         async fn offer_state(
             &self,
-            did: &str,
-            offer_id: &str,
-            key: &str,
-            wait_s: u8,
+            _did: &str,
+            _offer_id: &str,
+            _key: &str,
+            _wait_s: u8,
         ) -> Result<ad4m_ldk::identity::OfferProgress, IdentityError> {
-            self.inner.offer_state(did, offer_id, key, wait_s).await
+            let state = self.offer.lock().unwrap().clone();
+            let seq = self
+                .inner
+                .events
+                .lock()
+                .unwrap()
+                .len()
+                .checked_sub(1)
+                .map(|seq| seq as u64)
+                .filter(|_| state == "spent");
+            Ok(ad4m_ldk::identity::OfferProgress { state, seq })
         }
     }
 
@@ -1241,6 +1320,83 @@ mod tests {
         assert_eq!(trusted, 1, "the store's head is accepted");
         assert_eq!(
             db(|db| db.agent_identity(&agent_did)).unwrap(),
+            Some(incept.scid.clone())
+        );
+    }
+
+    /// The join row goes in before the store call. A claim the store refused leaves it, and
+    /// `joinStatus` reports the offer's state; a claim the store committed whose answer was
+    /// lost leaves it too, so once the add spent the offer `joinStatus` binds the main agent
+    /// (a retry would get `gone`).
+    #[tokio::test]
+    async fn a_claim_keeps_its_join_row_when_the_store_call_fails() {
+        use crate::identity::types::ClaimOfferParams;
+        use ad4m_identity_core::link::OfferString;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = AgentContext::main_agent();
+        let (main_did, _) = device_key(&main).unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        let incept = test_service()
+            .cosign_incept(&main, &incept_listing(&main, 57))
+            .await
+            .unwrap();
+        let incept = Event::from_json(&incept).unwrap();
+        let _record = OperatorRecord::set(&did_of(&incept.scid));
+        let backend = Arc::new(RecordingStore::new(vec![incept.clone()], false));
+        let service = service_on(backend.clone());
+        let offer = |id: u8| OfferString {
+            store: "https://store.example".into(),
+            scid: incept.scid.clone(),
+            offer_id: bs58::encode([id; 16]).into_string(),
+            s: bs58::encode([1u8; 32]).into_string(),
+        };
+        let params = |offer: &OfferString| ClaimOfferParams {
+            offer: offer.encode(),
+            hint: None,
+        };
+        let claims = || backend.claims.load(std::sync::atomic::Ordering::SeqCst);
+
+        // The store refuses the claim: the row stays and reports the offer's state.
+        *backend.claim_error.lock().unwrap() = Some(IdentityError::Gone("expired".into()));
+        let refused = offer(3);
+        service
+            .claims()
+            .claim_for_main(&params(&refused))
+            .await
+            .expect_err("the store refused");
+        assert_eq!(claims(), 1);
+        *backend.offer.lock().unwrap() = "expired".into();
+        let status = service
+            .claims()
+            .join_status(&main, &refused.offer_id)
+            .await
+            .expect("the row is there");
+        assert_eq!(status.state, "expired");
+        assert_eq!(status.key_id, None);
+        assert_eq!(db(|db| db.agent_identity(&main_did)).unwrap(), None);
+
+        // The store commits the claim and its answer is lost: once the add spends the offer,
+        // `joinStatus` finds the row and binds the main agent.
+        *backend.claim_error.lock().unwrap() =
+            Some(IdentityError::Unavailable("the answer was lost".into()));
+        let lost = offer(4);
+        service
+            .claims()
+            .claim_for_main(&params(&lost))
+            .await
+            .expect_err("the answer was lost");
+        assert_eq!(claims(), 2);
+        *backend.offer.lock().unwrap() = "spent".into();
+        let status = service
+            .claims()
+            .join_status(&main, &lost.offer_id)
+            .await
+            .expect("the row is there");
+        assert_eq!(status.state, "spent");
+        assert_eq!(status.key_id.as_deref(), Some("d1"));
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
             Some(incept.scid.clone())
         );
     }

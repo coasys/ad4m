@@ -22,10 +22,6 @@
  * plus a client-computed `link_hash` for OR-Set dedup. The local store
  * always holds decrypted links (see src/sync.ts); only the wire
  * representation is ciphertext.
- *
- * `decryptLinkFromWire` handles both the current full-encryption format and
- * the legacy data-only format (for backward compatibility with links
- * encrypted before the full-encryption change).
  */
 
 import { ed25519, x25519 } from "@noble/curves/ed25519";
@@ -73,6 +69,19 @@ export function hexToBytes(hex: string): Uint8Array {
         }
         out[i] = parseInt(byte, 16);
     }
+    return out;
+}
+
+export function bytesToBase64(bytes: Uint8Array): string {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+}
+
+export function base64ToBytes(b64: string): Uint8Array {
+    const binary = atob(b64.trim());
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
     return out;
 }
 
@@ -335,18 +344,16 @@ export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array, ke
     const ciphertext = gcm(roomKey, nonce).encrypt(plaintext);
 
     return {
-        data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
+        data: { ciphertext: bytesToBase64(ciphertext), nonce: bytesToBase64(nonce) },
         link_hash: linkHash,
         ...(keyVersion !== undefined ? { key_version: keyVersion } : {}),
     };
 }
 
 /**
- * Reverses encryptLinkForWire. Handles both formats:
- * - Full encryption (current): ciphertext contains `{author, timestamp, proof, data}`
- * - Legacy data-only: ciphertext contains `{source, predicate, target}`
- * Throws if `roomKey` is wrong or the ciphertext was tampered with
- * (AES-GCM auth tag failure).
+ * Reverses encryptLinkForWire: the ciphertext holds `{author, timestamp,
+ * proof, data}`. Throws if `roomKey` is wrong, the ciphertext was tampered
+ * with (AES-GCM auth tag failure), or the payload is not that shape.
  */
 export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKeyOrRing: Uint8Array | KeyRing): LinkExpression {
     if (!isEncryptedLinkData(wireLink.data)) {
@@ -366,26 +373,22 @@ export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKeyOrRing:
     } else {
         roomKey = roomKeyOrRing;
     }
-    const nonce = hexToBytes(wireLink.data.nonce);
-    const ciphertext = hexToBytes(wireLink.data.ciphertext);
+    const nonce = base64ToBytes(wireLink.data.nonce);
+    const ciphertext = base64ToBytes(wireLink.data.ciphertext);
     const plaintext = gcm(roomKey, nonce).decrypt(ciphertext);
     const parsed = JSON.parse(bytesToUtf8(plaintext));
 
-    if (parsed.author && parsed.data && typeof parsed.data === "object") {
-        return {
-            author: parsed.author,
-            timestamp: parsed.timestamp,
-            proof: parsed.proof,
-            ...statusField(parsed.status),
-            data: parsed.data as Link,
-        };
+    if (
+        !parsed || typeof parsed !== "object" || !parsed.author || typeof parsed.timestamp !== "string" ||
+        !parsed.proof || typeof parsed.proof !== "object" || !parsed.data || typeof parsed.data !== "object"
+    ) {
+        throw new Error("decryptLinkFromWire: the decrypted payload is not {author, timestamp, proof, data}");
     }
-
     return {
-        author: wireLink.author ?? "",
-        timestamp: wireLink.timestamp ?? "",
-        proof: wireLink.proof ?? { signature: "", key: "" },
-        ...statusField(wireLink.status),
-        data: parsed as Link,
+        author: parsed.author,
+        timestamp: parsed.timestamp,
+        proof: parsed.proof,
+        ...statusField(parsed.status),
+        data: parsed.data as Link,
     };
 }

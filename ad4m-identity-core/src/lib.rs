@@ -75,6 +75,22 @@ pub fn fold(events: &[Event]) -> Result<KelChain, ChainError<FoldError>> {
     ad4m_hash_chain::fold(&KelPolicy, events)
 }
 
+/// [`fold`] for a host's own stored, already-verified log only: events a host reads back from its
+/// own storage, each of which passed [`fold`], `KelChain::append` or [`import`] before it stored
+/// it (`ad4m_hash_chain::fold_stored`). It leaves out the two checks that only refuse and cost
+/// the most, both of which every stored event passed: the proofs' signatures (which proofs an
+/// event carries is still checked) and the scan for a duplicate signing key (rule K8, quadratic
+/// over a long log). Every other rule runs and the state changes the same, so it gives the same
+/// chain as [`fold`] for every log `fold` accepts. Never call it on events from outside, a peer
+/// or a client: a forged proof or a reused key would pass.
+///
+/// Behind the `stored-fold` feature, which only the identity store enables, so no executor,
+/// wallet or wasm build can reach it by accident.
+#[cfg(feature = "stored-fold")]
+pub fn fold_stored(events: &[Event]) -> Result<KelChain, ChainError<FoldError>> {
+    ad4m_hash_chain::fold_stored(&KelPolicy, events)
+}
+
 /// [`fold`] over events given as JSON: each one is parsed under the format-1 rules first, and a
 /// parse refusal is `ChainError::Policy(FoldError)` (unknown op or field, float, big integer, …).
 pub fn fold_json(events: &[Value]) -> Result<KelChain, ChainError<FoldError>> {

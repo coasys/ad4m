@@ -181,7 +181,7 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
     it("links B, started with --operator, through `ad4m-executor claim`", async () => {
         b = await startNode("b", ["--operator", did]);
         const opened = await holder.send({ cmd: "open", did, store: store.url });
-        expect(opened.link).to.match(/^https:\/\/coasys\.id\/o#coasys:offer:1:/);
+        expect(opened.link).to.match(/^https:\/\/id\.coasys\.org\/o#coasys:offer:1:/);
 
         const claim = new ClaimCommand(b.ports[0], opened.link, "server b");
         const bCode = await claim.matchCode();
@@ -430,7 +430,10 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(meta["coasys:skipped"]!.some((s) => /the store is behind/.test(s.reason))).to.equal(true);
         await new Promise((r) => setTimeout(r, 1000));
         expect(forks).to.have.length(0);
-        expect((await a.client.identity.status()).fork).to.be.null;
+        const status = await a.client.identity.status();
+        expect(status.fork).to.be.null;
+        // The status shows the store behind, at the head it answers (seq 1 of A's 2).
+        expect(status.storeBehind?.seq).to.equal(1);
     });
 
     it("serves the log from the cache after A restarts, with the store down", async () => {

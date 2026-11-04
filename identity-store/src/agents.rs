@@ -195,21 +195,20 @@ impl Store {
 
 impl Store {
     /// The bot-scope check: a bot key writes its own record only while its scope is in force.
-    /// Runs in the write's transaction.
+    /// Read from the key index (the bot scope in force at the stored head, its `expires`, and
+    /// whether the key is revoked there), so a record never makes the store replay a log. Runs
+    /// in the write's transaction.
     fn check_bot_writer(&self, conn: &Connection, key: &str, now: u64) -> Result<(), ApiError> {
-        let Some(scid) = db::key_owner(conn, key)? else {
+        let Some(standing) = db::standing(conn, key)? else {
             return Ok(());
         };
-        let chain = self
-            .held_chain(conn, &scid)?
-            .ok_or_else(|| ApiError::internal("key without its log"))?;
-        let state = chain.state();
-        let head = chain.head().seq;
-        if state.bot_scope_at(key, head).is_some() && !state.key_valid_at_time(key, head, now) {
-            return Err(ApiError::forbidden(
-                "writer",
-                "the bot key's scope is not in force",
-            ));
+        if let Some(expires) = standing.bot_expires {
+            if standing.revoked || now >= expires {
+                return Err(ApiError::forbidden(
+                    "writer",
+                    "the bot key's scope is not in force",
+                ));
+            }
         }
         Ok(())
     }
