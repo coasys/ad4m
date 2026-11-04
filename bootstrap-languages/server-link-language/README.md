@@ -5,8 +5,10 @@ self-hosted [**link-server**](../../link-server/README.md)
 instance — HTTP for auth, commit, and catch-up sync; a native WebSocket for
 real-time diff push, presence, and telepresence. Every AD4M link-language capability is implemented:
 `perspective-commit`, `perspective-sync`, `perspective-query`, `peers`, and
-`telepresence`. Optional end-to-end encryption protects link payloads when
-the room has E2E enabled.
+`telepresence`. Every room's links are end-to-end encrypted from creation:
+they leave the agent only as ciphertext, and there is no plaintext mode.
+Presence and telepresence signals are not encrypted (`src/telepresence.ts`):
+the link server relays them as sent.
 
 Built on the modern [ALDK](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk)
 (`@coasys/ad4m-ldk`) pattern — see
@@ -111,14 +113,14 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 
 | Method & path | Purpose |
 |---|---|
-| `POST /rooms/:roomId/auth` | DID challenge-response. Step 1: `{did}` → `{challenge}`. Step 2: `{did, challenge, signature}` → `{token}` |
-| `POST /rooms/:roomId/commit` | Push a `{additions, removals}` diff |
-| `GET /rooms/:roomId/sync?since=<sequence>` | Pull diffs newer than `sequence` → `{diffs[], revision, sequence}` |
-| `GET /rooms/:roomId/render` | Full current snapshot → `{links[], revision}` |
+| `POST /rooms/:roomId/auth` | DID challenge-response. Step 1: `{did}` → `{challenge}`. Step 2: `{did, challenge, signature}` → `{token}`; the call that creates the room makes the caller its admin |
+| `POST /rooms/:roomId/commit` | Push a `{additions, removals}` diff of encrypted links (base64 `{ciphertext, nonce}`); the server refuses a plaintext link (400) in every room |
+| `GET /rooms/:roomId/sync?since=<sequence>&limit=100` | Pull up to 100 diffs newer than `sequence` → `{diffs[] (each with its sequence), revision, sequence, next}` |
+| `GET /rooms/:roomId/render?limit=500[&next=<cursor>]` | One page of the snapshot pinned at `upto` → `{links[], revision, sequence, upto, next}` |
 | `GET /rooms/:roomId/peers` | Connected agent DIDs → `{peers: string[]}` |
 | `GET /rooms/:roomId/revision` | `{revision, sequence}` |
 | `GET /rooms/:roomId/acl` | `{admin, members: [{did}]}` |
-| `GET /rooms/:roomId/keys` | This agent's sealed room key versions → `{keys: [{encryptedKey, version, commitment}], e2e_enabled}` (E2E rooms only) |
+| `GET /rooms/:roomId/keys` | This agent's sealed room key versions → `{keys: [{encryptedKey, version, commitment}]}`. An empty list means this agent waits for one; an error status, 404 included, is an error |
 | `POST /rooms/:roomId/keys/rotate` | Room admin: `{keys, commitment}`, a new version sealed to every ACL member and the commitment to its key (`roomKeyCommitment`) |
 | `DELETE /rooms/:roomId/keys/:version` | Any member: drops its own box for a version whose key does not match the commitment, so a holder grants it again |
 | `GET /rooms/:roomId/keys/missing` | Any member: `{membersNeedingHistoricalKeys: [{did, missingVersions}]}` |
@@ -194,13 +196,31 @@ costs that one link, not the rest of its batch or the other held links.
 
 ### Sync strategy
 
-- `init()` runs a one-shot `bootstrap()`: fetch the full `/render` snapshot,
-  apply it to the local store as the room's current state (emitting what it
-  adds and removes), and record the sequence cursor — far cheaper than
-  replaying the room's entire diff history on every fresh instance. A stored
-  link whose encrypted copy in the snapshot no key opens yet is kept.
+- `init()` runs `bootstrap()`. A member with a cursor above 0 catches up:
+  it tails `/sync` from its cursor, which brings every change since (the
+  link server keeps the whole diff log). A fresh member (cursor 0) loads the
+  room's current state as a paged `/render` snapshot pinned at `upto`, then
+  tails `/sync?since=upto` (link-server README, "Paged snapshot, then
+  tail"), far cheaper than replaying the room's entire diff history. Each
+  page (500 links) is applied and emitted as its own diff and the cursor is
+  stored after it (`render/progress`), so a restart resumes at the next
+  page. Nothing is removed after the last page: a fresh store held nothing
+  the server does not have.
+- The stored `render/progress` is what says a fresh member's render is
+  still needed. `init()` stores it before authenticating, so a render that timed out, or
+  never ran because authentication failed first, is resumed by catch-up (the
+  WebSocket's `onOpen`, the runtime's `sync()`), the way catch-up re-reads
+  `/keys` while links are held. A render that never ran starts at the next
+  catch-up. After a failed page the next attempt waits 10 s, each further
+  failure doubles the wait up to 5 min, and the last page ends the retries
+  and resets the wait. Catch-up does not wait for the render, and while one is pending
+  it does not tail either: its cursor is 0, so reading the log from it is
+  the full replay the render replaces. WebSocket pushes are left to the
+  render meanwhile. The render's last page is followed by the tail from
+  `upto`.
 - The WebSocket pushes live diffs. On every (re)connect, `ws-client.ts`'s
-  `onOpen` handler also triggers an HTTP catch-up (`GET /sync?since=<cursor>`)
+  `onOpen` handler also triggers an HTTP catch-up (`GET /sync?since=<cursor>`,
+  100 diffs a page)
   as a belt-and-braces gap-fill for whatever happened while offline.
 - `sync.sync()` (called by the runtime on its own timer) always performs the
   same HTTP catch-up. This is deliberately unconditional rather than
@@ -226,18 +246,19 @@ summary:
   member, including members that never connected. Any member holding a
   version grants it to an ACL member lacking it (`src/room-keys.ts`); the
   server accepts a grant only of versions the granter holds.
-- **Link confidentiality.** Once a room key is available,
-  `encryptLinkForWire` / `decryptLinkFromWire` protect a link's
-  `{source, predicate, target}` payload with AES-256-GCM (fresh nonce per
-  link). `author` / `timestamp` / `proof` stay in the clear — the runtime's
-  signature was computed over plaintext data before this language ever saw
-  the diff, and this metadata is needed for verification and routing. **The
+- **Link confidentiality.** `encryptLinkForWire` / `decryptLinkFromWire`
+  protect the whole link (`author`, `timestamp`, `proof`, `data`) with
+  AES-256-GCM (fresh nonce per link); the server sees only
+  `{data: {ciphertext, nonce}, link_hash, key_version}`, `link_hash` being a
+  SHA-256 of the canonical plaintext fields for OR-Set matching. **The
   local store always holds decrypted links; only the wire representation is
   ciphertext.**
-- **Fail closed.** If the room key can't be fetched/decrypted for a reason
-  other than "this room has no E2E key" (network error, corrupt envelope,
-  wrong key), `commit()` refuses to send plaintext rather than risk leaking
-  data into a room that expects encryption.
+- **No plaintext mode.** A link leaves only encrypted: without a room key it
+  can open (none granted yet, a network error, a corrupt envelope) the agent
+  is `pending` or `error` and `commit()` throws, so the executor keeps the
+  diff and retries; `toWireLink` throws without a key ring. Inbound, a
+  plaintext link is skipped: no member can commit one, so only a server could
+  have put it there.
 
 The `encryptedKey` wire framing (JSON `SealedBox`) is the executor's sealed
 box; `link-server` only checks its shape.
@@ -261,12 +282,15 @@ inert mode (logs and returns without attempting any network I/O).
 neighbourhood name lives in the language meta (`name` field), not in the
 source code.
 
-E2E encryption activates automatically — the admin's language instance
-generates the initial room key during `init()` when no E2E exists yet.
-Members receive later keys from any member holding them (grants run on
-`peer-joined`, at init and after every sync); a member holding links it
-cannot open yet re-checks `/keys` on every sync, and a `keys-granted` push
-re-checks at once. There is no plaintext mode.
+Every room is E2E from creation: the link server refuses plaintext links in
+every room, before any key exists. The agent that creates the room (its
+admin: it is the first to sign in) mints key version 1 in its `init()`,
+before its first commit; the commit path rotates too, if `init()` could not,
+and reads the ACL again first only if the read at `init()` failed. Members receive keys from any member
+holding them (grants run on `peer-joined`, at init and after every sync); a
+member without a key commits nothing until it has one, re-checks `/keys` on
+every commit and on every sync while it holds links it cannot open, and a
+`keys-granted` push re-checks at once. There is no plaintext mode.
 
 ## Publishing
 

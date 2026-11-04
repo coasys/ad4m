@@ -56,7 +56,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use crate::db::Ad4mDb;
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub_sync;
 use crate::types::{LinkExpression, PerspectiveDiff};
@@ -131,11 +130,7 @@ pub struct SerializedPerspective {
 /// tasks, so a test can wait for them.
 pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
-    let handles = Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
+    let handles = crate::db_backend::db_backend()
         .get_all_perspectives()
         .expect("Couldn't get perspectives from db");
 
@@ -289,11 +284,7 @@ pub async fn add_perspective(
         ));
     }
 
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
+    crate::db_backend::db_backend()
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
@@ -427,9 +418,9 @@ pub async fn update_perspective_with(
         if link_language(&persisted) != before {
             instance.link_language_changed();
         }
-        Ad4mDb::with_global_instance(|db| {
-            db.update_perspective(&persisted).map_err(|e| e.to_string())
-        })?;
+        crate::db_backend::db_backend()
+            .update_perspective(&persisted)
+            .map_err(|e| e.to_string())?;
         // Signals reach owners through this cached copy, so it must not lag the handle
         // (users joining later got no broadcasts). Written under the lock, so a
         // concurrent change cannot register an older copy after a newer one.
@@ -468,13 +459,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         instance.teardown_background_tasks().await;
     }
 
-    if let Err(e) = Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
-        .remove_perspective(uuid)
-    {
+    if let Err(e) = crate::db_backend::db_backend().remove_perspective(uuid) {
         log::error!("Error removing perspective from db: {}", e);
     }
 
@@ -768,6 +753,7 @@ pub async fn import_perspective(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Ad4mDb;
     use crate::types::{ExpressionProof, Link};
     use chrono::Utc;
 
@@ -1036,7 +1022,9 @@ mod tests {
             },
             ..Default::default()
         });
-        Ad4mDb::with_global_instance(|db| db.add_perspective(&handle)).unwrap();
+        crate::db_backend::db_backend()
+            .add_perspective(&handle)
+            .unwrap();
         register_perspective(
             handle.uuid.clone(),
             PerspectiveInstance::new(handle.clone(), None),

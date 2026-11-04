@@ -94,6 +94,24 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   trigger or refresh cooldown. Never make delivery depend on a one-shot
   request succeeding (BUG-103: a single `/render` timeout after a key grant
   lost a member's history).
+- **A fresh member's render is retried until its last page.** Only a fresh
+  member renders: cursor 0 and no render stored. A member whose cursor is
+  above 0 never renders again; it tails `/sync` from its cursor, which brings
+  every change because the link server keeps the whole diff log. The stored
+  `render/progress` is the "render needed" state; there is no in-memory flag.
+  `init` calls `needRender()` before authenticating: at cursor 0 it stores
+  the first page's cursor unless a previous run left a render unfinished, so
+  a render that never ran (authentication failed first) is retried too. While it is
+  stored, `catchUp` ends with `retryRenderIfDue()`, the same shape as the
+  `/keys` re-read above. It resumes the render in the background (one at a
+  time, `_rendering`, which `bootstrap` joins; catch-up does not wait for
+  it), after a 10 s backoff that doubles per failure up to 5 min and resets
+  on the last page; `bootstrap` itself ignores the backoff. This is not the
+  deleted key-ring re-bootstrap: it runs only while a render is stored, and
+  stops at the last page. Without it a fresh member whose first render
+  failed would never load the room (BUG-115). The host's
+  `httpFetch` deadline is a fixed 10 s for every call, and the language
+  cannot raise it for `/render`.
 - **A link the key it names does not open costs that link only.** Its
   ciphertext or payload is malformed, and a key version is fixed by its
   rotation's commitment, so no key ever opens it: `openWireLink` logs it and
@@ -109,6 +127,20 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   commit at exactly cursor + 1 the cursor moves past it, so catch-up does
   not fetch our own links back; otherwise another agent's diff is in
   between and the cursor stays.
+- **The first-load snapshot is paged and resumable.** `bootstrap()` stores
+  `render/progress` before the first `/render` page and after each one.
+  While a render is stored, `catchUp()` does not tail `/sync`: a render is
+  stored only at cursor 0, and the log from 0 is the full replay the render
+  replaces. `applyInboundWireDiff` applies nothing then either: a WebSocket
+  push before the first page is inside the snapshot, one after it is in the
+  tail. The render's last page is followed by the tail from `upto`, inside
+  the same single flight. Nothing is removed after the last page: a fresh
+  store holds only the pages and its own commits, which the server has, in
+  the snapshot or the tail. A resumed render keeps its `upto`, so the tail
+  needs the log after it, which the server keeps.
+- **Encrypted links are base64.** `encryptLinkForWire` writes ciphertext and
+  nonce in base64, `decryptLinkFromWire` reads base64. (Sealed key boxes are
+  hex: that is the host contract's format, not the link wire format.)
 - **The executor owns the outbox; the language keeps none.** `commit`
   (index.ts) awaits the POST and throws on any failure (server down,
   refused, key ring not ready). The executor then keeps the diff in its
@@ -140,8 +172,9 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 - **Local store is always plaintext.** E2E encryption operates only at the
   wire boundary (`encryptLinkForWire`/`decryptLinkFromWire` in
   `src/encryption.ts`, called from `src/sync.ts`'s `toWireLink`/
-  `fromWireLink`). `render()`/`queryLinks()` must never need to know
-  whether the room is E2E — if you're touching decryption logic outside
+  `openWireLink`). Every room is E2E: `toWireLink` throws without a key
+  ring and `openWireLink` skips a plaintext link. `render()`/`queryLinks()`
+  never deal with ciphertext — if you're touching decryption logic outside
   `sync.ts`'s wire-translation functions, you're probably in the wrong
   place.
 - **Module state resets are almost free.** Per the AD4M language-interface
@@ -164,9 +197,19 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 
 ## Known limitations / follow-ups
 
-- **E2E encryption activates automatically — no plaintext mode.** The admin's
-  language instance generates the initial room key during `init()` when no E2E
-  exists yet. Subsequent rotations require explicit admin action.
+- **Rooms are E2E from creation — no plaintext mode.** The link server
+  refuses plaintext links in every room, before any key exists; the admin's
+  `init()` (or, failing that, its first commit) mints key version 1. Key
+  status is `pending | ready | error` (src/room-keys.ts); only `ready`
+  commits. `/keys` answers an empty list to an agent without a key; any error
+  status from it, 404 included, is an error (`api.fetchRoomKeys`). The ACL
+  read at `init()` sets `roomRole` (`admin | member | unknown`); only while
+  it is `unknown` (that read failed) and a key is missing does
+  `rotateIfAdminWithoutKey` read the ACL again (`adminRotationStep`), so an
+  admin whose startup read failed still rotates and a member is not re-read
+  on every commit. A role change after `init()` (an admin transfer) takes
+  effect at the next `init()`. Subsequent rotations require explicit admin
+  action.
   `performRotation()` (admin only) generates a fresh room key client-side,
   seals it to the DID of every ACL member, including members that never
   connected, and POSTs only sealed boxes — the server never sees plaintext.
@@ -177,14 +220,17 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   members lacking them (idempotent; the server keeps the first box per member
   and version and refuses versions the granter lacks). A member whose key
   status is `pending` (no box it holds opens: no member holding a key has
-  been online since it joined, or its boxes are in an older format; an admin
-  in that state rotates, `adminRotates` in src/room-keys.ts) re-reads `/keys`
+  been online since it joined, or its boxes are spoiled grants; an admin
+  in that state rotates, `adminRotationStep` in src/room-keys.ts) re-reads `/keys`
   on a commit, on a `keys-granted` push, and on every sync while it holds
   links it cannot open. A version whose box does not open is left out of the
   ring (`buildKeyRing`), so one bad grant costs that version, not the room.
   A failed re-read keeps a ring already loaded (`afterFailedKeyRead`): only a
   member that never loaded one is `error`, so one failed `/keys` read never
   refuses commits or holds inbound links.
+- **Signals are not encrypted.** Only links are E2E. Presence and
+  telepresence signals (`src/telepresence.ts`) travel to the link server as
+  sent.
 - **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
   form of the Ed25519 key in its `did:key`. The language seals itself
   (`sealToDid`, src/encryption.ts) and opens with the `agentOpenSealed(box)`
