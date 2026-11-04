@@ -133,8 +133,6 @@ pub(crate) const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
 /// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
 /// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
 pub async fn track_last_seen(agent_did: &str) {
-    use crate::db::Ad4mDb;
-
     let agent_did = agent_did.to_string();
     let now = chrono::Utc::now().timestamp();
 
@@ -162,41 +160,40 @@ pub async fn track_last_seen(agent_did: &str) {
     // Use spawn_blocking to avoid blocking the async runtime
     let agent_did_clone = agent_did.clone();
     let should_update = tokio::task::spawn_blocking(move || {
-        Ad4mDb::with_global_instance(|db| {
-            if let Ok(Some(user)) = db.get_user_by_did(&agent_did_clone) {
-                if let Some(last_seen) = user.last_seen {
-                    let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
+        let user = crate::db_backend::db_backend().get_user_by_did(&agent_did_clone);
+        if let Ok(Some(user)) = user {
+            if let Some(last_seen) = user.last_seen {
+                let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
 
-                    // Handle unrealistic future timestamps by treating them as stale
-                    // (allow some clock skew tolerance of 1 minute)
-                    let should_update = if last_seen > now + 60 {
-                        log::warn!(
-                            "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
-                            agent_did_clone, last_seen
-                        );
-                        true
-                    } else {
-                        last_seen < throttle_cutoff
-                    };
-
-                    log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
-                        agent_did_clone, last_seen, throttle_cutoff, should_update);
-                    (should_update, Some(last_seen))
-                } else {
-                    log::debug!(
-                        "last_seen tracking for {}: never seen before, updating now",
-                        agent_did_clone
+                // Handle unrealistic future timestamps by treating them as stale
+                // (allow some clock skew tolerance of 1 minute)
+                let should_update = if last_seen > now + 60 {
+                    log::warn!(
+                        "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
+                        agent_did_clone, last_seen
                     );
-                    (true, None) // Never updated, do it now
-                }
+                    true
+                } else {
+                    last_seen < throttle_cutoff
+                };
+
+                log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
+                    agent_did_clone, last_seen, throttle_cutoff, should_update);
+                (should_update, Some(last_seen))
             } else {
-                log::warn!(
-                    "last_seen tracking: no user owns the agent {}",
+                log::debug!(
+                    "last_seen tracking for {}: never seen before, updating now",
                     agent_did_clone
                 );
-                (false, None) // User not found
+                (true, None) // Never updated, do it now
             }
-        })
+        } else {
+            log::warn!(
+                "last_seen tracking: no user owns the agent {}",
+                agent_did_clone
+            );
+            (false, None) // User not found
+        }
     })
     .await;
 
@@ -229,7 +226,7 @@ pub async fn track_last_seen(agent_did: &str) {
         // Perform the update in spawn_blocking
         let agent_did_for_update = agent_did.clone();
         let update_result = tokio::task::spawn_blocking(move || {
-            Ad4mDb::with_global_instance(|db| db.update_agent_last_seen(&agent_did_for_update))
+            crate::db_backend::db_backend().update_agent_last_seen(&agent_did_for_update)
         })
         .await;
 
@@ -267,10 +264,11 @@ pub async fn track_last_seen(agent_did: &str) {
 /// mode is on, plus sign up, log in and verify an email when it is. Reading users is left out,
 /// so anonymous callers cannot list them.
 pub fn anonymous_capabilities() -> Vec<Capability> {
-    use crate::db::Ad4mDb;
-    anonymous_capabilities_when(Ad4mDb::with_global_instance(|db| {
-        db.get_multi_user_enabled().unwrap_or(false)
-    }))
+    anonymous_capabilities_when(
+        crate::db_backend::db_backend()
+            .get_multi_user_enabled()
+            .unwrap_or(false),
+    )
 }
 
 /// [`anonymous_capabilities`] with multi-user mode on or off.
@@ -1087,7 +1085,7 @@ mod app_token_tests {
             "the app list carried the app token"
         );
         assert!(!serde_json::to_string(&apps).unwrap().contains(&token));
-        let rows = crate::db::Ad4mDb::with_global_instance(|db| db.grants()).unwrap();
+        let rows = crate::db_backend::db_backend().grants().unwrap();
         assert!(rows.iter().any(|row| row.request_id == request_id));
         assert!(!format!("{rows:?}").contains(&token));
 
@@ -1373,11 +1371,7 @@ mod app_token_tests {
         assert!(requested_agent(Some("did:key:z6MkNoSuchAgent")).is_err());
         // An email without a user is taken, as one for nobody: the answer does not say
         // whether the email has an account.
-        let users = || {
-            crate::db::Ad4mDb::with_global_instance(|db| db.list_users())
-                .unwrap()
-                .len()
-        };
+        let users = || crate::db_backend::db_backend().list_users().unwrap().len();
         let before = users();
         assert_eq!(
             requested_agent(Some("nobody-here@example.org")).unwrap(),
