@@ -18,7 +18,6 @@ import {
   type LinkExpression,
 } from "../src/types.js";
 
-const { bytesToHex, hexToBytes } = ed.etc;
 
 /** Everything needed to act as an AD4M agent in tests: identity + signing key. */
 export interface TestAgent {
@@ -66,7 +65,7 @@ export async function createSignedLink(
   const nonce = new Uint8Array(randomBytes(12));
   const ciphertext = gcm(roomKey, nonce).encrypt(new TextEncoder().encode(JSON.stringify(signed)));
   return {
-    data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
+    data: { ciphertext: Buffer.from(ciphertext).toString("base64"), nonce: Buffer.from(nonce).toString("base64") },
     link_hash: sha256Hex(payload),
     key_version: keyVersion,
   };
@@ -75,7 +74,8 @@ export async function createSignedLink(
 /** Decrypts a wire link `createSignedLink` built back to the signed LinkExpression. */
 export function openLink(link: LinkExpression, roomKey: Uint8Array = TEST_ROOM_KEY): PlainLink {
   if (!isEncryptedLinkData(link.data)) throw new Error("openLink: not an encrypted link");
-  const plaintext = gcm(roomKey, hexToBytes(link.data.nonce)).decrypt(hexToBytes(link.data.ciphertext));
+  const nonce = new Uint8Array(Buffer.from(link.data.nonce, "base64"));
+  const plaintext = gcm(roomKey, nonce).decrypt(new Uint8Array(Buffer.from(link.data.ciphertext, "base64")));
   return JSON.parse(new TextDecoder().decode(plaintext)) as PlainLink;
 }
 
