@@ -1,8 +1,8 @@
 # Link server
 
-The **link server** is a self-hosted Node.js process, separate from the executor, that stores the links of **link-server rooms** for the [server link language](server-link-language.md). It runs on Fastify, `ws` and `better-sqlite3`, with one SQLite file. A room's active links are a set keyed by link hash; every commit also goes into a diff log that keeps the newest `maxDiffsPerRoom` (10 000) diffs per room. Agents authenticate with their `did:key` and get a JWT backed by a session row.
+The **link server** is a self-hosted Node.js process, separate from the executor, that stores the links of **link-server rooms** for the [server link language](server-link-language.md). It runs on Fastify, `ws` and `better-sqlite3`, with one SQLite file. A room's active links are a set keyed by link hash; every commit also goes into a diff log, which the server keeps whole. Agents authenticate with their `did:key` and get a JWT backed by a session row.
 
-**Why:** A community can run it on small hardware with no other services. The revision is the XOR of the active link hashes, so two rooms with the same links have the same revision. The server never decrypts link data, so encrypted and plaintext rooms use one code path.
+**Why:** A community can run it on small hardware with no other services. The revision is the XOR of the active link hashes, so two rooms with the same links have the same revision. The server never decrypts link data, and it accepts only encrypted links, so every room is end-to-end encrypted from creation.
 
 **Parent:** [Link languages](README.md)
 
@@ -20,7 +20,7 @@ The **link server** is a self-hosted Node.js process, separate from the executor
 
 1. The first DID that authenticates to an unknown room id creates the room and becomes its admin.
 2. Other DIDs need an ACL entry (or `--auto-admit`). Removing a DID from the ACL deletes its sessions and closes its sockets.
-3. A removal resends the original `LinkExpression`, so its hash equals the addition's. For plaintext links the server requires `author` = session DID. For encrypted links the hash is the client-supplied `link_hash`.
+3. A removal resends the original `LinkExpression`, so its hash equals the addition's. The commit route refuses a link whose data is not exactly `{ciphertext, nonce}` or that has no `link_hash`; that client-supplied `link_hash` is the link's hash.
 4. `--operator-port` with `--operator-token-file` starts a second, loopback-only app for the **link-server operator** (list rooms, change ACLs, audit log, the admission mode, live server logs). `GET /api/logs` streams the last 1000 log lines of both apps (`LogTail`), then each new one, as Server-Sent Events. The link-server operator is the person who runs the server; in the rest of ADAM, "operator" is the executor's administrator.
 
 </details>
