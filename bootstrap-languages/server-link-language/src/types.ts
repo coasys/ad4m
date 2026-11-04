@@ -96,11 +96,11 @@ export interface OnlineAgent {
 // ---------------------------------------------------------------------------
 
 /**
- * A LinkExpression as it travels over the wire. In a plaintext room this
- * is structurally identical to LinkExpression. In an E2E room, the `data`
- * field carries an `EncryptedLinkData` shape (`{ciphertext, nonce}`)
- * instead of a plaintext `Link` — there is no separate `encrypted` field.
- * See src/encryption.ts encryptLinkForWire / decryptLinkFromWire.
+ * A LinkExpression as it travels over the wire. Every room is end-to-end
+ * encrypted: `data` carries an `EncryptedLinkData` shape (`{ciphertext,
+ * nonce}`) and author, timestamp and proof are inside the ciphertext. A
+ * plaintext `Link` in `data` is what only a server could add; the language
+ * skips it. See src/encryption.ts encryptLinkForWire / decryptLinkFromWire.
  */
 export interface WireLinkExpression {
     author?: DID;
@@ -185,9 +185,6 @@ export interface KeysResponseEntry {
 
 export interface KeysResponse {
     keys: KeysResponseEntry[];
-    /** True when the room has E2E enabled (even if this agent has no keys
-     *  yet). Absent on 404 responses (room has no E2E at all). */
-    e2e_enabled?: boolean;
 }
 
 export interface MemberMissingKeys {
