@@ -18,6 +18,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `src/main.rs` | `identity-store [serve]`, `identity-store keygen`; configuration from the environment |
 | `src/lib.rs` | `Store` (database, head key, clock, settings, the change signal for waits), `Settings`, `Clock`, `Fault` |
 | `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`), log replay, key-index rows |
+| `src/held.rs` | `HeldLogs`: the folds of recently used logs at their stored heads, bounded, least recently used out; `Store::held_chain` |
 | `src/log.rs` | `POST …/events` with the admission checks (below), log pages, heads, the key index; `admit_new_log` (the brake's place) |
 | `src/offers.rs` | the offer routes, the claim route, the device's state poll, the store's side of the claim check (`check_spend`, `spend`, `supersede`) |
 | `src/request.rs` | signed requests (`X-Coasys-Request`): checks, nonce replay guard, `percent_decode` |
@@ -28,6 +29,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `tests/common/agent.rs` | a test person: fixed keys, a log built with the core's builders, offers, claims, signed requests, records |
 | `tests/common/mod.rs` | `TestStore`: a real store on a temp file with an injected clock, called through the router |
 | `tests/logs.rs`, `tests/offers.rs` | the store's acceptance tests: logs, heads, the key index, signed requests, limits and agent records; offers, claims, the state poll and the claim check |
+| `tests/held.rs` | the held folds: no replay per request, a forged request reads no log, an append's head in force at once, the bound, rival events |
 | `tests/serve.rs` | the `serve` process stops cleanly on SIGTERM and SIGINT |
 | `examples/test_agent.rs` | the test person over JSON lines, for the agent language suites |
 | `Dockerfile` | the container image (build from the repo root) |
@@ -123,7 +125,10 @@ tests name them by these names.
   the key on its own: a client knows it from configuration (the executor's
   `identity.storeKeys`; `serve` prints it on start, `keygen` on creation), and the `store`
   of every signed head (`GET /v1/heads/{scid}`, the `head` of a log page) names it once
-  checked against those keys. Then the key is valid at the head by the store's clock and has
+  checked against those keys. Then the signature verifies under the key the key index lists
+  for `keyId` in that log (before the log is read: a forged request costs an indexed lookup
+  and one signature check); then, on the log's fold at the stored head (`held.rs`), the
+  identity is not frozen, the key is valid at the head by the store's clock and has
   no bot mark;
   `kelSeq`/`kelHash` name a held position; `expires` lies at most 5 minutes ahead; method and
   **path** (percent-decoded, without the query) match; `bodyHash` is the multihash of the raw
@@ -161,12 +166,34 @@ tests name them by these names.
   proof of work) belongs in `log::admit_new_log`, which runs once event #0 has replayed and
   before the rest of the append replays.
 - The store reads the clock only through `Store::now` (tests inject it). A `wait` read
-  watches one `Topic`: the identity's offers (`GET /offers/{scid}`, the state poll) or one
-  key (`GET /keys/{k}`); a committed write wakes only the topics it concerns
-  (`Store::changed`: an offer write its identity's offers, an append its identity's offers
-  and every key it lists). At most `MAX_WAITERS_PER_TOPIC` (16) reads wait on one topic and
-  `MAX_WAITERS` (4096) on the store; a read over a cap answers at once, as with `wait=0`. The
-  caps are per topic, not per caller address: behind a proxy every caller has one address.
+  watches one `Topic`: the identity's offers (`GET /offers/{scid}`, master-signed), the
+  identity's offers for the device's unauthenticated state poll (`OfferState`, its own
+  places, so pollers never take the owner's) or one key (`GET /keys/{k}`); a committed write
+  wakes only the topics it concerns (`Store::changed`: an offer write its identity's offers
+  and their state polls, an append those and every key it lists). At most
+  `MAX_WAITERS_PER_TOPIC` (16) reads wait on one topic: a read that finds its topic full takes
+  the oldest read's place, and that one answers at once, as with `wait=0`, so squatters who
+  know an offer and its claiming key cannot shut the claimant's poll out, they only shorten
+  each other's waits. At most `MAX_WAITERS` (4096) wait on the store; a read over that answers
+  at once. The caps are per topic, not per caller address: behind a proxy every caller has one
+  address.
+- **Held folds** (`held.rs`): the store keeps each recently used log folded in memory, keyed
+  by the stored head it ends at. `Store::held_chain` reads the head from `chain_heads` (one
+  primary-key lookup) and uses the held fold only when it ends exactly there; otherwise the
+  log folds once from `chain_entries` and is held. An append puts its new fold in after its
+  transaction commits, under the database lock, so the next request sees the new head's keys
+  (a revoked key is refused at once) with no replay. The folds are bounded by the events they
+  cover together (`HELD_LOG_EVENTS`, default 1 048 576), least recently used out first; a log
+  longer than the bound is folded on every use. `Store::held.folds()` counts replays (the
+  tests count them instead of timing requests). A restart starts with nothing held: each log
+  folds once on its first use. A rival (fork) event replays the prefix before it only when it
+  carries a proof by the master that signs at its seq, read from the held fold, and only
+  while that master has no recorded fork, so nobody without a master key of the log makes the
+  store replay it.
+- **A fresh database**: the store has never been deployed, and a store file from before the
+  agent-record version ceiling and the `fork_signers` table is not upgraded: start such a
+  store on an empty database. Records stored above the store's clock and forks recorded
+  without their signing master would otherwise stay as they are. There are no migrations.
 - **Forks**: an event at a seq the store holds, with another hash than the stored one, that
   replays on the stored events before it (every proof checked) is a fork. The store records it
   in `chain_forks` with the event's JSON (`SqliteChainStore::record_fork_in`) and its signing
@@ -204,6 +231,7 @@ tests name them by these names.
 | `POW_BITS` | `22` | what `GET /v1/pow` publishes and a sent proof must meet |
 | `CORS_ORIGINS` | none | comma-separated browser origins (all routes but the public host profile's, which allow any origin) |
 | `FEED_TOKEN` | none | the mirror token; without one the feed answers `401` |
+| `HELD_LOG_EVENTS` | `1048576` | the most events the logs held folded in memory cover together |
 
 `serve` prints `identity-store listening on http://<addr> store-key <multikey>` once it listens.
 
