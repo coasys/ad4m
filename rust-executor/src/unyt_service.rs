@@ -1631,6 +1631,7 @@ pub async fn check_pending_sends() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Ad4mDb;
     use crate::holochain_service::interface::{
         Envelope, HolochainServiceRequest, HolochainServiceResponse,
     };
