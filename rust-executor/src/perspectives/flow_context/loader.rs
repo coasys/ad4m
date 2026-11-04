@@ -71,11 +71,10 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
 /// to scope against, so surfacing every FlowInstance would be
 /// unbounded and violate Model C scope discipline (James PR #929 J#1).
 ///
-/// Single-URI queries push the filter down to `model_query`
-/// (`where.subject == uri`) so the existing typed-in-store path is
-/// preserved. Multi-URI batches load-all and filter in-Rust because
-/// `model_query` has no `in` operator today; the batch is bounded by
-/// the auto-processor's drained item count.
+/// The filter is pushed down to `model_query`: one URI as
+/// `where.subject == uri`, several as an array `where.subject`, which
+/// `model_query` reads as "any of" (#1257). The result is still checked
+/// against `subjects` here.
 ///
 /// Silently returns `Ok(vec![])` when the `FlowInstance` class hasn't
 /// been registered yet on this perspective — a freshly-created
@@ -89,12 +88,11 @@ pub async fn load_flow_instances(
     if subjects.is_empty() {
         return Ok(vec![]);
     }
-    // `model_query` has no `in` operator, so only a single subject is
-    // pushed down; a batch loads everything and filters here.
+    // An array `where` value is "any of" in `model_query`.
     let query = if subjects.len() == 1 {
         serde_json::json!({ "where": { "subject": subjects[0].clone() } })
     } else {
-        serde_json::json!({})
+        serde_json::json!({ "where": { "subject": subjects } })
     };
     let records = query_flow_instances(perspective, &query).await?;
     Ok(records
