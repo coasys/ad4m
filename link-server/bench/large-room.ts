@@ -140,10 +140,8 @@ async function pagedSync(server: TestServerHandle, roomId: string, token: string
 
 async function main(): Promise<void> {
   // A high rate limit: the bench sends far more requests than a member would.
-  // maxDiffsPerRoom 0 keeps the whole diff log (the default prunes to 10 000, BUG-118).
   const server = await startTestServer({
     rateLimits: { roomJwt: { limit: 100_000, windowMs: 60_000 } },
-    maxDiffsPerRoom: 0,
   });
   try {
     console.log(
