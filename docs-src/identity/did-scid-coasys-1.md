@@ -560,11 +560,17 @@ Coasys identity store adds these checks:
   further event, a `rotate` included.
 - **Per-log budget.** Events differ a hundredfold in the state they add (a `scope` may name its
   actions any number of times within the event size limit), so the length cap does not bound
-  what a log costs a host to hold or replay. The store refuses an append after which the
-  replayed state of the log would take more than its per-log budget in memory (default
-  16 MiB, configurable; a log of 16 384 rotations takes under 7 MB), and stores none of the
-  append's events (`400 log-too-large`). A log that reaches the budget may still take an event
-  small enough to fit. A `rotate` is never refused by the budget: an append whose events are
+  what a log costs a host to hold or replay. The budget (default 16 MiB, configurable; a log
+  of 16 384 rotations takes under 7 MB) has two bounds on the replayed state of the log in
+  memory: its live part, the state without the records of keys revoked at the head (device
+  keys revoked, masters replaced by a `rotate`), may take at most the budget, and the whole
+  state, revoked keys included, at most twice it. The store refuses an append after which
+  either bound would be passed, and stores none of the append's events (`400 log-too-large`).
+  A log that reaches the budget may still take an event small enough to fit. Revoking keys
+  frees the live part: someone holding a stolen master can pad the live part to the budget,
+  and once the owner rotates and revokes the keys that padded it, the owner appends again, up
+  to the whole bound. A log stolen and padded twice can reach the whole bound and then takes
+  no event but a `rotate`. A `rotate` is never refused by the budget: an append whose events are
   all `rotate`s is not measured. Rotation is the recovery from a stolen master, and someone
   holding the current master could otherwise pad the log up to the budget and lock the
   owner's `rotate` out. A `rotate` adds one master key to the state, and the length cap
