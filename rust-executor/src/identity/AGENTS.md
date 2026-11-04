@@ -10,7 +10,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `resolver.rs` | The one place that decides what a log says. `key_speaks_for`, `key_valid_at_anchor` and `verify_expression` (all up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`; `proof.record` anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Later checks (link anchors, verdicts, key login) belong here |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
-| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages; one fetch per log at a time, and a waiter takes the answer of a fetch that began after it called), `ingest`, `accept`, `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh) |
+| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages; one fetch per log at a time, and a waiter takes the answer of a fetch that began after it called), `ingest`, `accept` (a lower store head: `Behind` or `Conflict`, a fork only with a valid rival), `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh) |
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
@@ -31,13 +31,31 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   over the did:scid host profile (`src_fetch.rs`), where the address policy can be enforced at
   connect time; its events are folded in memory for that one answer and never cached, its head
   is only a paging hint. Nothing else here speaks HTTP.
-- The cache only extends a log. A different event at a held seq, or a signed head below the
-  cached one (a shorter log never truncates a held one), records a fork, appends nothing and fires
-  `identity-fork` once per fork, to the sessions of the identity's local agents. A store that
-  answers no log (`null`) records a fork only when the cache holds a head a key of the current
-  `identity.storeKeys` verifies; a log only a foreign `src` served, or a former store's head, is
-  no evidence against the store. `identityLog` answering `undefined` is refused
-  (`backend::Undefined::Refused`), never read as no log.
+- The cache only extends a log. A different event at a held seq that holds (below) records a
+  fork, appends nothing and fires `identity-fork` once per fork, to the sessions of the
+  identity's local agents.
+- **A store that answers less is behind, not a fork.** A shorter log never truncates a held
+  one, and it is no evidence by itself (a store restored from a backup answers one). In
+  `KelCache::accept`, a store-signed head below the cached head is compared with the cached
+  event *at the head's own seq*:
+  - the same hash: the store is behind on the cached branch. `CacheError::Behind`: nothing
+    recorded, nobody alerted, the cached log and its accepted head stay (the trusted seq does
+    not move back). Callers treat it as a soft miss: `refreshed_or_cached` and the resolver
+    answer from the cache (`identity.resolve` lists the store in `coasys:skipped`, "the store
+    is behind"), and the next refresh window reads the store again.
+  - another hash: a signed head names a hash, not an event, so it is no fork either. The
+    store's events at or below that seq go through the same import as `ingest`; `fetch`
+    re-reads the store's log from seq 0 once for them, since the page from the cached head
+    holds none. A competing event that holds (`rival_holds`) records the fork, evidence at
+    that event's seq (ours vs theirs there). Without one: `CacheError::Conflict`, evidence at
+    the head's seq (our hash there vs `head.hash`), nothing recorded, nobody alerted, the
+    cache answers (`coasys:skipped` with the conflict).
+  - A head at the cached seq with another hash than the cached event is a `Conflict` too.
+  - A store that answers no log (`null`) of one it signed a head of (under a key of the current
+    `identity.storeKeys`) is `Behind` (`store: None`); without such a head it is `NotFound`
+    (a log only a foreign `src` served, or a former store's head, says nothing about the store).
+  `identityLog` answering `undefined` is refused (`backend::Undefined::Refused`), never read as
+  no log.
 - **A different event counts only when it is valid.** `import` compares hashes at a held seq
   and checks no proof there, so before a fork is recorded (or a `src` conflict reported as
   `coasys:fork`) the competing event goes through `cache::rival_holds`: the core's `fold` of the
@@ -55,7 +73,7 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 - **A signed head proves authenticity, not freshness.** `verify_head` checks the store's
   signature and never reads `time` (the head's append time, not the read's): a store, or
   anyone replaying its answer, can serve an older signed head, and no signed statement proves
-  a read is current. The cache never moves back (a lower head is a fork), and
+  a read is current. The cache never moves back (a lower head is `Behind` or a `Conflict`), and
   `ADMIT_FRESHNESS` bounds how long a positive verdict goes without a re-read; neither proves
   the store showed its latest head.
 - **A fork has one way out: `identity.resetLog { did }`** (`Guard::Operator`). It drops this
@@ -81,7 +99,10 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   `identity.status`, `identity.log` and `identity.devices` show the cached log as it is.
   Without `identity.storeKeys` no `did:scid` author verifies, and `identity.publish` and
   `identity.claimOffer` refuse with `no-store-keys` before the store commits anything: a log
-  the executor can never accept would still take the agent's key for every identity.
+  the executor can never accept would still take the agent's key for every identity. No
+  production store key ships with the executor, so the default config (no `identity.storeUrl`:
+  the language's default store) is in this state; `init` logs
+  `missing_store_keys_warning` at start, naming the store and the consequence.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
   first-link rule itself: `already-linked` while the main key is valid in its identity's log at
   the trusted seq, `no-operator` without a record, `first-link` for another identity.
@@ -133,7 +154,7 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   admits the key but last refreshed from the configured store longer ago than that (the time is
   kept in memory only, so after a restart every log is stale), the read refreshes it once and
   checks again, so a revocation at the store reaches every reader within the window. Offline
-  policy: when that refresh fails (the store unreachable, or a fork) the cached trusted head
+  policy: when that refresh fails (the store unreachable or behind, a conflict, a fork) the cached trusted head
   answers, and the failed attempt counts as the window's read, so an unreachable store is tried
   once per window per log, not on every read.
 - An agent keeps the first identity it joined (`identity_agents`); `agent.status` and

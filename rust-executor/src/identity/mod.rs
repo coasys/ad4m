@@ -83,15 +83,34 @@ pub struct IdentitySettings {
     pub allow_private_src: bool,
 }
 
+/// The warning logged at start when `identity.storeKeys` is empty, naming the store it leaves
+/// untrusted and what that costs; `None` with keys. No production store key ships with the
+/// executor, so the default config (no `identity.storeUrl`: the agent language's default store)
+/// verifies no `did:scid` record until the operator sets the store's key.
+pub fn missing_store_keys_warning(settings: &IdentitySettings) -> Option<String> {
+    if !settings.store_keys.is_empty() {
+        return None;
+    }
+    let store = match &settings.store_url {
+        Some(url) => format!("the identity store at {url}"),
+        None => "the agent language's default identity store (identity.storeUrl is unset)".into(),
+    };
+    Some(format!(
+        "identity: identity.storeKeys is empty, so no head of {store} is trusted and this \
+         executor verifies no did:scid record: expressions by a did:scid author are invalid, \
+         no device key speaks for a person, and identity.publish and identity.claimOffer refuse \
+         with no-store-keys. Set identity.storeKeys (--identity-store-keys) to the store's \
+         Ed25519 multikey."
+    ))
+}
+
 /// Opens the key-log cache in the executor database at `db_path` and starts the module. Called
 /// once at startup, after the database opens.
 pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheError> {
     let mut cache = KelCache::open(db_path, settings.store_keys.clone())?;
     cache.set_fork_listener(Box::new(publish_fork));
-    if settings.store_keys.is_empty() {
-        log::warn!(
-            "identity: identity.storeKeys is not set, so no head from the identity store is accepted"
-        );
+    if let Some(warning) = missing_store_keys_warning(settings) {
+        log::warn!("{warning}");
     }
     if settings.allow_private_src {
         log::warn!(
@@ -299,6 +318,30 @@ mod tests {
         assert!(check_store_url(Some("  ")).is_err());
         assert!(check_store_url(None).is_ok());
         assert!(check_store_url(Some("https://store.example")).is_ok());
+    }
+
+    /// Without `identity.storeKeys` the executor warns at start, naming the store it does not
+    /// trust and that no did:scid record verifies; with keys it says nothing.
+    #[test]
+    fn empty_store_keys_warn_naming_the_store_and_the_consequence() {
+        let configured =
+            missing_store_keys_warning(&store_url("https://store.example")).expect("a warning");
+        assert!(configured.contains("https://store.example"), "{configured}");
+        assert!(
+            configured.contains("verifies no did:scid record"),
+            "{configured}"
+        );
+        assert!(configured.contains("identity.storeKeys"), "{configured}");
+
+        let default = missing_store_keys_warning(&IdentitySettings::default()).expect("a warning");
+        assert!(default.contains("default identity store"), "{default}");
+        assert!(default.contains("verifies no did:scid record"), "{default}");
+
+        let keyed = IdentitySettings {
+            store_keys: vec!["z6MkA".into()],
+            ..store_url("https://store.example")
+        };
+        assert_eq!(missing_store_keys_warning(&keyed), None);
     }
 
     fn store_url(url: &str) -> IdentitySettings {

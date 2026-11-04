@@ -365,7 +365,7 @@ mod tests {
     }
 
     /// `identityLog` answering `undefined` is a language off the interface, not a missing log
-    /// (`null`), which would record a fork of a log the store signed; a void export's
+    /// (`null`), which would read as a store behind a log it signed; a void export's
     /// `undefined` is its `null`.
     #[test]
     fn an_undefined_answer_is_no_null() {
