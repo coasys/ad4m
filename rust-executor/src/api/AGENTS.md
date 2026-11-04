@@ -7,7 +7,7 @@ REST/WS shim. Split plan: spec item 6.
 
 | Route | Handler | Notes |
 |---|---|---|
-| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice is refused from the frame's text (`identity_ws::duplicate_member_refusal`, 400 `invalid: DuplicateMember`): the params `Value` keeps only the last. **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
+| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice, or that repeats `params`, `events` or `event`, is refused from the frame's text (`identity_ws::duplicate_member_refusal`, 400 `invalid: DuplicateMember`): the params `Value` keeps only the last. The refusal comes after `HandlerMap::admit`, so a caller the guard refuses gets the access answer. **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS |
 
@@ -119,8 +119,12 @@ token on an executor without one, on a loopback listener). The dispatcher checks
 guard: every other caller gets 403 `guards::LOCAL_ONLY` (`local-only: …`), a grant with every
 capability and the admin credential on a network listener included. An operator from a key
 login is never on this machine, on a loopback listener too (a forwarded port makes a remote
-device key look local), so every local-only method refuses it. The guard table marks
-these methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
+device key look local), so every local-only method refuses it. Every method that is not
+local only admits it as the operator, as its guard says. That is the rule for the calls
+that create, import or lock the executor's agent and move its data folder: `agent.generate`,
+`agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` are not local
+only, so a remote operator (a key login, or the admin credential on a network listener) may
+move the whole data folder. The guard table marks the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
 `machine` key to a caller off this machine (`config_rpc`). `identity.custodyStatus` adds the
 custody channel's own check (`identity::custody::admit`: the admin credential, not a tokenless
 operator, and `--custody-channel`).
@@ -144,8 +148,9 @@ Notes on some methods:
   `get_perspective_with_access` in its handler, so an app exports only the main agent's
   perspectives. A `db` export names no perspective and checks nothing past the guard: it writes
   the whole executor database (`export_all_to_json`). It and `runtime.importData` read and
-  write paths on the executor's machine; they are not local only yet (nor are
-  `agent.generate`, `agent.import` and `agent.lock`).
+  write paths on the executor's machine and are not local only (nor are `agent.generate`,
+  `agent.import` and `agent.lock`): the operator calls them from anywhere, an operator
+  from a key login included (`method_matrix_tests::OPERATOR_ANYWHERE`).
 - `Cap` methods that read executor-wide data users read today: `agent.getTrustedAgents`,
   `ai.models`, `language.*` reads, link-language templates,
   `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse

@@ -32,7 +32,8 @@ fn answer<T: serde::Serialize>(value: T) -> Result<Value, WsRpcError> {
 }
 
 /// The refusal of an `identity.publish` or `identity.cosignIncept` frame whose event (in
-/// `params.events`, `params.event`) names a member twice: `invalid: DuplicateMember (…)`, the
+/// `params.events`, `params.event`) names a member twice, or whose frame repeats `params`,
+/// `events` or `event`: `invalid: DuplicateMember (…)`, the
 /// rule's name as the store gives it. The socket reads a frame into a `Value`, which keeps only the
 /// last of the two, so the frame's own text is read here; every other rule of the event format
 /// the handler applies to the values. `None` for another method, or a frame this does not read
@@ -53,7 +54,17 @@ pub(crate) fn duplicate_member_refusal(method: &str, frame: &str) -> Option<WsRp
     if !matches!(method, "identity.publish" | "identity.cosignIncept") {
         return None;
     }
-    let params = serde_json::from_str::<Frame>(frame).ok()?.params?;
+    let refusal = |e: FormatError| WsRpcError::bad_request(format!("invalid: {} ({e})", e.name()));
+    // A repeated `params`, `events` or `event` is a duplicate member too: the frame's `Value`
+    // would carry only the last copy. The derived `Deserialize` refuses it as a duplicate field.
+    let params = match serde_json::from_str::<Frame>(frame) {
+        Ok(frame) => frame.params?,
+        Err(e) => {
+            let text = e.to_string();
+            let name = text.strip_prefix("duplicate field `")?.split('`').next()?;
+            return Some(refusal(FormatError::DuplicateMember(name.to_string())));
+        }
+    };
     let texts = match method {
         "identity.publish" => params.events.unwrap_or_default(),
         _ => params.event.into_iter().collect(),
@@ -64,7 +75,7 @@ pub(crate) fn duplicate_member_refusal(method: &str, frame: &str) -> Option<WsRp
             Err(FoldError::Format(e @ FormatError::DuplicateMember(_))) => Some(e),
             _ => None,
         })
-        .map(|e| WsRpcError::bad_request(format!("invalid: {} ({e})", e.name())))
+        .map(refusal)
 }
 
 async fn status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -253,6 +264,32 @@ mod tests {
         assert!(cosign.is_some());
         // A nested object counts too.
         assert!(publish(r#"[{"proof":[{"a":1,"a":2}]}]"#).is_some());
+        // So does a frame that repeats `params`, `events` or `event`: its `Value` keeps the last.
+        let repeated = |frame: &str, method: &str, member: &str| {
+            let refused = duplicate_member_refusal(method, frame).expect("refused");
+            assert_eq!(refused.code, 400);
+            assert!(
+                refused.message.starts_with("invalid: DuplicateMember")
+                    && refused.message.contains(member),
+                "{}",
+                refused.message
+            );
+        };
+        repeated(
+            r#"{"type":"identity.publish","params":{"events":[]},"params":{"events":[{"seq":0}]}}"#,
+            "identity.publish",
+            "params",
+        );
+        repeated(
+            r#"{"type":"identity.publish","params":{"events":[],"events":[{"seq":0}]}}"#,
+            "identity.publish",
+            "events",
+        );
+        repeated(
+            r#"{"type":"identity.cosignIncept","params":{"event":{},"event":{"seq":0}}}"#,
+            "identity.cosignIncept",
+            "event",
+        );
         // Another format error, params outside the contract, another method: not refused here.
         assert!(publish(r#"[{"seq":0}]"#).is_none());
         assert!(publish(r#""not a list""#).is_none());

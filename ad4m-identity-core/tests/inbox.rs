@@ -221,7 +221,7 @@ fn bound_offer(log: &Log, bound: Option<String>) -> Offer {
 fn ticket(log: &Log, offer: Offer, s: [u8; 32]) -> InboxPayload {
     let signed = signed_offer(log, offer);
     let body = InboxBody::OfferTicket(Box::new(OfferTicket {
-        store: "https://store.coasys.org".into(),
+        store: "https://store.ad4m.dev".into(),
         scid: log.chain.state().scid.clone(),
         offer_id: signed.offer.offer_id.clone(),
         s: bs58::encode(s).into_string(),

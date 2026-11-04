@@ -4,8 +4,9 @@
 mod common;
 
 use ad4m_hash_chain::{
-    compare, entry_hash, entry_hash_json, fold, import, verify_proof, CanonError, Chain,
-    ChainError, ChainId, ChainPolicy, ChainType, Compare, ForkEvidence, ImportOutcome, ProofError,
+    compare, entry_hash, entry_hash_json, fold, fold_stored, import, verify_proof, CanonError,
+    Chain, ChainError, ChainId, ChainPolicy, ChainType, Compare, ForkEvidence, ImportOutcome,
+    ProofError,
 };
 use common::*;
 use serde_json::json;
@@ -184,6 +185,105 @@ impl ChainPolicy for Counting {
     }
 }
 
+// ------------------------------------------------------------- stored chains
+
+/// The test chain type, with `_stored` methods that leave out the signature check (as the KEL
+/// does), counting how often each kind of step runs.
+#[derive(Default)]
+struct Stored {
+    full: AtomicUsize,
+    stored: AtomicUsize,
+}
+
+impl ChainPolicy for Stored {
+    type Entry = TestEntry;
+    type State = TestState;
+    type Error = TestError;
+    const TYPE: ChainType = <TestPolicy as ChainPolicy>::TYPE;
+    const DOMAIN: &'static str = DOMAIN;
+
+    fn genesis(&self, entry: &TestEntry) -> Result<(ChainId, TestState), TestError> {
+        self.full.fetch_add(1, Ordering::SeqCst);
+        TestPolicy.genesis(entry)
+    }
+
+    fn chain_of(&self, entry: &TestEntry) -> ChainId {
+        TestPolicy.chain_of(entry)
+    }
+
+    fn apply(&self, state: &mut TestState, entry: &TestEntry) -> Result<(), TestError> {
+        self.full.fetch_add(1, Ordering::SeqCst);
+        TestPolicy.apply(state, entry)
+    }
+
+    fn genesis_stored(&self, entry: &TestEntry) -> Result<(ChainId, TestState), TestError> {
+        self.stored.fetch_add(1, Ordering::SeqCst);
+        let key = entry.key.clone().ok_or(TestError::NoKey)?;
+        Ok((entry.chain.clone(), TestState { key, count: 0 }))
+    }
+
+    fn apply_stored(&self, state: &mut TestState, entry: &TestEntry) -> Result<(), TestError> {
+        self.stored.fetch_add(1, Ordering::SeqCst);
+        if let Some(key) = &entry.key {
+            state.key = key.clone();
+        }
+        state.count += 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn fold_stored_without_overrides_checks_everything_fold_checks() {
+    // The defaults are the full checks: a policy that does not opt in loses nothing.
+    let entries = make_chain("c", 1, 5);
+    let full = fold(&TestPolicy, &entries).unwrap();
+    let stored = fold_stored(&TestPolicy, &entries).unwrap();
+    assert_eq!(chain_json(&stored), chain_json(&full));
+    let mut forged = entries.clone();
+    forged[3] = sign(forged[3].clone(), &signing_key(9), DOMAIN);
+    assert!(matches!(
+        fold_stored(&TestPolicy, &forged).unwrap_err(),
+        ChainError::Policy(TestError::BadProof(_))
+    ));
+}
+
+#[test]
+fn fold_stored_runs_only_the_stored_steps_and_still_checks_order_links_and_chain() {
+    let entries = make_chain("c", 1, 6);
+    let policy = Stored::default();
+    let stored = fold_stored(&policy, &entries).unwrap();
+    assert_eq!(policy.stored.load(Ordering::SeqCst), 6);
+    assert_eq!(policy.full.load(Ordering::SeqCst), 0);
+    let full = fold(&TestPolicy, &entries).unwrap();
+    assert_eq!(stored.id(), full.id());
+    assert_eq!(stored.hashes(), full.hashes());
+    assert_eq!(stored.state(), full.state());
+    // A forged signature passes the stored steps (what a host trusts its storage for) ...
+    let mut forged = entries.clone();
+    forged[3] = sign(forged[3].clone(), &signing_key(9), DOMAIN);
+    assert!(fold_stored(&policy, &forged).is_ok());
+    assert!(fold(&policy, &forged).is_err());
+    // ... but storage that hands back another order, a broken link or another chain fails.
+    let mut swapped = entries.clone();
+    swapped.swap(2, 3);
+    assert!(matches!(
+        fold_stored(&policy, &swapped).unwrap_err(),
+        ChainError::Seq { want: 2, got: 3 }
+    ));
+    let mut relinked = entries.clone();
+    relinked[4].prev = Some(entry_hash(&entries[2]).unwrap());
+    assert!(matches!(
+        fold_stored(&policy, &relinked).unwrap_err(),
+        ChainError::Prev { .. }
+    ));
+    let mut other = entries.clone();
+    other[2].chain = "d".into();
+    assert!(matches!(
+        fold_stored(&policy, &other).unwrap_err(),
+        ChainError::WrongChain { .. }
+    ));
+}
+
 #[test]
 fn fold_never_copies_the_state_and_append_copies_it_once() {
     // A state that grows with the chain makes a copy per entry quadratic: fold copies none,
@@ -197,6 +297,51 @@ fn fold_never_copies_the_state_and_append_copies_it_once() {
     assert_eq!(clones.load(Ordering::SeqCst), 0);
     chain.append(&policy, &entries[64]).unwrap();
     assert_eq!(clones.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn appended_copies_no_state_and_a_batch_staged_on_one_copy_costs_one() {
+    let clones = Arc::new(AtomicUsize::new(0));
+    let policy = Counting(clones.clone());
+    let entries = make_chain("c", 1, 40);
+    let held = fold(&policy, &entries[..8]).unwrap();
+    // A batch of 32 staged on one copy of the held chain: one copy in all.
+    let mut staged = held.clone();
+    for entry in &entries[8..] {
+        staged = staged.appended(&policy, entry).unwrap();
+    }
+    assert_eq!(clones.load(Ordering::SeqCst), 1);
+    let full = fold(&TestPolicy, &entries).unwrap();
+    assert_eq!(staged.hashes(), full.hashes());
+    assert_eq!(staged.state().inner, *full.state());
+    assert_eq!(held.head().seq, 7);
+    // A batch that fails at its last entry: still one copy, and the held chain is unchanged.
+    clones.store(0, Ordering::SeqCst);
+    let mut unsigned = entries[39].clone();
+    unsigned.proof.clear();
+    let mut staged = Some(held.clone());
+    let mut refused = None;
+    for entry in entries[8..39].iter().chain([&unsigned]) {
+        match staged.take().unwrap().appended(&policy, entry) {
+            Ok(next) => staged = Some(next),
+            Err(e) => {
+                refused = Some(e);
+                break;
+            }
+        }
+    }
+    assert_eq!(clones.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        policy_err(&refused.unwrap()),
+        Some(&TestError::MissingProof)
+    );
+    assert_eq!(held.head().seq, 7);
+    assert_eq!(held.state().inner.count, 7);
+    // The order, link and chain checks run as in `append`.
+    assert!(matches!(
+        held.clone().appended(&policy, &entries[9]),
+        Err(ChainError::Seq { want: 8, got: 9 })
+    ));
 }
 
 #[test]

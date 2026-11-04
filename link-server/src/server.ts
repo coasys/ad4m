@@ -1,5 +1,6 @@
 import path from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
+import compressPlugin from "@fastify/compress";
 import websocketPlugin from "@fastify/websocket";
 import { AuthManager, ChallengeStore } from "./auth.js";
 import { LinkServerDB } from "./db.js";
@@ -41,8 +42,6 @@ export interface ServerOptions {
     roomJwt?: { limit: number; windowMs: number };
     commitJwt?: { limit: number; windowMs: number };
   };
-  /** Maximum diff entries retained per room. Older diffs get pruned. Default 10 000. */
-  maxDiffsPerRoom?: number;
   /** Maximum HTTP request body size. Default "10mb". */
   bodyLimit?: number;
   /** How often expired sessions get swept from the DB (ms). Default 900 000 (15 min). */
@@ -74,7 +73,7 @@ export interface BuiltServer {
  */
 export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   const dbPath = opts.dataDir === ":memory:" ? ":memory:" : path.join(opts.dataDir, "data.sqlite");
-  const db = new LinkServerDB(dbPath, { maxDiffsPerRoom: opts.maxDiffsPerRoom });
+  const db = new LinkServerDB(dbPath);
 
   // One destination for both apps, so the operator's log view shows the
   // public app's lines and its own.
@@ -87,6 +86,12 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
     logger,
     bodyLimit: opts.bodyLimit ?? 10 * 1024 * 1024, // 10 MiB
   });
+  // Compresses JSON answers (above 1 kB) for a client that sends
+  // Accept-Encoding: the Deno host's fetch sends it and decodes br/gzip. A
+  // client that sends none gets the uncompressed body, as before. Request
+  // bodies stay uncompressed: decompressing them would let a small upload
+  // grow past bodyLimit.
+  await app.register(compressPlugin, { globalDecompression: false });
   await app.register(websocketPlugin, {
     options: {
       // Cap inbound WebSocket frames at 1 MiB — link diffs and telepresence

@@ -362,7 +362,7 @@ fn check_add_refuses_each_condition_alone() {
 
 fn offer_string() -> OfferString {
     OfferString {
-        store: "https://store.coasys.org".into(),
+        store: "https://store.ad4m.dev".into(),
         scid: Log::new().chain.state().scid.clone(),
         offer_id: link_offer_id(),
         s: bs58::encode(link_secret()).into_string(),
@@ -375,7 +375,7 @@ fn the_offer_string_round_trips_bare_and_as_a_link() {
     assert!(string.encode().starts_with("coasys:offer:1:"));
     assert!(string
         .link()
-        .starts_with("https://coasys.id/o#coasys:offer:1:"));
+        .starts_with("https://id.coasys.org/o#coasys:offer:1:"));
     assert_eq!(OfferString::parse(&string.encode()).unwrap(), string);
     assert_eq!(OfferString::parse_link(&string.link()).unwrap(), string);
     assert_eq!(OfferString::parse_link(&string.encode()).unwrap(), string);
@@ -404,9 +404,9 @@ fn the_offer_string_parser_refuses_other_prefixes_short_codes_and_extra_fields()
 #[test]
 fn an_offer_link_with_the_string_in_a_query_or_path_is_refused() {
     let string = offer_string().encode();
-    assert!(OfferString::parse_link(&format!("https://coasys.id/o?o={string}")).is_err());
-    assert!(OfferString::parse_link(&format!("https://coasys.id/o?x=1#{string}")).is_err());
-    assert!(OfferString::parse_link(&format!("https://coasys.id/{string}#{string}")).is_err());
+    assert!(OfferString::parse_link(&format!("https://id.coasys.org/o?o={string}")).is_err());
+    assert!(OfferString::parse_link(&format!("https://id.coasys.org/o?x=1#{string}")).is_err());
+    assert!(OfferString::parse_link(&format!("https://id.coasys.org/{string}#{string}")).is_err());
 }
 
 #[test]
@@ -417,7 +417,7 @@ fn the_device_string_round_trips_and_refuses_extra_fields() {
         r: bs58::encode([3u8; 16]).into_string(),
         exp: LINK_NOW + 300,
         hint: None,
-        store: "https://store.coasys.org".into(),
+        store: "https://store.ad4m.dev".into(),
     };
     assert_eq!(DeviceString::parse(&device.encode()).unwrap(), device);
     assert!(OfferString::parse(&device.encode()).is_err());

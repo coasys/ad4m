@@ -124,7 +124,8 @@ enum Domain {
         /// The did:scid of the identity that operates this executor. Recorded only while the
         /// data folder has no operator; another identity never replaces it (only the recorded
         /// operator can). On a data folder already initialized, only the operator is recorded
-        /// (the seed stays, unless --network-bootstrap-seed is given too).
+        /// (the seed stays, unless --network-bootstrap-seed is given too). The operator is
+        /// recorded in this data folder: give `init` the same --data-path that `run` uses.
         #[arg(long)]
         operator: Option<String>,
     },
@@ -133,7 +134,7 @@ enum Domain {
     /// (`--admin-credential` or AD4M_ADMIN_CREDENTIAL) and an operator recorded with
     /// `init --operator`.
     Claim {
-        /// The offer link (`https://coasys.id/o#coasys:offer:1:…`) or the offer string.
+        /// The offer link (`https://id.coasys.org/o#coasys:offer:1:…`) or the offer string.
         offer: String,
         /// A name for this executor the app shows on its confirm card.
         #[arg(long)]

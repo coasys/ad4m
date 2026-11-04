@@ -369,6 +369,22 @@ fn scope_on_a_key_without_the_bot_mark() {
 }
 
 #[test]
+fn scope_with_no_action() {
+    assert_eq!(
+        policy_of(refuse("scope with no action")),
+        FoldError::EmptyScope
+    );
+}
+
+#[test]
+fn scope_with_an_unknown_action() {
+    assert_eq!(
+        format_of(refuse("scope with an unknown action")),
+        FormatError::UnknownAction("admin".into())
+    );
+}
+
+#[test]
 fn rotate_with_a_wrong_salt() {
     assert_eq!(
         policy_of(refuse("rotate with a wrong salt")),

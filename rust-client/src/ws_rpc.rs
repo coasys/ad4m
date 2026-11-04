@@ -226,13 +226,24 @@ mod tests {
     /// A failed connect names the executor but never the token (the URL carries it).
     #[tokio::test]
     async fn a_failed_connect_never_shows_the_token() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // The port stays ours: the server refuses the upgrade with a plain HTTP answer.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+        });
         let error = WsRpcClient::connect(&format!("http://127.0.0.1:{port}"), "secret-cap-token")
             .await
             .err()
-            .expect("nothing listens on the port")
+            .expect("the upgrade is refused")
             .to_string();
         assert!(!error.contains("secret-cap-token"), "{error}");
         assert!(error.contains(&format!("127.0.0.1:{port}")), "{error}");

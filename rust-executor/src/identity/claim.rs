@@ -99,12 +99,9 @@ impl ClaimService<'_> {
         signer.check().map_err(WsRpcError::internal)?;
         let claim: ad4m_ldk::identity::Claim =
             convert(&claim).map_err(|e| WsRpcError::internal(e.to_string()))?;
-        let receipt = self
-            .identity
-            .backend
-            .claim_offer(&offer_did, &offer.offer_id, &claim)
-            .await
-            .map_err(backend_error)?;
+        // The row goes in before the store call: when the store commits the claim and its
+        // answer is lost, a retry gets `gone` once the add spent the offer, and only this row
+        // lets `joinStatus` follow the offer and record the binding.
         db(|db| {
             db.add_join(&JoinRow {
                 offer_id: offer.offer_id.clone(),
@@ -112,6 +109,12 @@ impl ClaimService<'_> {
                 claimed_at: now(),
             })
         })?;
+        let receipt = self
+            .identity
+            .backend
+            .claim_offer(&offer_did, &offer.offer_id, &claim)
+            .await
+            .map_err(backend_error)?;
         Ok(ClaimOfferResult {
             did: offer_did,
             match_code: link::match_code(&offer.scid, &offer.offer_id, signer.key().as_str()),
