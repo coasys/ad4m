@@ -15,6 +15,7 @@ import type { AgentAdapter } from "../src/adapters.js";
 import {
     AES_KEY_BYTES,
     buildKeyRing,
+    bytesToBase64,
     bytesToHex,
     decryptLinkFromWire,
     encryptLinkForWire,
@@ -193,7 +194,16 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         assert.equal(wire.author, undefined);
         assert.equal(wire.timestamp, undefined);
         assert.equal(wire.proof, undefined);
-        assert.equal((wire.data as any).ciphertext.includes(Buffer.from("s3cr3t").toString("hex")), false);
+        assert.equal(Buffer.from((wire.data as any).ciphertext, "base64").includes(Buffer.from("s3cr3t")), false);
+    });
+
+    it("writes ciphertext and nonce in canonical base64", () => {
+        const roomKey = generateRoomKey();
+        const wire = encryptLinkForWire(makeLink(), roomKey, 1);
+        const data = wire.data as { ciphertext: string; nonce: string };
+        assert.match(data.nonce, /^[A-Za-z0-9+/]{16}$/, "a 12-byte nonce is 16 base64 characters");
+        const ciphertextBytes = Buffer.from(data.ciphertext, "base64");
+        assert.equal(ciphertextBytes.toString("base64"), data.ciphertext, "the ciphertext is canonical base64");
     });
 
     it("uses a fresh nonce per call (different ciphertext for identical input)", () => {
@@ -223,7 +233,7 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         const wire = {
             author: "did:key:z6MkCleartext",
             timestamp: "2026-01-01T00:00:00.000Z",
-            data: { ciphertext: bytesToHex(gcm(roomKey, nonce).encrypt(payload)), nonce: bytesToHex(nonce) },
+            data: { ciphertext: bytesToBase64(gcm(roomKey, nonce).encrypt(payload)), nonce: bytesToBase64(nonce) },
         };
         assert.throws(() => decryptLinkFromWire(wire, roomKey), /not \{author, timestamp, proof, data\}/);
     });
@@ -234,7 +244,7 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         const payload = new TextEncoder().encode(
             JSON.stringify({ author: "did:key:z6MkA", data: { source: "s", predicate: "p", target: "t" } }),
         );
-        const wire = { data: { ciphertext: bytesToHex(gcm(roomKey, nonce).encrypt(payload)), nonce: bytesToHex(nonce) } };
+        const wire = { data: { ciphertext: bytesToBase64(gcm(roomKey, nonce).encrypt(payload)), nonce: bytesToBase64(nonce) } };
         assert.throws(() => decryptLinkFromWire(wire as any, roomKey), /not \{author, timestamp, proof, data\}/);
     });
 
