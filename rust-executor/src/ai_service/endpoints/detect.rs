@@ -45,7 +45,8 @@ pub const PROBED_PORTS: [u16; 5] = PORTS;
 
 /// The loopback ports of the managed endpoints (`Endpoint::managed`).
 fn managed_ports() -> Vec<u16> {
-    crate::db::Ad4mDb::with_global_instance(|db| db.get_endpoints())
+    crate::db_backend::db_backend()
+        .get_endpoints()
         .unwrap_or_default()
         .iter()
         .filter(|endpoint| endpoint.managed)

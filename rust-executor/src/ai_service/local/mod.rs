@@ -42,7 +42,6 @@ use self::supervisor::{
     ChildSpec, Phase, ProcessStatus, Readiness, RestartBudget, Supervised, Timing,
 };
 use super::AIService;
-use crate::db::Ad4mDb;
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
 use crate::secret::Secret;
@@ -348,8 +347,12 @@ pub async fn status() -> LocalStatus {
     let paths = LocalPaths::from_config();
     let selection = Selection::load(&paths);
     let running = RUNNING.lock().await;
-    let models = Ad4mDb::with_global_instance(|db| db.get_models()).unwrap_or_default();
-    let endpoints = Ad4mDb::with_global_instance(|db| db.get_endpoints()).unwrap_or_default();
+    let models = crate::db_backend::db_backend()
+        .get_models()
+        .unwrap_or_default();
+    let endpoints = crate::db_backend::db_backend()
+        .get_endpoints()
+        .unwrap_or_default();
     let managed: Vec<&Endpoint> = endpoints.iter().filter(|e| e.managed).collect();
     let selection_ref = selection.as_ref();
     LocalStatus {
@@ -1095,9 +1098,7 @@ fn spawn_health_follower(
                 continue;
             }
             last = phase;
-            if let Ok(Some(endpoint)) =
-                Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint_id))
-            {
+            if let Ok(Some(endpoint)) = crate::db_backend::db_backend().get_endpoint(&endpoint_id) {
                 let _ = super::endpoints::check_health(&endpoint).await;
             }
             if matches!(phase, Phase::Stopped | Phase::Failed) {
@@ -1329,7 +1330,7 @@ async fn register(
     capabilities.sort();
     capabilities.dedup();
     let name = endpoint_name(runtime.provider);
-    let existing = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name(name))?;
+    let existing = crate::db_backend::db_backend().get_endpoint_by_name(name)?;
     if existing.as_ref().is_some_and(|e| !e.managed) {
         bail!("An endpoint named {name:?} exists already and is not local AI's: rename it");
     }
@@ -1355,9 +1356,9 @@ async fn register(
     };
     let service = AIService::global_instance().await?;
     match &existing {
-        None => Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint))?,
+        None => crate::db_backend::db_backend().insert_endpoint(&endpoint)?,
         Some(_) => {
-            for model_id in Ad4mDb::with_global_instance(|db| db.update_endpoint(&endpoint))? {
+            for model_id in crate::db_backend::db_backend().update_endpoint(&endpoint)? {
                 if let Err(e) = service.reload_model(model_id.clone()).await {
                     log::warn!("Local AI: model {model_id} did not reload: {e:#}");
                 }
@@ -1369,7 +1370,7 @@ async fn register(
         .map_err(|e| log::warn!("Local AI: health of {name}: {e}"))
         .ok();
 
-    let rows = Ad4mDb::with_global_instance(|db| db.get_models())?;
+    let rows = crate::db_backend::db_backend().get_models()?;
     for model in models {
         let model_type = model.service.model_type();
         let row = rows.iter().find(|row| row.name == model.model_id);
@@ -1405,9 +1406,9 @@ async fn register(
             }
             None => service.add_model(input).await?,
         };
-        let has_default =
-            Ad4mDb::with_global_instance(|db| db.get_default_model(model_type.clone()))?
-                .is_some_and(|default| rows.iter().any(|r| r.id == default) || default == id);
+        let has_default = crate::db_backend::db_backend()
+            .get_default_model(model_type.clone())?
+            .is_some_and(|default| rows.iter().any(|r| r.id == default) || default == id);
         if make_default || !has_default {
             service.set_default_model(model_type, id).await?;
         }
@@ -1431,7 +1432,7 @@ async fn stop_all() {
         endpoint_ids.extend(running.endpoint_id);
     }
     for id in endpoint_ids {
-        if let Ok(Some(endpoint)) = Ad4mDb::with_global_instance(|db| db.get_endpoint(&id)) {
+        if let Ok(Some(endpoint)) = crate::db_backend::db_backend().get_endpoint(&id) {
             let _ = super::endpoints::check_health(&endpoint).await;
         }
     }
@@ -1453,14 +1454,14 @@ pub async fn remove(params: RemoveParams) -> Result<bool> {
     stop_all().await;
     let paths = LocalPaths::from_config();
     let service = AIService::global_instance().await?;
-    for endpoint in Ad4mDb::with_global_instance(|db| db.get_endpoints())? {
+    for endpoint in crate::db_backend::db_backend().get_endpoints()? {
         if !endpoint.managed {
             continue;
         }
-        for model_id in Ad4mDb::with_global_instance(|db| db.endpoint_model_ids(&endpoint.id))? {
+        for model_id in crate::db_backend::db_backend().endpoint_model_ids(&endpoint.id)? {
             service.remove_model(model_id).await?;
         }
-        Ad4mDb::with_global_instance(|db| db.remove_endpoint(&endpoint.id))?;
+        crate::db_backend::db_backend().remove_endpoint(&endpoint.id)?;
     }
     let _ = std::fs::remove_file(Selection::path(&paths));
     let _ = std::fs::remove_file(pid_file(&paths));

@@ -13,7 +13,6 @@ use crate::ai_service::providers::http::{
     is_transport_safe, CLEARTEXT_KEY_REFUSAL, DISCOVERY_TIMEOUT,
 };
 use crate::ai_service::AIService;
-use crate::db::Ad4mDb;
 use crate::secret::Secret;
 use crate::types::{
     AITask, AITaskInput, DetectedEndpoint, DiscoveredModel, EndpointInput, EndpointKind,
@@ -28,16 +27,22 @@ use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 /// Refuses a request whose user has no compute credits left. A caller without a user
 /// (the operator, an app) pays nothing. `agent_did` is the managed agent the request acts as.
 fn check_compute_credits_ws(agent_did: Option<&str>) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    if agent_did.is_none() {
+        return Ok(());
+    }
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     if global_free {
         return Ok(());
     }
     if let Some(did) = agent_did {
-        let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(did))
+        let free = crate::db_backend::db_backend()
+            .get_agent_free_access(did)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_agent_credits(did))
+            let credits = crate::db_backend::db_backend()
+                .get_agent_credits(did)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             if credits <= 0.0 {
                 return Err(WsRpcError::forbidden("Insufficient compute credits"));
@@ -85,7 +90,8 @@ async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Val
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
     let (kind, base_url, api_key) = match body {
         AiDiscoverModelsParams::Endpoint { endpoint_id } => {
-            let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint_id))
+            let endpoint = crate::db_backend::db_backend()
+                .get_endpoint(&endpoint_id)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?
                 .ok_or_else(|| WsRpcError::not_found(EndpointNotFound.to_string()))?;
             (endpoint.kind, endpoint.base_url, endpoint.api_key)
@@ -294,7 +300,8 @@ async fn get_default_model(params: Value, _ctx: Arc<RequestContext>) -> Result<V
     let model_type: ModelType = serde_json::from_str(&format!("\"{}\"", model_type_str))
         .map_err(|e| WsRpcError::bad_request(format!("Invalid modelType: {}", e)))?;
 
-    let model_id = Ad4mDb::with_global_instance(|db| db.get_default_model(model_type))
+    let model_id = crate::db_backend::db_backend()
+        .get_default_model(model_type)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let model = match model_id {
@@ -334,7 +341,8 @@ async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?
     } else {
         let agent = ctx.acts_as();
-        Ad4mDb::with_global_instance(|db| db.get_tasks_owned_by(agent.managed_did()))
+        crate::db_backend::db_backend()
+            .get_tasks_owned_by(agent.managed_did())
             .map_err(|e| WsRpcError::internal(e.to_string()))?
     };
     Ok(serde_json::to_value(tasks)?)
@@ -405,7 +413,9 @@ fn upstream_failure(e: &anyhow::Error, ctx: &RequestContext) -> WsRpcError {
     if ctx.user_did().is_none() {
         return WsRpcError::internal(message);
     }
-    let endpoints = Ad4mDb::with_global_instance(|db| db.get_endpoints()).unwrap_or_default();
+    let endpoints = crate::db_backend::db_backend()
+        .get_endpoints()
+        .unwrap_or_default();
     WsRpcError::internal(without_endpoint_urls(&message, &endpoints))
 }
 
@@ -920,6 +930,7 @@ pub struct AiTranscriptionCloseParams {
 #[cfg(test)]
 mod model_view_tests {
     use super::*;
+    use crate::db::Ad4mDb;
     use crate::types::{Endpoint, EndpointHealth, EndpointState};
 
     const KEY: &str = "sk-provider-secret";
@@ -1067,6 +1078,7 @@ mod model_view_tests {
 #[cfg(test)]
 mod compute_credit_tests {
     use super::*;
+    use crate::db::Ad4mDb;
 
     // #1175: the check used to decode the caller's token again to find the user. It now
     // takes the user the request resolved, so it needs no token.
@@ -1095,11 +1107,25 @@ mod compute_credit_tests {
             check_compute_credits_ws(Some(&funded_did)),
             check_compute_credits_ws(None),
         );
-        Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(was_free)).unwrap();
+        crate::db_backend::db_backend()
+            .set_free_hosting_enabled(was_free)
+            .unwrap();
 
         assert_eq!(results.0.unwrap_err().code, 403, "a user without credits");
         assert!(results.1.is_ok(), "a user with credits");
         assert!(results.2.is_ok(), "a caller without a user pays nothing");
+    }
+
+    // On dev a closed database panicked the check, so the request failed. The read error
+    // must not count as free hosting: the request would run without a credit check.
+    #[test]
+    fn a_closed_database_is_not_free_hosting() {
+        let _closed = crate::test_utils::DbClosed::now();
+        assert!(check_compute_credits_ws(Some("did:key:z6MkClosedDbUser")).is_err());
+        assert!(
+            check_compute_credits_ws(None).is_ok(),
+            "a caller without a user pays nothing and reads no setting"
+        );
     }
 }
 

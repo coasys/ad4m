@@ -474,6 +474,20 @@ mod tests {
         assert_eq!(status_table, 0);
     }
 
+    /// Opens an in-memory global database when dropped, even after a panic. A test that opens
+    /// the global database on a file in a temporary directory declares it after the directory,
+    /// so it drops first: later tests that reuse the global database would otherwise write to a
+    /// deleted file (SQLite: "attempt to write a readonly database").
+    struct GlobalDbInMemoryOnDrop;
+
+    impl Drop for GlobalDbInMemoryOnDrop {
+        fn drop(&mut self) {
+            let db = Ad4mDb::global_instance();
+            let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *db = Some(Ad4mDb::new(":memory:").expect("an in-memory database"));
+        }
+    }
+
     // dev's default embedding model, stored: after the move an embed that names the default
     // asks local AI for an embedding model, as dev's first embed loaded `bert`.
     #[tokio::test]
@@ -489,6 +503,7 @@ mod tests {
             .unwrap();
         }
         Ad4mDb::init_global_instance(&path).unwrap();
+        let _in_memory_after = GlobalDbInMemoryOnDrop;
         Ad4mDb::with_global_instance(|db| {
             assert!(db.get_models().unwrap().is_empty());
             assert_eq!(db.get_default_model(ModelType::Embedding).unwrap(), None);
