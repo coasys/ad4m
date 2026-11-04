@@ -134,7 +134,7 @@ enum Domain {
     /// (`--admin-credential` or AD4M_ADMIN_CREDENTIAL) and an operator recorded with
     /// `init --operator`.
     Claim {
-        /// The offer link (`https://coasys.id/o#coasys:offer:1:…`) or the offer string.
+        /// The offer link (`https://id.coasys.org/o#coasys:offer:1:…`) or the offer string.
         offer: String,
         /// A name for this executor the app shows on its confirm card.
         #[arg(long)]

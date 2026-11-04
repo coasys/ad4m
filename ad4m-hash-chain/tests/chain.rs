@@ -300,6 +300,51 @@ fn fold_never_copies_the_state_and_append_copies_it_once() {
 }
 
 #[test]
+fn appended_copies_no_state_and_a_batch_staged_on_one_copy_costs_one() {
+    let clones = Arc::new(AtomicUsize::new(0));
+    let policy = Counting(clones.clone());
+    let entries = make_chain("c", 1, 40);
+    let held = fold(&policy, &entries[..8]).unwrap();
+    // A batch of 32 staged on one copy of the held chain: one copy in all.
+    let mut staged = held.clone();
+    for entry in &entries[8..] {
+        staged = staged.appended(&policy, entry).unwrap();
+    }
+    assert_eq!(clones.load(Ordering::SeqCst), 1);
+    let full = fold(&TestPolicy, &entries).unwrap();
+    assert_eq!(staged.hashes(), full.hashes());
+    assert_eq!(staged.state().inner, *full.state());
+    assert_eq!(held.head().seq, 7);
+    // A batch that fails at its last entry: still one copy, and the held chain is unchanged.
+    clones.store(0, Ordering::SeqCst);
+    let mut unsigned = entries[39].clone();
+    unsigned.proof.clear();
+    let mut staged = Some(held.clone());
+    let mut refused = None;
+    for entry in entries[8..39].iter().chain([&unsigned]) {
+        match staged.take().unwrap().appended(&policy, entry) {
+            Ok(next) => staged = Some(next),
+            Err(e) => {
+                refused = Some(e);
+                break;
+            }
+        }
+    }
+    assert_eq!(clones.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        policy_err(&refused.unwrap()),
+        Some(&TestError::MissingProof)
+    );
+    assert_eq!(held.head().seq, 7);
+    assert_eq!(held.state().inner.count, 7);
+    // The order, link and chain checks run as in `append`.
+    assert!(matches!(
+        held.clone().appended(&policy, &entries[9]),
+        Err(ChainError::Seq { want: 8, got: 9 })
+    ));
+}
+
+#[test]
 fn policy_hooks_follow_the_key_named_in_entry_zero_and_rotations() {
     let k1 = signing_key(1);
     let k2 = signing_key(2);

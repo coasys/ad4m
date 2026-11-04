@@ -286,7 +286,8 @@ pub async fn owns(ctx: &RequestContext, owner: Owner, id: &str) -> Result<(), Ws
                 .map(|_| ())
         }
         Owner::Task => {
-            let task_owner = crate::db::Ad4mDb::with_global_instance(|db| db.get_task_owner(id))
+            let task_owner = crate::db_backend::db_backend()
+                .get_task_owner(id)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             // The outer `None`: no such task. The inner one: a task of the main agent.
             let Some(task_owner) = task_owner else {

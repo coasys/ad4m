@@ -261,7 +261,7 @@ pub struct OfferListing {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimOfferParams {
-    /// The offer string (`coasys:offer:1:…`) or the offer link (`https://coasys.id/o#…`).
+    /// The offer string (`coasys:offer:1:…`) or the offer link (`https://id.coasys.org/o#…`).
     pub offer: String,
     /// A name for this device the holder sees on the confirm card (at most 64 characters).
     #[ts(optional)]

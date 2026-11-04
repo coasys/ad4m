@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ad4m_hash_chain::store::SqliteChainStore;
-use ad4m_hash_chain::Head;
-use ad4m_identity_core::{BotScope, KelChain, KeyRecord};
+use ad4m_hash_chain::{Hash, Head};
+use ad4m_identity_core::{BotScope, KelChain, KeyRecord, KeyState};
 use rusqlite::Connection;
 
 use crate::db::{self, KEL};
@@ -114,6 +114,49 @@ pub fn held_bytes_of(chain: &KelChain) -> usize {
     masters + keys + hashes + fixed
 }
 
+/// The state of a log before `seq`, rebuilt from `state`, the state of the same log at a later
+/// head (seq ≥ `seq`), with no replay: the masters and device keys added before `seq`, each with
+/// the revocations and bot scopes before `seq` only, and `next`, the next-key commitment the
+/// caller read from the event that added the last of those masters (a state keeps only its
+/// latest). A key log only adds: an event never removes a key, and every change it makes to a
+/// key is stamped with its seq (`added`, `revoked`, a scope's seq), so this is exactly the state
+/// a fold of the events before `seq` gives (`tests/held.rs` checks it at every seq of a log of
+/// every op). Not ended: a log holds no event after its end, and the head is at `seq` or later.
+pub fn state_before(state: &KeyState, seq: u64, next: Option<Hash>) -> KeyState {
+    let rewind = |r: &KeyRecord| KeyRecord {
+        id: r.id.clone(),
+        sign: r.sign.clone(),
+        enc: r.enc.clone(),
+        added: r.added,
+        revoked: r.revoked.filter(|at| *at < seq),
+        scopes: r
+            .scopes
+            .iter()
+            .filter(|(at, _)| *at < seq)
+            .cloned()
+            .collect(),
+    };
+    KeyState {
+        did: state.did.clone(),
+        scid: state.scid.clone(),
+        kind: state.kind,
+        masters: state
+            .masters
+            .iter()
+            .filter(|m| m.added < seq)
+            .map(rewind)
+            .collect(),
+        next,
+        keys: state
+            .keys
+            .iter()
+            .filter(|(_, r)| r.added < seq)
+            .map(|(id, r)| (id.clone(), rewind(r)))
+            .collect(),
+        ended: false,
+    }
+}
+
 impl HeldLogs {
     pub fn new(max_bytes: usize) -> HeldLogs {
         HeldLogs {
@@ -124,7 +167,7 @@ impl HeldLogs {
     }
 
     /// The held fold of `scid` when it ends at `head`. A fold for another head is dropped.
-    fn get(&self, scid: &str, head: &Head) -> Option<Arc<KelChain>> {
+    pub(crate) fn get(&self, scid: &str, head: &Head) -> Option<Arc<KelChain>> {
         let mut inner = self.inner.lock().ok()?;
         let tick = inner.next_tick();
         let inner = &mut *inner;

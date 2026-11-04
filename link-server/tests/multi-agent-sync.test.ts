@@ -21,6 +21,7 @@ import {
   createTestAgent,
   authenticateAgent,
   createSignedLink,
+  openLink,
   openAuthenticatedWs,
   collectMessages,
   postJson,
@@ -104,7 +105,7 @@ test("late joiner receives all prior links via /render bootstrap", async () => {
     assert.equal(render.body.sequence, commitRes.body.sequence);
 
     // Verify the link data round-tripped correctly
-    const sources = render.body.links.map((l) => (l.data as { source: string }).source).sort();
+    const sources = render.body.links.map((l) => openLink(l).data.source).sort();
     assert.deepEqual(sources, ["test://source-0", "test://source-1", "test://source-2"]);
   });
 });
@@ -144,7 +145,7 @@ test("real-time WS push: A commits, B receives the diff via WebSocket", async ()
     assert.equal(diffMsg.revision, commitRes.body.revision);
     const payload = diffMsg.payload as PerspectiveDiff;
     assert.equal(payload.additions.length, 1);
-    assert.equal((payload.additions[0].data as { source: string }).source, "test://ws-push");
+    assert.equal(openLink(payload.additions[0]).data.source, "test://ws-push");
 
     closeAll(wsB);
   });
@@ -182,7 +183,7 @@ test("bidirectional sync: both agents commit and receive each other's links", as
     // B should receive A's diff
     const bGotA = await collectorB.waitForType("diff", 3000);
     assert.equal(
-      ((bGotA.payload as PerspectiveDiff).additions[0].data as { source: string }).source,
+      openLink((bGotA.payload as PerspectiveDiff).additions[0]).data.source,
       "test://from-a"
     );
 
@@ -201,7 +202,7 @@ test("bidirectional sync: both agents commit and receive each other's links", as
     // A should receive B's diff
     const aGotB = await collectorA.waitForType("diff", 3000);
     assert.equal(
-      ((aGotB.payload as PerspectiveDiff).additions[0].data as { source: string }).source,
+      openLink((aGotB.payload as PerspectiveDiff).additions[0]).data.source,
       "test://from-b"
     );
 
@@ -211,7 +212,7 @@ test("bidirectional sync: both agents commit and receive each other's links", as
       tokenA
     );
     assert.equal(render.body.links.length, 2);
-    const sources = render.body.links.map((l) => (l.data as { source: string }).source).sort();
+    const sources = render.body.links.map((l) => openLink(l).data.source).sort();
     assert.deepEqual(sources, ["test://from-a", "test://from-b"]);
 
     closeAll(wsA, wsB);
@@ -290,7 +291,7 @@ test("offline catch-up: B disconnects, A commits, B catches up via /sync?since=N
 
     const catchUpSources = syncRes.body.diffs
       .flatMap((d) => d.additions)
-      .map((l) => (l.data as { source: string }).source)
+      .map((l) => openLink(l).data.source)
       .sort();
     assert.deepEqual(catchUpSources, ["test://while-offline-1", "test://while-offline-2"]);
   });
@@ -362,7 +363,7 @@ test("OR-Set convergence: interleaved adds/removes from both agents yield same r
       tokenA
     );
     assert.equal(render.body.links.length, 2);
-    const sources = render.body.links.map((l) => (l.data as { source: string }).source).sort();
+    const sources = render.body.links.map((l) => openLink(l).data.source).sort();
     assert.deepEqual(sources, ["test://y", "test://z"]);
   });
 });
@@ -410,8 +411,8 @@ test("WS push and HTTP sync return identical data for the same diffs", async () 
 
     assert.equal(wsPayload.additions.length, httpDiff.additions.length);
     assert.equal(
-      (wsPayload.additions[0].data as { source: string }).source,
-      (httpDiff.additions[0].data as { source: string }).source
+      openLink(wsPayload.additions[0]).data.source,
+      openLink(httpDiff.additions[0]).data.source
     );
     assert.equal(wsMsg.revision, syncRes.body.revision);
     assert.equal(wsMsg.sequence, syncRes.body.sequence);
@@ -468,9 +469,9 @@ test("room isolation: commits in room-1 do not leak into room-2", async () => {
       token2
     );
     assert.equal(render1.body.links.length, 1);
-    assert.equal((render1.body.links[0].data as { source: string }).source, "test://room1-only");
+    assert.equal(openLink(render1.body.links[0]).data.source, "test://room1-only");
     assert.equal(render2.body.links.length, 1);
-    assert.equal((render2.body.links[0].data as { source: string }).source, "test://room2-only");
+    assert.equal(openLink(render2.body.links[0]).data.source, "test://room2-only");
   });
 });
 
@@ -662,7 +663,7 @@ test("WS reconnect: second WS session receives diffs committed during the gap", 
 
     assert.equal(catchUp.body.diffs.length, 1, "catch-up must return the 1 missed diff");
     assert.equal(
-      (catchUp.body.diffs[0].additions[0].data as { source: string }).source,
+      openLink(catchUp.body.diffs[0].additions[0]).data.source,
       "test://during-offline"
     );
 
@@ -680,7 +681,7 @@ test("WS reconnect: second WS session receives diffs committed during the gap", 
 
     const liveMsg = await collector2.waitForType("diff", 3000);
     assert.equal(
-      ((liveMsg.payload as PerspectiveDiff).additions[0].data as { source: string }).source,
+      openLink((liveMsg.payload as PerspectiveDiff).additions[0]).data.source,
       "test://after-reconnect"
     );
 

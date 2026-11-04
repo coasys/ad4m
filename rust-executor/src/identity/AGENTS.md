@@ -19,7 +19,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `service.rs` | `IdentityService`: status, log, resetLog, cosignIncept, publish, openOffer, offers, devices; error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity` |
 
-Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` → SCID),
+Rows in `db/identity.rs`, reached through `db_backend()` (`service::db`): `operator_record`, `identity_agents` (agent `did:key` → SCID),
 `identity_joins` (claims to follow; written before the store call, so a claim the store
 committed whose answer was lost is still followed by `joinStatus`, and a refused one reports
 the offer's state).

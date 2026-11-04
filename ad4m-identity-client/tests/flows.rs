@@ -758,7 +758,7 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     .unwrap();
     assert!(flow
         .link()
-        .starts_with("https://coasys.id/o#coasys:offer:1:"));
+        .starts_with("https://id.coasys.org/o#coasys:offer:1:"));
     let parsed = OfferString::parse_link(&flow.link()).unwrap();
     assert_eq!(parsed.store, STORE_URL);
 

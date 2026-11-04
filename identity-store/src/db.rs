@@ -449,6 +449,26 @@ pub(crate) fn stored_hash(
         .optional()?)
 }
 
+/// The stored event of `scid` at `seq`, parsed (one primary-key lookup of `chain_entries`).
+pub(crate) fn stored_event(
+    conn: &Connection,
+    scid: &str,
+    seq: u64,
+) -> Result<Option<Event>, ApiError> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT json FROM chain_entries WHERE type = ?1 AND chain = ?2 AND seq = ?3",
+            params![KEL, scid, to_sql(seq)?],
+            |row| row.get(0),
+        )
+        .optional()?;
+    text.map(|t| {
+        Event::from_json_text(&t)
+            .map_err(|e| ApiError::internal(format!("stored event of {scid}: {e}")))
+    })
+    .transpose()
+}
+
 /// A key's standing at the stored head of its log, by the key index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Standing {

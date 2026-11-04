@@ -1,7 +1,7 @@
 //! `fold_stored`, the replay of a host's own stored, already-verified log: the same chain as
 //! `fold` for every log `fold` accepts, and the only checks it leaves out are the proofs'
 //! signatures and the duplicate-key scan (rule K8).
-#![cfg(feature = "build")]
+#![cfg(all(feature = "build", feature = "stored-fold"))]
 
 mod common;
 
@@ -92,6 +92,34 @@ fn a_stored_fold_refuses_what_a_full_fold_refuses_but_a_bad_signature_or_a_reuse
     }
     // At least a wrong signature and a duplicate key.
     assert!(skipped >= 2, "{skipped}");
+}
+
+#[test]
+fn a_stored_fold_refuses_a_scope_with_no_action_or_an_unknown_one() {
+    // The action check is no signature check: it runs in a stored fold too.
+    for (name, want) in [
+        ("scope with no action", FoldError::EmptyScope),
+        (
+            "scope with an unknown action",
+            ad4m_identity_core::FormatError::UnknownAction("admin".into()).into(),
+        ),
+    ] {
+        let case = refusal_cases()
+            .into_iter()
+            .find(|c| c.name == name)
+            .unwrap();
+        let events: Vec<Event> = case
+            .events
+            .iter()
+            .map(|e| Event::from_json(e).unwrap())
+            .collect();
+        assert_eq!(fold(&events).unwrap_err(), ChainError::Policy(want.clone()));
+        assert_eq!(
+            fold_stored(&events).unwrap_err(),
+            ChainError::Policy(want),
+            "{name}"
+        );
+    }
 }
 
 #[test]

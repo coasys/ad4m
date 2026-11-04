@@ -6,15 +6,15 @@ use std::sync::Arc;
 use ad4m_hash_chain::store::{SqliteChainStore, StoreError, StoredEntry};
 use ad4m_hash_chain::{verify_proof, ForkEvidence, Head, Multikey};
 use ad4m_identity_core::{
-    commitment, did_of, error_code, event_hash, pow, ChainError, DeviceKey, Event, FoldError,
-    FormatError, KelChain, KelPolicy, KeyLife, Op, KEL_DOMAIN,
+    commitment, did_of, error_code, event_hash, pow, ChainError, ChainPolicy, DeviceKey, Event,
+    FoldError, FormatError, KelChain, KelPolicy, KeyLife, Op, KEL_DOMAIN,
 };
 use ad4m_ldk::identity::{AppendRequest, KeyIndexEntry, LogPage, SignedHead};
 use rusqlite::{params, Connection, TransactionBehavior};
 
 use crate::db::{self, to_sql, KEL};
 use crate::error::ApiError;
-use crate::held::held_bytes_of;
+use crate::held::{held_bytes_of, state_before};
 use crate::offers;
 use crate::{Fault, Store, Topic};
 
@@ -200,6 +200,47 @@ enum First {
 }
 
 impl Store {
+    /// Whether `event`, a rival at seq ≥ 1 of the stored log `scid`, is refused on the state
+    /// before its seq, rebuilt from the fold of the stored head (`Store::held_chain`: the held
+    /// fold, or on a miss one fold that is then held, so a rival sent again replays nothing) by
+    /// `held::state_before`, with the next-key commitment there read from the one stored event
+    /// that set it, and with the checks a replay runs on it: its `prev` and chain id, then the
+    /// identity core's full `apply`.
+    fn refused_on_held_fold(
+        &self,
+        conn: &Connection,
+        scid: &str,
+        event: &Event,
+    ) -> Result<bool, ApiError> {
+        let Some(held) = self.held_chain(conn, scid)? else {
+            return Ok(false);
+        };
+        let seq = event.seq;
+        if seq == 0 || seq > held.head().seq {
+            return Ok(false);
+        }
+        let Some(added) = held
+            .state()
+            .masters
+            .iter()
+            .rev()
+            .find(|m| m.added < seq)
+            .map(|m| m.added)
+        else {
+            return Ok(false);
+        };
+        let next = match db::stored_event(conn, scid, added)?.map(|e| e.op) {
+            Some(Op::Incept { next, .. }) => Some(next),
+            Some(Op::Rotate { next, .. }) => next,
+            _ => return Ok(false),
+        };
+        if event.prev.as_ref() != held.hash_at(seq - 1) || event.scid != *held.id() {
+            return Ok(true);
+        }
+        let mut before = state_before(held.state(), seq, next);
+        Ok(KelPolicy.apply(&mut before, event).is_err())
+    }
+
     /// The fork `event` makes with the stored log of `scid`, when it is one: an event at a seq
     /// the store holds, with another hash than the stored event there, that replays on the
     /// stored events before it (the stored prefix folded as the store's own, `fold_stored`; the
@@ -210,7 +251,10 @@ impl Store {
     ///
     /// Called only for an event [`Store::authenticate_first`] found to be a rival signed by the
     /// master that signs at its seq, with no recorded fork: only then is the prefix replayed
-    /// (event #0 needs no replay), and the whole log never is.
+    /// (event #0 needs no replay). A rival that does not replay is refused on the fold of the
+    /// stored head first ([`Store::refused_on_held_fold`]), with no replay while the log is held;
+    /// one that passes there is still replayed on the stored prefix before it is recorded,
+    /// which happens once per signing master.
     fn competing_event(
         &self,
         conn: &Connection,
@@ -229,6 +273,8 @@ impl Store {
         };
         let after = if event.seq == 0 {
             KelChain::genesis(&KelPolicy, event).ok()
+        } else if self.refused_on_held_fold(conn, scid, event)? {
+            None
         } else {
             self.held.count_fold();
             match db::load_chain_before(conn, scid, event.seq)? {
@@ -397,9 +443,15 @@ impl Store {
         let stored = self.held_chain(&tx, scid)?;
         let new_log = stored.is_none();
 
-        // The continuity check, the new-log admission and the replay check.
+        // The continuity check, the new-log admission and the replay check. The batch steps on
+        // one staged chain: for a stored log, one copy of the held fold, which each event then
+        // changes in place (`Chain::appended`), so a batch costs one copy of the state whatever
+        // its length and wherever it fails, and the held fold stays as it is until the commit.
         let mut chain: KelChain;
-        let mut befores = Vec::with_capacity(events.len());
+        // The claim check of each `add`, run on the staged state just before the `add` steps
+        // (the state the core's `check_add` reads) and answered below in the order of the
+        // checks, so no state before an event is kept.
+        let mut claim_checks: Vec<Option<Result<(), ApiError>>> = Vec::with_capacity(events.len());
         let rest: &[Event];
         match stored {
             None => {
@@ -418,7 +470,7 @@ impl Store {
                     // No vouching service exists yet: nothing is committed.
                     return Err(ApiError::unavailable("vouch-unavailable"));
                 }
-                befores.push(None);
+                claim_checks.push(None);
                 rest = &events[1..];
             }
             Some(existing) => {
@@ -428,22 +480,36 @@ impl Store {
                 if first.seq != head.seq + 1 || first.prev.as_ref() != Some(&head.hash) {
                     return Err(ApiError::conflict(&current_head(&tx, scid)?));
                 }
-                // The held fold stays as it is until this append commits.
+                // The one copy of the append: the held fold stays as it is until the commit.
                 chain = KelChain::clone(&existing);
                 rest = &events[..];
             }
         }
         for event in rest {
-            let before = chain.state().clone();
-            chain
-                .append(&KelPolicy, event)
+            claim_checks.push(match &event.op {
+                Op::Add { offer, .. } => Some(offers::check_spend(
+                    &tx,
+                    scid,
+                    offer,
+                    chain.state(),
+                    event,
+                    now,
+                )),
+                _ => None,
+            });
+            chain = chain
+                .appended(&KelPolicy, event)
                 .map_err(|e| chain_error(&e))?;
-            befores.push(Some(before));
         }
         // The per-log budget: no log grows past what one fold may take in memory, so every log
-        // the store takes can be held, and a miss on any of them costs a bounded replay.
+        // the store takes can be held, and a miss on any of them costs a bounded replay. An
+        // append of `rotate`s only is never refused by it: a `rotate` is the recovery from a
+        // stolen master, which a thief holding that master could otherwise lock out by padding
+        // the log to the budget. A `rotate` adds one master record to the fold, and the length
+        // cap bounds how many there are.
+        let only_rotates = events.iter().all(|e| matches!(e.op, Op::Rotate { .. }));
         let fold_bytes = held_bytes_of(&chain);
-        if fold_bytes > self.settings.log_fold_bytes {
+        if !only_rotates && fold_bytes > self.settings.log_fold_bytes {
             return Err(ApiError::invalid(
                 "log-too-large",
                 format!(
@@ -457,16 +523,16 @@ impl Store {
         // Expiries by the store's clock, the one-key check and the claim check.
         let mut spends = Vec::new();
         let mut supersede = false;
-        for (event, before) in events.iter().zip(&befores) {
+        for (event, claim_check) in events.iter().zip(claim_checks) {
             check_expires(event, now)?;
             for key in listed_keys(event) {
                 if db::key_owner(&tx, key)?.is_some() {
                     return Err(ApiError::key_taken(key));
                 }
             }
-            match (&event.op, before) {
-                (Op::Add { offer, .. }, Some(before)) => {
-                    offers::check_spend(&tx, scid, offer, before, event, now)?;
+            match (&event.op, claim_check) {
+                (Op::Add { offer, .. }, Some(checked)) => {
+                    checked?;
                     spends.push((offer.clone(), event.seq));
                 }
                 (Op::Rotate { .. }, _) => supersede = true,

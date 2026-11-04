@@ -181,3 +181,154 @@ async fn a_miss_on_logs_padded_with_repeated_scope_actions() {
         time_requests(t, &alice, &label).await;
     }
 }
+
+/// Times `events` sent as one append, `rounds` times, each answered `want`.
+async fn time_appends(
+    t: &TestStore,
+    scid: &str,
+    events: &[Event],
+    want: (StatusCode, &str),
+    label: &str,
+) {
+    let refs: Vec<_> = events.iter().collect();
+    for round in 0..3 {
+        let folds = t.store.held.folds();
+        let start = Instant::now();
+        let reply = t.append(scid, &refs).await;
+        let took = start.elapsed();
+        assert_eq!(reply.status, want.0, "{}", reply.body);
+        assert_eq!(reply.body["error"], want.1, "{}", reply.body);
+        eprintln!(
+            "{label}, round {round}: {:.1} ms ({} replay)",
+            took.as_secs_f64() * 1000.0,
+            t.store.held.folds() - folds
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_late_failing_batch_on_a_held_log_at_its_budget() {
+    // The owner pads the log to the per-log budget through the store, so it stays held; then
+    // one batch of 31 valid small scopes and a 32nd event without a proof, sent again and
+    // again: it commits nothing.
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let bot = Device::new("alice bot");
+    let scope = BotScope {
+        can: vec!["read".into()],
+        expires: t.now() + 86_400,
+    };
+    let bot_id = t.link(&mut alice, &bot, OfferKind::Bot, Some(scope)).await;
+    let mut repeats = 9_400;
+    loop {
+        let op = Op::Scope {
+            key: bot_id.clone(),
+            can: vec!["read".to_string(); repeats],
+            expires: t.now() + 86_400,
+        };
+        let event = next_event(alice.events.last().unwrap(), op, "m0", &alice.master(0));
+        if serde_json::to_vec(&json!({ "events": [&event] }))
+            .unwrap()
+            .len()
+            > MAX_BODY
+        {
+            repeats -= 50;
+            continue;
+        }
+        let reply = t.append(&alice.scid(), &[&event]).await;
+        if reply.status != StatusCode::OK {
+            assert_eq!(reply.body["error"], "log-too-large", "{}", reply.body);
+            break;
+        }
+        alice.push(event);
+    }
+    assert!(t.store.held.holds(&alice.scid()));
+    let mut batch: Vec<Event> = Vec::new();
+    for _ in 0..MAX_EVENTS - 1 {
+        let op = Op::Scope {
+            key: bot_id.clone(),
+            can: vec!["read".into()],
+            expires: t.now() + 86_400,
+        };
+        let prev = batch.last().unwrap_or(alice.events.last().unwrap());
+        batch.push(next_event(prev, op, "m0", &alice.master(0)));
+    }
+    let mut unsigned = next_event(
+        batch.last().unwrap(),
+        Op::Revoke {
+            revoke: vec!["d1".into()],
+        },
+        "m0",
+        &alice.master(0),
+    );
+    unsigned.proof.clear();
+    batch.push(unsigned);
+    let label = format!(
+        "a log of {} events at its budget (fold {} B), 31 small scopes and one unsigned event",
+        alice.events.len(),
+        held_bytes_of(&alice.chain)
+    );
+    time_appends(
+        &t,
+        &alice.scid(),
+        &batch,
+        (StatusCode::BAD_REQUEST, "MissingProof"),
+        &label,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_rival_at_the_head_of_a_held_full_rotation_log_that_does_not_replay() {
+    let t = TestStore::new();
+    let alice = Person::new("alice");
+    t.publish(&alice).await;
+    let mut events = alice.events.clone();
+    let mut batch = Vec::new();
+    for i in 1..MAX_LOG_EVENTS as u32 {
+        let op = Op::Rotate {
+            master: multikey(&alice.master(i)),
+            salt: alice.salt(i),
+            next: Some(alice.next(i + 1)),
+            revoke: Vec::new(),
+        };
+        let event = next_event(
+            events.last().unwrap(),
+            op,
+            &format!("m{i}"),
+            &alice.master(i),
+        );
+        events.push(event.clone());
+        batch.push(event);
+        if batch.len() == MAX_EVENTS || i == MAX_LOG_EVENTS as u32 - 1 {
+            let refs: Vec<_> = batch.iter().collect();
+            let reply = t.append(&alice.scid(), &refs).await;
+            assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+            batch.clear();
+        }
+    }
+    assert!(t.store.held.holds(&alice.scid()));
+    // At the head's seq, signed by the master current there (retired by the head's rotate),
+    // revoking a key the log never listed: it does not replay, so it is a plain conflict.
+    let at = events.len() - 1;
+    let signer = at as u32 - 1;
+    let rival = next_event(
+        &events[at - 1],
+        Op::Revoke {
+            revoke: vec!["d99".into()],
+        },
+        &format!("m{signer}"),
+        &alice.master(signer),
+    );
+    time_appends(
+        &t,
+        &alice.scid(),
+        &[rival],
+        (StatusCode::CONFLICT, "conflict"),
+        "a rival at the head of a held full rotation log that does not replay",
+    )
+    .await;
+}

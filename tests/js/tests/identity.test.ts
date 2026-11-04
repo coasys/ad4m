@@ -180,7 +180,7 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
     it("links B, started with --operator, through `ad4m-executor claim`", async () => {
         b = await startNode("b", ["--operator", did]);
         const opened = await holder.send({ cmd: "open", did, store: store.url });
-        expect(opened.link).to.match(/^https:\/\/coasys\.id\/o#coasys:offer:1:/);
+        expect(opened.link).to.match(/^https:\/\/id\.coasys\.org\/o#coasys:offer:1:/);
 
         const claim = new ClaimCommand(b.ports[0], opened.link, "server b");
         const bCode = await claim.matchCode();

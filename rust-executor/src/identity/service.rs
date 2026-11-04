@@ -20,7 +20,7 @@ use super::types::{
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
-use crate::db::Ad4mDb;
+use crate::db_backend::{db_backend, DbBackend};
 
 pub(super) fn now() -> u64 {
     std::time::SystemTime::now()
@@ -100,10 +100,11 @@ pub fn cache_error(e: CacheError) -> WsRpcError {
     }
 }
 
+/// Runs `f` on the executor's database, a database error as a 500.
 pub(super) fn db<T>(
-    f: impl FnOnce(&Ad4mDb) -> crate::db::Ad4mDbResult<T>,
+    f: impl FnOnce(&dyn DbBackend) -> crate::db::Ad4mDbResult<T>,
 ) -> Result<T, WsRpcError> {
-    Ad4mDb::with_global_instance(f).map_err(|e| WsRpcError::internal(e.to_string()))
+    f(db_backend()).map_err(|e| WsRpcError::internal(e.to_string()))
 }
 
 /// The identity a local agent (`did:key`) speaks for, or `None` (also before the database and
@@ -115,10 +116,7 @@ pub async fn identity_of_agent(agent_did: &str) -> Option<String> {
 
 /// The SCID `identity_agents` binds `agent_did` to (`None` also without an open database).
 fn bound_identity(agent_did: &str) -> Option<String> {
-    let instance = Ad4mDb::global_instance();
-    let guard = instance.lock().ok()?;
-    let db = guard.as_ref()?;
-    db.agent_identity(agent_did).ok().flatten()
+    db_backend().agent_identity(agent_did).ok().flatten()
 }
 
 fn first_fork(forks: &[ad4m_identity_core::ForkEvidence]) -> Option<ForkRecord> {
@@ -566,7 +564,7 @@ pub(super) fn first_link_error(refusal: FirstLinkRefusal) -> WsRpcError {
     WsRpcError::forbidden(refusal.to_string())
 }
 
-/// An offer string (`coasys:offer:1:…`) or link (`https://coasys.id/o#…`).
+/// An offer string (`coasys:offer:1:…`) or link (`https://id.coasys.org/o#…`).
 pub fn parse_offer(text: &str) -> Result<OfferString, WsRpcError> {
     let text = text.trim();
     let parsed = if text.starts_with(link::OFFER_STRING_PREFIX) {
@@ -580,6 +578,7 @@ pub fn parse_offer(text: &str) -> Result<OfferString, WsRpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Ad4mDb;
     use crate::identity::cache::tests::TestLog;
 
     #[test]
