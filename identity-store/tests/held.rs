@@ -9,6 +9,7 @@ mod common;
 
 use ad4m_identity_core::build;
 use axum::http::StatusCode;
+use identity_store::held::held_bytes_of;
 use identity_store::Settings;
 use serde_json::{json, Value};
 
@@ -56,10 +57,10 @@ async fn note_by_d1(t: &TestStore, person: &Person) -> common::Reply {
     t.send("POST", &path, Some(body), Some(header)).await
 }
 
-fn store_with_bound(held_log_events: usize) -> TestStore {
+fn store_with_bound(held_log_bytes: usize) -> TestStore {
     TestStore::with_settings(Settings {
         pow_bits: 8,
-        held_log_events,
+        held_log_bytes,
         ..Settings::default()
     })
 }
@@ -219,7 +220,9 @@ async fn a_fold_held_for_an_older_head_is_never_used() {
 
 #[tokio::test]
 async fn the_bound_drops_the_least_recently_used_and_a_miss_folds_once() {
-    let t = store_with_bound(3);
+    // Room for three one-event logs (each the same size: the same keys and lengths).
+    let one = held_bytes_of(&Person::new("someone").chain);
+    let t = store_with_bound(3 * one);
     let people: Vec<Person> = ["alice", "bob", "carol"]
         .iter()
         .map(|name| Person::new(name))
@@ -231,7 +234,7 @@ async fn the_bound_drops_the_least_recently_used_and_a_miss_folds_once() {
         unreachable!()
     };
     assert!(people.iter().all(|p| t.store.held.holds(&p.scid())));
-    assert_eq!(t.store.held.held_events(), 3);
+    assert_eq!(t.store.held.held_bytes(), 3 * one);
 
     // Alice is used, so bob is now the least recently used: dave's log drops him.
     assert_eq!(list(&t, alice).await.status, StatusCode::OK);
@@ -241,7 +244,7 @@ async fn the_bound_drops_the_least_recently_used_and_a_miss_folds_once() {
     assert!(t.store.held.holds(&alice.scid()));
     assert!(t.store.held.holds(&carol.scid()));
     assert!(t.store.held.holds(&dave.scid()));
-    assert_eq!(t.store.held.held_events(), 3);
+    assert_eq!(t.store.held.held_bytes(), 3 * one);
 
     // A request of bob's misses, folds once and holds his log again (carol goes); the next
     // request of his replays nothing.
@@ -253,12 +256,13 @@ async fn the_bound_drops_the_least_recently_used_and_a_miss_folds_once() {
     assert_eq!(list(&t, bob).await.status, StatusCode::OK);
     assert_eq!(t.store.held.folds(), folds + 1);
 
-    // A log longer than the bound is never held, and holds nothing else out.
+    // A log whose fold is larger than the bound is never held, and holds nothing else out.
     let mut erin = Person::new("erin");
     t.publish(&erin).await;
-    grow(&t, &mut erin, 3).await;
+    grow(&t, &mut erin, 32).await;
+    assert!(held_bytes_of(&erin.chain) > 3 * one);
     assert!(!t.store.held.holds(&erin.scid()));
-    assert!(t.store.held.held_events() <= 3);
+    assert!(t.store.held.held_bytes() <= 3 * one);
 }
 
 #[tokio::test]

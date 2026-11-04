@@ -63,7 +63,7 @@ impl TestStore {
             pow_bits: 8,
             feed_token: Some("mirror-token".into()),
             cors_origins: Vec::new(),
-            held_log_events: identity_store::DEFAULT_HELD_LOG_EVENTS,
+            held_log_bytes: identity_store::DEFAULT_HELD_LOG_BYTES,
         }
     }
 

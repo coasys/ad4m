@@ -17,7 +17,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 |---|---|
 | `src/main.rs` | `identity-store [serve]`, `identity-store keygen`; configuration from the environment |
 | `src/lib.rs` | `Store` (database, head key, clock, settings, the change signal for waits), `Settings`, `Clock`, `Fault` |
-| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`), log replay, key-index rows |
+| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`), log replay, the key index (key rows with each master marked, the next-key commitment in `logs.next`) and its lookups |
 | `src/held.rs` | `HeldLogs`: the folds of recently used logs at their stored heads, bounded, least recently used out; `Store::held_chain` |
 | `src/log.rs` | `POST …/events` with the admission checks (below), log pages, heads, the key index; `admit_new_log` (the brake's place) |
 | `src/offers.rs` | the offer routes, the claim route, the device's state poll, the store's side of the claim check (`check_spend`, `spend`, `supersede`) |
@@ -30,6 +30,8 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `tests/common/mod.rs` | `TestStore`: a real store on a temp file with an injected clock, called through the router |
 | `tests/logs.rs`, `tests/offers.rs` | the store's acceptance tests: logs, heads, the key index, signed requests, limits and agent records; offers, claims, the state poll and the claim check |
 | `tests/held.rs` | the held folds: no replay per request, a forged request reads no log, an append's head in force at once, the bound, rival events |
+| `tests/authenticate.rs` | authenticated before any replay: junk and wrongly signed appends, offers and requests on an unheld log replay nothing; a valid append and a `rotate` replay once; the length cap |
+| `tests/held_memory.rs` | the heap a held fold takes per event (a counting allocator; the bound stated under "Held folds") |
 | `tests/serve.rs` | the `serve` process stops cleanly on SIGTERM and SIGINT |
 | `examples/test_agent.rs` | the test person over JSON lines, for the agent language suites |
 | `Dockerfile` | the container image (build from the repo root) |
@@ -38,7 +40,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 
 | Route | Answers |
 |---|---|
-| `POST /logs/{scid}/events` `AppendRequest` | `200 {head}` · `400 {error}` (`malformed`, `too-many-events`, `vouch-and-pow`, `expires`, a `ChainError` or `FoldError` name; an event that does not parse names its `FormatError`, e.g. `DuplicateMember`) · `403 pow` · `403 claim` · `404` a first event that is not #0 · `409 {head}` · `409 forked {head, fork}` · `409 key-taken` · `413` · `503 vouch-unavailable` |
+| `POST /logs/{scid}/events` `AppendRequest` | `200 {head}` · `400 {error}` (`malformed`, `too-many-events`, `log-full`, `vouch-and-pow`, `expires`, a `ChainError` or `FoldError` name; an event that does not parse names its `FormatError`, e.g. `DuplicateMember`) · `403 pow` · `403 claim` · `404` a first event that is not #0 · `409 {head}` · `409 forked {head, fork}` · `409 key-taken` · `413` · `503 vouch-unavailable` |
 | `GET /logs/{scid}?from=` (public host profile) | `200 LogPage` (≤ 256 events; `vouched: false`, no note, no pauses) · `404` |
 | `GET /heads/{scid}` (public host profile) | `200 SignedHead` · `404` |
 | `GET /keys/{multikey}?wait=0..8` | `200 KeyIndexEntry` · `404` (at once, or at the timeout) · `400` wait > 8 |
@@ -142,6 +144,16 @@ tests name them by these names.
   writes `stored + 1` at the latest a second later, so revoking the key and republishing
   replaces the thief's record. The signer check, the version check and the write run in one
   immediate transaction (a revocation commits before the check or after the write).
+  The ceiling follows the store's wall clock, so a clock step on a live store moves it: a
+  **forward** jump of D seconds admits versions up to D + 300 s ahead of true time; while the
+  clock is ahead the owner still writes `stored + 1` (the language does that on
+  `409 {version}`), but once it is set right a record stored at such a version blocks every
+  write, `stored + 1` included (`400 version`), until true time reaches it: up to D. A key
+  that was valid during the jump (a stolen device key, any key for a `did:key`) can use that
+  to freeze the record for up to D. A **backward** jump of D (more than 300 s) refuses every
+  honest write, whose version is the writer's clock, with `400 version` until the store's
+  clock is right again. Run the store on a disciplined clock (NTP slewing, not stepping) and
+  never set it forward by hand.
 - **Agent record signatures**: `sig` is the `coasys:agent-record` signature of `{profile, version, anchor}` by
   `signedBy`. A `did:key` record is signed by that key and its `anchor` is `null`. A
   `did:scid` record comes with a signed request of that identity, and its `anchor` is one
@@ -182,18 +194,56 @@ tests name them by these names.
   primary-key lookup) and uses the held fold only when it ends exactly there; otherwise the
   log folds once from `chain_entries` and is held. An append puts its new fold in after its
   transaction commits, under the database lock, so the next request sees the new head's keys
-  (a revoked key is refused at once) with no replay. The folds are bounded by the events they
-  cover together (`HELD_LOG_EVENTS`, default 1 048 576), least recently used out first; a log
-  longer than the bound is folded on every use. `Store::held.folds()` counts replays (the
-  tests count them instead of timing requests). A restart starts with nothing held: each log
-  folds once on its first use. A rival (fork) event replays the prefix before it only when it
-  carries a proof by the master that signs at its seq, read from the held fold, and only
-  while that master has no recorded fork, so nobody without a master key of the log makes the
-  store replay it.
+  (a revoked key is refused at once) with no replay. The folds are bounded by the heap they
+  take together (`HELD_LOG_BYTES`, default 256 MiB), least recently used out first; a log
+  whose fold is larger than the bound is folded on every use. `Store::held.folds()` counts
+  replays (the tests count them instead of timing requests). A restart starts with nothing
+  held: each log folds once on its first use.
+  The bound counts bytes, not events, because events differ a hundredfold: measured with a
+  counting allocator (`tests/held_memory.rs`), a held fold takes about 265 B per `scope`
+  event and 395 B per `rotate` (the costliest common kind), but one `incept` listing 150 keys
+  takes 55 kB and one `scope` naming an action 2 000 times 59 kB, both within the 64 kB body.
+  Each fold is sized by `held::held_bytes_of` (key records, strings, scopes and hashes, the
+  state's vector capacities), which the same test keeps between the measured heap and twice
+  it. At the default a full log (16 384 rotations, about 6.5 MB) takes under 3 % of the
+  bound, and the bound holds about 670 000 rotations' worth of folds.
+- **Authenticated before any replay**: nobody without a key of a log makes the store replay
+  it, and for a log event only a master key does. A miss in the held folds (a log never used
+  since the start, or one evicted by a flood of cheap logs) costs a full replay under the
+  database lock, so every path that may fold a log first checks the sender against the key
+  index, which describes the stored head and is written in the append's transaction: each
+  key's row in `keys` (masters with `master = 1` and the seqs that added and retired them,
+  device keys with their revocation and bot scope) and the next-key commitment in `logs.next`.
+  - An append (`log::authenticate_first`): the first event's proof must verify under the key
+    that signs at its seq. Only masters sign events after #0 (`KelPolicy`: `add`, `revoke`,
+    `scope` by the current master, `rotate` by the master it reveals; a device key never signs
+    one), so that key is the master current there, or for a `rotate` the key the stored
+    next-key commitment names (at the head) or the master the log rotated onto (a rival). An
+    event that continues the head without it is refused with the replay's own error (`400
+    MissingProof`, `BadProof`, `NextMismatch`, `Ended`; an event with several faults may be
+    named by its signature fault). An event past the head, a resend, and a rival without it
+    are `409 {head}`; a rival by a master that already has a recorded fork is answered with
+    that fork. The freeze is read from the index too. Only a rival with a valid proof and no
+    recorded fork replays anything, and then the prefix before it only, never the whole log.
+  - A signed request (`request.rs`): the signature under the indexed key, then the indexed
+    standing (revoked, a bot key, or not the current master on a master route) before the
+    log is read.
+  - An offer (`offers.rs`, an unauthenticated route): `by.keyId` must be the indexed current
+    master and its signature must verify under that key before the log is read.
+  - An agent record's bot-scope check reads the index alone (`agents.rs`).
+
+  `tests/authenticate.rs` counts the replays of each refusal (zero) and of each accepted write
+  on an unheld log (one).
+- **Log length cap** (`log::MAX_LOG_EVENTS`, 16 384 events, seqs 0 to 16 383): the readers'
+  bound. The executor's resolver pages through a log at most 64 pages of 256 events deep, so
+  the store refuses an append whose last event would lie past it (`400 log-full`, before the
+  database is touched). The cap bounds a log's replay too: at most 16 384 events, each
+  signature-checked once.
 - **A fresh database**: the store has never been deployed, and a store file from before the
-  agent-record version ceiling and the `fork_signers` table is not upgraded: start such a
-  store on an empty database. Records stored above the store's clock and forks recorded
-  without their signing master would otherwise stay as they are. There are no migrations.
+  agent-record version ceiling, the `fork_signers` table and the key index's `keys.master` and
+  `logs.next` columns is not upgraded: start such a store on an empty database. Records
+  stored above the store's clock, forks recorded without their signing master and key rows
+  without their role would otherwise stay as they are. There are no migrations.
 - **Forks**: an event at a seq the store holds, with another hash than the stored one, that
   replays on the stored events before it (every proof checked) is a fork. The store records it
   in `chain_forks` with the event's JSON (`SqliteChainStore::record_fork_in`) and its signing
@@ -207,9 +257,10 @@ tests name them by these names.
   words racing, or a retired (stolen) master signing on the prefix where it was current. A
   resent stored event, an event past the head and one that does not replay are plain
   `409 {head}`.
-- **The freeze** (`db::freezing_fork`, derived from the fork rows and the held log each time,
-  no stored flag): the identity is frozen only while a recorded fork's signing master is the
-  current master at the held head (one primary-key lookup of `fork_signers`, no replay). A
+- **The freeze** (`db::freezing_fork` on the held log for a signed request, the key index's
+  current master for an append; derived from the fork rows each time, no stored flag): the
+  identity is frozen only while a recorded fork's signing master is the current master at
+  the stored head (one primary-key lookup of `fork_signers`, no replay). A
   rival `rotate` is signed by the master it names: a twin rotating onto the committed next key
   freezes nothing until the owner rotates onto that same key, and then freezes until a second
   `rotate` retires it. A fork by a master the held log rotated away from at the
@@ -231,7 +282,7 @@ tests name them by these names.
 | `POW_BITS` | `22` | what `GET /v1/pow` publishes and a sent proof must meet |
 | `CORS_ORIGINS` | none | comma-separated browser origins (all routes but the public host profile's, which allow any origin) |
 | `FEED_TOKEN` | none | the mirror token; without one the feed answers `401` |
-| `HELD_LOG_EVENTS` | `1048576` | the most events the logs held folded in memory cover together |
+| `HELD_LOG_BYTES` | `268435456` (256 MiB) | the most heap the logs held folded in memory take together (`held::held_bytes_of`) |
 
 `serve` prints `identity-store listening on http://<addr> store-key <multikey>` once it listens.
 
