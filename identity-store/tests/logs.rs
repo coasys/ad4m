@@ -1498,6 +1498,7 @@ async fn logs_and_heads_are_readable_from_any_origin_and_writes_only_from_the_co
         pow_bits: 8,
         feed_token: None,
         cors_origins: vec!["https://app.example".into()],
+        ..Settings::default()
     });
     let alice = Person::new("alice");
     let incept = serde_json::to_vec(&json!({ "events": [alice.json(0)] })).unwrap();

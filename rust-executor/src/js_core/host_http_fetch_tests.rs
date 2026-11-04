@@ -166,6 +166,143 @@ async fn http_fetch_times_out_when_the_body_stalls() {
     assert_timed_out(&result, &url);
 }
 
+/// host.js's `HTTP_FETCH_MAX_BYTES`.
+const HOST_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// Run `httpFetch(url, "GET", "", "", maxBytes)` and return `ok:<status>:<body length>` or
+/// `err:<code>:<message>`.
+async fn fetch_capped(js: &JsCore, url: &str, max_bytes: Option<usize>) -> String {
+    let url_lit = serde_json::to_string(url).unwrap();
+    let max = max_bytes.map_or("undefined".to_string(), |m| m.to_string());
+    let script = format!(
+        r#"globalThis.__httpFetch({url_lit}, "GET", "", "", {max}).then(
+            r => "ok:" + r.status + ":" + r.body.length,
+            e => "err:" + (e && e.code) + ":" + (e && e.message))"#
+    );
+    tokio::time::timeout(SETTLE_BOUND, js.execute(&script))
+        .await
+        .unwrap_or_else(|_| panic!("httpFetch({url}) did not settle within {SETTLE_BOUND:?}"))
+        .expect("script ran")
+}
+
+/// Serve one connection with a chunked 200 whose body would be `total` bytes of `x`, in
+/// 64 KiB chunks, counting the body bytes written until the client goes away.
+fn serve_chunked(total: usize) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}/big", listener.local_addr().unwrap());
+    let sent = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = sent.clone();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        if stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .is_err()
+        {
+            return;
+        }
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut left = total;
+        while left > 0 {
+            let n = left.min(chunk.len());
+            let framed = [
+                format!("{n:x}\r\n").as_bytes(),
+                &chunk[..n],
+                b"\r\n".as_slice(),
+            ]
+            .concat();
+            if stream.write_all(&framed).is_err() {
+                return;
+            }
+            counter.fetch_add(n, Ordering::SeqCst);
+            left -= n;
+        }
+        let _ = stream.write_all(b"0\r\n\r\n");
+        let _ = stream.flush();
+    });
+    (url, sent)
+}
+
+/// A body past the caller's `maxBytes` is refused (`too-large`) while it streams: the server
+/// meant to send 256 MiB and could write only a little past the limit before the client went
+/// away.
+#[tokio::test]
+async fn http_fetch_refuses_a_reply_over_max_bytes_before_reading_it_all() {
+    let (js, _dir) = language_isolate().await;
+    let limit = 1024 * 1024;
+    let total = 256 * 1024 * 1024;
+    let (url, sent) = serve_chunked(total);
+    let result = fetch_capped(&js, &url, Some(limit)).await;
+    assert!(
+        result.starts_with("err:too-large:") && result.contains(&url),
+        "expected a too-large refusal naming {url}, got: {result}"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sent = sent.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        sent < 32 * 1024 * 1024,
+        "the server wrote {sent} of {total} bytes: the body was read past the limit"
+    );
+}
+
+/// Without `maxBytes` the host-wide limit applies, and a larger `maxBytes` does not raise it.
+#[tokio::test]
+async fn http_fetch_refuses_a_reply_over_the_host_limit() {
+    let (js, _dir) = language_isolate().await;
+    for max in [None, Some(HOST_MAX_BYTES * 4)] {
+        let (url, _) = serve_chunked(HOST_MAX_BYTES + 1);
+        let result = fetch_capped(&js, &url, max).await;
+        assert!(
+            result.starts_with("err:too-large:") && result.contains(&HOST_MAX_BYTES.to_string()),
+            "maxBytes {max:?}: expected a too-large refusal at the host limit, got: {result}"
+        );
+    }
+}
+
+/// A `Content-Length` over the limit is refused at once, without waiting for the body.
+#[tokio::test]
+async fn http_fetch_refuses_a_declared_length_over_the_limit_at_once() {
+    let (js, _dir) = language_isolate().await;
+    let (url, _hold) = serve_once(Reply::Partial(
+        "HTTP/1.1 200 OK\r\nContent-Length: 2000000\r\n\r\nxxxx",
+    ));
+    let started = Instant::now();
+    let result = fetch_capped(&js, &url, Some(1_000_000)).await;
+    assert!(
+        result.starts_with("err:too-large:"),
+        "expected a too-large refusal, got: {result}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "waited for the body"
+    );
+}
+
+/// A body of exactly the limit passes, streamed or with its length declared.
+#[tokio::test]
+async fn http_fetch_takes_a_reply_at_the_limit() {
+    let (js, _dir) = language_isolate().await;
+    let limit = 1024 * 1024 + 7;
+    let (url, _) = serve_chunked(limit);
+    assert_eq!(
+        fetch_capped(&js, &url, Some(limit)).await,
+        format!("ok:200:{limit}")
+    );
+
+    let body = "y".repeat(limit);
+    let reply: &'static str = Box::leak(
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {limit}\r\nConnection: close\r\n\r\n{body}")
+            .into_boxed_str(),
+    );
+    let (url, _hold) = serve_once(Reply::Full(reply));
+    assert_eq!(
+        fetch_capped(&js, &url, Some(limit)).await,
+        format!("ok:200:{limit}")
+    );
+}
+
 #[tokio::test]
 async fn http_fetch_returns_status_and_body_from_a_prompt_server() {
     let (js, _dir) = language_isolate().await;
