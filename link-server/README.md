@@ -252,7 +252,7 @@ All endpoints except `/rooms/:roomId/auth` require `Authorization: Bearer <jwt>`
 POST /rooms/:roomId/auth      { did } -> { challenge }
                                { did, challenge, signature } -> { token, expiresAt }
 POST /rooms/:roomId/commit    { additions: LinkExpression[], removals: LinkExpression[] } -> { sequence, revision }
-                               (every link encrypted: data { ciphertext, nonce } in base64 and a link_hash; key_version, when sent, a positive integer; 400 otherwise)
+                               (400 unless every link has data exactly { ciphertext, nonce } (strings; base64 by client convention, not checked) and a link_hash, and key_version, when sent, is a positive integer)
 GET  /rooms/:roomId/sync      ?since=<sequence>[&limit=<n>] -> { diffs: (PerspectiveDiff & {sequence})[], revision, sequence, next }
 GET  /rooms/:roomId/render    ?[limit=<n>][&next=<cursor>] -> { links: LinkExpression[], revision, sequence, upto, next }
 GET  /rooms/:roomId/revision  -> { revision, sequence }

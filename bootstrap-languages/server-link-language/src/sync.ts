@@ -223,7 +223,9 @@ function openOrHoldDiff(wire: WirePerspectiveDiff): PerspectiveDiff {
  *  page. Applying it early would let a lost later push leave a link the
  *  snapshot no longer has. */
 export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): PerspectiveDiff {
-    if (store.getRenderProgress()) return { additions: [], removals: [] };
+    // A push at or below the cursor is already applied, and applying it again
+    // could undo a later diff (re-add a link a later diff removed).
+    if (store.getRenderProgress() || sequence <= store.getSequence()) return { additions: [], removals: [] };
     const emitted = applyAndEmit(openOrHoldDiff(wireDiff));
     // Only the next diff moves the cursor: a push further ahead leaves the
     // diffs in between to the tail, which re-applies this one too.

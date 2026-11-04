@@ -139,6 +139,22 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.equal(store.getRevision(), "rev-4");
     });
 
+    it("a push at or below the cursor is ignored, so it cannot re-add a link a later diff removed", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const link = makeLink();
+        // The tail applied 5 (add) and 6 (remove); the push of 5 arrives late.
+        store.setSequence(6);
+        store.setRevision("rev-6");
+
+        const result = syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, 5, "rev-5");
+
+        assert.deepEqual(result, { additions: [], removals: [] });
+        assert.deepEqual(store.allLinks().links, []);
+        assert.equal(store.getSequence(), 6);
+        assert.equal(store.getRevision(), "rev-6");
+    });
+
     it("applies removals and still emits", () => {
         const transport = new MockTransport();
         setup(transport);
