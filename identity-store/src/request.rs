@@ -17,7 +17,7 @@ use ad4m_hash_chain::{decode_proof_value, hash_bytes};
 use ad4m_identity_core::{scid_of, verify_signed, KelChain, REQUEST_DOMAIN};
 use ad4m_ldk::identity::SignedRequest;
 use base64::Engine;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 
 use crate::db::{self, to_sql};
 use crate::error::ApiError;
@@ -62,8 +62,10 @@ fn refuse(detail: impl Into<String>) -> ApiError {
 }
 
 /// Records `nonce` (16 bytes, base58btc) as seen at `now`: `403 signer` when it was seen in
-/// the last [`NONCE_WINDOW_S`]. Signed requests and pre-join inbox reads share the store.
-pub(crate) fn take_nonce(conn: &mut Connection, nonce: &str, now: u64) -> Result<(), ApiError> {
+/// the last [`NONCE_WINDOW_S`]. Signed requests and pre-join inbox reads share the store. Runs
+/// on `conn` as given: a caller that checks more in the same write passes its transaction, and
+/// a refusal rolls the nonce back with it.
+pub(crate) fn take_nonce(conn: &Connection, nonce: &str, now: u64) -> Result<(), ApiError> {
     // 16 bytes take at most 22 base58 characters; longer text is refused before decoding.
     let nonce_ok = nonce.len() <= 22 && bs58::decode(nonce).into_vec().is_ok_and(|b| b.len() == 16);
     if !nonce_ok {
@@ -72,19 +74,17 @@ pub(crate) fn take_nonce(conn: &mut Connection, nonce: &str, now: u64) -> Result
             "the nonce is 16 bytes of base58btc",
         ));
     }
-    let tx = conn.transaction()?;
-    tx.execute(
+    conn.execute(
         "DELETE FROM nonces WHERE seen_at <= ?1",
         params![to_sql(now.saturating_sub(NONCE_WINDOW_S))?],
     )?;
-    let fresh = tx.execute(
+    let fresh = conn.execute(
         "INSERT OR IGNORE INTO nonces (nonce, seen_at) VALUES (?1, ?2)",
         params![nonce, to_sql(now)?],
     )?;
     if fresh == 0 {
         return Err(refuse("the nonce was seen in the last 10 minutes"));
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -149,9 +149,27 @@ impl Store {
     }
 
     /// Checks a signed request for the identity `did` (when the route names one) and records
-    /// its nonce.
+    /// its nonce, in a transaction of its own.
     pub fn verify_request(
         &self,
+        incoming: &Incoming<'_>,
+        did: Option<&str>,
+        signer: Signer,
+    ) -> Result<Verified, ApiError> {
+        let mut conn = self.db.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let verified = self.verify_request_in(&tx, incoming, did, signer)?;
+        tx.commit()?;
+        Ok(verified)
+    }
+
+    /// [`Store::verify_request`] on `conn`, inside the caller's transaction: a route that writes
+    /// after the check (an agent record) reads the log, checks the key and writes in one
+    /// transaction, so no append (a revocation) can commit between the check and the write. The
+    /// nonce is recorded in that transaction too.
+    pub(crate) fn verify_request_in(
+        &self,
+        conn: &Connection,
         incoming: &Incoming<'_>,
         did: Option<&str>,
         signer: Signer,
@@ -183,9 +201,15 @@ impl Store {
         if req.expires > now + MAX_AHEAD_S {
             return Err(refuse("the request expires more than 5 minutes ahead"));
         }
-        let mut conn = self.db.lock()?;
-        let chain = db::load_chain(&conn, scid)?
+        let chain = db::load_chain(conn, scid)?
             .ok_or_else(|| refuse("the store holds no log of the identity"))?;
+        // A frozen identity (a fork signed by the current master, `db::freezing_fork`): no key
+        // of it speaks for it at this store until a `rotate` ends the freeze.
+        if let Some(fork) = db::freezing_fork(conn, scid, &chain)? {
+            let head = db::signed_head(conn, scid)?
+                .ok_or_else(|| ApiError::internal(format!("log {scid} has no head")))?;
+            return Err(ApiError::forked(&head, &fork));
+        }
         if chain.hash_at(req.kel_seq) != Some(&req.kel_hash) {
             return Err(refuse("kelSeq and kelHash name no position of the log"));
         }
@@ -209,7 +233,7 @@ impl Store {
         if !verify_signed(REQUEST_DOMAIN, req, &record.sign, &sig) {
             return Err(refuse("the signature does not verify"));
         }
-        take_nonce(&mut conn, &req.nonce, now)?;
+        take_nonce(conn, &req.nonce, now)?;
         Ok(Verified {
             scid: scid.to_string(),
             key_id: req.key_id.clone(),

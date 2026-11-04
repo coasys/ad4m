@@ -409,7 +409,11 @@ store (`identity-store`); a later Holochain or Holograph agent language serves t
 Each call is its own capability (`identity-log`, `identity-head`, …), detected from its flat
 export. **The executor calls them only on the language at `system_addresses.agent_language`**
 (`LanguageController::language_for_capability` refuses any other language with
-`NotAgentLanguage`), so a third-party language that exports them is never asked.
+`NotAgentLanguage`), so a third-party language that exports them is never asked. The executor
+side of this section (this routing, `IdentityBackend` and the `identity.storeUrl` and
+`identity.storeKeys` config keys) is the executor's planned behaviour: the guard exists, and
+the executor's identity change routes every identity call through it; until then no executor
+path makes these calls.
 
 | Export | Parameters | Returns | Store route |
 |---|---|---|---|
@@ -445,8 +449,9 @@ records are sealed (`docs-src/identity/did-scid-coasys-1.md`, section 17), and i
 Every call goes to the language's own store. A did:scid `src` hint (a DID URL's `?src=`,
 another host of the log) is not part of this interface: the executor fetches such a host
 itself, over the did:scid host profile (`GET {base}/v1/logs/{scid}?from=`), with a transport
-that refuses non-public addresses when it connects. A log page over 256 events or over the
-size of 257 store bodies (64 KiB each) is refused as `invalid` (`too-large`).
+that refuses non-public addresses when it connects. A log page over 256 events, and any reply
+over the size of 257 store bodies (64 KiB each; a full log page), whatever the route and
+status, is refused as `invalid` (`too-large`).
 
 `did` is the full `did:scid:coasys:1:<scid>`. The wire types live in `ad4m-ldk`
 (`js/src/types.ts`, `rust/src/identity.rs`); JSON field names are camelCase.
@@ -461,7 +466,10 @@ Rules for an implementation:
   be replayed to a second store holding the same log. The signer takes it from
   `identity.storeKeys`, or from the `store` of a head it checked against them. Events are
   opaque JSON objects, so a new event format needs no new language: the language never reads
-  one; the executor and the store check each with the identity core.
+  one; the executor and the store check each with the identity core. One check needs the
+  store's text, which the executor never sees (the page reaches it as values, which keep only
+  the last of two members of one name): `identityLog` refuses a page with an event whose text
+  names a member twice as `invalid` (`DuplicateMember`).
 - **Refusals map one to one** onto `IdentityErrorCode` (`conflict` with the store's head,
   `key-taken`, `forbidden` with a reason (`vouch`, `pow`, `claim`, `signer`, `secret`,
   `bound`, `cosig`, `writer`, `store`), `invalid` (a record whose version is not the stored one
@@ -471,8 +479,15 @@ Rules for an implementation:
   in Rust). A network failure or the 10-second host timeout is `unavailable`.
 - **The store's base URL comes from the language settings** (`{"storeUrl": "https://…"}`),
   which the executor fills from its config key `identity.storeUrl` before the language loads.
-  The executor accepts a head from the language only when one of the keys in its config key
-  `identity.storeKeys` signed it (`coasys:head`).
+  The URL is `https`, or plain `http` to a loopback address only; the language refuses any
+  other as `invalid` (`store-url`) and sends nothing. The executor accepts a head from the
+  language only when one of the keys in its config key `identity.storeKeys` signed it
+  (`coasys:head`), and fills the same keys into the `storeKeys` setting
+  (`{"storeKeys": ["z6Mk…"]}`): when the language reads a log itself (to check a `did:scid`
+  agent record), it keeps the log only when it ends exactly at a head one of those keys signed
+  for that log, and reads at most 64 pages and two pages' worth of bytes. A signed head
+  carries no freshness (an older one verifies as well), so it proves the store held at least
+  that log, never that the log ends there.
 - `expressionGet` / `expressionCreate` keep working for agent profiles, on the store's
   `/v1/agents/{did}` routes. A `did:key` record's `profile` is the Agent as the agent's signed
   AD4M expression (the host's `createSignedExpression`), and `expressionGet` answers that
@@ -483,7 +498,7 @@ Rules for an implementation:
   it exactly as stored plus one field, `proof.record` = `{version, anchor, sig}` of the record
   (`AgentRecordProof`), and ignores a record whose profile is not of that form. The executor
   then checks the record itself at its anchor, from signed data only: removing `proof.record`
-  gives back `profile`, `sig` must hold over `{profile, version, anchor}` (`coasys:link`) by
+  gives back `profile`, `sig` must hold over `{profile, version, anchor}` (`coasys:agent-record`) by
   `proof.key`, and that key must be valid at `anchor` in the log. A profile the store took
   before a revocation so stays valid after it, as the anchor rule below says.
 - **An agent record's `anchor` is one seq.** `sig` covers `{profile, version, anchor}`. A
@@ -497,7 +512,7 @@ Rules for an implementation:
   when the record arrives (`403 signer` otherwise): a revoked key cannot backdate a new record
   to an anchor before its revocation, and a record the store took before the revocation stays
   valid. The language on read checks at the anchor and relies on that admission. The DID is the record's, the key id is in the log, and
-  a fork freezes the identity anyway, so the anchor carries no DID, key id or hash.
+  the store keeps one branch of a fork, so the anchor carries no DID, key id or hash.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
 calls it makes today are `log`, `keyOwner`, `append`, `openOffer`, `listOffers`, `claimOffer`

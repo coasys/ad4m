@@ -134,6 +134,75 @@ fn a_claim_verifies_and_its_cosig_covers_enc_key_and_can_keep_master() {
 }
 
 #[test]
+fn the_holder_checks_the_stores_claim_view_before_signing_the_add() {
+    let log = Log::new();
+    let offer = link_offer(&log, OfferKind::Device, None);
+    let view = claim_view(&link_claim(&log, 2, true), LINK_NOW + 5);
+    assert_eq!(verify_claim_view(&offer, &view), Ok(()));
+
+    // A store that swaps the X25519 key the device's messages (and later the master key) are
+    // sealed to, or the custody flag, or the signing key, or answers a view of another offer.
+    let mut swapped = view.clone();
+    swapped.enc_key = enc("someone else");
+    assert_eq!(verify_claim_view(&offer, &swapped), Err(LinkError::CoSig));
+    let mut flipped = view.clone();
+    flipped.can_keep_master = false;
+    assert_eq!(verify_claim_view(&offer, &flipped), Err(LinkError::CoSig));
+    let mut other_key = view.clone();
+    other_key.device_key = mk(&dev(3));
+    assert_eq!(verify_claim_view(&offer, &other_key), Err(LinkError::CoSig));
+    let mut other_offer = offer.clone();
+    other_offer.offer_id = bs58::encode([9u8; 16]).into_string();
+    assert_eq!(
+        verify_claim_view(&other_offer, &view),
+        Err(LinkError::CoSig)
+    );
+    let mut other_scid = offer.clone();
+    other_scid.scid = "QmOther".into();
+    assert_eq!(verify_claim_view(&other_scid, &view), Err(LinkError::CoSig));
+
+    // Malformed keys and a long hint are refused before the signature is read.
+    let mut bad_enc = view.clone();
+    bad_enc.enc_key = mk(&dev(2));
+    assert!(matches!(
+        verify_claim_view(&offer, &bad_enc),
+        Err(LinkError::Malformed(_))
+    ));
+    let mut long_hint = view.clone();
+    long_hint.hint = Some("x".repeat(HINT_MAX_CHARS + 1));
+    assert!(matches!(
+        verify_claim_view(&offer, &long_hint),
+        Err(LinkError::Malformed(_))
+    ));
+    // The hint is private and outside the co-signature: a changed one still verifies.
+    let mut renamed = view;
+    renamed.hint = Some("Pixel 9".into());
+    assert_eq!(verify_claim_view(&offer, &renamed), Ok(()));
+}
+
+#[test]
+fn a_store_that_swaps_the_whole_key_of_a_bound_offer_is_refused() {
+    // The store answers its own deviceKey and encKey with a fresh co-signature over this offer's
+    // scid and offerId: the co-signature verifies, so only the offer's bound key can refuse it.
+    let log = Log::new();
+    let view = claim_view(&link_claim(&log, 2, true), LINK_NOW + 5);
+    let whole_swap = claim_view(&link_claim(&log, 3, true), LINK_NOW + 5);
+
+    let mut bound = link_offer(&log, OfferKind::Device, None);
+    bound.device_key = Some(mk(&dev(2)));
+    assert_eq!(verify_claim_view(&bound, &view), Ok(()));
+    assert_eq!(
+        verify_claim_view(&bound, &whole_swap),
+        Err(LinkError::Bound)
+    );
+
+    // An unbound offer names no key: any well-formed, co-signed view passes as before.
+    let unbound = link_offer(&log, OfferKind::Device, None);
+    assert_eq!(unbound.device_key, None);
+    assert_eq!(verify_claim_view(&unbound, &whole_swap), Ok(()));
+}
+
+#[test]
 fn a_claim_with_the_wrong_secret_fails_the_commit() {
     let log = Log::new();
     let offer = link_offer(&log, OfferKind::Device, None);

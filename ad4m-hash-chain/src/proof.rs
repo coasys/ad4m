@@ -62,18 +62,18 @@ pub enum ProofError {
 
 /// The bytes a key signs for `proof_without_value` over `entry` (eddsa-jcs-2022). The
 /// caller holds the key and signs. `proof_value` of the given proof is ignored. Fails when
-/// the entry has no canonical form (a float, an integer outside ±(2^53 − 1), or not an
-/// object).
+/// the entry has no canonical form (a float, finite or not, an integer outside ±(2^53 − 1),
+/// or not an object).
 pub fn signing_input<E: Entry>(
     entry: &E,
     proof_without_value: &Proof,
 ) -> Result<Vec<u8>, CanonError> {
-    let value = serde_json::to_value(entry).map_err(|e| CanonError::Serde(e.to_string()))?;
-    signing_input_json(&value, proof_without_value)
+    signing_input_json(&crate::jcs::to_value(entry)?, proof_without_value)
 }
 
-/// [`signing_input`] over an entry given as JSON.
-fn signing_input_json(entry: &Value, proof: &Proof) -> Result<Vec<u8>, CanonError> {
+/// [`signing_input`] over an entry given as JSON; [`verify_proof_json`] checks a signature
+/// over these bytes.
+pub fn signing_input_json(entry: &Value, proof: &Proof) -> Result<Vec<u8>, CanonError> {
     let map = entry.as_object().ok_or(CanonError::NotObject)?;
     let mut config = serde_json::to_value(proof).map_err(|e| CanonError::Serde(e.to_string()))?;
     let config_map = config
@@ -97,11 +97,12 @@ pub fn verify_proof<E: Entry>(
     key: &Multikey,
     domain: &str,
 ) -> Result<(), ProofError> {
-    let value = serde_json::to_value(entry).map_err(|_| ProofError::Encoding)?;
+    let value = crate::jcs::to_value(entry).map_err(|_| ProofError::Encoding)?;
     verify_proof_json(&value, proof, key, domain)
 }
 
-/// [`verify_proof`] over an entry given as JSON.
+/// [`verify_proof`] over an entry given as JSON. The signature check is Ed25519
+/// `verify_strict`: a non-canonical `s` or a small-order key or `R` is `Signature`.
 pub fn verify_proof_json(
     entry: &Value,
     proof: &Proof,

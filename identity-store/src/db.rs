@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use ad4m_hash_chain::store::SqliteChainStore;
-use ad4m_hash_chain::ChainType;
+use ad4m_hash_chain::{ChainType, ForkEvidence, Multikey};
 use ad4m_identity_core::{fold, Event, KelChain, KeyState};
 use ad4m_ldk::identity::{KeyIndexEntry, SignedHead};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -116,6 +116,13 @@ CREATE TABLE IF NOT EXISTS buckets (
     tokens      INTEGER NOT NULL,
     refilled_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS fork_signers (
+    scid   TEXT NOT NULL,
+    signer TEXT NOT NULL,
+    seq    INTEGER NOT NULL,
+    theirs TEXT NOT NULL,
+    PRIMARY KEY (scid, signer)
+);
 ";
 
 /// The store's database.
@@ -162,11 +169,21 @@ pub(crate) fn from_sql(n: i64) -> u64 {
 
 /// The events of a log, replayed: `None` when the store holds no event of `scid`.
 pub fn load_chain(conn: &Connection, scid: &str) -> Result<Option<KelChain>, ApiError> {
+    load_chain_before(conn, scid, u64::MAX)
+}
+
+/// The stored events of `scid` below seq `end`, replayed: `None` when there are none.
+pub fn load_chain_before(
+    conn: &Connection,
+    scid: &str,
+    end: u64,
+) -> Result<Option<KelChain>, ApiError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT json FROM chain_entries WHERE type = ?1 AND chain = ?2 ORDER BY seq",
+        "SELECT json FROM chain_entries WHERE type = ?1 AND chain = ?2 AND seq < ?3 ORDER BY seq",
     )?;
+    let end = i64::try_from(end).unwrap_or(i64::MAX);
     let texts = stmt
-        .query_map(params![KEL, scid], |row| row.get::<_, String>(0))?
+        .query_map(params![KEL, scid, end], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     if texts.is_empty() {
         return Ok(None);
@@ -174,15 +191,78 @@ pub fn load_chain(conn: &Connection, scid: &str) -> Result<Option<KelChain>, Api
     let events = texts
         .iter()
         .map(|t| {
-            let value: serde_json::Value = serde_json::from_str(t)
-                .map_err(|e| ApiError::internal(format!("stored event of {scid}: {e}")))?;
-            Event::from_json(&value)
+            Event::from_json_text(t)
                 .map_err(|e| ApiError::internal(format!("stored event of {scid}: {e}")))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let chain = fold(&events)
         .map_err(|e| ApiError::internal(format!("stored log {scid} does not replay: {e}")))?;
     Ok(Some(chain))
+}
+
+/// The recorded fork that freezes `scid`, if any (the fork rule of `identity-store/AGENTS.md`,
+/// section 14 of `docs-src/identity/did-scid-coasys-1.md`): a fork whose rival event was signed
+/// by the master that is current at the head of the held log `held`. A fork signed by a master
+/// the held log has rotated away from (at the fork's seq or later) stays recorded and served as
+/// evidence but freezes nothing, so a retired (stolen) master cannot lock the identity out. A
+/// `rotate` appended on the held log retires the rival's signer and so ends the freeze. Derived
+/// from the fork rows and `held` each time (one primary-key lookup in `fork_signers`): nothing
+/// about a freeze is stored.
+pub fn freezing_fork(
+    conn: &Connection,
+    scid: &str,
+    held: &KelChain,
+) -> Result<Option<ForkEvidence>, ApiError> {
+    let Some(current) = held.state().current_master() else {
+        return Ok(None);
+    };
+    signer_fork(conn, scid, &current.sign)
+}
+
+/// The fork recorded for `scid` whose rival event `signer` signed, if any.
+fn signer_fork(
+    conn: &Connection,
+    scid: &str,
+    signer: &Multikey,
+) -> Result<Option<ForkEvidence>, ApiError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT f.seq, c.ours, f.theirs FROM fork_signers f
+         JOIN chain_forks c ON c.type = ?1 AND c.chain = f.scid AND c.seq = f.seq
+                           AND c.theirs = f.theirs
+         WHERE f.scid = ?2 AND f.signer = ?3",
+    )?;
+    Ok(stmt
+        .query_row(params![KEL, scid, signer], |row| {
+            Ok(ForkEvidence {
+                chain: scid.to_string(),
+                seq: from_sql(row.get(0)?),
+                ours: row.get(1)?,
+                theirs: row.get(2)?,
+            })
+        })
+        .optional()?)
+}
+
+/// Records the fork `fork` (rival event `theirs_json`, signed by the master `signer`) and
+/// answers the evidence to send back. The store keeps at most one fork per identity and signing
+/// master: a second rival by a master that already has one adds nothing and is answered with the
+/// recorded fork, so the fork rows of an identity are bounded by the masters its log ever had.
+/// Call inside the append's transaction.
+pub(crate) fn record_fork(
+    conn: &Connection,
+    fork: ForkEvidence,
+    theirs_json: &str,
+    signer: &Multikey,
+) -> Result<ForkEvidence, ApiError> {
+    if let Some(recorded) = signer_fork(conn, &fork.chain, signer)? {
+        return Ok(recorded);
+    }
+    SqliteChainStore::record_fork_in(conn, KEL, &fork, theirs_json)?;
+    conn.execute(
+        "INSERT INTO fork_signers (scid, signer, seq, theirs) VALUES (?1, ?2, ?3, ?4)",
+        params![fork.chain, signer, to_sql(fork.seq)?, fork.theirs],
+    )?;
+    Ok(fork)
 }
 
 /// Up to `limit` stored events of `scid` from `from`: their JSON and when they were stored.
