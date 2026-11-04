@@ -122,9 +122,7 @@ pub async fn install_neighbourhood_with_context(
             );
             if let Some(user_did) = context.managed_did().map(str::to_string) {
                 // Update database
-                crate::db::Ad4mDb::with_global_instance(|db| {
-                    db.add_owner_to_neighbourhood(&url, &user_did)
-                })?;
+                crate::db_backend::db_backend().add_owner_to_neighbourhood(&url, &user_did)?;
 
                 // Add user to owners list, under the perspective's lock so
                 // concurrent joins cannot overwrite each other's owner
@@ -147,9 +145,8 @@ pub async fn install_neighbourhood_with_context(
                 let main_agent_did = crate::agent::did_for_context(context)?;
 
                 // Update database
-                crate::db::Ad4mDb::with_global_instance(|db| {
-                    db.add_owner_to_neighbourhood(&url, &main_agent_did)
-                })?;
+                crate::db_backend::db_backend()
+                    .add_owner_to_neighbourhood(&url, &main_agent_did)?;
 
                 // Add main agent to owners list, under the perspective's lock
                 let handle = update_perspective_with(&p.uuid, |h| h.add_owner(&main_agent_did))
@@ -270,7 +267,8 @@ mod tests {
             .lock()
             .await
             .clone();
-        let stored = Ad4mDb::with_global_instance(|db| db.get_all_perspectives())
+        let stored = crate::db_backend::db_backend()
+            .get_all_perspectives()
             .unwrap()
             .into_iter()
             .find(|s| s.uuid == handle.uuid)
@@ -320,7 +318,8 @@ mod tests {
             .lock()
             .await
             .clone();
-        let stored = Ad4mDb::with_global_instance(|db| db.get_all_perspectives())
+        let stored = crate::db_backend::db_backend()
+            .get_all_perspectives()
             .unwrap()
             .into_iter()
             .find(|s| s.uuid == handle.uuid)
