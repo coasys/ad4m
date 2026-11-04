@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use ad4m_hash_chain::store::SqliteChainStore;
 use ad4m_hash_chain::{ChainType, ForkEvidence, Multikey};
-use ad4m_identity_core::{fold, Event, KelChain, KeyState};
+use ad4m_identity_core::{fold_stored, Event, KelChain, KeyState};
 use ad4m_ldk::identity::{KeyIndexEntry, SignedHead};
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -143,6 +143,13 @@ pub fn load_chain(conn: &Connection, scid: &str) -> Result<Option<KelChain>, Api
 }
 
 /// The stored events of `scid` below seq `end`, replayed: `None` when there are none.
+///
+/// Every stored event was fully verified when the store appended it (every proof checked by the
+/// identity core), and the store trusts its own database, so the replay is the core's
+/// `fold_stored`: every rule but the proofs' signatures and the duplicate-key scan, the same
+/// state as a full `fold`. A miss in the held folds costs the parse and the hashing of the log,
+/// linear in its length and bounded by the per-log budget (`Settings::log_fold_bytes`), and no
+/// signature check. New events are never folded here: an append checks them in full (`log.rs`).
 pub fn load_chain_before(
     conn: &Connection,
     scid: &str,
@@ -165,7 +172,7 @@ pub fn load_chain_before(
                 .map_err(|e| ApiError::internal(format!("stored event of {scid}: {e}")))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let chain = fold(&events)
+    let chain = fold_stored(&events)
         .map_err(|e| ApiError::internal(format!("stored log {scid} does not replay: {e}")))?;
     Ok(Some(chain))
 }

@@ -11,14 +11,14 @@ mod common;
 
 use ad4m_identity_core::build;
 use ad4m_identity_core::link::{sign_offer, OfferKind};
-use ad4m_identity_core::{Event, Op};
+use ad4m_identity_core::{BotScope, Event, Op};
 use axum::http::StatusCode;
 use identity_store::held::held_bytes_of;
 use identity_store::log::MAX_LOG_EVENTS;
 use identity_store::Settings;
 use serde_json::json;
 
-use common::agent::{key, multikey, Person};
+use common::agent::{key, multikey, Device, Person};
 use common::{Reply, TestStore};
 
 fn store_with_bound(held_log_bytes: usize) -> TestStore {
@@ -231,6 +231,44 @@ async fn an_offer_the_master_did_not_sign_replays_nothing() {
     let reply = t.open_offer(&offer).await;
     assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
     assert_eq!(t.store.held.folds(), folds + 1);
+}
+
+#[tokio::test]
+async fn a_request_by_a_bot_key_replays_nothing() {
+    let (t, mut alice) = unheld_alice().await;
+    let bot = Device::new("alice bot");
+    let bot_id = t
+        .link(
+            &mut alice,
+            &bot,
+            OfferKind::Bot,
+            Some(BotScope {
+                can: vec!["read".into()],
+                expires: t.now() + 86_400,
+            }),
+        )
+        .await;
+    assert!(!t.store.held.holds(&alice.scid()));
+    let folds = t.store.held.folds();
+    let path = format!("/v1/notes/{}", alice.scid());
+    let body = serde_json::to_vec(&json!({ "token": "a-token" })).unwrap();
+    for _ in 0..5 {
+        // Validly signed by the bot under its own id: refused from the key index alone.
+        let header = alice.request(&bot_id, &bot.key, "POST", &path, &body, t.now() + 60);
+        let reply = t
+            .send("POST", &path, Some(body.clone()), Some(header))
+            .await;
+        refused_as(&reply, StatusCode::FORBIDDEN, "signer");
+        assert!(
+            reply.body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("a bot key signs no request"),
+            "{}",
+            reply.body
+        );
+    }
+    assert_eq!(t.store.held.folds(), folds);
 }
 
 #[tokio::test]

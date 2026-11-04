@@ -556,6 +556,18 @@ Coasys identity store adds these checks:
   the executor's resolver reads (64 pages of 256 events, section 13), and refuses an append
   whose last event would lie past it (`400 log-full`). A log that reaches the cap can take no
   further event, a `rotate` included.
+- **Per-log budget.** Events differ a hundredfold in the state they add (a `scope` may name its
+  actions any number of times within the event size limit), so the length cap does not bound
+  what a log costs a host to hold or replay. The store refuses an append after which the
+  replayed state of the log would take more than its per-log budget in memory (default
+  16 MiB, configurable; a log of 16 384 rotations takes under 7 MB), and stores none of the
+  append's events (`400 log-too-large`). A log that reaches the budget may still take an event
+  small enough to fit.
+- **Replay of stored events.** A host checks every event in full (`fold`, every proof) before
+  it stores it. When it replays a log from its own storage, it may leave out the checks that
+  every stored event already passed and that only refuse: the proofs' signatures and the
+  duplicate-key check (rule K8). The state is the same. This trusts the host's own storage
+  only; events from anyone else are always checked in full.
 - **Signed before read.** Before it replays a stored log for an append, the store checks the
   first event's proof against the key that signs at its seq, from its key index at the head
   (the master current there; for a `rotate`, the key the stored next-key commitment names).
