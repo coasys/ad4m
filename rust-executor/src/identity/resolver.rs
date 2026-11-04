@@ -27,7 +27,10 @@ use ad4m_identity_core::{
 use serde_json::Value;
 
 use super::backend::{IdentityBackend, IdentityError};
-use super::cache::{fold_log, holding_rival, scid_from, CacheError, Ingested, KelCache, MAX_PAGES};
+use super::cache::{
+    fold_log, holding_rival, scid_from, CacheError, Ingested, KelCache, MAX_PAGES,
+    MAX_SRC_LOG_BYTES,
+};
 use super::src_fetch::{refuse_private_host, SrcFetch};
 use super::types::{
     convert, DidDocumentMetadata, DidResolutionMetadata, DidResolutionResult, ForkRecord,
@@ -39,12 +42,6 @@ pub const DID_LD_JSON: &str = "application/did+ld+json";
 /// How long a failed fetch from a foreign host keeps the resolver from asking it again for the
 /// same identity.
 pub const MISS_TTL: Duration = Duration::from_secs(300);
-/// The most bytes one resolution reads from a foreign `src`, over all its pages. A person's key
-/// log is an incept and a few adds, revokes and rotations, about a kilobyte each (an event the
-/// store takes is at most 64 KiB), so 1 MiB holds hundreds of ordinary events. The page cap
-/// alone (`MAX_PAGES` × `MAX_LOG_PAGE_BYTES`, about 1 GiB) would let any `agent:READ` session
-/// make the executor hold a host's choice of bytes in memory for one answer.
-const MAX_SRC_LOG_BYTES: usize = 1 << 20;
 /// The most events a page holds (`identity-store`'s page size).
 const PAGE_EVENTS: usize = 256;
 /// How long (seconds) a log refreshed from the configured store may admit a key before the
