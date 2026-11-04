@@ -25,7 +25,7 @@ use ad4m_ldk::imports as rt;
 use ad4m_ldk::prelude::*;
 
 use agents::AgentKey;
-use store::{store_settings_from, Http, HttpReply, Store};
+use store::{store_settings_from, Http, HttpFailure, HttpReply, Store};
 
 /// The host's `httpFetch`.
 pub struct HostHttp;
@@ -37,14 +37,21 @@ impl Http for HostHttp {
         method: &str,
         headers_json: &str,
         body: &str,
-    ) -> Result<HttpReply, String> {
-        rt::http_fetch_typed(url, method, headers_json, body)
+        max_bytes: usize,
+    ) -> Result<HttpReply, HttpFailure> {
+        rt::http_fetch_typed_capped(url, method, headers_json, body, max_bytes)
             .await
             .map(|r| HttpReply {
                 status: r.status,
                 body: r.body,
             })
-            .map_err(|e| format!("{e:?}"))
+            .map_err(|e| {
+                if rt::http_fetch_too_large(&e) {
+                    HttpFailure::TooLarge
+                } else {
+                    HttpFailure::Failed(format!("{e:?}"))
+                }
+            })
     }
 }
 

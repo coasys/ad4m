@@ -20,7 +20,7 @@ use ad4m_ldk::identity::{
 use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
 use centralized_agent_language::agents::{self, AgentKey};
 use centralized_agent_language::store::{
-    encode_request, Http, HttpReply, Store, MAX_REPLY_BYTES, REQUEST_HEADER,
+    encode_request, Http, HttpFailure, HttpReply, Store, MAX_REPLY_BYTES, REQUEST_HEADER,
 };
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use futures::executor::block_on;
@@ -212,11 +212,16 @@ struct Recorded {
     method: String,
     headers: serde_json::Map<String, Value>,
     body: String,
+    /// The `maxBytes` the language asked for.
+    max_bytes: usize,
 }
 
-/// The host's `httpFetch`: HTTP/1.1 over a TCP stream, recording each call.
+/// The host's `httpFetch`: HTTP/1.1 over a TCP stream, recording each call. Like the executor's,
+/// it refuses a reply body past `maxBytes` ([`HttpFailure::TooLarge`]) unless `ignores_max` is
+/// set (a host older than the limit).
 #[derive(Clone, Default)]
 struct Host {
+    ignores_max: Rc<std::cell::Cell<bool>>,
     calls: Rc<RefCell<Vec<Recorded>>>,
     url: Rc<RefCell<String>>,
     /// Fixed replies for URL prefixes (an `https://` base: the suite has no TLS; or one path
@@ -301,12 +306,14 @@ impl Http for Host {
         method: &str,
         headers_json: &str,
         body: &str,
-    ) -> Result<HttpReply, String> {
+        max_bytes: usize,
+    ) -> Result<HttpReply, HttpFailure> {
         self.calls.borrow_mut().push(Recorded {
             url: url.to_string(),
             method: method.to_string(),
             headers: serde_json::from_str(headers_json).unwrap_or_default(),
             body: body.to_string(),
+            max_bytes,
         });
         let reply = self
             .remotes
@@ -317,10 +324,14 @@ impl Http for Host {
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?']))
             })
             .map(|(_, reply)| reply.clone());
-        match reply {
-            Some(reply) => Ok(reply),
-            None => fetch_blocking(url, method, headers_json, body),
+        let reply = match reply {
+            Some(reply) => reply,
+            None => fetch_blocking(url, method, headers_json, body).map_err(HttpFailure::Failed)?,
+        };
+        if reply.body.len() > max_bytes && !self.ignores_max.get() {
+            return Err(HttpFailure::TooLarge);
         }
+        Ok(reply)
     }
 }
 
@@ -1636,6 +1647,27 @@ fn a_reply_over_the_byte_cap_is_refused_on_every_route() {
     );
     *host.url.borrow_mut() = "https://atcap.example".into();
     assert_eq!(block_on(store.head(&did)).unwrap().unwrap(), head);
+    // Every call asked the host to stop reading past the cap.
+    assert!(host
+        .calls
+        .borrow()
+        .iter()
+        .all(|c| c.max_bytes == MAX_REPLY_BYTES));
+
+    // A host that ignores `maxBytes` (older than the limit) hands over the whole body: the
+    // language refuses it all the same.
+    host.ignores_max.set(true);
+    let mut over = serde_json::to_string(&head).unwrap();
+    over.insert_str(1, &format!("\"pad\":\"{pad}\","));
+    host.serve(
+        "https://oldhost.example",
+        HttpReply {
+            status: 200,
+            body: over,
+        },
+    );
+    *host.url.borrow_mut() = "https://oldhost.example".into();
+    assert_eq!(refusal(block_on(store.head(&did))), too_large);
 }
 
 /// A `did:scid` person with a linked phone and a record by d1 the store took: answers the did,
