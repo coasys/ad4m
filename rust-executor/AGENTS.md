@@ -82,6 +82,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   a network listener included, gets 403 `local-only`. It is on `agent.unlock`,
   `identity.rekey`, `identity.custodyStatus` and `runtime.quit`, and `runtime.setConfig`
   refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
+  An operator from a key login is never on this machine, so these refuse it too; it calls
+  every other method as the operator, `agent.generate`, `agent.import`, `agent.lock`,
+  `runtime.exportData` and `runtime.importData` included (a remote operator may move the
+  whole data folder).
   An executor on `--localhost false` without TLS has no loopback listener, so these calls
   answer on no listener there.
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.
