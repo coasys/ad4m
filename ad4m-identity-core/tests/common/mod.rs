@@ -1212,7 +1212,7 @@ fn build_link() -> Value {
     let bot_offer = signed_offer(&log, link_offer(&log, OfferKind::Bot, Some(bot_scope)));
     let bot_add = build::add_claimed(&log.chain, &master(0), &bot_offer.offer, &view).unwrap();
     let offer_string = OfferString {
-        store: "https://store.coasys.org".into(),
+        store: "https://store.ad4m.dev".into(),
         scid: scid.clone(),
         offer_id: link_offer_id(),
         s: bs58::encode(s).into_string(),
@@ -1223,7 +1223,7 @@ fn build_link() -> Value {
         r: bs58::encode(&sha256(b"device r")[..16]).into_string(),
         exp: LINK_NOW + 300,
         hint: Some("Pixel 8".into()),
-        store: "https://store.coasys.org".into(),
+        store: "https://store.ad4m.dev".into(),
     };
     let claim_bytes = signing_bytes(CLAIM_DOMAIN, &claim_body(&scid, &claim)).unwrap();
     json!({
