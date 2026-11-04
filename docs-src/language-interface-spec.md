@@ -467,7 +467,10 @@ Rules for an implementation:
   (`coasys:head`), and fills the same keys into the `storeKeys` setting
   (`{"storeKeys": ["z6Mk…"]}`): when the language reads a log itself (to check a `did:scid`
   agent record), it keeps the log only when it ends exactly at a head one of those keys signed
-  for that log, and reads at most 64 pages and two pages' worth of bytes. A signed head
+  for that log, and reads at most 64 pages and two pages' worth of bytes. With neither
+  `identity.storeUrl` nor `identity.storeKeys` set, the executor fills in the default store's
+  key (the language's default store, `https://store.ad4m.dev`); a configured `storeUrl`
+  without `storeKeys` gets no key. A signed head
   carries no freshness (an older one verifies as well), so it proves the store held at least
   that log, never that the log ends there.
 - `expressionGet` / `expressionCreate` keep working for agent profiles, on the store's

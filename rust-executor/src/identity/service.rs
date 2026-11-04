@@ -1156,9 +1156,10 @@ mod tests {
         }
     }
 
-    /// With `identity.storeKeys` unset (the default), the executor can accept no store head, so
-    /// a publish can never bind the agent. It must refuse before the store commits the events:
-    /// once the store holds the incept, the device key is taken for every identity, forever.
+    /// With no store key (`identity.storeUrl` set, `identity.storeKeys` unset), the executor
+    /// can accept no store head, so a publish can never bind the agent. It must refuse before
+    /// the store commits the events: once the store holds the incept, the device key is taken
+    /// for every identity, forever.
     #[tokio::test]
     async fn without_store_keys_publish_refuses_before_the_store_commits() {
         crate::test_utils::setup_wallet();

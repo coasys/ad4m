@@ -6,7 +6,7 @@
 //! of the log) before it is stored, and the store only ever extends a log.
 //!
 //! Extend only: the cache accepts only events that continue its head. A different event at a
-//! seq it holds that is valid on the held prefix below it ([`rival_holds`]) records a fork with
+//! seq it holds that is valid on the held prefix below it ([`holding_rival`]) records a fork with
 //! `record_fork`, appends nothing, keeps the cached history and calls the fork listener once per
 //! new fork (the executor publishes `identity-fork`). A store that answers a shorter log never
 //! truncates a held one, and is no fork by itself: over the cached event at its head's seq it is
@@ -234,7 +234,7 @@ pub fn global_key_map() -> Arc<KeyMap> {
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
     /// Two different events at one seq, the other one valid on the held prefix below it
-    /// ([`rival_holds`]): recorded. Nothing was appended; the cached history stays.
+    /// ([`holding_rival`]): recorded. Nothing was appended; the cached history stays.
     #[error("fork at seq {}: ours {}, theirs {}", .0.seq, .0.ours, .0.theirs)]
     Fork(ForkEvidence),
     /// The store's signed head names another hash at a seq the cache holds, and no event of
@@ -385,16 +385,6 @@ pub fn fold_log(scid: &str, events: &[Event]) -> Result<(KelChain, Vec<Event>), 
     Ok((chain, sorted))
 }
 
-/// Checks that `rival`, an event at a seq `held` holds with another hash, is a valid event of
-/// `scid`'s log: the module's `import` compares hashes only and checks no proof of an event at a
-/// held seq, so a hash-only conflict is no evidence until the rival steps through the core's own
-/// rules on the held prefix below it (`fold` of `held[..rival.seq]` and the rival: seq, prev,
-/// chain id, every rule of `KelPolicy`, the proofs). Without it anybody could raise forks with
-/// no key. `Err` says why the rival does not hold.
-pub fn rival_holds(scid: &str, held: &[Event], rival: &Event) -> Result<(), CacheError> {
-    rival_steps(prefix_below(scid, held, rival.seq)?, rival)
-}
-
 /// The fold of `held`'s events below `seq`: the log a rival at `seq` steps on.
 fn prefix_below(scid: &str, held: &[Event], seq: u64) -> Result<KelChain, CacheError> {
     let prefix: Vec<Event> = held.iter().filter(|e| e.seq < seq).cloned().collect();
@@ -403,6 +393,9 @@ fn prefix_below(scid: &str, held: &[Event], seq: u64) -> Result<KelChain, CacheE
 
 /// Whether `rival` steps on `below` (its seq, prev, chain id, every rule of `KelPolicy`, the
 /// proofs): what a fold of `below`'s events and the rival checks, without folding them again.
+/// The module's `import` compares hashes only and checks no proof of an event at a held seq, so
+/// a hash-only conflict is no evidence until the rival steps here: without it anybody could
+/// raise forks with no key. `Err` says why the rival does not hold.
 fn rival_steps(below: KelChain, rival: &Event) -> Result<(), CacheError> {
     #[cfg(test)]
     tests::STEPS.with(|steps| steps.set(steps.get() + 1));
@@ -443,7 +436,7 @@ pub fn rival_signer(chain: &KelChain, rival: &Event) -> Option<String> {
 }
 
 /// The rival of `fork` among `served` that a master of `chain` signed and that holds on `held`
-/// ([`rival_signer`], [`rival_holds`]), with its signer. Every copy at the fork's seq with its
+/// ([`rival_signer`], [`rival_steps`]), with its signer. Every copy at the fork's seq with its
 /// hash is tried, as `import` tries every copy: one with its proofs stripped hashes the same as
 /// the signed one. Else why none holds.
 pub fn holding_rival<'a>(
@@ -922,7 +915,7 @@ impl KelCache {
     /// recorded. When it has another hash, the head alone names a hash, not an event, so it is no
     /// fork: the store's `events` at or below the head's seq go through the same comparison as
     /// [`KelCache::ingest`], which records a fork only for a rival event that holds on the held
-    /// prefix ([`rival_holds`]); without one the answer is [`CacheError::Conflict`], nothing
+    /// prefix ([`holding_rival`]); without one the answer is [`CacheError::Conflict`], nothing
     /// recorded. A head at the cached seq with another hash than the cached event is a
     /// `Conflict` too.
     pub async fn accept(
@@ -2069,7 +2062,11 @@ pub(crate) mod tests {
         )
         .unwrap();
         cosign(&mut other, "m0", &log.master).unwrap();
-        rival_holds(&log.scid(), &log.events, &other).unwrap();
+        rival_steps(
+            prefix_below(&log.scid(), &log.events, other.seq).unwrap(),
+            &other,
+        )
+        .unwrap();
         let theirs_hash = ad4m_identity_core::event_hash(&other).unwrap();
         for _ in 0..2 {
             match cache.ingest(&log.scid(), &[other.clone()]).await {
@@ -2143,7 +2140,11 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(ad4m_identity_core::event_hash(&served[0]).unwrap(), theirs);
-        assert!(rival_holds(&log.scid(), &log.events, &served[0]).is_err());
+        assert!(rival_steps(
+            prefix_below(&log.scid(), &log.events, served[0].seq).unwrap(),
+            &served[0]
+        )
+        .is_err());
         served.push(rival.clone());
         let fork = ForkEvidence {
             chain: log.scid(),

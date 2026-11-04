@@ -542,11 +542,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 .expect("App data path not set in Ad4mConfig"),
         )
         .join("ad4m_db.sqlite");
-        let settings = crate::identity::IdentitySettings {
-            store_url: config.identity_store_url.clone(),
-            store_keys: config.identity_store_keys.clone().unwrap_or_default(),
-            allow_private_src: config.identity_allow_private_src.unwrap_or(false),
-        };
+        let settings = crate::identity::IdentitySettings::from_config(&config);
         if let Err(e) = crate::identity::check_store_keys(&settings.store_keys)
             .and_then(|_| crate::identity::check_store_url(settings.store_url.as_deref()))
         {
