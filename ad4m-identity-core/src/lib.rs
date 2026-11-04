@@ -83,6 +83,10 @@ pub fn fold(events: &[Event]) -> Result<KelChain, ChainError<FoldError>> {
 /// over a long log). Every other rule runs and the state changes the same, so it gives the same
 /// chain as [`fold`] for every log `fold` accepts. Never call it on events from outside, a peer
 /// or a client: a forged proof or a reused key would pass.
+///
+/// Behind the `stored-fold` feature, which only the identity store enables, so no executor,
+/// wallet or wasm build can reach it by accident.
+#[cfg(feature = "stored-fold")]
 pub fn fold_stored(events: &[Event]) -> Result<KelChain, ChainError<FoldError>> {
     ad4m_hash_chain::fold_stored(&KelPolicy, events)
 }

@@ -61,7 +61,9 @@ identity core, not here).
   canonical form, `seq`, `prev`, chain id, then the policy. `append` copies the state for
   that; `fold` fails as a whole, so it applies every entry to one state in place and never
   copies it (a state that grows with the chain would make a copy per entry quadratic;
-  `tests/chain.rs` counts the copies).
+  `tests/chain.rs` counts the copies). `Chain::appended` consumes the chain and steps it in
+  place, no copy: for a batch a caller stages on one copy of a chain it keeps (the identity
+  store's append), which so costs one copy whatever its length and wherever it fails.
 - **Fork detection only.** Two entries at one seq give `ForkEvidence`; nothing appends;
   the store keeps both (`record_fork`). The module never truncates a chain, never picks a
   branch, and a shorter peer chain is `WeExtend` (the chain type decides if that alarms).

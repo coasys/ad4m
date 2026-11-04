@@ -59,12 +59,13 @@ pub struct Settings {
     /// `HELD_LOG_BYTES`: the most heap the logs held folded in memory take together, by
     /// `held::held_bytes_of` (default 256 MiB; `held.rs`). A log whose fold is larger is folded
     /// on every use. At least [`Settings::log_fold_bytes`] ([`Settings::check`]), so every log
-    /// the store takes can be held.
+    /// within its budget can be held.
     pub held_log_bytes: usize,
     /// `LOG_FOLD_BYTES`: the most heap one log's fold may take, by `held::held_bytes_of`
-    /// (default 16 MiB). An append whose fold would take more is `400 log-too-large`. It bounds
-    /// what a miss in the held folds costs (the parse and hashing of one log) and keeps any
-    /// accepted log holdable.
+    /// (default 16 MiB). An append whose fold would take more is `400 log-too-large`, unless
+    /// all its events are `rotate`s (the recovery from a stolen master is never refused by
+    /// it). It bounds what a miss in the held folds costs (the parse and hashing of one log)
+    /// and keeps every log within it holdable.
     pub log_fold_bytes: usize,
 }
 

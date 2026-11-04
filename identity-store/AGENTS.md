@@ -18,7 +18,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `src/main.rs` | `identity-store [serve]`, `identity-store keygen`; configuration from the environment |
 | `src/lib.rs` | `Store` (database, head key, clock, settings, the change signal for waits), `Settings`, `Clock`, `Fault` |
 | `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`), log replay, the key index (key rows with each master marked, the next-key commitment in `logs.next`) and its lookups |
-| `src/held.rs` | `HeldLogs`: the folds of recently used logs at their stored heads, bounded, least recently used out; `Store::held_chain` |
+| `src/held.rs` | `HeldLogs`: the folds of recently used logs at their stored heads, bounded, least recently used out; `Store::held_chain`; `state_before` (a log's state before a seq, rebuilt from a later state) |
 | `src/log.rs` | `POST …/events` with the admission checks (below), log pages, heads, the key index; `admit_new_log` (the brake's place) |
 | `src/offers.rs` | the offer routes, the claim route, the device's state poll, the store's side of the claim check (`check_spend`, `spend`, `supersede`) |
 | `src/request.rs` | signed requests (`X-Coasys-Request`): checks, nonce replay guard, `percent_decode` |
@@ -29,11 +29,12 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `tests/common/agent.rs` | a test person: fixed keys, a log built with the core's builders, offers, claims, signed requests, records |
 | `tests/common/mod.rs` | `TestStore`: a real store on a temp file with an injected clock, called through the router |
 | `tests/logs.rs`, `tests/offers.rs` | the store's acceptance tests: logs, heads, the key index, signed requests, limits and agent records; offers, claims, the state poll and the claim check |
-| `tests/held.rs` | the held folds: no replay per request, a forged request reads no log, an append's head in force at once, the bound, rival events |
+| `tests/held.rs` | the held folds: no replay per request, a forged request reads no log, an append's head in force at once, the bound, rival events (one that does not replay refused on the held fold with no replay), `state_before` against a fold at every seq |
+| `tests/append_copies.rs` | an append copies the held fold once, taken or refused at its last event (a counting allocator) |
 | `tests/authenticate.rs` | authenticated before any replay: junk and wrongly signed appends, offers and requests on an unheld log replay nothing; a valid append and a `rotate` replay once; the length cap |
 | `tests/held_memory.rs` | the heap a held fold takes per event (a counting allocator; the bound stated under "Held folds") |
-| `tests/miss.rs` | a miss in the held folds checks no stored signature (every stored proof replaced, the miss still folds; a new event is still checked); the per-log budget (`log-too-large`) |
-| `tests/miss_cost.rs` | ignored: the wall time of one signed request on a miss, on a full rotation log and on logs padded with repeated scope actions (`-- --ignored --nocapture`, release) |
+| `tests/miss.rs` | a miss in the held folds checks no stored signature (every stored proof replaced, the miss still folds; a new event is still checked); the per-log budget (`log-too-large`), and a `rotate` taken past it |
+| `tests/miss_cost.rs` | ignored: the wall time of one signed request on a miss, on a full rotation log and on logs padded with repeated scope actions; of a late-failing batch on a log held at its budget; of a rival that does not replay on a held full rotation log (`-- --ignored --nocapture`, release) |
 | `tests/serve.rs` | the `serve` process stops cleanly on SIGTERM and SIGINT |
 | `examples/test_agent.rs` | the test person over JSON lines, for the agent language suites |
 | `Dockerfile` | the container image (build from the repo root) |
@@ -198,8 +199,8 @@ tests name them by these names.
   transaction commits, under the database lock, so the next request sees the new head's keys
   (a revoked key is refused at once) with no replay. The folds are bounded by the heap they
   take together (`HELD_LOG_BYTES`, default 256 MiB), least recently used out first; the bound
-  is at least the per-log budget (`Settings::check`, at start), so every log the store takes
-  can be held. `Store::held.folds()` counts replays (the tests count them instead of timing
+  is at least the per-log budget (`Settings::check`, at start), so every log within its
+  budget can be held (a log past it by rotations alone, below, needs some room above it). `Store::held.folds()` counts replays (the tests count them instead of timing
   requests). A restart starts with nothing held: each log folds once on its first use.
   The bound counts bytes, not events, because events differ a hundredfold: measured with a
   counting allocator (`tests/held_memory.rs`), a held fold takes about 265 B per `scope`
@@ -219,6 +220,15 @@ tests name them by these names.
   log padded to the per-log budget (`tests/miss_cost.rs`, release, one machine). New events
   are always replayed in full. Forks replay the stored prefix the same way and the rival in
   full. `tests/miss.rs` replaces every stored signature and the miss still folds.
+- **One copy per append**: an append stages its events on one copy of the held fold and
+  steps each in place (`Chain::appended`); the held fold stays as it is until the commit,
+  and a refused event drops the copy. So an append of 32 events allocates about one fold,
+  taken or refused at its last event, never one per event (`tests/append_copies.rs`, a
+  counting allocator). No state before an event is kept: the claim check of an `add` runs on
+  the staged state just before the `add` steps, and its answer is given in the order of the
+  admission checks. On a log held at the per-log budget, a batch of 31 valid small scopes and
+  a 32nd event without a proof took 14 ms (790–990 ms with two copies of the state per event;
+  `tests/miss_cost.rs`, release, one machine).
 - **Authenticated before any replay**: nobody without a key of a log makes the store replay
   it, and for a log event only a master key does. A miss in the held folds (a log never used
   since the start, or one evicted by a flood of cheap logs) costs a replay under the database
@@ -236,7 +246,16 @@ tests name them by these names.
     named by its signature fault). An event past the head, a resend, and a rival without it
     are `409 {head}`; a rival by a master that already has a recorded fork is answered with
     that fork. The freeze is read from the index too. Only a rival with a valid proof and no
-    recorded fork replays anything, and then the prefix before it only, never the whole log.
+    recorded fork goes further. It is first checked on the state before its seq, rebuilt
+    from the fold of the stored head with no replay (`held::state_before`: a key log only
+    adds, and stamps every change to a key with its seq; the next-key commitment there is
+    read from the one stored event that set it; `tests/held.rs` checks the rebuilt state
+    against a fold at every seq of a log of every op): its `prev`, its chain id and the
+    core's full `apply`. A rival that fails there is a plain `409 {head}` with no replay
+    while the log is held (on a miss, the one fold of `held_chain`, which is then held): 4 ms
+    on a held full rotation log, where the prefix replay took 220–240 ms. A rival that passes
+    is replayed on the stored prefix before it is recorded, once per signing master, since a
+    recorded fork answers the next rival by that master.
   - A signed request (`request.rs`): the signature under the indexed key, then the indexed
     standing (revoked, a bot key, or not the current master on a master route) before the
     log is read.
@@ -258,11 +277,19 @@ tests name them by these names.
   events and no more). Events differ a hundredfold in what they cost a fold, so the cap on
   events does not bound it: a `scope` may name its actions again and again (the format allows
   it, and refusing it would change the format), and 800 scopes of one full body each take
-  296 MB. The budget bounds what a miss costs and keeps any accepted log holdable. A full
+  296 MB. The budget bounds what a miss costs and keeps every log within it holdable. A full
   rotation log takes 4.6 MB; a log padded with repeated scope actions stops at 45 events of
   one full body each. `log-too-large` is its own name, not `log-full`: `log-full` follows
   from the seq alone, before the database is touched, while this one follows from what the
   log holds, and a client tells the two apart.
+  **A `rotate` is never refused by the budget**: an append whose events are all `rotate`s is
+  not measured. A `rotate` is the recovery from a stolen master, and a thief holding the
+  current master could otherwise pad the log to within one action of the budget and lock the
+  owner's `rotate` out. A `rotate` adds one master record (about 400 B) to the fold, and the
+  length cap bounds how many there are, so a log is past its budget by its rotations alone
+  (at most 16 384 × 400 B, about 6.5 MB); such a log is held while the bound has room for it.
+  Any other append is measured, a `rotate` in it included, so the owner sends the recovery
+  `rotate` on its own.
 - **A fresh database**: the store has never been deployed, and a store file from before the
   agent-record version ceiling, the `fork_signers` table and the key index's `keys.master` and
   `logs.next` columns is not upgraded: start such a store on an empty database. Records
@@ -307,7 +334,7 @@ tests name them by these names.
 | `CORS_ORIGINS` | none | comma-separated browser origins (all routes but the public host profile's, which allow any origin) |
 | `FEED_TOKEN` | none | the mirror token; without one the feed answers `401` |
 | `HELD_LOG_BYTES` | `268435456` (256 MiB) | the most heap the logs held folded in memory take together (`held::held_bytes_of`); at least `LOG_FOLD_BYTES`, else `serve` refuses to start |
-| `LOG_FOLD_BYTES` | `16777216` (16 MiB) | the most heap one log's fold may take; an append past it is `400 log-too-large` |
+| `LOG_FOLD_BYTES` | `16777216` (16 MiB) | the most heap one log's fold may take; an append past it is `400 log-too-large`, unless all its events are `rotate`s |
 
 `serve` prints `identity-store listening on http://<addr> store-key <multikey>` once it listens.
 

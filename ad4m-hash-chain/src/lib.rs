@@ -259,6 +259,26 @@ impl<P: ChainPolicy> Chain<P> {
         })
     }
 
+    /// [`append`](Self::append) on a chain the caller owns and drops when a check fails: the
+    /// policy changes the state in place, with no copy. The chain is consumed, so a refused
+    /// entry (which may have left the state half changed) is never seen. For a batch staged on
+    /// a copy of a chain the caller keeps: one copy, then `appended` per entry, costs one copy
+    /// of the state whatever the batch's length and wherever it fails, where `append` per entry
+    /// costs one per entry.
+    pub fn appended(mut self, policy: &P, entry: &P::Entry) -> Result<Self, ChainError<P::Error>> {
+        let head = self.head();
+        let hash = step(
+            policy,
+            &self.id,
+            &head,
+            &mut self.state,
+            entry,
+            Proofs::Verify,
+        )?;
+        self.hashes.push(hash);
+        Ok(self)
+    }
+
     pub fn id(&self) -> &ChainId {
         &self.id
     }

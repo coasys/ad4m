@@ -562,7 +562,12 @@ Coasys identity store adds these checks:
   replayed state of the log would take more than its per-log budget in memory (default
   16 MiB, configurable; a log of 16 384 rotations takes under 7 MB), and stores none of the
   append's events (`400 log-too-large`). A log that reaches the budget may still take an event
-  small enough to fit.
+  small enough to fit. A `rotate` is never refused by the budget: an append whose events are
+  all `rotate`s is not measured. Rotation is the recovery from a stolen master, and someone
+  holding the current master could otherwise pad the log up to the budget and lock the
+  owner's `rotate` out. A `rotate` adds one master key to the state, and the length cap
+  bounds how many there are. An append with any other event is measured, a `rotate` in it
+  included, so a wallet sends a recovery `rotate` on its own.
 - **Replay of stored events.** A host checks every event in full (`fold`, every proof) before
   it stores it. When it replays a log from its own storage, it may leave out the checks that
   every stored event already passed and that only refuse: the proofs' signatures and the
