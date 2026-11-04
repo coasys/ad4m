@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::super::providers::http::is_transport_safe;
-use crate::db::Ad4mDb;
 use crate::secret::Secret;
 use crate::types::{AiCapability, Endpoint, EndpointHealth, EndpointKind, ModelInput, ModelType};
 
@@ -109,7 +108,7 @@ fn apply_endpoint(
             setting.base_url
         );
     }
-    let existing = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name(&setting.name))?;
+    let existing = crate::db_backend::db_backend().get_endpoint_by_name(&setting.name)?;
     let endpoint = Endpoint {
         id: existing
             .as_ref()
@@ -133,9 +132,11 @@ fn apply_endpoint(
             .unwrap_or_else(EndpointHealth::default),
     };
     match existing {
-        None => Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)),
+        None => crate::db_backend::db_backend().insert_endpoint(&endpoint),
         Some(stored) if same_settings(&stored, &endpoint) => Ok(()),
-        Some(_) => Ad4mDb::with_global_instance(|db| db.update_endpoint(&endpoint)).map(|_| ()),
+        Some(_) => crate::db_backend::db_backend()
+            .update_endpoint(&endpoint)
+            .map(|_| ()),
     }
 }
 
@@ -150,7 +151,8 @@ fn same_settings(stored: &Endpoint, wanted: &Endpoint) -> bool {
 }
 
 fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {
-    let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name(&setting.endpoint))?
+    let endpoint = crate::db_backend::db_backend()
+        .get_endpoint_by_name(&setting.endpoint)?
         .ok_or_else(|| anyhow::anyhow!("no endpoint is named {:?}", setting.endpoint))?;
     let input = ModelInput {
         name: setting.name.clone(),
@@ -159,11 +161,14 @@ fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {
         remote_model: setting.remote_model.clone(),
         native_tools: setting.native_tools,
     };
-    let existing = Ad4mDb::with_global_instance(|db| db.get_models())?
+    let existing = crate::db_backend::db_backend()
+        .get_models()?
         .into_iter()
         .find(|model| model.name == setting.name);
     match existing {
-        None => Ad4mDb::with_global_instance(|db| db.add_model(&input)).map(|_| ()),
+        None => crate::db_backend::db_backend()
+            .add_model(&input)
+            .map(|_| ()),
         Some(model)
             if model.endpoint_id == input.endpoint_id
                 && model.model_type == input.model_type
@@ -172,21 +177,23 @@ fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {
         {
             Ok(())
         }
-        Some(model) => Ad4mDb::with_global_instance(|db| db.update_model(&model.id, &input)),
+        Some(model) => crate::db_backend::db_backend().update_model(&model.id, &input),
     }
 }
 
 fn apply_default(model_type: ModelType, name: &str) -> anyhow::Result<()> {
-    let model = Ad4mDb::with_global_instance(|db| db.get_models())?
+    let model = crate::db_backend::db_backend()
+        .get_models()?
         .into_iter()
         .find(|model| model.name == name && model.model_type == model_type)
         .ok_or_else(|| anyhow::anyhow!("no {model_type} model is named {name:?}"))?;
-    Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model.id))
+    crate::db_backend::db_backend().set_default_model(model_type, &model.id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Ad4mDb;
 
     fn settings() -> AiSettings {
         serde_json::from_value(serde_json::json!({

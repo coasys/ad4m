@@ -1,5 +1,4 @@
 use self::error::AIServiceError;
-use crate::db::Ad4mDb;
 use crate::types::RequestContext;
 use crate::types::{AITask, AITaskInput, Endpoint, Model, ModelInput, ModelType};
 use anyhow::{anyhow, Context};
@@ -376,7 +375,7 @@ impl AIService {
     /// loads none: AI features answer that no model is configured until the operator adds
     /// one. A model whose client does not build logs why and stays without one.
     pub async fn load(&self) -> Result<()> {
-        let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
+        let models = crate::db_backend::db_backend().get_models()?;
         for model in models {
             if let Err(e) = self.init_model(&model).await {
                 error!(
@@ -392,7 +391,8 @@ impl AIService {
     /// streams and speech requests build theirs per stream and per request: nothing to hold.
     async fn init_model(&self, model: &Model) -> Result<()> {
         self.drop_clients(&model.id).await;
-        let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint(&model.endpoint_id))?
+        let endpoint = crate::db_backend::db_backend()
+            .get_endpoint(&model.endpoint_id)?
             .ok_or_else(|| anyhow!("The endpoint of model {:?} is gone", model.name))?;
         match model.model_type {
             ModelType::Llm => {
@@ -426,13 +426,13 @@ impl AIService {
     /// the endpoint does not gain the capability either.
     pub async fn add_model(&self, input: ModelInput) -> Result<String> {
         Self::check_endpoint_serves(&input)?;
-        let model = Ad4mDb::with_global_instance(|db| {
-            let id = db.add_model(&input)?;
-            db.get_model(id)
-        })?
-        .ok_or_else(|| anyhow!("The model just added is gone"))?;
+        let db = crate::db_backend::db_backend();
+        let model = db
+            .add_model(&input)
+            .and_then(|id| db.get_model(id))?
+            .ok_or_else(|| anyhow!("The model just added is gone"))?;
         if let Err(e) = self.init_model(&model).await {
-            Ad4mDb::with_global_instance(|db| db.remove_model(&model.id))?;
+            db.remove_model(&model.id)?;
             return Err(crate::db::InvalidModel(format!("{e:#}")).into());
         }
         Ok(model.id)
@@ -442,8 +442,7 @@ impl AIService {
     /// has no route for the model's type, or would get a key over plain HTTP: the client the
     /// model needs does not build. A missing endpoint is left to the database's refusal.
     fn check_endpoint_serves(input: &ModelInput) -> Result<()> {
-        let Some(endpoint) =
-            Ad4mDb::with_global_instance(|db| db.get_endpoint(&input.endpoint_id))?
+        let Some(endpoint) = crate::db_backend::db_backend().get_endpoint(&input.endpoint_id)?
         else {
             return Ok(());
         };
@@ -467,34 +466,33 @@ impl AIService {
 
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
         // Tasks on "default" resolve it when they are prompted: nothing to move.
-        Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))
+        crate::db_backend::db_backend().set_default_model(model_type, &model_id)
     }
 
     /// Every model, as RPC results show it.
     pub fn model_views() -> Result<Vec<crate::types::ModelView>> {
-        Ad4mDb::with_global_instance(|db| {
-            let endpoints: HashMap<String, Endpoint> = db
-                .get_endpoints()?
-                .into_iter()
-                .map(|e| (e.id.clone(), e))
-                .collect();
-            Ok(db
-                .get_models()?
-                .iter()
-                .map(|m| m.view(endpoints.get(&m.endpoint_id)))
-                .collect())
-        })
+        let db = crate::db_backend::db_backend();
+        // Two reads: a model whose endpoint is removed in between shows without a status.
+        let endpoints: HashMap<String, Endpoint> = db
+            .get_endpoints()?
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
+        Ok(db
+            .get_models()?
+            .iter()
+            .map(|m| m.view(endpoints.get(&m.endpoint_id)))
+            .collect())
     }
 
     /// Model `model_id`, as RPC results show it.
     pub fn model_view(model_id: &str) -> Result<Option<crate::types::ModelView>> {
-        Ad4mDb::with_global_instance(|db| {
-            let Some(model) = db.get_model(model_id.to_string())? else {
-                return Ok(None);
-            };
-            let endpoint = db.get_endpoint(&model.endpoint_id)?;
-            Ok(Some(model.view(endpoint.as_ref())))
-        })
+        let db = crate::db_backend::db_backend();
+        let Some(model) = db.get_model(model_id.to_string())? else {
+            return Ok(None);
+        };
+        let endpoint = db.get_endpoint(&model.endpoint_id)?;
+        Ok(Some(model.view(endpoint.as_ref())))
     }
 
     pub async fn init_global_instance() -> Result<()> {
@@ -517,7 +515,8 @@ impl AIService {
     // -------------------------------------
 
     pub fn get_tasks() -> Result<Vec<AITask>> {
-        let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        let tasks = crate::db_backend::db_backend()
+            .get_tasks()
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         Ok(tasks)
     }
@@ -527,8 +526,8 @@ impl AIService {
     pub async fn add_task(&self, task: AITaskInput, agent_did: Option<&str>) -> Result<AITask> {
         self.chat_model(&Self::replace_model_variables(&task.model_id)?)
             .await?;
-        let task_id = Ad4mDb::with_global_instance(|db| {
-            db.add_task(
+        let task_id = crate::db_backend::db_backend()
+            .add_task(
                 task.name.clone(),
                 task.model_id.clone(),
                 task.system_prompt.clone(),
@@ -539,16 +538,17 @@ impl AIService {
                 task.meta_data.clone(),
                 agent_did,
             )
-        })
-        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        Ok(Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
+        Ok(crate::db_backend::db_backend()
+            .get_task(task_id)?
             .expect("to get task that we just created"))
     }
 
     fn replace_model_variables(model_id: &String) -> Result<String> {
         Ok(if model_id == "default" {
-            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?
+            crate::db_backend::db_backend()
+                .get_default_model(ModelType::Llm)?
                 .ok_or_else(|| anyhow::anyhow!("Task needs default model but no default set"))?
         } else {
             model_id.clone()
@@ -574,8 +574,8 @@ impl AIService {
         self.chat_model(&Self::replace_model_variables(&task.model_id)?)
             .await?;
         let task_id = task.task_id.clone();
-        Ad4mDb::with_global_instance(|db| {
-            db.update_task(
+        crate::db_backend::db_backend()
+            .update_task(
                 task.task_id,
                 task.name,
                 task.model_id,
@@ -583,16 +583,17 @@ impl AIService {
                 task.prompt_examples,
                 task.meta_data,
             )
-        })
-        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        Ad4mDb::with_global_instance(|db| db.get_task(task_id))
+        crate::db_backend::db_backend()
+            .get_task(task_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
             .ok_or_else(|| AIServiceError::TaskNotFound.into())
     }
 
     pub async fn delete_task(&self, task_id: String) -> Result<bool> {
-        Ad4mDb::with_global_instance(|db| db.remove_task(task_id))
+        crate::db_backend::db_backend()
+            .remove_task(task_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         Ok(true)
     }
@@ -693,15 +694,14 @@ impl AIService {
         let Ok(resolved) = Self::replace_model_variables(&model_id.to_string()) else {
             return false;
         };
-        Ad4mDb::with_global_instance(|db| -> Result<bool> {
-            let Some(model) = db.get_model(resolved)? else {
-                return Ok(false);
-            };
-            Ok(db
-                .get_endpoint(&model.endpoint_id)?
-                .is_some_and(|endpoint| model.uses_native_tools(&endpoint)))
-        })
-        .unwrap_or(false)
+        let db = crate::db_backend::db_backend();
+        let Ok(Some(model)) = db.get_model(resolved) else {
+            return false;
+        };
+        db.get_endpoint(&model.endpoint_id)
+            .ok()
+            .flatten()
+            .is_some_and(|endpoint| model.uses_native_tools(&endpoint))
     }
 
     /// Prompt a model with a complete turn list and tool definitions, getting
@@ -796,7 +796,8 @@ impl AIService {
         prompt: String,
         bill_to: Option<String>,
     ) -> Result<PromptResult> {
-        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id.clone()))
+        let task = crate::db_backend::db_backend()
+            .get_task(task_id.clone())
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
 
@@ -968,7 +969,7 @@ impl AIService {
     /// The id of the embedding model `requested` names: a model's id, else the name of an
     /// embedding model.
     fn embedding_model_id(requested: &str) -> Result<String> {
-        let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
+        let models = crate::db_backend::db_backend().get_models()?;
         models
             .iter()
             .find(|m| m.id == requested)
@@ -1187,9 +1188,9 @@ impl AIService {
         session: &TranscriptionSession,
         caller: &RequestContext,
     ) -> Result<()> {
-        let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.get_multi_user_enabled().unwrap_or(false)
-        });
+        let multi_user_enabled = crate::db_backend::db_backend()
+            .get_multi_user_enabled()
+            .map_err(|e| anyhow!("Failed to read the multi-user setting: {}", e))?;
 
         if !multi_user_enabled {
             // Single-user mode — no ownership enforcement
@@ -1213,11 +1214,13 @@ impl AIService {
     /// with the row already rewritten.
     pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
         log::info!("Updating model: {} with: {:?}", model_id, model_config);
-        Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))?
+        crate::db_backend::db_backend()
+            .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
         Self::check_endpoint_serves(&model_config)?;
         // `context`, not a new error, so the API can still tell an `InvalidModel`.
-        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model_config))
+        crate::db_backend::db_backend()
+            .update_model(&model_id, &model_config)
             .context("Failed to update model in database")?;
         self.reload_model(model_id).await
     }
@@ -1225,16 +1228,19 @@ impl AIService {
     /// Builds a model's client again from its stored row, after the row changed: an update
     /// of the model, or of the endpoint it runs on.
     pub(crate) async fn reload_model(&self, model_id: String) -> Result<()> {
-        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))?
+        let model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
         self.init_model(&model).await
     }
 
     pub async fn remove_model(&self, model_id: String) -> Result<()> {
-        Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))?
+        crate::db_backend::db_backend()
+            .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
         self.drop_clients(&model_id).await;
-        Ad4mDb::with_global_instance(|db| db.remove_model(&model_id))
+        crate::db_backend::db_backend()
+            .remove_model(&model_id)
             .map_err(|e| anyhow!("Failed to remove model from database: {}", e))
     }
 }
@@ -1242,6 +1248,7 @@ impl AIService {
 #[cfg(test)]
 mod tests {
     use super::providers::{ChatTurn, ToolCall};
+    use crate::db::Ad4mDb;
 
     fn call(arguments: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -1758,6 +1765,16 @@ mod stream_ownership_tests {
         assert!(!reaches(&alices, &anonymous));
     }
 
+    // On dev a closed database panicked the check. The read error must not count as
+    // single-user mode, which enforces no ownership: another user's stream would be reachable.
+    #[test]
+    fn a_closed_database_is_not_single_user_mode() {
+        let bob = RequestContext::user_for_test("did:key:bob", vec![]);
+        let alices = stream_of(Some("did:key:alice"));
+        let _closed = crate::test_utils::DbClosed::now();
+        assert!(AIService::verify_stream_ownership(&alices, &bob).is_err());
+    }
+
     // An app on the main agent is not the operator: it reaches the main agent's streams, not
     // a user's, whatever id it knows. Feeding (`feed_transcription_stream`, both forms) and
     // closing (`close_transcription_stream`) all check this rule.
@@ -1836,6 +1853,7 @@ mod remote_stream_tests {
     use super::providers::audio::{AudioFile, RemoteTranscribe, TranscribeReply};
     use super::*;
     use crate::billing::test_seam;
+    use crate::db::Ad4mDb;
     use crate::events::{Audience, Topic};
     use crate::pubsub::get_global_pubsub;
 
@@ -2111,6 +2129,7 @@ mod remote_stream_http_tests {
     use super::transcription::speech_fixture as speech;
     use super::*;
     use crate::billing::test_seam;
+    use crate::db::Ad4mDb;
     use mockito::Matcher;
 
     /// Deterministic white noise at `level`: keyboard and fan noise, not a voice.

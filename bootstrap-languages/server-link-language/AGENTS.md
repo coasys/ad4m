@@ -140,8 +140,9 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 - **Local store is always plaintext.** E2E encryption operates only at the
   wire boundary (`encryptLinkForWire`/`decryptLinkFromWire` in
   `src/encryption.ts`, called from `src/sync.ts`'s `toWireLink`/
-  `fromWireLink`). `render()`/`queryLinks()` must never need to know
-  whether the room is E2E — if you're touching decryption logic outside
+  `openWireLink`). Every room is E2E: `toWireLink` throws without a key
+  ring and `openWireLink` skips a plaintext link. `render()`/`queryLinks()`
+  never deal with ciphertext — if you're touching decryption logic outside
   `sync.ts`'s wire-translation functions, you're probably in the wrong
   place.
 - **Module state resets are almost free.** Per the AD4M language-interface
@@ -164,9 +165,19 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 
 ## Known limitations / follow-ups
 
-- **E2E encryption activates automatically — no plaintext mode.** The admin's
-  language instance generates the initial room key during `init()` when no E2E
-  exists yet. Subsequent rotations require explicit admin action.
+- **Rooms are E2E from creation — no plaintext mode.** The link server
+  refuses plaintext links in every room, before any key exists; the admin's
+  `init()` (or, failing that, its first commit) mints key version 1. Key
+  status is `pending | ready | error` (src/room-keys.ts); only `ready`
+  commits. `/keys` answers an empty list to an agent without a key; any error
+  status from it, 404 included, is an error (`api.fetchRoomKeys`). The ACL
+  read at `init()` sets `roomRole` (`admin | member | unknown`); only while
+  it is `unknown` (that read failed) and a key is missing does
+  `rotateIfAdminWithoutKey` read the ACL again (`adminRotationStep`), so an
+  admin whose startup read failed still rotates and a member is not re-read
+  on every commit. A role change after `init()` (an admin transfer) takes
+  effect at the next `init()`. Subsequent rotations require explicit admin
+  action.
   `performRotation()` (admin only) generates a fresh room key client-side,
   seals it to the DID of every ACL member, including members that never
   connected, and POSTs only sealed boxes — the server never sees plaintext.
@@ -177,14 +188,17 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   members lacking them (idempotent; the server keeps the first box per member
   and version and refuses versions the granter lacks). A member whose key
   status is `pending` (no box it holds opens: no member holding a key has
-  been online since it joined, or its boxes are in an older format; an admin
-  in that state rotates, `adminRotates` in src/room-keys.ts) re-reads `/keys`
+  been online since it joined, or its boxes are spoiled grants; an admin
+  in that state rotates, `adminRotationStep` in src/room-keys.ts) re-reads `/keys`
   on a commit, on a `keys-granted` push, and on every sync while it holds
   links it cannot open. A version whose box does not open is left out of the
   ring (`buildKeyRing`), so one bad grant costs that version, not the room.
   A failed re-read keeps a ring already loaded (`afterFailedKeyRead`): only a
   member that never loaded one is `error`, so one failed `/keys` read never
   refuses commits or holds inbound links.
+- **Signals are not encrypted.** Only links are E2E. Presence and
+  telepresence signals (`src/telepresence.ts`) travel to the link server as
+  sent.
 - **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
   form of the Ed25519 key in its `did:key`. The language seals itself
   (`sealToDid`, src/encryption.ts) and opens with the `agentOpenSealed(box)`

@@ -17,21 +17,42 @@ function message(err: unknown): string {
 }
 
 /**
- * - "none": the room has no room key yet (or no E2E): plaintext commits are fine.
+ * There is no plaintext mode: only "ready" commits.
+ * - "pending": this agent holds no room key it opens (the admin has not
+ *   rotated one in yet, or no member holding one has granted it).
  * - "ready": the key ring is loaded.
- * - "pending": the room has keys, but none sealed to this agent opens yet.
  * - "error": the key ring could not be read or opened.
  */
-export type KeyRingStatus = "none" | "pending" | "ready" | "error";
+export type KeyRingStatus = "pending" | "ready" | "error";
 
 /**
- * An admin holding no room key it can open ("none": the room has none yet;
- * "pending": none sealed to it opens) mints one, once a run. A box it just
+ * An admin holding no room key it can open ("pending": the room has none
+ * yet, or none sealed to it opens) mints one, once a run. A box it just
  * sealed to its own DID that does not open means its executor cannot open
  * any, so another version would only pile up unopened keys.
  */
 export function adminRotates(status: KeyRingStatus, rotatedThisRun: boolean): boolean {
-    return !rotatedThisRun && (status === "none" || status === "pending");
+    return !rotatedThisRun && status === "pending";
+}
+
+/** What the room's ACL says this agent is: its admin, a member, or "unknown" (the read failed). */
+export type RoomRole = "admin" | "member" | "unknown";
+
+/**
+ * The next step for an agent that may have to mint a room key. "read-acl"
+ * only while a rotation is due and the role is unknown: a member the ACL
+ * already named is not re-read on every commit (each read counts against the
+ * room's rate limit), and an admin whose startup read failed still finds out
+ * and rotates.
+ */
+export function adminRotationStep(
+    status: KeyRingStatus,
+    rotatedThisRun: boolean,
+    role: RoomRole,
+): "rotate" | "read-acl" | "none" {
+    if (!adminRotates(status, rotatedThisRun)) return "none";
+    if (role === "admin") return "rotate";
+    return role === "unknown" ? "read-acl" : "none";
 }
 
 /**

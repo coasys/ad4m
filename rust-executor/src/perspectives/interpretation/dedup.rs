@@ -411,27 +411,26 @@ fn effective_strategy(strategy: &DedupStrategy) -> std::borrow::Cow<'_, DedupStr
     let DedupStrategy::Semantic { model, threshold } = strategy else {
         return Cow::Borrowed(strategy);
     };
-    let embedding_models: Vec<crate::types::Model> =
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_models())
-            .map(|models| {
-                models
-                    .into_iter()
-                    .filter(|m| m.model_type == crate::types::ModelType::Embedding)
-                    .collect()
-            })
-            .unwrap_or_default();
+    let embedding_models: Vec<crate::types::Model> = crate::db_backend::db_backend()
+        .get_models()
+        .map(|models| {
+            models
+                .into_iter()
+                .filter(|m| m.model_type == crate::types::ModelType::Embedding)
+                .collect()
+        })
+        .unwrap_or_default();
     if embedding_models
         .iter()
         .any(|m| m.id == *model || m.name == *model)
     {
         return Cow::Borrowed(strategy);
     }
-    let default = crate::db::Ad4mDb::with_global_instance(|db| {
-        db.get_default_model(crate::types::ModelType::Embedding)
-    })
-    .ok()
-    .flatten()
-    .filter(|id| embedding_models.iter().any(|m| m.id == *id));
+    let default = crate::db_backend::db_backend()
+        .get_default_model(crate::types::ModelType::Embedding)
+        .ok()
+        .flatten()
+        .filter(|id| embedding_models.iter().any(|m| m.id == *id));
     if let Some(instead) = default.or_else(|| embedding_models.first().map(|m| m.id.clone())) {
         log::info!(
             "Semantic dedup: no EMBEDDING model '{model}' on this executor; embedding with \
