@@ -68,23 +68,58 @@ pub fn check_store_url(url: Option<&str>) -> Result<(), String> {
     }
 }
 
-/// The identity settings of the executor's config (`identity.storeUrl`, `identity.storeKeys`).
+/// The head-signing key (Ed25519 multikey) of the agent language's default store,
+/// `https://store.ad4m.dev` (`DEFAULT_STORE_URL` in the centralized agent language), the
+/// staging network's store, as its `identity-store serve` prints it. The executor trusts it
+/// when the config names neither `identity.storeUrl` nor `identity.storeKeys`
+/// ([`IdentitySettings::from_config`]). One store per build: a build or deployment for another
+/// network sets both `identity.storeUrl` and `identity.storeKeys`.
+pub const DEFAULT_STORE_KEY: &str = "z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj";
+
+/// The identity settings of the executor's config (`identity.storeUrl`, `identity.storeKeys`),
+/// built by [`IdentitySettings::from_config`] (`Default` is the empty value, no key: for tests).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IdentitySettings {
     /// The store's base URL; the agent language's `storeUrl` setting. Unset: the language's
     /// default, `https://store.ad4m.dev`.
     pub store_url: Option<String>,
-    /// The store keys (multikeys) a head must be signed by. Empty: no head is accepted.
+    /// The store keys (multikeys) a head must be signed by: `identity.storeKeys`, or
+    /// [`DEFAULT_STORE_KEY`] when neither it nor `identity.storeUrl` is set. Empty: no head is
+    /// accepted.
     pub store_keys: Vec<String>,
     /// `identity.allowPrivateSrc`: let a DID URL's `src` reach loopback and private addresses.
     /// Off by default; for tests and local development only.
     pub allow_private_src: bool,
 }
 
+impl IdentitySettings {
+    /// The settings of `config`. The one place that decides which store keys count:
+    /// - `identity.storeKeys` set: exactly those (an explicit list wins, for the default store
+    ///   too);
+    /// - else `identity.storeUrl` unset: the language's default store, so its key,
+    ///   [`DEFAULT_STORE_KEY`];
+    /// - else (another store, no keys): none. The default store's key never applies to a
+    ///   configured URL; [`missing_store_keys_warning`] warns and `identity.publish` /
+    ///   `identity.claimOffer` refuse `no-store-keys`.
+    pub fn from_config(config: &crate::config::Ad4mConfig) -> Self {
+        IdentitySettings {
+            store_url: config.identity_store_url.clone(),
+            store_keys: match (&config.identity_store_keys, &config.identity_store_url) {
+                (Some(keys), _) => keys.clone(),
+                (None, None) => vec![DEFAULT_STORE_KEY.to_string()],
+                (None, Some(_)) => vec![],
+            },
+            allow_private_src: config.identity_allow_private_src.unwrap_or(false),
+        }
+    }
+}
+
 /// The warning logged at start when `identity.storeKeys` is empty, naming the store it leaves
-/// untrusted and what that costs; `None` with keys. No store key ships with the
-/// executor, so the default config (no `identity.storeUrl`: the agent language's default store)
-/// verifies no `did:scid` record until the operator sets the store's key.
+/// untrusted and what that costs; `None` with keys. The default config (neither
+/// `identity.storeUrl` nor `identity.storeKeys`) has the default store's key
+/// ([`DEFAULT_STORE_KEY`]) and does not warn; a configured `identity.storeUrl` without
+/// `identity.storeKeys` (or an empty `identity.storeKeys`) does: such an executor verifies no
+/// `did:scid` record until the operator sets the store's key.
 pub fn missing_store_keys_warning(settings: &IdentitySettings) -> Option<String> {
     if !settings.store_keys.is_empty() {
         return None;
@@ -175,9 +210,10 @@ fn publish_fork(did: &str, fork: &ad4m_identity_core::ForkEvidence) {
 /// Writes the agent language's `storeUrl` and `storeKeys` settings from `identity.storeUrl`
 /// and `identity.storeKeys` before the language loads (it reads
 /// `languages/<address>/settings.json` at load). Called on every start: an unset
-/// `identity.storeUrl` removes `storeUrl` (the language's default store), and no
-/// `identity.storeKeys` removes `storeKeys` (the language then trusts no head), so nothing an
-/// earlier run wrote stays in force. Other settings stay.
+/// `identity.storeUrl` removes `storeUrl` (the language's default store), and empty
+/// `IdentitySettings::store_keys` removes `storeKeys` (the language then trusts no head), so
+/// nothing an earlier run wrote stays in force. With neither config key set the settings carry
+/// [`DEFAULT_STORE_KEY`], so the language trusts the default store's heads. Other settings stay.
 ///
 /// The file is replaced atomically (a temporary file in the same directory, then a rename), so
 /// a failure leaves the old file as it was. An error means the settings may not be in force:
@@ -240,18 +276,14 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// The identity settings from the executor's global config.
+/// The identity settings from the executor's global config ([`IdentitySettings::from_config`]).
 pub fn settings_from_config() -> IdentitySettings {
     crate::config::GLOBAL_AD4M_CONFIG
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .map(|c| IdentitySettings {
-            store_url: c.identity_store_url.clone(),
-            store_keys: c.identity_store_keys.clone().unwrap_or_default(),
-            allow_private_src: c.identity_allow_private_src.unwrap_or(false),
-        })
-        .unwrap_or_default()
+        .map(IdentitySettings::from_config)
+        .unwrap_or_else(|| IdentitySettings::from_config(&crate::config::Ad4mConfig::unprepared()))
 }
 
 #[cfg(test)]
@@ -341,6 +373,66 @@ mod tests {
             ..store_url("https://store.example")
         };
         assert_eq!(missing_store_keys_warning(&keyed), None);
+    }
+
+    fn config(url: Option<&str>, keys: Option<&[&str]>) -> crate::config::Ad4mConfig {
+        let mut config = crate::config::Ad4mConfig::unprepared();
+        config.identity_store_url = url.map(String::from);
+        config.identity_store_keys = keys.map(|keys| keys.iter().map(|k| k.to_string()).collect());
+        config
+    }
+
+    /// The default store's key is a key the executor can match against a head.
+    #[test]
+    fn the_default_store_key_is_a_bare_ed25519_multikey() {
+        assert_eq!(check_store_keys(&[DEFAULT_STORE_KEY.to_string()]), Ok(()));
+    }
+
+    /// Neither `identity.storeUrl` nor `identity.storeKeys`: the language's default store, and
+    /// its key. The default config warns of nothing and the language gets the key.
+    #[test]
+    fn the_default_config_trusts_the_default_stores_key() {
+        let settings = IdentitySettings::from_config(&config(None, None));
+        assert_eq!(settings.store_url, None);
+        assert_eq!(settings.store_keys, vec![DEFAULT_STORE_KEY.to_string()]);
+        assert_eq!(missing_store_keys_warning(&settings), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_language_settings(dir.path(), "QmAgent", &settings).unwrap();
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("QmAgent").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["storeKeys"], serde_json::json!([DEFAULT_STORE_KEY]));
+        assert!(written.get("storeUrl").is_none(), "{written}");
+    }
+
+    /// Another store without `identity.storeKeys` gets no key (the default store's key never
+    /// applies to a configured URL, not even the default URL written out), so it still warns.
+    #[test]
+    fn a_configured_store_url_without_keys_trusts_no_key() {
+        for url in ["http://127.0.0.1:8080", "https://store.ad4m.dev"] {
+            let settings = IdentitySettings::from_config(&config(Some(url), None));
+            assert_eq!(settings.store_url.as_deref(), Some(url));
+            assert!(settings.store_keys.is_empty(), "{url}");
+            let warning = missing_store_keys_warning(&settings).expect("a warning");
+            assert!(warning.contains(url), "{warning}");
+        }
+    }
+
+    /// `identity.storeKeys` set: exactly those, with or without a URL (an explicit list wins
+    /// over the default store's key, an explicit empty list too).
+    #[test]
+    fn configured_store_keys_are_taken_as_given() {
+        let keys = ["z6MkA", "z6MkB"];
+        for url in [None, Some("http://127.0.0.1:8080")] {
+            let settings = IdentitySettings::from_config(&config(url, Some(&keys)));
+            assert_eq!(settings.store_keys, vec!["z6MkA", "z6MkB"], "{url:?}");
+            assert_eq!(settings.store_url.as_deref(), url);
+        }
+        let empty = IdentitySettings::from_config(&config(None, Some(&[])));
+        assert!(empty.store_keys.is_empty());
+        assert!(missing_store_keys_warning(&empty).is_some());
     }
 
     fn store_url(url: &str) -> IdentitySettings {
