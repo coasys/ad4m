@@ -37,7 +37,7 @@ export class AgentReplyRecord extends Ad4mModel {
    * class is `ad4m://AgentReply`.
    */
   @Property({ through: "ad4m://agent_reply/status", required: true })
-  status: string = "";
+  status: AgentReplyStatus = "running";
 
   /** What the agent answered, once it is `done`. */
   @Property({ through: "ad4m://agent_reply/text" })
