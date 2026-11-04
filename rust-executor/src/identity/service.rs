@@ -947,6 +947,12 @@ mod tests {
         appends: std::sync::atomic::AtomicUsize,
         /// Answers every append `409` with the head of the log it holds, appending nothing.
         conflict: bool,
+        /// Claims taken (each counts, whether or not its answer arrives).
+        claims: std::sync::atomic::AtomicUsize,
+        /// When set, a claim fails with this error, after it counted.
+        claim_error: std::sync::Mutex<Option<IdentityError>>,
+        /// What `offer_state` answers for every offer.
+        offer: std::sync::Mutex<String>,
     }
 
     impl RecordingStore {
@@ -955,6 +961,9 @@ mod tests {
                 inner: crate::identity::cache::tests::FakeStore::new(events),
                 appends: std::sync::atomic::AtomicUsize::new(0),
                 conflict,
+                claims: std::sync::atomic::AtomicUsize::new(0),
+                claim_error: std::sync::Mutex::new(None),
+                offer: std::sync::Mutex::new("claimed".into()),
             }
         }
     }
@@ -1050,20 +1059,39 @@ mod tests {
         }
         async fn claim_offer(
             &self,
-            did: &str,
-            offer_id: &str,
-            claim: &ad4m_ldk::identity::Claim,
+            _did: &str,
+            _offer_id: &str,
+            _claim: &ad4m_ldk::identity::Claim,
         ) -> Result<ad4m_ldk::identity::ClaimReceipt, IdentityError> {
-            self.inner.claim_offer(did, offer_id, claim).await
+            self.claims
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(error) = self.claim_error.lock().unwrap().clone() {
+                return Err(error);
+            }
+            Ok(ad4m_ldk::identity::ClaimReceipt {
+                state: "claimed".into(),
+                kind: ad4m_ldk::identity::OfferKind::Device,
+                expires: u64::MAX,
+            })
         }
         async fn offer_state(
             &self,
-            did: &str,
-            offer_id: &str,
-            key: &str,
-            wait_s: u8,
+            _did: &str,
+            _offer_id: &str,
+            _key: &str,
+            _wait_s: u8,
         ) -> Result<ad4m_ldk::identity::OfferProgress, IdentityError> {
-            self.inner.offer_state(did, offer_id, key, wait_s).await
+            let state = self.offer.lock().unwrap().clone();
+            let seq = self
+                .inner
+                .events
+                .lock()
+                .unwrap()
+                .len()
+                .checked_sub(1)
+                .map(|seq| seq as u64)
+                .filter(|_| state == "spent");
+            Ok(ad4m_ldk::identity::OfferProgress { state, seq })
         }
     }
 
@@ -1224,6 +1252,83 @@ mod tests {
         assert_eq!(trusted, 1, "the store's head is accepted");
         assert_eq!(
             db(|db| db.agent_identity(&agent_did)).unwrap(),
+            Some(incept.scid.clone())
+        );
+    }
+
+    /// The join row goes in before the store call. A claim the store refused leaves it, and
+    /// `joinStatus` reports the offer's state; a claim the store committed whose answer was
+    /// lost leaves it too, so once the add spent the offer `joinStatus` binds the main agent
+    /// (a retry would get `gone`).
+    #[tokio::test]
+    async fn a_claim_keeps_its_join_row_when_the_store_call_fails() {
+        use crate::identity::types::ClaimOfferParams;
+        use ad4m_identity_core::link::OfferString;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = AgentContext::main_agent();
+        let (main_did, _) = device_key(&main).unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        let incept = test_service()
+            .cosign_incept(&main, &incept_listing(&main, 57))
+            .await
+            .unwrap();
+        let incept = Event::from_json(&incept).unwrap();
+        let _record = OperatorRecord::set(&did_of(&incept.scid));
+        let backend = Arc::new(RecordingStore::new(vec![incept.clone()], false));
+        let service = service_on(backend.clone());
+        let offer = |id: u8| OfferString {
+            store: "https://store.example".into(),
+            scid: incept.scid.clone(),
+            offer_id: bs58::encode([id; 16]).into_string(),
+            s: bs58::encode([1u8; 32]).into_string(),
+        };
+        let params = |offer: &OfferString| ClaimOfferParams {
+            offer: offer.encode(),
+            hint: None,
+        };
+        let claims = || backend.claims.load(std::sync::atomic::Ordering::SeqCst);
+
+        // The store refuses the claim: the row stays and reports the offer's state.
+        *backend.claim_error.lock().unwrap() = Some(IdentityError::Gone("expired".into()));
+        let refused = offer(3);
+        service
+            .claims()
+            .claim_for_main(&params(&refused))
+            .await
+            .expect_err("the store refused");
+        assert_eq!(claims(), 1);
+        *backend.offer.lock().unwrap() = "expired".into();
+        let status = service
+            .claims()
+            .join_status(&main, &refused.offer_id)
+            .await
+            .expect("the row is there");
+        assert_eq!(status.state, "expired");
+        assert_eq!(status.key_id, None);
+        assert_eq!(db(|db| db.agent_identity(&main_did)).unwrap(), None);
+
+        // The store commits the claim and its answer is lost: once the add spends the offer,
+        // `joinStatus` finds the row and binds the main agent.
+        *backend.claim_error.lock().unwrap() =
+            Some(IdentityError::Unavailable("the answer was lost".into()));
+        let lost = offer(4);
+        service
+            .claims()
+            .claim_for_main(&params(&lost))
+            .await
+            .expect_err("the answer was lost");
+        assert_eq!(claims(), 2);
+        *backend.offer.lock().unwrap() = "spent".into();
+        let status = service
+            .claims()
+            .join_status(&main, &lost.offer_id)
+            .await
+            .expect("the row is there");
+        assert_eq!(status.state, "spent");
+        assert_eq!(status.key_id.as_deref(), Some("d1"));
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
             Some(incept.scid.clone())
         );
     }

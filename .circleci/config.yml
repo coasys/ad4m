@@ -563,7 +563,7 @@ jobs:
             cargo test --release -p ad4m-hash-chain --all-features
             cargo test --release -p ad4m-identity-core --all-features
             cargo test --release -p identity-store
-            cargo test --release -p ad4m-identity-client
+            cargo test --release -p ad4m-identity-client --features ws,test-vault
           no_output_timeout: 30m
       - run:
           # ad4m-hash-chain on wasm32 under Node: the shared vectors, the RFC 8785 data, the

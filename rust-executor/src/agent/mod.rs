@@ -485,6 +485,10 @@ lazy_static! {
 /// bookkeeping without decoupling them.
 static AGENT_PUBLISH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// How long one managed agent's profile publish after unlock may take (the did:key profile and
+/// the person's, each a few agent-language calls with their own store timeouts).
+const MANAGED_PROFILE_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// SHA-256 over the names and public keys in a wallet, in name order.
 fn key_set_fingerprint(wallet: &dyn crate::wallet::WalletBackend) -> String {
     use sha2::{Digest, Sha256};
@@ -847,9 +851,20 @@ impl AgentService {
                     continue;
                 }
             }
-            match publish(AgentContext::managed(did.clone())).await {
-                Ok(()) => published.push(did),
-                Err(e) => log::warn!("Error publishing the profile of {did}: {e}"),
+            // A hung publish must not stop the next agents or keep the publish lock: dropping
+            // it at the deadline releases the lock.
+            match tokio::time::timeout(
+                MANAGED_PROFILE_PUBLISH_TIMEOUT,
+                publish(AgentContext::managed(did.clone())),
+            )
+            .await
+            {
+                Ok(Ok(())) => published.push(did),
+                Ok(Err(e)) => log::warn!("Error publishing the profile of {did}: {e}"),
+                Err(_) => log::warn!(
+                    "The profile of {did} was not published within {} s; the next agent is tried",
+                    MANAGED_PROFILE_PUBLISH_TIMEOUT.as_secs()
+                ),
             }
         }
         published
@@ -1363,6 +1378,47 @@ mod tests {
         assert!(!tried.contains(&without_profile), "no profile, no publish");
         assert!(published.contains(&with_profile));
         assert!(!published.contains(&failing));
+    }
+
+    /// A publish that never answers ends at its deadline: the next agent is published, and the
+    /// publish lock it held is free again.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_managed_profile_publish_ends_at_its_deadline() {
+        ensure_setup();
+        let hung = crate::test_utils::create_test_user(&format!(
+            "hung-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let next = crate::test_utils::create_test_user(&format!(
+            "next-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        for did in [&hung, &next] {
+            let agent = Agent {
+                did: did.clone(),
+                direct_message_language: None,
+                perspective: None,
+            };
+            AgentService::store_managed_agent_profile(did, &agent).unwrap();
+        }
+
+        let started = tokio::time::Instant::now();
+        let published = AgentService::publish_managed_profiles_with(|context| {
+            let hangs = context.managed_did() == Some(hung.as_str());
+            async move {
+                // As a real publish does, under the publish lock.
+                let _guard = AGENT_PUBLISH_LOCK.lock().await;
+                if hangs {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        })
+        .await;
+        assert!(published.contains(&next), "{published:?}");
+        assert!(!published.contains(&hung));
+        assert!(started.elapsed() >= MANAGED_PROFILE_PUBLISH_TIMEOUT);
+        assert!(AGENT_PUBLISH_LOCK.try_lock().is_ok(), "the lock is free");
     }
 
     /// Serialises one map entry, then fails: a write that breaks partway.

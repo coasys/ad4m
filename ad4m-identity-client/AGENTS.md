@@ -13,7 +13,7 @@ master key for the person.
 | `src/vault.rs` | `Vault`, `Unlocked` (one unlock per flow, `MasterUse::ttl_s`: a link's lasts `OFFER_TTL_S + CONFIRM_GRACE_S`, so `confirm` works through the store's grace; a revocation's 300 s; a vault passes `why` to `Unlocked::new`), `MasterSigner` (`Signer` + `index`), `KeySigner`, `MasterUse` (`Link`, `Revoke`), `VaultError`; the trait has `store_master`, `unlock` and the pending incept of a `create` (`store_pending_incept`, `pending_incepts`, `incept_published`); `MemoryVault` (tests and feature `test-vault`, never in a release build) |
 | `src/executor.rs` | `ExecutorRpc` (one RPC call), `ViaExecutor` (the typed `identity.*` calls the flows make: status, log, cosignIncept, publish, openOffer, offers; claiming is the joining executor's call, `ad4m-executor claim`); feature `ws`: `ExecutorRpc` for `ad4m-client`'s `WsRpcClient` |
 | `src/flows/create.rs` | `CreateFlow` (words shown, as `CreateScreen::ShowWords(Secret<Vec<String>>)`, zeroed on drop → two typed back → `finish`): master #0, `incept` listing the executor's key as `d1`, `identity.cosignIncept`, fold, the vault keeps master #0 and the co-signed incept, then `identity.publish`; `resume` publishes a kept incept again after a failed or unanswered publish |
-| `src/flows/link.rs` | `LinkFlow`: `open` (offer signed by the current master at the head, offer link), `wait_for_claim` (master-signed list requests; past the offer's `expires` it answers `OfferEnded("expired")` before any request; `link::verify_claim_view` refuses a claim view whose device co-signature does not cover its `encKey` and `canKeepMaster`, before anything is signed; the match code), `confirm` (the `add` that spends the claim) |
+| `src/flows/link.rs` | `LinkFlow`: `open` (offer signed by the current master at the head, offer link), `wait_for_claim` (master-signed list requests; past the offer's `expires` it answers `OfferEnded("expired")` before any request; `link::verify_claim_view` refuses a claim view whose device co-signature does not cover its `encKey` and `canKeepMaster`, before anything is signed; the match code), `confirm` (the `add` that spends the claim; takes `&self`, so after a failed publish the flow confirms again while the claim is still `claimed`) |
 | `src/flows/revoke.rs` | `revoke` (a `revoke` signed by the current master), `key_id_of` |
 | `examples/holder.rs` | the flows over JSON lines against a real executor (features `ws,test-vault`), for `tests/js/tests/identity.test.ts` |
 | `tests/flows.rs` | the flows against a real `identity-store` (router in process) through a test executor |
@@ -39,7 +39,7 @@ master key for the person.
 ## Tests
 
 ```bash
-cargo test -p ad4m-identity-client
+cargo test -p ad4m-identity-client --features ws,test-vault
 cargo clippy -p ad4m-identity-client --all-targets --features test-vault -- -D warnings
 cargo fmt -p ad4m-identity-client --check
 cargo build -p ad4m-identity-client --target wasm32-unknown-unknown
