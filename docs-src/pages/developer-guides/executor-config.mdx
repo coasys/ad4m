@@ -129,7 +129,14 @@ Settings with no config key are flags only, each with its
 `--hc-use-bootstrap`, `--hc-use-local-proxy`, `--hc-use-mdns`,
 `--hc-use-proxy`, `--hc-proxy-url`, `--hc-bootstrap-url`, `--hc-relay-url`,
 `--log-holochain-metrics`, `--dynamic-class-tools`, `--pid-file`,
-`--insecure-no-admin-credential`.
+`--exit-with-parent`, `--insecure-no-admin-credential`.
+
+`--exit-with-parent` (`AD4M_EXIT_WITH_PARENT=true`) is for launchers and test
+harnesses: the executor shuts down once the process that started it is gone,
+however that process ended, so a launcher that crashes or is killed leaves no
+executor behind. Off by default, so an executor started in the background from
+a shell keeps running after the shell exits. Linux and macOS only: on Windows
+the setting is accepted and has no effect.
 The variable name is the flag in upper case with `-` as `_`, prefixed with
 `AD4M_`: `--hc-relay-url` reads `AD4M_HC_RELAY_URL`.
 
