@@ -220,11 +220,11 @@ pub fn retain_selected_flows(
 /// the fallback is "extract without flow-aware prompting", which is
 /// exactly the pre-slice-10.2 behaviour.
 ///
-/// `subjects` is the set of base-expression URIs the extraction pass is
-/// operating on — the drained batch bases in the auto-processor path
-/// (see `InterpretationRunCursor.sources`). A FlowInstance whose
-/// `subject` matches one of these is running on the same expression the
-/// pass is interpreting and is included in the prompt.
+/// `subjects` is the set of record URIs the extraction pass may touch:
+/// the records its prompt shows as `existing` plus the dedup scope's
+/// anchor (`interpretation::run::flow_subjects_for_pass`, #1257). A
+/// FlowInstance whose `subject` matches one of these governs a record
+/// the model might update and is included in the prompt.
 ///
 /// Empty `subjects` returns an empty result rather than the whole
 /// perspective's FlowInstance set — the pre-fix behaviour (loading
@@ -251,6 +251,10 @@ pub async fn gather_active_flow_contexts(
     };
     retain_selected_flows(&mut flows_by_uri, flow_filter);
     if flows_by_uri.is_empty() {
+        log::debug!(
+            "🧠 flow context: no flow selected, 0 active flow(s) for {} subject(s)",
+            subjects.len()
+        );
         return Vec::new();
     }
     let records = match load_flow_instances(perspective, subjects).await {
@@ -311,14 +315,18 @@ pub async fn gather_active_flow_contexts(
             contention: ContentionStatus::from_fresh_derivation(df.contested),
         }));
     }
-    build_flow_contexts(&resolved, &flows_by_uri)
+    let contexts = build_flow_contexts(&resolved, &flows_by_uri);
+    log::debug!(
+        "🧠 flow context: {} active flow(s) for {} subject(s)",
+        contexts.len(),
+        subjects.len()
+    );
+    contexts
 }
 
-/// Derive the flow-filter subject key from an extraction pass `Scope`.
-/// Kept for the strategy-path call site that has no drained-batch cursor
-/// available yet (it still uses the dedup scope's anchor URI). New code
-/// should prefer wiring `InterpretationRunCursor.sources` through and
-/// calling [`gather_active_flow_contexts`] with the batch bases.
+/// Derive the flow-filter subject key from an extraction pass `Scope`:
+/// the dedup scope's anchor URI, one of the subjects
+/// `interpretation::run::flow_subjects_for_pass` loads flows for.
 pub fn scope_subject(scope: &Scope) -> &str {
     match scope {
         Scope::Model { id, .. } => id.as_str(),
