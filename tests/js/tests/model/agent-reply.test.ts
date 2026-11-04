@@ -75,6 +75,7 @@ describe("perspective.agentReply", function () {
       refused = e;
     }
     expect(String(refused)).to.contain("nothing to answer");
+    expect(await AgentReplyRecord.findAll(p)).to.deep.equal([]);
   });
 
   it("creates the reply under the conversation, and a subscription sees how it ends", async () => {

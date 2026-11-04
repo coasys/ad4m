@@ -3,7 +3,8 @@
 //! A reply's task does not survive a restart, so a reply still `running` when a perspective loads
 //! was cut off. Without the sweep it would read as running for good. Each one by an agent this
 //! node hosts is marked `interrupted`, written as that agent. A reply by another node's agent, in
-//! a shared perspective, is that node's to settle.
+//! a shared perspective, is that node's to settle. At teardown the replies still running here are
+//! stopped.
 
 use super::PerspectiveInstance;
 use crate::agent::{AgentContext, AgentService};
@@ -35,6 +36,20 @@ impl PerspectiveInstance {
         };
         if let Err(e) = self.interrupt_stale_replies(&main_did).await {
             log::warn!("agent replies: the sweep at load failed: {e:#}");
+        }
+    }
+
+    /// Stop every reply running in this perspective, at teardown, so none runs on for up to
+    /// `REPLY_TIMEOUT` in a removed perspective and writes its end there.
+    pub(crate) fn abort_agent_replies(&self) {
+        let running: Vec<_> = self
+            .agent_replies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+            .collect();
+        for (_, reply) in running {
+            reply.abort();
         }
     }
 

@@ -488,7 +488,7 @@ export class PerspectiveProxy {
         return await this.#client.agentReply(this.#handle.uuid, container, settings)
     }
 
-    /** Stop the reply running in `container`. `false` when none was running. */
+    /** Stop the caller's reply running in `container`. `false` when the caller had none running. */
     async agentReplyCancel(container: string): Promise<boolean> {
         return await this.#client.agentReplyCancel(this.#handle.uuid, container)
     }
