@@ -103,7 +103,10 @@ pub fn transport_allowed(url: &str) -> bool {
     let Some((scheme, rest)) = url.split_once("://") else {
         return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // A URL parser that follows the WHATWG URL standard (the host's `fetch`) also ends the
+    // authority at a backslash for http and https: `http://evil.example\@127.0.0.1` goes to
+    // `evil.example`.
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or("");
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     if host_port.is_empty() {
         return false;
@@ -672,6 +675,8 @@ mod tests {
             "http://127.0.0.1.attacker.example",
             "http://localhost.attacker.example",
             "http://127.0.0.1@attacker.example",
+            "http://attacker.example\\@127.0.0.1",
+            "http://attacker.example\\@127.0.0.1/identity",
             "http://[::2]:80",
             "ftp://127.0.0.1",
             "store.coasys.org",
