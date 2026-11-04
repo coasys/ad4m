@@ -233,7 +233,7 @@ pub struct ExecutorConfigFile {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityFileSettings {
-    /// The identity store's base URL, e.g. `https://store-staging.coasys.org`.
+    /// The identity store's base URL, e.g. `https://store.ad4m.dev` (the agent language's default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_url: Option<String>,
     /// The store's head keys (Ed25519 multikeys, `z6Mk…`).

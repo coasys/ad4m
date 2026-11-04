@@ -55,7 +55,7 @@ pub fn check_store_keys(keys: &[String]) -> Result<(), String> {
 
 /// `identity.storeUrl` as the executor can use it: unset (the language's default store) or a
 /// URL. The agent language reads an empty `storeUrl` as unset, so `""` would send every
-/// profile and identity call to the production store while the executor's resolver names no
+/// profile and identity call to the default store while the executor's resolver names no
 /// store: the executor refuses to start with it.
 pub fn check_store_url(url: Option<&str>) -> Result<(), String> {
     match url {
@@ -72,7 +72,7 @@ pub fn check_store_url(url: Option<&str>) -> Result<(), String> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IdentitySettings {
     /// The store's base URL; the agent language's `storeUrl` setting. Unset: the language's
-    /// default (the production store).
+    /// default, `https://store.ad4m.dev`.
     pub store_url: Option<String>,
     /// The store keys (multikeys) a head must be signed by. Empty: no head is accepted.
     pub store_keys: Vec<String>,
@@ -82,7 +82,7 @@ pub struct IdentitySettings {
 }
 
 /// The warning logged at start when `identity.storeKeys` is empty, naming the store it leaves
-/// untrusted and what that costs; `None` with keys. No production store key ships with the
+/// untrusted and what that costs; `None` with keys. No store key ships with the
 /// executor, so the default config (no `identity.storeUrl`: the agent language's default store)
 /// verifies no `did:scid` record until the operator sets the store's key.
 pub fn missing_store_keys_warning(settings: &IdentitySettings) -> Option<String> {
