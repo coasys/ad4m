@@ -33,9 +33,18 @@ import * as auth from "../src/auth.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
 import * as api from "../src/api.js";
-import { buildKeyRing, bytesToHex, generateRoomKey, hexToBytes, sealToDid } from "../src/encryption.js";
+import {
+  buildKeyRing,
+  bytesToHex,
+  decryptLinkFromWire,
+  generateRoomKey,
+  hexToBytes,
+  sealToDid,
+  type KeyRing,
+} from "../src/encryption.js";
 import { grantMissingRoomKeys, rotateRoomKey } from "../src/room-keys.js";
-import type { LinkExpression, PerspectiveDiff, SealedBox } from "../src/types.js";
+import type { LinkExpression, PerspectiveDiff, SealedBox, WireLinkExpression } from "../src/types.js";
+import { isEncryptedLinkData } from "../src/types.js";
 import { openSealed } from "./sealed-box.js";
 
 // Link-server imports — test helpers to boot a real server, and auth
@@ -139,12 +148,17 @@ async function bootServer(): Promise<TestServerHandle> {
   return _server;
 }
 
+/** The room key every agent of these tests holds, as members do once the admin's rotation reached them.
+ *  Rooms this language creates refuse plaintext, so every commit is encrypted. */
+const SHARED_RING: KeyRing = new Map([[1, generateRoomKey()]]);
+
 /** Wire the server-link-language adapters against a real server + agent. */
 function wireClient(
   serverUrl: string,
   roomId: string,
   agent: RealAgent,
   storage: MemoryStorage = new MemoryStorage(),
+  ring: KeyRing | null = SHARED_RING,
 ): { emittedDiffs: PerspectiveDiff[]; syncStates: string[] } {
   resetAdapters();
   syncModule._resetRenderStateForTests();
@@ -169,7 +183,7 @@ function wireClient(
     invalidateToken: () => auth.invalidateSession(),
     emitDiff: (diff) => emittedDiffs.push(diff),
     emitSyncState: (state) => syncStates.push(state),
-    getKeyRing: () => null,
+    getKeyRing: () => ring,
   });
 
   return { emittedDiffs, syncStates };
@@ -214,6 +228,45 @@ describe("integration: auth against real server", () => {
   });
 });
 
+describe("integration: a room is end-to-end encrypted from creation", () => {
+  it("the server refuses plaintext before any key exists, and a member with no key commits nothing", async () => {
+    const server = await bootServer();
+    const roomId = "e2e-from-creation-room";
+    const admin = RealAgent.create();
+    wireClient(server.url, roomId, admin, new MemoryStorage(), null);
+    const adminToken = await auth.getValidToken();
+    // Plaintext sent straight to the server, past the language: refused before any key or commit exists.
+    await assert.rejects(
+      () => api.commitDiff({ serverUrl: server.url, roomId }, adminToken, {
+        additions: [{
+          author: admin.did(),
+          timestamp: new Date().toISOString(),
+          data: { source: "test://plain", predicate: "test://p", target: "test://t" },
+        }],
+        removals: [],
+      }),
+      (err) => err instanceof api.ApiError && err.status === 400,
+    );
+
+    // A member signs in before the admin rotated a key in: it holds none.
+    const member = RealAgent.create();
+    wireClient(server.url, roomId, member, new MemoryStorage(), null);
+    const memberToken = await auth.getValidToken();
+    assert.deepEqual(await api.fetchRoomKeys({ serverUrl: server.url, roomId }, memberToken), { keys: [] });
+    await assert.rejects(() => syncModule.commit({
+      additions: [{
+        author: member.did(),
+        timestamp: new Date().toISOString(),
+        data: { source: "test://first", predicate: "test://p", target: "test://t" },
+        proof: { signature: "sig", key: `${member.did()}#primary` },
+      }],
+      removals: [],
+    }));
+    const render = await api.fetchRender({ serverUrl: server.url, roomId }, memberToken);
+    assert.deepEqual(render.links, [], "nothing reached the server");
+  });
+});
+
 describe("integration: commit + HTTP sync", () => {
   it("committed links appear in /render and /sync", async () => {
     const server = await bootServer();
@@ -239,9 +292,10 @@ describe("integration: commit + HTTP sync", () => {
       { Authorization: `Bearer ${token}` },
       "",
     );
-    const rendered = JSON.parse(renderRes.body) as { links: LinkExpression[] };
+    const rendered = JSON.parse(renderRes.body) as { links: WireLinkExpression[] };
     assert.equal(rendered.links.length, 1);
-    assert.equal((rendered.links[0].data as { source: string }).source, "test://int-source");
+    assert.ok(isEncryptedLinkData(rendered.links[0].data), "the server holds only ciphertext");
+    assert.deepEqual(decryptLinkFromWire(rendered.links[0], SHARED_RING), link);
   });
 });
 
@@ -396,7 +450,7 @@ describe("integration: two-agent commit + sync through real server", () => {
       getToken: () => auth.getValidToken(),
       emitDiff: (diff) => bDiffs.push(diff),
       emitSyncState: () => {},
-      getKeyRing: () => null,
+      getKeyRing: () => SHARED_RING,
     });
     await syncModule.bootstrap();
     assert.equal(store.allLinks().links.length, 1);
@@ -423,7 +477,7 @@ describe("integration: two-agent commit + sync through real server", () => {
       getToken: () => auth.getValidToken(),
       emitDiff: () => {},
       emitSyncState: () => {},
-      getKeyRing: () => null,
+      getKeyRing: () => SHARED_RING,
     });
     await syncModule.bootstrap();
     const aLinks = store.allLinks().links;

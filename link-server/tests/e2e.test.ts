@@ -314,11 +314,11 @@ test("full E2E lifecycle: rotate, late member, grant, all decrypt", async () => 
     const bobToken = await authenticateAgent(server.url, roomId, bob);
 
     // Bob has no keys yet
-    const bobKeysBefore = await getJson<{ keys: unknown[]; e2e_enabled: boolean }>(
+    const bobKeysBefore = await getJson<{ keys: unknown[] }>(
       `${server.url}/rooms/${roomId}/keys`, bobToken,
     );
+    assert.equal(bobKeysBefore.status, 200);
     assert.equal(bobKeysBefore.body.keys.length, 0);
-    assert.equal(bobKeysBefore.body.e2e_enabled, true);
 
     // --- Version 2: admin + alice + bob ---
     const rot2 = await clientSideRotate(server.url, roomId, adminToken);
