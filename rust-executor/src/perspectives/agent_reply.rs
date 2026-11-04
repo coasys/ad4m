@@ -26,10 +26,13 @@
 //! the model as a turn of the conversation. What the agent's tools read in `workIn` is another
 //! matter: that is the data it works on.
 //!
-//! **One at a time.** A container has at most one reply running ([`RunningReplies`], held per
-//! perspective). [`cancel_reply`] stops it. A reply still `running` when the executor starts
-//! again was cut off: the sweep at load marks it `interrupted`
-//! (`perspective_instance::agent_replies`).
+//! **One at a time, per caller.** A caller has at most one reply running in a container
+//! ([`RunningReplies`], held per perspective): the conversation is the caller's, so two people
+//! in one shared container each get their own. [`cancel_reply`] stops the caller's own reply and
+//! no one else's. A reply still `running` when the executor starts again was cut off: the sweep
+//! at load marks it `interrupted` (`perspective_instance::agent_replies`). Nothing else marks a
+//! reply it did not start: a `running` reply in the container may be another node's, still
+//! working.
 
 use crate::agent::AgentContext;
 use crate::perspectives::agent_session::{AgentMessage, AgentReply, AgentSessionError};
@@ -88,9 +91,12 @@ pub struct RunningReply {
     abort: Option<tokio::task::AbortHandle>,
 }
 
-/// The replies running in one perspective, by container. A std mutex: held only to read or swap
-/// an entry, never across an await.
-pub type RunningReplies = HashMap<String, RunningReply>;
+/// Whose reply a slot holds: the container, and the caller's DID.
+pub type ReplySlot = (String, String);
+
+/// The replies running in one perspective, by container and caller. A std mutex: held only to
+/// read or swap an entry, never across an await.
+pub type RunningReplies = HashMap<ReplySlot, RunningReply>;
 
 /// Runs the agent on the conversation: in the executor, `run_agent_session` with the caller's
 /// session; in tests, a script.
@@ -104,7 +110,7 @@ pub enum ReplyError {
     /// The request can't be answered as it is: nothing to answer, or no container.
     #[error("{0}")]
     Invalid(String),
-    /// A reply is already running in this container.
+    /// The caller already has a reply running in this container.
     #[error("a reply is already running in this conversation: wait for it, or cancel it")]
     Busy,
     #[error(transparent)]
@@ -144,22 +150,23 @@ pub async fn start_reply(
     }
     ensure_agent_reply_class(&mut perspective, &context).await?;
 
-    // Hold the container's slot from here, so two calls can't both start a reply.
+    // Hold the caller's slot in the container from here, so two calls can't both start a reply.
+    let slot: ReplySlot = (container.to_string(), caller_did.to_string());
     let reply = format!("{REPLY_URI_PREFIX}{}", uuid::Uuid::new_v4());
-    reserve(&perspective, container, &reply)?;
+    reserve(&perspective, &slot, &reply)?;
     let started =
         prepare_and_create(&mut perspective, container, caller_did, &reply, &context).await;
     let messages = match started {
         Ok(messages) => messages,
         Err(e) => {
-            release(&perspective, container, &reply);
+            release(&perspective, &slot, &reply);
             return Err(e);
         }
     };
 
     let cancel_context = context.clone();
     let task_perspective = perspective.clone();
-    let task_container = container.to_string();
+    let task_slot = slot.clone();
     let task_reply = reply.clone();
     // The task waits until its abort handle is in the slot. Otherwise a runner that answers at
     // once releases the slot first, and the check below reads the empty slot as a cancel.
@@ -176,7 +183,7 @@ pub async fn start_reply(
             ))),
         };
         // Whoever takes the slot writes the end: this task, or a cancel that got there first.
-        if !release(&task_perspective, &task_container, &task_reply) {
+        if !release(&task_perspective, &task_slot, &task_reply) {
             return;
         }
         let values = match outcome {
@@ -192,7 +199,7 @@ pub async fn start_reply(
             .agent_replies
             .lock()
             .expect("agent replies poisoned");
-        match running.get_mut(container) {
+        match running.get_mut(&slot) {
             Some(entry) if entry.reply == reply => {
                 entry.abort = Some(handle.abort_handle());
                 false
@@ -221,18 +228,21 @@ pub async fn start_reply(
     Ok(reply)
 }
 
-/// Stop the reply running in `container` and mark it `cancelled`. `false` when none is running.
-/// What the agent wrote before it was stopped stays written.
+/// Stop the reply `caller_did` has running in `container` and mark it `cancelled`. `false` when
+/// the caller has none running: another caller's reply in the same container is theirs to
+/// cancel. What the agent wrote before it was stopped stays written.
 pub async fn cancel_reply(
     perspective: PerspectiveInstance,
     container: &str,
+    caller_did: &str,
     context: &AgentContext,
 ) -> anyhow::Result<bool> {
+    let slot: ReplySlot = (container.trim().to_string(), caller_did.to_string());
     let taken = perspective
         .agent_replies
         .lock()
         .expect("agent replies poisoned")
-        .remove(container.trim());
+        .remove(&slot);
     let Some(running) = taken else {
         return Ok(false);
     };
@@ -252,8 +262,8 @@ pub async fn cancel_reply(
     Ok(true)
 }
 
-/// Read the conversation, refuse one with nothing to answer, settle replies left `running` by
-/// an earlier executor, and create the new reply under the container.
+/// Read the conversation, refuse one with nothing to answer, and create the new reply under the
+/// container.
 async fn prepare_and_create(
     perspective: &mut PerspectiveInstance,
     container: &str,
@@ -262,18 +272,6 @@ async fn prepare_and_create(
     context: &AgentContext,
 ) -> Result<Vec<AgentMessage>, ReplyError> {
     let replies = replies_in(perspective, container, caller_did).await?;
-    for (id, row) in &replies {
-        // The slot is ours, so a `running` reply here has no task: it was cut off.
-        if row.status == ReplyStatus::Running.as_str() {
-            set_reply(
-                perspective.clone(),
-                id,
-                json!({ "status": ReplyStatus::Interrupted.as_str() }),
-                context,
-            )
-            .await?;
-        }
-    }
 
     let query = json!({
         "parent": { "id": container },
@@ -482,18 +480,18 @@ pub(crate) async fn stale_running_replies(
 
 fn reserve(
     perspective: &PerspectiveInstance,
-    container: &str,
+    slot: &ReplySlot,
     reply: &str,
 ) -> Result<(), ReplyError> {
     let mut running = perspective
         .agent_replies
         .lock()
         .expect("agent replies poisoned");
-    if running.contains_key(container) {
+    if running.contains_key(slot) {
         return Err(ReplyError::Busy);
     }
     running.insert(
-        container.to_string(),
+        slot.clone(),
         RunningReply {
             reply: reply.to_string(),
             abort: None,
@@ -502,15 +500,15 @@ fn reserve(
     Ok(())
 }
 
-/// Give up the container's slot if `reply` still holds it. `true` if it did.
-fn release(perspective: &PerspectiveInstance, container: &str, reply: &str) -> bool {
+/// Give up the slot if `reply` still holds it. `true` if it did.
+fn release(perspective: &PerspectiveInstance, slot: &ReplySlot, reply: &str) -> bool {
     let mut running = perspective
         .agent_replies
         .lock()
         .expect("agent replies poisoned");
-    match running.get(container) {
+    match running.get(slot) {
         Some(entry) if entry.reply == reply => {
-            running.remove(container);
+            running.remove(slot);
             true
         }
         _ => false,

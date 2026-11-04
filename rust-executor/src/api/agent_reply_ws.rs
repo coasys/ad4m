@@ -96,7 +96,10 @@ async fn agent_reply_cancel(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let body: AgentReplyCancelRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let perspective = guarded_perspective(&params).await?;
-    let cancelled = cancel_reply(perspective, &body.container, &ctx.acts_as())
+    let agent_context = ctx.acts_as();
+    let caller_did = crate::agent::did_for_context(&agent_context)
+        .map_err(|e| WsRpcError::internal(format!("could not read the caller's DID: {e:#}")))?;
+    let cancelled = cancel_reply(perspective, &body.container, &caller_did, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(format!("{e:#}")))?;
     Ok(json!(cancelled))
@@ -151,6 +154,7 @@ pub struct AgentReplyStarted {
 #[ts(export)]
 pub struct AgentReplyCancelRequest {
     pub uuid: String,
-    /// The node that holds the conversation whose running reply is stopped.
+    /// The node that holds the conversation. The caller's own running reply there is stopped;
+    /// another caller's is not.
     pub container: String,
 }

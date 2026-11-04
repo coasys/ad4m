@@ -2,6 +2,7 @@
 
 export type AgentReplyCancelRequest = { uuid: string, 
 /**
- * The node that holds the conversation whose running reply is stopped.
+ * The node that holds the conversation. The caller's own running reply there is stopped;
+ * another caller's is not.
  */
 container: string, };

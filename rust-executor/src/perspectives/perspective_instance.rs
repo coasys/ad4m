@@ -672,8 +672,8 @@ pub struct PerspectiveInstance {
     /// `propose`, the engine's mint-and-sweep, the sync-triggered sweep),
     /// never inside `run_flow_consensus_pass`, which those nest.
     pub(crate) flow_pass_lock: Arc<Mutex<()>>,
-    /// The agent replies running in this perspective, one per container
-    /// (`perspectives::agent_reply`). A std mutex: held to read or swap an
+    /// The agent replies running in this perspective, one per caller in a
+    /// container (`perspectives::agent_reply`). A std mutex: held to read or swap an
     /// entry, never across an await.
     pub(crate) agent_replies:
         Arc<std::sync::Mutex<crate::perspectives::agent_reply::RunningReplies>>,

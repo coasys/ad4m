@@ -3,7 +3,7 @@
 //! and the sweep of replies an earlier executor left running.
 
 use super::agent_reply::{
-    cancel_reply, conversation, start_reply, ReplyError, ReplyRow, ReplyStatus, Runner,
+    cancel_reply, conversation, start_reply, ReplyError, ReplyRow, ReplySlot, ReplyStatus, Runner,
     AGENT_REPLY_CLASS,
 };
 use super::agent_session::{AgentMessage, AgentReply, AgentSessionError};
@@ -149,6 +149,10 @@ async fn until_status(f: &Fixture, id: &str, status: ReplyStatus) -> Value {
     );
 }
 
+fn slot(f: &Fixture) -> ReplySlot {
+    (CHAT.to_string(), f.did.clone())
+}
+
 async fn start(f: &Fixture, run: Runner) -> Result<String, ReplyError> {
     start_reply(f.perspective.clone(), CHAT, &f.did, f.ctx.clone(), run).await
 }
@@ -249,7 +253,7 @@ async fn a_conversation_with_nothing_to_answer_is_refused_and_writes_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_container_runs_one_reply_at_a_time() {
+async fn a_caller_runs_one_reply_at_a_time_in_a_container() {
     let mut f = fixture().await;
     say(&mut f, "app://m/1", "hello").await;
     let (run, go) = waiting();
@@ -260,7 +264,7 @@ async fn a_container_runs_one_reply_at_a_time() {
 
     go.send(()).unwrap();
     until_status(&f, &first, ReplyStatus::Done).await;
-    // Once it ends, the container takes another.
+    // Once it ends, the caller may start another.
     say(&mut f, "app://m/2", "and again").await;
     let third = start(&f, answering("ok", Arc::default())).await.unwrap();
     until_status(&f, &third, ReplyStatus::Done).await;
@@ -273,7 +277,15 @@ async fn a_cancelled_reply_stops_and_says_so() {
     let (run, go) = waiting();
     let id = start(&f, run).await.unwrap();
 
-    assert!(cancel_reply(f.perspective.clone(), CHAT, &f.ctx)
+    assert!(
+        !cancel_reply(f.perspective.clone(), CHAT, "did:someone-else", &f.ctx)
+            .await
+            .unwrap(),
+        "another caller cannot cancel it"
+    );
+    assert_eq!(reply(&f, &id).await["status"], "running");
+
+    assert!(cancel_reply(f.perspective.clone(), CHAT, &f.did, &f.ctx)
         .await
         .unwrap());
     until_status(&f, &id, ReplyStatus::Cancelled).await;
@@ -283,7 +295,7 @@ async fn a_cancelled_reply_stops_and_says_so() {
     assert_eq!(reply(&f, &id).await["status"], "cancelled");
 
     assert!(
-        !cancel_reply(f.perspective.clone(), CHAT, &f.ctx)
+        !cancel_reply(f.perspective.clone(), CHAT, &f.did, &f.ctx)
             .await
             .unwrap(),
         "nothing left to cancel"
@@ -308,24 +320,81 @@ async fn a_reply_left_running_by_an_earlier_executor_becomes_interrupted() {
     let (run, _go) = waiting();
     let id = start(&f, run).await.unwrap();
     // A restart: the task and the slot are gone, the record still says `running`.
-    let abandoned = f.perspective.agent_replies.lock().unwrap().remove(CHAT);
+    let abandoned = f
+        .perspective
+        .agent_replies
+        .lock()
+        .unwrap()
+        .remove(&slot(&f));
     drop(abandoned);
 
     f.perspective.agent_reply_sweep_at_load().await;
     until_status(&f, &id, ReplyStatus::Interrupted).await;
 }
 
+/// A `running` reply with no task here may be another node's, still working: starting a reply
+/// leaves it alone, and only the sweep at load settles this node's own.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_reply_settles_one_left_running_without_a_task() {
+async fn a_new_reply_leaves_a_running_reply_it_did_not_start_alone() {
     let mut f = fixture().await;
     say(&mut f, "app://m/1", "hello").await;
     let (run, _go) = waiting();
-    let stale = start(&f, run).await.unwrap();
-    f.perspective.agent_replies.lock().unwrap().remove(CHAT);
+    let other = start(&f, run).await.unwrap();
+    f.perspective
+        .agent_replies
+        .lock()
+        .unwrap()
+        .remove(&slot(&f));
 
+    say(&mut f, "app://m/2", "hello again").await;
     let fresh = start(&f, answering("hi", Arc::default())).await.unwrap();
-    until_status(&f, &stale, ReplyStatus::Interrupted).await;
     until_status(&f, &fresh, ReplyStatus::Done).await;
+    assert_eq!(reply(&f, &other).await["status"], "running");
+}
+
+/// Two people in one shared container each have their own reply: one running does not refuse
+/// the other, and each is given only their own messages.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_callers_in_one_container_each_get_their_own_reply() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "rename the board").await;
+    let (run, go) = waiting();
+    let alices = start(&f, run).await.unwrap();
+
+    let bob = TestSigner::generate();
+    f.perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(vec![
+            peer_link(
+                &bob,
+                "app://m/bob",
+                "app://message_text",
+                "literal:string:hi",
+            ),
+            peer_link(&bob, CHAT, HAS_CHILD, "app://m/bob"),
+        ]))
+        .await
+        .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let bobs = start_reply(
+        f.perspective.clone(),
+        CHAT,
+        &bob.did,
+        f.ctx.clone(),
+        answering("hello Bob", seen.clone()),
+    )
+    .await
+    .unwrap();
+    until_status(&f, &bobs, ReplyStatus::Done).await;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![AgentMessage {
+            role: "user".into(),
+            content: "hi".into()
+        }]
+    );
+
+    go.send(()).unwrap();
+    until_status(&f, &alices, ReplyStatus::Done).await;
 }
 
 fn row(id: &str, text: &str) -> Value {
