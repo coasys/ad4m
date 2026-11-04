@@ -362,7 +362,7 @@ fn check_add_refuses_each_condition_alone() {
 
 fn offer_string() -> OfferString {
     OfferString {
-        store: "https://store.coasys.org".into(),
+        store: "https://store.ad4m.dev".into(),
         scid: Log::new().chain.state().scid.clone(),
         offer_id: link_offer_id(),
         s: bs58::encode(link_secret()).into_string(),
@@ -417,7 +417,7 @@ fn the_device_string_round_trips_and_refuses_extra_fields() {
         r: bs58::encode([3u8; 16]).into_string(),
         exp: LINK_NOW + 300,
         hint: None,
-        store: "https://store.coasys.org".into(),
+        store: "https://store.ad4m.dev".into(),
     };
     assert_eq!(DeviceString::parse(&device.encode()).unwrap(), device);
     assert!(OfferString::parse(&device.encode()).is_err());
