@@ -583,6 +583,26 @@ describe("SFU path", () => {
         expect(heard).not.toHaveBeenCalled()
     })
 
+    it("a replaced call's late error does not reach the next call's listeners", async () => {
+        // Each join gets its own manager, so the first one's handlers stay bound to it.
+        const first = { ...mockSfuManagerInstance, on: jest.fn() }
+        ;(SfuManager as unknown as jest.Mock).mockImplementationOnce(() => first)
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await session.join(fakeMediaStream())
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        for (const [name, handler] of first.on.mock.calls) if (name === "replaced") handler(event)
+        await session.join(fakeMediaStream())
+        expect(session.getState()).toBe("active")
+
+        const heard = jest.fn()
+        session.on("error", heard)
+        for (const [name, handler] of first.on.mock.calls) if (name === "error") handler(new Error("late"))
+        expect(heard).not.toHaveBeenCalled()
+        // The current manager's errors still arrive.
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "error") handler(new Error("now"))
+        expect(heard).toHaveBeenCalledTimes(1)
+    })
+
     it("a call replaced while it joins stays idle", async () => {
         const session = createSession(baseConfig({ topology: "sfu" }))
         const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
