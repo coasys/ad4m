@@ -21,7 +21,8 @@ use ad4m_ldk::identity::{
 use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
 use centralized_agent_language::agents::{self, AgentKey};
 use centralized_agent_language::store::{
-    encode_header, Http, HttpReply, Store, MAX_REPLY_BYTES, PRE_INBOX_HEADER, REQUEST_HEADER,
+    encode_header, Http, HttpFailure, HttpReply, Store, MAX_REPLY_BYTES, PRE_INBOX_HEADER,
+    REQUEST_HEADER,
 };
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use futures::executor::block_on;
@@ -31,11 +32,44 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
+/// Where `build` puts the store: `IDENTITY_STORE_TARGET`, else the `CARGO_TARGET_DIR` that the
+/// `cargo build` in `build` inherits (relative to the repo root, where that build runs), else
+/// the repo root's `target`.
+fn target_dir(store_target: Option<String>, cargo_target: Option<String>) -> PathBuf {
+    let set = |v: Option<String>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
+    match set(store_target).or_else(|| set(cargo_target)) {
+        Some(dir) if dir.is_absolute() => dir,
+        Some(dir) => root().join(dir),
+        None => root().join("target"),
+    }
+}
+
 fn bin(name: &str) -> PathBuf {
-    let target = std::env::var("IDENTITY_STORE_TARGET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| root().join("target"));
-    target.join("debug").join(name)
+    target_dir(
+        std::env::var("IDENTITY_STORE_TARGET").ok(),
+        std::env::var("CARGO_TARGET_DIR").ok(),
+    )
+    .join("debug")
+    .join(name)
+}
+
+#[test]
+fn the_store_binary_is_looked_for_where_cargo_builds_it() {
+    let root = root();
+    assert_eq!(target_dir(None, None), root.join("target"));
+    assert_eq!(target_dir(None, Some(String::new())), root.join("target"));
+    assert_eq!(
+        target_dir(None, Some("/elsewhere/target".into())),
+        PathBuf::from("/elsewhere/target")
+    );
+    assert_eq!(
+        target_dir(None, Some("build/target".into())),
+        root.join("build/target")
+    );
+    assert_eq!(
+        target_dir(Some("/store".into()), Some("/elsewhere".into())),
+        PathBuf::from("/store")
+    );
 }
 
 /// Builds the store and the helper once per test binary (a no-op when up to date).
@@ -216,11 +250,16 @@ struct Recorded {
     method: String,
     headers: serde_json::Map<String, Value>,
     body: String,
+    /// The `maxBytes` the language asked for.
+    max_bytes: usize,
 }
 
-/// The host's `httpFetch`: HTTP/1.1 over a TCP stream, recording each call.
+/// The host's `httpFetch`: HTTP/1.1 over a TCP stream, recording each call. Like the executor's,
+/// it refuses a reply body past `maxBytes` ([`HttpFailure::TooLarge`]) unless `ignores_max` is
+/// set (a host older than the limit).
 #[derive(Clone, Default)]
 struct Host {
+    ignores_max: Rc<std::cell::Cell<bool>>,
     calls: Rc<RefCell<Vec<Recorded>>>,
     url: Rc<RefCell<String>>,
     /// Fixed replies for URL prefixes (an `https://` base: the suite has no TLS; or one path
@@ -305,12 +344,14 @@ impl Http for Host {
         method: &str,
         headers_json: &str,
         body: &str,
-    ) -> Result<HttpReply, String> {
+        max_bytes: usize,
+    ) -> Result<HttpReply, HttpFailure> {
         self.calls.borrow_mut().push(Recorded {
             url: url.to_string(),
             method: method.to_string(),
             headers: serde_json::from_str(headers_json).unwrap_or_default(),
             body: body.to_string(),
+            max_bytes,
         });
         let reply = self
             .remotes
@@ -321,10 +362,14 @@ impl Http for Host {
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?']))
             })
             .map(|(_, reply)| reply.clone());
-        match reply {
-            Some(reply) => Ok(reply),
-            None => fetch_blocking(url, method, headers_json, body),
+        let reply = match reply {
+            Some(reply) => reply,
+            None => fetch_blocking(url, method, headers_json, body).map_err(HttpFailure::Failed)?,
+        };
+        if reply.body.len() > max_bytes && !self.ignores_max.get() {
+            return Err(HttpFailure::TooLarge);
         }
+        Ok(reply)
     }
 }
 
@@ -1985,6 +2030,27 @@ fn a_reply_over_the_byte_cap_is_refused_on_every_route() {
     );
     *host.url.borrow_mut() = "https://atcap.example".into();
     assert_eq!(block_on(store.head(&did)).unwrap().unwrap(), head);
+    // Every call asked the host to stop reading past the cap.
+    assert!(host
+        .calls
+        .borrow()
+        .iter()
+        .all(|c| c.max_bytes == MAX_REPLY_BYTES));
+
+    // A host that ignores `maxBytes` (older than the limit) hands over the whole body: the
+    // language refuses it all the same.
+    host.ignores_max.set(true);
+    let mut over = serde_json::to_string(&head).unwrap();
+    over.insert_str(1, &format!("\"pad\":\"{pad}\","));
+    host.serve(
+        "https://oldhost.example",
+        HttpReply {
+            status: 200,
+            body: over,
+        },
+    );
+    *host.url.borrow_mut() = "https://oldhost.example".into();
+    assert_eq!(refusal(block_on(store.head(&did))), too_large);
 }
 
 /// A `did:scid` person with a linked phone and a record by d1 the store took: answers the did,
@@ -2188,21 +2254,36 @@ fn a_log_read_is_bounded_whatever_head_the_store_names() {
         .filter(|c| c.url.starts_with(&log_path))
         .count();
     assert_eq!(pages - reads_before, agents::MAX_LOG_READ_PAGES);
-    // Pages each within the page limit, together past the byte limit.
+    // Pages each within the page limit, together past the byte limit: the read stops on the
+    // page that crosses the byte limit, long before the page limit.
     let mut padded = endless;
     padded["pad"] = json!("x".repeat(MAX_LOG_PAGE_BYTES - 4096));
+    let padded = padded.to_string();
+    assert!(padded.len() <= MAX_LOG_PAGE_BYTES);
+    let crossing = agents::MAX_LOG_READ_BYTES / padded.len() + 1;
+    assert!(crossing < agents::MAX_LOG_READ_PAGES);
     host.remotes.borrow_mut().clear();
     host.serve(
         &log_path,
         HttpReply {
             status: 200,
-            body: padded.to_string(),
+            body: padded,
         },
     );
-    assert_eq!(
-        refusal(block_on(agents::get(&store, &did, now_s()))),
-        too_large
-    );
+    let reads_before = host
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.url.starts_with(&log_path))
+        .count();
+    assert_eq!(refusal(block_on(agents::read_log(&store, &did))), too_large);
+    let pages = host
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.url.starts_with(&log_path))
+        .count();
+    assert_eq!(pages - reads_before, crossing);
 }
 
 #[test]

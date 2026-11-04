@@ -220,7 +220,8 @@ impl Store {
         let now = self.now();
         let mut conn = self.db.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let chain = db::load_chain(&tx, scid)?
+        let chain = self
+            .held_chain(&tx, scid)?
             .ok_or_else(|| ApiError::not_found(format!("no log {scid}")))?;
         match verify_offer(signed, &chain, now) {
             Ok(()) => {}

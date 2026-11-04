@@ -1,11 +1,13 @@
 //! Logs: the append with the admission checks of `identity-store/AGENTS.md`, log pages, heads
 //! and the key index.
 
+use std::sync::Arc;
+
 use ad4m_hash_chain::store::{SqliteChainStore, StoreError, StoredEntry};
-use ad4m_hash_chain::{ForkEvidence, Head, Multikey};
+use ad4m_hash_chain::{verify_proof, ForkEvidence, Head, Multikey};
 use ad4m_identity_core::{
-    error_code, event_hash, pow, ChainError, DeviceKey, Event, FoldError, KelChain, KelPolicy,
-    KeyLife, Op,
+    commitment, error_code, event_hash, pow, ChainError, DeviceKey, Event, FoldError, KelChain,
+    KelPolicy, KeyLife, Op, KEL_DOMAIN,
 };
 use ad4m_ldk::identity::{AppendRequest, KeyIndexEntry, LogPage, SignedHead};
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -127,51 +129,93 @@ fn listed_keys(event: &Event) -> Vec<&str> {
     }
 }
 
-/// The fork `event` makes with the stored log `stored` of `scid`, when it is one: an event at a
-/// seq the store holds, with another hash than the stored event there, that replays on the
-/// stored events before it (every proof checked by the identity core). Answers the evidence and
-/// the master that signed the event, read from that replay: the last master of the state after
-/// it (an `incept` or `rotate` is signed by the master it names, every other event by the master
-/// current before it). `None` for a resend of a stored event, an event past the head (a gap)
-/// and an event that does not replay.
-fn competing_event(
-    conn: &Connection,
-    scid: &str,
-    stored: &KelChain,
-    event: &Event,
-) -> Result<Option<(ForkEvidence, Multikey)>, ApiError> {
-    let Some(ours) = stored.hash_at(event.seq) else {
-        return Ok(None);
+/// The master that must have signed a rival to the stored event at `event.seq` (≥ 1), read from
+/// the held fold `held` without a replay: the master current before that seq, or for a `rotate`
+/// the master it names, which must be the key the held log rotated onto there or, at the
+/// current master, the key the commitment `next` names. `None` when no master could have signed
+/// it or no proof of `event` verifies under that master (`coasys:kel`): such an event cannot
+/// replay, so nothing is replayed to find that out.
+fn rival_signer(held: &KelChain, event: &Event) -> Option<Multikey> {
+    let seq = event.seq;
+    let masters = &held.state().masters;
+    let at = masters
+        .iter()
+        .position(|m| m.added < seq && m.revoked.is_none_or(|r| r >= seq))?;
+    let signer = match &event.op {
+        Op::Rotate { master, salt, .. } => match masters.get(at + 1) {
+            Some(successor) => (successor.sign == *master).then(|| master.clone())?,
+            None => (held.state().next.as_ref() == Some(&commitment(master, salt)))
+                .then(|| master.clone())?,
+        },
+        Op::Incept { .. } => return None,
+        _ => masters[at].sign.clone(),
     };
-    let Ok(theirs) = event_hash(event) else {
-        return Ok(None);
-    };
-    if &theirs == ours {
-        return Ok(None);
-    }
-    let after = if event.seq == 0 {
-        if event.scid != scid {
+    event
+        .proof
+        .iter()
+        .any(|p| verify_proof(event, p, &signer, KEL_DOMAIN).is_ok())
+        .then_some(signer)
+}
+
+impl Store {
+    /// The fork `event` makes with the stored log `stored` of `scid`, when it is one: an event
+    /// at a seq the store holds, with another hash than the stored event there, that replays on
+    /// the stored events before it (every proof checked by the identity core). Answers the
+    /// evidence and the master that signed the event, read from that replay: the last master of
+    /// the state after it (an `incept` or `rotate` is signed by the master it names, every other
+    /// event by the master current before it). `None` for a resend of a stored event, an event
+    /// past the head (a gap) and an event that does not replay.
+    ///
+    /// The prefix is replayed only for an event signed by the master [`rival_signer`] names,
+    /// and only while that master has no recorded fork (with one, the evidence is answered and
+    /// [`db::record_fork`] answers the recorded fork): whoever holds no master key of the log
+    /// cannot make the store replay it.
+    fn competing_event(
+        &self,
+        conn: &Connection,
+        scid: &str,
+        stored: &KelChain,
+        event: &Event,
+    ) -> Result<Option<(ForkEvidence, Multikey)>, ApiError> {
+        let Some(ours) = stored.hash_at(event.seq) else {
+            return Ok(None);
+        };
+        let Ok(theirs) = event_hash(event) else {
+            return Ok(None);
+        };
+        if &theirs == ours {
             return Ok(None);
         }
-        KelChain::genesis(&KelPolicy, event).ok()
-    } else {
-        match db::load_chain_before(conn, scid, event.seq)? {
-            Some(mut prefix) => prefix.append(&KelPolicy, event).is_ok().then_some(prefix),
-            None => None,
-        }
-    };
-    let Some(signer) = after.and_then(|a| a.state().masters.last().map(|m| m.sign.clone())) else {
-        return Ok(None);
-    };
-    Ok(Some((
-        ForkEvidence {
+        let evidence = ForkEvidence {
             chain: scid.to_string(),
             seq: event.seq,
             ours: ours.clone(),
             theirs,
-        },
-        signer,
-    )))
+        };
+        let after = if event.seq == 0 {
+            if event.scid != scid {
+                return Ok(None);
+            }
+            KelChain::genesis(&KelPolicy, event).ok()
+        } else {
+            let Some(signer) = rival_signer(stored, event) else {
+                return Ok(None);
+            };
+            if db::signer_fork(conn, scid, &signer)?.is_some() {
+                return Ok(Some((evidence, signer)));
+            }
+            self.held.count_fold();
+            match db::load_chain_before(conn, scid, event.seq)? {
+                Some(mut prefix) => prefix.append(&KelPolicy, event).is_ok().then_some(prefix),
+                None => None,
+            }
+        };
+        let Some(signer) = after.and_then(|a| a.state().masters.last().map(|m| m.sign.clone()))
+        else {
+            return Ok(None);
+        };
+        Ok(Some((evidence, signer)))
+    }
 }
 
 fn current_head(conn: &Connection, scid: &str) -> Result<SignedHead, ApiError> {
@@ -213,7 +257,7 @@ impl Store {
 
         let mut conn = self.db.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let stored = db::load_chain(&tx, scid)?;
+        let stored = self.held_chain(&tx, scid)?;
         let new_log = stored.is_none();
         let first = &events[0];
 
@@ -265,7 +309,9 @@ impl Store {
                     // is the held log's current master (`db::freezing_fork`). One fork is kept
                     // per signing master: a further rival by the same master is answered with
                     // the recorded fork and adds nothing. Anything else is a plain conflict.
-                    if let Some((fork, signer)) = competing_event(&tx, scid, &existing, first)? {
+                    if let Some((fork, signer)) =
+                        self.competing_event(&tx, scid, &existing, first)?
+                    {
                         let theirs = ad4m_hash_chain::entry_json(first)
                             .map_err(|e| ApiError::invalid("malformed", e.to_string()))?;
                         let fork = db::record_fork(&tx, fork, &theirs, &signer)?;
@@ -277,7 +323,8 @@ impl Store {
                     }
                     return Err(ApiError::conflict(&current_head(&tx, scid)?));
                 }
-                chain = existing;
+                // The held fold stays as it is until this append commits.
+                chain = KelChain::clone(&existing);
                 rest = &events[..];
             }
         }
@@ -364,6 +411,9 @@ impl Store {
         let signed = self.key.sign_head(scid, head.seq, &head.hash, now);
         db::put_head(&tx, &signed)?;
         tx.commit()?;
+        // The new head's fold, held before the database lock is released, so the next request
+        // checks against it (a revoked key is refused at once) with no replay.
+        self.held.put(scid, Arc::new(chain));
         drop(conn);
         let mut topics = vec![Topic::offers(scid)];
         for event in &events {

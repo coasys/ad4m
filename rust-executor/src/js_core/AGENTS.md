@@ -10,7 +10,7 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
 |---|---|
 | `mod.rs` | `JsCore`: Deno `MainWorker` from the custom snapshot, extension registration, `new_for_language` |
 | `language_bootstrap.js` | Main module of every language isolate: loads the bundle, wires `ad4m:host` |
-| `host.js` | `ad4m:host` shim: ~28 functions (agent, holochain, http, hashing, language ctx, emit, storage) backed by ops |
+| `host.js` | `ad4m:host` shim: ~28 functions (agent, holochain, http, hashing, language ctx, emit, storage) backed by ops. `httpFetch`: 10 s for headers and body; the body is read as a stream and refused (`code` `"too-large"`) past `HTTP_FETCH_MAX_BYTES` (32 MiB) or the call's lower `maxBytes` (5th argument) |
 | `*_extension.rs` + `.js` | `#[op2]` ops per area: agent (16), languages (8), utils (5), signature (2), pubsub (1). Holochain (15), runtime (3), entanglement (5) ops live in their service dirs |
 | `string_module_loader.rs`, `options.rs`, `futures.rs`, `error.rs` | module loading from strings, worker options, future bridging |
 | `residual_lazy.rs`, `../../CUSTOM_DENO_SNAPSHOT.bin` | snapshot artifacts; rebuild with `pnpm build` after any `.js` change |

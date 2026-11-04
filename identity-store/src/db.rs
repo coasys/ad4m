@@ -1,8 +1,9 @@
 //! The SQLite file: the hash-chain module's tables and the store's own.
 //!
 //! The store keeps one connection behind a mutex; every write runs in one immediate
-//! transaction. Reads replay a log from `chain_entries` with the identity core each time: a log
-//! is short, and the store keeps no second copy of what the module's tables hold.
+//! transaction. A log is replayed from `chain_entries` with the identity core when its fold for
+//! the stored head is not held in memory (`held.rs`); the database keeps no second copy of what
+//! the module's tables hold.
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS keys (
     bot     TEXT,
     expires INTEGER
 );
+CREATE INDEX IF NOT EXISTS keys_of_log ON keys(scid, key_id);
 CREATE TABLE IF NOT EXISTS agents (
     did       TEXT PRIMARY KEY,
     record    TEXT NOT NULL,
@@ -220,7 +222,7 @@ pub fn freezing_fork(
 }
 
 /// The fork recorded for `scid` whose rival event `signer` signed, if any.
-fn signer_fork(
+pub(crate) fn signer_fork(
     conn: &Connection,
     scid: &str,
     signer: &Multikey,
@@ -330,6 +332,15 @@ pub fn key_owner(conn: &Connection, sign: &str) -> Result<Option<String>, ApiErr
 /// A fresh id for a stored row: 16 random bytes, base58btc.
 pub(crate) fn new_id() -> String {
     bs58::encode(rand::random::<[u8; 16]>()).into_string()
+}
+
+/// The signing keys the key index lists under `key_id` in the log of `scid` (one, unless the
+/// index is damaged). A signed request's signature is checked against these before the log is
+/// read, so a forged request costs one indexed lookup and one signature check.
+pub fn indexed_signs(conn: &Connection, scid: &str, key_id: &str) -> Result<Vec<String>, ApiError> {
+    let mut stmt = conn.prepare_cached("SELECT sign FROM keys WHERE scid = ?1 AND key_id = ?2")?;
+    let rows = stmt.query_map(params![scid, key_id], |row| row.get(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 /// Writes the key-index rows of every key of `state` as they stand at `head_seq`.

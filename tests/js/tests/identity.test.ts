@@ -405,26 +405,32 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect((await d.client.agent.status()).did).to.match(/^did:key:/);
     });
 
-    it("raises identity-fork on A when the store answers a shorter log, and keeps A's history", async () => {
+    it("keeps A's history and raises no identity-fork when the store is restored behind it", async () => {
         const forks: any[] = [];
         a.client.on("identity-fork", (event) => forks.push(event));
-        // The store loses the revoke: it serves the log it held before (two events).
+        // The store is restored from a backup taken before the revoke: it serves the log it
+        // held then (two events), on the same branch as A's.
         await store.stop();
         store.restoreDb(storeCopy);
         await store.restart();
 
-        const log = await a.client.identity.log(did, 0, true);
-        expect(log.events).to.have.length(3);
-        expect(log.fork).to.not.be.null;
-        expect(log.fork!.seq).to.equal(2);
-        await pollUntil(() => forks.length > 0, { timeoutMs: 10_000, intervalMs: 200, label: "identity-fork event" });
-        expect(forks[0].did).to.equal(did);
-        expect(forks[0].seq).to.equal(2);
-        // A second refresh records no second fork.
-        await a.client.identity.log(did, 0, true);
+        for (let i = 0; i < 2; i++) {
+            const log = await a.client.identity.log(did, 0, true);
+            expect(log.events).to.have.length(3);
+            expect(log.head!.seq).to.equal(2);
+            expect(log.fork).to.be.null;
+        }
+        // The resolver keeps answering A's cached log at its accepted head.
+        const resolved = await a.client.identity.resolve(did, { fresh: true });
+        const meta = resolved.didResolutionMetadata;
+        expect(meta.error, meta["coasys:message"]).to.be.undefined;
+        expect(meta["coasys:headTrusted"]).to.equal(true);
+        expect(meta["coasys:fork"]).to.be.undefined;
+        expect(resolved.didDocumentMetadata.versionId).to.equal("2");
+        expect(meta["coasys:skipped"]!.some((s) => /the store is behind/.test(s.reason))).to.equal(true);
         await new Promise((r) => setTimeout(r, 1000));
-        expect(forks).to.have.length(1);
-        expect((await a.client.identity.status()).fork!.seq).to.equal(2);
+        expect(forks).to.have.length(0);
+        expect((await a.client.identity.status()).fork).to.be.null;
     });
 
     it("serves the log from the cache after A restarts, with the store down", async () => {
@@ -436,7 +442,7 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         const status = await a.client.identity.status();
         expect(status.did).to.equal(did);
         expect(status.keyId).to.equal("d1");
-        expect(status.fork!.seq).to.equal(2);
+        expect(status.fork).to.be.null;
         expect((await a.client.agent.status()).identity).to.equal(did);
     });
 });

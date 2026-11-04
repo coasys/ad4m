@@ -13,6 +13,7 @@
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
 //! | `IDENTITY_BURST` | `5` | writes per identity at once (the identity bucket) |
 //! | `IDENTITY_REFILL_S` | `60` | seconds per write the identity bucket refills |
+//! | `HELD_LOG_EVENTS` | `1048576` | the most events the logs held folded in memory cover together |
 //!
 //! `serve` sweeps expired inbox messages and requests every minute.
 //! On start, `serve` prints `identity-store listening on http://<addr> store-key <multikey>`.
@@ -52,6 +53,7 @@ fn settings() -> Result<Settings, String> {
         cors_origins,
         identity_burst: number("IDENTITY_BURST", defaults.identity_burst)?,
         identity_refill_s: number("IDENTITY_REFILL_S", defaults.identity_refill_s)?,
+        held_log_events: number("HELD_LOG_EVENTS", defaults.held_log_events)?,
     })
 }
 

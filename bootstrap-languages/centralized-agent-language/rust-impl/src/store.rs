@@ -6,8 +6,10 @@
 //! `X-Coasys-Request` header (base64url of its canonical JSON); every body goes out as the
 //! canonical JSON of the argument, so a signer hashes `JCS(body)` for `bodyHash`. HTTP
 //! statuses map one to one onto `IdentityErrorCode`; a network failure or the host's
-//! 10-second timeout is `unavailable`. The store URL is read on every call, and every call goes
-//! to that store: a did:scid `src` hint is the executor's to fetch, never the language's.
+//! 10-second timeout is `unavailable`, a reply body past [`MAX_REPLY_BYTES`] (the host stops
+//! reading it there) is `invalid` (`too-large`). The store URL is read on every call, and every
+//! call goes to that store: a did:scid `src` hint is the executor's to fetch, never the
+//! language's.
 
 use std::future::Future;
 
@@ -32,8 +34,9 @@ pub const REQUEST_HEADER: &str = "X-Coasys-Request";
 /// The header of a pre-join inbox read: base64url(JCS(PreInboxAuth)).
 pub const PRE_INBOX_HEADER: &str = "X-Coasys-Inbox";
 /// The largest reply body the language takes from the store, on every route and status: a log
-/// page ([`MAX_LOG_PAGE_BYTES`]) is the largest answer a store gives. The host's `httpFetch`
-/// has read the body by then; the cap bounds what the language parses and keeps.
+/// page ([`MAX_LOG_PAGE_BYTES`]) is the largest answer a store gives. The language passes it to
+/// the host's `httpFetch` as `maxBytes`, so the host stops reading a body past it; the language
+/// checks the length again for a host that ignores `maxBytes`.
 pub const MAX_REPLY_BYTES: usize = MAX_LOG_PAGE_BYTES;
 
 /// What the host's `httpFetch` answers.
@@ -43,7 +46,17 @@ pub struct HttpReply {
     pub body: String,
 }
 
-/// The host's `httpFetch`: `Err` only on a network failure or the 10-second timeout.
+/// Why the host's `httpFetch` gave no reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpFailure {
+    /// The reply body passed `max_bytes`: the host stopped reading it.
+    TooLarge,
+    /// A network failure or the 10-second timeout.
+    Failed(String),
+}
+
+/// The host's `httpFetch`: `Err` on a network failure, the 10-second timeout, or a reply body
+/// past `max_bytes` (refused while it streams).
 pub trait Http {
     fn fetch(
         &self,
@@ -51,7 +64,8 @@ pub trait Http {
         method: &str,
         headers_json: &str,
         body: &str,
-    ) -> impl Future<Output = Result<HttpReply, String>>;
+        max_bytes: usize,
+    ) -> impl Future<Output = Result<HttpReply, HttpFailure>>;
 }
 
 /// What the language reads from its settings on every call.
@@ -344,9 +358,12 @@ impl<H: Http> Store<H> {
         let headers = Value::Object(headers).to_string();
         let reply = self
             .http
-            .fetch(&url, method, &headers, &body)
+            .fetch(&url, method, &headers, &body, MAX_REPLY_BYTES)
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(|failure| match failure {
+                HttpFailure::TooLarge => invalid("too-large"),
+                HttpFailure::Failed(_) => unavailable(),
+            })?;
         if reply.body.len() > MAX_REPLY_BYTES {
             return Err(invalid("too-large"));
         }

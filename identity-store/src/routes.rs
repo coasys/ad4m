@@ -370,7 +370,7 @@ async fn offer_state(
         return ok(first);
     }
     let changed = store
-        .wait_for(Topic::offers(&scid), wait, || {
+        .wait_for(Topic::offer_state(&scid), wait, || {
             let now = store.offer_progress(&scid, &offer_id, &key)?;
             Ok(now.filter(|n| *n != first))
         })
