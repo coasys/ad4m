@@ -279,6 +279,49 @@ async fn a_failing_language_is_retried_with_backoff() {
     assert_eq!(pending(&perspective), 10, "an outage loses nothing");
 }
 
+/// The queue of commits a link language did not accept lives in the
+/// executor's database, not in the language: a restart (a new instance over
+/// the same database, with a new language instance) sends them, oldest
+/// first, and does not send again a diff the language accepted before it.
+#[tokio::test(start_paused = true)]
+async fn a_restart_sends_the_diffs_the_language_did_not_accept() {
+    let before = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&before).await;
+    perspective.set_immediate_commits(10).await;
+    perspective.commit(&add("accepted")).await.unwrap();
+    before.down.store(true, Ordering::SeqCst);
+    for t in ["first", "second", "third"] {
+        perspective.commit(&add(t)).await.unwrap();
+    }
+    assert_eq!(before.committed(), vec!["+accepted"]);
+    assert_eq!(
+        queued_targets(&perspective),
+        vec!["first", "second", "third"]
+    );
+
+    // The restart: nothing of the old instance or its language survives
+    // but the database.
+    let handle = perspective.persisted.lock().await.clone();
+    drop(perspective);
+    let after = Arc::new(FakeLanguage::default());
+    let restarted = PerspectiveInstance::new(handle, None);
+    let language = after.clone();
+    *restarted.link_language.write().await = Some(Language::with_test_commit(
+        "fake-link-language".to_string(),
+        Arc::new(move |diff| language.commit(diff)),
+    ));
+    let task = start_loop(&restarted);
+    let drained = run_until(Duration::from_secs(30), || pending(&restarted) == 0).await;
+    task.abort();
+
+    assert!(drained.is_some(), "{} still pending", pending(&restarted));
+    assert_eq!(
+        after.committed(),
+        vec!["+first", "+second", "+third"],
+        "the restarted executor sends what was not accepted, in order, and only that"
+    );
+}
+
 /// A success resets the backoff: a second outage starts again from 100 ms
 /// instead of the 30 s the first one reached.
 #[tokio::test(start_paused = true)]

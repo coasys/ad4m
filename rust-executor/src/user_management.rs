@@ -38,25 +38,21 @@ fn check_executor_unlocked() -> Result<(), String> {
 
 /// Check if multi-user mode is enabled.
 pub fn is_multi_user_enabled() -> bool {
-    Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false))
+    crate::db_backend::db_backend()
+        .get_multi_user_enabled()
+        .unwrap_or(false)
 }
 
 /// Create a verification code for the given email and type ("signup" or "login").
 pub fn create_verification_code(email: &str, verification_type: &str) -> Result<String, String> {
-    let db = Ad4mDb::global_instance();
-    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-    db_ref
+    crate::db_backend::db_backend()
         .create_verification_code(email, verification_type)
         .map_err(|e| format!("Failed to create verification code: {}", e))
 }
 
 /// Verify a code for the given email and type.
 pub fn verify_code(email: &str, code: &str, verification_type: &str) -> Result<bool, String> {
-    let db = Ad4mDb::global_instance();
-    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-    db_ref
+    crate::db_backend::db_backend()
         .verify_code(email, code, verification_type)
         .map_err(|e| format!("Verification failed: {}", e))
 }
@@ -109,7 +105,7 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
 
     // Check if user already exists (local DB or shared DB) before creating a key: a key made
     // for an email that is taken would be an orphan in the wallet.
-    let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+    let user_exists = crate::db_backend::db_backend().get_user(email).is_ok();
     if user_exists {
         return Err("User already exists".to_string());
     }
@@ -141,14 +137,9 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
         Ad4mDb::hash_password(password).map_err(|e| format!("Failed to hash password: {}", e))?;
 
     // Add user to local DB
-    {
-        let db = Ad4mDb::global_instance();
-        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-        db_ref
-            .add_user_prehashed(email, &did, &password_hash)
-            .map_err(|e| format!("Failed to add user: {}", e))?;
-    }
+    crate::db_backend::db_backend()
+        .add_user_prehashed(email, &did, &password_hash)
+        .map_err(|e| format!("Failed to add user: {}", e))?;
 
     // Also store in shared DB for cross-executor access
     if config.db_backend.as_deref() == Some("shared") {
@@ -199,7 +190,7 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
     check_executor_unlocked()?;
 
     // Try local DB first
-    let local_result = Ad4mDb::with_global_instance(|db| db.verify_user_password(email, password));
+    let local_result = crate::db_backend::db_backend().verify_user_password(email, password);
 
     match local_result {
         Ok(true) => {
@@ -308,18 +299,18 @@ fn adopt_shared_user(
     did: &str,
     stored_hash: &str,
 ) -> Result<String, deno_core::error::AnyError> {
-    if let Err(e) =
-        Ad4mDb::with_global_instance(|db| db.add_user_prehashed(email, did, stored_hash))
-    {
+    if let Err(e) = crate::db_backend::db_backend().add_user_prehashed(email, did, stored_hash) {
         log::warn!("Failed to import user to local DB: {}", e);
     }
-    let local = Ad4mDb::with_global_instance(|db| db.get_user(email)).map_err(|_| {
-        deno_core::anyhow::anyhow!(
-            "The shared record of {} names the agent {}, which is not this user's here",
-            email,
-            did
-        )
-    })?;
+    let local = crate::db_backend::db_backend()
+        .get_user(email)
+        .map_err(|_| {
+            deno_core::anyhow::anyhow!(
+                "The shared record of {} names the agent {}, which is not this user's here",
+                email,
+                did
+            )
+        })?;
     if local.did != did {
         return Err(deno_core::anyhow::anyhow!(
             "The shared record of {} names the agent {}, but the local account holds {}",
@@ -386,7 +377,8 @@ pub async fn request_login_code(email: &str, app_name: Option<&str>) -> Result<(
     }
     user_exists(email)?;
 
-    Ad4mDb::with_global_instance(|db| db.check_and_update_rate_limit(email))
+    crate::db_backend::db_backend()
+        .check_and_update_rate_limit(email)
         .map_err(|e| e.to_string())?;
 
     let code = create_verification_code(email, "login")?;
@@ -418,7 +410,7 @@ pub fn verify_and_login(
 /// Check if a user exists in both DB and AgentService.
 pub fn user_exists(email: &str) -> Result<(), String> {
     check_executor_unlocked()?;
-    let db_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+    let db_exists = crate::db_backend::db_backend().get_user(email).is_ok();
     if !db_exists {
         return Err("User not found".to_string());
     }
@@ -461,10 +453,14 @@ mod tests {
     fn a_shared_record_acts_only_as_the_agent_its_local_row_holds() {
         setup();
         let victim = "did:key:z6MkSharedVictim";
-        Ad4mDb::with_global_instance(|db| db.add_user("victim@example.org", victim, "pw")).unwrap();
+        crate::db_backend::db_backend()
+            .add_user("victim@example.org", victim, "pw")
+            .unwrap();
 
         assert!(adopt_shared_user("other@example.org", victim, "hash").is_err());
-        assert!(Ad4mDb::with_global_instance(|db| db.get_user("other@example.org")).is_err());
+        assert!(crate::db_backend::db_backend()
+            .get_user("other@example.org")
+            .is_err());
         assert!(
             adopt_shared_user("victim@example.org", "did:key:z6MkSomeoneElse", "hash").is_err()
         );
@@ -481,13 +477,10 @@ mod tests {
     fn reading_a_shared_record_adds_no_local_user() {
         setup();
         let victim = "did:key:z6MkPeekVictim";
-        Ad4mDb::with_global_instance(|db| db.add_user("peek-victim@example.org", victim, "pw"))
+        crate::db_backend::db_backend()
+            .add_user("peek-victim@example.org", victim, "pw")
             .unwrap();
-        let users = || {
-            Ad4mDb::with_global_instance(|db| db.list_users())
-                .unwrap()
-                .len()
-        };
+        let users = || crate::db_backend::db_backend().list_users().unwrap().len();
         let before = users();
 
         let record = serde_json::json!({ "did": "did:key:z6MkPeekNew", "password_hash": "h" });
@@ -495,7 +488,9 @@ mod tests {
             shared_record_did("peek-new@example.org", Some(&record)).as_deref(),
             Some("did:key:z6MkPeekNew")
         );
-        assert!(Ad4mDb::with_global_instance(|db| db.get_user("peek-new@example.org")).is_err());
+        assert!(crate::db_backend::db_backend()
+            .get_user("peek-new@example.org")
+            .is_err());
         assert_eq!(users(), before, "reading a shared record wrote a user");
 
         // A record naming a local user's DID under another email names no agent.
@@ -558,7 +553,7 @@ mod tests {
         // value and never observe the row that actually bricks the account. In
         // that order it also stays a real guard if a future refactor moves the
         // check somewhere that still returns Err but writes the row anyway.
-        let row_written = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+        let row_written = crate::db_backend::db_backend().get_user(email).is_ok();
         assert!(
             !row_written,
             "create_user must not write a user row when the executor is locked — \
