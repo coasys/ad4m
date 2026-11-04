@@ -1280,6 +1280,143 @@ async fn a_retried_confirm_pushes_the_master_key_and_writes_the_record_once() {
         .is_none());
 }
 
+/// The store took the `add` but its answer was lost: the confirm failed with the offer
+/// already `spent`. Confirming again finds this claim's add in the log and, without a second
+/// publish, pushes the master key once and writes the record once, under the flow's one
+/// unlock. A confirm after that is refused before a second push or record write.
+#[tokio::test]
+async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 14).await;
+    let device = device_string(&desk, STORE_URL, SystemClock.now() + 300);
+    let flow = LinkFlow::scan(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        &device,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_desk = desk.rpc().take_ticket(&device.r).await.unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+
+    a.rpc().lose_publish_answer.set(true);
+    let publishes = a.rpc().publishes.get();
+    flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
+        .await
+        .expect_err("the publish answer was lost");
+    assert_eq!(a.rpc().publishes.get(), publishes + 1);
+    assert_eq!(
+        join(&desk, &claimed_desk["offerId"]).await["state"],
+        "spent"
+    );
+    assert!(vault.pending_pushes().unwrap().is_empty());
+    assert!(record::read(&a, &did).await.unwrap().is_none());
+
+    let linked = flow
+        .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
+        .await
+        .unwrap();
+    assert_eq!(a.rpc().publishes.get(), publishes + 1, "no second publish");
+    assert_eq!((linked.head.seq, linked.key_id.as_str()), (1, "d2"));
+    assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
+    assert_eq!(linked.record.unwrap(), 1);
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(opened.version, 1);
+    assert_eq!(opened.record.devices["d2"].name, "Desk");
+    assert_eq!(
+        opened.record.devices["d2"].holds_master,
+        HoldsMaster::Offered
+    );
+    assert!(vault.pending_pushes().unwrap().is_empty());
+
+    // After the full success a confirm is refused: no second push, the record unchanged.
+    flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
+        .await
+        .expect_err("the offer is spent");
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
+    assert!(vault.pending_pushes().unwrap().is_empty());
+    assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
+
+    // One master key waits in the desktop's inbox, not two.
+    join(&desk, &claimed_desk["offerId"]).await;
+    let desk_vault = MemoryVault::new();
+    take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("a master key waits");
+    assert!(take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// A spent offer whose add in the log is not this claim's is still refused: a claim of
+/// another key on the spent offer, and the added key's claim on another offer. The claim the
+/// add does spend still finishes its confirm.
+#[tokio::test]
+async fn a_confirm_of_a_spent_offer_whose_add_is_another_claim_is_refused() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 8).await;
+    let open = || {
+        LinkFlow::open(
+            &a,
+            &vault,
+            &did,
+            OfferKind::Node,
+            None,
+            STORE_URL,
+            &SystemClock,
+            &OsRandom,
+        )
+    };
+    let flow_b = open().await.unwrap();
+    let flow_c = open().await.unwrap();
+    claim(&b, &flow_b.link(), None).await.unwrap();
+    claim(&c, &flow_c.link(), None).await.unwrap();
+    let claimed_b = flow_b.wait_for_claim().await.unwrap();
+    let claimed_c = flow_c.wait_for_claim().await.unwrap();
+
+    a.rpc().lose_publish_answer.set(true);
+    flow_b
+        .confirm(&claimed_b, entry("b.example", DeviceKind::Server), false)
+        .await
+        .expect_err("the publish answer was lost");
+
+    // The spent offer's add is b's key: c's claim is refused on it.
+    flow_b
+        .confirm(&claimed_c, entry("c.example", DeviceKind::Server), false)
+        .await
+        .expect_err("the offer is spent by another key");
+    // b's key is in the log, but by the other offer: refused on this one.
+    flow_c
+        .confirm(&claimed_b, entry("b.example", DeviceKind::Server), false)
+        .await
+        .expect_err("the add spends another offer");
+    assert!(record::read(&a, &did).await.unwrap().is_none());
+
+    let linked = flow_b
+        .confirm(&claimed_b, entry("b.example", DeviceKind::Server), false)
+        .await
+        .unwrap();
+    assert_eq!((linked.head.seq, linked.key_id.as_str()), (1, "d2"));
+    assert_eq!(linked.record.unwrap(), 1);
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices.len(), 1);
+    assert_eq!(opened.record.devices["d2"].name, "b.example");
+}
+
 /// The system clock moved ahead by a number of seconds: the holder's time runs on while the
 /// store's stays real (the store would still take the `add`).
 struct Ahead(Cell<u64>);

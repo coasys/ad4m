@@ -16,6 +16,8 @@
 //!    ticked "Keep my master key on this device too", the master key into the device's inbox
 //!    ([`super::master`]); then the device's entry in the private record.
 
+use std::cell::Cell;
+
 use ad4m_identity_core::build::add_claimed;
 use ad4m_identity_core::inbox::{
     pre_address, seal, sign_payload, InboxAddress, InboxBody, OfferTicket,
@@ -24,7 +26,7 @@ use ad4m_identity_core::link::{
     self, ClaimView, DeviceString, Offer, OfferKind, OfferString, SignedOffer,
 };
 use ad4m_identity_core::record::{DeviceEntry, HoldsMaster};
-use ad4m_identity_core::{KelChain, KeyId};
+use ad4m_identity_core::{Event, KelChain, KeyId, Op};
 use ad4m_ldk::identity::{InboxBind, InboxWrite, OfferState, SignedHead, SignedRequest};
 use serde_json::json;
 
@@ -36,7 +38,7 @@ use crate::request::{
 };
 use crate::secret::Secret;
 use crate::vault::{MasterUse, Unlocked, Vault};
-use crate::{ClientError, Clock, Random, RandomRng};
+use crate::{fold, ClientError, Clock, Random, RandomRng};
 
 /// The seconds each list request waits for a change (the store's longest wait).
 const LIST_WAIT_S: u8 = 8;
@@ -81,6 +83,8 @@ pub struct LinkFlow<'a, R: ExecutorRpc> {
     signed: SignedOffer,
     offer_string: OfferString,
     _secret: Secret<[u8; 32]>,
+    /// `confirm` got past the add and ran the steps after it (the push, the record write).
+    followed_up: Cell<bool>,
 }
 
 impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
@@ -147,6 +151,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             signed,
             offer_string,
             _secret: secret,
+            followed_up: Cell::new(false),
         })
     }
 
@@ -343,8 +348,14 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
     ///
     /// The flow stays: after a failed publish it can confirm again while the claim is
     /// `claimed`. The push and the record write run only after the publish succeeded, so a
-    /// failed confirm did neither; once the store took the add, the offer is `spent` and a
-    /// repeat is refused before anything is pushed or written.
+    /// failed confirm did neither. When the store took the add but its answer (or the log read
+    /// after it) was lost, the offer is `spent` and the confirm failed before both: confirming
+    /// again finds, in the refreshed log, the `add` of this offer with this claim's device key
+    /// and co-signature, publishes nothing, and runs the push and the record write once, under
+    /// the flow's one unlock (a push past [`MasterUse::Link`]'s ttl is refused as expired).
+    /// Once a confirm ran those steps, or when the log's add is another key's or another
+    /// offer's, a repeat goes to the store, which refuses it before anything is pushed or
+    /// written.
     pub async fn confirm(
         &self,
         claimed: &Claimed,
@@ -354,18 +365,51 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         if keep_master && !self.may_keep(claimed) {
             return Err(ClientError::NotAKeeper(claimed.device_key.clone()));
         }
-        let chain = chain_of(self.executor, &self.did).await?;
-        let signer = self.unlocked.signer(self.clock.now())?;
-        let event = add_claimed(&chain, signer, &self.offer, &claimed.claim)?;
-        let head = self.executor.publish(std::slice::from_ref(&event)).await?;
-        let chain = chain_of(self.executor, &self.did).await?;
+        let log = self.executor.log(&self.did, 0, true).await?;
+        let events = log
+            .events
+            .iter()
+            .map(Event::from_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                ClientError::Protocol(format!("the log holds an unparsable event: {e}"))
+            })?;
+        // The store took this claim's add before, but its answer (or the read after it) was
+        // lost, so this flow never ran the steps after it: they run now, with no publish. Any
+        // other add (another key, another offer) leaves the publish to the store's refusal.
+        let landed = !self.followed_up.get()
+            && events.iter().any(|e| {
+                matches!(&e.op, Op::Add { add, offer, co_sig }
+                    if *offer == self.offer.offer_id
+                        && *co_sig == claimed.claim.co_sig
+                        && add.iter().any(|k| k.sign == claimed.device_key))
+            });
+        let (head, chain) = if landed {
+            let head = log.head.ok_or_else(|| {
+                ClientError::Protocol("the executor accepted no head for the log".into())
+            })?;
+            (head, fold(&events)?)
+        } else {
+            let chain = fold(&events)?;
+            let signer = self.unlocked.signer(self.clock.now())?;
+            let event = add_claimed(&chain, signer, &self.offer, &claimed.claim)?;
+            let head = self.executor.publish(std::slice::from_ref(&event)).await?;
+            (head, chain_of(self.executor, &self.did).await?)
+        };
         let key_id = chain
             .state()
             .key_id_of(&claimed.device_key)
             .cloned()
             .ok_or_else(|| ClientError::Protocol("the log does not list the new key".into()))?;
-        let master = if keep_master {
-            let signer = self.unlocked.signer(self.clock.now())?;
+        let signer = if keep_master {
+            Some(self.unlocked.signer(self.clock.now())?)
+        } else {
+            None
+        };
+        // From here on the steps after the add run (the push is on the retry list before its
+        // put): a later confirm goes to the store again, which refuses the spent offer.
+        self.followed_up.set(true);
+        let master = if let Some(signer) = signer {
             Some(
                 super::master::push(
                     self.executor,
