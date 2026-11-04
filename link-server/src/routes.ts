@@ -116,6 +116,43 @@ function jwtRateLimit(limiter: SlidingWindowLimiter) {
   return rateLimitHook(limiter, (request) => request.authClaims?.token ?? request.ip);
 }
 
+/** The most links (`/render`) or diffs (`/sync`) one page may carry. */
+export const MAX_PAGE_LIMIT = 5000;
+
+/** The page size of a `/render` or `/sync` request that names no `limit`. */
+export const DEFAULT_PAGE_LIMIT = 500;
+
+/** The page size a request asks for; null when `limit` is not an integer from 1 to MAX_PAGE_LIMIT. */
+function parsePageLimit(raw: string | undefined): number | null {
+  if (raw === undefined) return DEFAULT_PAGE_LIMIT;
+  if (!/^\d+$/.test(raw)) return null;
+  const limit = Number(raw);
+  return limit >= 1 && limit <= MAX_PAGE_LIMIT ? limit : null;
+}
+
+/** Where a paged `/render` resumes: the snapshot's `upto` and the last `(sequence, link_hash)` sent. */
+interface RenderCursor {
+  upto: number;
+  sequence: number;
+  hash: string;
+}
+
+function encodeRenderCursor(cursor: RenderCursor): string {
+  return Buffer.from(JSON.stringify([cursor.upto, cursor.sequence, cursor.hash])).toString("base64url");
+}
+
+function decodeRenderCursor(raw: string): RenderCursor | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as unknown;
+    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+    const [upto, sequence, hash] = parsed as unknown[];
+    if (!Number.isSafeInteger(upto) || !Number.isSafeInteger(sequence) || typeof hash !== "string") return null;
+    return { upto: upto as number, sequence: sequence as number, hash };
+  } catch {
+    return null;
+  }
+}
+
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // ---- health check (public, unauthenticated) ----
 
@@ -258,18 +295,26 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   // ---- sync / render / revision / peers ----
 
+  // Both routes are paged; see README, "Paged snapshot, then tail".
   app.get(
     "/rooms/:roomId/sync",
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const query = request.query as { since?: string };
+      const query = request.query as { since?: string; limit?: string };
       const parsedSince = query.since !== undefined ? Number.parseInt(query.since, 10) : 0;
       const since = Number.isFinite(parsedSince) ? Math.max(parsedSince, 0) : 0;
-      const rows = ctx.db.getDiffsSinceParsed(claims.roomId, since);
+      const limit = parsePageLimit(query.limit);
+      if (limit === null) return reply.code(400).send({ error: `limit must be an integer from 1 to ${MAX_PAGE_LIMIT}` });
       const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);
-      return reply.send({ diffs: rows.map((r) => r.diff), revision, sequence });
+      // One row past the page tells whether another page follows.
+      const rows = ctx.db.getDiffPageSince(claims.roomId, since, limit + 1);
+      const page = rows.slice(0, limit);
+      const next = rows.length > limit ? page[page.length - 1].sequence : null;
+      // Each entry names its sequence, so a client's cursor never runs ahead of what it applied.
+      const diffs = page.map((row) => ({ ...(JSON.parse(row.diff_data) as object), sequence: row.sequence }));
+      return reply.send({ diffs, revision, sequence, next });
     }
   );
 
@@ -278,10 +323,27 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const links = ctx.db.getActiveLinks(claims.roomId);
+      const query = request.query as { limit?: string; next?: string };
+      const limit = parsePageLimit(query.limit);
+      if (limit === null) return reply.code(400).send({ error: `limit must be an integer from 1 to ${MAX_PAGE_LIMIT}` });
       const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);
-      return reply.send({ links, revision, sequence });
+      // The first page pins the snapshot at the room's current sequence; the
+      // cursor carries it to every later page.
+      let cursor: RenderCursor = { upto: sequence, sequence: 0, hash: "" };
+      if (query.next !== undefined) {
+        const decoded = decodeRenderCursor(query.next);
+        if (!decoded) return reply.code(400).send({ error: "malformed next cursor" });
+        cursor = decoded;
+      }
+      const rows = ctx.db.getActiveLinkPage(claims.roomId, cursor.upto, cursor, limit + 1);
+      const page = rows.slice(0, limit);
+      const last = page[page.length - 1];
+      const next = rows.length > limit
+        ? encodeRenderCursor({ upto: cursor.upto, sequence: last.sequence, hash: last.link_hash })
+        : null;
+      const links = page.map((row) => JSON.parse(row.link_data) as LinkExpression);
+      return reply.send({ links, revision, sequence, upto: cursor.upto, next });
     }
   );
 
