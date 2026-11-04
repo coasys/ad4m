@@ -30,11 +30,10 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     let body: AgentReplyRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let perspective = guarded_perspective(&params).await?;
-    check_credits(ctx.user_did())?;
 
+    // `workIn` is an access check, so it runs before the handler's own checks (credits,
+    // settings): a call that fails both gets the access answer.
     let write_tools = body.write_tools.unwrap_or_default();
-    let max_tool_calls = body.max_tool_calls.unwrap_or(DEFAULT_MAX_TOOL_CALLS);
-    check_settings(&write_tools, max_tool_calls).map_err(WsRpcError::bad_request)?;
     let work_cap = if write_tools.is_empty() {
         perspective_query_capability
     } else {
@@ -47,6 +46,9 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             &ctx,
         )
         .await?;
+    check_credits(ctx.user_did())?;
+    let max_tool_calls = body.max_tool_calls.unwrap_or(DEFAULT_MAX_TOOL_CALLS);
+    check_settings(&write_tools, max_tool_calls).map_err(WsRpcError::bad_request)?;
 
     let agent_context = ctx.acts_as();
     let caller_did = crate::agent::did_for_context(&agent_context)
