@@ -14,7 +14,7 @@ use super::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
 use super::providers::ollama;
 use super::{AIService, Result};
 use crate::agent::AgentService;
-use crate::db::{Ad4mDb, InvalidEndpoint};
+use crate::db::InvalidEndpoint;
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
 use crate::secret::Secret;
@@ -45,7 +45,9 @@ impl std::fmt::Display for EndpointNotFound {
 impl std::error::Error for EndpointNotFound {}
 
 fn stored_endpoint(id: &str) -> Result<Endpoint> {
-    Ad4mDb::with_global_instance(|db| db.get_endpoint(id))?.ok_or_else(|| EndpointNotFound.into())
+    crate::db_backend::db_backend()
+        .get_endpoint(id)?
+        .ok_or_else(|| EndpointNotFound.into())
 }
 
 /// List the endpoint's models once: its health and, unless the operator named them, its
@@ -133,7 +135,7 @@ pub async fn check_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
         .health()
         .await
     };
-    Ad4mDb::with_global_instance(|db| db.set_endpoint_health(&endpoint.id, &health))?;
+    crate::db_backend::db_backend().set_endpoint_health(&endpoint.id, &health)?;
     let changed = health.state != endpoint.health.state
         || health.served_models != endpoint.health.served_models
         || health.detail != endpoint.health.detail;
@@ -151,7 +153,7 @@ pub fn spawn_health_loop() {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            let endpoints = match Ad4mDb::with_global_instance(|db| db.get_endpoints()) {
+            let endpoints = match crate::db_backend::db_backend().get_endpoints() {
                 Ok(endpoints) => endpoints,
                 Err(e) => {
                     log::warn!("AI endpoint health: could not read the endpoints: {e}");
@@ -182,7 +184,8 @@ fn ollama_endpoint(id: &str) -> Result<Endpoint> {
 
 impl AIService {
     pub fn endpoints() -> Result<Vec<EndpointView>> {
-        Ok(Ad4mDb::with_global_instance(|db| db.get_endpoints())?
+        Ok(crate::db_backend::db_backend()
+            .get_endpoints()?
             .iter()
             .map(Endpoint::view)
             .collect())
@@ -202,7 +205,7 @@ impl AIService {
         };
         refuse_cleartext_key(&endpoint)?;
         probe(&mut endpoint, input.capabilities).await;
-        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint))?;
+        crate::db_backend::db_backend().insert_endpoint(&endpoint)?;
         Ok(endpoint.view())
     }
 
@@ -212,7 +215,7 @@ impl AIService {
         stored_endpoint(id)?;
         let api_key = match input.api_key {
             Some(key) => key,
-            None => Ad4mDb::with_global_instance(|db| db.kept_endpoint_key(id, &input.base_url))?,
+            None => crate::db_backend::db_backend().kept_endpoint_key(id, &input.base_url)?,
         };
         let mut endpoint = Endpoint {
             id: id.to_string(),
@@ -226,7 +229,7 @@ impl AIService {
         };
         refuse_cleartext_key(&endpoint)?;
         probe(&mut endpoint, input.capabilities).await;
-        let models = Ad4mDb::with_global_instance(|db| db.update_endpoint(&endpoint))?;
+        let models = crate::db_backend::db_backend().update_endpoint(&endpoint)?;
         for model_id in models {
             if let Err(e) = self.reload_model(model_id.clone()).await {
                 log::warn!("Model {model_id} did not reload after its endpoint changed: {e:#}");
@@ -241,11 +244,11 @@ impl AIService {
     pub async fn remove_endpoint(&self, id: &str, cascade: bool) -> Result<()> {
         stored_endpoint(id)?;
         if cascade {
-            for model_id in Ad4mDb::with_global_instance(|db| db.endpoint_model_ids(id))? {
+            for model_id in crate::db_backend::db_backend().endpoint_model_ids(id)? {
                 self.remove_model(model_id).await?;
             }
         }
-        Ad4mDb::with_global_instance(|db| db.remove_endpoint(id))
+        crate::db_backend::db_backend().remove_endpoint(id)
     }
 
     /// Pull `remote_model` onto the Ollama endpoint `endpoint_id`, publishing `model-status`
@@ -298,7 +301,7 @@ impl AIService {
     pub async fn delete_upstream_model(&self, endpoint_id: &str, remote_model: &str) -> Result<()> {
         let endpoint = ollama_endpoint(endpoint_id)?;
         let users =
-            Ad4mDb::with_global_instance(|db| db.models_using_remote(endpoint_id, remote_model))?;
+            crate::db_backend::db_backend().models_using_remote(endpoint_id, remote_model)?;
         if !users.is_empty() {
             return Err(InvalidEndpoint(format!(
                 "{remote_model} is used by model(s) {}: remove them first",
@@ -317,6 +320,7 @@ impl AIService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Ad4mDb;
     use crate::types::AiCapability;
 
     fn input(name: &str, url: &str, key: Option<&str>) -> EndpointInput {
