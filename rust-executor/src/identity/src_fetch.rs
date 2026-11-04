@@ -21,12 +21,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ad4m_identity_core::Event;
 use ad4m_ldk::identity::MAX_LOG_PAGE_BYTES;
 use futures::future::BoxFuture;
 use hyper_014::client::connect::dns::Name;
 use reqwest::dns::{Addrs, Resolve, Resolving};
 use serde::Deserialize;
-use serde_json::Value;
 
 use super::resolver::{is_public, HttpsBase};
 
@@ -55,10 +55,12 @@ fn system_lookup() -> Lookup {
 
 /// The part of a log page the resolver reads from a foreign host: the events, and the head's
 /// seq as a hint of how far to page. A host may add members (section 13); its head need not be
-/// signed, and is never trusted.
+/// signed, and is never trusted. Each event is read from its own text by `Event`'s
+/// `Deserialize`, which refuses one that names a member twice (`DuplicateMember`): a page with
+/// such an event is no log page.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HostPage {
-    pub events: Vec<Value>,
+    pub events: Vec<Event>,
     pub head: HostHead,
 }
 

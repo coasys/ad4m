@@ -18,6 +18,23 @@
       }
     },
     {
+      "domain": "coasys:agent-record",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "1fd85f6305755d4862595532d3210757f1f76f31470cd6e329ee3c357224b2f25637e034973c81c31e87abd5a749b1aeb44e56d04e4cad73492ddb2ef585060f",
+      "signingBytes": "{\"domain\":\"coasys:agent-record\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:agent-record\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:agent-record"
+      }
+    },
+    {
       "domain": "coasys:store-request",
       "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
       "signature": "92c110bbf7507abead2f19ab96ff8e8feae2dc02de767bda31bbfed3270a2c1522753c59aadf6342fa019cc509c8f6b22d2f688c34c7fa39bab4d5d8814a0005",
@@ -214,6 +231,11 @@
     },
     {
       "name": "coasys:link",
+      "owner": "identity",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:agent-record",
       "owner": "identity",
       "scheme": "domain-field"
     },

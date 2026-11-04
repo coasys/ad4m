@@ -42,6 +42,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroize;
 
+use super::cache::CacheError;
 use super::device::{device_key, enc_key_of, WalletSigner, REQUEST_TTL_S};
 use super::record::DevicePosition;
 use super::service::{backend_error, cache_error, error, now, IdentityService};
@@ -269,7 +270,7 @@ impl IdentityService {
             .trusted(&position.scid)
             .await
             .map_err(cache_error)?
-            .ok_or_else(|| cache_error(super::cache::CacheError::NotFound))?;
+            .ok_or_else(|| cache_error(CacheError::NotFound))?;
         let (_, sealed_at, _) = joined(&position);
         for message in self.list_joined(&position).await? {
             let mut opened = match open(agent, &sealed_at, &message.sealed) {
@@ -585,6 +586,27 @@ impl IdentityService {
         };
         let chain = match self.cache.refresh(self.backend.as_ref(), &scid).await {
             Ok(chain) => chain,
+            // A store behind the cache, or whose head names another hash, is no fork: the
+            // cached log up to its trusted seq answers, as in `refreshed_or_cached`.
+            Err(e @ (CacheError::Behind { .. } | CacheError::Conflict(_))) => {
+                match self.cache.trusted(&scid).await {
+                    Ok(Some((chain, _))) => {
+                        log::info!(
+                            "identity: the store is behind for {} ({e}); checking the pre-join \
+                             ticket against the cached log",
+                            did_of(&scid)
+                        );
+                        chain
+                    }
+                    Ok(None) | Err(_) => {
+                        log::warn!(
+                            "identity: the log of {} for a pre-join ticket cannot be read now ({e})",
+                            did_of(&scid)
+                        );
+                        return false;
+                    }
+                }
+            }
             Err(e) => {
                 log::warn!(
                     "identity: the log of {} for a pre-join ticket cannot be read now ({e})",
@@ -1117,6 +1139,33 @@ mod tests {
                 (main_key.as_str(), store_did.as_str())
             );
         }
+        ends(&service);
+    }
+
+    /// A store behind the cache (restored from a backup: it answers no log of an identity whose
+    /// head it signed) is no fork and no outage: the ticket is checked against the cached log
+    /// and claimed, not left waiting.
+    #[tokio::test]
+    async fn a_ticket_is_claimed_against_the_cached_log_while_the_store_is_behind() {
+        let log = TestLog::new(93);
+        let (service, store) = holder_store(&log);
+        let _record = OperatorRecord::set(&did_of(&log.scid()));
+        service
+            .cache
+            .refresh(store.as_ref(), &log.scid())
+            .await
+            .unwrap();
+        store.events.lock().unwrap().clear();
+        assert!(matches!(
+            service.cache.refresh(store.as_ref(), &log.scid()).await,
+            Err(CacheError::Behind { store: None, .. })
+        ));
+        let prepared = prepare_device(&service, false).await.unwrap();
+        let device = DeviceString::parse(&prepared.device).unwrap();
+        let offer_id = push_ticket(&log, &store, &device);
+
+        until("the claim", || !store.claims.lock().unwrap().is_empty()).await;
+        assert_eq!(store.claims.lock().unwrap()[0].0, offer_id);
         ends(&service);
     }
 

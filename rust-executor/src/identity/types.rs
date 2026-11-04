@@ -33,9 +33,10 @@ pub struct SignedHead {
     pub sig: String,
 }
 
-/// Two different events at one seq of a log, as the cache recorded them. For a store that
-/// answers a shorter log, `seq` is the cache's head, `ours` its hash and `theirs` the hash of the
-/// head the store signed (a shorter log never truncates the cached one).
+/// Two different events at one seq of a log, as the cache recorded them: `ours` the hash of the
+/// cached event at `seq`, `theirs` the hash of the other one, which holds on the log before
+/// `seq`. A store that answers a shorter log records none (it is behind, or an unverified
+/// conflict).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ForkRecord {
@@ -623,8 +624,8 @@ pub struct InboxMessageEvent {
     pub kind: InboxMessageType,
 }
 
-/// `identity-fork`: the cache found two different events at one seq of a log, or a store that
-/// answered a shorter log. It kept its history and appended nothing.
+/// `identity-fork`: the cache found two different valid events at one seq of a log. It kept its
+/// history and appended nothing. A store that answers a shorter log raises none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityForkEvent {

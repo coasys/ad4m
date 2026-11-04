@@ -36,7 +36,7 @@ type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 
 const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Agent ──
-    'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
+    'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm', identity: 'did:scid:coasys:1:QmTest' },
     'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' },
     // ── Identity ──
     'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null },
@@ -457,6 +457,8 @@ describe('AgentClient', () => {
         const agent = await ad4m.agent.me();
         expect(agent.did).toBe('did:test:123');
         expect(agent.directMessageLanguage).toBe('lang://dm');
+        // agent.get's identity reaches the Agent, as IdentityClient documents.
+        expect(agent.identity).toBe('did:scid:coasys:1:QmTest');
     });
 
     test('status() returns agent status', async () => {

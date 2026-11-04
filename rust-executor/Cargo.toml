@@ -106,7 +106,8 @@ signal-hook = "0.3"
 chrono = { version = "0.4.6", features = ["serde"] }
 env_logger = "0.10.0"
 colored = "2.0"
-serde_json = "1.0.95"
+# `raw_value`: the events of an `identity.*` frame are read from their own text.
+serde_json = { version = "1.0.95", features = ["raw_value"] }
 rmpv = "1"
 rmp-serde = "1"
 uuid = "1.3.0"
