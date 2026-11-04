@@ -986,6 +986,7 @@ mod tests {
             backend: as_backend,
             cache,
             store_url: None,
+            challenges: Default::default(),
         }
     }
 
