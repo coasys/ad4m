@@ -14,7 +14,6 @@ CREATE TABLE IF NOT EXISTS rooms (
   id TEXT PRIMARY KEY,
   admin_did TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  e2e_enabled INTEGER DEFAULT 0,
   revision TEXT
 );
 CREATE TABLE IF NOT EXISTS acl (
@@ -84,7 +83,6 @@ export interface RoomRow {
   id: string;
   admin_did: string;
   created_at: string;
-  e2e_enabled: number;
   revision: string | null;
 }
 
@@ -147,14 +145,8 @@ export interface ServerIdentityRow {
  * shapes the rest of the server needs. Kept dependency-free of any other
  * module in this package so it can be imported everywhere without cycles.
  */
-export interface LinkServerDBOptions {
-  /** Maximum diffs to retain per room. Older diffs get pruned. Default 10000. 0 disables pruning. */
-  maxDiffsPerRoom?: number;
-}
-
 export class LinkServerDB {
   readonly raw: Database.Database;
-  readonly maxDiffsPerRoom: number;
 
   // Cached prepared statements — prepared once, reused for the lifetime of
   // the DB connection. Avoids re-parsing SQL on every call (particularly
@@ -162,7 +154,7 @@ export class LinkServerDB {
   // otherwise prepare the same INSERT 1500 times).
   private readonly stmts: ReturnType<LinkServerDB["prepareStatements"]>;
 
-  constructor(filePath: string, opts?: LinkServerDBOptions) {
+  constructor(filePath: string) {
     if (filePath !== ":memory:") {
       mkdirSync(dirname(filePath), { recursive: true });
     }
@@ -170,7 +162,6 @@ export class LinkServerDB {
     this.raw.pragma("journal_mode = WAL");
     this.raw.pragma("foreign_keys = ON");
     this.raw.exec(SCHEMA);
-    this.maxDiffsPerRoom = opts?.maxDiffsPerRoom ?? 10_000;
     this.stmts = this.prepareStatements();
   }
 
@@ -182,9 +173,8 @@ export class LinkServerDB {
          FROM rooms r ORDER BY r.created_at DESC`
       ),
       createRoom: this.raw.prepare(
-        "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled, revision) VALUES (?, ?, ?, 0, ?)"
+        "INSERT INTO rooms (id, admin_did, created_at, revision) VALUES (?, ?, ?, ?)"
       ),
-      setE2e: this.raw.prepare("UPDATE rooms SET e2e_enabled = ? WHERE id = ?"),
       updateRevision: this.raw.prepare("UPDATE rooms SET revision = ? WHERE id = ?"),
 
       getAcl: this.raw.prepare("SELECT * FROM acl WHERE room_id = ? ORDER BY added_at ASC"),
@@ -264,15 +254,6 @@ export class LinkServerDB {
          VALUES (?, ?, ?)`
       ),
 
-      // diff retention
-      countDiffs: this.raw.prepare("SELECT COUNT(*) AS cnt FROM diffs WHERE room_id = ?"),
-      getOldestRetainedSeq: this.raw.prepare(
-        "SELECT sequence FROM diffs WHERE room_id = ? ORDER BY sequence ASC LIMIT 1 OFFSET ?"
-      ),
-      deleteDiffsBefore: this.raw.prepare(
-        "DELETE FROM diffs WHERE room_id = ? AND sequence < ?"
-      ),
-
       // session sweep
       deleteExpiredSessions: this.raw.prepare(
         "DELETE FROM sessions WHERE expires_at < ?"
@@ -296,20 +277,17 @@ export class LinkServerDB {
     return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number }>;
   }
 
+  /** Every room is end-to-end encrypted: the commit route refuses plaintext links from creation. */
   createRoom(roomId: string, adminDid: string): RoomRow {
     const createdAt = new Date().toISOString();
     this.stmts.createRoom.run(roomId, adminDid, createdAt, EMPTY_REVISION);
-    return { id: roomId, admin_did: adminDid, created_at: createdAt, e2e_enabled: 0, revision: EMPTY_REVISION };
+    return { id: roomId, admin_did: adminDid, created_at: createdAt, revision: EMPTY_REVISION };
   }
 
   /** Returns the revision for a room. Always present — set at creation and updated on every commit. */
   getRoomRevision(roomId: string): string {
     const room = this.getRoom(roomId);
     return room?.revision ?? EMPTY_REVISION;
-  }
-
-  setE2eEnabled(roomId: string, enabled: boolean): void {
-    this.stmts.setE2e.run(enabled ? 1 : 0, roomId);
   }
 
   // ---- acl ----
@@ -447,9 +425,6 @@ export class LinkServerDB {
       }
       this.appendDiff(roomId, sequence, JSON.stringify(diff), authorDid);
       this.stmts.updateRevision.run(revision, roomId);
-      if (this.maxDiffsPerRoom > 0) {
-        this.pruneOldDiffs(roomId, this.maxDiffsPerRoom);
-      }
       return { sequence, revision };
     });
     return run();
@@ -538,18 +513,6 @@ export class LinkServerDB {
 
   setIdentity(keyType: string, publicKey: string, privateKey: string): void {
     this.stmts.setIdentity.run(keyType, publicKey, privateKey);
-  }
-
-  // ---- diff retention ----
-
-  /** Prune the oldest diffs for a room, keeping at most `maxDiffs` entries. */
-  pruneOldDiffs(roomId: string, maxDiffs: number): void {
-    const row = this.stmts.countDiffs.get(roomId) as { cnt: number };
-    if (row.cnt <= maxDiffs) return;
-    const cutoff = this.stmts.getOldestRetainedSeq.get(roomId, maxDiffs) as { sequence: number } | undefined;
-    if (cutoff) {
-      this.stmts.deleteDiffsBefore.run(roomId, cutoff.sequence);
-    }
   }
 
   // ---- session sweep ----

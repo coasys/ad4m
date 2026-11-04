@@ -206,6 +206,7 @@ pub struct HostingRequestPaymentResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Ad4mDb;
     use serde_json::json;
 
     // A wallet read answers 503 at once when the Holochain conductor does not run, even
