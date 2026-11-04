@@ -552,6 +552,14 @@ Coasys identity store adds these checks:
   someone who holds the 12 words (the recovery secret, and so the committed next key) a freeze
   lasts only until they append that `rotate` themselves; this is inherent to pre-rotation, where
   whoever holds the next key is the owner as far as the log can tell.
+- **Length cap.** The store holds at most 16 384 events per log (seqs 0 to 16 383), the most
+  the executor's resolver reads (64 pages of 256 events, section 13), and refuses an append
+  whose last event would lie past it (`400 log-full`). A log that reaches the cap can take no
+  further event, a `rotate` included.
+- **Signed before read.** Before it replays a stored log for an append, the store checks the
+  first event's proof against the key that signs at its seq, from its key index at the head
+  (the master current there; for a `rotate`, the key the stored next-key commitment names).
+  Someone without a master key of the log cannot make the store replay it.
 - **Proof of work for a log with no vouching note**, below.
 
 ### Proof of work for a log with no vouching note

@@ -2,8 +2,11 @@
 //!
 //! The store keeps one connection behind a mutex; every write runs in one immediate
 //! transaction. A log is replayed from `chain_entries` with the identity core when its fold for
-//! the stored head is not held in memory (`held.rs`); the database keeps no second copy of what
-//! the module's tables hold.
+//! the stored head is not held in memory (`held.rs`); the database keeps no second copy of the
+//! folded state. What it keeps beside the events is the key index at the stored head, written
+//! in the append's transaction: every key's row in `keys` (masters marked `master = 1`, with the
+//! seqs that added and retired them) and the next-key commitment in `logs.next`. That is what a
+//! write is authenticated against before any replay (`log.rs`, `request.rs`, `offers.rs`).
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -24,7 +27,8 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS logs (
     scid        TEXT PRIMARY KEY,
     created_at  INTEGER NOT NULL,
-    admitted_by TEXT NOT NULL CHECK (admitted_by IN ('vouch', 'brake'))
+    admitted_by TEXT NOT NULL CHECK (admitted_by IN ('vouch', 'brake')),
+    next        TEXT
 );
 CREATE TABLE IF NOT EXISTS heads (
     scid        TEXT PRIMARY KEY,
@@ -37,9 +41,11 @@ CREATE TABLE IF NOT EXISTS keys (
     added   INTEGER NOT NULL,
     revoked INTEGER,
     bot     TEXT,
-    expires INTEGER
+    expires INTEGER,
+    master  INTEGER NOT NULL CHECK (master IN (0, 1))
 );
 CREATE INDEX IF NOT EXISTS keys_of_log ON keys(scid, key_id);
+CREATE INDEX IF NOT EXISTS masters_of_log ON keys(scid, added) WHERE master = 1;
 CREATE TABLE IF NOT EXISTS agents (
     did       TEXT PRIMARY KEY,
     record    TEXT NOT NULL,
@@ -300,16 +306,19 @@ pub fn indexed_signs(conn: &Connection, scid: &str, key_id: &str) -> Result<Vec<
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Writes the key-index rows of every key of `state` as they stand at `head_seq`.
+/// Writes the key-index rows of every key of `state` as they stand at `head_seq`, and the
+/// next-key commitment of `state` (`logs.next`, `NULL` once the log has ended). The `logs` row
+/// must exist.
 pub(crate) fn put_keys(conn: &Connection, state: &KeyState, head_seq: u64) -> Result<(), ApiError> {
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO keys (sign, scid, key_id, added, revoked, bot, expires)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO keys (sign, scid, key_id, added, revoked, bot, expires, master)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(sign) DO UPDATE SET revoked = excluded.revoked, bot = excluded.bot,
                                          expires = excluded.expires
          WHERE keys.scid = excluded.scid",
     )?;
-    for record in state.masters.iter().chain(state.keys.values()) {
+    let masters = state.masters.iter().map(|m| (m, true));
+    for (record, master) in masters.chain(state.keys.values().map(|k| (k, false))) {
         let bot = state.bot_scope_at(&record.id, head_seq);
         let expires = bot.map(|b| b.expires);
         let bot = bot
@@ -324,9 +333,137 @@ pub(crate) fn put_keys(conn: &Connection, state: &KeyState, head_seq: u64) -> Re
             record.revoked.map(to_sql).transpose()?,
             bot,
             expires.map(to_sql).transpose()?,
+            master,
         ])?;
     }
+    conn.execute(
+        "UPDATE logs SET next = ?2 WHERE scid = ?1",
+        params![state.scid, state.next],
+    )?;
     Ok(())
+}
+
+/// A master key of a log as the key index lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexedMaster {
+    pub id: String,
+    pub sign: Multikey,
+    pub revoked: Option<u64>,
+}
+
+fn indexed_master(
+    conn: &Connection,
+    sql: &str,
+    scid: &str,
+    seq: u64,
+) -> Result<Option<IndexedMaster>, ApiError> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    Ok(stmt
+        .query_row(params![scid, to_sql(seq)?], |row| {
+            Ok(IndexedMaster {
+                id: row.get(0)?,
+                sign: row.get(1)?,
+                revoked: row.get::<_, Option<i64>>(2)?.map(from_sql),
+            })
+        })
+        .optional()?)
+}
+
+/// The master of `scid` that signs an event at `seq` (≥ 1), by the key index: the master added
+/// before `seq` and not retired before it. At `seq` = head + 1 that is the current master;
+/// `None` there means the log has ended.
+pub(crate) fn master_at(
+    conn: &Connection,
+    scid: &str,
+    seq: u64,
+) -> Result<Option<IndexedMaster>, ApiError> {
+    indexed_master(
+        conn,
+        "SELECT key_id, sign, revoked FROM keys
+         WHERE scid = ?1 AND master = 1 AND added < ?2 AND (revoked IS NULL OR revoked >= ?2)",
+        scid,
+        seq,
+    )
+}
+
+/// The master of `scid` that the `rotate` at `seq` revealed, by the key index.
+pub(crate) fn master_added_at(
+    conn: &Connection,
+    scid: &str,
+    seq: u64,
+) -> Result<Option<IndexedMaster>, ApiError> {
+    indexed_master(
+        conn,
+        "SELECT key_id, sign, revoked FROM keys WHERE scid = ?1 AND master = 1 AND added = ?2",
+        scid,
+        seq,
+    )
+}
+
+/// How many masters the log of `scid` has had (the next one is `m<count>`).
+pub(crate) fn master_count(conn: &Connection, scid: &str) -> Result<u64, ApiError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM keys WHERE scid = ?1 AND master = 1",
+        params![scid],
+        |row| row.get(0),
+    )?;
+    Ok(from_sql(count))
+}
+
+/// The next-key commitment of `scid` at its stored head; `None` once the log has ended.
+pub(crate) fn next_commitment(conn: &Connection, scid: &str) -> Result<Option<String>, ApiError> {
+    Ok(conn
+        .query_row(
+            "SELECT next FROM logs WHERE scid = ?1",
+            params![scid],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// The seq of the stored head of `scid` (one primary-key lookup of `chain_heads`).
+pub(crate) fn head_seq(conn: &Connection, scid: &str) -> Result<Option<u64>, ApiError> {
+    Ok(SqliteChainStore::head_in(conn, KEL, &scid.to_string())?.map(|head| head.seq))
+}
+
+/// The hash of the stored event of `scid` at `seq`.
+pub(crate) fn stored_hash(
+    conn: &Connection,
+    scid: &str,
+    seq: u64,
+) -> Result<Option<String>, ApiError> {
+    Ok(conn
+        .query_row(
+            "SELECT hash FROM chain_entries WHERE type = ?1 AND chain = ?2 AND seq = ?3",
+            params![KEL, scid, to_sql(seq)?],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// A key's standing at the stored head of its log, by the key index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Standing {
+    /// Revoked, replaced (a master) or ended at or before the head.
+    pub revoked: bool,
+    /// The `expires` of the bot scope in force at the head; `None` for a key without the bot
+    /// mark.
+    pub bot_expires: Option<u64>,
+}
+
+/// The standing of the signing key `sign` at the head of the log that lists it.
+pub(crate) fn standing(conn: &Connection, sign: &str) -> Result<Option<Standing>, ApiError> {
+    let mut stmt = conn.prepare_cached("SELECT revoked, bot, expires FROM keys WHERE sign = ?1")?;
+    Ok(stmt
+        .query_row(params![sign], |row| {
+            let bot: Option<String> = row.get(1)?;
+            Ok(Standing {
+                revoked: row.get::<_, Option<i64>>(0)?.is_some(),
+                bot_expires: bot.and(row.get::<_, Option<i64>>(2)?).map(from_sql),
+            })
+        })
+        .optional()?)
 }
 
 /// The key-index entry of `sign`, with the head it describes.

@@ -56,9 +56,10 @@ pub struct Settings {
     pub feed_token: Option<String>,
     /// `CORS_ORIGINS`: the origins allowed to call from a browser (the auth domain, the web app).
     pub cors_origins: Vec<String>,
-    /// `HELD_LOG_EVENTS`: the most events the logs held folded in memory cover together
-    /// (default 1 048 576; `held.rs`). A log longer than this is folded on every use.
-    pub held_log_events: usize,
+    /// `HELD_LOG_BYTES`: the most heap the logs held folded in memory take together, by
+    /// `held::held_bytes_of` (default 256 MiB; `held.rs`). A log whose fold is larger is folded
+    /// on every use.
+    pub held_log_bytes: usize,
 }
 
 impl Default for Settings {
@@ -67,13 +68,15 @@ impl Default for Settings {
             pow_bits: 22,
             feed_token: None,
             cors_origins: Vec::new(),
-            held_log_events: DEFAULT_HELD_LOG_EVENTS,
+            held_log_bytes: DEFAULT_HELD_LOG_BYTES,
         }
     }
 }
 
-/// The default of [`Settings::held_log_events`].
-pub const DEFAULT_HELD_LOG_EVENTS: usize = 1 << 20;
+/// The default of [`Settings::held_log_bytes`]: 256 MiB, about 670 000 events of the costliest
+/// common kind (a rotation, about 400 B held; `tests/held_memory.rs`), so a full log of
+/// rotations (`log::MAX_LOG_EVENTS`) takes under 3 % of it.
+pub const DEFAULT_HELD_LOG_BYTES: usize = 256 << 20;
 
 /// A point inside a write where a test makes the store fail, to check that the write's
 /// transaction leaves nothing behind (an append, a claim's spend).
@@ -106,7 +109,7 @@ impl Store {
         Arc::new(Store {
             db,
             key,
-            held: held::HeldLogs::new(settings.held_log_events),
+            held: held::HeldLogs::new(settings.held_log_bytes),
             settings,
             clock,
             started_at,
