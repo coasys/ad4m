@@ -1559,6 +1559,42 @@ pub(crate) mod tests {
         );
     }
 
+    /// A signed head at the cached head's seq naming another hash, with no event of the
+    /// store's there: a conflict, recorded nowhere. The accepted head stays the one over the
+    /// cached event, so the cached log stays trusted.
+    #[tokio::test]
+    async fn a_head_at_the_cached_seq_with_another_hash_is_an_unrecorded_conflict() {
+        let mut log = TestLog::new(1);
+        let at_incept = log.chain();
+        log.events.push(add_device(&at_incept, &log.master, 40));
+        let mut cache = trusting();
+        let forks = counting_cache(&mut cache);
+        accept_signed(&cache, &log.events).await;
+        let scid = log.scid();
+
+        let theirs =
+            ad4m_identity_core::event_hash(&add_device(&at_incept, &log.master, 42)).unwrap();
+        let head = store_key().sign_head(&scid, 1, &theirs, 2);
+        match cache.accept(&scid, &head, &[]).await {
+            Err(CacheError::Conflict(evidence)) => {
+                assert_eq!(evidence.seq, 1);
+                assert_eq!(&evidence.ours, log.chain().hash_at(1).unwrap());
+                assert_eq!(evidence.theirs, theirs);
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(forks.load(Ordering::SeqCst), 0);
+        assert!(cache.forks(&scid).await.unwrap().is_empty());
+        assert_eq!(
+            cache.accepted_head(&scid).unwrap().unwrap().hash,
+            log.chain().head().hash
+        );
+        assert_eq!(
+            cache.trusted(&scid).await.unwrap().map(|(_, seq)| seq),
+            Some(1)
+        );
+    }
+
     /// A store on another branch whose head is below the cached one: the refresh reads the
     /// store's log from seq 0, and its event at the head's seq holds on the held prefix, so the
     /// fork is recorded once, with evidence at that one seq.
