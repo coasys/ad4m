@@ -17,9 +17,14 @@
 //! an ordinary query subscription on `AgentReply` in the container.
 //!
 //! **Which messages are the request.** The caller's own messages are the person's turns, and the
-//! replies that finished are the agent's. Anything else in the container (another person's
-//! message, a reply that failed) is left out, so a message somebody else wrote never reaches the
-//! model as an instruction.
+//! caller's replies that finished are the agent's. Anything else in the container (another
+//! person's message, another person's reply, a reply that failed) is left out. "The caller's"
+//! is read per link: a message counts only when the caller wrote its `text` and nobody else did,
+//! and a reply only when the same holds for its `status` and `text`. In a shared container
+//! another member can write a newer `text` onto the caller's message, and a record's `author`
+//! (its earliest link's) would still name the caller. So nothing another member writes reaches
+//! the model as a turn of the conversation. What the agent's tools read in `workIn` is another
+//! matter: that is the data it works on.
 //!
 //! **One at a time.** A container has at most one reply running ([`RunningReplies`], held per
 //! perspective). [`cancel_reply`] stops it. A reply still `running` when the executor starts
@@ -256,7 +261,7 @@ async fn prepare_and_create(
     reply: &str,
     context: &AgentContext,
 ) -> Result<Vec<AgentMessage>, ReplyError> {
-    let replies = replies_in(perspective, container).await?;
+    let replies = replies_in(perspective, container, caller_did).await?;
     for (id, row) in &replies {
         // The slot is ours, so a `running` reply here has no task: it was cut off.
         if row.status == ReplyStatus::Running.as_str() {
@@ -272,12 +277,13 @@ async fn prepare_and_create(
 
     let query = json!({
         "parent": { "id": container },
+        "where": written_only_by(caller_did, &["text"]),
         "order": [["timestamp", "desc"]],
         "limit": CONVERSATION_LIMIT,
     });
     let mut rows = query_rows(perspective, TEXT_CONTENT_URI, &query).await?;
     rows.reverse();
-    let messages = conversation(&rows, &replies, caller_did);
+    let messages = conversation(&rows, &replies);
     match messages.last() {
         Some(last) if last.role == "user" => {}
         _ => {
@@ -323,18 +329,53 @@ async fn prepare_and_create(
     Ok(messages)
 }
 
-/// A reply as the conversation reads it.
+/// A reply as the conversation reads it. `trusted` when the caller wrote all of it: the reply
+/// itself and every `status` and `text` link on it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReplyRow {
     pub status: String,
     pub text: String,
+    pub trusted: bool,
 }
 
-/// The container's replies, by id.
+/// A `where` clause for records whose `properties` `did` wrote and nobody else did. A property
+/// reads its latest link whoever wrote it, and a record's `author` is only its earliest link's,
+/// so checking the author would let another member of a shared perspective change the words of
+/// the caller's own message. Each condition is on the property's own links, answered in the
+/// store.
+fn written_only_by(did: &str, properties: &[&str]) -> Value {
+    let conditions: Vec<Value> = properties
+        .iter()
+        .flat_map(|p| {
+            [
+                json!({ *p: { "author": did } }),
+                json!({ "NOT": { *p: { "author": { "not": did } } } }),
+            ]
+        })
+        .collect();
+    json!({ "AND": conditions })
+}
+
+/// The container's replies, by id, each marked whether the caller wrote all of it.
 async fn replies_in(
     perspective: &PerspectiveInstance,
     container: &str,
+    caller_did: &str,
 ) -> anyhow::Result<HashMap<String, ReplyRow>> {
+    let ids = |rows: &[Value]| -> HashSet<String> {
+        rows.iter()
+            .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect()
+    };
+    let trusted = ids(&query_rows(
+        perspective,
+        AGENT_REPLY_CLASS,
+        &json!({
+            "parent": { "id": container },
+            "where": written_only_by(caller_did, &["status", "text"]),
+        }),
+    )
+    .await?);
     let rows = query_rows(
         perspective,
         AGENT_REPLY_CLASS,
@@ -350,35 +391,35 @@ async fn replies_in(
                 ReplyRow {
                     status: string_field(row, "status"),
                     text: string_field(row, "text"),
+                    trusted: trusted.contains(id),
                 },
             ))
         })
         .collect())
 }
 
-/// The conversation the model is given, oldest first: the caller's own messages as the
-/// person's turns, finished replies as the agent's, and nothing else.
+/// The conversation the model is given, oldest first, from `rows`: the container's messages
+/// the caller wrote alone (see [`written_only_by`]). The caller's messages are the person's
+/// turns, the caller's finished replies the agent's, and nothing else: another reply is never a
+/// message, so a reply somebody else wrote can't be read as the caller's.
 pub(crate) fn conversation(
     rows: &[Value],
     replies: &HashMap<String, ReplyRow>,
-    caller_did: &str,
 ) -> Vec<AgentMessage> {
     rows.iter()
         .filter_map(|row| {
             let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
             if let Some(reply) = replies.get(id) {
                 let finished = reply.status == ReplyStatus::Done.as_str();
-                return (finished && !reply.text.trim().is_empty()).then(|| AgentMessage {
-                    role: "assistant".into(),
-                    content: reply.text.clone(),
+                return (reply.trusted && finished && !reply.text.trim().is_empty()).then(|| {
+                    AgentMessage {
+                        role: "assistant".into(),
+                        content: reply.text.clone(),
+                    }
                 });
             }
-            let author = row
-                .get("author")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
             let text = string_field(row, "text");
-            (author == caller_did && !text.trim().is_empty()).then(|| AgentMessage {
+            (!text.trim().is_empty()).then(|| AgentMessage {
                 role: "user".into(),
                 content: text,
             })
