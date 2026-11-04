@@ -11,7 +11,6 @@
 //! `model_not_found` shape.
 
 use super::errors::{OpenAIError, OpenAIResult};
-use crate::db::Ad4mDb;
 use crate::types::ModelType;
 
 pub async fn resolve_model(requested: &str, expected_type: ModelType) -> OpenAIResult<String> {
@@ -21,7 +20,8 @@ pub async fn resolve_model(requested: &str, expected_type: ModelType) -> OpenAIR
         ));
     }
 
-    let models = Ad4mDb::with_global_instance(|db| db.get_models())
+    let models = crate::db_backend::db_backend()
+        .get_models()
         .map_err(|e| OpenAIError::internal(format!("Database error listing models: {e}")))?;
 
     // Pass 1: exact id match.
@@ -53,7 +53,8 @@ pub async fn resolve_model(requested: &str, expected_type: ModelType) -> OpenAIR
     // Pass 3: the `"default"` keyword resolves via the DB's per-type
     // pointer, after id/name so a real model named "default" wins.
     if requested == "default" {
-        return Ad4mDb::with_global_instance(|db| db.get_default_model(expected_type.clone()))
+        return crate::db_backend::db_backend()
+            .get_default_model(expected_type.clone())
             .map_err(|e| OpenAIError::internal(format!("Database error: {e}")))?
             .ok_or_else(|| {
                 OpenAIError::not_found(format!(
