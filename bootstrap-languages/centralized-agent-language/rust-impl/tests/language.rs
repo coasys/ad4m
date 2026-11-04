@@ -1892,3 +1892,18 @@ fn a_store_over_plain_http_is_called_only_on_a_loopback_address() {
     );
     assert_eq!(host.calls.borrow().len(), calls, "nothing was sent");
 }
+
+/// The language has no default store: without a `storeUrl` setting it calls nothing.
+#[test]
+fn without_a_store_url_nothing_is_sent() {
+    let server = StoreProcess::start();
+    let (host, store) = Host::of(&server);
+    *host.url.borrow_mut() = String::new();
+    assert_eq!(
+        refusal(block_on(store.pow_params())),
+        IdentityErrorCode::Invalid {
+            reason: "store-url".into()
+        }
+    );
+    assert!(host.calls.borrow().is_empty(), "nothing was sent");
+}

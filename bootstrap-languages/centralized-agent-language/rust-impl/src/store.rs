@@ -22,9 +22,6 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
-/// The staging network's store, used when the settings name none. One store per build: a build
-/// for another network sets `storeUrl` (and the executor's `identity.storeUrl`).
-pub const DEFAULT_STORE_URL: &str = "https://store.ad4m.dev";
 pub const REQUEST_HEADER: &str = "X-Coasys-Request";
 /// The largest reply body the language takes from the store, on every route and status: a log
 /// page ([`MAX_LOG_PAGE_BYTES`]) is the largest answer a store gives. The host's `httpFetch`
@@ -52,7 +49,9 @@ pub trait Http {
 /// What the language reads from its settings on every call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreSettings {
-    /// `storeUrl`: the store's base URL (the default store when unset).
+    /// `storeUrl`: the store's base URL, which the executor writes from its network's seed or
+    /// its `identity.storeUrl`. Empty when unset: the language has no default store, so every
+    /// call refuses `invalid` (`store-url`).
     pub url: String,
     /// `storeKeys`: the store keys (Ed25519 multikeys) a signed head must be signed by before
     /// the language reads a log through it (the executor fills it from `identity.storeKeys`).
@@ -66,8 +65,7 @@ pub fn store_settings_from(settings: &str) -> StoreSettings {
     let url = value
         .get("storeUrl")
         .and_then(Value::as_str)
-        .filter(|url| !url.is_empty())
-        .unwrap_or(DEFAULT_STORE_URL)
+        .unwrap_or_default()
         .to_string();
     let keys = value
         .get("storeKeys")
@@ -603,8 +601,10 @@ mod tests {
     fn the_store_url_comes_from_the_settings() {
         let url = |settings: &str| store_settings_from(settings).url;
         assert_eq!(url(r#"{"storeUrl":"http://x"}"#), "http://x");
-        assert_eq!(url(""), DEFAULT_STORE_URL);
-        assert_eq!(url(r#"{"storeUrl":""}"#), DEFAULT_STORE_URL);
+        // No default store: unset is empty, which no call takes.
+        assert_eq!(url(""), "");
+        assert_eq!(url(r#"{"storeUrl":""}"#), "");
+        assert!(!transport_allowed(&url("")));
         assert_eq!(
             store_settings_from(r#"{"storeUrl":"https://s","storeKeys":["z6MkA",3,"z6MkB"]}"#),
             StoreSettings {
