@@ -42,11 +42,15 @@ the offer's state).
     recorded, nobody alerted, the cached log and its accepted head stay (the trusted seq does
     not move back). Callers treat it as a soft miss: `refreshed_or_cached` and the resolver
     answer from the cache (`identity.resolve` lists the store in `coasys:skipped`, "the store
-    is behind"), and the next refresh window reads the store again.
+    is behind"), and the next refresh window reads the store again. `KelCache::refresh`
+    notes it per log (`store_behind`, in memory): `identity.status` answers
+    `storeBehind: { since, seq }` (the first refresh that saw it, the store's head seq or
+    `null` for no log) until a refresh succeeds, or `resetLog`.
   - another hash: a signed head names a hash, not an event, so it is no fork either. The
     store's events at or below that seq go through the same import as `ingest`; `fetch`
-    re-reads the store's log from seq 0 once for them, since the page from the cached head
-    holds none. A competing event that holds (`holding_rival`) records the fork, evidence at
+    re-reads the store's log from seq 0 up to the head's seq once for them (page after page,
+    at most `MAX_PAGES`: `store_events_to`), since the page from the cached head holds none.
+    A competing event that holds (`holding_rival`) records the fork, evidence at
     that event's seq (ours vs theirs there). Without one: `CacheError::Conflict`, evidence at
     the head's seq (our hash there vs `head.hash`), nothing recorded, nobody alerted, the
     cache answers (`coasys:skipped` with the conflict).
@@ -61,9 +65,10 @@ the offer's state).
   `coasys:fork`) the competing event goes through `cache::holding_rival`: first
   `rival_signer`, one proof check against the master of the log current before its seq (for a
   `rotate`, the key it names), so a body no master signed is refused before the prefix is read;
-  then `rival_holds`, the core's `fold` of the held prefix below it and the event, every rule
-  and proof. Every copy with the rival's hash is tried, as `import` tries them (a copy with its
-  proofs stripped hashes the same). One that does not hold records nothing and alerts nobody:
+  then the event steps on the core's `fold` of the held prefix below it (`KelChain::appended`),
+  every rule and proof. Every copy with the rival's hash is tried, as `import` tries them (a
+  copy with its proofs stripped hashes the same); the prefix folds once and each copy steps on
+  a copy of it, so a host serving many copies (each with another junk proof) costs one fold. One that does not hold records nothing and alerts nobody:
   `ingest` refuses it as `CacheError::Fold`, and a foreign `src` serving it is skipped
   (`coasys:skipped`, "does not hold") and not read again for `MISS_TTL`. Without this a store
   or host with no key could raise a persistent fork alert per body it makes up.

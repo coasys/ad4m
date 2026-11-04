@@ -25,7 +25,11 @@ export class IdentityClient {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     }
 
-    /** This agent's identity, device key, `enc` key and the cached head. */
+    /**
+     * This agent's identity, device key, `enc` key and the cached head. `storeBehind` is set
+     * (`{ since, seq }`) while the configured store answers the log behind the executor's cache,
+     * and `null` once it catches up.
+     */
     async status(): Promise<IdentityStatus> {
         return this.#apiClient.call("identity.status", {});
     }

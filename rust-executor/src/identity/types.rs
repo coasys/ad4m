@@ -65,6 +65,21 @@ pub struct IdentityStatus {
     pub head: Option<SignedHead>,
     /// The first fork the cache recorded for the log.
     pub fork: Option<ForkRecord>,
+    /// Set while the configured store answers the log behind the cache (a store restored from
+    /// a backup, or not caught up): the cached log answers meanwhile. `null` once it catches up.
+    pub store_behind: Option<StoreBehind>,
+}
+
+/// The configured store answering a log behind this executor's cache (`identity.status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreBehind {
+    /// When the executor first saw it behind (unix seconds; in this run of the executor).
+    #[ts(type = "number")]
+    pub since: u64,
+    /// The seq of the store's head at its last answer; `null` when it answered no log.
+    #[ts(type = "number | null")]
+    pub seq: Option<u64>,
 }
 
 /// `identity.log` params.

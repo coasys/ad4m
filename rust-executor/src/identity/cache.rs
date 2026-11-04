@@ -33,6 +33,7 @@ use tokio::sync::Mutex;
 
 use super::backend::{IdentityBackend, IdentityError};
 use super::head::verify_head;
+use super::types::StoreBehind;
 
 /// The chain type of key logs in the hash-chain tables.
 pub const KEL_TYPE: ChainType = "coasys:kel";
@@ -136,6 +137,9 @@ pub struct KelCache {
     /// When each log last refreshed from the configured store (unix seconds), in memory only:
     /// after a restart every log counts as stale ([`KelCache::refreshed_within`]).
     refreshed: StdMutex<HashMap<String, u64>>,
+    /// The logs the configured store answers behind the cache ([`CacheError::Behind`]), in
+    /// memory only, until a refresh succeeds ([`KelCache::store_behind`]).
+    behind: StdMutex<HashMap<String, StoreBehind>>,
     store_keys: Vec<String>,
     on_fork: Option<ForkListener>,
 }
@@ -169,6 +173,8 @@ pub fn scid_from(did: &str) -> &str {
 /// The log that `events` start (from seq 0, in any order, repeats dropped), checked to be
 /// `scid`'s; with the events in seq order.
 pub fn fold_log(scid: &str, events: &[Event]) -> Result<(KelChain, Vec<Event>), CacheError> {
+    #[cfg(test)]
+    tests::FOLDS.with(|folds| folds.set(folds.get() + 1));
     let mut sorted: Vec<Event> = events.to_vec();
     sorted.sort_by_key(|e| e.seq);
     sorted.dedup_by(|a, b| a.seq == b.seq && a == b);
@@ -199,9 +205,22 @@ pub fn fold_log(scid: &str, events: &[Event]) -> Result<(KelChain, Vec<Event>), 
 /// chain id, every rule of `KelPolicy`, the proofs). Without it anybody could raise forks with
 /// no key. `Err` says why the rival does not hold.
 pub fn rival_holds(scid: &str, held: &[Event], rival: &Event) -> Result<(), CacheError> {
-    let mut prefix: Vec<Event> = held.iter().filter(|e| e.seq < rival.seq).cloned().collect();
-    prefix.push(rival.clone());
-    fold_log(scid, &prefix).map(|_| ())
+    rival_steps(prefix_below(scid, held, rival.seq)?, rival)
+}
+
+/// The fold of `held`'s events below `seq`: the log a rival at `seq` steps on.
+fn prefix_below(scid: &str, held: &[Event], seq: u64) -> Result<KelChain, CacheError> {
+    let prefix: Vec<Event> = held.iter().filter(|e| e.seq < seq).cloned().collect();
+    fold_log(scid, &prefix).map(|(chain, _)| chain)
+}
+
+/// Whether `rival` steps on `below` (its seq, prev, chain id, every rule of `KelPolicy`, the
+/// proofs): what a fold of `below`'s events and the rival checks, without folding them again.
+fn rival_steps(below: KelChain, rival: &Event) -> Result<(), CacheError> {
+    below
+        .appended(&ad4m_identity_core::KelPolicy, rival)
+        .map(|_| ())
+        .map_err(CacheError::Fold)
 }
 
 /// The master of `chain` (a log holding `rival.seq`) that signed `rival`, as the identity store
@@ -245,9 +264,17 @@ pub fn holding_rival<'a>(
     fork: &ForkEvidence,
     served: &'a [Event],
 ) -> Result<(&'a Event, String), CacheError> {
+    let rivals = signed_rivals(chain, fork, served);
+    if rivals.is_empty() {
+        return Err(unsigned_rival(fork));
+    }
+    // The prefix folds once and each copy steps on a copy of it: a host can serve a thousand
+    // copies of one event in one answer (each with another junk proof, the same hash), and a
+    // fold per copy would cost copies × prefix.
+    let below = prefix_below(scid, held, fork.seq)?;
     let mut why = None;
-    for (rival, signer) in signed_rivals(chain, fork, served) {
-        match rival_holds(scid, held, rival) {
+    for (rival, signer) in rivals {
+        match rival_steps(below.clone(), rival) {
             Ok(()) => return Ok((rival, signer)),
             Err(e) => why = why.or(Some(e)),
         }
@@ -311,6 +338,7 @@ impl KelCache {
             chains: Mutex::new(HashMap::new()),
             fetching: Mutex::new(HashMap::new()),
             refreshed: StdMutex::new(HashMap::new()),
+            behind: StdMutex::new(HashMap::new()),
             store_keys,
             on_fork: None,
         })
@@ -459,6 +487,7 @@ impl KelCache {
         if let Ok(mut refreshed) = self.refreshed.lock() {
             refreshed.remove(scid);
         }
+        self.note_behind(scid, None);
         Ok(())
     }
 
@@ -735,8 +764,13 @@ impl KelCache {
                 }
             }
         };
-        if result.is_ok() {
-            self.note_refreshed(&scid, now());
+        match &result {
+            Ok(_) => {
+                self.note_refreshed(&scid, now());
+                self.note_behind(&scid, None);
+            }
+            Err(CacheError::Behind { store, .. }) => self.note_behind(&scid, Some(*store)),
+            Err(_) => {}
         }
         let mut fetching = self.fetching.lock().await;
         // The map's handle and ours: nobody else waits on this gate.
@@ -774,6 +808,57 @@ impl KelCache {
             .is_some_and(|at| now.saturating_sub(at) < window)
     }
 
+    /// Notes the configured store's answer for `scid`: `Some(seq)` behind the cache (the first
+    /// time stays `since`), `None` caught up.
+    fn note_behind(&self, scid: &str, store: Option<Option<u64>>) {
+        let Ok(mut behind) = self.behind.lock() else {
+            return;
+        };
+        match store {
+            Some(seq) => {
+                behind
+                    .entry(scid.to_string())
+                    .and_modify(|b| b.seq = seq)
+                    .or_insert(StoreBehind { since: now(), seq });
+            }
+            None => {
+                behind.remove(scid);
+            }
+        }
+    }
+
+    /// Whether the configured store answered `scid`'s log behind the cache at the last refresh
+    /// (in this run of the executor), and since when; `None` once a refresh succeeds.
+    pub fn store_behind(&self, scid: &str) -> Option<StoreBehind> {
+        self.behind.lock().ok()?.get(scid).copied()
+    }
+
+    /// The store's events of `did` from seq 0 to `seq`, page after page (at most
+    /// [`MAX_PAGES`]): the events a head at `seq` names. Fewer when the store's pages end first.
+    async fn store_events_to(
+        backend: &dyn IdentityBackend,
+        did: &str,
+        seq: u64,
+    ) -> Result<Vec<Event>, CacheError> {
+        let mut events: Vec<Event> = Vec::new();
+        let mut from = 0;
+        for _ in 0..MAX_PAGES {
+            let Some(page) = backend.log(did, from).await? else {
+                return Err(CacheError::NotFound);
+            };
+            let page = Self::page_events(&page)?;
+            let Some(last) = page.iter().map(|e| e.seq).max() else {
+                break;
+            };
+            events.extend(page.into_iter().filter(|e| e.seq >= from && e.seq <= seq));
+            if last >= seq || last < from {
+                break;
+            }
+            from = last + 1;
+        }
+        Ok(events)
+    }
+
     /// The pages of [`KelCache::refresh`], under the identity's gate.
     async fn fetch(
         &self,
@@ -809,13 +894,11 @@ impl KelCache {
                 .await
             {
                 // The head disagrees with the cached log below this page: read the store's log
-                // from seq 0 once, so a rival event of its that holds is recorded as a fork.
+                // from seq 0 up to the head's seq once, so a rival event of its that holds is
+                // recorded as a fork wherever it sits.
                 Err(CacheError::Conflict(_)) if page.head.seq < from => {
-                    let Some(page) = backend.log(&did, 0).await? else {
-                        return Err(CacheError::NotFound);
-                    };
-                    self.accept(scid, &page.head, &Self::page_events(&page)?)
-                        .await?
+                    let events = Self::store_events_to(backend, &did, page.head.seq).await?;
+                    self.accept(scid, &page.head, &events).await?
                 }
                 other => other?,
             };
@@ -853,6 +936,15 @@ pub(crate) mod tests {
     use ed25519_dalek::SigningKey;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    thread_local! {
+        /// How many times [`fold_log`] ran on this thread: a test bounds the folds of one call.
+        pub(crate) static FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn folds() -> usize {
+        FOLDS.with(|folds| folds.get())
+    }
 
     /// A cache in memory, trusting heads signed by `store_keys`.
     pub(crate) fn in_memory(store_keys: Vec<String>) -> KelCache {
@@ -1240,6 +1332,10 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(forks.load(Ordering::SeqCst), 0, "no identity-fork");
+        let behind = cache
+            .store_behind(&log.scid())
+            .expect("the store shows as behind");
+        assert_eq!(behind.seq, Some(0));
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
         let kept = cache.chain(&log.scid()).await.unwrap().unwrap();
         assert_eq!(kept.head(), log.chain().head(), "the cached history stays");
@@ -1256,17 +1352,23 @@ pub(crate) mod tests {
         // The store catches up: the next refresh takes it, as ever.
         *store.events.lock().unwrap() = log.events.clone();
         cache.refresh(&store, &log.scid()).await.unwrap();
+        assert_eq!(cache.store_behind(&log.scid()), None, "caught up");
     }
 
     /// An `add` of a new device (seed `seed`) on `chain`, signed by `master` (m0).
     pub(crate) fn add_device(chain: &KelChain, master: &SigningKey, seed: u8) -> Event {
-        let device = SigningKey::from_bytes(&[seed; 32]);
+        add_device_from(chain, master, [seed; 32])
+    }
+
+    /// [`add_device`] with the device's whole 32-byte seed, for logs of more than 256 devices.
+    fn add_device_from(chain: &KelChain, master: &SigningKey, seed: [u8; 32]) -> Event {
+        let device = SigningKey::from_bytes(&seed);
         let mut event = ad4m_identity_core::build::add_unsigned(
             chain,
             DeviceKey {
                 id: chain.state().next_device_id(),
                 sign: device.key(),
-                enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+                enc: ad4m_identity_core::encode_x25519_multikey(&seed),
                 life: KeyLife::Standing,
             },
             "offer",
@@ -1388,6 +1490,58 @@ pub(crate) mod tests {
         );
     }
 
+    /// The store's lower head names another branch that splits from ours past its first page:
+    /// the re-read pages from seq 0 up to the head's seq, so the store's rival there is found
+    /// and recorded as a fork (one page from seq 0 holds only the shared prefix).
+    #[tokio::test]
+    async fn a_split_past_the_first_page_is_found_by_the_re_read() {
+        let mut log = TestLog::new(1);
+        let mut chain = log.chain();
+        let device = |n: u32| {
+            let mut seed = [7u8; 32];
+            seed[..4].copy_from_slice(&n.to_be_bytes());
+            seed
+        };
+        // A shared prefix up to seq 299, then ours goes on to 302; the store's rival is at 300.
+        for n in 1..300u32 {
+            let event = add_device_from(&chain, &log.master, device(n));
+            chain
+                .append(&ad4m_identity_core::KelPolicy, &event)
+                .unwrap();
+            log.events.push(event);
+        }
+        let at_split = chain.clone();
+        let rival = add_device_from(&at_split, &log.master, device(1000));
+        let mut theirs_log = log.events.clone();
+        theirs_log.push(rival.clone());
+        for n in 300..303u32 {
+            let event = add_device_from(&chain, &log.master, device(n));
+            chain
+                .append(&ad4m_identity_core::KelPolicy, &event)
+                .unwrap();
+            log.events.push(event);
+        }
+        let store = FakeStore::new(theirs_log);
+        *store.page_limit.lock().unwrap() = Some(PAGE as usize);
+        let mut cache = trusting();
+        let forks = counting_cache(&mut cache);
+        accept_signed(&cache, &log.events).await;
+        let scid = log.scid();
+
+        match cache.refresh(&store, &scid).await {
+            Err(CacheError::Fork(fork)) => {
+                assert_eq!(fork.seq, 300);
+                assert_eq!(fork.theirs, ad4m_identity_core::event_hash(&rival).unwrap());
+            }
+            other => panic!("expected a fork, got {other:?}"),
+        }
+        assert_eq!(forks.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cache.chain(&scid).await.unwrap().unwrap().head(),
+            chain.head()
+        );
+    }
+
     #[tokio::test]
     async fn an_unsigned_event_at_a_held_seq_raises_no_fork() {
         let mut log = TestLog::new(1);
@@ -1497,6 +1651,51 @@ pub(crate) mod tests {
         assert!(!cache
             .signer_has_fork(&log.scid(), &log.master.key())
             .unwrap());
+    }
+
+    /// Many signed copies of one rival, each with another junk proof (all hash the same): the
+    /// prefix below the rival folds once, not once per copy, and the copy that steps is found.
+    #[test]
+    fn every_copy_of_a_rival_steps_on_one_fold_of_the_prefix() {
+        let mut log = TestLog::new(1);
+        let at_incept = log.chain();
+        log.revoke_d1();
+        let rival = add_device(&at_incept, &log.master, 42);
+        let theirs = ad4m_identity_core::event_hash(&rival).unwrap();
+        let mut served: Vec<Event> = (0..200)
+            .map(|i| {
+                let mut copy = rival.clone();
+                let mut junk = copy.proof[0].clone();
+                junk.verification_method = format!("m{}", i + 7);
+                copy.proof.push(junk);
+                copy
+            })
+            .collect();
+        assert_eq!(ad4m_identity_core::event_hash(&served[0]).unwrap(), theirs);
+        assert!(rival_holds(&log.scid(), &log.events, &served[0]).is_err());
+        served.push(rival.clone());
+        let fork = ForkEvidence {
+            chain: log.scid(),
+            seq: 1,
+            ours: ad4m_identity_core::event_hash(&log.events[1]).unwrap(),
+            theirs,
+        };
+
+        let (scid, chain) = (log.scid(), log.chain());
+        let before = folds();
+        let (found, signer) = holding_rival(&scid, &chain, &log.events, &fork, &served).unwrap();
+        assert_eq!(folds() - before, 1, "one fold of the prefix for every copy");
+        assert!(std::ptr::eq(found, served.last().unwrap()));
+        assert_eq!(signer, log.master.key());
+
+        // No copy steps: still one fold, and why the first one failed.
+        served.pop();
+        let before = folds();
+        assert!(matches!(
+            holding_rival(&scid, &chain, &log.events, &fork, &served),
+            Err(CacheError::Fold(_))
+        ));
+        assert_eq!(folds() - before, 1);
     }
 
     #[tokio::test]

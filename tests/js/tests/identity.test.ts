@@ -357,7 +357,10 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(meta["coasys:skipped"]!.some((s) => /the store is behind/.test(s.reason))).to.equal(true);
         await new Promise((r) => setTimeout(r, 1000));
         expect(forks).to.have.length(0);
-        expect((await a.client.identity.status()).fork).to.be.null;
+        const status = await a.client.identity.status();
+        expect(status.fork).to.be.null;
+        // The status shows the store behind, at the head it answers (seq 1 of A's 2).
+        expect(status.storeBehind?.seq).to.equal(1);
     });
 
     it("serves the log from the cache after A restarts, with the store down", async () => {

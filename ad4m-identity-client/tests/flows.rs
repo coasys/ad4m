@@ -200,6 +200,7 @@ impl ExecutorRpc for TestExecutor {
                     "revoked": revoked,
                     "head": null,
                     "fork": null,
+                    "storeBehind": null,
                 }))
             }
             "identity.cosignIncept" => {

@@ -194,6 +194,7 @@ impl IdentityService {
             revoked: None,
             head: None,
             fork: None,
+            store_behind: None,
         };
         let Some(scid) = db(|db| db.agent_identity(&agent_did))? else {
             return Ok(status);
@@ -212,6 +213,7 @@ impl IdentityService {
             status.head = Some(mirror_head(&head)?);
         }
         status.fork = first_fork(&self.cache.forks(&scid).await.map_err(cache_error)?);
+        status.store_behind = self.cache.store_behind(&scid);
         Ok(status)
     }
 
@@ -685,6 +687,55 @@ mod tests {
             cache,
             store_url: None,
         }
+    }
+
+    /// `identity.status` shows a configured store that answers the log behind the cache, from
+    /// the first such answer, until it catches up.
+    #[tokio::test]
+    async fn status_shows_a_store_that_stays_behind_until_it_catches_up() {
+        use crate::identity::cache::tests::{trusting, FakeStore};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let user = crate::test_utils::create_test_user(&format!(
+            "behind-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let agent = AgentContext::managed(user);
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let mut log = TestLog::new(81);
+        log.revoke_d1();
+        let scid = log.scid();
+        db(|db| db.set_agent_identity(&agent_did, &scid, now())).unwrap();
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let backend: Arc<dyn IdentityBackend> = store.clone();
+        let cache = Arc::new(trusting());
+        let service = IdentityService {
+            resolver: Arc::new(crate::identity::resolver::Resolver::new(
+                cache.clone(),
+                backend.clone(),
+                None,
+                false,
+            )),
+            backend,
+            cache,
+            store_url: None,
+        };
+        assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
+
+        // The store loses the last event: it answers seq 0, the cache holds seq 1.
+        store.events.lock().unwrap().truncate(1);
+        let status = service.status(&agent).await.unwrap();
+        let behind = status.store_behind.expect("the store shows as behind");
+        assert_eq!(behind.seq, Some(0));
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["storeBehind"]["seq"],
+            0
+        );
+        let again = service.status(&agent).await.unwrap().store_behind.unwrap();
+        assert_eq!(again.since, behind.since, "since the first answer behind");
+
+        *store.events.lock().unwrap() = log.events.clone();
+        assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
     }
 
     /// The first-link rule runs inside `claim_for_main`: while the main key is in no log, an
