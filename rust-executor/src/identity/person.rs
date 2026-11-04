@@ -255,6 +255,7 @@ mod tests {
                 backend,
                 cache,
                 store_url: None,
+                store_keys_source: crate::identity::StoreSource::Config,
             };
             World {
                 service,
