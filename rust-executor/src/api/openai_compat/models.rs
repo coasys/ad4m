@@ -13,19 +13,24 @@ use super::chat::epoch_seconds;
 use super::errors::{OpenAIError, OpenAIResult};
 use super::types::{ModelExtensions, ModelInfo, ModelListResponse};
 use crate::agent::capabilities::AI_READ_CAPABILITY;
-use crate::db::Ad4mDb;
 use crate::types::{Endpoint, EndpointState, Model, ModelState, ModelStatus, RequestContext};
 
 pub async fn list_models(auth: RequestContext) -> OpenAIResult<Json<ModelListResponse>> {
     auth.require(&AI_READ_CAPABILITY)
         .map_err(OpenAIError::forbidden)?;
 
-    let (models, endpoints) = Ad4mDb::with_global_instance(|db| {
-        Ok::<_, anyhow::Error>((db.get_models()?, db.get_endpoints()?))
-    })
-    .map_err(|e| OpenAIError::internal(format!("Database error listing models: {e}")))?;
-    let endpoints: HashMap<String, Endpoint> =
-        endpoints.into_iter().map(|e| (e.id.clone(), e)).collect();
+    let db = crate::db_backend::db_backend();
+    let models = db
+        .get_models()
+        .map_err(|e| OpenAIError::internal(format!("Database error listing models: {e}")))?;
+    // Read apart from the models: a model whose endpoint is removed in between lists
+    // without a status, as one without an endpoint does.
+    let endpoints: HashMap<String, Endpoint> = db
+        .get_endpoints()
+        .map_err(|e| OpenAIError::internal(format!("Database error listing endpoints: {e}")))?
+        .into_iter()
+        .map(|e| (e.id.clone(), e))
+        .collect();
 
     let created = epoch_seconds();
     let data = models
