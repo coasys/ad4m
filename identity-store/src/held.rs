@@ -11,7 +11,8 @@
 //! The entries are bounded by the heap their folds take together ([`Settings::held_log_bytes`],
 //! each fold sized by [`held_bytes_of`]); the least recently used go first. A fold larger than
 //! the bound is never held: its log is folded on every use. The per-log budget
-//! ([`Settings::log_fold_bytes`], at most the bound) keeps every log the store takes below it,
+//! ([`Settings::log_fold_bytes`] for the live part of a fold, twice it for the whole; the bound is
+//! at least the whole, [`crate::Settings::check`]) keeps every log the store takes below it,
 //! and a miss folds with the core's `fold_stored` (`db::load_chain_before`), no signature
 //! checked. The bound is in bytes, not events,
 //! because one event can cost the heap a hundred times another: an `incept` lists as many keys
@@ -72,13 +73,39 @@ impl Inner {
     }
 }
 
-/// The heap a held fold of `chain` takes, approximately: every key record (masters and device
-/// keys) with its strings and bot scopes, every event hash, and the fold's fixed part. Vectors
-/// of the state count their capacity; the hash list, whose capacity is private, counts twice
-/// its headers (a vector grown by doubling holds at most that). It reads the state once, as a
-/// fold or an append already has. `tests/held_memory.rs` checks it against a counting
-/// allocator: never below the heap a fold allocates, and within twice it.
+/// The heap a held fold of `chain` takes, approximately: [`FoldBytes::total`] of
+/// [`fold_bytes_of`]. The held folds count it.
 pub fn held_bytes_of(chain: &KelChain) -> usize {
+    fold_bytes_of(chain).total
+}
+
+/// What a fold takes in memory, as two figures from one walk of its state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FoldBytes {
+    /// The heap the whole fold takes, revoked keys included: the fold keeps every key record in
+    /// full, since [`state_before`] rebuilds earlier states from them. The held folds count it,
+    /// and the per-log budget bounds it at twice [`Settings::log_fold_bytes`].
+    ///
+    /// [`Settings::log_fold_bytes`]: crate::Settings::log_fold_bytes
+    pub total: usize,
+    /// `total` less the records of the keys revoked at the head: a device key's record with its
+    /// strings, bot scopes and map entry, a master's record with its strings once a `rotate`
+    /// replaced it (`KeyRecord::revoked` set, for masters and device keys alike). The masters'
+    /// vector, the event hashes and the fixed part stay in it. The per-log budget bounds it at
+    /// [`Settings::log_fold_bytes`], so revoking the keys a thief padded frees the budget.
+    ///
+    /// [`Settings::log_fold_bytes`]: crate::Settings::log_fold_bytes
+    pub live: usize,
+}
+
+/// The heap a held fold of `chain` takes ([`FoldBytes::total`]) and the part of it that is not
+/// the records of revoked keys ([`FoldBytes::live`]): every key record (masters and device keys)
+/// with its strings and bot scopes, every event hash, and the fold's fixed part. Vectors of the
+/// state count their capacity; the hash list, whose capacity is private, counts twice its
+/// headers (a vector grown by doubling holds at most that). It reads the state once, as a fold
+/// or an append already has. `tests/held_memory.rs` checks the total against a counting
+/// allocator: never below the heap a fold allocates, and within twice it.
+pub fn fold_bytes_of(chain: &KelChain) -> FoldBytes {
     /// A string's bytes, rounded up to the allocator's 16-byte grain.
     fn bytes(s: &str) -> usize {
         s.len().next_multiple_of(16)
@@ -96,22 +123,40 @@ pub fn held_bytes_of(chain: &KelChain) -> usize {
             + r.scopes.iter().map(|(_, s)| scope(s)).sum::<usize>()
     }
     let state = chain.state();
-    let masters = state.masters.capacity() * size_of::<KeyRecord>()
-        + state.masters.iter().map(record).sum::<usize>();
+    // The heap of the records of revoked keys, counted in the total and left out of the live part.
+    let mut revoked = 0;
+    let mut masters = state.masters.capacity() * size_of::<KeyRecord>();
+    for r in &state.masters {
+        let heap = record(r);
+        masters += heap;
+        if r.revoked.is_some() {
+            revoked += heap;
+        }
+    }
     // A device key sits in a B-tree under its id: the entry, the key's bytes, and a node's
     // spare room (a node can be half empty).
     let entry = (size_of::<String>() + size_of::<KeyRecord>()) * 2;
-    let keys = state
-        .keys
-        .iter()
-        .map(|(id, r)| entry + bytes(id) + record(r))
-        .sum::<usize>();
+    let mut keys = 0;
+    for (id, r) in &state.keys {
+        let heap = entry + bytes(id) + record(r);
+        keys += heap;
+        if r.revoked.is_some() {
+            revoked += heap;
+        }
+    }
     let hashes = usize::try_from(chain.head().seq)
         .unwrap_or(usize::MAX)
         .saturating_add(1)
         .saturating_mul(2 * size_of::<String>() + bytes(&chain.head().hash));
     let fixed = size_of::<KelChain>() + bytes(&state.did) + bytes(&state.scid) * 2 + 256;
-    masters + keys + hashes + fixed
+    let total = masters
+        .saturating_add(keys)
+        .saturating_add(hashes)
+        .saturating_add(fixed);
+    FoldBytes {
+        total,
+        live: total.saturating_sub(revoked),
+    }
 }
 
 /// The state of a log before `seq`, rebuilt from `state`, the state of the same log at a later

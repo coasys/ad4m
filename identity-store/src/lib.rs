@@ -58,14 +58,18 @@ pub struct Settings {
     pub cors_origins: Vec<String>,
     /// `HELD_LOG_BYTES`: the most heap the logs held folded in memory take together, by
     /// `held::held_bytes_of` (default 256 MiB; `held.rs`). A log whose fold is larger is folded
-    /// on every use. At least [`Settings::log_fold_bytes`] ([`Settings::check`]), so every log
-    /// within its budget can be held.
+    /// on every use. At least twice [`Settings::log_fold_bytes`] ([`Settings::check`]), so every
+    /// log within its budget can be held.
     pub held_log_bytes: usize,
-    /// `LOG_FOLD_BYTES`: the most heap one log's fold may take, by `held::held_bytes_of`
-    /// (default 16 MiB). An append whose fold would take more is `400 log-too-large`, unless
-    /// all its events are `rotate`s (the recovery from a stolen master is never refused by
-    /// it). It bounds what a miss in the held folds costs (the parse and hashing of one log)
-    /// and keeps every log within it holdable.
+    /// `LOG_FOLD_BYTES`: the per-log budget (default 16 MiB), by `held::fold_bytes_of`. Two
+    /// bounds: the live part of a log's fold (without the records of keys revoked at the head)
+    /// at most this, and the whole fold at most twice this. An append past either is
+    /// `400 log-too-large`, unless all its events are `rotate`s (the recovery from a stolen
+    /// master is never refused by it). A thief can pad the live part to the budget; after the
+    /// owner rotates and revokes the thief's keys, the live part drops and the owner appends
+    /// again, up to the whole-fold bound. A log stolen and padded twice can reach that bound
+    /// and stays full. It bounds what a miss in the held folds costs (the parse and hashing of
+    /// one log) and keeps every log within it holdable.
     pub log_fold_bytes: usize,
 }
 
@@ -89,17 +93,18 @@ pub const DEFAULT_HELD_LOG_BYTES: usize = 256 << 20;
 /// The default of [`Settings::log_fold_bytes`]: 16 MiB. A full log of rotations
 /// (`log::MAX_LOG_EVENTS`, the costliest common kind) takes about 6.5 MB, so no ordinary log
 /// comes near it; what reaches it is a log padded on purpose (a `scope` may name its actions
-/// many times over). The held folds' default bound holds 16 such logs.
+/// many times over). The held folds' default bound holds 8 logs at the whole-fold bound
+/// (32 MiB each).
 pub const DEFAULT_LOG_FOLD_BYTES: usize = 16 << 20;
 
 impl Settings {
     /// Refuses settings under which an accepted log could not be held: a held bound below the
-    /// per-log budget would fold such a log on every use.
+    /// per-log whole-fold bound (twice `LOG_FOLD_BYTES`) would fold such a log on every use.
     pub fn check(&self) -> Result<(), String> {
-        if self.held_log_bytes < self.log_fold_bytes {
+        if self.held_log_bytes < self.log_fold_bytes.saturating_mul(2) {
             return Err(format!(
-                "HELD_LOG_BYTES={} is below LOG_FOLD_BYTES={}: a log the store takes must fit in \
-                 the held folds",
+                "HELD_LOG_BYTES={} is below twice LOG_FOLD_BYTES={}: a log the store takes may \
+                 fold to twice LOG_FOLD_BYTES and must fit in the held folds",
                 self.held_log_bytes, self.log_fold_bytes
             ));
         }

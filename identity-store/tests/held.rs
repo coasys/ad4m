@@ -372,6 +372,47 @@ async fn a_signed_rival_that_does_not_replay_is_refused_on_the_held_fold_with_no
     assert!(t.store.held.holds(&alice.scid()));
 }
 
+#[tokio::test]
+async fn a_signed_rival_at_the_head_seq_that_does_not_replay_is_refused_with_no_replay() {
+    // The same as below the head, at the head's own seq: the rival takes the place of the last
+    // stored event, and the state before it is rebuilt from the held fold too.
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    grow(&t, &mut alice, 64).await;
+    assert!(t.store.held.holds(&alice.scid()));
+    let folds = t.store.held.folds();
+    let at = alice.head_seq();
+    assert_eq!(at, 64);
+    let prefix = ad4m_identity_core::fold(&alice.events[..at as usize]).unwrap();
+
+    // Signed by the master current at the head's seq (m63, retired by the stored rotation
+    // there), revoking a key the log never listed: a plain conflict, however often.
+    let rival = build::revoke(&prefix, &alice.master(63), &["d9".to_string()]).unwrap();
+    assert_eq!(rival.seq, at);
+    for _ in 0..3 {
+        let reply = t.append(&alice.scid(), &[&rival]).await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.body["error"], "conflict", "{}", reply.body);
+    }
+    // A `rotate` by the key the log rotated onto at the head (m64) with another salt: the
+    // commitment before the head refuses it.
+    let mut wrong_salt = build::rotate_unsigned(
+        &prefix,
+        &common::agent::multikey(&alice.master(64)),
+        &alice.salt(65),
+        Some(alice.next(65)),
+        &[],
+    )
+    .unwrap();
+    build::cosign(&mut wrong_salt, "m64", &alice.master(64)).unwrap();
+    let reply = t.append(&alice.scid(), &[&wrong_salt]).await;
+    assert_eq!(reply.body["error"], "conflict", "{}", reply.body);
+    assert_eq!(t.store.held.folds(), folds);
+    assert_eq!(t.count("chain_forks"), 0);
+    assert_eq!(t.store.head(&alice.scid()).unwrap().unwrap().seq, at);
+}
+
 /// A device key for `life`, with the id the log gives next, added by the current master.
 fn add_key(person: &Person, label: &str, life: KeyLife) -> ad4m_identity_core::Event {
     let id = person.chain.state().next_device_id();

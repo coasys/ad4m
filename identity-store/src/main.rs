@@ -11,8 +11,8 @@
 //! | `POW_BITS` | `22` | the proof-of-work cost `GET /v1/pow` publishes |
 //! | `CORS_ORIGINS` | none | comma-separated origins allowed from a browser |
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
-//! | `HELD_LOG_BYTES` | 256 MiB | the most heap the held folds take together |
-//! | `LOG_FOLD_BYTES` | 16 MiB | the most heap one log's fold may take; at most `HELD_LOG_BYTES` |
+//! | `HELD_LOG_BYTES` | 256 MiB | the most heap the held folds take together; at least twice `LOG_FOLD_BYTES` |
+//! | `LOG_FOLD_BYTES` | 16 MiB | the per-log budget: the most heap one log's fold may take without revoked keys; the whole fold at most twice it |
 //!
 //! On start, `serve` prints `identity-store listening on http://<addr> store-key <multikey>`.
 

@@ -14,7 +14,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 
 use crate::db::{self, to_sql, KEL};
 use crate::error::ApiError;
-use crate::held::{held_bytes_of, state_before};
+use crate::held::{fold_bytes_of, state_before, FoldBytes};
 use crate::offers;
 use crate::{Fault, Store, Topic};
 
@@ -501,23 +501,38 @@ impl Store {
                 .appended(&KelPolicy, event)
                 .map_err(|e| chain_error(&e))?;
         }
-        // The per-log budget: no log grows past what one fold may take in memory, so every log
-        // the store takes can be held, and a miss on any of them costs a bounded replay. An
-        // append of `rotate`s only is never refused by it: a `rotate` is the recovery from a
+        // The per-log budget, two bounds. The live part of the fold (without the records of
+        // keys revoked at the head) stays within `log_fold_bytes`, so after a thief pads a log
+        // with the keys of a stolen master, the owner's `rotate` and the revocation of those
+        // keys free the budget again. The whole fold stays within twice it, so no log grows
+        // past what one fold may take in memory by padding and revoking over and over: every
+        // log the store takes can be held, and a miss on any of them costs a bounded replay.
+        // An append of `rotate`s only is refused by neither: a `rotate` is the recovery from a
         // stolen master, which a thief holding that master could otherwise lock out by padding
         // the log to the budget. A `rotate` adds one master record to the fold, and the length
         // cap bounds how many there are.
         let only_rotates = events.iter().all(|e| matches!(e.op, Op::Rotate { .. }));
-        let fold_bytes = held_bytes_of(&chain);
-        if !only_rotates && fold_bytes > self.settings.log_fold_bytes {
-            return Err(ApiError::invalid(
-                "log-too-large",
-                format!(
-                    "the log's fold would take {fold_bytes} bytes, above the store's budget of {} \
-                     bytes per log",
-                    self.settings.log_fold_bytes
-                ),
-            ));
+        if !only_rotates {
+            let budget = self.settings.log_fold_bytes;
+            let FoldBytes { total, live } = fold_bytes_of(&chain);
+            if total > budget.saturating_mul(2) {
+                return Err(ApiError::invalid(
+                    "log-too-large",
+                    format!(
+                        "the log's whole fold would take {total} bytes, above twice the store's \
+                         budget of {budget} bytes per log"
+                    ),
+                ));
+            }
+            if live > budget {
+                return Err(ApiError::invalid(
+                    "log-too-large",
+                    format!(
+                        "the live part of the log's fold (without revoked keys) would take {live} \
+                         bytes, above the store's budget of {budget} bytes per log"
+                    ),
+                ));
+            }
         }
 
         // Expiries by the store's clock, the one-key check and the claim check.
