@@ -44,3 +44,5 @@ pub use router::router;
 mod passthrough_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tool_choice_e2e;
