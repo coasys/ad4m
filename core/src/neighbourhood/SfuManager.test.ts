@@ -1067,6 +1067,30 @@ test("a manager that never joined, or whose join was refused, sends no leave", a
     expect(refused.getState().participantId).toBeNull()
 })
 
+test("replaced while the join applies its answer: the join resolves, and leaves nothing", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+    const replacedEvents: unknown[] = []
+    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    const original = FakePeerConnection.prototype.setRemoteDescription
+    // The notice lands while the answer is applied: stop() closes the connection under it.
+    FakePeerConnection.prototype.setRemoteDescription = async () => {
+        api.emitReplaced(replaced(MINE))
+        throw new Error("InvalidStateError: the connection is closed")
+    }
+    try {
+        await expect(manager.join(fakeStream())).resolves.toBeUndefined()
+    } finally {
+        FakePeerConnection.prototype.setRemoteDescription = original
+    }
+    await flush()
+
+    expect(replacedEvents).toEqual([replaced(MINE)])
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    expect(manager.getState().participantId).toBeNull()
+    expect(manager.getState().peerConnection).toBeNull()
+})
+
 test("a join whose answer cannot be applied leaves the session it made, once", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)

@@ -589,8 +589,11 @@ export class SfuManager {
             const answer = JSON.parse(session.sdpAnswer)
             await pc.setRemoteDescription(new RTCSessionDescription(answer))
         } catch (err) {
-            // The executor holds a session this connection cannot use: leave it.
             markJoined()
+            // Replaced or left while the answer applied: that already closed the
+            // connection and settled the session, so the join just ends.
+            if (generation !== this.generation) return
+            // The executor holds a session this connection cannot use: leave it.
             this.abandon(pc)
             await this.leaveSession()
             throw err
