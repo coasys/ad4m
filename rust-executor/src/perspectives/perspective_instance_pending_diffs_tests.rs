@@ -427,6 +427,34 @@ async fn the_fallback_sync_matches_an_empty_predicate_to_none() {
     assert!(fake.committed().is_empty(), "{:?}", fake.committed());
 }
 
+/// Two links that differ only in a nonempty predicate are two links: the
+/// fallback sync sends the one the remote lacks.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_tells_two_predicates_apart() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let with = |predicate: &str| LinkExpression {
+        data: Link {
+            predicate: Some(predicate.to_string()),
+            ..link("did:key:alice", "plain").data
+        },
+        ..link("did:key:alice", "plain")
+    };
+    perspective
+        .sparql_store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..with("ad4m://other")
+        })
+        .unwrap();
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, vec![with("ad4m://has")]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.committed(), vec!["+plain"]);
+}
+
 /// The fallback sync sends the Shared links the remote lacks, but never the
 /// links of a parked diff: they stay Shared in the store, and sending them
 /// would put them behind the diffs that went through after them. The parked
