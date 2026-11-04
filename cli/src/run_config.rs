@@ -334,7 +334,8 @@ pub struct RunArgs {
     )]
     pub sfu_preferred_node: Option<String>,
     /// The identity store's base URL (`identity.storeUrl`), given to the agent language.
-    /// Default: the agent language's own, `https://store.ad4m.dev` (the staging network).
+    /// Default: the store the network's seed names (`identityStore` in the seed `init`
+    /// wrote; this build's seed names `https://store.ad4m.dev`); without one, no store.
     #[arg(
         long,
         env = "AD4M_IDENTITY_STORE_URL",
@@ -343,7 +344,7 @@ pub struct RunArgs {
     pub identity_store_url: Option<String>,
     /// The identity store's head keys (`identity.storeKeys`, Ed25519 multikeys), comma
     /// separated: a head from the store counts only when one of them signed it. Default: the
-    /// default store's key when `--identity-store-url` is unset too; none for another store.
+    /// seed's store keys when `--identity-store-url` is unset too; none for another store.
     #[arg(
         long,
         env = "AD4M_IDENTITY_STORE_KEYS",

@@ -196,9 +196,11 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   resolution metadata (`coasys:skipped`), never recorded as a fork. A head counts only under a key of the
   config's `identity.storeKeys`, authorship reads a log only up to that head, and
   `identity.storeUrl` and `identity.storeKeys` become the agent language's `storeUrl` and
-  `storeKeys` settings at every start (unset removes them; with neither set, the keys are the
-  default store's, `identity::DEFAULT_STORE_KEY`; a `storeUrl` without `storeKeys` has none
-  and warns at start: no `did:scid` record verifies). A different event at a held seq that holds on the prefix
+  `storeKeys` settings at every start (unset removes them; with neither set, the store and
+  keys are the network seed's `identityStore` (the compiled-in `mainnet_seed.json` names
+  `https://store.ad4m.dev`, today's staging network), and without one there is no store; a
+  `storeUrl` without `storeKeys` has no key; without a key the executor warns at start: no
+  `did:scid` record verifies). A different event at a held seq that holds on the prefix
   records a fork, keeps the history and fires `identity-fork`; a store answering a shorter log
   is behind (or an unverified conflict), records nothing, and the cache answers.
   `ad4m-executor init --operator <did:scid>` records the operator (`operator_record`, never

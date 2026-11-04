@@ -114,6 +114,7 @@ export type { SignedOffer } from "./SignedOffer";
 export type { SignedRequest } from "./SignedRequest";
 export type { SkippedSource } from "./SkippedSource";
 export type { StoreBehind } from "./StoreBehind";
+export type { StoreInfo } from "./StoreInfo";
 // Key sessions: login with a device key (user.sessionChallenge, user.loginWithKey, ...).
 export type { EndAllSessionsParams } from "./EndAllSessionsParams";
 export type { EndedSessions } from "./EndedSessions";

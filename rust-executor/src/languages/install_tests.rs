@@ -155,8 +155,8 @@ async fn a_source_request_that_hangs_ends_at_the_timeout() {
 
 /// The agent language sends profiles and identity calls to its `storeUrl` setting. When
 /// `identity.storeUrl` cannot be written there, the language is never fetched or loaded, so no
-/// identity call reaches the store an older or unparsable settings file names (or the
-/// language's default store): the identity backend answers `unavailable`.
+/// identity call reaches the store an older or unparsable settings file names: the identity
+/// backend answers `unavailable`.
 #[tokio::test(start_paused = true)]
 async fn the_agent_language_is_not_loaded_when_its_store_url_cannot_be_written() {
     use crate::identity::backend::{AgentLanguageBackend, IdentityBackend, IdentityError};
