@@ -13,6 +13,7 @@
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
 //! | `IDENTITY_BURST` | `5` | writes per identity at once (the identity bucket) |
 //! | `IDENTITY_REFILL_S` | `60` | seconds per write the identity bucket refills |
+//! | `HELD_LOG_EVENTS` | `1048576` | the most events the logs held folded in memory cover together |
 //!
 //! `serve` sweeps expired inbox messages and requests every minute.
 //! On start, `serve` prints `identity-store listening on http://<addr> store-key <multikey>`.
@@ -52,6 +53,7 @@ fn settings() -> Result<Settings, String> {
         cors_origins,
         identity_burst: number("IDENTITY_BURST", defaults.identity_burst)?,
         identity_refill_s: number("IDENTITY_REFILL_S", defaults.identity_refill_s)?,
+        held_log_events: number("HELD_LOG_EVENTS", defaults.held_log_events)?,
     })
 }
 
@@ -81,11 +83,31 @@ async fn serve() -> Result<(), String> {
         }
     });
     axum::serve(listener, router(store))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Resolves on SIGINT, or on SIGTERM (what `docker stop` and service managers send).
+async fn shutdown() {
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
 }
 
 fn keygen() -> Result<(), String> {

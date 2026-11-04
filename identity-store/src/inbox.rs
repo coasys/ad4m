@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use crate::db::{self, from_sql, to_sql};
 use crate::error::ApiError;
 use crate::request::{decode_json_header, percent_decode, take_nonce, Incoming, Signer};
-use crate::{limits, offers, Store};
+use crate::{limits, offers, Store, Topic};
 
 /// The header of a pre-join read: base64url(JCS(PreInboxAuth)).
 pub const PRE_INBOX_HEADER: &str = "x-coasys-inbox";
@@ -161,13 +161,15 @@ impl Store {
             ApiError::invalid("malformed", "a pre-join write names its offer in bind")
         })?;
         let did = ad4m_identity_core::did_of(&bind.scid);
-        let verified = self.verify_request(incoming, Some(&did), Signer::AnyKey)?;
-        if pre_address(&bind.sign, &bind.r).ok().as_deref() != Some(address) {
-            return Err(writer_refused("the address is not the device string's"));
-        }
         let now = self.now();
         let mut conn = self.db.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // The request, the offer and the writer are checked against the log and the offers as
+        // this transaction sees them.
+        let verified = self.verify_request_in(&tx, incoming, Some(&did), Signer::AnyKey)?;
+        if pre_address(&bind.sign, &bind.r).ok().as_deref() != Some(address) {
+            return Err(writer_refused("the address is not the device string's"));
+        }
         let offer = offers::open_offer_at(&tx, &bind.scid, &bind.offer_id, now)?
             .ok_or_else(|| writer_refused("no open offer of that id"))?;
         if offer.offer.device_key.as_deref() != Some(bind.sign.as_str()) {
@@ -175,9 +177,7 @@ impl Store {
                 "the offer is not bound to the device string's key",
             ));
         }
-        let chain = db::load_chain(&tx, &bind.scid)?
-            .ok_or_else(|| writer_refused("no log of the identity"))?;
-        let current = chain.state().current_master().map(|m| &m.id);
+        let current = verified.chain.state().current_master().map(|m| &m.id);
         if current != Some(&verified.key_id) || offer.by.key_id != verified.key_id {
             return Err(writer_refused(
                 "only the current master key that opened the offer writes",
@@ -199,7 +199,7 @@ impl Store {
         )?;
         tx.commit()?;
         drop(conn);
-        self.changed();
+        self.changed(&[Topic::inbox(&text)]);
         Ok(stored)
     }
 
@@ -219,12 +219,12 @@ impl Store {
             ));
         }
         let did = ad4m_identity_core::did_of(scid);
-        let verified = self.verify_request(incoming, Some(&did), Signer::AnyKey)?;
         let now = self.now();
         let mut conn = self.db.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let chain = db::load_chain(&tx, scid)?
-            .ok_or_else(|| ApiError::not_found("no log of the identity"))?;
+        // The writer and the receiver are checked against the log as this transaction sees it.
+        let verified = self.verify_request_in(&tx, incoming, Some(&did), Signer::AnyKey)?;
+        let chain = &verified.chain;
         let state = chain.state();
         if state.current_master().map(|m| &m.id) != Some(&verified.key_id) {
             return Err(writer_refused("only the current master key writes"));
@@ -254,7 +254,7 @@ impl Store {
         )?;
         tx.commit()?;
         drop(conn);
-        self.changed();
+        self.changed(&[Topic::inbox(&address)]);
         Ok(stored)
     }
 
@@ -305,7 +305,10 @@ impl Store {
             ));
         }
         let mut conn = self.db.lock()?;
-        take_nonce(&mut conn, &auth.nonce, now)
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        take_nonce(&tx, &auth.nonce, now)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// The live messages at `address` (`pre:<a>` or `<scid>/<keyId>`), oldest first.
@@ -351,7 +354,6 @@ impl Store {
         if gone == 0 {
             return Err(ApiError::not_found("no such message"));
         }
-        self.changed();
         Ok(())
     }
 }

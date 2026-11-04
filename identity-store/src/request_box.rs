@@ -29,13 +29,13 @@ impl Store {
         incoming: &Incoming<'_>,
     ) -> Result<Value, ApiError> {
         let did = ad4m_identity_core::did_of(scid);
-        let verified = self.verify_request(incoming, Some(&did), Signer::AnyKey)?;
-        let signed = decode_header(incoming.header.unwrap_or_default())?;
         let now = self.now();
         let mut conn = self.db.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let chain = db::load_chain(&tx, scid)?
-            .ok_or_else(|| ApiError::not_found("no log of the identity"))?;
+        // Checked against the log as this transaction sees it: no revoke commits in between.
+        let verified = self.verify_request_in(&tx, incoming, Some(&did), Signer::AnyKey)?;
+        let signed = decode_header(incoming.header.unwrap_or_default())?;
+        let chain = &verified.chain;
         let state = chain.state();
         let by = &verified.key_id;
         let device = state
@@ -83,8 +83,6 @@ impl Store {
             ],
         )?;
         tx.commit()?;
-        drop(conn);
-        self.changed();
         Ok(json!({ "id": id }))
     }
 
@@ -141,12 +139,14 @@ impl Store {
         incoming: &Incoming<'_>,
     ) -> Result<(), ApiError> {
         let did = ad4m_identity_core::did_of(scid);
-        let verified = self.verify_request(incoming, Some(&did), Signer::AnyKey)?;
         let now = to_sql(self.now())?;
+        let mut conn = self.db.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Checked against the log as this transaction sees it: no rotate commits in between.
+        let verified = self.verify_request_in(&tx, incoming, Some(&did), Signer::AnyKey)?;
         let master =
             verified.chain.state().current_master().map(|m| &m.id) == Some(&verified.key_id);
-        let conn = self.db.lock()?;
-        let by: Option<String> = rusqlite::OptionalExtension::optional(conn.query_row(
+        let by: Option<String> = rusqlite::OptionalExtension::optional(tx.query_row(
             "SELECT by_key FROM requests WHERE scid = ?1 AND id = ?2 AND expires > ?3",
             params![scid, id, now],
             |r| r.get(0),
@@ -160,12 +160,11 @@ impl Store {
                 "only the poster or the current master key deletes a request",
             ));
         }
-        conn.execute(
+        tx.execute(
             "DELETE FROM requests WHERE scid = ?1 AND id = ?2",
             params![scid, id],
         )?;
-        drop(conn);
-        self.changed();
+        tx.commit()?;
         Ok(())
     }
 }

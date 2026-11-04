@@ -85,7 +85,7 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
                 perspective: Some(DomainPerspective { links: vec![] }),
             },
         };
-        return Ok(serde_json::to_value(with_identity(agent))?);
+        return Ok(serde_json::to_value(with_identity(agent).await)?);
     }
 
     // Fallback to main agent for admin/legacy mode.
@@ -104,12 +104,13 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         Ok::<Agent, WsRpcError>(agent)
     })?;
 
-    Ok(serde_json::to_value(with_identity(agent))?)
+    Ok(serde_json::to_value(with_identity(agent).await)?)
 }
 
-/// `agent.get`'s answer: the profile, and the `did:scid` its device key speaks for.
-fn with_identity(agent: Agent) -> crate::identity::types::AgentWithIdentity {
-    let identity = crate::identity::service::identity_of_agent(&agent.did);
+/// `agent.get`'s answer: the profile, and the `did:scid` its device key speaks for (`null` once
+/// a revocation of the key reaches the log's trusted seq).
+async fn with_identity(agent: Agent) -> crate::identity::types::AgentWithIdentity {
+    let identity = crate::identity::service::identity_of_agent(&agent.did).await;
     crate::identity::types::AgentWithIdentity { agent, identity }
 }
 
@@ -406,7 +407,9 @@ async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
         agent_service.passphrase = Some(body.passphrase.clone());
 
         agent_service.dump().clone()
-    });
+    })
+    .with_identity()
+    .await;
 
     let mut init_errors: Vec<String> = Vec::new();
     let config = crate::config::get_global_config();
@@ -455,7 +458,9 @@ async fn lock_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
     let agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(body.passphrase.clone());
         agent_service.dump().clone()
-    });
+    })
+    .with_identity()
+    .await;
 
     get_global_pubsub()
         .await
@@ -530,7 +535,16 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
 
         log::info!("AD4M init complete");
 
-        spawn_main_agent_publish();
+        // The main agent's profile, then every managed user's, so the profiles an earlier
+        // agent language held reach the configured store.
+        tokio::spawn(async {
+            if let Err(e) =
+                AgentService::publish_agent_to_language(&AgentContext::main_agent()).await
+            {
+                log::warn!("Error publishing agent expression: {}", e);
+            }
+            AgentService::publish_managed_profiles().await;
+        });
     }
 
     let mut agent = {
@@ -541,7 +555,9 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
             .as_ref()
             .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         agent_ref.dump().clone()
-    };
+    }
+    .with_identity()
+    .await;
 
     if !is_unlocked {
         agent.error = Some("Failed to unlock agent".to_string());
@@ -751,13 +767,14 @@ async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
                 is_unlocked: true,
                 identity: None,
             }
-            .with_identity(),
+            .with_identity()
+            .await,
         )?);
     }
 
     // Fallback to main agent status
     let status = AgentService::with_global_instance(|agent_service| agent_service.dump());
-    Ok(serde_json::to_value(status.with_identity())?)
+    Ok(serde_json::to_value(status.with_identity().await)?)
 }
 
 /// agent.isLocked — check if agent is locked

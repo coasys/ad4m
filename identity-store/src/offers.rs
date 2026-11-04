@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::db::{self, from_sql, to_sql};
 use crate::error::ApiError;
-use crate::{inbox, limits, Store};
+use crate::{inbox, limits, Store, Topic};
 
 /// How long a terminal offer stays readable.
 pub const TOMBSTONE_S: u64 = 86_400;
@@ -220,7 +220,8 @@ impl Store {
         let now = self.now();
         let mut conn = self.db.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let chain = db::load_chain(&tx, scid)?
+        let chain = self
+            .held_chain(&tx, scid)?
             .ok_or_else(|| ApiError::not_found(format!("no log {scid}")))?;
         match verify_offer(signed, &chain, now) {
             Ok(()) => {}
@@ -275,7 +276,7 @@ impl Store {
         }
         tx.commit()?;
         drop(conn);
-        self.changed();
+        self.changed(&[Topic::offers(scid)]);
         Ok(json!({ "offerId": offer.offer_id }))
     }
 
@@ -302,7 +303,7 @@ impl Store {
         tx.commit()?;
         drop(conn);
         if expired {
-            self.changed();
+            self.changed(&[Topic::offers(scid)]);
         }
         Ok(out)
     }
@@ -321,7 +322,7 @@ impl Store {
         end(&tx, scid, offer_id, "cancelled", now)?;
         tx.commit()?;
         drop(conn);
-        self.changed();
+        self.changed(&[Topic::offers(scid)]);
         Ok(())
     }
 
@@ -351,7 +352,7 @@ impl Store {
             tx.commit()?;
             drop(conn);
             if expired {
-                self.changed();
+                self.changed(&[Topic::offers(scid)]);
             }
             return Err(ApiError::not_found("no such offer"));
         };
@@ -359,7 +360,7 @@ impl Store {
             tx.commit()?;
             drop(conn);
             if expired {
-                self.changed();
+                self.changed(&[Topic::offers(scid)]);
             }
             return Err(ApiError::gone(&row.state));
         }
@@ -408,7 +409,7 @@ impl Store {
             end(&tx, scid, offer_id, "contested", now)?;
             tx.commit()?;
             drop(conn);
-            self.changed();
+            self.changed(&[Topic::offers(scid)]);
             return Err(ApiError::gone("contested"));
         }
         tx.execute(
@@ -422,7 +423,7 @@ impl Store {
         inbox::drop_closed_offer_messages(&tx, scid)?;
         tx.commit()?;
         drop(conn);
-        self.changed();
+        self.changed(&[Topic::offers(scid)]);
         Ok(ClaimAnswer::Claimed(receipt(&row.signed)))
     }
 
@@ -470,7 +471,7 @@ impl Store {
         tx.commit()?;
         drop(conn);
         if expired {
-            self.changed();
+            self.changed(&[Topic::offers(scid)]);
         }
         Ok(answer)
     }

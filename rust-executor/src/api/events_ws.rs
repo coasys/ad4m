@@ -43,7 +43,7 @@
 //! | `sfu-data`                    | (inline)      | the room's other agents on this executor | SFU data channel message |
 //! | `sfu-room-roster`             | (inline)      | listed DIDs and the departed DID | Who is in a call room now         |
 //! | `flow-state-changed`          | (inline)      | `agentDid` if it reads the perspective; else the main agent's to `Operator` | A flow instance's state moved on that agent's replica (#1424) |
-//! | `identity-fork`               | (inline)      | the local agents that speak for the identity | The key-log cache found two logs (a different event at a held seq, or a shorter log) and kept its own (a shorter log never truncates a held one) |
+//! | `identity-fork`               | (inline)      | the local agents that speak for the identity | The key-log cache found two logs (a different valid event at a held seq) and kept its own (a store answering a shorter log raises none) |
 //! | `config-changed`              | (inline)      | the operator           | `runtime.setConfig` wrote keys to the config file; they take effect at the next start |
 //! | `link-ticket`                 | (inline)      | the operator on this machine | The executor claimed the offer a holder sent to an open `identity.prepareDevice`: the identity and the match code |
 //! | `inbox-message`               | (inline)      | the operator on this machine | A message waits in this executor's inbox (`{id, kind}`, never a body); for `master` the custody service calls `identity.takeMaster` |

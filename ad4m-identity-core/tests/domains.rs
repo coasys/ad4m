@@ -19,6 +19,7 @@ use wasm_bindgen_test::wasm_bindgen_test as test;
 
 const OTHER: &[&str] = &[
     "coasys:link",
+    "coasys:agent-record",
     "coasys:store-request",
     "coasys:head",
     "coasys:vouch",

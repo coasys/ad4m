@@ -19,7 +19,7 @@ impl ApiError {
         ApiError { status, body }
     }
 
-    /// `400 {error}`: malformed, or a `ChainError` / `FoldError` name.
+    /// `400 {error}`: malformed, or a `ChainError` / `FoldError` / `FormatError` name.
     pub fn invalid(error: &str, detail: impl Into<String>) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
@@ -48,6 +48,18 @@ impl ApiError {
         Self::new(
             StatusCode::CONFLICT,
             json!({ "error": "conflict", "head": head }),
+        )
+    }
+
+    /// `409 {error:"forked", head, fork}`: the store holds a fork of the log (two validly signed
+    /// events at `fork.seq`). The answer to the append that brought the fork, and to every
+    /// append and signed request while the fork freezes the identity (`db::freezing_fork`).
+    /// `head` is the head the store keeps serving.
+    pub fn forked(head: &SignedHead, fork: &ad4m_hash_chain::ForkEvidence) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            json!({ "error": "forked", "head": head,
+                    "fork": { "seq": fork.seq, "ours": fork.ours, "theirs": fork.theirs } }),
         )
     }
 
@@ -101,11 +113,14 @@ impl ApiError {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": error }))
     }
 
-    /// `500`: the store failed (its database); nothing was committed.
+    /// `500 {error: "internal"}`: the store failed (its database); nothing was committed. The
+    /// detail goes to the store's log (stderr), never into the body: it can name tables,
+    /// paths and stored data.
     pub fn internal(detail: impl Into<String>) -> Self {
+        eprintln!("identity-store: internal error: {}", detail.into());
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            json!({ "error": "internal", "detail": detail.into() }),
+            json!({ "error": "internal" }),
         )
     }
 }
@@ -132,5 +147,19 @@ impl IntoResponse for ApiError {
             }
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_database_failure_answers_a_generic_body() {
+        let error = ApiError::from(rusqlite::Error::InvalidColumnName(
+            "secret_column in /var/lib/store.sqlite".into(),
+        ));
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.body, json!({ "error": "internal" }));
     }
 }

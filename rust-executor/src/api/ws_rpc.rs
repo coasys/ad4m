@@ -538,6 +538,8 @@ impl Connection {
             guard.insert(id.clone(), cancel_token.clone());
         }
 
+        // An event that names a member twice, which `params` (a `Value`) no longer shows.
+        let refused = super::identity_ws::duplicate_member_refusal(&msg_type, text);
         let handler_map = self.handler_map.clone();
         let base_ctx = self.ctx.clone();
         let inflight = self.inflight.clone();
@@ -600,7 +602,10 @@ impl Connection {
                         Some(opening) => opening.acquire_owned().await.ok(),
                         None => None,
                     };
-                    handler_map.dispatch(&msg_type, params, req_ctx).await
+                    match refused {
+                        Some(e) => Err(e),
+                        None => handler_map.dispatch(&msg_type, params, req_ctx).await,
+                    }
                 } => {
                     match result {
                         Ok(val) => json!({"id": id, "result": val}),
@@ -939,6 +944,47 @@ mod socket_tests {
     // revokeToken() used to leave open sockets open until their next request or event. Now
     // each of the token's sockets closes at the revoke, with the frame a failed check sends.
     // The operator revokes through the RPC, by the app's JWT (#1060).
+    /// An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice
+    /// is refused from the frame's text: the `Value` the handler gets keeps only the last.
+    #[tokio::test]
+    async fn an_identity_event_that_names_a_member_twice_is_refused() {
+        let addr = start_server().await;
+        let mut ws = connect(addr, ADMIN).await;
+        let event = r#"{"seq":0,"seq":1}"#;
+        for (id, frame) in [
+            (
+                "p",
+                format!(
+                    r#"{{"id":"p","type":"identity.publish","params":{{"events":[{event}]}}}}"#
+                ),
+            ),
+            (
+                "c",
+                format!(
+                    r#"{{"id":"c","type":"identity.cosignIncept","params":{{"event":{event}}}}}"#
+                ),
+            ),
+        ] {
+            ws.send(WsMessage::Text(frame.into())).await.unwrap();
+            let reply = loop {
+                let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
+                    .await
+                    .expect("a reply")
+                    .expect("an open socket")
+                    .unwrap();
+                if let WsMessage::Text(text) = frame {
+                    let reply: Value = serde_json::from_str(&text).unwrap();
+                    if reply["id"] == id {
+                        break reply;
+                    }
+                }
+            };
+            assert_eq!(reply["error"]["code"], 400, "{reply}");
+            let message = reply["error"]["message"].as_str().unwrap();
+            assert!(message.starts_with("invalid: DuplicateMember"), "{reply}");
+        }
+    }
+
     #[tokio::test]
     async fn every_socket_of_a_token_closes_with_1008_when_it_is_revoked() {
         let addr = start_server().await;

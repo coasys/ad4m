@@ -103,6 +103,10 @@ pub trait IdentityBackend: Send + Sync {
         record: &AgentRecord,
         req: Option<&SignedRequest>,
     ) -> Result<(), IdentityError>;
+    /// The `version` of the agent record the store holds for `did`, as the agent language
+    /// answers the record (`expressionGet`, `proof.record.version`); `None` without one. A put
+    /// must carry a greater version, so a device whose clock lags another's reads it first.
+    async fn agent_version(&self, did: &str) -> Result<Option<u64>, IdentityError>;
     async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, IdentityError>;
     async fn list_offers(
         &self,
@@ -177,8 +181,9 @@ pub trait IdentityBackend: Send + Sync {
 }
 
 /// The script that calls `export` with `args` (JSON literals) on the language and answers
-/// `{"ok": result}` or `{"err": {"message": …}}`. A refusal's message is the refusal as JSON
-/// (`IdentityError` in `ad4m-ldk/js`, `IdentityErrorCode` in `ad4m-ldk/rust`).
+/// `{"ok": result}`, `{"undefined": true}` when the export answered `undefined`, or
+/// `{"err": {"message": …}}`. A refusal's message is the refusal as JSON (`IdentityError` in
+/// `ad4m-ldk/js`, `IdentityErrorCode` in `ad4m-ldk/rust`).
 pub(crate) fn call_script(export: &str, args: &[Value]) -> String {
     let args = args
         .iter()
@@ -189,7 +194,7 @@ pub(crate) fn call_script(export: &str, args: &[Value]) -> String {
         r#"JSON.stringify(await (async () => {{
     try {{
         const result = await language.{export}({args});
-        return {{ ok: result === undefined ? null : result }};
+        return result === undefined ? {{ undefined: true }} : {{ ok: result }};
     }} catch (e) {{
         const message = (e && typeof e === "object" && "message" in e) ? String(e.message) : String(e);
         return {{ err: {{ message }} }};
@@ -203,6 +208,8 @@ struct Envelope {
     #[serde(default)]
     ok: Option<Value>,
     #[serde(default)]
+    undefined: bool,
+    #[serde(default)]
     err: Option<EnvelopeError>,
 }
 
@@ -211,8 +218,21 @@ struct EnvelopeError {
     message: String,
 }
 
+/// What an export may answer as `undefined`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Undefined {
+    /// Nothing: an identity export answers `null` for no value (`identityLog` with no log), so
+    /// `undefined` is a language that does not follow the interface, never a missing log.
+    Refused,
+    /// `null`: a void export (`Promise<void>`), or an expression adapter's `get`.
+    Null,
+}
+
 /// The answer of a [`call_script`] run: the result as `T`, or the refusal it carried.
-pub(crate) fn read_answer<T: DeserializeOwned>(text: &str) -> Result<T, IdentityError> {
+pub(crate) fn read_answer<T: DeserializeOwned>(
+    text: &str,
+    undefined: Undefined,
+) -> Result<T, IdentityError> {
     let envelope: Envelope = serde_json::from_str(text)
         .map_err(|e| IdentityError::Unavailable(format!("the agent language answered {e}")))?;
     if let Some(err) = envelope.err {
@@ -223,8 +243,23 @@ pub(crate) fn read_answer<T: DeserializeOwned>(text: &str) -> Result<T, Identity
             },
         );
     }
+    if envelope.undefined && undefined == Undefined::Refused {
+        return Err(IdentityError::Invalid(
+            "the agent language answered undefined".into(),
+        ));
+    }
     serde_json::from_value(envelope.ok.unwrap_or(Value::Null))
         .map_err(|e| IdentityError::Invalid(format!("the agent language answered {e}")))
+}
+
+/// The `version` of the agent record a profile came in (`proof.record.version`, which the agent
+/// language adds to a `did:scid` profile); `None` without one.
+pub(crate) fn record_version(profile: &Value) -> Option<u64> {
+    profile
+        .get("proof")?
+        .get("record")?
+        .get("version")?
+        .as_u64()
 }
 
 /// [`IdentityBackend`] on the agent language.
@@ -235,6 +270,22 @@ impl AgentLanguageBackend {
         &self,
         cap: Capability,
         args: &[Value],
+    ) -> Result<T, IdentityError> {
+        let undefined = match cap {
+            Capability::IdentityPutAgent => Undefined::Null,
+            _ => Undefined::Refused,
+        };
+        self.call_export(cap, cap.export_name(), args, undefined)
+            .await
+    }
+
+    /// `export` on the agent language that serves `cap`.
+    async fn call_export<T: DeserializeOwned>(
+        &self,
+        cap: Capability,
+        export: &str,
+        args: &[Value],
+        undefined: Undefined,
     ) -> Result<T, IdentityError> {
         let controller = LanguageController::global_instance();
         let language = controller
@@ -247,13 +298,13 @@ impl AgentLanguageBackend {
                 cap.wire_name()
             )));
         }
-        let script = call_script(cap.export_name(), args);
+        let script = call_script(export, args);
         let run = controller.execute_on_language(language.address(), &script);
         let text = tokio::time::timeout(CALL_TIMEOUT, run)
             .await
-            .map_err(|_| IdentityError::Unavailable(format!("{} timed out", cap.wire_name())))?
+            .map_err(|_| IdentityError::Unavailable(format!("{export} timed out")))?
             .map_err(|e| IdentityError::Unavailable(e.to_string()))?;
-        read_answer(&text)
+        read_answer(&text, undefined)
     }
 }
 
@@ -293,6 +344,19 @@ impl IdentityBackend for AgentLanguageBackend {
         let req = req.map(json).transpose()?.unwrap_or(Value::Null);
         self.call(Capability::IdentityPutAgent, &[json(record)?, req])
             .await
+    }
+
+    async fn agent_version(&self, did: &str) -> Result<Option<u64>, IdentityError> {
+        // The language that takes the record answers it: the profile with `proof.record`.
+        let profile: Option<Value> = self
+            .call_export(
+                Capability::IdentityPutAgent,
+                "expressionGet",
+                &[did.into()],
+                Undefined::Null,
+            )
+            .await?;
+        Ok(profile.as_ref().and_then(record_version))
     }
 
     async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, IdentityError> {
@@ -453,16 +517,39 @@ mod tests {
         assert!(script.is_ascii());
     }
 
+    /// `identityLog` answering `undefined` is a language off the interface, not a missing log
+    /// (`null`), which would read as a store behind a log it signed; a void export's
+    /// `undefined` is its `null`.
+    #[test]
+    fn an_undefined_answer_is_no_null() {
+        let script = call_script("identityLog", &[json!("did:scid:coasys:1:Qm"), json!(0)]);
+        assert!(script.contains("result === undefined ? { undefined: true } : { ok: result }"));
+        let answer = r#"{"undefined": true}"#;
+        assert!(matches!(
+            read_answer::<Option<LogPage>>(answer, Undefined::Refused),
+            Err(IdentityError::Invalid(m)) if m.contains("undefined")
+        ));
+        read_answer::<()>(answer, Undefined::Null).unwrap();
+        assert_eq!(
+            read_answer::<Option<Value>>(answer, Undefined::Null).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_answer::<Option<LogPage>>(r#"{"ok": null}"#, Undefined::Refused).unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn a_result_and_each_refusal_read_back() {
-        let page: Option<u64> = read_answer(r#"{"ok": null}"#).unwrap();
+        let page: Option<u64> = read_answer(r#"{"ok": null}"#, Undefined::Refused).unwrap();
         assert_eq!(page, None);
-        let n: u64 = read_answer(r#"{"ok": 7}"#).unwrap();
+        let n: u64 = read_answer(r#"{"ok": 7}"#, Undefined::Refused).unwrap();
         assert_eq!(n, 7);
 
         let refusal = |code: Value| {
             let text = json!({"err": {"message": code.to_string()}}).to_string();
-            read_answer::<Value>(&text).unwrap_err()
+            read_answer::<Value>(&text, Undefined::Refused).unwrap_err()
         };
         assert_eq!(
             refusal(json!({"code": "key-taken", "key": "z6Mk"})),
@@ -486,11 +573,14 @@ mod tests {
         ));
         // A thrown error that carries no refusal is the language failing: unavailable.
         assert!(matches!(
-            read_answer::<Value>(r#"{"err": {"message": "TypeError: boom"}}"#),
+            read_answer::<Value>(
+                r#"{"err": {"message": "TypeError: boom"}}"#,
+                Undefined::Refused
+            ),
             Err(IdentityError::Unavailable(m)) if m == "TypeError: boom"
         ));
         assert!(matches!(
-            read_answer::<Value>("not json"),
+            read_answer::<Value>("not json", Undefined::Refused),
             Err(IdentityError::Unavailable(_))
         ));
     }

@@ -566,6 +566,20 @@ jobs:
             cargo test --release -p ad4m-identity-client
           no_output_timeout: 30m
       - run:
+          # ad4m-hash-chain on wasm32 under Node: the shared vectors, the RFC 8785 data, the
+          # text checks and the wasm-bindgen exports. The test runner must be the locked
+          # wasm-bindgen version; it is installed once into the (persistent) target dir.
+          name: identity crates wasm tests
+          command: |
+            WASM_BINDGEN=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+            RUNNER=$PWD/target/wasm-tools/bin/wasm-bindgen-test-runner
+            if ! "$RUNNER" --version 2>/dev/null | grep -q " $WASM_BINDGEN\$"; then
+              cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked --root target/wasm-tools
+            fi
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER \
+              cargo test -p ad4m-hash-chain --target wasm32-unknown-unknown --features wasm
+          no_output_timeout: 30m
+      - run:
           # ad4m-ldk/rust is its own workspace, so the commands above skip it. Here
           # rather than in a separate job because rust-tests is a required check.
           name: ad4m-ldk (Rust) tests
@@ -697,7 +711,7 @@ jobs:
           destination: test-logs
 
   # Identity end to end: a real identity-store and three executors (create, link,
-  # first-link refusal, revoke, fork on a shorter log, cache after restart).
+  # first-link refusal, revoke, a store restored behind the cache, cache after restart).
   # No Holochain. The suite builds identity-store and the holder example with cargo.
   integration-tests-identity:
     machine: true

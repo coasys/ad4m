@@ -9,7 +9,10 @@
 //!   place of mock.ad4m.dev.
 //!
 //! The store's base URL is the `storeUrl` language setting (the executor fills it from
-//! `identity.storeUrl`), read on every call; without one, the production store. The language
+//! `identity.storeUrl`), read on every call; without one, the production store. It must be
+//! `https`, or plain `http` to a loopback address. The `storeKeys` setting (from
+//! `identity.storeKeys`) lists the store keys whose signed heads the language trusts when it
+//! reads a log to check a `did:scid` record; without it no such record verifies. The language
 //! does not implement the token interface: the executor answers `disabled`.
 
 pub mod agents;
@@ -25,7 +28,7 @@ use ad4m_ldk::imports as rt;
 use ad4m_ldk::prelude::*;
 
 use agents::AgentKey;
-use store::{store_url_from, Http, HttpReply, Store};
+use store::{store_settings_from, Http, HttpFailure, HttpReply, Store};
 
 /// The host's `httpFetch`.
 pub struct HostHttp;
@@ -37,14 +40,21 @@ impl Http for HostHttp {
         method: &str,
         headers_json: &str,
         body: &str,
-    ) -> Result<HttpReply, String> {
-        rt::http_fetch_typed(url, method, headers_json, body)
+        max_bytes: usize,
+    ) -> Result<HttpReply, HttpFailure> {
+        rt::http_fetch_typed_capped(url, method, headers_json, body, max_bytes)
             .await
             .map(|r| HttpReply {
                 status: r.status,
                 body: r.body,
             })
-            .map_err(|e| format!("{e:?}"))
+            .map_err(|e| {
+                if rt::http_fetch_too_large(&e) {
+                    HttpFailure::TooLarge
+                } else {
+                    HttpFailure::Failed(format!("{e:?}"))
+                }
+            })
     }
 }
 
@@ -88,7 +98,7 @@ impl Language for CentralizedAgentLanguage {
 
     async fn init() -> LanguageResult<Self> {
         Ok(CentralizedAgentLanguage {
-            store: Store::new(HostHttp, || store_url_from(&rt::language_settings())),
+            store: Store::new(HostHttp, || store_settings_from(&rt::language_settings())),
         })
     }
 }

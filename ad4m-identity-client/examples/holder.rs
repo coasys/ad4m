@@ -61,13 +61,14 @@ async fn create(
     let CreateScreen::ShowWords(words) = screen else {
         return Err("the flow did not show the words".into());
     };
-    let parsed = words::parse(&words.join(" ")).map_err(|e| e.to_string())?;
+    let parsed = words::parse(&words.expose().join(" ")).map_err(|e| e.to_string())?;
     let master = words::master_key(&words::seed(&parsed), 0).map_err(|e| e.to_string())?;
     let CreateScreen::ConfirmWords { positions } =
         flow.words_written(&RANDOM).map_err(|e| e.to_string())?
     else {
         return Err("the flow did not ask for the words".into());
     };
+    let words = words.expose();
     flow.confirm([&words[positions[0] - 1], &words[positions[1] - 1]])
         .map_err(|e| e.to_string())?;
     let created = flow

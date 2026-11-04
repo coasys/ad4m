@@ -275,6 +275,47 @@ async fn a_joined_message_goes_after_30_days() {
 }
 
 #[tokio::test]
+async fn a_waiting_inbox_read_answers_within_one_second_of_a_write_to_its_address() {
+    use std::time::{Duration, Instant};
+
+    let t = TestStore::with_identity_burst(100);
+    let (alice, _phone) = alice_with_phone(&t).await;
+    let path = format!("/v1/inbox/{}/d1", alice.scid());
+    let header = alice.request("d1", &alice.device_key(1), "GET", &path, b"", t.now() + 60);
+
+    let router = t.router.clone();
+    let uri = format!("{path}?wait=8");
+    let waiting = tokio::spawn(async move {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let request = axum::http::Request::get(uri)
+            .header("x-coasys-request", header)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, Instant::now(), body)
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // A write to another address does not answer the waiting read.
+    let other = master_put_joined(&t, &alice, "d2", &alice.seal_master("d2")).await;
+    assert_eq!(other.status, StatusCode::CREATED, "{}", other.body);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished());
+
+    let reply = master_put_joined(&t, &alice, "d1", &alice.seal_master("d1")).await;
+    let written = Instant::now();
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    let (status, answered, body) = waiting.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert!(answered.duration_since(written) < Duration::from_secs(1));
+    let list: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["id"], reply.body["id"]);
+}
+
+#[tokio::test]
 async fn a_revoke_deletes_the_revoked_keys_inbox_in_its_transaction() {
     let t = TestStore::with_identity_burst(100);
     let (mut alice, phone) = alice_with_phone(&t).await;

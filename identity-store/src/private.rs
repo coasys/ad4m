@@ -11,7 +11,7 @@ use ad4m_identity_core::record::{check_sealed, SealedRecord};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 
-use crate::db::{self, from_sql, to_sql};
+use crate::db::{from_sql, to_sql};
 use crate::error::ApiError;
 use crate::request::{Incoming, Signer};
 use crate::{limits, Store};
@@ -48,24 +48,14 @@ impl Store {
         incoming: &Incoming<'_>,
     ) -> Result<Value, ApiError> {
         let did = ad4m_identity_core::did_of(scid);
-        let verified = self.verify_request(incoming, Some(&did), Signer::AnyKey)?;
         let now = self.now();
         let mut conn = self.db.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let chain = db::load_chain(&tx, scid)?
-            .ok_or_else(|| ApiError::not_found("no log of the identity"))?;
-        // The log as this transaction sees it: a revoke or a rotate that landed after the
-        // request was checked ends the writer here.
-        if !chain
-            .state()
-            .key_valid_at(&verified.key_id, chain.head().seq)
-        {
-            return Err(ApiError::forbidden(
-                "signer",
-                "the key is not valid at the head",
-            ));
-        }
-        check_sealed(record, &chain).map_err(|e| ApiError::invalid(e.name(), e.to_string()))?;
+        // The request is checked against the log as this transaction sees it, so no revoke or
+        // rotate commits between the check and the write.
+        let verified = self.verify_request_in(&tx, incoming, Some(&did), Signer::AnyKey)?;
+        let chain = &verified.chain;
+        check_sealed(record, chain).map_err(|e| ApiError::invalid(e.name(), e.to_string()))?;
         let stored: Option<(i64, String)> = tx
             .query_row(
                 "SELECT version, sealed FROM records WHERE scid = ?1",
@@ -99,8 +89,6 @@ impl Store {
             params![scid, text, to_sql(record.version)?, to_sql(now)?],
         )?;
         tx.commit()?;
-        drop(conn);
-        self.changed();
         Ok(json!({ "version": record.version }))
     }
 }

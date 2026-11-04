@@ -251,6 +251,9 @@ fn incept_json(edit: impl FnOnce(&mut Value)) -> Vec<Value> {
     vec![value]
 }
 
+/// A `next` that is not a multihash: `-` is not a base58btc character.
+const NOT_A_HASH: &str = "not-a-multihash";
+
 /// Every refusal case of the format spec, one per rule.
 pub fn refusal_cases() -> Vec<Case> {
     let base = Log::new();
@@ -614,6 +617,47 @@ pub fn refusal_cases() -> Vec<Case> {
         format("BadSalt"),
     );
 
+    // Each of these would fold without its check: the rest of the event is signed and valid.
+    let mut bad_next = build::incept_unsigned(
+        &mk(&master(0)),
+        NOT_A_HASH.into(),
+        vec![device(1, KeyLife::Standing)],
+    )
+    .unwrap();
+    sign(&mut bad_next, "m0", &master(0));
+    sign(&mut bad_next, "d1", &dev(1));
+    case(
+        "incept whose next is not a multihash",
+        "2",
+        typed(&[bad_next]),
+        format("BadHash"),
+    );
+
+    let mut bad_rotate_next = build::rotate_unsigned(
+        &base.chain,
+        &mk(&master(1)),
+        &salt(1),
+        Some(NOT_A_HASH.into()),
+        &[],
+    )
+    .unwrap();
+    sign(&mut bad_rotate_next, "m1", &master(1));
+    case(
+        "rotate whose next is not a multihash",
+        "5",
+        typed(&[first.clone(), bad_rotate_next]),
+        format("BadHash"),
+    );
+
+    let mut empty_revoke = build::revoke_unsigned(&base.chain, &[]).unwrap();
+    sign(&mut empty_revoke, "m0", &master(0));
+    case(
+        "revoke of no key",
+        "4",
+        typed(&[first.clone(), empty_revoke]),
+        format("EmptyRevoke"),
+    );
+
     let mut ended = Log::new();
     ended.rotate(&[], true);
     assert_eq!(
@@ -648,6 +692,43 @@ pub fn refusal_cases() -> Vec<Case> {
     );
 
     cases
+}
+
+/// One crafted refusal given as text, for what a JSON value cannot hold: the event texts and
+/// the error code that parsing each with `Event::from_json_text` and folding must give.
+pub struct TextCase {
+    pub name: &'static str,
+    pub rule: &'static str,
+    pub events: Vec<String>,
+    pub error: Value,
+}
+
+/// The refusal cases that only text can carry.
+pub fn text_refusal_cases() -> Vec<TextCase> {
+    let base = Log::new();
+    let text = base.events[0].to_canonical_json().unwrap();
+    let member = format!("\"next\":\"{}\"", next(1));
+    assert!(text.contains(&member));
+    // A parser that keeps the last member reads the signed incept; one that keeps the first
+    // reads another `next`.
+    let twice = text.replacen(&member, &format!("\"next\":\"{}\",{member}", next(2)), 1);
+    vec![TextCase {
+        name: "duplicate member name",
+        rule: "10",
+        events: vec![twice],
+        error: format("DuplicateMember"),
+    }]
+}
+
+/// Parses each text with `Event::from_json_text`, then folds: the error code of the first refusal.
+pub fn fold_texts(texts: &[String]) -> Option<Value> {
+    let events: Result<Vec<Event>, FoldError> =
+        texts.iter().map(|t| Event::from_json_text(t)).collect();
+    let err = match events {
+        Ok(events) => ad4m_identity_core::fold(&events).err()?,
+        Err(e) => ad4m_identity_core::ChainError::Policy(e),
+    };
+    Some(pinned(&error_code(&err)))
 }
 
 /// The `{code, reason, format}` part of an error code that vectors pin.
@@ -743,7 +824,19 @@ fn build_fold() -> Value {
             json!({"name": c.name, "rule": c.rule, "events": c.events, "error": c.error})
         })
         .collect();
-    json!({"description": "One invalid log per rule; `error` is the pinned part of the ChainErrorCode.", "cases": cases})
+    let text_cases: Vec<Value> = text_refusal_cases()
+        .into_iter()
+        .map(|c| {
+            let got = fold_texts(&c.events).unwrap_or_else(|| panic!("{} folds", c.name));
+            assert_eq!(got, c.error, "{}", c.name);
+            json!({"name": c.name, "rule": c.rule, "events": c.events, "error": c.error})
+        })
+        .collect();
+    json!({
+        "description": "One invalid log per rule; `error` is the pinned part of the ChainErrorCode. In `textCases` each event is JSON text, parsed before the fold.",
+        "cases": cases,
+        "textCases": text_cases,
+    })
 }
 
 fn build_proofs() -> Value {
@@ -926,6 +1019,11 @@ fn check_fold(file: &Value) {
             .err()
             .unwrap_or_else(|| panic!("{} folds", case["name"]));
         assert_eq!(pinned(&error_code(&err)), case["error"], "{}", case["name"]);
+    }
+    for case in file["textCases"].as_array().unwrap() {
+        let texts: Vec<String> = serde_json::from_value(case["events"].clone()).unwrap();
+        let got = fold_texts(&texts).unwrap_or_else(|| panic!("{} folds", case["name"]));
+        assert_eq!(got, case["error"], "{}", case["name"]);
     }
 }
 

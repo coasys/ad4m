@@ -837,6 +837,50 @@ impl AgentService {
         .await
     }
 
+    /// Publishes again the profile of every managed agent that has a stored one, through
+    /// [`AgentService::publish_agent_to_language`]. Run after the main agent unlocks, so the
+    /// profiles an earlier agent language held (mock.ad4m.dev) reach the configured store. A
+    /// publish replaces the agent's record, so running it twice changes nothing. Returns the
+    /// DIDs published; a failure is logged and the next agent is tried.
+    pub async fn publish_managed_profiles() -> Vec<String> {
+        Self::publish_managed_profiles_with(|context| async move {
+            Self::publish_agent_to_language(&context).await
+        })
+        .await
+    }
+
+    /// [`AgentService::publish_managed_profiles`] with `publish` in place of the agent
+    /// language, one agent after another.
+    pub(crate) async fn publish_managed_profiles_with<F, Fut>(publish: F) -> Vec<String>
+    where
+        F: Fn(AgentContext) -> Fut,
+        Fut: std::future::Future<Output = Result<(), AnyError>>,
+    {
+        let dids = match Self::managed_agent_dids() {
+            Ok(dids) => dids,
+            Err(e) => {
+                log::warn!("Could not list the managed agents to publish their profiles: {e}");
+                return vec![];
+            }
+        };
+        let mut published = vec![];
+        for did in dids {
+            match Self::load_managed_agent_profile(&did) {
+                Ok(Some(_)) => {}
+                Ok(None) => continue,
+                Err(e) => {
+                    log::warn!("Could not read the profile of {did} to publish it: {e}");
+                    continue;
+                }
+            }
+            match publish(AgentContext::managed(did.clone())).await {
+                Ok(()) => published.push(did),
+                Err(e) => log::warn!("Error publishing the profile of {did}: {e}"),
+            }
+        }
+        published
+    }
+
     /// Publishes `context`'s profile with `publish_did_key` (the did:key profile), then, through
     /// `identity`, the person's profile. A failure of the person's profile is logged and leaves
     /// the did:key publish successful; the next publish tries again.
@@ -1268,12 +1312,13 @@ impl AgentService {
 }
 
 impl AgentStatus {
-    /// The status with `identity` read for its `did` from the executor database.
-    pub fn with_identity(mut self) -> AgentStatus {
-        self.identity = self
-            .did
-            .as_deref()
-            .and_then(crate::identity::service::identity_of_agent);
+    /// The status with `identity`: the `did:scid` its `did` speaks for
+    /// (`identity::service::identity_of_agent`: bound, and the key valid at the trusted seq).
+    pub async fn with_identity(mut self) -> AgentStatus {
+        self.identity = match self.did.as_deref() {
+            Some(did) => crate::identity::service::identity_of_agent(did).await,
+            None => None,
+        };
         self
     }
 }
@@ -1296,6 +1341,54 @@ mod tests {
             setup_wallet();
             setup_agent();
         });
+    }
+
+    /// After unlock every managed agent with a stored profile is published again: one without
+    /// a profile is skipped, and a failed publish leaves the others published.
+    #[tokio::test]
+    async fn managed_profiles_are_published_again_and_a_failure_skips_only_that_agent() {
+        ensure_setup();
+        let failing = crate::test_utils::create_test_user(&format!(
+            "failing-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let with_profile = crate::test_utils::create_test_user(&format!(
+            "profile-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let without_profile = crate::test_utils::create_test_user(&format!(
+            "bare-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        for did in [&failing, &with_profile] {
+            let agent = Agent {
+                did: did.clone(),
+                direct_message_language: None,
+                perspective: None,
+            };
+            AgentService::store_managed_agent_profile(did, &agent).unwrap();
+        }
+
+        let tried = std::sync::Mutex::new(Vec::<String>::new());
+        let published = AgentService::publish_managed_profiles_with(|context| {
+            let did = context.managed_did().unwrap().to_string();
+            tried.lock().unwrap().push(did.clone());
+            let fails = did == failing;
+            async move {
+                if fails {
+                    Err(anyhow!("the store is down"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        let tried = tried.into_inner().unwrap();
+        assert!(tried.contains(&failing), "{tried:?}");
+        assert!(tried.contains(&with_profile), "{tried:?}");
+        assert!(!tried.contains(&without_profile), "no profile, no publish");
+        assert!(published.contains(&with_profile));
+        assert!(!published.contains(&failing));
     }
 
     /// Serialises one map entry, then fails: a write that breaks partway.
