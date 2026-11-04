@@ -147,9 +147,12 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         store.setSequence(6);
         store.setRevision("rev-6");
 
-        const result = syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, 5, "rev-5");
+        // Below the cursor (a late push), and equal to it (the echo of our own commit).
+        for (const sequence of [5, 6]) {
+            const result = syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, sequence, `rev-${sequence}`);
+            assert.deepEqual(result, { additions: [], removals: [] });
+        }
 
-        assert.deepEqual(result, { additions: [], removals: [] });
         assert.deepEqual(store.allLinks().links, []);
         assert.equal(store.getSequence(), 6);
         assert.equal(store.getRevision(), "rev-6");
