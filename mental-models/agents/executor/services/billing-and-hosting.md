@@ -12,7 +12,7 @@ Charging a link write:
 
 1. Before the write, `check_compute_credits(did)` allows it when free hosting is on, the agent has free access, or credits > 0.
 2. After the write, `bill_compute(did, amount, operation, summary)` deducts and logs (`deduct_credits_and_log`).
-3. Only managed agents are billed. `add_link` and the other write paths call billing only when `AgentContext::managed_did()` is set.
+3. Only managed agents are billed. `add_link` and the other write paths call billing only when `AgentContext::managed_did()` is set. The RPC checks (`check_credits`, `reserve_credits`, `check_compute_credits_ws`) allow a caller without a managed agent before they read the free-hosting flag. A flag that cannot be read refuses the call.
 
 Only local link writes (`add_link`, `add_links`, `link_mutations`, `update_link`), the AI handlers and the OpenAI-compatible routes bill. Links that arrive from link languages, Holochain gossip, SFU media and language `httpFetch` are not billed.
 
@@ -35,6 +35,7 @@ Settings: `runtime.setHostRates` (operator only), `runtime.setFreeHostingEnabled
 
 - [rust-executor/src/billing.rs](../../../../rust-executor/src/billing.rs): `check_compute_credits`, `bill_compute`, `bill_ai_operation`, `get_link_write_rate`.
 - [rust-executor/src/unyt_service.rs](../../../../rust-executor/src/unyt_service.rs): alliance DNA install, proposals, `handle_signal`, `check_pending_payments`, `ALLIANCE_CALL_LOCK`.
+- [rust-executor/src/api/perspectives_ws.rs](../../../../rust-executor/src/api/perspectives_ws.rs): `check_credits`, `reserve_credits`; [rust-executor/src/api/ai_ws.rs](../../../../rust-executor/src/api/ai_ws.rs): `check_compute_credits_ws`.
 - [rust-executor/src/api/hosting_ws.rs](../../../../rust-executor/src/api/hosting_ws.rs): `hosting.*` RPC.
 - [rust-executor/src/api/runtime_ws.rs](../../../../rust-executor/src/api/runtime_ws.rs): free hosting and host-rate RPC.
 - [rust-executor/src/perspectives/perspective_instance.rs](../../../../rust-executor/src/perspectives/perspective_instance.rs): billing on link writes.

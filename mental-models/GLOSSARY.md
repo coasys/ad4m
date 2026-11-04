@@ -136,11 +136,11 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Host rates** (`host_rates` table, `bill_ai_operation`): The prices in HOT per billed operation or model name. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
 
-**Hosted mode** (`wallet_backend = "shared"`, `db_backend = "shared"`, `SharedWallet`, `SharedDb`): An executor that reads its wallet and its user table from a hosting service over HTTP. [Executor data](agents/executor/data.md) — not: shared mode
+**Hosted mode** (`wallet_backend = "shared"`, `db_backend = "shared"`, `SharedWallet`, `SharedDb`): An executor that reads its wallet, and the users and perspective metadata that executors share, from a hosting service over HTTP. Every other table stays in its own SQLite database. [Executor data](agents/executor/data.md) — not: shared mode
 
 **Hosting** (`api/hosting_ws.rs`): The executor's offer to managed agents: host rates, a hot wallet and credit top-ups. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
 
-**Hosting service** (`wallet_backend_url`, `INTERNAL_API_TOKEN`): The external service that serves keys and users to executors in hosted mode and calls their `/health` and `/internal/shutdown` routes. [Executor data](agents/executor/data.md)
+**Hosting service** (`wallet_backend_url`, `db_backend_url`, `INTERNAL_API_TOKEN`): The external service that serves keys, users and perspective metadata to executors in hosted mode and calls their `/health` and `/internal/shutdown` routes. [Executor data](agents/executor/data.md)
 
 **Installing (a language)** (`language_by_ref`, `install_language`, `install_language_from_address`): Getting a bundle by address, checking its hash, saving it and loading it into an isolate. [Installing languages](languages/runtime/installing/README.md)
 
