@@ -263,40 +263,91 @@ test("applyDiffAndAppend processes additions before removals — simultaneous ad
   });
 });
 
-// ---- Review item 14: diff retention overflow + bootstrap recovery ----
+// ---- The diff log is the catch-up source: it is never pruned ----
 
-test("client falling behind maxDiffsPerRoom can recover via render (bootstrap)", async () => {
-  const server = await startTestServer({ maxDiffsPerRoom: 3 });
-  try {
+test("sync from an early cursor returns every later diff, past 10,000 commits", async () => {
+  await withServer(async (server) => {
     const roomId = randomUUID();
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
-    // Commit 5 diffs — with max 3, the oldest get pruned.
-    for (let i = 0; i < 5; i++) {
-      const link = await createSignedLink(agent, {
-        source: `s${i}`, predicate: "p", target: `t${i}`,
-      });
-      await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [link] }, token);
+    // Sequence 1 goes through the commit route; it is the member's cursor.
+    const first = await createSignedLink(agent, { source: "s0", predicate: "p", target: "t0" });
+    const commitRes = await postJson<{ sequence: number }>(
+      `${server.url}/rooms/${roomId}/commit`, { additions: [first], removals: [] }, token,
+    );
+    assert.equal(commitRes.status, 200);
+    const cursor = commitRes.body.sequence;
+    assert.equal(cursor, 1);
+
+    // The other members then commit more than 10,000 diffs. They go through
+    // the same db call the commit route makes, without signing and HTTP
+    // round-trips for each one (/sync returns stored diffs unchecked).
+    const later = 10_050;
+    for (let i = 1; i <= later; i++) {
+      server.built.db.applyDiffAndAppend(roomId, {
+        additions: [{
+          author: agent.did,
+          timestamp: new Date(0).toISOString(),
+          data: { source: `s${i}`, predicate: "p", target: `t${i}` },
+          proof: { signature: "00", key: "00", valid: true, invalid: false },
+        } as LinkExpression],
+        removals: [],
+      }, agent.did);
     }
 
-    // Sync from sequence 0 — should only return retained diffs (at most 3).
     const syncRes = await getJson<{ diffs: PerspectiveDiff[]; sequence: number }>(
+      `${server.url}/rooms/${roomId}/sync?since=${cursor}`, token,
+    );
+    assert.equal(syncRes.status, 200);
+    assert.equal(syncRes.body.sequence, cursor + later);
+    assert.equal(syncRes.body.diffs.length, later,
+      "every diff after the cursor must still be in the log");
+    assert.equal(syncRes.body.diffs[0].additions[0].data.source, "s1",
+      "the first diff after the cursor must be the next one committed");
+    assert.equal(syncRes.body.diffs[later - 1].additions[0].data.source, `s${later}`);
+
+    const all = await getJson<{ diffs: PerspectiveDiff[] }>(
       `${server.url}/rooms/${roomId}/sync?since=0`, token,
     );
-    assert.ok(
-      syncRes.body.diffs.length <= 3,
-      `expected at most 3 retained diffs, got ${syncRes.body.diffs.length}`,
-    );
+    assert.equal(all.body.diffs.length, later + 1);
+  });
+});
 
-    // But render returns ALL 5 active links — the full snapshot.
-    const renderRes = await getJson<{ links: LinkExpression[]; revision: string; sequence: number }>(
+test("render still returns the whole active set for a room whose early diffs were pruned before this change", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const links: LinkExpression[] = [];
+    for (let i = 0; i < 5; i++) {
+      const link = await createSignedLink(agent, { source: `s${i}`, predicate: "p", target: `t${i}` });
+      links.push(link);
+      const res = await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [link], removals: [] }, token);
+      assert.equal(res.status, 200);
+    }
+    const removed = await postJson(
+      `${server.url}/rooms/${roomId}/commit`, { additions: [], removals: [links[4]] }, token,
+    );
+    assert.equal(removed.status, 200);
+
+    // A server that ran the old pruning deleted the room's early diff rows
+    // and kept the active set they built.
+    server.built.db.raw.prepare("DELETE FROM diffs WHERE room_id = ? AND sequence <= ?").run(roomId, 3);
+
+    const sync = await getJson<{ diffs: PerspectiveDiff[] }>(`${server.url}/rooms/${roomId}/sync?since=0`, token);
+    assert.equal(sync.body.diffs.length, 3, "the gap stays in the log");
+
+    const render = await getJson<{ links: LinkExpression[]; revision: string }>(
       `${server.url}/rooms/${roomId}/render`, token,
     );
-    assert.equal(renderRes.body.links.length, 5,
-      "render must return all active links regardless of diff pruning");
-    assert.equal(renderRes.body.sequence, 5);
-  } finally {
-    await server.close();
-  }
+    assert.equal(render.status, 200);
+    assert.deepEqual(
+      render.body.links.map((l) => l.data.source).sort(),
+      ["s0", "s1", "s2", "s3"],
+      "render answers from the active set, so it repairs a member behind the gap",
+    );
+    assert.equal(render.body.revision, computeRevision(links.slice(0, 4).map(linkHashOf)));
+  });
 });
