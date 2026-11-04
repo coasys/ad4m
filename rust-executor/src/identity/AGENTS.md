@@ -122,9 +122,13 @@ the offer's state).
   `identity.status`, `identity.log` and `identity.devices` show the cached log as it is.
   Without `identity.storeKeys` no `did:scid` author verifies, and `identity.publish` and
   `identity.claimOffer` refuse with `no-store-keys` before the store commits anything: a log
-  the executor can never accept would still take the agent's key for every identity. No
-  store key ships with the executor, so the default config (no `identity.storeUrl`:
-  the language's default store) is in this state; `init` logs
+  the executor can never accept would still take the agent's key for every identity.
+  `IdentitySettings::from_config` is the one place that picks the keys: `identity.storeKeys`
+  set → exactly those (for the default URL too); neither `identity.storeUrl` nor
+  `identity.storeKeys` set → the language's default store and its key, `DEFAULT_STORE_KEY`
+  (`https://store.ad4m.dev`, the staging network; one store per build, so a build for another
+  network sets both); `identity.storeUrl` set without `identity.storeKeys` → no key (the
+  default key never applies to a configured URL). Without a key `init` logs
   `missing_store_keys_warning` at start, naming the store and the consequence.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
   first-link rule itself: `already-linked` while the main key is valid in its identity's log at
