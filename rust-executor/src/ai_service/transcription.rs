@@ -17,7 +17,6 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::providers::audio::{AudioFile, OpenAiTranscribe, RemoteTranscribe, TranscribeFailure};
 use super::Result;
-use crate::db::Ad4mDb;
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
 use crate::types::{ModelType, TranscriptionTextFilter};
@@ -83,7 +82,8 @@ impl SpeechGate {
 /// The client of the endpoint that serves transcription model `model_id`, the id the
 /// endpoint knows the model by, and the endpoint's id.
 pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<(OpenAiTranscribe, String, String)> {
-    let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.to_string()))?
+    let model = crate::db_backend::db_backend()
+        .get_model(model_id.to_string())?
         .ok_or_else(|| anyhow!("No transcription model has the id '{model_id}'"))?;
     if model.model_type != ModelType::Transcription {
         return Err(anyhow!(
@@ -91,7 +91,8 @@ pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<(OpenAiTranscribe, 
             model.name
         ));
     }
-    let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint(&model.endpoint_id))?
+    let endpoint = crate::db_backend::db_backend()
+        .get_endpoint(&model.endpoint_id)?
         .ok_or_else(|| {
             anyhow!(
                 "The endpoint of transcription model '{}' is gone",

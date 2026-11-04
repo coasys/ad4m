@@ -14,7 +14,6 @@
 //! with a name.
 
 use super::errors::{OpenAIError, OpenAIResult};
-use crate::db::Ad4mDb;
 use crate::types::{Endpoint, Model, ModelType};
 
 /// A registered model, with the endpoint that serves it.
@@ -45,7 +44,9 @@ pub async fn resolve(requested: &str, expected_type: ModelType) -> OpenAIResult<
         ));
     }
 
-    let models = Ad4mDb::with_global_instance(|db| db.get_models()).map_err(db_error)?;
+    let models = crate::db_backend::db_backend()
+        .get_models()
+        .map_err(db_error)?;
 
     let found = models
         .iter()
@@ -53,30 +54,30 @@ pub async fn resolve(requested: &str, expected_type: ModelType) -> OpenAIResult<
         // Case-sensitive, as OpenAI's.
         .or_else(|| models.iter().find(|m| m.name == requested))
         .cloned();
-    let model = match found {
-        Some(model) => model,
-        // After id and name, so a real model named "default" wins.
-        None if requested == "default" => {
-            let id = Ad4mDb::with_global_instance(|db| db.get_default_model(expected_type.clone()))
-                .map_err(db_error)?
-                .ok_or_else(|| {
-                    OpenAIError::not_found(format!(
-                        "No default {} model configured on this executor",
-                        type_label(&expected_type)
-                    ))
-                })?;
-            models
-                .iter()
-                .find(|m| m.id == id)
-                .cloned()
-                .ok_or_else(|| OpenAIError::not_found(format!("Default model {id} not found")))?
-        }
-        None => by_endpoint_and_remote(&models, requested)?.ok_or_else(|| {
-            OpenAIError::not_found(format!(
-                "Model '{requested}' not found. List registered models with GET /v1/models."
-            ))
-        })?,
-    };
+    let model =
+        match found {
+            Some(model) => model,
+            // After id and name, so a real model named "default" wins.
+            None if requested == "default" => {
+                let id = crate::db_backend::db_backend()
+                    .get_default_model(expected_type.clone())
+                    .map_err(db_error)?
+                    .ok_or_else(|| {
+                        OpenAIError::not_found(format!(
+                            "No default {} model configured on this executor",
+                            type_label(&expected_type)
+                        ))
+                    })?;
+                models.iter().find(|m| m.id == id).cloned().ok_or_else(|| {
+                    OpenAIError::not_found(format!("Default model {id} not found"))
+                })?
+            }
+            None => by_endpoint_and_remote(&models, requested)?.ok_or_else(|| {
+                OpenAIError::not_found(format!(
+                    "Model '{requested}' not found. List registered models with GET /v1/models."
+                ))
+            })?,
+        };
 
     if model.model_type != expected_type {
         return Err(OpenAIError::invalid_request(format!(
@@ -87,7 +88,8 @@ pub async fn resolve(requested: &str, expected_type: ModelType) -> OpenAIResult<
         )));
     }
 
-    let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint(&model.endpoint_id))
+    let endpoint = crate::db_backend::db_backend()
+        .get_endpoint(&model.endpoint_id)
         .map_err(db_error)?
         .ok_or_else(|| {
             OpenAIError::internal(format!("The endpoint of model '{}' is gone", model.name))
@@ -105,7 +107,8 @@ fn by_endpoint_and_remote(models: &[Model], requested: &str) -> OpenAIResult<Opt
     let Some((endpoint_name, remote)) = requested.split_once('/') else {
         return Ok(None);
     };
-    let Some(endpoint) = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name(endpoint_name))
+    let Some(endpoint) = crate::db_backend::db_backend()
+        .get_endpoint_by_name(endpoint_name)
         .map_err(db_error)?
     else {
         return Ok(None);
