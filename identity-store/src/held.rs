@@ -10,11 +10,15 @@
 //!
 //! The entries are bounded by the heap their folds take together ([`Settings::held_log_bytes`],
 //! each fold sized by [`held_bytes_of`]); the least recently used go first. A fold larger than
-//! the bound is never held: its log is folded on every use. The bound is in bytes, not events,
+//! the bound is never held: its log is folded on every use. The per-log budget
+//! ([`Settings::log_fold_bytes`], at most the bound) keeps every log the store takes below it,
+//! and a miss folds with the core's `fold_stored` (`db::load_chain_before`), no signature
+//! checked. The bound is in bytes, not events,
 //! because one event can cost the heap a hundred times another: an `incept` lists as many keys
 //! as its 64 kB body holds, and a `scope` may name its actions many times over.
 //!
 //! [`Settings::held_log_bytes`]: crate::Settings::held_log_bytes
+//! [`Settings::log_fold_bytes`]: crate::Settings::log_fold_bytes
 
 use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;

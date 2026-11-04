@@ -13,7 +13,7 @@ the signing domains other than `coasys:kel`), is informative.
 
 | File | What |
 |---|---|
-| `src/lib.rs` | `FORMAT`, `DID_PREFIX`, `KEL_DOMAIN`, `KelChain`, `fold`, `fold_json`, `import`, `import_json`, `event_hash`, `derive_scid`, `commitment`, `error_code`, `did_of`, `scid_of`; re-exports of the module (`Hash`, `Proof`, `Head`, `Chain`, `ChainError`, `ChainPolicy`, `Entry`, `ForkEvidence`, `ImportOutcome`) |
+| `src/lib.rs` | `FORMAT`, `DID_PREFIX`, `KEL_DOMAIN`, `KelChain`, `fold`, `fold_stored`, `fold_json`, `import`, `import_json`, `event_hash`, `derive_scid`, `commitment`, `error_code`, `did_of`, `scid_of`; re-exports of the module (`Hash`, `Proof`, `Head`, `Chain`, `ChainError`, `ChainPolicy`, `Entry`, `ForkEvidence`, `ImportOutcome`) |
 | `src/event.rs` | `Event`, `Op`, `DeviceKey`, `KeyLife`, `BotScope`, `Kind`; the strict JSON parser `Event::from_json`, and `Event::from_json_text` for text (also behind `Deserialize`; refuses a duplicate member name) |
 | `src/policy.rs` | `KelPolicy` (`genesis`, `apply`), `FoldError`, `FormatError` |
 | `src/state.rs` | `KeyState`, `KeyRecord`: `key_valid_at`, `key_valid_at_time`, `bot_scope_at`, `current_master`, `key_id_of`, `device_key_id_of` (content signers: device keys only), `next_device_id`, `encryption_keys_at` |
@@ -58,6 +58,12 @@ the signing domains other than `coasys:kel`), is informative.
   `ChainError::Policy(FoldError)`. `FoldError::name()` is the `reason` of the error code.
 - Who signs is checked strictly: each required signer has exactly one proof, and any other
   proof fails the event (`BadProof`).
+- `fold_stored` is for a host's own stored, already-verified log only (the identity store on
+  a miss in its held folds). It leaves out the signature checks and the duplicate-key scan
+  (K8, quadratic over a long log), both of which only refuse, and gives the same chain as
+  `fold` for every log `fold` accepts (`tests/fold_stored.rs`). Never use it on events from a
+  peer, a client or a wallet: a forged proof or a reused key would pass. Executors and
+  wallets use `fold` and `import`.
 - Changing an encoding, a field or a derivation changes the vectors: that is a format change
   and needs the spec updated with it.
 
@@ -84,6 +90,9 @@ spend a claim.
 ended, past the head, member order); `vectors/document.json` pins the document and metadata
 of the log of `log.json` at the head and after every seq.
 `tests/fold.rs` has one test per refusal case and fails if a case in `refusal_cases()` has none.
+`tests/fold_stored.rs` pins `fold_stored` to `fold`: the same chain at every seq of a log of
+every op, the same refusal for every case but a bad signature or a duplicate key, and the
+proofs' presence and purpose still checked.
 `vectors/fold.json` holds `cases` (events as JSON values) and `textCases` (events as JSON text,
 for what a value cannot hold: a duplicate member name), from `refusal_cases()` and
 `text_refusal_cases()`.

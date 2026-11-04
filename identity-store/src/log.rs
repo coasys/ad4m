@@ -14,6 +14,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 
 use crate::db::{self, to_sql, KEL};
 use crate::error::ApiError;
+use crate::held::held_bytes_of;
 use crate::offers;
 use crate::{Fault, Store, Topic};
 
@@ -201,7 +202,8 @@ enum First {
 impl Store {
     /// The fork `event` makes with the stored log of `scid`, when it is one: an event at a seq
     /// the store holds, with another hash than the stored event there, that replays on the
-    /// stored events before it (every proof checked by the identity core). Answers the evidence
+    /// stored events before it (the stored prefix folded as the store's own, `fold_stored`; the
+    /// event itself checked in full by the identity core). Answers the evidence
     /// and the master that signed the event, read from that replay: the last master of the state
     /// after it (an `incept` or `rotate` is signed by the master it names, every other event by
     /// the master current before it). `None` for an event that does not replay.
@@ -437,6 +439,19 @@ impl Store {
                 .append(&KelPolicy, event)
                 .map_err(|e| chain_error(&e))?;
             befores.push(Some(before));
+        }
+        // The per-log budget: no log grows past what one fold may take in memory, so every log
+        // the store takes can be held, and a miss on any of them costs a bounded replay.
+        let fold_bytes = held_bytes_of(&chain);
+        if fold_bytes > self.settings.log_fold_bytes {
+            return Err(ApiError::invalid(
+                "log-too-large",
+                format!(
+                    "the log's fold would take {fold_bytes} bytes, above the store's budget of {} \
+                     bytes per log",
+                    self.settings.log_fold_bytes
+                ),
+            ));
         }
 
         // Expiries by the store's clock, the one-key check and the claim check.

@@ -32,6 +32,8 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `tests/held.rs` | the held folds: no replay per request, a forged request reads no log, an append's head in force at once, the bound, rival events |
 | `tests/authenticate.rs` | authenticated before any replay: junk and wrongly signed appends, offers and requests on an unheld log replay nothing; a valid append and a `rotate` replay once; the length cap |
 | `tests/held_memory.rs` | the heap a held fold takes per event (a counting allocator; the bound stated under "Held folds") |
+| `tests/miss.rs` | a miss in the held folds checks no stored signature (every stored proof replaced, the miss still folds; a new event is still checked); the per-log budget (`log-too-large`) |
+| `tests/miss_cost.rs` | ignored: the wall time of one signed request on a miss, on a full rotation log and on logs padded with repeated scope actions (`-- --ignored --nocapture`, release) |
 | `tests/serve.rs` | the `serve` process stops cleanly on SIGTERM and SIGINT |
 | `examples/test_agent.rs` | the test person over JSON lines, for the agent language suites |
 | `Dockerfile` | the container image (build from the repo root) |
@@ -40,7 +42,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 
 | Route | Answers |
 |---|---|
-| `POST /logs/{scid}/events` `AppendRequest` | `200 {head}` · `400 {error}` (`malformed`, `too-many-events`, `log-full`, `vouch-and-pow`, `expires`, a `ChainError` or `FoldError` name; an event that does not parse names its `FormatError`, e.g. `DuplicateMember`) · `403 pow` · `403 claim` · `404` a first event that is not #0 · `409 {head}` · `409 forked {head, fork}` · `409 key-taken` · `413` · `503 vouch-unavailable` |
+| `POST /logs/{scid}/events` `AppendRequest` | `200 {head}` · `400 {error}` (`malformed`, `too-many-events`, `log-full`, `log-too-large`, `vouch-and-pow`, `expires`, a `ChainError` or `FoldError` name; an event that does not parse names its `FormatError`, e.g. `DuplicateMember`) · `403 pow` · `403 claim` · `404` a first event that is not #0 · `409 {head}` · `409 forked {head, fork}` · `409 key-taken` · `413` · `503 vouch-unavailable` |
 | `GET /logs/{scid}?from=` (public host profile) | `200 LogPage` (≤ 256 events; `vouched: false`, no note, no pauses) · `404` |
 | `GET /heads/{scid}` (public host profile) | `200 SignedHead` · `404` |
 | `GET /keys/{multikey}?wait=0..8` | `200 KeyIndexEntry` · `404` (at once, or at the timeout) · `400` wait > 8 |
@@ -195,10 +197,10 @@ tests name them by these names.
   log folds once from `chain_entries` and is held. An append puts its new fold in after its
   transaction commits, under the database lock, so the next request sees the new head's keys
   (a revoked key is refused at once) with no replay. The folds are bounded by the heap they
-  take together (`HELD_LOG_BYTES`, default 256 MiB), least recently used out first; a log
-  whose fold is larger than the bound is folded on every use. `Store::held.folds()` counts
-  replays (the tests count them instead of timing requests). A restart starts with nothing
-  held: each log folds once on its first use.
+  take together (`HELD_LOG_BYTES`, default 256 MiB), least recently used out first; the bound
+  is at least the per-log budget (`Settings::check`, at start), so every log the store takes
+  can be held. `Store::held.folds()` counts replays (the tests count them instead of timing
+  requests). A restart starts with nothing held: each log folds once on its first use.
   The bound counts bytes, not events, because events differ a hundredfold: measured with a
   counting allocator (`tests/held_memory.rs`), a held fold takes about 265 B per `scope`
   event and 395 B per `rotate` (the costliest common kind), but one `incept` listing 150 keys
@@ -207,11 +209,21 @@ tests name them by these names.
   state's vector capacities), which the same test keeps between the measured heap and twice
   it. At the default a full log (16 384 rotations, about 6.5 MB) takes under 3 % of the
   bound, and the bound holds about 670 000 rotations' worth of folds.
+- **A miss trusts the database** (`db::load_chain_before`): every event in `chain_entries`
+  passed the full replay when the store appended it, so a miss rebuilds the fold with the
+  core's `fold_stored`, which leaves out the proofs' signatures and the duplicate-key scan
+  (rule K8, quadratic over a long log) and runs every other rule, giving the same state as
+  `fold` (`ad4m-identity-core/tests/fold_stored.rs` pins that on a log of every op). A miss
+  costs the parse and the hashing of the log, linear in its length: one signed request on a
+  miss took 219 ms on a full rotation log (1 161 ms with every proof checked) and 77 ms on a
+  log padded to the per-log budget (`tests/miss_cost.rs`, release, one machine). New events
+  are always replayed in full. Forks replay the stored prefix the same way and the rival in
+  full. `tests/miss.rs` replaces every stored signature and the miss still folds.
 - **Authenticated before any replay**: nobody without a key of a log makes the store replay
   it, and for a log event only a master key does. A miss in the held folds (a log never used
-  since the start, or one evicted by a flood of cheap logs) costs a full replay under the
-  database lock, so every path that may fold a log first checks the sender against the key
-  index, which describes the stored head and is written in the append's transaction: each
+  since the start, or one evicted by a flood of cheap logs) costs a replay under the database
+  lock (no signature checks, bounded by the per-log budget), so every path that may fold a
+  log first checks the sender against the key index, which describes the stored head and is written in the append's transaction: each
   key's row in `keys` (masters with `master = 1` and the seqs that added and retired them,
   device keys with their revocation and bot scope) and the next-key commitment in `logs.next`.
   - An append (`log::authenticate_first`): the first event's proof must verify under the key
@@ -238,15 +250,27 @@ tests name them by these names.
   bound. The executor's resolver pages through a log at most 64 pages of 256 events deep, so
   the store refuses an append whose last event would lie past it (`400 log-full`, before the
   database is touched). The cap bounds a log's replay too: at most 16 384 events, each
-  signature-checked once.
+  signature-checked once, when it is appended.
+- **Per-log budget** (`LOG_FOLD_BYTES`, `Settings::log_fold_bytes`, default 16 MiB): the most
+  heap one log's fold may take, by `held::held_bytes_of`. The store measures the fold the
+  append's replay gives, before the transaction writes anything, and refuses an append past
+  it whole (`400 log-too-large`; nothing stored, so a resend costs the replay of its own
+  events and no more). Events differ a hundredfold in what they cost a fold, so the cap on
+  events does not bound it: a `scope` may name its actions again and again (the format allows
+  it, and refusing it would change the format), and 800 scopes of one full body each take
+  296 MB. The budget bounds what a miss costs and keeps any accepted log holdable. A full
+  rotation log takes 4.6 MB; a log padded with repeated scope actions stops at 45 events of
+  one full body each. `log-too-large` is its own name, not `log-full`: `log-full` follows
+  from the seq alone, before the database is touched, while this one follows from what the
+  log holds, and a client tells the two apart.
 - **A fresh database**: the store has never been deployed, and a store file from before the
   agent-record version ceiling, the `fork_signers` table and the key index's `keys.master` and
   `logs.next` columns is not upgraded: start such a store on an empty database. Records
   stored above the store's clock, forks recorded without their signing master and key rows
   without their role would otherwise stay as they are. There are no migrations.
 - **Forks**: an event at a seq the store holds, with another hash than the stored one, that
-  replays on the stored events before it (every proof checked) is a fork. The store records it
-  in `chain_forks` with the event's JSON (`SqliteChainStore::record_fork_in`) and its signing
+  replays on the stored events before it (its own proofs checked) is a fork. The store records
+  it in `chain_forks` with the event's JSON (`SqliteChainStore::record_fork_in`) and its signing
   master (the last master of the state that replay gives) in `fork_signers` (`db::record_fork`,
   same transaction), and answers `409 {error:"forked", head, fork:{seq, ours, theirs}}`. It
   keeps **one fork per identity and signing master** (`fork_signers` primary key
@@ -282,7 +306,8 @@ tests name them by these names.
 | `POW_BITS` | `22` | what `GET /v1/pow` publishes and a sent proof must meet |
 | `CORS_ORIGINS` | none | comma-separated browser origins (all routes but the public host profile's, which allow any origin) |
 | `FEED_TOKEN` | none | the mirror token; without one the feed answers `401` |
-| `HELD_LOG_BYTES` | `268435456` (256 MiB) | the most heap the logs held folded in memory take together (`held::held_bytes_of`) |
+| `HELD_LOG_BYTES` | `268435456` (256 MiB) | the most heap the logs held folded in memory take together (`held::held_bytes_of`); at least `LOG_FOLD_BYTES`, else `serve` refuses to start |
+| `LOG_FOLD_BYTES` | `16777216` (16 MiB) | the most heap one log's fold may take; an append past it is `400 log-too-large` |
 
 `serve` prints `identity-store listening on http://<addr> store-key <multikey>` once it listens.
 

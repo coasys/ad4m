@@ -58,8 +58,14 @@ pub struct Settings {
     pub cors_origins: Vec<String>,
     /// `HELD_LOG_BYTES`: the most heap the logs held folded in memory take together, by
     /// `held::held_bytes_of` (default 256 MiB; `held.rs`). A log whose fold is larger is folded
-    /// on every use.
+    /// on every use. At least [`Settings::log_fold_bytes`] ([`Settings::check`]), so every log
+    /// the store takes can be held.
     pub held_log_bytes: usize,
+    /// `LOG_FOLD_BYTES`: the most heap one log's fold may take, by `held::held_bytes_of`
+    /// (default 16 MiB). An append whose fold would take more is `400 log-too-large`. It bounds
+    /// what a miss in the held folds costs (the parse and hashing of one log) and keeps any
+    /// accepted log holdable.
+    pub log_fold_bytes: usize,
 }
 
 impl Default for Settings {
@@ -69,6 +75,7 @@ impl Default for Settings {
             feed_token: None,
             cors_origins: Vec::new(),
             held_log_bytes: DEFAULT_HELD_LOG_BYTES,
+            log_fold_bytes: DEFAULT_LOG_FOLD_BYTES,
         }
     }
 }
@@ -77,6 +84,27 @@ impl Default for Settings {
 /// common kind (a rotation, about 400 B held; `tests/held_memory.rs`), so a full log of
 /// rotations (`log::MAX_LOG_EVENTS`) takes under 3 % of it.
 pub const DEFAULT_HELD_LOG_BYTES: usize = 256 << 20;
+
+/// The default of [`Settings::log_fold_bytes`]: 16 MiB. A full log of rotations
+/// (`log::MAX_LOG_EVENTS`, the costliest common kind) takes about 6.5 MB, so no ordinary log
+/// comes near it; what reaches it is a log padded on purpose (a `scope` may name its actions
+/// many times over). The held folds' default bound holds 16 such logs.
+pub const DEFAULT_LOG_FOLD_BYTES: usize = 16 << 20;
+
+impl Settings {
+    /// Refuses settings under which an accepted log could not be held: a held bound below the
+    /// per-log budget would fold such a log on every use.
+    pub fn check(&self) -> Result<(), String> {
+        if self.held_log_bytes < self.log_fold_bytes {
+            return Err(format!(
+                "HELD_LOG_BYTES={} is below LOG_FOLD_BYTES={}: a log the store takes must fit in \
+                 the held folds",
+                self.held_log_bytes, self.log_fold_bytes
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// A point inside a write where a test makes the store fail, to check that the write's
 /// transaction leaves nothing behind (an append, a claim's spend).

@@ -11,6 +11,8 @@
 //! | `POW_BITS` | `22` | the proof-of-work cost `GET /v1/pow` publishes |
 //! | `CORS_ORIGINS` | none | comma-separated origins allowed from a browser |
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
+//! | `HELD_LOG_BYTES` | 256 MiB | the most heap the held folds take together |
+//! | `LOG_FOLD_BYTES` | 16 MiB | the most heap one log's fold may take; at most `HELD_LOG_BYTES` |
 //!
 //! On start, `serve` prints `identity-store listening on http://<addr> store-key <multikey>`.
 
@@ -45,12 +47,21 @@ fn settings() -> Result<Settings, String> {
             .map_err(|_| format!("HELD_LOG_BYTES={v} is not a number of bytes"))?,
         Err(_) => Settings::default().held_log_bytes,
     };
-    Ok(Settings {
+    let log_fold_bytes = match std::env::var("LOG_FOLD_BYTES") {
+        Ok(v) => v
+            .parse::<usize>()
+            .map_err(|_| format!("LOG_FOLD_BYTES={v} is not a number of bytes"))?,
+        Err(_) => Settings::default().log_fold_bytes,
+    };
+    let settings = Settings {
         pow_bits,
         feed_token,
         cors_origins,
         held_log_bytes,
-    })
+        log_fold_bytes,
+    };
+    settings.check()?;
+    Ok(settings)
 }
 
 async fn serve() -> Result<(), String> {
