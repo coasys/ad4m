@@ -703,11 +703,11 @@ impl LanguageController {
         Ok(())
     }
 
-    /// Writes `identity.storeUrl` and `identity.storeKeys` into the agent language's settings,
-    /// then installs and loads it. The language sends agent profiles and every identity call to
-    /// its `storeUrl`; when the settings cannot be written, the language is not loaded at all, so profile and
-    /// identity calls fail (the identity calls as `unavailable`) instead of reaching an older
-    /// store or the language's default one.
+    /// Writes the identity store's URL and keys (the config's, else the network seed's) into
+    /// the agent language's settings, then installs and loads it. The language sends agent
+    /// profiles and every identity call to its `storeUrl`; when the settings cannot be written,
+    /// the language is not loaded at all, so profile and identity calls fail (the identity
+    /// calls as `unavailable`) instead of reaching an older store.
     pub(crate) async fn install_agent_language(
         &self,
         languages_dir: &std::path::Path,

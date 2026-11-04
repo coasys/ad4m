@@ -233,11 +233,12 @@ pub struct ExecutorConfigFile {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityFileSettings {
-    /// The identity store's base URL, e.g. `https://store.ad4m.dev` (the agent language's default).
+    /// The identity store's base URL, e.g. `https://store.ad4m.dev`. Unset: the store the
+    /// network's seed names (`identityStore`), else none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_url: Option<String>,
-    /// The store's head keys (Ed25519 multikeys, `z6Mk…`). Unset: the default store's key
-    /// (`identity::DEFAULT_STORE_KEY`) when `storeUrl` is unset too, else none.
+    /// The store's head keys (Ed25519 multikeys, `z6Mk…`). Unset: the seed's store keys when
+    /// `storeUrl` is unset too, else none (`identity::IdentitySettings::from_config`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_keys: Option<Vec<String>>,
     /// Let a DID URL's `src` reach loopback and private addresses (tests, local development).

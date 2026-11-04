@@ -163,10 +163,10 @@ pub struct Ad4mConfig {
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
     /// `identity.storeUrl`: the identity store's base URL, given to the agent language as its
-    /// `storeUrl` setting. Unset: the language's default store.
+    /// `storeUrl` setting. Unset: the network seed's `identityStore`, else no store.
     pub identity_store_url: Option<String>,
     /// `identity.storeKeys`: the store keys (Ed25519 multikeys) a head from the store must be
-    /// signed by. A list, so the store's key can rotate. Unset: the default store's key when
+    /// signed by. A list, so the store's key can rotate. Unset: the seed's store keys when
     /// `identity_store_url` is unset too, else none (`IdentitySettings::from_config`).
     pub identity_store_keys: Option<Vec<String>>,
     /// `identity.allowPrivateSrc`: let the `src` of a DID URL that `identity.resolve` reads

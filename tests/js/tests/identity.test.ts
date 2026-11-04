@@ -123,6 +123,8 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(before.did).to.be.null;
         expect(before.deviceKey).to.match(/^z6Mk/);
         expect(before.deviceEnc).to.match(/^z6LS/);
+        // The configured store (AD4M_IDENTITY_STORE_URL/KEYS) wins over the seed's, trusted.
+        expect(before.store).to.deep.equal({ url: store.url, trusted: true });
 
         const created = await holder.send({ cmd: "create" });
         did = created.did;

@@ -4,7 +4,9 @@ pub(crate) mod notification_access;
 pub mod runtime_service_extension;
 use std::sync::Arc;
 
-#[derive(Debug, Serialize, Deserialize)]
+/// A network's bootstrap seed (`mainnet_seed.seed` in the data folder, written by `init`): its
+/// system languages, the agents whose languages it installs, and its identity store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapSeed {
     #[serde(rename = "trustedAgents")]
     pub trusted_agents: Vec<String>,
@@ -20,6 +22,23 @@ pub struct BootstrapSeed {
     pub neighbourhood_language: String,
     #[serde(rename = "languageLanguageBundle")]
     pub language_language_bundle: String,
+    /// The network's identity store (`did:scid:coasys:1` key logs), used when the config names
+    /// none (`identity::IdentitySettings::from_config`). Absent: the network has no store.
+    #[serde(
+        rename = "identityStore",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub identity_store: Option<IdentityStoreSeed>,
+}
+
+/// A seed's `identityStore`: the store's base URL and the keys (bare Ed25519 multikeys, `z6Mk…`)
+/// its signed heads must carry. A list, so the store's key can rotate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IdentityStoreSeed {
+    pub url: String,
+    pub keys: Vec<String>,
 }
 
 use serde::{Deserialize, Serialize};
@@ -77,6 +96,21 @@ impl RuntimeService {
         let runtime_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
         let runtime_ref = runtime_lock.as_ref().expect("Ad4mDb not initialized");
         func(runtime_ref)
+    }
+
+    /// The seed's identity store; `None` when the network has none.
+    pub fn identity_store(&self) -> Option<IdentityStoreSeed> {
+        self.seed.identity_store.clone()
+    }
+
+    /// The loaded seed's identity store; `None` when the network has none or no seed is
+    /// loaded (the service did not start).
+    pub fn seed_identity_store() -> Option<IdentityStoreSeed> {
+        RUNTIME_INSTANCE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|service| service.identity_store())
     }
 
     pub fn get_language_language_bundle(&self) -> String {
@@ -218,5 +252,68 @@ impl RuntimeService {
         }
 
         Ok(notification_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The seed this build writes at `init` names its network's identity store
+    /// (`https://store.ad4m.dev`) with a key the executor can match against a signed head.
+    #[test]
+    fn the_embedded_seed_names_the_networks_identity_store() {
+        let seed: BootstrapSeed = serde_json::from_str(crate::globals::MAINNET_JSON).unwrap();
+        let store = seed
+            .identity_store
+            .expect("the seed names an identity store");
+        assert_eq!(
+            store,
+            IdentityStoreSeed {
+                url: "https://store.ad4m.dev".into(),
+                keys: vec!["z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj".into()],
+            }
+        );
+        assert_eq!(crate::identity::check_store_keys(&store.keys), Ok(()));
+        assert_eq!(crate::identity::check_store_url(Some(&store.url)), Ok(()));
+    }
+
+    /// A seed without `identityStore` (every seed written before the field, or a network
+    /// without a store) parses, has no store, and writes no `identityStore` back.
+    #[test]
+    fn a_seed_without_an_identity_store_parses_and_round_trips() {
+        let json = serde_json::json!({
+            "trustedAgents": [], "knownLinkLanguages": [], "directMessageLanguage": "",
+            "agentLanguage": "", "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+            "languageLanguageBundle": "",
+        });
+        let parsed: BootstrapSeed = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(parsed.identity_store, None);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    /// An `identityStore` without its keys, or with a field it does not know, is refused: a
+    /// seed must name the keys of the store it names.
+    #[test]
+    fn an_identity_store_needs_its_url_and_keys() {
+        let seed = |store: serde_json::Value| {
+            serde_json::from_value::<BootstrapSeed>(serde_json::json!({
+                "trustedAgents": [], "knownLinkLanguages": [], "directMessageLanguage": "",
+                "agentLanguage": "", "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+                "languageLanguageBundle": "", "identityStore": store,
+            }))
+        };
+        assert!(seed(serde_json::json!({ "url": "https://s" })).is_err());
+        assert!(seed(serde_json::json!({ "keys": [] })).is_err());
+        assert!(seed(serde_json::json!({ "url": "https://s", "keys": [], "key": "z" })).is_err());
+        assert_eq!(
+            seed(serde_json::json!({ "url": "https://s", "keys": ["z6MkA"] }))
+                .unwrap()
+                .identity_store,
+            Some(IdentityStoreSeed {
+                url: "https://s".into(),
+                keys: vec!["z6MkA".into()],
+            })
+        );
     }
 }
