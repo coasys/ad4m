@@ -222,6 +222,28 @@ impl Store {
         else {
             return Err(refuse("the signature does not verify"));
         };
+        // The key's standing at the head by the key index, still before the log is read: a
+        // revoked key, a bot key, or on a master route any key but the current master, makes
+        // the store read nothing.
+        match db::standing(conn, sign)? {
+            Some(standing) if standing.bot_expires.is_some() => {
+                return Err(refuse("a bot key signs no request for its owner"))
+            }
+            Some(standing) if standing.revoked => {
+                return Err(refuse("the key is not valid at the head"))
+            }
+            Some(_) => {}
+            None => return Err(refuse("the key is not in the log")),
+        }
+        if signer == Signer::Master {
+            let current = match db::head_seq(conn, scid)? {
+                Some(head) => db::master_at(conn, scid, head + 1)?,
+                None => None,
+            };
+            if current.map(|m| m.id) != Some(req.key_id.clone()) {
+                return Err(refuse("the route needs the current master key"));
+            }
+        }
         // Then the key's standing, on the log's fold at the stored head (held in memory, or
         // folded once here and held).
         let chain = self

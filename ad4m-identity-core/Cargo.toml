@@ -20,6 +20,9 @@ words = [
     "dep:hkdf",
     "rand_core/getrandom",
 ]
+# `fold_stored`: the replay of a host's own stored, already-verified log, without the signature
+# checks. Only the identity store enables it; never a client, an executor or a wallet.
+stored-fold = []
 # wasm-bindgen exports: the `KelChain` class with `fold` and `import`, and `KelHandle.didDocument`.
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 

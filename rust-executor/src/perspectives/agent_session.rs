@@ -221,7 +221,8 @@ pub async fn run_agent_session(
 
     let model_id = match request.model {
         Some(model) => model.to_string(),
-        None => crate::db::Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))
+        None => crate::db_backend::db_backend()
+            .get_default_model(ModelType::Llm)
             .map_err(|e| anyhow!("could not read the default model: {e}"))?
             .ok_or_else(|| {
                 AgentSessionError::Invalid(

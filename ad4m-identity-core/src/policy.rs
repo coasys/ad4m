@@ -171,57 +171,7 @@ impl ChainPolicy for KelPolicy {
 
     /// Event #0 (spec rules K1–K4): the SCID and the `incept` signers. The chain id is the SCID.
     fn genesis(&self, event: &Event) -> Result<(ChainId, KeyState), FoldError> {
-        check_format(event)?;
-        let Op::Incept {
-            kind,
-            master,
-            next,
-            add,
-        } = &event.op
-        else {
-            return Err(FormatError::NotIncept.into());
-        };
-        let want = derive_scid(event)?;
-        if want != event.scid {
-            return Err(FormatError::Scid {
-                want,
-                got: event.scid.clone(),
-            }
-            .into());
-        }
-        if !is_ed25519_multikey(master) {
-            return Err(FoldError::UnsupportedKeyType);
-        }
-        check_hash(next)?;
-        if add.is_empty() {
-            return Err(FormatError::EmptyAdd.into());
-        }
-        let mut state = KeyState {
-            did: format!("{DID_PREFIX}{}", event.scid),
-            scid: event.scid.clone(),
-            kind: *kind,
-            masters: vec![KeyRecord {
-                id: "m0".into(),
-                sign: master.clone(),
-                enc: None,
-                added: 0,
-                revoked: None,
-                scopes: Vec::new(),
-            }],
-            next: Some(next.clone()),
-            keys: BTreeMap::new(),
-            ended: false,
-        };
-        for key in add {
-            if matches!(key.life, KeyLife::Bot(_)) {
-                return Err(FoldError::BotInIncept);
-            }
-            insert_key(&mut state, key, 0)?;
-        }
-        let mut signers: Vec<(KeyId, Multikey)> = vec![("m0".into(), master.clone())];
-        signers.extend(add.iter().map(|k| (k.id.clone(), k.sign.clone())));
-        check_signers(&state.did, event, &signers)?;
-        Ok((event.scid.clone(), state))
+        genesis(event, Replay::Full)
     }
 
     fn chain_of(&self, event: &Event) -> ChainId {
@@ -231,93 +181,175 @@ impl ChainPolicy for KelPolicy {
     /// Spec rules K5–K15. Calls `verify_proof` with the key that `KeyState` names and the
     /// domain "coasys:kel".
     fn apply(&self, state: &mut KeyState, event: &Event) -> Result<(), FoldError> {
-        if state.ended {
-            return Err(FoldError::Ended);
-        }
-        check_format(event)?;
-        let seq = event.seq;
-        match &event.op {
-            Op::Incept { .. } => return Err(FormatError::InceptAfterGenesis.into()),
-            Op::Add { add, .. } => {
-                let [key] = add.as_slice() else {
-                    return Err(FoldError::AddNotOne);
-                };
-                require_master(state, event)?;
-                insert_key(state, key, seq)?;
-            }
-            Op::Revoke { revoke } => {
-                if revoke.is_empty() {
-                    return Err(FormatError::EmptyRevoke.into());
-                }
-                require_master(state, event)?;
-                revoke_keys(state, revoke, seq)?;
-            }
-            Op::Rotate {
-                master,
-                salt,
-                next,
-                revoke,
-            } => {
-                if !is_ed25519_multikey(master) {
-                    return Err(FoldError::UnsupportedKeyType);
-                }
-                if let Some(next) = next {
-                    check_hash(next)?;
-                }
-                check_salt(salt)?;
-                if state.next.as_deref() != Some(commitment(master, salt).as_str()) {
-                    return Err(FoldError::NextMismatch);
-                }
-                if state.key_id_of(master).is_some() {
-                    return Err(FoldError::DuplicateKey(master.clone()));
-                }
-                let id = state.next_master_id();
-                check_signers(&state.did, event, &[(id.clone(), master.clone())])?;
-                revoke_keys(state, revoke, seq)?;
-                if let Some(old) = state.masters.last_mut() {
-                    old.revoked = Some(seq);
-                }
-                state.masters.push(KeyRecord {
-                    id,
-                    sign: master.clone(),
-                    enc: None,
-                    added: seq,
-                    revoked: None,
-                    scopes: Vec::new(),
-                });
-                state.next = next.clone();
-                if next.is_none() {
-                    // `next: null` ends the log: every key stops at this seq.
-                    state.ended = true;
-                    for record in state.masters.iter_mut().chain(state.keys.values_mut()) {
-                        record.revoked.get_or_insert(seq);
-                    }
-                }
-            }
-            Op::Scope { key, can, expires } => {
-                check_actions(can)?;
-                require_master(state, event)?;
-                let record = state
-                    .keys
-                    .get_mut(key)
-                    .ok_or_else(|| FoldError::UnknownKey(key.clone()))?;
-                if record.revoked.is_some() {
-                    return Err(FoldError::RevokedKey(key.clone()));
-                }
-                if record.scopes.is_empty() {
-                    return Err(FoldError::NotABot(key.clone()));
-                }
-                record.scopes.push((
-                    seq,
-                    crate::event::BotScope {
-                        can: can.clone(),
-                        expires: *expires,
-                    },
-                ));
-            }
-        }
-        Ok(())
+        apply(state, event, Replay::Full)
     }
+
+    /// [`genesis`](Self::genesis) without the signature and duplicate-key checks (`Replay`):
+    /// for [`crate::fold_stored`] only, on a host's own stored events. The state is the same.
+    fn genesis_stored(&self, event: &Event) -> Result<(ChainId, KeyState), FoldError> {
+        genesis(event, Replay::Stored)
+    }
+
+    /// [`apply`](Self::apply) without the signature and duplicate-key checks (`Replay`): for
+    /// [`crate::fold_stored`] only, on a host's own stored events. The state changes the same.
+    fn apply_stored(&self, state: &mut KeyState, event: &Event) -> Result<(), FoldError> {
+        apply(state, event, Replay::Stored)
+    }
+}
+
+/// Which replay runs: `Full`, every check (every event from outside), or `Stored`
+/// ([`crate::fold_stored`], a host's own stored events, each of which passed `Full` when it was
+/// stored). `Stored` leaves out the two checks that only refuse and cost the most: each proof's
+/// signature, and the scan of every key for a duplicate signing key (rule K8), which makes a
+/// replay of a long log of rotations or adds quadratic. Which proofs an event carries, and every
+/// other rule, are checked either way, and the state changes the same.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Replay {
+    Full,
+    Stored,
+}
+
+fn genesis(event: &Event, replay: Replay) -> Result<(ChainId, KeyState), FoldError> {
+    check_format(event)?;
+    let Op::Incept {
+        kind,
+        master,
+        next,
+        add,
+    } = &event.op
+    else {
+        return Err(FormatError::NotIncept.into());
+    };
+    let want = derive_scid(event)?;
+    if want != event.scid {
+        return Err(FormatError::Scid {
+            want,
+            got: event.scid.clone(),
+        }
+        .into());
+    }
+    if !is_ed25519_multikey(master) {
+        return Err(FoldError::UnsupportedKeyType);
+    }
+    check_hash(next)?;
+    if add.is_empty() {
+        return Err(FormatError::EmptyAdd.into());
+    }
+    let mut state = KeyState {
+        did: format!("{DID_PREFIX}{}", event.scid),
+        scid: event.scid.clone(),
+        kind: *kind,
+        masters: vec![KeyRecord {
+            id: "m0".into(),
+            sign: master.clone(),
+            enc: None,
+            added: 0,
+            revoked: None,
+            scopes: Vec::new(),
+        }],
+        next: Some(next.clone()),
+        keys: BTreeMap::new(),
+        ended: false,
+    };
+    for key in add {
+        if matches!(key.life, KeyLife::Bot(_)) {
+            return Err(FoldError::BotInIncept);
+        }
+        insert_key(&mut state, key, 0, replay)?;
+    }
+    let mut signers: Vec<(KeyId, Multikey)> = vec![("m0".into(), master.clone())];
+    signers.extend(add.iter().map(|k| (k.id.clone(), k.sign.clone())));
+    check_signers(&state.did, event, &signers, replay)?;
+    Ok((event.scid.clone(), state))
+}
+
+fn apply(state: &mut KeyState, event: &Event, replay: Replay) -> Result<(), FoldError> {
+    if state.ended {
+        return Err(FoldError::Ended);
+    }
+    check_format(event)?;
+    let seq = event.seq;
+    match &event.op {
+        Op::Incept { .. } => return Err(FormatError::InceptAfterGenesis.into()),
+        Op::Add { add, .. } => {
+            let [key] = add.as_slice() else {
+                return Err(FoldError::AddNotOne);
+            };
+            require_master(state, event, replay)?;
+            insert_key(state, key, seq, replay)?;
+        }
+        Op::Revoke { revoke } => {
+            if revoke.is_empty() {
+                return Err(FormatError::EmptyRevoke.into());
+            }
+            require_master(state, event, replay)?;
+            revoke_keys(state, revoke, seq)?;
+        }
+        Op::Rotate {
+            master,
+            salt,
+            next,
+            revoke,
+        } => {
+            if !is_ed25519_multikey(master) {
+                return Err(FoldError::UnsupportedKeyType);
+            }
+            if let Some(next) = next {
+                check_hash(next)?;
+            }
+            check_salt(salt)?;
+            if state.next.as_deref() != Some(commitment(master, salt).as_str()) {
+                return Err(FoldError::NextMismatch);
+            }
+            if replay == Replay::Full && state.key_id_of(master).is_some() {
+                return Err(FoldError::DuplicateKey(master.clone()));
+            }
+            let id = state.next_master_id();
+            check_signers(&state.did, event, &[(id.clone(), master.clone())], replay)?;
+            revoke_keys(state, revoke, seq)?;
+            if let Some(old) = state.masters.last_mut() {
+                old.revoked = Some(seq);
+            }
+            state.masters.push(KeyRecord {
+                id,
+                sign: master.clone(),
+                enc: None,
+                added: seq,
+                revoked: None,
+                scopes: Vec::new(),
+            });
+            state.next = next.clone();
+            if next.is_none() {
+                // `next: null` ends the log: every key stops at this seq.
+                state.ended = true;
+                for record in state.masters.iter_mut().chain(state.keys.values_mut()) {
+                    record.revoked.get_or_insert(seq);
+                }
+            }
+        }
+        Op::Scope { key, can, expires } => {
+            check_actions(can)?;
+            require_master(state, event, replay)?;
+            let record = state
+                .keys
+                .get_mut(key)
+                .ok_or_else(|| FoldError::UnknownKey(key.clone()))?;
+            if record.revoked.is_some() {
+                return Err(FoldError::RevokedKey(key.clone()));
+            }
+            if record.scopes.is_empty() {
+                return Err(FoldError::NotABot(key.clone()));
+            }
+            record.scopes.push((
+                seq,
+                crate::event::BotScope {
+                    can: can.clone(),
+                    expires: *expires,
+                },
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn check_format(event: &Event) -> Result<(), FoldError> {
@@ -358,7 +390,12 @@ fn check_actions(can: &[String]) -> Result<(), FoldError> {
 }
 
 /// Spec rules K7, K8, K9 and K15 for one listed key, then adds it at `seq`.
-fn insert_key(state: &mut KeyState, key: &DeviceKey, seq: u64) -> Result<(), FoldError> {
+fn insert_key(
+    state: &mut KeyState,
+    key: &DeviceKey,
+    seq: u64,
+    replay: Replay,
+) -> Result<(), FoldError> {
     let want = state.next_device_id();
     if key.id != want {
         return Err(FoldError::KeyIdOrder {
@@ -369,7 +406,7 @@ fn insert_key(state: &mut KeyState, key: &DeviceKey, seq: u64) -> Result<(), Fol
     if !is_ed25519_multikey(&key.sign) || !is_x25519_multikey(&key.enc) {
         return Err(FoldError::UnsupportedKeyType);
     }
-    if state.key_id_of(&key.sign).is_some() {
+    if replay == Replay::Full && state.key_id_of(&key.sign).is_some() {
         return Err(FoldError::DuplicateKey(key.sign.clone()));
     }
     let scopes = match &key.life {
@@ -408,18 +445,26 @@ fn revoke_keys(state: &mut KeyState, ids: &[KeyId], seq: u64) -> Result<(), Fold
 }
 
 /// `add`, `revoke`, `scope`: the current master key signs, and no other key.
-fn require_master(state: &KeyState, event: &Event) -> Result<(), FoldError> {
+fn require_master(state: &KeyState, event: &Event, replay: Replay) -> Result<(), FoldError> {
     let master = state.current_master().ok_or(FoldError::Ended)?;
     check_signers(
         &state.did,
         event,
         &[(master.id.clone(), master.sign.clone())],
+        replay,
     )
 }
 
 /// Spec rules K4 and K10: each listed signer has exactly one proof, naming `<did>#<id>`, purpose
 /// `assertionMethod`, domain `coasys:kel`, that verifies under its key. Any other proof fails.
-fn check_signers(did: &str, event: &Event, signers: &[(KeyId, Multikey)]) -> Result<(), FoldError> {
+/// With `Replay::Stored` the proofs are matched to their signers as above, and only
+/// `verify_proof` is left out.
+fn check_signers(
+    did: &str,
+    event: &Event,
+    signers: &[(KeyId, Multikey)],
+    replay: Replay,
+) -> Result<(), FoldError> {
     for (id, key) in signers {
         let method = format!("{did}#{id}");
         let mut matching = event
@@ -432,7 +477,10 @@ fn check_signers(did: &str, event: &Event, signers: &[(KeyId, Multikey)]) -> Res
         if matching.next().is_some() || proof.proof_purpose != PROOF_PURPOSE {
             return Err(FoldError::BadProof(id.clone()));
         }
-        verify_proof(event, proof, key, KEL_DOMAIN).map_err(|_| FoldError::BadProof(id.clone()))?;
+        if replay == Replay::Full {
+            verify_proof(event, proof, key, KEL_DOMAIN)
+                .map_err(|_| FoldError::BadProof(id.clone()))?;
+        }
     }
     if let Some(extra) = event.proof.iter().find(|p| {
         !signers

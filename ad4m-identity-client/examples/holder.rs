@@ -249,14 +249,18 @@ async fn main() {
             }
             Some("confirm") => {
                 async {
-                    let (flow, kind) = link.take().ok_or("open a link first")?;
-                    let claim = claimed.take().ok_or("wait for the claim first")?;
-                    let entry = device_entry(&command, claim.hint.as_deref(), kind)?;
+                    let (flow, kind) = link.as_ref().ok_or("open a link first")?;
+                    let claim = claimed.as_ref().ok_or("wait for the claim first")?;
+                    let entry = device_entry(&command, claim.hint.as_deref(), *kind)?;
                     let keep = command["keepMaster"].as_bool().unwrap_or(false);
                     let linked = flow
-                        .confirm(&claim, entry, keep)
+                        .confirm(claim, entry, keep)
                         .await
                         .map_err(|e| e.to_string())?;
+                    // Kept until the add is in: a failed publish can be confirmed again while
+                    // the claim is still `claimed`.
+                    link = None;
+                    claimed = None;
                     Ok(json!({
                         "seq": linked.head.seq,
                         "keyId": linked.key_id,

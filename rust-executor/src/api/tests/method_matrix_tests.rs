@@ -44,6 +44,9 @@ pub(super) enum Caller {
     /// The admin credential on a listener that the network reaches: the operator, but not on
     /// this machine, so every `.local_only()` method refuses it.
     OperatorOnNetwork,
+    /// The operator from a key login (a grant with the operator role, `OperatorSource::Key`),
+    /// on a loopback listener: the operator for every method but the `.local_only()` ones.
+    OperatorFromKeyLogin,
     /// An app token on the main agent without the guard's capability.
     AppWithout,
     /// An app token on the main agent with the guard's capability.
@@ -791,6 +794,10 @@ fn context(caller: Caller, capability: Option<Capability>) -> RequestContext {
             crate::agent::session::Session::for_test(crate::agent::session::Principal::Operator)
                 .on_network(),
         ),
+        Caller::OperatorFromKeyLogin => RequestContext::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Operator)
+                .from_key_login(),
+        ),
         Caller::AppWithout => RequestContext::app_for_test(vec![]),
         Caller::AppWith => RequestContext::app_for_test(caps()),
         Caller::User => RequestContext::user_for_test(USER_DID, caps()),
@@ -939,7 +946,7 @@ fn outcome(result: Result<(), WsRpcError>) -> Result<(), u16> {
 /// Every row of every method in `map` whose answer differs from the row's (and every method
 /// without a guard), and the number of rows checked. A `.local_only()` method admits only the
 /// operator on this machine: every row its guard grants to another caller is a 403, and the
-/// operator on the network gets a 403 too.
+/// operator on the network and the operator from a key login get a 403 too.
 async fn walk(map: &HandlerMap, world: &World) -> (Vec<String>, usize) {
     let mut failures = Vec::new();
     let mut checked = 0;
@@ -965,13 +972,15 @@ async fn walk(map: &HandlerMap, world: &World) -> (Vec<String>, usize) {
                 }),
             );
         } else {
-            // Every guard but `Owns` admits the operator, wherever it calls from.
+            // Every guard but `Owns` admits the operator, wherever it calls from and however
+            // it proved it is the operator.
             let expect = if is_local {
                 Expect::Forbidden
             } else {
                 Expect::Granted
             };
             cases.push((Caller::OperatorOnNetwork, None, expect));
+            cases.push((Caller::OperatorFromKeyLogin, None, expect));
         }
         for (caller, target, expect) in cases {
             let expect = match (is_local, caller, expect) {
@@ -1111,9 +1120,8 @@ async fn no_local_only_method_admits_an_operator_from_a_key_login() {
 }
 
 /// The calls that stay on this machine: opening and replacing the executor's own key, signing
-/// as this device, the custody channel and stopping its process. (`agent.generate`,
-/// `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` are not local
-/// only yet.)
+/// as this device, the custody channel and stopping its process. [`OPERATOR_ANYWHERE`] are not
+/// among them.
 #[test]
 fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
     assert_eq!(
@@ -1131,6 +1139,103 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
             "runtime.quit",
         ]
     );
+}
+
+/// The calls that create, import or lock the executor's agent and move its data folder: not
+/// local only, so the operator calls them from anywhere, an operator from a key login included
+/// (a remote operator may move the whole data folder).
+const OPERATOR_ANYWHERE: [&str; 5] = [
+    "agent.generate",
+    "agent.import",
+    "agent.lock",
+    "runtime.exportData",
+    "runtime.importData",
+];
+
+/// An operator from a key login calls each of [`OPERATOR_ANYWHERE`], on a loopback listener and
+/// on a network listener, and still gets 403 `local-only` from a local-only method.
+#[tokio::test]
+async fn an_operator_from_a_key_login_moves_the_data_folder_but_stays_off_this_machine() {
+    let map = build_handler_map();
+    let key_login = |on_network: bool| {
+        let session =
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Operator)
+                .from_key_login();
+        RequestContext::for_session(if on_network {
+            session.on_network()
+        } else {
+            session
+        })
+    };
+    let local_only = map.local_only_methods();
+    for on_network in [false, true] {
+        let key = key_login(on_network);
+        assert_eq!(
+            key.session.operator_source(),
+            Some(crate::agent::session::OperatorSource::Key)
+        );
+        for method in OPERATOR_ANYWHERE {
+            assert!(!local_only.contains(&method), "{method}");
+            let admitted = map.admit(method, &params(method, None, false), &key).await;
+            assert!(
+                admitted.is_ok(),
+                "{method} (network {on_network}): {admitted:?}"
+            );
+        }
+        let refused = map
+            .admit(
+                "identity.rekey",
+                &params("identity.rekey", None, false),
+                &key,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (403, crate::api::guards::LOCAL_ONLY),
+            "identity.rekey (network {on_network})"
+        );
+    }
+}
+
+/// The operator role of a key login is not an app's: an app grant on the main agent without
+/// the methods' capabilities, or a user's session, calls none of [`OPERATOR_ANYWHERE`] but
+/// `agent.import` (a `Cap` guard), and no app imports a data folder, whatever it holds.
+#[tokio::test]
+async fn an_app_grant_does_not_call_the_operators_data_folder_methods() {
+    let map = build_handler_map();
+    let app = context(Caller::AppWithout, None);
+    for method in OPERATOR_ANYWHERE {
+        let refused = map
+            .admit(method, &params(method, None, false), &app)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 403, "{method}");
+    }
+    let every =
+        RequestContext::app_for_test(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]);
+    let user = RequestContext::user_for_test(
+        USER_DID,
+        vec![crate::agent::capabilities::ALL_CAPABILITY.clone()],
+    );
+    for (who, ctx) in [("app with every capability", &every), ("user", &user)] {
+        let refused = map
+            .admit(
+                "runtime.importData",
+                &params("runtime.importData", None, false),
+                ctx,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 403, "{who}");
+    }
+    for method in ["agent.generate", "agent.lock", "runtime.exportData"] {
+        let refused = map
+            .admit(method, &params(method, None, false), &user)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 403, "user: {method}");
+    }
 }
 
 #[tokio::test]

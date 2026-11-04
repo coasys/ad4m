@@ -236,7 +236,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         Ok(())
     }
 
-    /// The offer link (`https://coasys.id/o#coasys:offer:1:…`): the QR code shows it.
+    /// The offer link (`https://id.coasys.org/o#coasys:offer:1:…`): the QR code shows it.
     pub fn link(&self) -> String {
         self.offer_string.link()
     }
@@ -340,8 +340,13 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
     /// then, with `keep_master` (only where [`LinkFlow::may_keep`]), puts the master key into
     /// the device's inbox; then writes `device` (its name, kind, …) into the record, with
     /// `holdsMaster: "offered"` when the master key went and `false` otherwise.
+    ///
+    /// The flow stays: after a failed publish it can confirm again while the claim is
+    /// `claimed`. The push and the record write run only after the publish succeeded, so a
+    /// failed confirm did neither; once the store took the add, the offer is `spent` and a
+    /// repeat is refused before anything is pushed or written.
     pub async fn confirm(
-        self,
+        &self,
         claimed: &Claimed,
         device: DeviceEntry,
         keep_master: bool,

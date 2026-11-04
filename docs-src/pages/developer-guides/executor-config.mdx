@@ -200,7 +200,11 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
   `local-only`. A listener is loopback by the address it binds, not by the
   address a caller connects from: on `--localhost false` without TLS the
   executor binds 0.0.0.0, has no loopback listener, and these calls answer
-  no one.
+  no one. An operator who logged in with a device key is never on this
+  machine, so these refuse it too. Creating, importing or locking the agent
+  and exporting or importing data (`agent.generate`, `agent.import`,
+  `agent.lock`, `runtime.exportData`, `runtime.importData`) are not local
+  only: a remote operator may move the whole data folder.
 - **`ad4m-executor rekey`**: gives the executor a new main wallet key, so a
   revoked server links again. Run it on the server itself: it calls
   `identity.rekey` on a loopback address with the admin credential from

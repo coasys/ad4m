@@ -303,6 +303,55 @@ async fn http_fetch_takes_a_reply_at_the_limit() {
     );
 }
 
+/// Serve one connection with a 200 whose body is `len` bytes of `x`, gzip-compressed, with
+/// `Content-Encoding: gzip` and the compressed length as `Content-Length`.
+fn serve_gzip(len: usize) -> String {
+    use flate2::{write::GzEncoder, Compression};
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(&vec![b'x'; len]).unwrap();
+    let body = encoder.finish().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}/gzip", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(&body);
+        let _ = stream.flush();
+    });
+    url
+}
+
+/// `maxBytes` counts the decompressed body: Deno's fetch decompresses a gzip reply and its
+/// body stream yields only the decompressed bytes, which `readCapped` counts. A reply of a few
+/// kilobytes on the wire (its declared length far under the limit) that decompresses past the
+/// limit is refused `too-large`; one that decompresses under it passes at its decompressed
+/// length.
+#[tokio::test]
+async fn http_fetch_counts_the_decompressed_bytes_of_a_gzip_reply() {
+    let (js, _dir) = language_isolate().await;
+    let limit = 1024 * 1024;
+
+    let url = serve_gzip(limit * 8);
+    let result = fetch_capped(&js, &url, Some(limit)).await;
+    assert!(
+        result.starts_with("err:too-large:") && result.contains(&limit.to_string()),
+        "expected a too-large refusal of the decompressed body, got: {result}"
+    );
+
+    let under = limit / 2;
+    let url = serve_gzip(under);
+    assert_eq!(
+        fetch_capped(&js, &url, Some(limit)).await,
+        format!("ok:200:{under}")
+    );
+}
+
 #[tokio::test]
 async fn http_fetch_returns_status_and_body_from_a_prompt_server() {
     let (js, _dir) = language_isolate().await;

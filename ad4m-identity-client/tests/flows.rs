@@ -380,6 +380,7 @@ impl ExecutorRpc for TestExecutor {
                     "revoked": revoked,
                     "head": null,
                     "fork": null,
+                    "storeBehind": null,
                 }))
             }
             "identity.cosignIncept" => {
@@ -1083,7 +1084,7 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     .unwrap();
     assert!(flow
         .link()
-        .starts_with("https://coasys.id/o#coasys:offer:1:"));
+        .starts_with("https://id.coasys.org/o#coasys:offer:1:"));
     let parsed = OfferString::parse_link(&flow.link()).unwrap();
     assert_eq!(parsed.store, STORE_URL);
 
@@ -1176,6 +1177,107 @@ async fn a_bound_offer_takes_only_its_device_and_gives_its_ticket() {
         .await
         .unwrap();
     assert_eq!(linked.head.seq, 1);
+}
+
+/// A confirm whose publish fails keeps the flow: confirming again, while the claim is still
+/// `claimed`, spends it under the same unlock.
+#[tokio::test]
+async fn a_confirm_after_a_failed_publish_succeeds() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 6).await;
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Node,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_b = claim(&b, &flow.link(), None).await.unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+
+    a.rpc().refuse_publish.set(true);
+    flow.confirm(&claimed, entry("node.example", DeviceKind::Server), false)
+        .await
+        .expect_err("the publish failed");
+    assert_eq!(join(&b, &claimed_b["offerId"]).await["state"], "claimed");
+    assert!(record::read(&a, &did).await.unwrap().is_none());
+
+    let linked = flow
+        .confirm(&claimed, entry("node.example", DeviceKind::Server), false)
+        .await
+        .unwrap();
+    assert_eq!(linked.head.seq, 1);
+    assert_eq!(linked.record.unwrap(), 1);
+    assert_eq!(join(&b, &claimed_b["offerId"]).await["state"], "spent");
+    assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
+}
+
+/// A confirm with "keep the master key" whose publish failed pushed nothing and wrote no
+/// record; its retry pushes the key once and writes the record once; a confirm after the add
+/// is in is refused before a second push or record write.
+#[tokio::test]
+async fn a_retried_confirm_pushes_the_master_key_and_writes_the_record_once() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 14).await;
+    let device = device_string(&desk, STORE_URL, SystemClock.now() + 300);
+    let flow = LinkFlow::scan(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        &device,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_desk = desk.rpc().take_ticket(&device.r).await.unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+
+    a.rpc().refuse_publish.set(true);
+    flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
+        .await
+        .expect_err("the publish failed");
+    assert!(vault.pending_pushes().unwrap().is_empty());
+    assert!(record::read(&a, &did).await.unwrap().is_none());
+
+    let linked = flow
+        .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
+        .await
+        .unwrap();
+    assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
+    assert_eq!(linked.record.unwrap(), 1);
+
+    flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
+        .await
+        .expect_err("the offer is spent");
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
+    assert!(vault.pending_pushes().unwrap().is_empty());
+    assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
+
+    // One master key waits in the desktop's inbox, not two.
+    join(&desk, &claimed_desk["offerId"]).await;
+    let desk_vault = MemoryVault::new();
+    take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("a master key waits");
+    assert!(take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 /// The system clock moved ahead by a number of seconds: the holder's time runs on while the

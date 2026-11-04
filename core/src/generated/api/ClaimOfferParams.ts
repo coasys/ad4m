@@ -5,7 +5,7 @@
  */
 export type ClaimOfferParams = { 
 /**
- * The offer string (`coasys:offer:1:…`) or the offer link (`https://coasys.id/o#…`).
+ * The offer string (`coasys:offer:1:…`) or the offer link (`https://id.coasys.org/o#…`).
  */
 offer: string, 
 /**

@@ -271,9 +271,9 @@ async fn admitted_key(
 }
 
 fn db<R>(
-    f: impl FnOnce(&crate::db::Ad4mDb) -> crate::db::Ad4mDbResult<R>,
+    f: impl FnOnce(&dyn crate::db_backend::DbBackend) -> crate::db::Ad4mDbResult<R>,
 ) -> Result<R, KeyLoginError> {
-    crate::db::Ad4mDb::with_global_instance(f).map_err(|e| KeyLoginError::Internal(e.to_string()))
+    f(crate::db_backend::db_backend()).map_err(|e| KeyLoginError::Internal(e.to_string()))
 }
 
 /// Who a key login of the identity `did` (whose key `key` the log admits) acts as here: the
@@ -711,6 +711,14 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use std::sync::atomic::Ordering;
 
+    /// The test-only rows (the operator record, cleared identities) are `Ad4mDb` methods
+    /// outside `DbBackend`.
+    fn test_db<R>(
+        f: impl FnOnce(&crate::db::Ad4mDb) -> crate::db::Ad4mDbResult<R>,
+    ) -> crate::db::Ad4mDbResult<R> {
+        crate::db::Ad4mDb::with_global_instance(f)
+    }
+
     /// A person's log on a store: master m0, d1 (`log.device`), a second device d2, and a bot
     /// key d3; the cache holds it under a head the store signed at its last event.
     struct World {
@@ -839,7 +847,7 @@ mod tests {
 
         /// Records the operator record as this world's identity.
         fn operate(&self) {
-            db(|db| db.set_operator_record_for_test(Some(&self.did))).unwrap();
+            test_db(|db| db.set_operator_record_for_test(Some(&self.did))).unwrap();
         }
     }
 
@@ -884,7 +892,7 @@ mod tests {
     }
 
     fn no_operator() {
-        db(|db| db.set_operator_record_for_test(None)).unwrap();
+        test_db(|db| db.set_operator_record_for_test(None)).unwrap();
     }
 
     /// Binds the main agent to `scid` in the shared database until dropped.
@@ -893,7 +901,7 @@ mod tests {
     impl MainBound {
         fn to(scid: &str) -> MainBound {
             let main = did_for_context(&AgentContext::main_agent()).unwrap();
-            db(|db| db.clear_agent_identity_for_test(&main)).unwrap();
+            test_db(|db| db.clear_agent_identity_for_test(&main)).unwrap();
             db(|db| db.set_agent_identity(&main, scid, 1)).unwrap();
             MainBound(main)
         }
@@ -901,7 +909,7 @@ mod tests {
 
     impl Drop for MainBound {
         fn drop(&mut self) {
-            let _ = db(|db| db.clear_agent_identity_for_test(&self.0));
+            let _ = test_db(|db| db.clear_agent_identity_for_test(&self.0));
         }
     }
 
@@ -995,7 +1003,7 @@ mod tests {
 
         // The grant reads back with its role and key after a restart.
         let reloaded = Grants::default();
-        crate::db::Ad4mDb::with_global_instance(|db| reloaded.load(db)).unwrap();
+        reloaded.load(crate::db_backend::db_backend()).unwrap();
         let grant = reloaded
             .get(&crate::agent::session::TokenId(result.grant_id))
             .unwrap();
@@ -1264,7 +1272,7 @@ mod tests {
         assert_eq!(open(&result.token).unwrap_err(), AuthError::Revoked);
 
         let reloaded = Grants::default();
-        crate::db::Ad4mDb::with_global_instance(|db| reloaded.load(db)).unwrap();
+        reloaded.load(crate::db_backend::db_backend()).unwrap();
         assert!(reloaded
             .get(&crate::agent::session::TokenId(result.grant_id))
             .is_none());
@@ -1484,7 +1492,7 @@ mod tests {
             grant: None,
             issued_at: 5,
         };
-        db(|db| db.clear_agent_identity_for_test(&main)).unwrap();
+        test_db(|db| db.clear_agent_identity_for_test(&main)).unwrap();
         assert!(matches!(
             sign_statement(unsigned.clone()),
             Err(KeyLoginError::BadRequest(m)) if m.starts_with("no-identity")
