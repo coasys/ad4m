@@ -2,6 +2,7 @@
 import type { ForkRecord } from "./ForkRecord";
 import type { SignedHead } from "./SignedHead";
 import type { StoreBehind } from "./StoreBehind";
+import type { StoreInfo } from "./StoreInfo";
 
 /**
  * `identity.status`: what this agent's device key speaks for.
@@ -40,4 +41,9 @@ fork: ForkRecord | null,
  * Set while the configured store answers the log behind the cache (a store restored from
  * a backup, or not caught up): the cached log answers meanwhile. `null` once it catches up.
  */
-storeBehind: StoreBehind | null, };
+storeBehind: StoreBehind | null, 
+/**
+ * The identity store this executor uses (the config's, else its network seed's), and
+ * whether it trusts a key for it; `null` when it has none (a network without a store).
+ */
+store: StoreInfo | null, };

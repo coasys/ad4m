@@ -29,7 +29,9 @@ export class IdentityClient {
     /**
      * This agent's identity, device key, `enc` key and the cached head. `storeBehind` is set
      * (`{ since, seq }`) while the configured store answers the log behind the executor's cache,
-     * and `null` once it catches up.
+     * and `null` once it catches up. `store` is the identity store this executor uses
+     * (`{ url, trusted }`: its config's, else its network's) and whether it trusts a key for it;
+     * `null` when its network has no store, so identities cannot be created or linked there.
      */
     async status(): Promise<IdentityStatus> {
         return this.#apiClient.call("identity.status", {});

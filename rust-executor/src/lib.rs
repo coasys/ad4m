@@ -533,6 +533,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     )
     .expect("Failed to initialize Ad4mDb");
 
+    // The seed names the network's identity store, which the identity module reads below.
+    info!("Initializing Runtime service...");
+    RuntimeService::init_global_instance(
+        std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
+            .join("mainnet_seed.seed")
+            .to_string_lossy()
+            .into_owned(),
+    );
+
     // The key-log cache lives in the same database file.
     {
         let db_path = std::path::Path::new(
@@ -542,7 +551,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 .expect("App data path not set in Ad4mConfig"),
         )
         .join("ad4m_db.sqlite");
-        let settings = crate::identity::IdentitySettings::from_config(&config);
+        let settings = crate::identity::IdentitySettings::from_config(
+            &config,
+            RuntimeService::seed_identity_store().as_ref(),
+        );
         if let Err(e) = crate::identity::check_store_keys(&settings.store_keys)
             .and_then(|_| crate::identity::check_store_url(settings.store_url.as_deref()))
         {
@@ -617,14 +629,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
         }
     });
-
-    info!("Initializing Runtime service...");
-    RuntimeService::init_global_instance(
-        std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
-            .join("mainnet_seed.seed")
-            .to_string_lossy()
-            .into_owned(),
-    );
 
     // Grants are the allowlist of tokens: load them before the API serves.
     if let Err(e) = agent::grants::load_at_start() {

@@ -55,39 +55,30 @@ pub fn check_store_keys(keys: &[String]) -> Result<(), String> {
     }
 }
 
-/// `identity.storeUrl` as the executor can use it: unset (the language's default store) or a
-/// URL. The agent language reads an empty `storeUrl` as unset, so `""` would send every
-/// profile and identity call to the default store while the executor's resolver names no
-/// store: the executor refuses to start with it.
+/// `identity.storeUrl` as the executor can use it: unset (the network's store, or none) or a
+/// URL. The agent language reads an empty `storeUrl` as unset, so `""` would leave the language
+/// without a store while the executor's resolver names one: the executor refuses to start with
+/// it.
 pub fn check_store_url(url: Option<&str>) -> Result<(), String> {
     match url {
         Some(url) if url.trim().is_empty() => Err(
             "identity.storeUrl is empty; give the store's base URL, or leave it out for the \
-             default store"
+             network's store"
                 .into(),
         ),
         _ => Ok(()),
     }
 }
 
-/// The head-signing key (Ed25519 multikey) of the agent language's default store,
-/// `https://store.ad4m.dev` (`DEFAULT_STORE_URL` in the centralized agent language), the
-/// staging network's store, as its `identity-store serve` prints it. The executor trusts it
-/// when the config names neither `identity.storeUrl` nor `identity.storeKeys`
-/// ([`IdentitySettings::from_config`]). One store per build: a build or deployment for another
-/// network sets both `identity.storeUrl` and `identity.storeKeys`.
-pub const DEFAULT_STORE_KEY: &str = "z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj";
-
-/// The identity settings of the executor's config (`identity.storeUrl`, `identity.storeKeys`),
-/// built by [`IdentitySettings::from_config`] (`Default` is the empty value, no key: for tests).
+/// The identity store this executor uses and the keys it trusts for it, built by
+/// [`IdentitySettings::from_config`] from the config and the network's seed (`Default` is the
+/// empty value, no store and no key: for tests).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IdentitySettings {
-    /// The store's base URL; the agent language's `storeUrl` setting. Unset: the language's
-    /// default, `https://store.ad4m.dev`.
+    /// The store's base URL; the agent language's `storeUrl` setting. `None`: no store (the
+    /// network has none), so the language answers every identity call `invalid` (`store-url`).
     pub store_url: Option<String>,
-    /// The store keys (multikeys) a head must be signed by: `identity.storeKeys`, or
-    /// [`DEFAULT_STORE_KEY`] when neither it nor `identity.storeUrl` is set. Empty: no head is
-    /// accepted.
+    /// The store keys (multikeys) a head must be signed by. Empty: no head is accepted.
     pub store_keys: Vec<String>,
     /// `identity.allowPrivateSrc`: let a DID URL's `src` reach loopback and private addresses.
     /// Off by default; for tests and local development only.
@@ -95,48 +86,59 @@ pub struct IdentitySettings {
 }
 
 impl IdentitySettings {
-    /// The settings of `config`. The one place that decides which store keys count:
-    /// - `identity.storeKeys` set: exactly those (an explicit list wins, for the default store
-    ///   too);
-    /// - else `identity.storeUrl` unset: the language's default store, so its key,
-    ///   [`DEFAULT_STORE_KEY`];
-    /// - else (another store, no keys): none. The default store's key never applies to a
-    ///   configured URL; [`missing_store_keys_warning`] warns and `identity.publish` /
-    ///   `identity.claimOffer` refuse `no-store-keys`.
-    pub fn from_config(config: &crate::config::Ad4mConfig) -> Self {
+    /// The settings of `config` on the network whose seed names `seed_store` (its
+    /// `identityStore`). The one place that decides the store and its keys; the config
+    /// (`identity.storeUrl`, `identity.storeKeys`: config file, CLI or env) wins over the seed:
+    /// - the URL: `identity.storeUrl`, else the seed's store, else none (no store);
+    /// - the keys: `identity.storeKeys` set: exactly those (`[]` too, and for the seed's store
+    ///   too); else `identity.storeUrl` set: none (the seed's keys never apply to a configured
+    ///   URL); else the seed's keys, else none.
+    ///
+    /// Without keys [`missing_store_keys_warning`] warns at start and `identity.publish` /
+    /// `identity.claimOffer` refuse `no-store-keys`.
+    pub fn from_config(
+        config: &crate::config::Ad4mConfig,
+        seed_store: Option<&crate::runtime_service::IdentityStoreSeed>,
+    ) -> Self {
+        let store_url = config
+            .identity_store_url
+            .clone()
+            .or_else(|| seed_store.map(|seed| seed.url.clone()));
+        let store_keys = match (&config.identity_store_keys, &config.identity_store_url) {
+            (Some(keys), _) => keys.clone(),
+            (None, Some(_)) => vec![],
+            (None, None) => seed_store.map(|seed| seed.keys.clone()).unwrap_or_default(),
+        };
         IdentitySettings {
-            store_url: config.identity_store_url.clone(),
-            store_keys: match (&config.identity_store_keys, &config.identity_store_url) {
-                (Some(keys), _) => keys.clone(),
-                (None, None) => vec![DEFAULT_STORE_KEY.to_string()],
-                (None, Some(_)) => vec![],
-            },
+            store_url,
+            store_keys,
             allow_private_src: config.identity_allow_private_src.unwrap_or(false),
         }
     }
 }
 
-/// The warning logged at start when `identity.storeKeys` is empty, naming the store it leaves
-/// untrusted and what that costs; `None` with keys. The default config (neither
-/// `identity.storeUrl` nor `identity.storeKeys`) has the default store's key
-/// ([`DEFAULT_STORE_KEY`]) and does not warn; a configured `identity.storeUrl` without
-/// `identity.storeKeys` (or an empty `identity.storeKeys`) does: such an executor verifies no
-/// `did:scid` record until the operator sets the store's key.
+/// The warning logged at start when the executor trusts no store key, naming why and what that
+/// costs; `None` with keys. Without a store (the network's seed has no `identityStore` and the
+/// config names none) it says the network has no identity store; with a store URL but no keys
+/// it names the store and how to give its key.
 pub fn missing_store_keys_warning(settings: &IdentitySettings) -> Option<String> {
     if !settings.store_keys.is_empty() {
         return None;
     }
-    let store = match &settings.store_url {
-        Some(url) => format!("the identity store at {url}"),
-        None => "the agent language's default identity store (identity.storeUrl is unset)".into(),
-    };
-    Some(format!(
-        "identity: identity.storeKeys is empty, so no head of {store} is trusted and this \
-         executor verifies no did:scid record: expressions by a did:scid author are invalid, \
-         no device key speaks for a person, and identity.publish and identity.claimOffer refuse \
-         with no-store-keys. Set identity.storeKeys (--identity-store-keys) to the store's \
-         Ed25519 multikey."
-    ))
+    let consequence = "so this executor verifies no did:scid record: expressions by a did:scid \
+         author are invalid, no device key speaks for a person, and identity.publish and \
+         identity.claimOffer refuse with no-store-keys";
+    Some(match &settings.store_url {
+        None => format!(
+            "identity: this network has no identity store (its bootstrap seed names no \
+             identityStore and identity.storeUrl is unset), {consequence}."
+        ),
+        Some(url) => format!(
+            "identity: no key of the identity store at {url} is trusted (identity.storeKeys is \
+             empty), {consequence}. Set identity.storeKeys (--identity-store-keys) to the store's \
+             Ed25519 multikey."
+        ),
+    })
 }
 
 /// Opens the key-log cache in the executor database at `db_path` and starts the module. Called
@@ -209,13 +211,12 @@ fn publish_fork(did: &str, fork: &ad4m_identity_core::ForkEvidence) {
     }
 }
 
-/// Writes the agent language's `storeUrl` and `storeKeys` settings from `identity.storeUrl`
-/// and `identity.storeKeys` before the language loads (it reads
-/// `languages/<address>/settings.json` at load). Called on every start: an unset
-/// `identity.storeUrl` removes `storeUrl` (the language's default store), and empty
-/// `IdentitySettings::store_keys` removes `storeKeys` (the language then trusts no head), so
-/// nothing an earlier run wrote stays in force. With neither config key set the settings carry
-/// [`DEFAULT_STORE_KEY`], so the language trusts the default store's heads. Other settings stay.
+/// Writes the agent language's `storeUrl` and `storeKeys` settings from [`IdentitySettings`]
+/// (the config's store, else the network seed's) before the language loads (it reads
+/// `languages/<address>/settings.json` at load). Called on every start: no store removes
+/// `storeUrl` (the language has no default, so every identity call answers `invalid`
+/// `store-url`), and empty `IdentitySettings::store_keys` removes `storeKeys` (the language
+/// then trusts no head), so nothing an earlier run wrote stays in force. Other settings stay.
 ///
 /// The file is replaced atomically (a temporary file in the same directory, then a rename), so
 /// a failure leaves the old file as it was. An error means the settings may not be in force:
@@ -278,14 +279,21 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// The identity settings from the executor's global config ([`IdentitySettings::from_config`]).
+/// The identity settings from the executor's global config and the loaded network seed
+/// ([`IdentitySettings::from_config`]).
 pub fn settings_from_config() -> IdentitySettings {
+    let seed_store = crate::runtime_service::RuntimeService::seed_identity_store();
     crate::config::GLOBAL_AD4M_CONFIG
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .map(IdentitySettings::from_config)
-        .unwrap_or_else(|| IdentitySettings::from_config(&crate::config::Ad4mConfig::unprepared()))
+        .map(|config| IdentitySettings::from_config(config, seed_store.as_ref()))
+        .unwrap_or_else(|| {
+            IdentitySettings::from_config(
+                &crate::config::Ad4mConfig::unprepared(),
+                seed_store.as_ref(),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -311,8 +319,7 @@ mod tests {
         assert_eq!(read()["storeUrl"], "http://127.0.0.1:9");
         assert_eq!(read()["storagePath"], "/x");
 
-        // No storeUrl configured: the earlier run's URL goes, so the language's default store
-        // answers; other settings stay.
+        // No store: the earlier run's URL goes, so the language has none; other settings stay.
         write_agent_language_settings(dir.path(), "QmAgent", &IdentitySettings::default()).unwrap();
         assert!(read().get("storeUrl").is_none(), "{}", read());
         assert_eq!(read()["storagePath"], "/x");
@@ -353,10 +360,11 @@ mod tests {
         assert!(check_store_url(Some("https://store.example")).is_ok());
     }
 
-    /// Without `identity.storeKeys` the executor warns at start, naming the store it does not
-    /// trust and that no did:scid record verifies; with keys it says nothing.
+    /// Without store keys the executor warns at start: with a store URL, naming the store and
+    /// `identity.storeKeys`; without a store, saying the network has none. With keys it says
+    /// nothing.
     #[test]
-    fn empty_store_keys_warn_naming_the_store_and_the_consequence() {
+    fn empty_store_keys_warn_naming_the_cause_and_the_consequence() {
         let configured =
             missing_store_keys_warning(&store_url("https://store.example")).expect("a warning");
         assert!(configured.contains("https://store.example"), "{configured}");
@@ -366,9 +374,13 @@ mod tests {
         );
         assert!(configured.contains("identity.storeKeys"), "{configured}");
 
-        let default = missing_store_keys_warning(&IdentitySettings::default()).expect("a warning");
-        assert!(default.contains("default identity store"), "{default}");
-        assert!(default.contains("verifies no did:scid record"), "{default}");
+        let none = missing_store_keys_warning(&IdentitySettings::default()).expect("a warning");
+        assert!(
+            none.contains("this network has no identity store"),
+            "{none}"
+        );
+        assert!(none.contains("verifies no did:scid record"), "{none}");
+        assert!(!none.contains("Set identity.storeKeys"), "{none}");
 
         let keyed = IdentitySettings {
             store_keys: vec!["z6MkA".into()],
@@ -384,57 +396,103 @@ mod tests {
         config
     }
 
-    /// The default store's key is a key the executor can match against a head.
-    #[test]
-    fn the_default_store_key_is_a_bare_ed25519_multikey() {
-        assert_eq!(check_store_keys(&[DEFAULT_STORE_KEY.to_string()]), Ok(()));
+    /// A store as a seed names it.
+    fn seed_store() -> crate::runtime_service::IdentityStoreSeed {
+        crate::runtime_service::IdentityStoreSeed {
+            url: "https://seed.store".into(),
+            keys: vec!["z6MkSeed".into()],
+        }
     }
 
-    /// Neither `identity.storeUrl` nor `identity.storeKeys`: the language's default store, and
-    /// its key. The default config warns of nothing and the language gets the key.
+    fn settings_file(dir: &Path) -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(dir.join("QmAgent").join("settings.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Neither `identity.storeUrl` nor `identity.storeKeys`: the seed's store and its keys.
+    /// Nothing to warn of, and the agent language gets both.
     #[test]
-    fn the_default_config_trusts_the_default_stores_key() {
-        let settings = IdentitySettings::from_config(&config(None, None));
-        assert_eq!(settings.store_url, None);
-        assert_eq!(settings.store_keys, vec![DEFAULT_STORE_KEY.to_string()]);
+    fn without_a_configured_store_the_seeds_store_and_keys_count() {
+        let settings = IdentitySettings::from_config(&config(None, None), Some(&seed_store()));
+        assert_eq!(settings.store_url.as_deref(), Some("https://seed.store"));
+        assert_eq!(settings.store_keys, vec!["z6MkSeed".to_string()]);
         assert_eq!(missing_store_keys_warning(&settings), None);
 
         let dir = tempfile::tempdir().unwrap();
         write_agent_language_settings(dir.path(), "QmAgent", &settings).unwrap();
-        let written: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.path().join("QmAgent").join("settings.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(written["storeKeys"], serde_json::json!([DEFAULT_STORE_KEY]));
-        assert!(written.get("storeUrl").is_none(), "{written}");
+        let written = settings_file(dir.path());
+        assert_eq!(written["storeUrl"], "https://seed.store");
+        assert_eq!(written["storeKeys"], serde_json::json!(["z6MkSeed"]));
     }
 
-    /// Another store without `identity.storeKeys` gets no key (the default store's key never
-    /// applies to a configured URL, not even the default URL written out), so it still warns.
+    /// Neither configured nor in the seed (a network without a store): no store. The warning says
+    /// the network has none, and the agent language gets no `storeUrl` and no `storeKeys`, even
+    /// where an earlier run wrote them.
+    #[test]
+    fn without_a_configured_store_or_one_in_the_seed_there_is_no_store() {
+        let settings = IdentitySettings::from_config(&config(None, None), None);
+        assert_eq!(settings.store_url, None);
+        assert!(settings.store_keys.is_empty());
+        let warning = missing_store_keys_warning(&settings).expect("a warning");
+        assert!(warning.contains("no identity store"), "{warning}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let seeded = IdentitySettings::from_config(&config(None, None), Some(&seed_store()));
+        write_agent_language_settings(dir.path(), "QmAgent", &seeded).unwrap();
+        write_agent_language_settings(dir.path(), "QmAgent", &settings).unwrap();
+        let written = settings_file(dir.path());
+        assert!(written.get("storeUrl").is_none(), "{written}");
+        assert!(written.get("storeKeys").is_none(), "{written}");
+    }
+
+    /// A configured `identity.storeUrl` without `identity.storeKeys` wins over the seed's store
+    /// and gets no key (the seed's keys never apply to a configured URL, not even the seed's
+    /// own URL written out), so it warns, naming the store.
     #[test]
     fn a_configured_store_url_without_keys_trusts_no_key() {
-        for url in ["http://127.0.0.1:8080", "https://store.ad4m.dev"] {
-            let settings = IdentitySettings::from_config(&config(Some(url), None));
-            assert_eq!(settings.store_url.as_deref(), Some(url));
-            assert!(settings.store_keys.is_empty(), "{url}");
-            let warning = missing_store_keys_warning(&settings).expect("a warning");
-            assert!(warning.contains(url), "{warning}");
+        for seed in [None, Some(seed_store())] {
+            for url in ["http://127.0.0.1:8080", "https://seed.store"] {
+                let settings =
+                    IdentitySettings::from_config(&config(Some(url), None), seed.as_ref());
+                assert_eq!(settings.store_url.as_deref(), Some(url));
+                assert!(settings.store_keys.is_empty(), "{url} {seed:?}");
+                let warning = missing_store_keys_warning(&settings).expect("a warning");
+                assert!(warning.contains(url), "{warning}");
+            }
         }
     }
 
-    /// `identity.storeKeys` set: exactly those, with or without a URL (an explicit list wins
-    /// over the default store's key, an explicit empty list too).
+    /// `identity.storeKeys` set: exactly those, over the seed's keys, an explicit empty list
+    /// too. With `identity.storeUrl` they are that store's; without it, the seed's store's
+    /// (no store without one).
     #[test]
     fn configured_store_keys_are_taken_as_given() {
         let keys = ["z6MkA", "z6MkB"];
-        for url in [None, Some("http://127.0.0.1:8080")] {
-            let settings = IdentitySettings::from_config(&config(url, Some(&keys)));
-            assert_eq!(settings.store_keys, vec!["z6MkA", "z6MkB"], "{url:?}");
-            assert_eq!(settings.store_url.as_deref(), url);
+        for seed in [None, Some(seed_store())] {
+            let configured = IdentitySettings::from_config(
+                &config(Some("http://127.0.0.1:8080"), Some(&keys)),
+                seed.as_ref(),
+            );
+            assert_eq!(configured.store_keys, vec!["z6MkA", "z6MkB"]);
+            assert_eq!(
+                configured.store_url.as_deref(),
+                Some("http://127.0.0.1:8080")
+            );
+
+            let keys_only =
+                IdentitySettings::from_config(&config(None, Some(&keys)), seed.as_ref());
+            assert_eq!(keys_only.store_keys, vec!["z6MkA", "z6MkB"]);
+            assert_eq!(
+                keys_only.store_url,
+                seed.as_ref().map(|seed| seed.url.clone()),
+            );
+
+            let empty = IdentitySettings::from_config(&config(None, Some(&[])), seed.as_ref());
+            assert!(empty.store_keys.is_empty(), "{seed:?}");
+            assert!(missing_store_keys_warning(&empty).is_some());
         }
-        let empty = IdentitySettings::from_config(&config(None, Some(&[])));
-        assert!(empty.store_keys.is_empty());
-        assert!(missing_store_keys_warning(&empty).is_some());
     }
 
     fn store_url(url: &str) -> IdentitySettings {

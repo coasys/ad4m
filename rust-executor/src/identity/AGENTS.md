@@ -6,7 +6,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 
 | File | What |
 |---|---|
-| `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`, `identity.allowPrivateSrc`), `write_agent_language_settings`, the `identity-fork` publisher; re-exports `verify_expression` |
+| `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`, else the network seed's `identityStore`; `identity.allowPrivateSrc`), `write_agent_language_settings`, the `identity-fork` publisher; re-exports `verify_expression` |
 | `resolver.rs` | The one place that decides what a log says. `key_speaks_for`, `key_valid_at_anchor` and `verify_expression` (all up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`; `proof.record` anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Later checks (link anchors, verdicts, key login) belong here |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
@@ -120,16 +120,28 @@ the offer's state).
   (`already-linked`). Events past the trusted seq, and every event a foreign `src` served, are
   for resolution display only (`identity.resolve` shows them, `coasys:headTrusted: false`).
   `identity.status`, `identity.log` and `identity.devices` show the cached log as it is.
-  Without `identity.storeKeys` no `did:scid` author verifies, and `identity.publish` and
-  `identity.claimOffer` refuse with `no-store-keys` before the store commits anything: a log
-  the executor can never accept would still take the agent's key for every identity.
-  `IdentitySettings::from_config` is the one place that picks the keys: `identity.storeKeys`
-  set → exactly those (for the default URL too); neither `identity.storeUrl` nor
-  `identity.storeKeys` set → the language's default store and its key, `DEFAULT_STORE_KEY`
-  (`https://store.ad4m.dev`, the staging network; one store per build, so a build for another
-  network sets both); `identity.storeUrl` set without `identity.storeKeys` → no key (the
-  default key never applies to a configured URL). Without a key `init` logs
-  `missing_store_keys_warning` at start, naming the store and the consequence.
+  Without a store key no `did:scid` author verifies, and `identity.publish` and
+  `identity.claimOffer` refuse with `no-store-keys` (naming the cause: the network has no
+  store, or a store URL is configured without its keys) before the store commits anything: a
+  log the executor can never accept would still take the agent's key for every identity.
+- **The store is the network's.** A network is its bootstrap seed (`<data>/mainnet_seed.seed`,
+  which `init` writes from the seed compiled in, `mainnet_seed.json`, or from
+  `--network-bootstrap-seed`); the seed's optional `identityStore` (`{ url, keys }`,
+  `runtime_service::IdentityStoreSeed`, carried from `cli/seed_proto.json` by
+  `dev generate-bootstrap`) names its store. The compiled-in seed names
+  `https://store.ad4m.dev`, the store of today's (staging) network; another network is
+  another seed. There is no built-in default store in code (here or in the agent language).
+  `IdentitySettings::from_config(config, seed_store)` is the one place that picks the store
+  and keys, the config winning: URL → `identity.storeUrl`, else the seed's, else none; keys →
+  `identity.storeKeys` when set (exactly those, `[]` too), else none when `identity.storeUrl`
+  is set (the seed's keys never apply to a configured URL), else the seed's, else none.
+  `lib.rs` loads the seed (`RuntimeService`) before `identity::init`, and
+  `settings_from_config()` reads it for the agent language's settings. Without a key `init`
+  logs `missing_store_keys_warning` at start: "this network has no identity store" without a
+  URL, else the store's URL and `identity.storeKeys`. `identity.status.store` (`StoreInfo
+  { url, trusted }`, `null` without a store) tells apps which store this executor uses and
+  whether it trusts a key for it. Without a store the agent language answers every identity
+  call `invalid` (`store-url`), which reaches callers as an error, never a panic.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
   first-link rule itself: `already-linked` while the main key is valid in its identity's log at
   the trusted seq, `no-operator` without a record, `first-link` for another identity.
@@ -143,14 +155,14 @@ the offer's state).
   the main agent only the operator (the admin credential the custody service holds), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
   managed agent.
-- `identity.storeUrl` and `identity.storeKeys` reach the agent language only through
+- The store's URL and keys (`IdentitySettings`) reach the agent language only through
   `write_agent_language_settings` (atomic: temp file + rename), as its `storeUrl` and
-  `storeKeys` settings, on every start: an unset key removes the setting, so an earlier run's
-  store never stays in force. The language keeps a `did:scid` log only under a head signed by
-  a key of `storeKeys`. `"storeUrl": ""` stops startup (`check_store_url`: the language would
-  read it as its default store, `https://store.ad4m.dev`). When the write fails, `LanguageController::install_agent_language`
-  does not load the agent language, so no profile or identity call goes to an older or the
-  default store; identity calls answer `unavailable`.
+  `storeKeys` settings, on every start: no store or no keys removes the setting, so an earlier
+  run's store never stays in force. The language keeps a `did:scid` log only under a head
+  signed by a key of `storeKeys`. `"storeUrl": ""` stops startup (`check_store_url`: the
+  language would read it as unset). When the write fails,
+  `LanguageController::install_agent_language` does not load the agent language, so no
+  profile or identity call goes to an older store; identity calls answer `unavailable`.
 - An expression by a `did:scid` author verifies only under its `proof.key` (a bare `did:key`)
   and only when its own signature holds under that key. Which seq of the log counts:
   - With `proof.record` (`{version, anchor, sig}`, which the agent language adds to a
