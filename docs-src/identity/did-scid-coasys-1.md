@@ -243,6 +243,14 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
    event hashes). Both must be valid: the competing event must replay on the prefix below it,
    proofs included. A different event there that does not is no fork (anyone can write one
    without a key); the source gave no valid log and is skipped.
+   A source that answers less than the resolver holds (a head below its own, or no log) is no
+   fork by itself: a host restored from a backup does so. Its head is compared with the held
+   log at the head's own seq. The same hash there: the source is behind on the held branch; the
+   resolver keeps its log, records nothing and tries the source again later. Another hash: a
+   head names a hash, not an event, so the resolver reads the source's events up to that seq;
+   one that differs from the held log and replays on the prefix below it is a fork (reported
+   with that seq and the two event hashes). Without such an event the source is skipped as
+   conflicting, and nothing is recorded.
 4. **The DID document.** The resolver derives the DID document (section 9) from the state
    after the head. With `versionId=<seq>`, it derives it from the state after that seq.
    DID Core defines `versionId` only as an identifier of a version of the DID document and
@@ -421,7 +429,8 @@ DID URL from the identity, the anchor and the key id that the log lists for the 
 - A store can withhold events but cannot add one: every event carries proofs by keys the state
   before it names. A verifier re-checks everything a store serves.
 - Forks (two valid events at one seq) are detected, never resolved, by the hash-chain module;
-  a shorter peer log never truncates a held one.
+  a shorter peer log never truncates a held one, and is no fork unless it holds a valid
+  different event at a seq both hold.
 - Only the words make master *n*+1, so whoever holds master *n* cannot rotate alone.
 - `fold` refuses unknown fields so that no personal data enters a log by accident. `offer` and
   `coSig` are opaque to `fold`.
@@ -497,7 +506,9 @@ GET /v1/logs/<scid>?from=<n>
     read, so a host (or anyone replaying its answer) can serve an older signed head, and with
     the prefix of the log it covers it verifies as well as the current one. A reader that
     trusts the key learns that the host held at least that log, never that the log ends there;
-    it reads over an authenticated channel (HTTPS) and never takes a head below one it holds.
+    it reads over an authenticated channel (HTTPS) and never takes a head below one it holds. A
+    signed head below the reader's, over the event the reader holds at that seq, shows the host
+    behind (restored from a backup, or not caught up), not a fork (section 8, step 3).
   - `appendedAt`: one unix time per event, when the host stored it. It is the host's claim
     and no part of the verifiable history.
 
@@ -552,7 +563,10 @@ Coasys identity store adds these checks:
   frozen the store takes no signed request and one kind of append only: a `rotate`, which the
   committed next key signs (a holder of the current master alone cannot). Once it is appended
   the competing event's signer is no longer current, so the freeze ends by the same rule. The
-  store derives the freeze from the recorded fork and the held log; it stores no flag.
+  store derives the freeze from the recorded fork and the held log; it stores no flag. Against
+  someone who holds the 12 words (the recovery secret, and so the committed next key) a freeze
+  lasts only until they append that `rotate` themselves; this is inherent to pre-rotation, where
+  whoever holds the next key is the owner as far as the log can tell.
 - **Proof of work for a log with no vouching note**, below.
 
 ### Proof of work for a log with no vouching note

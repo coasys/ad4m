@@ -6,11 +6,14 @@
 //! of the log) before it is stored, and the store only ever extends a log.
 //!
 //! Extend only: the cache accepts only events that continue its head. A different event at a
-//! seq it holds, or a store that answers a shorter log (a signed head below the cached one: a
-//! shorter log never truncates a held one), records a fork with `record_fork`, appends nothing,
-//! keeps the cached history and calls the fork listener once per new fork (the executor
-//! publishes `identity-fork`). Signed heads: a head from the agent language counts only under a
-//! key of `identity.storeKeys`; events that arrive through [`KelCache::ingest`] need none.
+//! seq it holds that is valid on the held prefix below it ([`rival_holds`]) records a fork with
+//! `record_fork`, appends nothing, keeps the cached history and calls the fork listener once per
+//! new fork (the executor publishes `identity-fork`). A store that answers a shorter log never
+//! truncates a held one, and is no fork by itself: over the cached event at its head's seq it is
+//! behind ([`CacheError::Behind`]); over another hash it is a [`CacheError::Conflict`] unless
+//! its own event there holds. Neither is recorded. Signed heads: a head from the agent language
+//! counts only under a key of `identity.storeKeys`; events that arrive through
+//! [`KelCache::ingest`] need none.
 //! [`KelCache::reset`] (`identity.resetLog`) is the one way a held log leaves: the operator
 //! drops this executor's copy, and the next read takes the store's branch.
 
@@ -217,10 +220,28 @@ pub fn global_key_map() -> Arc<KeyMap> {
 /// Why the cache refused or could not answer.
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
-    /// Two different events at one seq, or a store that answered a shorter log. Nothing was
-    /// appended; the cached history stays.
+    /// Two different events at one seq, the other one valid on the held prefix below it
+    /// ([`rival_holds`]): recorded. Nothing was appended; the cached history stays.
     #[error("fork at seq {}: ours {}, theirs {}", .0.seq, .0.ours, .0.theirs)]
     Fork(ForkEvidence),
+    /// The store's signed head names another hash at a seq the cache holds, and no event of
+    /// the store's that holds there came with it: a signed head names a hash, not an event, so
+    /// this is no fork. Nothing recorded, nobody alerted; the cached log answers.
+    #[error(
+        "the store's head names {} at seq {}, the cached log holds {} there, and no valid event of the store's shows it",
+        .0.theirs, .0.seq, .0.ours
+    )]
+    Conflict(ForkEvidence),
+    /// The store answered less than the cache holds on the same branch: a signed head below the
+    /// cached one over the cached event at its seq (`store`), or no log (`None`) of one it
+    /// signed a head of. A store restored from a backup, or not caught up. Nothing recorded,
+    /// nobody alerted; the cached log and its accepted head stay, and the next refresh tries
+    /// again.
+    #[error(
+        "the store is behind the cache: its head is at seq {}, the cached log's at {ours}",
+        .store.map_or_else(|| "none (no log)".to_string(), |s| s.to_string())
+    )]
+    Behind { store: Option<u64>, ours: u64 },
     /// The events do not continue the log, or break one of its rules.
     #[error("the events do not fold: {0}")]
     Fold(ChainError<FoldError>),
@@ -352,6 +373,15 @@ pub fn rival_holds(scid: &str, held: &[Event], rival: &Event) -> Result<(), Cach
 }
 
 impl KelCache {
+    /// The events of a store's page, each checked by `Event::from_json`.
+    fn page_events(page: &ad4m_ldk::identity::LogPage) -> Result<Vec<Event>, CacheError> {
+        page.events
+            .iter()
+            .map(Event::from_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CacheError::Fold(ChainError::Policy(e)))
+    }
+
     /// The cache in the database file at `path` (the executor's `ad4m_db.sqlite`), trusting
     /// heads signed by `store_keys` (multikeys).
     pub fn open(path: impl AsRef<Path>, store_keys: Vec<String>) -> Result<Self, CacheError> {
@@ -716,8 +746,18 @@ impl KelCache {
     }
 
     /// Takes a signed head and the events that reach it from the agent language: the head must
-    /// verify under `identity.storeKeys`; a head below the cached one is a fork; the events must
-    /// continue the cached log up to the head. Then the head is the log's accepted head.
+    /// verify under `identity.storeKeys`; the events must continue the cached log up to the
+    /// head. Then the head is the log's accepted head.
+    ///
+    /// A head below the cached one is never taken (a shorter log never truncates a held one).
+    /// When the cached event at the head's seq has the head's hash, the store is behind on the
+    /// cached branch (restored from a backup, or not caught up): [`CacheError::Behind`], nothing
+    /// recorded. When it has another hash, the head alone names a hash, not an event, so it is no
+    /// fork: the store's `events` at or below the head's seq go through the same comparison as
+    /// [`KelCache::ingest`], which records a fork only for a rival event that holds on the held
+    /// prefix ([`rival_holds`]); without one the answer is [`CacheError::Conflict`], nothing
+    /// recorded. A head at the cached seq with another hash than the cached event is a
+    /// `Conflict` too.
     pub async fn accept(
         &self,
         scid: &str,
@@ -737,15 +777,28 @@ impl KelCache {
         if let Some(cached) = self.chain_locked(&mut chains, scid).await? {
             let ours = cached.head();
             if head.seq < ours.seq {
-                let fork = ForkEvidence {
+                let held = cached.hash_at(head.seq).cloned().unwrap_or_default();
+                if held == head.hash {
+                    return Err(CacheError::Behind {
+                        store: Some(head.seq),
+                        ours: ours.seq,
+                    });
+                }
+                let conflict = ForkEvidence {
                     chain: scid.to_string(),
-                    seq: ours.seq,
-                    ours: ours.hash,
+                    seq: head.seq,
+                    ours: held,
                     theirs: head.hash.clone(),
                 };
-                let theirs = serde_json::to_string(head).map_err(storage)?;
-                self.record_fork(&fork, &theirs).await?;
-                return Err(CacheError::Fork(fork));
+                let below: Vec<Event> = events
+                    .iter()
+                    .filter(|e| e.seq <= head.seq)
+                    .cloned()
+                    .collect();
+                return match self.ingest_locked(&mut chains, scid, &below).await {
+                    Err(e @ (CacheError::Fork(_) | CacheError::Storage(_))) => Err(e),
+                    _ => Err(CacheError::Conflict(conflict)),
+                };
             }
         }
         self.ingest_locked(&mut chains, scid, events).await?;
@@ -754,15 +807,12 @@ impl KelCache {
         };
         let ours = chain.head();
         if ours.seq == head.seq && ours.hash != head.hash {
-            let fork = ForkEvidence {
+            return Err(CacheError::Conflict(ForkEvidence {
                 chain: scid.to_string(),
                 seq: ours.seq,
                 ours: ours.hash.clone(),
                 theirs: head.hash.clone(),
-            };
-            let theirs = serde_json::to_string(head).map_err(storage)?;
-            self.record_fork(&fork, &theirs).await?;
-            return Err(CacheError::Fork(fork));
+            }));
         }
         if ours.seq == head.seq {
             self.accept_head(head)?;
@@ -862,34 +912,39 @@ impl KelCache {
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
             let Some(page) = backend.log(&did, from).await? else {
                 return match cached {
-                    // The store answers no log of one it signed a head of: the shortest log. A
-                    // log only another host served is no evidence against the store, nor is a
-                    // head no key of `identity.storeKeys` verifies now (a former store's).
+                    // The store answers no log of one it signed a head of: it is behind (a
+                    // store restored from a backup older than the log). No event names a rival,
+                    // so it is no fork. A log only another host served is no evidence about the
+                    // store at all, nor is a head no key of `identity.storeKeys` verifies now
+                    // (a former store's).
                     Some(chain)
                         if self
                             .accepted_head(scid)?
                             .is_some_and(|head| verify_head(&head, &self.store_keys)) =>
                     {
-                        let ours = chain.head();
-                        let fork = ForkEvidence {
-                            chain: scid.to_string(),
-                            seq: ours.seq,
-                            ours: ours.hash,
-                            theirs: String::new(),
-                        };
-                        self.record_fork(&fork, "null").await?;
-                        Err(CacheError::Fork(fork))
+                        Err(CacheError::Behind {
+                            store: None,
+                            ours: chain.head().seq,
+                        })
                     }
                     _ => Err(CacheError::NotFound),
                 };
             };
-            let events = page
-                .events
-                .iter()
-                .map(Event::from_json)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| CacheError::Fold(ChainError::Policy(e)))?;
-            let reached = self.accept(scid, &page.head, &events).await?;
+            let reached = match self
+                .accept(scid, &page.head, &Self::page_events(&page)?)
+                .await
+            {
+                // The head disagrees with the cached log below this page: read the store's log
+                // from seq 0 once, so a rival event of its that holds is recorded as a fork.
+                Err(CacheError::Conflict(_)) if page.head.seq < from => {
+                    let Some(page) = backend.log(&did, 0).await? else {
+                        return Err(CacheError::NotFound);
+                    };
+                    self.accept(scid, &page.head, &Self::page_events(&page)?)
+                        .await?
+                }
+                other => other?,
+            };
             match reached {
                 Some(head) if head.seq >= page.head.seq => {
                     return self.chain(scid).await?.ok_or(CacheError::NotFound);
@@ -1410,8 +1465,11 @@ pub(crate) mod tests {
         );
     }
 
+    /// A store restored from a backup answers a shorter log on the cached branch: its signed
+    /// head is below the cached one, over the cached event at its seq. It is behind, not a fork:
+    /// nothing is recorded, nobody is alerted, and the cached log and its accepted head stay.
     #[tokio::test]
-    async fn a_shorter_log_raises_one_fork_and_keeps_history() {
+    async fn a_store_behind_on_the_same_branch_records_no_fork() {
         let mut log = TestLog::new(1);
         log.revoke_d1();
         let store = FakeStore::new(log.events.clone());
@@ -1419,14 +1477,111 @@ pub(crate) mod tests {
         let forks = counting_cache(&mut cache);
         cache.refresh(&store, &log.scid()).await.unwrap();
 
-        // The store now withholds the revoke.
+        // The store loses the revoke.
         store.events.lock().unwrap().truncate(1);
         for _ in 0..2 {
             match cache.refresh(&store, &log.scid()).await {
+                Err(CacheError::Behind {
+                    store: Some(0),
+                    ours: 1,
+                }) => {}
+                other => panic!("expected the store behind, got {other:?}"),
+            }
+        }
+        assert_eq!(forks.load(Ordering::SeqCst), 0, "no identity-fork");
+        assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
+        let kept = cache.chain(&log.scid()).await.unwrap().unwrap();
+        assert_eq!(kept.head(), log.chain().head(), "the cached history stays");
+        assert_eq!(cache.accepted_head(&log.scid()).unwrap().unwrap().seq, 1);
+        assert_eq!(
+            cache
+                .trusted(&log.scid())
+                .await
+                .unwrap()
+                .map(|(_, seq)| seq),
+            Some(1)
+        );
+
+        // The store catches up: the next refresh takes it, as ever.
+        *store.events.lock().unwrap() = log.events.clone();
+        cache.refresh(&store, &log.scid()).await.unwrap();
+    }
+
+    /// An `add` of a new device (seed `seed`) on `chain`, signed by `master` (m0).
+    pub(crate) fn add_device(chain: &KelChain, master: &SigningKey, seed: u8) -> Event {
+        let device = SigningKey::from_bytes(&[seed; 32]);
+        let mut event = ad4m_identity_core::build::add_unsigned(
+            chain,
+            DeviceKey {
+                id: chain.state().next_device_id(),
+                sign: device.key(),
+                enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+                life: KeyLife::Standing,
+            },
+            "offer",
+            "coSig",
+        )
+        .unwrap();
+        cosign(&mut event, "m0", master).unwrap();
+        event
+    }
+
+    /// A signed head below the cached one naming another hash at its seq, with no event of the
+    /// store's there: a head names a hash, not an event, so it is a conflict, not a fork. The
+    /// evidence is at the head's own seq: our hash there against the head's.
+    #[tokio::test]
+    async fn a_lower_head_with_another_hash_and_no_rival_is_an_unrecorded_conflict() {
+        let mut log = TestLog::new(1);
+        let at_incept = log.chain();
+        log.events.push(add_device(&at_incept, &log.master, 40));
+        log.events.push(add_device(&log.chain(), &log.master, 41));
+        let mut cache = trusting();
+        let forks = counting_cache(&mut cache);
+        accept_signed(&cache, &log.events).await;
+        let scid = log.scid();
+
+        let theirs =
+            ad4m_identity_core::event_hash(&add_device(&at_incept, &log.master, 42)).unwrap();
+        let head = store_key().sign_head(&scid, 1, &theirs, 2);
+        match cache.accept(&scid, &head, &[]).await {
+            Err(CacheError::Conflict(evidence)) => {
+                assert_eq!(evidence.seq, 1);
+                assert_eq!(&evidence.ours, log.chain().hash_at(1).unwrap());
+                assert_eq!(evidence.theirs, theirs);
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(forks.load(Ordering::SeqCst), 0);
+        assert!(cache.forks(&scid).await.unwrap().is_empty());
+        assert_eq!(
+            cache.trusted(&scid).await.unwrap().map(|(_, seq)| seq),
+            Some(2)
+        );
+    }
+
+    /// A store on another branch whose head is below the cached one: the refresh reads the
+    /// store's log from seq 0, and its event at the head's seq holds on the held prefix, so the
+    /// fork is recorded once, with evidence at that one seq.
+    #[tokio::test]
+    async fn a_lower_head_on_another_branch_with_a_valid_rival_records_one_fork() {
+        let mut log = TestLog::new(1);
+        let at_incept = log.chain();
+        log.events.push(add_device(&at_incept, &log.master, 40));
+        log.events.push(add_device(&log.chain(), &log.master, 41));
+        let rival = add_device(&at_incept, &log.master, 42);
+        let store = FakeStore::new(vec![log.events[0].clone(), rival.clone()]);
+        let mut cache = trusting();
+        let forks = counting_cache(&mut cache);
+        accept_signed(&cache, &log.events).await;
+        let scid = log.scid();
+
+        let theirs = ad4m_identity_core::event_hash(&rival).unwrap();
+        for _ in 0..2 {
+            match cache.refresh(&store, &scid).await {
                 Err(CacheError::Fork(fork)) => {
                     assert_eq!(fork.seq, 1);
-                    assert_eq!(fork.ours, log.chain().head().hash);
-                    assert_eq!(fork.theirs, log.chain().hash_at(0).unwrap().clone());
+                    assert_eq!(&fork.ours, log.chain().hash_at(1).unwrap());
+                    assert_eq!(fork.theirs, theirs);
                 }
                 other => panic!("expected a fork, got {other:?}"),
             }
@@ -1436,10 +1591,14 @@ pub(crate) mod tests {
             1,
             "one identity-fork per fork"
         );
-        assert_eq!(cache.forks(&log.scid()).await.unwrap().len(), 1);
-        let kept = cache.chain(&log.scid()).await.unwrap().unwrap();
-        assert_eq!(kept.head(), log.chain().head(), "the cached history stays");
-        assert_eq!(cache.accepted_head(&log.scid()).unwrap().unwrap().seq, 1);
+        let recorded = cache.forks(&scid).await.unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].seq, 1);
+        assert_eq!(
+            cache.chain(&scid).await.unwrap().unwrap().head(),
+            log.chain().head(),
+            "the cached history stays"
+        );
     }
 
     #[tokio::test]
@@ -1717,12 +1876,17 @@ pub(crate) mod tests {
         ));
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
 
-        // Under the key that signed the held head, the same answer is a fork.
+        // Under the key that signed the held head, the same answer is a store behind the cache
+        // (restored from a backup older than the log): no fork either.
         let cache = KelCache::open(&path, vec![former.key.multikey()]).unwrap();
         assert!(matches!(
             cache.refresh(&new, &log.scid()).await,
-            Err(CacheError::Fork(_))
+            Err(CacheError::Behind {
+                store: None,
+                ours: 0
+            })
         ));
-        assert_eq!(cache.forks(&log.scid()).await.unwrap().len(), 1);
+        assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
+        assert!(cache.trusted(&log.scid()).await.unwrap().is_some());
     }
 }

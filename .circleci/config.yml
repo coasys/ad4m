@@ -711,7 +711,7 @@ jobs:
           destination: test-logs
 
   # Identity end to end: a real identity-store and three executors (create, link,
-  # first-link refusal, revoke, fork on a shorter log, cache after restart).
+  # first-link refusal, revoke, a store restored behind the cache, cache after restart).
   # No Holochain. The suite builds identity-store and the holder example with cargo.
   integration-tests-identity:
     machine: true

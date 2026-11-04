@@ -1613,7 +1613,9 @@ fn failure(e: ResolveError, mut meta: DidResolutionMetadata) -> DidResolutionRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::cache::tests::{accept_signed, in_memory, trusting, FakeStore, TestLog};
+    use crate::identity::cache::tests::{
+        accept_signed, add_device, in_memory, trusting, FakeStore, TestLog,
+    };
     use crate::identity::src_fetch::test_host::{from_of, response, TestHost};
     use crate::identity::types::DidDocument;
     use ad4m_identity_core::build::Signer;
@@ -1997,13 +1999,16 @@ mod tests {
     #[tokio::test]
     async fn a_fork_is_reported_and_the_held_log_answers() {
         let mut log = TestLog::new(1);
-        log.revoke_d1();
-        let store = Arc::new(FakeStore::new(log.events.clone()));
-        let (resolver, store) = resolver(in_memory(vec![store.key.multikey()]), store, None);
+        let at_incept = log.chain();
+        log.events.push(add_device(&at_incept, &log.master, 40));
+        log.events.push(add_device(&log.chain(), &log.master, 41));
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        // The store holds another valid branch from seq 1, with a head below the cached one.
+        let rival = add_device(&at_incept, &log.master, 42);
+        let store = Arc::new(FakeStore::new(vec![log.events[0].clone(), rival.clone()]));
+        let (resolver, _) = resolver(cache, store, None);
         let did = did_of(&log.scid());
-        resolver.resolve(&did, false).await;
-        // The store now withholds the revoke.
-        store.events.lock().unwrap().truncate(1);
         let result = resolver.resolve(&did, true).await;
         assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
         let fork = result
@@ -2012,12 +2017,19 @@ mod tests {
             .clone()
             .expect("the fork");
         assert_eq!(fork.seq, 1);
-        assert_eq!(fork.ours, log.chain().head().hash);
+        assert_eq!(&fork.ours, log.chain().hash_at(1).unwrap());
+        assert_eq!(fork.theirs, ad4m_identity_core::event_hash(&rival).unwrap());
         assert_eq!(
             result.did_document_metadata.version_id.as_deref(),
-            Some("1")
+            Some("2")
         );
-        assert!(methods(&result).is_empty(), "the held log, with the revoke");
+        let ids = methods(&result);
+        for id in ["#d1", "#d2", "#d3"] {
+            assert!(
+                ids.contains(&id.to_string()),
+                "the held log lists {id}: {ids:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2164,6 +2176,41 @@ mod tests {
             .resolve(&format!("did:key:{}", log.device.key()), false)
             .await;
         assert_eq!(again.did_resolution_metadata.key_id.as_deref(), Some("d1"));
+    }
+
+    /// A store restored behind the cache on the same branch: a fresh resolve keeps answering
+    /// the cached log at its accepted head, trusted, with no fork; the store is skipped as
+    /// behind.
+    #[tokio::test]
+    async fn a_store_behind_the_cache_leaves_the_cached_head_answering() {
+        let mut log = TestLog::new(1);
+        log.revoke_d1();
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let (resolver, store) = resolver(
+            in_memory(vec![store.key.multikey()]),
+            store,
+            Some("https://store.example"),
+        );
+        let did = did_of(&log.scid());
+        let first = resolver.resolve(&did, true).await;
+        assert_eq!(first.did_resolution_metadata.error, None, "{first:?}");
+
+        store.events.lock().unwrap().truncate(1);
+        let behind = resolver.resolve(&did, true).await;
+        let meta = &behind.did_resolution_metadata;
+        assert_eq!(meta.error, None, "{behind:?}");
+        assert_eq!(meta.fork, None);
+        assert_eq!(meta.head_trusted, Some(true));
+        assert_eq!(
+            behind.did_document_metadata.version_id.as_deref(),
+            Some("1")
+        );
+        assert!(
+            meta.skipped
+                .iter()
+                .any(|s| s.reason.contains("the store is behind")),
+            "{meta:?}"
+        );
     }
 
     #[tokio::test]

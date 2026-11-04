@@ -120,7 +120,7 @@ impl Store {
             if !record_signed_by(record, key) {
                 return Err(signature_refused());
             }
-            check_bot_writer(&tx, key, now)?;
+            self.check_bot_writer(&tx, key, now)?;
         } else if let Some(scid) = scid_of(did) {
             let verified = self.verify_request_in(&tx, incoming, Some(did), Signer::AnyKey)?;
             let anchor = record.anchor.ok_or_else(|| {
@@ -193,21 +193,24 @@ impl Store {
     }
 }
 
-/// The bot-scope check: a bot key writes its own record only while its scope is in force. Runs
-/// in the write's transaction.
-fn check_bot_writer(conn: &Connection, key: &str, now: u64) -> Result<(), ApiError> {
-    let Some(scid) = db::key_owner(conn, key)? else {
-        return Ok(());
-    };
-    let chain =
-        db::load_chain(conn, &scid)?.ok_or_else(|| ApiError::internal("key without its log"))?;
-    let state = chain.state();
-    let head = chain.head().seq;
-    if state.bot_scope_at(key, head).is_some() && !state.key_valid_at_time(key, head, now) {
-        return Err(ApiError::forbidden(
-            "writer",
-            "the bot key's scope is not in force",
-        ));
+impl Store {
+    /// The bot-scope check: a bot key writes its own record only while its scope is in force.
+    /// Runs in the write's transaction.
+    fn check_bot_writer(&self, conn: &Connection, key: &str, now: u64) -> Result<(), ApiError> {
+        let Some(scid) = db::key_owner(conn, key)? else {
+            return Ok(());
+        };
+        let chain = self
+            .held_chain(conn, &scid)?
+            .ok_or_else(|| ApiError::internal("key without its log"))?;
+        let state = chain.state();
+        let head = chain.head().seq;
+        if state.bot_scope_at(key, head).is_some() && !state.key_valid_at_time(key, head, now) {
+            return Err(ApiError::forbidden(
+                "writer",
+                "the bot key's scope is not in force",
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }

@@ -83,6 +83,8 @@ pub fn cache_error(e: CacheError) -> WsRpcError {
                 fork.seq, fork.ours, fork.theirs
             ),
         ),
+        e @ CacheError::Conflict(_) => error(409, format!("identity-conflict: {e}")),
+        e @ CacheError::Behind { .. } => error(503, format!("unavailable: {e}")),
         CacheError::Fold(e) => error(
             400,
             format!("invalid: {}", ad4m_identity_core::error_code(&e)),

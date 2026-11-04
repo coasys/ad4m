@@ -12,13 +12,16 @@
 //! last 10 minutes; and the key's `coasys:store-request` signature verifies. Routes that need
 //! the master key (the offer routes) also require `keyId` to be the current master's.
 
+use std::sync::Arc;
+
+use ad4m_hash_chain::store::SqliteChainStore;
 use ad4m_hash_chain::{decode_proof_value, hash_bytes};
 use ad4m_identity_core::{scid_of, verify_signed, KelChain, REQUEST_DOMAIN};
 use ad4m_ldk::identity::SignedRequest;
 use base64::Engine;
 use rusqlite::{params, Connection, TransactionBehavior};
 
-use crate::db::{self, to_sql};
+use crate::db::{self, to_sql, KEL};
 use crate::error::ApiError;
 use crate::Store;
 
@@ -39,10 +42,11 @@ pub enum Signer {
     Master,
 }
 
-/// A request that passed: the identity, its replayed log and the signing key's id.
+/// A request that passed: the identity, its log folded at the stored head and the signing key's
+/// id.
 pub struct Verified {
     pub scid: String,
-    pub chain: KelChain,
+    pub chain: Arc<KelChain>,
     pub key_id: String,
 }
 
@@ -159,7 +163,27 @@ impl Store {
         if req.expires > now + MAX_AHEAD_S {
             return Err(refuse("the request expires more than 5 minutes ahead"));
         }
-        let chain = db::load_chain(conn, scid)?
+        // The signature first, against the key the key index lists under `keyId`: a forged
+        // request costs an indexed lookup and one signature check, never a read of the log.
+        let sig =
+            decode_proof_value(&signed.sig).ok_or_else(|| refuse("the signature is malformed"))?;
+        let signs = db::indexed_signs(conn, scid, &req.key_id)?;
+        if signs.is_empty() {
+            if SqliteChainStore::head_in(conn, KEL, &scid.to_string())?.is_none() {
+                return Err(refuse("the store holds no log of the identity"));
+            }
+            return Err(refuse("the key is not in the log"));
+        }
+        let Some(sign) = signs
+            .iter()
+            .find(|sign| verify_signed(REQUEST_DOMAIN, req, sign, &sig))
+        else {
+            return Err(refuse("the signature does not verify"));
+        };
+        // Then the key's standing, on the log's fold at the stored head (held in memory, or
+        // folded once here and held).
+        let chain = self
+            .held_chain(conn, scid)?
             .ok_or_else(|| refuse("the store holds no log of the identity"))?;
         // A frozen identity (a fork signed by the current master, `db::freezing_fork`): no key
         // of it speaks for it at this store until a `rotate` ends the freeze.
@@ -175,7 +199,7 @@ impl Store {
         let head = chain.head();
         let record = state
             .record(&req.key_id)
-            .filter(|r| r.id == req.key_id)
+            .filter(|r| r.id == req.key_id && r.sign.as_str() == sign.as_str())
             .ok_or_else(|| refuse("the key is not in the log"))?;
         if !record.scopes.is_empty() {
             return Err(refuse("a bot key signs no request for its owner"));
@@ -185,11 +209,6 @@ impl Store {
         }
         if signer == Signer::Master && state.current_master().map(|m| &m.id) != Some(&req.key_id) {
             return Err(refuse("the route needs the current master key"));
-        }
-        let sig =
-            decode_proof_value(&signed.sig).ok_or_else(|| refuse("the signature is malformed"))?;
-        if !verify_signed(REQUEST_DOMAIN, req, &record.sign, &sig) {
-            return Err(refuse("the signature does not verify"));
         }
         let nonce_ok = bs58::decode(&req.nonce)
             .into_vec()
