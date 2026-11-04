@@ -124,7 +124,8 @@ enum Domain {
         /// The did:scid of the identity that operates this executor. Recorded only while the
         /// data folder has no operator; another identity never replaces it (only the recorded
         /// operator can). On a data folder already initialized, only the operator is recorded
-        /// (the seed stays, unless --network-bootstrap-seed is given too).
+        /// (the seed stays, unless --network-bootstrap-seed is given too). The operator is
+        /// recorded in this data folder: give `init` the same --data-path that `run` uses.
         #[arg(long)]
         operator: Option<String>,
     },

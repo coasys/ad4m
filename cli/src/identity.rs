@@ -120,7 +120,7 @@ pub async fn claim(
     println!("Confirm on the device that opened the offer that it shows the same code.");
     if no_wait {
         println!(
-            "Offer {}: run `ad4m-executor claim` again or call identity.joinStatus to follow it.",
+            "Offer {}: confirm on the app's device; identity.joinStatus reports when this executor has joined.",
             claimed.offer_id
         );
         return Ok(());

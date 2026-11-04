@@ -154,7 +154,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   (apps hold them through `ad4m-identity-client`). The configured store's logs come through the
   agent language (`Capability::Identity*`, refused on any other language); a DID URL's foreign
   `src` is read by the executor itself (`identity/src_fetch.rs`, public addresses only at
-  connect). Both are kept after `fold` in `KelCache`; a head counts only under a key of the
+  connect). The configured store's logs are kept after `fold` in `KelCache`; a foreign `src`
+  log is folded in memory only, never stored, and a conflict it shows is reported in the
+  resolution metadata (`coasys:skipped`), never recorded as a fork. A head counts only under a key of the
   config's `identity.storeKeys`, authorship reads a log only up to that head, and
   `identity.storeUrl` and `identity.storeKeys` become the agent language's `storeUrl` and
   `storeKeys` settings at every start (unset removes them; empty `storeKeys` warns at start:
