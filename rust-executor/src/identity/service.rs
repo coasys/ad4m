@@ -792,6 +792,7 @@ mod tests {
                 backend,
                 cache,
                 store_url: store_url.map(String::from),
+                challenges: Default::default(),
             }
         };
 
@@ -845,6 +846,7 @@ mod tests {
                 backend,
                 cache,
                 store_url: store_url.map(String::from),
+                challenges: Default::default(),
             }
             .refuse_without_store_keys()
             .unwrap_err()
