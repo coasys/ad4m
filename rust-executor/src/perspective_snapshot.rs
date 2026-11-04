@@ -266,7 +266,8 @@ pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
     // Start-up opens each stored perspective in its own task. An archive taken
     // before all are open would replace the last full snapshot with a partial
     // one, so refuse until every stored perspective has its store.
-    let stored = crate::db::Ad4mDb::with_global_instance(|db| db.get_all_perspectives())
+    let stored = crate::db_backend::db_backend()
+        .get_all_perspectives()
         .map_err(|e| anyhow!("Failed to list perspectives: {}", e))?;
     let loading = missing_stores(&stored, &stores);
     if !loading.is_empty() {
