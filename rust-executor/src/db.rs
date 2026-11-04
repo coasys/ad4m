@@ -2568,6 +2568,9 @@ impl Ad4mDb {
         }
     }
 
+    /// Runs `func` on the global instance. Tests only: executor code reaches the database
+    /// through `crate::db_backend::db_backend()`, so a shared-mode executor serves it too.
+    #[cfg(test)]
     pub fn with_global_instance<F, R>(func: F) -> R
     where
         F: FnOnce(&Ad4mDb) -> R,
