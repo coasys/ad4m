@@ -12,8 +12,8 @@
 //! | open sessions of the main agent (event audiences) | `Session::acts_as_did` reads the DID again after a re-key |
 //! | apps on the main agent | their grants are revoked: their tokens were signed with the old key |
 //! | perspective owners | each retired main DID is replaced by the new one (`update_perspective_with`) |
-//! | notification owners | from each retired main DID (`Ad4mDb::move_notification_owner`) |
-//! | the claims the old key made (`identity.joinStatus`) | forgotten (`Ad4mDb::clear_joins`) |
+//! | notification owners | from each retired main DID (`DbBackend::move_notification_owner`) |
+//! | the claims the old key made (`identity.joinStatus`) | forgotten (`DbBackend::clear_joins`) |
 //! | the published agent profile | published again under the new DID |
 //!
 //! Stays: the operator record (it names the operator's identity, not this key), the old key's
@@ -27,7 +27,7 @@ use crate::agent::grants::Grants;
 use crate::agent::rekey::retired_key_name;
 use crate::agent::{AgentContext, AgentService};
 use crate::api::ws_handler::WsRpcError;
-use crate::db::Ad4mDb;
+use crate::db_backend::db_backend;
 use crate::events::Event;
 use crate::pubsub::get_global_pubsub_sync;
 use crate::wallet::wallet_backend;
@@ -100,14 +100,14 @@ async fn rekey_and_move() -> Result<DeviceKeys, WsRpcError> {
         }
     }
 
-    let rows = Ad4mDb::with_global_instance(|db| {
-        for did in &retired {
-            db.move_notification_owner(did, new)?;
+    let db = db_backend();
+    for did in &retired {
+        if let Err(e) = db.move_notification_owner(did, new) {
+            failed.push(format!("the notifications of {did}: {e}"));
         }
-        db.clear_joins()
-    });
-    if let Err(e) = rows {
-        failed.push(format!("the notifications and claims: {e}"));
+    }
+    if let Err(e) = db.clear_joins() {
+        failed.push(format!("the claims of the old key: {e}"));
     }
 
     let (status, agent) = AgentService::with_global_instance(|svc| (svc.dump(), svc.agent.clone()));
@@ -140,7 +140,7 @@ mod tests {
     use super::*;
     use crate::agent::capabilities::{AuthInfo, ListenerReach};
     use crate::agent::session::Session;
-    use crate::db::JoinRow;
+    use crate::db::{Ad4mDb, JoinRow};
     use crate::types::{NotificationInput, PerspectiveHandle};
 
     /// After a re-key, every place of the table above holds the new DID (or let go of the

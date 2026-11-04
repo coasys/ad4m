@@ -28,8 +28,9 @@ use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::Value;
 
-/// The production store, used when the settings name none.
-pub const DEFAULT_STORE_URL: &str = "https://store.coasys.org";
+/// The staging network's store, used when the settings name none. One store per build: a build
+/// for another network sets `storeUrl` (and the executor's `identity.storeUrl`).
+pub const DEFAULT_STORE_URL: &str = "https://store.ad4m.dev";
 pub const REQUEST_HEADER: &str = "X-Coasys-Request";
 /// The header of a pre-join inbox read: base64url(JCS(PreInboxAuth)).
 pub const PRE_INBOX_HEADER: &str = "X-Coasys-Inbox";
@@ -803,7 +804,7 @@ mod tests {
     #[test]
     fn plain_http_is_taken_only_to_a_loopback_address() {
         for url in [
-            "https://store.coasys.org",
+            "https://store.ad4m.dev",
             "HTTPS://store.example:8443/base",
             "http://127.0.0.1:8080",
             "http://127.9.9.9",
@@ -814,7 +815,7 @@ mod tests {
             assert!(transport_allowed(url), "{url}");
         }
         for url in [
-            "http://store.coasys.org",
+            "http://store.ad4m.dev",
             "http://10.0.0.1:8080",
             "http://127.0.0.1.attacker.example",
             "http://localhost.attacker.example",
@@ -823,7 +824,7 @@ mod tests {
             "http://attacker.example\\@127.0.0.1/identity",
             "http://[::2]:80",
             "ftp://127.0.0.1",
-            "store.coasys.org",
+            "store.ad4m.dev",
             "https://",
         ] {
             assert!(!transport_allowed(url), "{url}");

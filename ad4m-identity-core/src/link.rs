@@ -43,7 +43,7 @@ pub const OFFER_STRING_PREFIX: &str = "coasys:offer:1:";
 /// The prefix of a device string.
 pub const DEVICE_STRING_PREFIX: &str = "coasys:device:1:";
 /// The page that opens an offer link; the offer string sits only in the fragment.
-pub const OFFER_LINK_PAGE: &str = "https://coasys.id/o";
+pub const OFFER_LINK_PAGE: &str = "https://id.coasys.org/o";
 /// Bytes of the offer secret `s`.
 pub const SECRET_LEN: usize = 32;
 /// Bytes of an offer id.
@@ -626,7 +626,7 @@ impl OfferString {
         )
     }
 
-    /// The offer link: the offer string only in the fragment of `https://coasys.id/o`.
+    /// The offer link: the offer string only in the fragment of `https://id.coasys.org/o`.
     pub fn link(&self) -> String {
         format!("{OFFER_LINK_PAGE}#{}", self.encode())
     }

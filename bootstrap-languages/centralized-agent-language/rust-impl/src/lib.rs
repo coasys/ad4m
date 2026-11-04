@@ -9,7 +9,7 @@
 //!   place of mock.ad4m.dev.
 //!
 //! The store's base URL is the `storeUrl` language setting (the executor fills it from
-//! `identity.storeUrl`), read on every call; without one, the production store. It must be
+//! `identity.storeUrl`), read on every call; without one, `DEFAULT_STORE_URL` (the staging network's store). It must be
 //! `https`, or plain `http` to a loopback address. The `storeKeys` setting (from
 //! `identity.storeKeys`) lists the store keys whose signed heads the language trusts when it
 //! reads a log to check a `did:scid` record; without it no such record verifies. The language

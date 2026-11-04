@@ -383,9 +383,13 @@ async fn main() {
             }
             Some("confirm") => {
                 async {
-                    let flow = link.take().ok_or("open a link first")?;
-                    let claim = claimed.take().ok_or("wait for the claim first")?;
-                    let head = flow.confirm(&claim).await.map_err(|e| e.to_string())?;
+                    let flow = link.as_ref().ok_or("open a link first")?;
+                    let claim = claimed.as_ref().ok_or("wait for the claim first")?;
+                    let head = flow.confirm(claim).await.map_err(|e| e.to_string())?;
+                    // Kept until the add is in: a failed publish can be confirmed again while
+                    // the claim is still `claimed`.
+                    link = None;
+                    claimed = None;
                     Ok(json!({ "seq": head.seq }))
                 }
                 .await

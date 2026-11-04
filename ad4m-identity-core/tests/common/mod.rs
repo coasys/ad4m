@@ -596,6 +596,29 @@ pub fn refusal_cases() -> Vec<Case> {
         policy("NotABot"),
     );
 
+    // A `scope` of a bot key, signed by the master, that names no action or an unknown one.
+    let mut with_bot = Log::new();
+    let bot_id = with_bot.add(bot(&["read"], 10));
+    let scoped = |can: Vec<String>| {
+        let scope = BotScope { can, expires: 20 };
+        let event = build::scope(&with_bot.chain, &master(0), &bot_id, &scope).unwrap();
+        let mut events = with_bot.events.clone();
+        events.push(event);
+        typed(&events)
+    };
+    case(
+        "scope with no action",
+        "8",
+        scoped(Vec::new()),
+        policy("EmptyScope"),
+    );
+    case(
+        "scope with an unknown action",
+        "8",
+        scoped(vec!["read".into(), "admin".into()]),
+        format("UnknownAction"),
+    );
+
     let mut wrong_salt =
         build::rotate_unsigned(&base.chain, &mk(&master(1)), &salt(2), Some(next(2)), &[]).unwrap();
     sign(&mut wrong_salt, "m1", &master(1));
@@ -1234,7 +1257,7 @@ fn build_link() -> Value {
     let bot_offer = signed_offer(&log, link_offer(&log, OfferKind::Bot, Some(bot_scope)));
     let bot_add = build::add_claimed(&log.chain, &master(0), &bot_offer.offer, &view).unwrap();
     let offer_string = OfferString {
-        store: "https://store.coasys.org".into(),
+        store: "https://store.ad4m.dev".into(),
         scid: scid.clone(),
         offer_id: link_offer_id(),
         s: bs58::encode(s).into_string(),
@@ -1245,7 +1268,7 @@ fn build_link() -> Value {
         r: bs58::encode(&sha256(b"device r")[..16]).into_string(),
         exp: LINK_NOW + 300,
         hint: Some("Pixel 8".into()),
-        store: "https://store.coasys.org".into(),
+        store: "https://store.ad4m.dev".into(),
     };
     let claim_bytes = signing_bytes(CLAIM_DOMAIN, &claim_body(&scid, &claim)).unwrap();
     json!({

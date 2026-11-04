@@ -171,7 +171,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         })
     }
 
-    /// The offer link (`https://coasys.id/o#coasys:offer:1:…`): the QR code shows it.
+    /// The offer link (`https://id.coasys.org/o#coasys:offer:1:…`): the QR code shows it.
     pub fn link(&self) -> String {
         self.offer_string.link()
     }
@@ -277,8 +277,10 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         }
     }
 
-    /// The person confirmed the same match code: appends the `add` that spends `claimed`.
-    pub async fn confirm(self, claimed: &Claimed) -> Result<SignedHead, ClientError> {
+    /// The person confirmed the same match code: appends the `add` that spends `claimed`. The
+    /// flow stays: after a failed publish it can confirm again while the claim is `claimed`
+    /// (once the store took the add, the offer is `spent` and a repeat is refused).
+    pub async fn confirm(&self, claimed: &Claimed) -> Result<SignedHead, ClientError> {
         let chain = chain_of(self.executor, &self.did).await?;
         let signer = self.unlocked.signer(self.clock.now())?;
         let event = add_claimed(&chain, signer, &self.offer, &claimed.claim)?;

@@ -113,6 +113,7 @@ export type { SignedHead } from "./SignedHead";
 export type { SignedOffer } from "./SignedOffer";
 export type { SignedRequest } from "./SignedRequest";
 export type { SkippedSource } from "./SkippedSource";
+export type { StoreBehind } from "./StoreBehind";
 // The device inbox, the private details record and the request box.
 export type { DeleteRequestParams } from "./DeleteRequestParams";
 export type { DeviceRequest } from "./DeviceRequest";

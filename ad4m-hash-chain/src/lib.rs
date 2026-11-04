@@ -89,6 +89,23 @@ pub trait ChainPolicy {
     fn chain_of(&self, entry: &Self::Entry) -> ChainId;
     /// Checks one later entry against the state before it: who may sign it and what it may do.
     fn apply(&self, state: &mut Self::State, entry: &Self::Entry) -> Result<(), Self::Error>;
+    /// [`genesis`](Self::genesis) for [`fold_stored`]: an entry the caller itself verified
+    /// before it stored it. It may leave out checks that only refuse (the proof verification
+    /// first), and must give the same id and state as `genesis` for every entry `genesis`
+    /// accepts. The default is `genesis`.
+    fn genesis_stored(&self, entry: &Self::Entry) -> Result<(ChainId, Self::State), Self::Error> {
+        self.genesis(entry)
+    }
+    /// [`apply`](Self::apply) for [`fold_stored`]: may leave out checks that only refuse (the
+    /// proof verification first), and must change the state as `apply` does for every entry
+    /// `apply` accepts. The default is `apply`.
+    fn apply_stored(
+        &self,
+        state: &mut Self::State,
+        entry: &Self::Entry,
+    ) -> Result<(), Self::Error> {
+        self.apply(state, entry)
+    }
 }
 
 /// The last entry of a chain.
@@ -189,6 +206,14 @@ where
 impl<P: ChainPolicy> Chain<P> {
     /// Starts a chain at entry 0: `seq` 0, `prev` null, then `policy.genesis`.
     pub fn genesis(policy: &P, entry: &P::Entry) -> Result<Self, ChainError<P::Error>> {
+        Self::genesis_as(policy, entry, Proofs::Verify)
+    }
+
+    fn genesis_as(
+        policy: &P,
+        entry: &P::Entry,
+        proofs: Proofs,
+    ) -> Result<Self, ChainError<P::Error>> {
         let hash = checked_hash(entry)?;
         if entry.seq() != 0 {
             return Err(ChainError::Seq {
@@ -201,7 +226,11 @@ impl<P: ChainPolicy> Chain<P> {
                 "entry 0 names prev {prev}; it must be null"
             )));
         }
-        let (id, state) = policy.genesis(entry).map_err(ChainError::Policy)?;
+        let (id, state) = match proofs {
+            Proofs::Verify => policy.genesis(entry),
+            Proofs::Stored => policy.genesis_stored(entry),
+        }
+        .map_err(ChainError::Policy)?;
         let named = policy.chain_of(entry);
         if named != id {
             return Err(ChainError::WrongChain {
@@ -221,13 +250,33 @@ impl<P: ChainPolicy> Chain<P> {
     pub fn append(&mut self, policy: &P, entry: &P::Entry) -> Result<Head, ChainError<P::Error>> {
         let mut state = self.state.clone();
         let head = self.head();
-        let hash = step(policy, &self.id, &head, &mut state, entry)?;
+        let hash = step(policy, &self.id, &head, &mut state, entry, Proofs::Verify)?;
         self.state = state;
         self.hashes.push(hash.clone());
         Ok(Head {
             seq: head.seq + 1,
             hash,
         })
+    }
+
+    /// [`append`](Self::append) on a chain the caller owns and drops when a check fails: the
+    /// policy changes the state in place, with no copy. The chain is consumed, so a refused
+    /// entry (which may have left the state half changed) is never seen. For a batch staged on
+    /// a copy of a chain the caller keeps: one copy, then `appended` per entry, costs one copy
+    /// of the state whatever the batch's length and wherever it fails, where `append` per entry
+    /// costs one per entry.
+    pub fn appended(mut self, policy: &P, entry: &P::Entry) -> Result<Self, ChainError<P::Error>> {
+        let head = self.head();
+        let hash = step(
+            policy,
+            &self.id,
+            &head,
+            &mut self.state,
+            entry,
+            Proofs::Verify,
+        )?;
+        self.hashes.push(hash);
+        Ok(self)
     }
 
     pub fn id(&self) -> &ChainId {
@@ -305,6 +354,7 @@ fn step<P: ChainPolicy>(
     head: &Head,
     state: &mut P::State,
     entry: &P::Entry,
+    proofs: Proofs,
 ) -> Result<Hash, ChainError<P::Error>> {
     let hash = checked_hash(entry)?;
     let want = head.seq + 1;
@@ -327,8 +377,20 @@ fn step<P: ChainPolicy>(
             got: named,
         });
     }
-    policy.apply(state, entry).map_err(ChainError::Policy)?;
+    match proofs {
+        Proofs::Verify => policy.apply(state, entry),
+        Proofs::Stored => policy.apply_stored(state, entry),
+    }
+    .map_err(ChainError::Policy)?;
     Ok(hash)
+}
+
+/// Which policy checks a step runs: the full ones, or those for a host's own stored entries
+/// ([`fold_stored`]).
+#[derive(Clone, Copy)]
+enum Proofs {
+    Verify,
+    Stored,
 }
 
 /// [`step`] on the first of `copies` (one entry, several proof sets) that passes; the first
@@ -350,7 +412,7 @@ fn step_any<'e, P: ChainPolicy>(
     let mut first_error = None;
     for entry in others {
         let mut attempt = state.clone();
-        match step(policy, id, head, &mut attempt, entry) {
+        match step(policy, id, head, &mut attempt, entry, Proofs::Verify) {
             Ok(hash) => {
                 *state = attempt;
                 return Ok((hash, entry));
@@ -360,7 +422,7 @@ fn step_any<'e, P: ChainPolicy>(
             }
         }
     }
-    match step(policy, id, head, state, last) {
+    match step(policy, id, head, state, last, Proofs::Verify) {
         Ok(hash) => Ok((hash, last)),
         Err(e) => Err(first_error.unwrap_or(e)),
     }
@@ -373,11 +435,33 @@ pub fn fold<P: ChainPolicy>(
     policy: &P,
     entries: &[P::Entry],
 ) -> Result<Chain<P>, ChainError<P::Error>> {
+    fold_as(policy, entries, Proofs::Verify)
+}
+
+/// [`fold`] for a host's own stored, already-verified chain only: entries a host reads back from
+/// its own storage, each of which passed [`fold`], [`Chain::append`] or [`import`] before it was
+/// stored. It calls [`ChainPolicy::genesis_stored`] and [`ChainPolicy::apply_stored`], which may
+/// leave out checks that only refuse (the proof verification, the costly part of a replay); the
+/// canonical form, `seq`, `prev` and chain id checks still run, so storage that hands back other
+/// entries or another order still fails. For every chain `fold` accepts it gives the same chain:
+/// id, hashes and state. Never call it on entries from outside: a forged proof would pass.
+pub fn fold_stored<P: ChainPolicy>(
+    policy: &P,
+    entries: &[P::Entry],
+) -> Result<Chain<P>, ChainError<P::Error>> {
+    fold_as(policy, entries, Proofs::Stored)
+}
+
+fn fold_as<P: ChainPolicy>(
+    policy: &P,
+    entries: &[P::Entry],
+    proofs: Proofs,
+) -> Result<Chain<P>, ChainError<P::Error>> {
     let (first, rest) = entries.split_first().ok_or(ChainError::Empty)?;
-    let mut chain = Chain::genesis(policy, first)?;
+    let mut chain = Chain::genesis_as(policy, first, proofs)?;
     for entry in rest {
         let head = chain.head();
-        let hash = step(policy, &chain.id, &head, &mut chain.state, entry)?;
+        let hash = step(policy, &chain.id, &head, &mut chain.state, entry, proofs)?;
         chain.hashes.push(hash);
     }
     Ok(chain)

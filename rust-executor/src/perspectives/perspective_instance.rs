@@ -23,12 +23,12 @@ use crate::prolog_service::{
 use crate::prolog_service::{PrologMode, PROLOG_MODE};
 use crate::pubsub::get_global_pubsub;
 use crate::runtime_service::notification_access::notifications_to_fire;
+use crate::types::*;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, OnlineAgent,
     PerspectiveExpression, PerspectiveHandle, PerspectiveLinkEvent, PerspectiveLinkUpdatedEvent,
     PerspectiveState, PerspectiveStateFilter,
 };
-use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
@@ -81,6 +81,10 @@ pub use expected_links::{ExpectedLinks, LinksChanged};
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
 mod subscription_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_subscription_recheck_tests.rs"]
+mod subscription_recheck_tests;
 
 #[cfg(test)]
 #[path = "perspective_instance_abstract_tests.rs"]
@@ -609,7 +613,9 @@ pub struct PerspectiveInstance {
     sdna_change_mutex: Arc<Mutex<()>>,
     /// Serialises `ensure_public_links_are_shared`: a publish and the link
     /// language loop it wakes both call it, and two concurrent calls would
-    /// each find the remote empty and commit every shared link.
+    /// each find the remote empty and commit every shared link. The commit
+    /// loop holds it from sending the rest of a batch to parking the oldest
+    /// diff, so a fallback sync either runs before the rest or sees the park.
     share_links_mutex: Arc<Mutex<()>>,
     /// Serialises `register_local_agents`. server-link-language replaces its
     /// local agent list (p-diff-sync adds to it), so a registration that
@@ -696,6 +702,33 @@ pub struct PerspectiveInstance {
     /// without a running link language. Compiled out in non-test builds.
     #[cfg(test)]
     force_shape_sync_wait: Arc<AtomicBool>,
+}
+
+/// The local Shared links the remote render lacks, without the links of the diffs the
+/// queue still holds (queued or parked). Links compare by author, timestamp, source,
+/// predicate and target; one set of those identities for remote and unsent keeps the
+/// pass linear.
+fn links_missing_remotely(
+    local_links: &[(LinkExpression, LinkStatus)],
+    remote_links: &[LinkExpression],
+    unsent: &[LinkExpression],
+) -> Vec<LinkExpression> {
+    fn identity(l: &LinkExpression) -> (&str, &str, &str, Option<&str>, &str) {
+        (
+            &l.author,
+            &l.timestamp,
+            &l.data.source,
+            l.data.predicate.as_deref(),
+            &l.data.target,
+        )
+    }
+    let known: HashSet<_> = remote_links.iter().chain(unsent).map(identity).collect();
+    local_links
+        .iter()
+        .map(|(link, _)| link)
+        .filter(|link| !known.contains(&identity(link)))
+        .cloned()
+        .collect()
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -959,8 +992,9 @@ impl PerspectiveInstance {
                 }
             };
 
-            let users_result =
-                Ad4mDb::with_global_instance(|db| db.list_users()).map_err(|e| e.to_string());
+            let users_result = crate::db_backend::db_backend()
+                .list_users()
+                .map_err(|e| e.to_string());
             let user_tuples: Vec<(String, Option<i64>)> = match users_result {
                 // Keyed by agent DID: a user without an agent has no loop to run.
                 Ok(users) => users
@@ -1322,10 +1356,9 @@ impl PerspectiveInstance {
             interval.tick().await;
 
             if Instant::now() >= retry_at && self.has_link_language().await {
-                let (_, ids) = Ad4mDb::with_global_instance(|db| {
-                    db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
-                })
-                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+                let (_, ids) = crate::db_backend::db_backend()
+                    .get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
+                    .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
                 if ids.is_empty() {
                     continue;
@@ -1387,9 +1420,8 @@ impl PerspectiveInstance {
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.uuid.clone();
 
-        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
-            db.get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))
-        })?;
+        let (pending_diffs, pending_ids) = crate::db_backend::db_backend()
+            .get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))?;
 
         if !pending_ids.is_empty() {
             let link_language_clone = {
@@ -1398,9 +1430,14 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
+                // From the first send until the clear or the park lands, the fallback
+                // sync must not run: it would send the same pending links again, or,
+                // reading no parked row yet, send the oldest diff's links after the
+                // rest. It holds this lock across its read and commit, and never
+                // waits on this loop.
+                let _sharing = self.share_links_mutex.lock().await;
                 log::debug!("💾 committing {} pending diffs...", pending_ids.len());
-                let commit_result = link_language.commit(pending_diffs).await;
-                match commit_result {
+                let committed_ids = match link_language.commit(pending_diffs.clone()).await {
                     // Spec §5.2 splits perspective-commit (write) from
                     // perspective-sync (revision read), so a spec-compliant
                     // flat language that implements only perspective-commit
@@ -1410,19 +1447,62 @@ impl PerspectiveInstance {
                     // never drain its retry queue. The success signal for
                     // the retry path is "commit didn't throw" — clear the
                     // diffs regardless of whether a revision came back.
-                    Ok(_) => {
-                        Ad4mDb::with_global_instance(|db| {
-                            db.clear_pending_diffs(&uuid, pending_ids)
-                        })?;
-                        // Reset immediate commits counter after successful commit
-                        self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
-                        log::debug!("✅ 💾 successfully committed pending diffs");
-                        Ok(())
+                    Ok(_) => pending_ids,
+                    // One diff the language refuses must not hold back the
+                    // diffs behind it. Send the oldest alone: if it goes
+                    // through, the next tick sends the rest. If the language
+                    // fails it but takes the rest, park it: keep its row, out
+                    // of the queue. A failure alone does not prove a permanent
+                    // refusal, so it is not deleted; it is not sent again
+                    // either, since that would reorder it behind newer diffs.
+                    // If it takes neither, it is down: keep the batch and back
+                    // off.
+                    Err(e) if pending_ids.len() > 1 => {
+                        let (oldest, oldest_ids) =
+                            crate::db_backend::db_backend().get_pending_diffs(&uuid, Some(1))?;
+                        match link_language.commit(oldest.clone()).await {
+                            Ok(_) => oldest_ids,
+                            Err(refusal) => {
+                                // The batch concatenates its diffs oldest first.
+                                let rest = PerspectiveDiff {
+                                    additions: pending_diffs.additions[oldest.additions.len()..]
+                                        .to_vec(),
+                                    removals: pending_diffs.removals[oldest.removals.len()..]
+                                        .to_vec(),
+                                };
+                                if link_language.commit(rest).await.is_err() {
+                                    return Err(e.context(format!(
+                                        "a batch of {} diffs",
+                                        pending_ids.len()
+                                    )));
+                                }
+                                log::error!(
+                                    "💾 perspective {}: the link language failed pending diff {:?} and accepted the {} after it; parked it (kept, no longer sent), its links stay local only: {:#}",
+                                    uuid,
+                                    oldest_ids,
+                                    pending_ids.len() - 1,
+                                    refusal
+                                );
+                                crate::db_backend::db_backend()
+                                    .park_pending_diffs(&uuid, oldest_ids.clone())?;
+                                pending_ids
+                                    .into_iter()
+                                    .filter(|id| !oldest_ids.contains(id))
+                                    .collect()
+                            }
+                        }
                     }
                     // The batch this commit sent: the size cap can make it smaller
                     // than the queue.
-                    Err(e) => Err(e.context(format!("a batch of {} diffs", pending_ids.len()))),
-                }
+                    Err(e) => {
+                        return Err(e.context(format!("a batch of {} diffs", pending_ids.len())))
+                    }
+                };
+                crate::db_backend::db_backend().clear_pending_diffs(&uuid, committed_ids)?;
+                // Reset immediate commits counter after successful commit
+                self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
+                log::debug!("✅ 💾 successfully committed pending diffs");
+                Ok(())
             } else {
                 Ok(()) // Keep diffs if no link language
             }
@@ -1560,18 +1640,19 @@ impl PerspectiveInstance {
                 },
             };
 
-            let mut links_to_commit = Vec::new();
-            for (local_link, _) in &local_links {
-                if !remote_links.iter().any(|e| {
-                    e.author == local_link.author
-                        && e.timestamp == local_link.timestamp
-                        && e.data.source == local_link.data.source
-                        && e.data.target == local_link.data.target
-                        && e.data.predicate == local_link.data.predicate
-                }) {
-                    links_to_commit.push(local_link.clone());
+            // A queued or parked diff's links stay Shared in the store, but the queue owns
+            // them: a queued one would be sent twice, a parked one after its successors.
+            let unsent = match crate::db_backend::db_backend().get_unsent_additions(&uuid) {
+                Ok(unsent) => unsent,
+                Err(e) => {
+                    log::warn!(
+                        "ensure_public_links_are_shared: could not read queued and parked diffs for perspective {}: {} — skipping this sync attempt",
+                        uuid, e
+                    );
+                    return false;
                 }
-            }
+            };
+            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &unsent);
 
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
@@ -1606,7 +1687,7 @@ impl PerspectiveInstance {
                 );
             }
 
-            //Ad4mDb::with_global_instance(|db| db.add_many_links(&self.persisted.lock().await.uuid, &remote_links)).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
+            //crate::db_backend::db_backend().add_many_links(&self.persisted.lock().await.uuid, &remote_links).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
             return true;
         }
         false
@@ -1661,9 +1742,9 @@ impl PerspectiveInstance {
         let _commit_order = self.commit_order.lock().await;
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
-        let (_, pending_ids) =
-            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
-                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+        let (_, pending_ids) = crate::db_backend::db_backend()
+            .get_pending_diffs(&handle.uuid, Some(1))
+            .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
         log::debug!(
             "commit({}): state={:?} link_language={} pending_ids={} adds={} removes={}",
@@ -1746,7 +1827,7 @@ impl PerspectiveInstance {
 
         if !ok {
             // Store diff in DB
-            Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
+            crate::db_backend::db_backend().add_pending_diff(&handle.uuid, diff)?;
             // Update or start timer
             let mut timer = self.commit_debounce_timer.lock().await;
             *timer = Some(tokio::time::Instant::now());
@@ -1768,9 +1849,7 @@ impl PerspectiveInstance {
             if let Err(e) = self_clone.commit(&diff_clone).await {
                 log::error!("PerspectiveInstance::commit() returned error: {:?}\nStoring in pending diffs for later", e);
                 let handle_clone = self_clone.persisted.lock().await.clone();
-                Ad4mDb::with_global_instance(|db|
-                    db.add_pending_diff(&handle_clone.uuid, &diff_clone)
-                ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
+                crate::db_backend::db_backend().add_pending_diff(&handle_clone.uuid, &diff_clone).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
             }
         });
     }
@@ -4580,7 +4659,7 @@ impl PerspectiveInstance {
             return Ok(BTreeMap::new());
         };
         let notifications = notifications_to_fire(
-            Ad4mDb::with_global_instance(|db| db.get_notifications())?,
+            crate::db_backend::db_backend().get_notifications()?,
             &handle,
             &main_agent_did,
         );
@@ -4886,7 +4965,8 @@ impl PerspectiveInstance {
     /// [`Self::LOCAL_ONLINE_THRESHOLD_SECS`].
     fn recently_active_users() -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
-        Ad4mDb::with_global_instance(|db| db.list_users())
+        crate::db_backend::db_backend()
+            .list_users()
             .unwrap_or_default()
             .into_iter()
             .filter(|user| {
@@ -6179,9 +6259,8 @@ impl PerspectiveInstance {
         // First, so the queries collected below carry the new class lists.
         let reresolved = self.refresh_abstract_subscriptions().await;
 
-        let mut query_futures: Vec<
-            std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
-        > = Vec::new();
+        let mut query_futures: Vec<future::BoxFuture<'static, Option<(String, String)>>> =
+            Vec::new();
 
         // Collect only the minimal data needed: ID, query string, predicates,
         // and model_query_params (if this is a model subscription).
@@ -6253,7 +6332,7 @@ impl PerspectiveInstance {
             let query_future = Box::pin(async move {
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
                 // With no shape wait: every subscription on the perspective is
-                // re-checked under one `join_all` below, so a wait here for one
+                // re-checked in the one pass below, so a wait here for one
                 // subscription's unsynced class would hold back every other
                 // subscription's update. A class still missing fails this pass
                 // at once and is retried on the next one.
@@ -6286,8 +6365,13 @@ impl PerspectiveInstance {
             query_futures.push(query_future);
         }
 
-        // Run all queries concurrently — no lock contention during execution
-        let results = future::join_all(query_futures).await;
+        // Run the re-checks off the async workers, a bounded number at once
+        // across the executor (the store reads are blocking). No lock is
+        // held meanwhile. Each subscription runs at most once per pass and
+        // passes run one after another, so the results compared below are
+        // the newest.
+        let results =
+            subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS).await;
 
         // Single lock acquisition to compare and update all results
         let mut delta_updates = Vec::new();
@@ -7082,8 +7166,9 @@ mod tests {
 
         let mut pending = PerspectiveDiff::empty();
         for _ in 0..100 {
-            (pending, _) =
-                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None)).unwrap();
+            (pending, _) = crate::db_backend::db_backend()
+                .get_pending_diffs(&uuid, None)
+                .unwrap();
             if !pending.removals.is_empty() {
                 break;
             }
@@ -7154,8 +7239,9 @@ mod tests {
         // queued the unmatched one would be too.
         let mut pending = PerspectiveDiff::empty();
         for _ in 0..100 {
-            (pending, _) =
-                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None)).unwrap();
+            (pending, _) = crate::db_backend::db_backend()
+                .get_pending_diffs(&uuid, None)
+                .unwrap();
             if !pending.removals.is_empty() {
                 break;
             }
@@ -9440,7 +9526,7 @@ mod tests {
         assert_one_budget_spent(&err, elapsed, "Task");
     }
 
-    /// Subscription re-checks run under one `join_all`, so a model
+    /// Subscription re-checks run in one pass, so a model
     /// subscription waiting for an include target that never syncs must not
     /// hold back another subscription's update on the same perspective.
     #[tokio::test(flavor = "multi_thread")]

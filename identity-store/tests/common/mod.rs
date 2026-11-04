@@ -103,6 +103,25 @@ impl TestStore {
         }
     }
 
+    /// The same store started again on its file, with the same key, clock and settings: it
+    /// holds no fold, so the first use of each log is a miss.
+    pub fn restarted(self) -> TestStore {
+        let db = Db::open(self.dir.path().join("store.sqlite")).unwrap();
+        let read = self.clock.clone();
+        let store = Store::new(
+            db,
+            StoreKey::from_secret(agent::TEST_STORE_SECRET),
+            Arc::new(move || read.load(Ordering::SeqCst)),
+            self.store.settings.clone(),
+        );
+        TestStore {
+            router: router(store.clone()),
+            store,
+            clock: self.clock,
+            dir: self.dir,
+        }
+    }
+
     pub fn now(&self) -> u64 {
         self.clock.load(Ordering::SeqCst)
     }

@@ -11,9 +11,10 @@
 //! | `POW_BITS` | `22` | the proof-of-work cost `GET /v1/pow` publishes |
 //! | `CORS_ORIGINS` | none | comma-separated origins allowed from a browser |
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
-//! | `IDENTITY_BURST` | `5` | writes per identity at once (the identity bucket) |
+//! | `IDENTITY_BURST` | `10` | writes per identity at once (the identity bucket) |
 //! | `IDENTITY_REFILL_S` | `60` | seconds per write the identity bucket refills |
-//! | `HELD_LOG_EVENTS` | `1048576` | the most events the logs held folded in memory cover together |
+//! | `HELD_LOG_BYTES` | 256 MiB | the most heap the held folds take together; at least twice `LOG_FOLD_BYTES` |
+//! | `LOG_FOLD_BYTES` | 16 MiB | the per-log budget: the most heap one log's fold may take without revoked keys; the whole fold at most twice it |
 //!
 //! `serve` sweeps expired inbox messages and requests every minute.
 //! On start, `serve` prints `identity-store listening on http://<addr> store-key <multikey>`.
@@ -47,14 +48,17 @@ fn settings() -> Result<Settings, String> {
         })
         .unwrap_or_default();
     let feed_token = std::env::var("FEED_TOKEN").ok().filter(|t| !t.is_empty());
-    Ok(Settings {
+    let settings = Settings {
         pow_bits: number("POW_BITS", defaults.pow_bits)?,
         feed_token,
         cors_origins,
         identity_burst: number("IDENTITY_BURST", defaults.identity_burst)?,
         identity_refill_s: number("IDENTITY_REFILL_S", defaults.identity_refill_s)?,
-        held_log_events: number("HELD_LOG_EVENTS", defaults.held_log_events)?,
-    })
+        held_log_bytes: number("HELD_LOG_BYTES", defaults.held_log_bytes)?,
+        log_fold_bytes: number("LOG_FOLD_BYTES", defaults.log_fold_bytes)?,
+    };
+    settings.check()?;
+    Ok(settings)
 }
 
 async fn serve() -> Result<(), String> {

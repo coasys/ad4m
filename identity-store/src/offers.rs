@@ -5,11 +5,13 @@
 //! offers: an `open` offer past `expires`, and a `claimed` one past `expires + 300 s`, become
 //! `expired`. A terminal offer stays 24 hours as a tombstone, so the device can read why it ended.
 
+use ad4m_hash_chain::decode_proof_value;
 use ad4m_identity_core::link::{
-    check_add, check_secret, claim_view, verify_claim, verify_offer, Claim, ClaimView, LinkError,
-    OfferKind, OfferState, SignedOffer, CONFIRM_GRACE_S, MAX_OPEN_OFFERS,
+    check_add, check_offer_shape, check_secret, claim_view, verify_claim, verify_offer, Claim,
+    ClaimView, LinkError, OfferKind, OfferState, SignedOffer, CONFIRM_GRACE_S, MAX_OPEN_OFFERS,
+    OFFER_DOMAIN,
 };
-use ad4m_identity_core::{Event, KeyState};
+use ad4m_identity_core::{verify_signed, Event, KeyState};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 
@@ -220,6 +222,26 @@ impl Store {
         let now = self.now();
         let mut conn = self.db.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // The offer's own shape (no log needed), then its signature against the current master
+        // the key index names: the route is unauthenticated, so an offer without the master's
+        // signature reads no log.
+        check_offer_shape(&signed.offer).map_err(|e| ApiError::invalid(e.name(), e.to_string()))?;
+        let Some(head) = db::head_seq(&tx, scid)? else {
+            return Err(ApiError::not_found(format!("no log {scid}")));
+        };
+        let master = db::master_at(&tx, scid, head + 1)?
+            .filter(|m| m.id == signed.by.key_id)
+            .ok_or_else(|| ApiError::forbidden("signer", LinkError::Signer.to_string()))?;
+        let by_master = decode_proof_value(&signed.sig).is_some_and(|sig| {
+            let value = json!({ "offer": signed.offer, "by": signed.by });
+            verify_signed(OFFER_DOMAIN, &value, &master.sign, &sig)
+        });
+        if !by_master {
+            return Err(ApiError::forbidden(
+                "signer",
+                LinkError::Signature.to_string(),
+            ));
+        }
         let chain = self
             .held_chain(&tx, scid)?
             .ok_or_else(|| ApiError::not_found(format!("no log {scid}")))?;

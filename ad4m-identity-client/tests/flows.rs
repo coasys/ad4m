@@ -200,6 +200,7 @@ impl ExecutorRpc for TestExecutor {
                     "revoked": revoked,
                     "head": null,
                     "fork": null,
+                    "storeBehind": null,
                 }))
             }
             "identity.cosignIncept" => {
@@ -759,7 +760,7 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     .unwrap();
     assert!(flow
         .link()
-        .starts_with("https://coasys.id/o#coasys:offer:1:"));
+        .starts_with("https://id.coasys.org/o#coasys:offer:1:"));
     let parsed = OfferString::parse_link(&flow.link()).unwrap();
     assert_eq!(parsed.store, STORE_URL);
 
@@ -832,6 +833,42 @@ async fn a_bound_offer_takes_only_its_device_and_gives_its_ticket() {
     assert_eq!(claimed.device_key, device_key);
     assert_eq!(claimed.match_code, claimed_b["matchCode"]);
     assert_eq!(flow.confirm(&claimed).await.unwrap().seq, 1);
+}
+
+/// A confirm whose publish fails keeps the flow: confirming again, while the claim is still
+/// `claimed`, spends it under the same unlock.
+#[tokio::test]
+async fn a_confirm_after_a_failed_publish_succeeds() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 6).await;
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Node,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_b = claim(&b, &flow.link(), None).await.unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+
+    a.rpc().refuse_publish.set(true);
+    flow.confirm(&claimed)
+        .await
+        .expect_err("the publish failed");
+    assert_eq!(join(&b, &claimed_b["offerId"]).await["state"], "claimed");
+
+    let head = flow.confirm(&claimed).await.unwrap();
+    assert_eq!(head.seq, 1);
+    assert_eq!(join(&b, &claimed_b["offerId"]).await["state"], "spent");
+    assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 }
 
 /// The system clock moved ahead by a number of seconds: the holder's time runs on while the
