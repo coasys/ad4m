@@ -35,39 +35,63 @@ use types::IdentityForkEvent;
 
 static SERVICE: OnceLock<Arc<IdentityService>> = OnceLock::new();
 
-/// `identity.storeKeys` as the executor can use them: each a bare Ed25519 multikey (`z6Mk…`),
+/// The identity store's keys as the executor can use them: each a bare Ed25519 multikey (`z6Mk…`),
 /// which a signed head's `store` names as `did:key:<multikey>` and `verify_head` compares
 /// without the prefix. Any other form (a `did:key:` prefix, a space after the comma, an empty
 /// string) never matches a head, while `KelCache::trusts_a_store` would say the executor trusts
 /// one: `identity.publish` and `identity.claimOffer` would then commit at the store, the cache
 /// would accept no head, and the agent's key would be taken for a log it can never bind to. So
-/// the executor refuses to start with such an entry.
-pub fn check_store_keys(keys: &[String]) -> Result<(), String> {
-    match keys
+/// the executor refuses to start with such an entry. The error names where the keys came from
+/// (`source`).
+pub fn check_store_keys(keys: &[String], source: StoreSource) -> Result<(), String> {
+    let Some(bad) = keys
         .iter()
         .find(|key| ad4m_hash_chain::decode_ed25519_multikey(key).is_none())
-    {
-        None => Ok(()),
-        Some(bad) => Err(format!(
+    else {
+        return Ok(());
+    };
+    Err(match source {
+        StoreSource::Config => format!(
             "identity.storeKeys: {bad:?} is not an Ed25519 multikey; give the store's key as the \
              bare multikey (z6Mk…), without did:key: and without spaces"
-        )),
+        ),
+        StoreSource::Seed => format!(
+            "the network's bootstrap seed (identityStore.keys): {bad:?} is not an Ed25519 \
+             multikey; the seed must give the store's key as the bare multikey (z6Mk…). Fix the \
+             seed, or set identity.storeUrl and identity.storeKeys to use another store"
+        ),
+    })
+}
+
+/// The identity store's URL as the executor can use it: unset (no store) or a URL. The agent
+/// language reads an empty `storeUrl` as unset, so `""` would leave the language without a
+/// store while the executor's resolver names one: the executor refuses to start with it. The
+/// error names where the URL came from (`source`).
+pub fn check_store_url(url: Option<&str>, source: StoreSource) -> Result<(), String> {
+    match url {
+        Some(url) if url.trim().is_empty() => Err(match source {
+            StoreSource::Config => "identity.storeUrl is empty; give the store's base URL, or \
+                                    leave it out for the network's store"
+                .into(),
+            StoreSource::Seed => "the network's bootstrap seed names an empty identity store URL \
+                                  (identityStore.url); fix the seed, or set identity.storeUrl \
+                                  and identity.storeKeys to use another store"
+                .into(),
+        }),
+        _ => Ok(()),
     }
 }
 
-/// `identity.storeUrl` as the executor can use it: unset (the network's store, or none) or a
-/// URL. The agent language reads an empty `storeUrl` as unset, so `""` would leave the language
-/// without a store while the executor's resolver names one: the executor refuses to start with
-/// it.
-pub fn check_store_url(url: Option<&str>) -> Result<(), String> {
-    match url {
-        Some(url) if url.trim().is_empty() => Err(
-            "identity.storeUrl is empty; give the store's base URL, or leave it out for the \
-             network's store"
-                .into(),
-        ),
-        _ => Ok(()),
-    }
+/// Where the identity store's URL or keys came from, so the errors and warnings about them name
+/// what the operator can change.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StoreSource {
+    /// The config: `identity.storeUrl` / `identity.storeKeys` (config file, CLI or env). Also
+    /// an unset value.
+    #[default]
+    Config,
+    /// The bootstrap seed's `identityStore` (`runtime_service::RuntimeService::identity_store`).
+    Seed,
 }
 
 /// The identity store this executor uses and the keys it trusts for it, built by
@@ -80,6 +104,10 @@ pub struct IdentitySettings {
     pub store_url: Option<String>,
     /// The store keys (multikeys) a head must be signed by. Empty: no head is accepted.
     pub store_keys: Vec<String>,
+    /// Where `store_url` came from (`Config` when it is unset).
+    pub store_url_source: StoreSource,
+    /// Where `store_keys` came from (`Config` when they are unset).
+    pub store_keys_source: StoreSource,
     /// `identity.allowPrivateSrc`: let a DID URL's `src` reach loopback and private addresses.
     /// Off by default; for tests and local development only.
     pub allow_private_src: bool,
@@ -87,58 +115,92 @@ pub struct IdentitySettings {
 
 impl IdentitySettings {
     /// The settings of `config` on the network whose seed names `seed_store` (its
-    /// `identityStore`). The one place that decides the store and its keys; the config
-    /// (`identity.storeUrl`, `identity.storeKeys`: config file, CLI or env) wins over the seed:
+    /// `identityStore`; `RuntimeService::identity_store` gives a seed without one the store of
+    /// the network this executor was built for). The one place that decides the store and its
+    /// keys; the config (`identity.storeUrl`, `identity.storeKeys`: config file, CLI or env) wins
+    /// over the seed:
     /// - the URL: `identity.storeUrl`, else the seed's store, else none (no store);
     /// - the keys: `identity.storeKeys` set: exactly those (`[]` too, and for the seed's store
     ///   too); else `identity.storeUrl` set: none (the seed's keys never apply to a configured
     ///   URL); else the seed's keys, else none.
     ///
-    /// Without keys [`missing_store_keys_warning`] warns at start and `identity.publish` /
-    /// `identity.claimOffer` refuse `no-store-keys`.
+    /// Each value records where it came from (`store_url_source`, `store_keys_source`), so
+    /// [`IdentitySettings::check`], [`missing_store_keys_warning`] and the `no-store-keys`
+    /// refusal name the config key or the seed. Without keys [`missing_store_keys_warning`]
+    /// warns at start and `identity.publish` / `identity.claimOffer` refuse `no-store-keys`.
     pub fn from_config(
         config: &crate::config::Ad4mConfig,
         seed_store: Option<&crate::runtime_service::IdentityStoreSeed>,
     ) -> Self {
-        let store_url = config
-            .identity_store_url
-            .clone()
-            .or_else(|| seed_store.map(|seed| seed.url.clone()));
-        let store_keys = match (&config.identity_store_keys, &config.identity_store_url) {
-            (Some(keys), _) => keys.clone(),
-            (None, Some(_)) => vec![],
-            (None, None) => seed_store.map(|seed| seed.keys.clone()).unwrap_or_default(),
+        let (store_url, store_url_source) = match (&config.identity_store_url, seed_store) {
+            (Some(url), _) => (Some(url.clone()), StoreSource::Config),
+            (None, Some(seed)) => (Some(seed.url.clone()), StoreSource::Seed),
+            (None, None) => (None, StoreSource::Config),
+        };
+        let (store_keys, store_keys_source) = match (
+            &config.identity_store_keys,
+            &config.identity_store_url,
+            seed_store,
+        ) {
+            (Some(keys), _, _) => (keys.clone(), StoreSource::Config),
+            (None, Some(_), _) | (None, None, None) => (vec![], StoreSource::Config),
+            (None, None, Some(seed)) => (seed.keys.clone(), StoreSource::Seed),
         };
         IdentitySettings {
             store_url,
             store_keys,
+            store_url_source,
+            store_keys_source,
             allow_private_src: config.identity_allow_private_src.unwrap_or(false),
         }
     }
+
+    /// The store keys and URL as the executor can use them ([`check_store_keys`],
+    /// [`check_store_url`]), the error naming where each came from. Checked at start.
+    pub fn check(&self) -> Result<(), String> {
+        check_store_keys(&self.store_keys, self.store_keys_source)?;
+        check_store_url(self.store_url.as_deref(), self.store_url_source)
+    }
 }
 
-/// The warning logged at start when the executor trusts no store key, naming why and what that
-/// costs; `None` with keys. Without a store (the network's seed has no `identityStore` and the
-/// config names none) it says the network has no identity store; with a store URL but no keys
-/// it names the store and how to give its key.
+/// The warning logged at start when the executor trusts no store key, naming why
+/// ([`no_store_keys_cause`]) and what that costs; `None` with keys. With a store URL it says how
+/// to give its key.
 pub fn missing_store_keys_warning(settings: &IdentitySettings) -> Option<String> {
     if !settings.store_keys.is_empty() {
         return None;
     }
+    let cause = no_store_keys_cause(settings.store_url.as_deref(), settings.store_keys_source);
     let consequence = "so this executor verifies no did:scid record: expressions by a did:scid \
          author are invalid, no device key speaks for a person, and identity.publish and \
          identity.claimOffer refuse with no-store-keys";
     Some(match &settings.store_url {
-        None => format!(
-            "identity: this network has no identity store (its bootstrap seed names no \
-             identityStore and identity.storeUrl is unset), {consequence}."
-        ),
-        Some(url) => format!(
-            "identity: no key of the identity store at {url} is trusted (identity.storeKeys is \
-             empty), {consequence}. Set identity.storeKeys (--identity-store-keys) to the store's \
-             Ed25519 multikey."
+        None => format!("identity: {cause}, {consequence}."),
+        Some(_) => format!(
+            "identity: {cause}, {consequence}. Set identity.storeKeys (--identity-store-keys) to \
+             the store's Ed25519 multikey."
         ),
     })
+}
+
+/// Why the executor trusts no store key, naming where the setting came from: no store at all
+/// (no `identity.storeUrl` and no bootstrap seed names an `identityStore`), a store without its
+/// keys in the config (`identity.storeKeys` unset or empty), or a seed that names its store
+/// without keys. Used by [`missing_store_keys_warning`] and the `no-store-keys` refusal.
+pub fn no_store_keys_cause(store_url: Option<&str>, keys_source: StoreSource) -> String {
+    match (store_url, keys_source) {
+        (None, _) => "this executor has no identity store (identity.storeUrl is unset and no \
+                      bootstrap seed names an identityStore)"
+            .to_string(),
+        (Some(url), StoreSource::Config) => format!(
+            "the identity store at {url} is configured without its keys (identity.storeKeys is \
+             unset or empty)"
+        ),
+        (Some(url), StoreSource::Seed) => format!(
+            "the network's bootstrap seed names the identity store at {url} without its keys \
+             (identityStore.keys is empty)"
+        ),
+    }
 }
 
 /// Opens the key-log cache in the executor database at `db_path` and starts the module. Called
@@ -166,6 +228,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         backend,
         cache,
         store_url: settings.store_url.clone(),
+        store_keys_source: settings.store_keys_source,
         resolver: Arc::new(resolver),
     };
     if SERVICE.set(Arc::new(service)).is_err() {
@@ -350,14 +413,25 @@ mod tests {
         assert_eq!(read()["storeUrl"], "http://127.0.0.1:9");
     }
 
-    /// An empty `identity.storeUrl` is refused (the language would read it as the default
-    /// store); unset and a URL pass.
+    /// An empty store URL is refused (the language would read it as unset); unset and a URL
+    /// pass. The error names where the URL came from: `identity.storeUrl`, or the seed.
     #[test]
     fn an_empty_store_url_is_refused() {
-        assert!(check_store_url(Some("")).is_err());
-        assert!(check_store_url(Some("  ")).is_err());
-        assert!(check_store_url(None).is_ok());
-        assert!(check_store_url(Some("https://store.example")).is_ok());
+        for source in [StoreSource::Config, StoreSource::Seed] {
+            assert!(check_store_url(Some(""), source).is_err());
+            assert!(check_store_url(Some("  "), source).is_err());
+            assert!(check_store_url(None, source).is_ok());
+            assert!(check_store_url(Some("https://store.example"), source).is_ok());
+        }
+        let configured = check_store_url(Some(""), StoreSource::Config).unwrap_err();
+        assert!(
+            configured.starts_with("identity.storeUrl is empty"),
+            "{configured}"
+        );
+        let seeded = check_store_url(Some(""), StoreSource::Seed).unwrap_err();
+        assert!(seeded.contains("bootstrap seed"), "{seeded}");
+        assert!(seeded.contains("identityStore.url"), "{seeded}");
+        assert!(!seeded.contains("identity.storeUrl is empty"), "{seeded}");
     }
 
     /// Without store keys the executor warns at start: with a store URL, naming the store and
@@ -376,7 +450,7 @@ mod tests {
 
         let none = missing_store_keys_warning(&IdentitySettings::default()).expect("a warning");
         assert!(
-            none.contains("this network has no identity store"),
+            none.contains("this executor has no identity store"),
             "{none}"
         );
         assert!(none.contains("verifies no did:scid record"), "{none}");
@@ -387,6 +461,67 @@ mod tests {
             ..store_url("https://store.example")
         };
         assert_eq!(missing_store_keys_warning(&keyed), None);
+    }
+
+    /// The seed's store with an empty key list: the warning names the seed, not a config key
+    /// the operator never set, and says how to give the key.
+    #[test]
+    fn a_seed_store_without_keys_warns_naming_the_seed() {
+        let seed = crate::runtime_service::IdentityStoreSeed {
+            url: "https://seed.store".into(),
+            keys: vec![],
+        };
+        let settings = IdentitySettings::from_config(&config(None, None), Some(&seed));
+        assert_eq!(settings.store_url_source, StoreSource::Seed);
+        assert_eq!(settings.store_keys_source, StoreSource::Seed);
+        let warning = missing_store_keys_warning(&settings).expect("a warning");
+        assert!(warning.contains("bootstrap seed"), "{warning}");
+        assert!(warning.contains("https://seed.store"), "{warning}");
+        assert!(warning.contains("identityStore.keys"), "{warning}");
+        assert!(!warning.contains("is configured without"), "{warning}");
+        assert!(warning.contains("Set identity.storeKeys"), "{warning}");
+    }
+
+    /// `IdentitySettings::check` names where a bad value came from: a bad key or an empty URL
+    /// of the seed names the seed; the same in the config names the config key. A config value
+    /// replaces the seed's, so a bad seed value the config overrides is not checked.
+    #[test]
+    fn a_bad_store_value_is_named_by_where_it_came_from() {
+        let bad_seed = crate::runtime_service::IdentityStoreSeed {
+            url: "https://seed.store".into(),
+            keys: vec!["did:key:z6MkA".into()],
+        };
+        let err = IdentitySettings::from_config(&config(None, None), Some(&bad_seed))
+            .check()
+            .unwrap_err();
+        assert!(err.contains("bootstrap seed"), "{err}");
+        assert!(!err.starts_with("identity.storeKeys"), "{err}");
+
+        let empty_seed_url = crate::runtime_service::IdentityStoreSeed {
+            url: "".into(),
+            keys: vec![],
+        };
+        let err = IdentitySettings::from_config(&config(None, None), Some(&empty_seed_url))
+            .check()
+            .unwrap_err();
+        assert!(err.contains("identityStore.url"), "{err}");
+
+        let err = IdentitySettings::from_config(
+            &config(None, Some(&["did:key:z6MkA"])),
+            Some(&seed_store()),
+        )
+        .check()
+        .unwrap_err();
+        assert!(err.starts_with("identity.storeKeys"), "{err}");
+
+        let key = crate::identity::head::test_store_key::TestStoreKey::new(1).multikey();
+        let overridden = IdentitySettings::from_config(
+            &config(Some("https://configured"), Some(&[key.as_str()])),
+            Some(&bad_seed),
+        );
+        assert_eq!(overridden.store_url_source, StoreSource::Config);
+        assert_eq!(overridden.store_keys_source, StoreSource::Config);
+        assert_eq!(overridden.check(), Ok(()));
     }
 
     fn config(url: Option<&str>, keys: Option<&[&str]>) -> crate::config::Ad4mConfig {
@@ -570,16 +705,18 @@ mod tests {
     #[test]
     fn store_keys_must_be_bare_ed25519_multikeys() {
         let key = crate::identity::head::test_store_key::TestStoreKey::new(1).multikey();
-        assert_eq!(check_store_keys(&[]), Ok(()));
-        assert_eq!(check_store_keys(&[key.clone()]), Ok(()));
-        for bad in [
-            format!(" {key}"),
-            format!("did:key:{key}"),
-            String::new(),
-            "z6MkA".to_string(),
-        ] {
-            let err = check_store_keys(&[key.clone(), bad.clone()]).unwrap_err();
-            assert!(err.contains(&format!("{bad:?}")), "{err}");
+        for source in [StoreSource::Config, StoreSource::Seed] {
+            assert_eq!(check_store_keys(&[], source), Ok(()));
+            assert_eq!(check_store_keys(&[key.clone()], source), Ok(()));
+            for bad in [
+                format!(" {key}"),
+                format!("did:key:{key}"),
+                String::new(),
+                "z6MkA".to_string(),
+            ] {
+                let err = check_store_keys(&[key.clone(), bad.clone()], source).unwrap_err();
+                assert!(err.contains(&format!("{bad:?}")), "{err}");
+            }
         }
     }
 }
