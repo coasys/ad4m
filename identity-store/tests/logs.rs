@@ -1057,6 +1057,39 @@ async fn a_bot_writes_its_own_record_only_while_its_scope_is_in_force() {
 }
 
 #[tokio::test]
+async fn a_revoked_bot_writes_no_record_while_its_scope_would_still_be_in_force() {
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let bot = Device::new("alice bot");
+    let bot_id = t
+        .link(&mut alice, &bot, OfferKind::Bot, Some(bot_scope(T0 + 1000)))
+        .await;
+    let profile = json!({ "name": "bot" });
+    let path = format!("/v1/agents/did:key:{}", bot.sign_key());
+    let put = |version: u64| {
+        let record = did_key_record(&bot.key, profile.clone(), version);
+        t.send(
+            "PUT",
+            &path,
+            Some(serde_json::to_vec(&record).unwrap()),
+            None,
+        )
+    };
+    let reply = put(1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    let revoke = alice.revoke(&[bot_id.as_str()]);
+    let reply = t.append_push(&mut alice, revoke).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // The scope's `expires` is still ahead: only the revocation stops the bot.
+    assert!(t.now() < T0 + 1000);
+    let reply = put(2).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "writer");
+}
+
+#[tokio::test]
 async fn a_did_scid_record_needs_a_signed_request_and_a_valid_non_bot_key_of_the_log() {
     let t = TestStore::new();
     let mut alice = Person::new("alice");

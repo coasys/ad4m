@@ -8,18 +8,27 @@
 //! the log, the head check catches it. An append puts its new fold in once its transaction has
 //! committed (`log.rs`), so the next request finds the new head's state at once.
 //!
-//! The entries are bounded by the events they cover ([`Settings::held_log_events`]); the least
-//! recently used go first. A log longer than the bound is folded on every use and never held.
+//! The entries are bounded by the heap their folds take together ([`Settings::held_log_bytes`],
+//! each fold sized by [`held_bytes_of`]); the least recently used go first. A fold larger than
+//! the bound is never held: its log is folded on every use. The per-log budget
+//! ([`Settings::log_fold_bytes`] for the live part of a fold, twice it for the whole; the bound is
+//! at least the whole, [`crate::Settings::check`]) keeps every log the store takes below it,
+//! and a miss folds with the core's `fold_stored` (`db::load_chain_before`), no signature
+//! checked. The bound is in bytes, not events,
+//! because one event can cost the heap a hundred times another: an `incept` lists as many keys
+//! as its 64 kB body holds, and a `scope` may name its actions many times over.
 //!
-//! [`Settings::held_log_events`]: crate::Settings::held_log_events
+//! [`Settings::held_log_bytes`]: crate::Settings::held_log_bytes
+//! [`Settings::log_fold_bytes`]: crate::Settings::log_fold_bytes
 
 use std::collections::{BTreeMap, HashMap};
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ad4m_hash_chain::store::SqliteChainStore;
-use ad4m_hash_chain::Head;
-use ad4m_identity_core::KelChain;
+use ad4m_hash_chain::{Hash, Head};
+use ad4m_identity_core::{BotScope, KelChain, KeyRecord, KeyState};
 use rusqlite::Connection;
 
 use crate::db::{self, KEL};
@@ -29,8 +38,8 @@ use crate::Store;
 /// The held folds, least recently used first out.
 pub struct HeldLogs {
     inner: Mutex<Inner>,
-    /// The most events the held logs cover together.
-    max_events: usize,
+    /// The most heap the held folds take together, by [`held_bytes_of`].
+    max_bytes: usize,
     /// How many times a log was folded from the database (tests and operators read it).
     folds: AtomicU64,
 }
@@ -41,20 +50,20 @@ struct Inner {
     /// Use order: tick → scid. The first is the least recently used.
     order: BTreeMap<u64, String>,
     tick: u64,
-    events: usize,
+    bytes: usize,
 }
 
 struct Slot {
     chain: Arc<KelChain>,
     tick: u64,
-    events: usize,
+    bytes: usize,
 }
 
 impl Inner {
     fn remove(&mut self, scid: &str) {
         if let Some(slot) = self.logs.remove(scid) {
             self.order.remove(&slot.tick);
-            self.events -= slot.events;
+            self.bytes -= slot.bytes;
         }
     }
 
@@ -64,23 +73,146 @@ impl Inner {
     }
 }
 
-fn events_of(chain: &KelChain) -> usize {
-    usize::try_from(chain.head().seq)
+/// The heap a held fold of `chain` takes, approximately: [`FoldBytes::total`] of
+/// [`fold_bytes_of`]. The held folds count it.
+pub fn held_bytes_of(chain: &KelChain) -> usize {
+    fold_bytes_of(chain).total
+}
+
+/// What a fold takes in memory, as two figures from one walk of its state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FoldBytes {
+    /// The heap the whole fold takes, revoked keys included: the fold keeps every key record in
+    /// full, since [`state_before`] rebuilds earlier states from them. The held folds count it,
+    /// and the per-log budget bounds it at twice [`Settings::log_fold_bytes`].
+    ///
+    /// [`Settings::log_fold_bytes`]: crate::Settings::log_fold_bytes
+    pub total: usize,
+    /// `total` less the records of the keys revoked at the head: a device key's record with its
+    /// strings, bot scopes and map entry, a master's record with its strings once a `rotate`
+    /// replaced it (`KeyRecord::revoked` set, for masters and device keys alike). The masters'
+    /// vector, the event hashes and the fixed part stay in it. The per-log budget bounds it at
+    /// [`Settings::log_fold_bytes`], so revoking the keys a thief padded frees the budget.
+    ///
+    /// [`Settings::log_fold_bytes`]: crate::Settings::log_fold_bytes
+    pub live: usize,
+}
+
+/// The heap a held fold of `chain` takes ([`FoldBytes::total`]) and the part of it that is not
+/// the records of revoked keys ([`FoldBytes::live`]): every key record (masters and device keys)
+/// with its strings and bot scopes, every event hash, and the fold's fixed part. Vectors of the
+/// state count their capacity; the hash list, whose capacity is private, counts twice its
+/// headers (a vector grown by doubling holds at most that). It reads the state once, as a fold
+/// or an append already has. `tests/held_memory.rs` checks the total against a counting
+/// allocator: never below the heap a fold allocates, and within twice it.
+pub fn fold_bytes_of(chain: &KelChain) -> FoldBytes {
+    /// A string's bytes, rounded up to the allocator's 16-byte grain.
+    fn bytes(s: &str) -> usize {
+        s.len().next_multiple_of(16)
+    }
+    fn scope(scope: &BotScope) -> usize {
+        scope.can.capacity() * size_of::<String>()
+            + scope.can.iter().map(|c| bytes(c)).sum::<usize>()
+    }
+    /// A record's heap, its own slot not included.
+    fn record(r: &KeyRecord) -> usize {
+        bytes(&r.id)
+            + bytes(&r.sign)
+            + r.enc.as_ref().map_or(0, |e| bytes(e))
+            + r.scopes.capacity() * size_of::<(u64, BotScope)>()
+            + r.scopes.iter().map(|(_, s)| scope(s)).sum::<usize>()
+    }
+    let state = chain.state();
+    // The heap of the records of revoked keys, counted in the total and left out of the live part.
+    let mut revoked = 0;
+    let mut masters = state.masters.capacity() * size_of::<KeyRecord>();
+    for r in &state.masters {
+        let heap = record(r);
+        masters += heap;
+        if r.revoked.is_some() {
+            revoked += heap;
+        }
+    }
+    // A device key sits in a B-tree under its id: the entry, the key's bytes, and a node's
+    // spare room (a node can be half empty).
+    let entry = (size_of::<String>() + size_of::<KeyRecord>()) * 2;
+    let mut keys = 0;
+    for (id, r) in &state.keys {
+        let heap = entry + bytes(id) + record(r);
+        keys += heap;
+        if r.revoked.is_some() {
+            revoked += heap;
+        }
+    }
+    let hashes = usize::try_from(chain.head().seq)
         .unwrap_or(usize::MAX)
         .saturating_add(1)
+        .saturating_mul(2 * size_of::<String>() + bytes(&chain.head().hash));
+    let fixed = size_of::<KelChain>() + bytes(&state.did) + bytes(&state.scid) * 2 + 256;
+    let total = masters
+        .saturating_add(keys)
+        .saturating_add(hashes)
+        .saturating_add(fixed);
+    FoldBytes {
+        total,
+        live: total.saturating_sub(revoked),
+    }
+}
+
+/// The state of a log before `seq`, rebuilt from `state`, the state of the same log at a later
+/// head (seq ≥ `seq`), with no replay: the masters and device keys added before `seq`, each with
+/// the revocations and bot scopes before `seq` only, and `next`, the next-key commitment the
+/// caller read from the event that added the last of those masters (a state keeps only its
+/// latest). A key log only adds: an event never removes a key, and every change it makes to a
+/// key is stamped with its seq (`added`, `revoked`, a scope's seq), so this is exactly the state
+/// a fold of the events before `seq` gives (`tests/held.rs` checks it at every seq of a log of
+/// every op). Not ended: a log holds no event after its end, and the head is at `seq` or later.
+pub fn state_before(state: &KeyState, seq: u64, next: Option<Hash>) -> KeyState {
+    let rewind = |r: &KeyRecord| KeyRecord {
+        id: r.id.clone(),
+        sign: r.sign.clone(),
+        enc: r.enc.clone(),
+        added: r.added,
+        revoked: r.revoked.filter(|at| *at < seq),
+        scopes: r
+            .scopes
+            .iter()
+            .filter(|(at, _)| *at < seq)
+            .cloned()
+            .collect(),
+    };
+    KeyState {
+        did: state.did.clone(),
+        scid: state.scid.clone(),
+        kind: state.kind,
+        masters: state
+            .masters
+            .iter()
+            .filter(|m| m.added < seq)
+            .map(rewind)
+            .collect(),
+        next,
+        keys: state
+            .keys
+            .iter()
+            .filter(|(_, r)| r.added < seq)
+            .map(|(id, r)| (id.clone(), rewind(r)))
+            .collect(),
+        ended: false,
+    }
 }
 
 impl HeldLogs {
-    pub fn new(max_events: usize) -> HeldLogs {
+    pub fn new(max_bytes: usize) -> HeldLogs {
         HeldLogs {
             inner: Mutex::new(Inner::default()),
-            max_events,
+            max_bytes,
             folds: AtomicU64::new(0),
         }
     }
 
     /// The held fold of `scid` when it ends at `head`. A fold for another head is dropped.
-    fn get(&self, scid: &str, head: &Head) -> Option<Arc<KelChain>> {
+    pub(crate) fn get(&self, scid: &str, head: &Head) -> Option<Arc<KelChain>> {
         let mut inner = self.inner.lock().ok()?;
         let tick = inner.next_tick();
         let inner = &mut *inner;
@@ -96,35 +228,30 @@ impl HeldLogs {
     }
 
     /// Holds `chain` as the fold of `scid`, in place of any earlier one, and drops the least
-    /// recently used folds until the bound holds. A log longer than the bound is not held.
+    /// recently used folds until the bound holds. A fold larger than the bound is not held.
     pub(crate) fn put(&self, scid: &str, chain: Arc<KelChain>) {
+        let bytes = held_bytes_of(&chain);
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
         inner.remove(scid);
-        let events = events_of(&chain);
-        if events > self.max_events {
+        if bytes > self.max_bytes {
             return;
         }
-        while inner.events + events > self.max_events {
+        while inner.bytes + bytes > self.max_bytes {
             let Some((_, oldest)) = inner.order.pop_first() else {
                 break;
             };
             if let Some(slot) = inner.logs.remove(&oldest) {
-                inner.events -= slot.events;
+                inner.bytes -= slot.bytes;
             }
         }
         let tick = inner.next_tick();
         inner.order.insert(tick, scid.to_string());
-        inner.events += events;
-        inner.logs.insert(
-            scid.to_string(),
-            Slot {
-                chain,
-                tick,
-                events,
-            },
-        );
+        inner.bytes += bytes;
+        inner
+            .logs
+            .insert(scid.to_string(), Slot { chain, tick, bytes });
     }
 
     /// Counts a replay of a log, or of a prefix of one, from the database.
@@ -146,9 +273,9 @@ impl HeldLogs {
             .unwrap_or(false)
     }
 
-    /// How many events the held folds cover together.
-    pub fn held_events(&self) -> usize {
-        self.inner.lock().map(|inner| inner.events).unwrap_or(0)
+    /// How much heap the held folds take together, by [`held_bytes_of`].
+    pub fn held_bytes(&self) -> usize {
+        self.inner.lock().map(|inner| inner.bytes).unwrap_or(0)
     }
 }
 

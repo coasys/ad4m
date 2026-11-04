@@ -63,7 +63,8 @@ impl TestStore {
             pow_bits: 8,
             feed_token: Some("mirror-token".into()),
             cors_origins: Vec::new(),
-            held_log_events: identity_store::DEFAULT_HELD_LOG_EVENTS,
+            held_log_bytes: identity_store::DEFAULT_HELD_LOG_BYTES,
+            log_fold_bytes: identity_store::DEFAULT_LOG_FOLD_BYTES,
         }
     }
 
@@ -93,6 +94,25 @@ impl TestStore {
             store,
             clock,
             dir,
+        }
+    }
+
+    /// The same store started again on its file, with the same key, clock and settings: it
+    /// holds no fold, so the first use of each log is a miss.
+    pub fn restarted(self) -> TestStore {
+        let db = Db::open(self.dir.path().join("store.sqlite")).unwrap();
+        let read = self.clock.clone();
+        let store = Store::new(
+            db,
+            StoreKey::from_secret(agent::TEST_STORE_SECRET),
+            Arc::new(move || read.load(Ordering::SeqCst)),
+            self.store.settings.clone(),
+        );
+        TestStore {
+            router: router(store.clone()),
+            store,
+            clock: self.clock,
+            dir: self.dir,
         }
     }
 

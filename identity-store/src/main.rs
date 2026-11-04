@@ -11,6 +11,8 @@
 //! | `POW_BITS` | `22` | the proof-of-work cost `GET /v1/pow` publishes |
 //! | `CORS_ORIGINS` | none | comma-separated origins allowed from a browser |
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
+//! | `HELD_LOG_BYTES` | 256 MiB | the most heap the held folds take together; at least twice `LOG_FOLD_BYTES` |
+//! | `LOG_FOLD_BYTES` | 16 MiB | the per-log budget: the most heap one log's fold may take without revoked keys; the whole fold at most twice it |
 //!
 //! On start, `serve` prints `identity-store listening on http://<addr> store-key <multikey>`.
 
@@ -39,18 +41,27 @@ fn settings() -> Result<Settings, String> {
         })
         .unwrap_or_default();
     let feed_token = std::env::var("FEED_TOKEN").ok().filter(|t| !t.is_empty());
-    let held_log_events = match std::env::var("HELD_LOG_EVENTS") {
+    let held_log_bytes = match std::env::var("HELD_LOG_BYTES") {
         Ok(v) => v
             .parse::<usize>()
-            .map_err(|_| format!("HELD_LOG_EVENTS={v} is not a number of events"))?,
-        Err(_) => Settings::default().held_log_events,
+            .map_err(|_| format!("HELD_LOG_BYTES={v} is not a number of bytes"))?,
+        Err(_) => Settings::default().held_log_bytes,
     };
-    Ok(Settings {
+    let log_fold_bytes = match std::env::var("LOG_FOLD_BYTES") {
+        Ok(v) => v
+            .parse::<usize>()
+            .map_err(|_| format!("LOG_FOLD_BYTES={v} is not a number of bytes"))?,
+        Err(_) => Settings::default().log_fold_bytes,
+    };
+    let settings = Settings {
         pow_bits,
         feed_token,
         cors_origins,
-        held_log_events,
-    })
+        held_log_bytes,
+        log_fold_bytes,
+    };
+    settings.check()?;
+    Ok(settings)
 }
 
 async fn serve() -> Result<(), String> {

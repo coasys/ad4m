@@ -159,7 +159,7 @@
   "now": 1700000000,
   "offerSigningBytes": "{\"by\":{\"kelHash\":\"QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71\",\"kelSeq\":0,\"keyId\":\"m0\"},\"domain\":\"coasys:offer\",\"offer\":{\"commit\":\"QmYaNuQLt6Cd2vRiVBqKn3YC9Q9fTuAtRLukhk6GpM4G3p\",\"expires\":1700000300,\"kind\":\"device\",\"offerId\":\"TpTwGZwLZ3MB973zpcsj5V\",\"scid\":\"QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p\"}}",
   "offerString": {
-    "link": "https://coasys.id/o#coasys:offer:1:gkCAigBSd97we4MNZV785UsDarie6uqU1gsANcfL3fYhBCu3s4sm9PaM5PciNPrWne32Lguf5kJHDXB3DKTdaAwu8j2qyJV3WT1to5gWzU5oLY5s4TbwjWSH3GFaZTgHQrE2foz4nEbj1TLET91a4x8x6J1YTvUwjzfNfm1zRAb324SpXq5vPoPxZKcpcvKsc5eJc47WZUKJDEnD8UEf35TaKtxKcMFxxo8uHQ5bJPopztqMohv",
+    "link": "https://id.coasys.org/o#coasys:offer:1:gkCAigBSd97we4MNZV785UsDarie6uqU1gsANcfL3fYhBCu3s4sm9PaM5PciNPrWne32Lguf5kJHDXB3DKTdaAwu8j2qyJV3WT1to5gWzU5oLY5s4TbwjWSH3GFaZTgHQrE2foz4nEbj1TLET91a4x8x6J1YTvUwjzfNfm1zRAb324SpXq5vPoPxZKcpcvKsc5eJc47WZUKJDEnD8UEf35TaKtxKcMFxxo8uHQ5bJPopztqMohv",
     "string": "coasys:offer:1:gkCAigBSd97we4MNZV785UsDarie6uqU1gsANcfL3fYhBCu3s4sm9PaM5PciNPrWne32Lguf5kJHDXB3DKTdaAwu8j2qyJV3WT1to5gWzU5oLY5s4TbwjWSH3GFaZTgHQrE2foz4nEbj1TLET91a4x8x6J1YTvUwjzfNfm1zRAb324SpXq5vPoPxZKcpcvKsc5eJc47WZUKJDEnD8UEf35TaKtxKcMFxxo8uHQ5bJPopztqMohv",
     "value": {
       "offerId": "TpTwGZwLZ3MB973zpcsj5V",

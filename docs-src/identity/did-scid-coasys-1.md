@@ -277,8 +277,8 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
 
 ## 9. DID document
 
-The DID document of a log at seq *s* is a pure function of the state after *s*. It reads no
-clock: a bot scope's expiry is a property of its verification method, never a filter, and a
+The DID document of a log at seq *s* is a pure function of the state after *s* and of the
+`src` list the resolver's caller gives, which fills only `alsoKnownAs`. It reads no clock: a bot scope's expiry is a property of its verification method, never a filter, and a
 verifier compares it with its own trusted time (`key_valid_at_time`, section 6). The
 reference is `ad4m_identity_core::did_document`.
 
@@ -312,7 +312,7 @@ Example: the log of `vectors/log.json` at `versionId=3` (`vectors/document.json`
   "@context": [
     "https://www.w3.org/ns/did/v1",
     "https://w3id.org/security/multikey/v1",
-    "https://coasys.org/ns/did-scid-coasys/v1"
+    "https://id.coasys.org/ns/did-scid-coasys/v1"
   ],
   "id": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
   "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
@@ -350,14 +350,16 @@ Example: the log of `vectors/log.json` at `versionId=3` (`vectors/document.json`
 Its metadata: `{"versionId": "3", "nextVersionId": "4", "deactivated": true}` (the log of
 the vectors ends at seq 6).
 
-The context `https://coasys.org/ns/did-scid-coasys/v1` defines the extension property:
+The context `https://id.coasys.org/ns/did-scid-coasys/v1` defines the extension property. The
+identity site serves the file `docs-src/identity/did-scid-coasys-v1.jsonld` of the AD4M
+repository, unchanged, at that URL (media type `application/ld+json`):
 
 ```json
 {
   "@context": {
     "@version": 1.1,
     "@protected": true,
-    "coasys": "https://coasys.org/ns/did-scid-coasys/v1#",
+    "coasys": "https://id.coasys.org/ns/did-scid-coasys/v1#",
     "coasys:bot": {
       "@id": "coasys:bot",
       "@context": {
@@ -567,6 +569,37 @@ Coasys identity store adds these checks:
   someone who holds the 12 words (the recovery secret, and so the committed next key) a freeze
   lasts only until they append that `rotate` themselves; this is inherent to pre-rotation, where
   whoever holds the next key is the owner as far as the log can tell.
+- **Length cap.** The store holds at most 16 384 events per log (seqs 0 to 16 383), the most
+  the executor's resolver reads (64 pages of 256 events, section 13), and refuses an append
+  whose last event would lie past it (`400 log-full`). A log that reaches the cap can take no
+  further event, a `rotate` included.
+- **Per-log budget.** Events differ a hundredfold in the state they add (a `scope` may name its
+  actions any number of times within the event size limit), so the length cap does not bound
+  what a log costs a host to hold or replay. The budget (default 16 MiB, configurable; a log
+  of 16 384 rotations takes under 7 MB) has two bounds on the replayed state of the log in
+  memory: its live part, the state without the records of keys revoked at the head (device
+  keys revoked, masters replaced by a `rotate`), may take at most the budget, and the whole
+  state, revoked keys included, at most twice it. The store refuses an append after which
+  either bound would be passed, and stores none of the append's events (`400 log-too-large`).
+  A log that reaches the budget may still take an event small enough to fit. Revoking keys
+  frees the live part: someone holding a stolen master can pad the live part to the budget,
+  and once the owner rotates and revokes the keys that padded it, the owner appends again, up
+  to the whole bound. A log stolen and padded twice can reach the whole bound and then takes
+  no event but a `rotate`. A `rotate` is never refused by the budget: an append whose events are
+  all `rotate`s is not measured. Rotation is the recovery from a stolen master, and someone
+  holding the current master could otherwise pad the log up to the budget and lock the
+  owner's `rotate` out. A `rotate` adds one master key to the state, and the length cap
+  bounds how many there are. An append with any other event is measured, a `rotate` in it
+  included, so a wallet sends a recovery `rotate` on its own.
+- **Replay of stored events.** A host checks every event in full (`fold`, every proof) before
+  it stores it. When it replays a log from its own storage, it may leave out the checks that
+  every stored event already passed and that only refuse: the proofs' signatures and the
+  duplicate-key check (rule K8). The state is the same. This trusts the host's own storage
+  only; events from anyone else are always checked in full.
+- **Signed before read.** Before it replays a stored log for an append, the store checks the
+  first event's proof against the key that signs at its seq, from its key index at the head
+  (the master current there; for a `rotate`, the key the stored next-key commitment names).
+  Someone without a master key of the log cannot make the store replay it.
 - **Proof of work for a log with no vouching note**, below.
 
 ### Proof of work for a log with no vouching note

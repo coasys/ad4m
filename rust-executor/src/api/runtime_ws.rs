@@ -8,7 +8,6 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::agent::AgentService;
-use crate::db::Ad4mDb;
 use crate::globals::{AD4M_COMMIT, AD4M_VERSION};
 use crate::holochain_service::get_holochain_service;
 use crate::languages::LanguageController;
@@ -142,7 +141,8 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 
     match body.export_type.as_str() {
         "db" => {
-            let json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
+            let json_data = crate::db_backend::db_backend()
+                .export_all_to_json()
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             let json_string = serde_json::to_string_pretty(&json_data)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -197,10 +197,9 @@ async fn import_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
             let json_data: serde_json::Value =
                 serde_json::from_str(&data).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
             let main_agent_did = AgentService::with_global_instance(|a| a.did.clone());
-            let result = Ad4mDb::with_global_instance(|db| {
-                db.import_from_json(json_data, main_agent_did.as_deref())
-            })
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            let result = crate::db_backend::db_backend()
+                .import_from_json(json_data, main_agent_did.as_deref())
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
             Ok(serde_json::to_value(result).map_err(|e| WsRpcError::internal(e.to_string()))?)
         }
         "perspective" => {
@@ -361,7 +360,8 @@ async fn check_notification_perspectives(
 /// The stored notification `id`, if the caller may update or delete it.
 /// Another user's notification reads as not found.
 fn notification_for_caller(id: &str, dids: &Dids) -> Result<Notification, WsRpcError> {
-    Ad4mDb::with_global_instance(|db| db.get_notification(id.to_string()))
+    crate::db_backend::db_backend()
+        .get_notification(id.to_string())
         .map_err(|e| WsRpcError::internal(e.to_string()))?
         .filter(|notification| caller_may_manage(notification, &dids.caller, &dids.main_agent))
         .ok_or_else(|| WsRpcError::not_found(format!("Notification {} not found", id)))
@@ -369,12 +369,12 @@ fn notification_for_caller(id: &str, dids: &Dids) -> Result<Notification, WsRpcE
 
 async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let dids = notification_dids(&ctx)?;
-    let notifications: Vec<NotificationView> =
-        Ad4mDb::with_global_instance(|db| db.get_notifications_for_owner(&dids.caller))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?
-            .iter()
-            .map(Notification::view)
-            .collect();
+    let notifications: Vec<NotificationView> = crate::db_backend::db_backend()
+        .get_notifications_for_owner(&dids.caller)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .iter()
+        .map(Notification::view)
+        .collect();
 
     Ok(serde_json::to_value(notifications)?)
 }
@@ -429,7 +429,8 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         owner_did: stored.owner_did,
     };
 
-    Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))
+    crate::db_backend::db_backend()
+        .update_notification(id, &notification)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(true))
@@ -440,12 +441,14 @@ async fn grant_notification(params: Value, _ctx: Arc<RequestContext>) -> Result<
     let body: NotificationGrantRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut updated = Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
+    let mut updated = crate::db_backend::db_backend()
+        .get_notification(id.clone())
         .map_err(|e| WsRpcError::internal(e.to_string()))?
         .ok_or_else(|| WsRpcError::not_found(format!("Notification {} not found", id)))?;
     updated.granted = body.granted;
 
-    Ad4mDb::with_global_instance(|db| db.update_notification(id, &updated))
+    crate::db_backend::db_backend()
+        .update_notification(id, &updated)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(true))
@@ -454,7 +457,8 @@ async fn grant_notification(params: Value, _ctx: Arc<RequestContext>) -> Result<
 async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
     notification_for_caller(&id, &notification_dids(&ctx)?)?;
-    Ad4mDb::with_global_instance(|db| db.remove_notification(id))
+    crate::db_backend::db_backend()
+        .remove_notification(id)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(true))
@@ -567,7 +571,8 @@ async fn get_free_hosting_enabled(
     _params: Value,
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let enabled = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
+    let enabled = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(Value::Bool(enabled))
 }
@@ -581,7 +586,8 @@ async fn set_free_hosting_enabled(
         .and_then(|v| v.as_bool())
         .ok_or_else(|| WsRpcError::bad_request("'enabled' boolean required"))?;
 
-    Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(enabled))
+    crate::db_backend::db_backend()
+        .set_free_hosting_enabled(enabled)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(enabled))
@@ -599,9 +605,9 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let since = params.opt_str("since");
     let limit = params.get("limit").and_then(|l| l.as_i64()).unwrap_or(100);
 
-    let logs =
-        Ad4mDb::with_global_instance(|db| db.get_compute_log(&agent_did, since.as_deref(), limit))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let logs = crate::db_backend::db_backend()
+        .get_compute_log(&agent_did, since.as_deref(), limit)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(logs).unwrap_or_default())
 }
@@ -639,7 +645,8 @@ async fn set_host_rates(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let rates = validate_host_rates(body.rates)?;
 
-    Ad4mDb::with_global_instance(|db| db.set_host_rates(&rates))
+    crate::db_backend::db_backend()
+        .set_host_rates(&rates)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(true))
@@ -670,7 +677,8 @@ fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpc
 }
 
 async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let rates: Vec<HostRate> = Ad4mDb::with_global_instance(|db| db.get_host_rates())
+    let rates: Vec<HostRate> = crate::db_backend::db_backend()
+        .get_host_rates()
         .map_err(|e| WsRpcError::internal(e.to_string()))?
         .into_iter()
         .map(|(description, price_in_hot)| HostRate {

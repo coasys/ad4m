@@ -5,7 +5,6 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
-use crate::db::Ad4mDb;
 use crate::types::domain::Perspective;
 use crate::types::{Agent, AgentStatus};
 use crate::types::{Expression, ExpressionProof};
@@ -137,12 +136,7 @@ fn managed_key_name(
 /// D16 is the usual cause. Runs at unlock, the first time the keys are in memory.
 fn warn_users_without_an_agent_key() {
     // Unlock can run before the database is up: then there are no users to check.
-    let db = Ad4mDb::global_instance();
-    let users = match db.lock() {
-        Ok(guard) => guard.as_ref().map(|db| db.list_users()),
-        Err(_) => None,
-    };
-    let Some(Ok(users)) = users else {
+    let Ok(users) = crate::db_backend::db_backend().list_users() else {
         return;
     };
     let wallet = wallet_backend();
@@ -511,6 +505,10 @@ lazy_static! {
 /// bookkeeping without decoupling them.
 static AGENT_PUBLISH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// How long one managed agent's profile publish after unlock may take (the did:key profile and
+/// the person's, each a few agent-language calls with their own store timeouts).
+const MANAGED_PROFILE_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// SHA-256 over the names and public keys in a wallet, in name order.
 fn key_set_fingerprint(wallet: &dyn crate::wallet::WalletBackend) -> String {
     use sha2::{Digest, Sha256};
@@ -685,7 +683,7 @@ impl AgentService {
     /// The DID of the managed agent of the user `user_email`, from the `users` table. On an
     /// executor with a shared database, a user created on another executor is imported first.
     pub fn did_for_email(user_email: &str) -> Result<String, AnyError> {
-        let local = Ad4mDb::with_global_instance(|db| db.get_user(user_email).ok());
+        let local = crate::db_backend::db_backend().get_user(user_email).ok();
         let did = match local {
             Some(user) => user.did,
             None => crate::user_management::import_user_from_shared_db(user_email)?
@@ -700,7 +698,9 @@ impl AgentService {
     /// The DID of the managed agent of the user `user_email` in this executor's `users` table,
     /// without importing from a shared database: for publishers, which must not create users.
     pub fn local_did_for_email(user_email: &str) -> Option<String> {
-        Ad4mDb::with_global_instance(|db| db.get_user(user_email).ok())
+        crate::db_backend::db_backend()
+            .get_user(user_email)
+            .ok()
             .map(|user| user.did)
             .filter(|did| !did.is_empty())
     }
@@ -710,7 +710,7 @@ impl AgentService {
     /// importing the user. For lookups that anonymous callers trigger (D15), where
     /// [`Self::did_for_email`] would import, and so write, a user.
     pub fn did_for_email_read_only(user_email: &str) -> Option<String> {
-        match Ad4mDb::with_global_instance(|db| db.get_user(user_email).ok()) {
+        match crate::db_backend::db_backend().get_user(user_email).ok() {
             Some(user) => Some(user.did).filter(|did| !did.is_empty()),
             None => crate::user_management::shared_did_for_email(user_email),
         }
@@ -720,13 +720,15 @@ impl AgentService {
     /// the name of the user's profile directory. Not an identity: everything else names the
     /// agent by its DID.
     pub fn email_for_did(did: &str) -> Result<String, AnyError> {
-        Ad4mDb::with_global_instance(|db| db.get_username_by_did(did))?
+        crate::db_backend::db_backend()
+            .get_username_by_did(did)?
             .ok_or_else(|| anyhow!("No user owns the agent {}", did))
     }
 
     /// The DIDs of the executor's managed agents: every user with an agent.
     pub fn managed_agent_dids() -> Result<Vec<String>, AnyError> {
-        Ok(Ad4mDb::with_global_instance(|db| db.list_users())?
+        Ok(crate::db_backend::db_backend()
+            .list_users()?
             .into_iter()
             .map(|user| user.did)
             .filter(|did| !did.is_empty())
@@ -873,9 +875,20 @@ impl AgentService {
                     continue;
                 }
             }
-            match publish(AgentContext::managed(did.clone())).await {
-                Ok(()) => published.push(did),
-                Err(e) => log::warn!("Error publishing the profile of {did}: {e}"),
+            // A hung publish must not stop the next agents or keep the publish lock: dropping
+            // it at the deadline releases the lock.
+            match tokio::time::timeout(
+                MANAGED_PROFILE_PUBLISH_TIMEOUT,
+                publish(AgentContext::managed(did.clone())),
+            )
+            .await
+            {
+                Ok(Ok(())) => published.push(did),
+                Ok(Err(e)) => log::warn!("Error publishing the profile of {did}: {e}"),
+                Err(_) => log::warn!(
+                    "The profile of {did} was not published within {} s; the next agent is tried",
+                    MANAGED_PROFILE_PUBLISH_TIMEOUT.as_secs()
+                ),
             }
         }
         published
@@ -1391,6 +1404,47 @@ mod tests {
         assert!(!published.contains(&failing));
     }
 
+    /// A publish that never answers ends at its deadline: the next agent is published, and the
+    /// publish lock it held is free again.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_managed_profile_publish_ends_at_its_deadline() {
+        ensure_setup();
+        let hung = crate::test_utils::create_test_user(&format!(
+            "hung-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let next = crate::test_utils::create_test_user(&format!(
+            "next-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        for did in [&hung, &next] {
+            let agent = Agent {
+                did: did.clone(),
+                direct_message_language: None,
+                perspective: None,
+            };
+            AgentService::store_managed_agent_profile(did, &agent).unwrap();
+        }
+
+        let started = tokio::time::Instant::now();
+        let published = AgentService::publish_managed_profiles_with(|context| {
+            let hangs = context.managed_did() == Some(hung.as_str());
+            async move {
+                // As a real publish does, under the publish lock.
+                let _guard = AGENT_PUBLISH_LOCK.lock().await;
+                if hangs {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        })
+        .await;
+        assert!(published.contains(&next), "{published:?}");
+        assert!(!published.contains(&hung));
+        assert!(started.elapsed() >= MANAGED_PROFILE_PUBLISH_TIMEOUT);
+        assert!(AGENT_PUBLISH_LOCK.try_lock().is_ok(), "the lock is free");
+    }
+
     /// Serialises one map entry, then fails: a write that breaks partway.
     struct FailsPartway;
     impl Serialize for FailsPartway {
@@ -1725,7 +1779,9 @@ mod tests {
         let did1 = crate::test_utils::create_test_user("user1.list@example.com");
         let did2 = crate::test_utils::create_test_user("user2.list@example.com");
         // A user without an agent is no agent.
-        Ad4mDb::with_global_instance(|db| db.add_user("no.agent@example.com", "", "pw")).unwrap();
+        crate::db_backend::db_backend()
+            .add_user("no.agent@example.com", "", "pw")
+            .unwrap();
 
         let managed = AgentService::managed_agent_dids().unwrap();
         assert_eq!(managed.len(), initial.len() + 2, "{managed:?}");
@@ -2019,7 +2075,9 @@ mod tests {
         for name in [crate::wallet::KEY_NAME_MAIN, "shared.user@example.org"] {
             wallet.generate_keypair(name).unwrap();
             let did = wallet.get_did_document(name).unwrap().id;
-            Ad4mDb::with_global_instance(|db| db.add_user(name, &did, "pw")).unwrap();
+            crate::db_backend::db_backend()
+                .add_user(name, &did, "pw")
+                .unwrap();
         }
         let did_of = |name: &str| wallet.get_did_document(name).unwrap().id;
 

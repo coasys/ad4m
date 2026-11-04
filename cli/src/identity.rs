@@ -34,8 +34,9 @@ pub fn record_operator(db: &Path, did: &str) -> Result<()> {
 /// `ad4m-executor init [--operator <did>]`: `init` runs the executor's init (`data_path`,
 /// `seed`). On a data folder `init` made before (it holds the seed), `--operator` records (or refuses) the operator
 /// first, and without `--network-bootstrap-seed` it stops there: the folder keeps its seed
-/// and everything else, and a refused operator changes nothing. On a new folder `init` makes
-/// it, then the operator is recorded.
+/// and everything else, and a refused operator changes nothing. A folder with the database but
+/// no seed has the operator checked (or recorded) before `init` writes the seed. On a new folder
+/// `init` makes it, then the operator is recorded.
 pub fn init_with_operator(
     data_path: Option<String>,
     seed: Option<String>,
@@ -47,14 +48,17 @@ pub fn init_with_operator(
     let existing = db
         .parent()
         .is_some_and(|dir| dir.join("mainnet_seed.seed").exists());
-    if let (Some(operator), true) = (operator, existing) {
+    // A database without the seed may hold an operator record already: check it before `init`
+    // writes the seed, so a refused operator changes nothing there either.
+    let check_first = existing || db.exists();
+    if let (Some(operator), true) = (operator, check_first) {
         record_operator(&db, operator)?;
-        if seed.is_none() {
+        if existing && seed.is_none() {
             return Ok(());
         }
     }
     init(data_path, seed)?;
-    if let (Some(operator), false) = (operator, existing) {
+    if let (Some(operator), false) = (operator, check_first) {
         record_operator(&db, operator)?;
     }
     Ok(())
@@ -83,6 +87,9 @@ struct Join {
 /// (`ad4m_identity_core::link::CONFIRM_GRACE_S`).
 const CONFIRM_GRACE_S: u64 = 300;
 
+/// How far past its issue an offer expires at most (`ad4m_identity_core::link::OFFER_TTL_S`).
+const OFFER_TTL_S: u64 = 300;
+
 /// Claims `offer` on the executor at `executor_url` (the operator's credential `token`), prints
 /// the match code, and unless `no_wait` waits until the holder confirms or the offer ends.
 pub async fn claim(
@@ -92,20 +99,28 @@ pub async fn claim(
     hint: Option<String>,
     no_wait: bool,
 ) -> Result<()> {
-    let client = WsRpcClient::connect(executor_url, token)
+    // The offer was issued before now, so its confirm window closes at most this far ahead:
+    // neither the handshake nor the claim may outlast it.
+    let window = tokio::time::Instant::now() + Duration::from_secs(OFFER_TTL_S + CONFIRM_GRACE_S);
+    let closed = || anyhow!("the executor did not answer before the offer's confirm window closed");
+    let client = tokio::time::timeout_at(window, WsRpcClient::connect(executor_url, token))
         .await
+        .map_err(|_| closed())?
         .with_context(|| format!("cannot reach the executor at {executor_url}"))?;
     let mut params = json!({ "offer": offer });
     if let Some(hint) = hint {
         params["hint"] = json!(hint);
     }
-    let claimed: Claimed = client.call("identity.claimOffer", params).await?;
+    let claimed: Claimed =
+        tokio::time::timeout_at(window, client.call("identity.claimOffer", params))
+            .await
+            .map_err(|_| closed())??;
     println!("Claimed a {} offer of {}.", claimed.kind, claimed.did);
     println!("Match code: {}", claimed.match_code);
     println!("Confirm on the device that opened the offer that it shows the same code.");
     if no_wait {
         println!(
-            "Offer {}: run `ad4m-executor claim` again or call identity.joinStatus to follow it.",
+            "Offer {}: confirm on the app's device; identity.joinStatus reports when this executor has joined.",
             claimed.offer_id
         );
         return Ok(());
@@ -136,8 +151,8 @@ fn unix_now() -> u64 {
 
 /// Follows the claim through `join_status` every `poll` until the holder confirms it (the
 /// "Joined …" line), the offer ends, or its confirm window (`expires + CONFIRM_GRACE_S` by
-/// `now`) closes. Each call is cut off at the window's end, so an executor that never answers
-/// cannot hold the command past it. A spent offer whose log does not list this executor's key
+/// `now`) closes. Each call and each wait between calls is cut off at the window's end, so an
+/// executor that never answers cannot hold the command past it. A spent offer whose log does not list this executor's key
 /// (`keyId: null`) is an error: the executor did not join.
 async fn follow_join<F, Fut>(
     claimed: &Claimed,
@@ -175,7 +190,9 @@ where
             }
             other => bail!("the offer ended unconfirmed: it is {other}"),
         }
-        tokio::time::sleep(poll).await;
+        // Never past the window: the next turn then ends the claim on time.
+        let left = Duration::from_secs(deadline.saturating_sub(now()));
+        tokio::time::sleep(poll.min(left)).await;
     }
 }
 
@@ -384,6 +401,50 @@ mod tests {
         assert!(far.is_ok(), "{far:?}");
     }
 
+    /// A wait between polls ends with the window: a claim the holder never confirms ends when
+    /// the window closes, not a poll interval later.
+    #[tokio::test(start_paused = true)]
+    async fn the_poll_wait_ends_with_the_confirm_window() {
+        let start = tokio::time::Instant::now();
+        let now = || 1_000 + start.elapsed().as_secs();
+        let unconfirmed = follow_join(
+            &claimed(1_000 + 1 - CONFIRM_GRACE_S),
+            || async { Ok(join("claimed", None)) },
+            now,
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(unconfirmed.is_err());
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
+
+    /// An executor that takes the connection and never completes the handshake cannot hold
+    /// `claim` past the longest confirm window an offer can have.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_executor_cannot_hold_the_claim_past_the_window() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let start = tokio::time::Instant::now();
+        let refused = claim(
+            &format!("http://127.0.0.1:{port}"),
+            "token",
+            "offer",
+            None,
+            true,
+        )
+        .await
+        .expect_err("the executor never answers");
+        assert!(refused.to_string().contains("confirm window"), "{refused}");
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_secs(OFFER_TTL_S + CONFIRM_GRACE_S)
+        );
+    }
+
     /// On an existing data folder `--operator` records or refuses before init runs, and init
     /// (which rewrites the seed) runs only with a new seed; on a new folder init runs first.
     #[test]
@@ -421,6 +482,29 @@ mod tests {
         })
         .unwrap();
         assert!(record_operator(&database_path(fresh_path.as_deref()), B).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder whose database records an operator but whose seed is gone: another operator is
+    /// refused before `init` writes a seed; the recorded one lets `init` make the seed.
+    #[test]
+    fn init_without_the_seed_checks_the_recorded_operator_first() {
+        let dir = std::env::temp_dir().join(format!("ad4m-cli-noseed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = Some(dir.to_str().unwrap().to_string());
+        record_operator(&database_path(path.as_deref()), A).unwrap();
+        let seed = dir.join("mainnet_seed.seed");
+        let init = |_: Option<String>, _: Option<String>| {
+            std::fs::write(&seed, "{}")?;
+            Ok(())
+        };
+
+        let refused = init_with_operator(path.clone(), Some("seed".into()), Some(B), init);
+        assert!(refused.is_err());
+        assert!(!seed.exists(), "a refused operator writes no seed");
+        init_with_operator(path, Some("seed".into()), Some(A), init).unwrap();
+        assert!(seed.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

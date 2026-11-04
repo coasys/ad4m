@@ -9,7 +9,7 @@ identity core, not here).
 
 | File | What |
 |---|---|
-| `src/lib.rs` | `Entry`, `entry_hash`, `entry_hash_json`, `entry_json`, `entry_from_json`, `ChainPolicy`, `Chain<P>`, `fold`, `import`, `compare`, `ForkEvidence`, `ChainError`, `ImportOutcome` |
+| `src/lib.rs` | `Entry`, `entry_hash`, `entry_hash_json`, `entry_json`, `entry_from_json`, `ChainPolicy`, `Chain<P>`, `fold`, `fold_stored`, `import`, `compare`, `ForkEvidence`, `ChainError`, `ImportOutcome` |
 | `src/jcs.rs` | RFC 8785 canonical JSON; refuses floats (finite or not) and integers outside ±(2^53 − 1); the canonical-text check behind `entry_from_json` |
 | `src/codec.rs` | SHA-256 multihash (`0x12 0x20`, base58btc, no multibase prefix, `Qm…`), Ed25519 multikey (`z6Mk…`), proof value |
 | `src/proof.rs` | `Proof`, `signing_input`, `signing_input_json`, `verify_proof`, `verify_proof_json` (`eddsa-jcs-2022` with `domain`, Ed25519 `verify_strict`) |
@@ -61,12 +61,20 @@ identity core, not here).
   canonical form, `seq`, `prev`, chain id, then the policy. `append` copies the state for
   that; `fold` fails as a whole, so it applies every entry to one state in place and never
   copies it (a state that grows with the chain would make a copy per entry quadratic;
-  `tests/chain.rs` counts the copies).
+  `tests/chain.rs` counts the copies). `Chain::appended` consumes the chain and steps it in
+  place, no copy: for a batch a caller stages on one copy of a chain it keeps (the identity
+  store's append), which so costs one copy whatever its length and wherever it fails.
 - **Fork detection only.** Two entries at one seq give `ForkEvidence`; nothing appends;
   the store keeps both (`record_fork`). The module never truncates a chain, never picks a
   branch, and a shorter peer chain is `WeExtend` (the chain type decides if that alarms).
 - A store checks nothing but the expected head (and that the batch runs on from it); the
   caller runs `Chain::append`/`import` first.
+- `fold_stored` is for a host's own stored, already-verified chain only: it calls the
+  policy's `genesis_stored`/`apply_stored`, which may leave out checks that only refuse (the
+  proof verification first) and must change the state as `genesis`/`apply` do. Their
+  defaults are `genesis`/`apply`, so a chain type that does not opt in loses no check. The
+  canonical form, `seq`, `prev` and chain id checks run either way. Never use it on entries
+  from outside.
 - Linear core, no DAG. No networking, gossip, consensus, timestamps in entries, pruning or
   cross-call buffering of early entries: those belong to a chain type or a backend.
 - Changing an encoding changes every KEL hash: the `coasys/1` bytes must not change.
