@@ -16,7 +16,7 @@
 //! app's records, in the app's classes: the app deletes them.
 
 use crate::agent::AgentContext;
-use crate::perspectives::agent_reply::{cancel_reply, AGENT_REPLY_CLASS};
+use crate::perspectives::agent_reply::{stop_replies_in, AGENT_REPLY_CLASS};
 use crate::perspectives::agent_reply_steps::AGENT_STEP_PREDICATE;
 use crate::perspectives::hardwired_class::ensure_subject_class;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
@@ -137,8 +137,8 @@ pub async fn session_settings(
     }))
 }
 
-/// Delete the session at `id`: stop its running reply, then remove the session, its replies
-/// and their steps, in one batch. `false` when `id` is no session.
+/// Delete the session at `id`: stop the replies running in it, then remove the session, its
+/// replies and their steps, in one batch. `false` when `id` is no session.
 pub async fn delete_session(
     mut perspective: PerspectiveInstance,
     id: &str,
@@ -147,7 +147,7 @@ pub async fn delete_session(
     if session_settings(&perspective, id).await?.is_none() {
         return Ok(false);
     }
-    cancel_reply(perspective.clone(), id, context).await?;
+    stop_replies_in(&perspective, id);
 
     let replies: Vec<String> = {
         let raw = perspective

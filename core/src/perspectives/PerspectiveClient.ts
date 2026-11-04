@@ -336,8 +336,10 @@ export class PerspectiveClient {
      * `AgentReplyRecord` under the container with `status: 'running'`, and the call returns its
      * id; the agent runs on the node in `workIn`, as the caller, and the reply gets its text and
      * `done` (or `failed`, with the error) when it ends, whether or not the caller is still
-     * connected. Only the caller's own messages and earlier finished replies reach the model.
-     * One reply runs per container: a second call while one runs is refused (409).
+     * connected. Only what the caller wrote reaches the model: their own messages and their
+     * earlier finished replies, read per link, so a message another member wrote onto is left
+     * out. A caller has one reply running per container: a second call while it runs is refused
+     * (409). Another person in a shared container has their own.
      */
     async agentReply(
         uuid: string,
@@ -389,8 +391,9 @@ export class PerspectiveClient {
     }
 
     /**
-     * Stop the reply running in `container` and mark it `cancelled`. What the agent wrote before
-     * it was stopped stays written. `false` when no reply was running.
+     * Stop the caller's reply running in `container` and mark it `cancelled`. What the agent
+     * wrote before it was stopped stays written. `false` when the caller had none running;
+     * another person's reply in the same container is theirs to cancel.
      */
     async agentReplyCancel(uuid: string, container: string): Promise<boolean> {
         return this.#apiClient.call('perspective.agentReplyCancel', { uuid, container })

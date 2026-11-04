@@ -22,7 +22,7 @@ An added DID can sync once it reconnects. It can read and write encrypted links 
 holding the room keys has been online and sealed them to its DID.</p>
 <div id="error" role="alert"></div>
 <h2>Rooms</h2>
-<table id="rooms"><thead><tr><th>Room</th><th>Admin</th><th>Members</th><th>E2E</th><th>Created</th></tr></thead><tbody></tbody></table>
+<table id="rooms"><thead><tr><th>Room</th><th>Admin</th><th>Members</th><th>Created</th></tr></thead><tbody></tbody></table>
 <section id="detail" hidden>
   <h2>Room <span id="detail-id" class="mono"></span></h2>
   <form id="add-form">
@@ -100,7 +100,7 @@ export const OPERATOR_PAGE_JS = `"use strict";
       if (data.rooms.length === 0) {
         var empty = el("tr");
         var cell = el("td", "No rooms yet.", "muted");
-        cell.colSpan = 5;
+        cell.colSpan = 4;
         empty.appendChild(cell);
         tbody.appendChild(empty);
       }
@@ -109,7 +109,6 @@ export const OPERATOR_PAGE_JS = `"use strict";
         row.appendChild(el("td", room.id, "mono"));
         row.appendChild(el("td", room.admin, "mono"));
         row.appendChild(el("td", room.memberCount));
-        row.appendChild(el("td", room.e2e ? "yes" : "no"));
         row.appendChild(el("td", room.createdAt.slice(0, 16).replace("T", " ")));
         row.addEventListener("click", function () { selectRoom(room.id); });
         tbody.appendChild(row);
