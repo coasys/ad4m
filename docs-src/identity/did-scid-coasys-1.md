@@ -266,8 +266,8 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
 
 ## 9. DID document
 
-The DID document of a log at seq *s* is a pure function of the state after *s*. It reads no
-clock: a bot scope's expiry is a property of its verification method, never a filter, and a
+The DID document of a log at seq *s* is a pure function of the state after *s* and of the
+`src` list the resolver's caller gives, which fills only `alsoKnownAs`. It reads no clock: a bot scope's expiry is a property of its verification method, never a filter, and a
 verifier compares it with its own trusted time (`key_valid_at_time`, section 6). The
 reference is `ad4m_identity_core::did_document`.
 
