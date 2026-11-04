@@ -91,6 +91,15 @@ pub struct RunningReply {
     abort: Option<tokio::task::AbortHandle>,
 }
 
+impl RunningReply {
+    /// Stop its task, if it has started.
+    pub(crate) fn abort(&self) {
+        if let Some(abort) = &self.abort {
+            abort.abort();
+        }
+    }
+}
+
 /// Whose reply a slot holds: the container, and the caller's DID.
 pub type ReplySlot = (String, String);
 
@@ -154,15 +163,17 @@ pub async fn start_reply(
     let slot: ReplySlot = (container.to_string(), caller_did.to_string());
     let reply = format!("{REPLY_URI_PREFIX}{}", uuid::Uuid::new_v4());
     reserve(&perspective, &slot, &reply)?;
-    let started =
-        prepare_and_create(&mut perspective, container, caller_did, &reply, &context).await;
-    let messages = match started {
-        Ok(messages) => messages,
-        Err(e) => {
-            release(&perspective, &slot, &reply);
-            return Err(e);
-        }
+    // The request can be dropped at any await from here (a client's `request.cancel`, a session
+    // that ends): the hold gives the slot back then, and on an error. The task takes it over
+    // below, with no await in between.
+    let hold = SlotHold {
+        perspective: perspective.clone(),
+        slot: slot.clone(),
+        reply: reply.clone(),
     };
+    let messages =
+        prepare_and_create(&mut perspective, container, caller_did, &reply, &context).await?;
+    std::mem::forget(hold);
 
     let cancel_context = context.clone();
     let task_perspective = perspective.clone();
@@ -190,9 +201,7 @@ pub async fn start_reply(
             Ok(answer) => json!({ "status": ReplyStatus::Done.as_str(), "text": answer.text }),
             Err(e) => json!({ "status": ReplyStatus::Failed.as_str(), "error": e.to_string() }),
         };
-        if let Err(e) = set_reply(task_perspective, &task_reply, values, &context).await {
-            log::error!("agent reply {task_reply}: could not record how it ended: {e:#}");
-        }
+        settle(task_perspective, &task_reply, values, &context).await;
     });
     let cancelled_meanwhile = {
         let mut running = perspective
@@ -214,16 +223,13 @@ pub async fn start_reply(
         // mark the reply: both are done here. Dropping `registered` ends the task unrun.
         drop(registered);
         handle.abort();
-        if let Err(e) = set_reply(
+        settle(
             perspective,
             &reply,
             json!({ "status": ReplyStatus::Cancelled.as_str() }),
             &cancel_context,
         )
-        .await
-        {
-            log::error!("agent reply {reply}: could not mark it cancelled: {e:#}");
-        }
+        .await;
     }
     Ok(reply)
 }
@@ -252,14 +258,52 @@ pub async fn cancel_reply(
         return Ok(true);
     };
     abort.abort();
-    set_reply(
+    settle(
         perspective,
         &running.reply,
         json!({ "status": ReplyStatus::Cancelled.as_str() }),
         context,
     )
-    .await?;
+    .await;
     Ok(true)
+}
+
+/// How long [`settle`] waits before it tries a failed write again.
+const SETTLE_RETRY: Duration = Duration::from_secs(1);
+
+/// Write how a reply ended, trying once more if the write fails. A reply whose end is never
+/// written reads as `running` until the sweep at the next load; the error is logged.
+async fn settle(
+    perspective: PerspectiveInstance,
+    reply: &str,
+    values: Value,
+    context: &AgentContext,
+) {
+    let Err(first) = set_reply(perspective.clone(), reply, values.clone(), context).await else {
+        return;
+    };
+    log::warn!("agent reply {reply}: could not record how it ended, trying again: {first:#}");
+    tokio::time::sleep(SETTLE_RETRY).await;
+    if let Err(e) = set_reply(perspective, reply, values, context).await {
+        log::error!(
+            "agent reply {reply}: could not record how it ended; it reads as running until the \
+             sweep at the next load: {e:#}"
+        );
+    }
+}
+
+/// Gives a reserved slot back when dropped: on an error, or when the request is dropped before
+/// the reply's task holds the slot. `std::mem::forget` it once the task does.
+struct SlotHold {
+    perspective: PerspectiveInstance,
+    slot: ReplySlot,
+    reply: String,
+}
+
+impl Drop for SlotHold {
+    fn drop(&mut self) {
+        release(&self.perspective, &self.slot, &self.reply);
+    }
 }
 
 /// Read the conversation, refuse one with nothing to answer, and create the new reply under the
@@ -294,6 +338,25 @@ async fn prepare_and_create(
     }
 
     let batch = perspective.create_batch().await;
+    if let Err(e) = stage_reply(perspective, container, reply, &batch, context).await {
+        let _ = perspective.discard_batch(&batch).await;
+        return Err(e.into());
+    }
+    perspective
+        .commit_batch(batch, context)
+        .await
+        .map_err(|e| anyhow::anyhow!("could not save the reply: {e:#}"))?;
+    Ok(messages)
+}
+
+/// The reply and its place in the conversation, staged in `batch`.
+async fn stage_reply(
+    perspective: &mut PerspectiveInstance,
+    container: &str,
+    reply: &str,
+    batch: &str,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
     perspective
         .create_subject(
             SubjectClassOption {
@@ -302,7 +365,7 @@ async fn prepare_and_create(
             },
             reply.to_string(),
             Some(json!({ "status": ReplyStatus::Running.as_str() })),
-            Some(batch.clone()),
+            Some(batch.to_string()),
             context,
         )
         .await
@@ -315,16 +378,12 @@ async fn prepare_and_create(
                 target: reply.to_string(),
             },
             LinkStatus::Shared,
-            Some(batch.clone()),
+            Some(batch.to_string()),
             context,
         )
         .await
         .map_err(|e| anyhow::anyhow!("could not put the reply in the conversation: {e:#}"))?;
-    perspective
-        .commit_batch(batch, context)
-        .await
-        .map_err(|e| anyhow::anyhow!("could not save the reply: {e:#}"))?;
-    Ok(messages)
+    Ok(())
 }
 
 /// A reply as the conversation reads it. `trusted` when the caller wrote all of it: the reply

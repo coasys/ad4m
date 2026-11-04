@@ -519,3 +519,58 @@ async fn a_reply_answered_at_once_is_done_not_cancelled() {
         assert_eq!(ended["text"], "at once");
     }
 }
+
+/// A request can be dropped at any await of `start_reply` (`request.cancel`, a session that
+/// ends). Wherever it is dropped, the caller's slot is not left taken: either the start never
+/// got far enough to hold it, or the reply's task holds it and gives it back when it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_dropped_part_way_does_not_keep_the_slot() {
+    let mut f = fixture().await;
+    for step in 0..40u64 {
+        say(&mut f, &format!("app://m/{step}"), "hello").await;
+        let _ = tokio::time::timeout(
+            Duration::from_micros(step * 100),
+            start(&f, answering("hi", Arc::default())),
+        )
+        .await;
+        let mut freed = false;
+        for _ in 0..100 {
+            if f.perspective.agent_replies.lock().unwrap().is_empty() {
+                freed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            freed,
+            "dropped after {} µs: the slot stayed taken",
+            step * 100
+        );
+    }
+}
+
+/// A batch whose reply could not be staged is discarded, not left for the batch sweep.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_that_cannot_be_staged_leaves_no_batch() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "hello").await;
+    f.perspective.fail_next_add_link(0);
+    let failed = start(&f, answering("hi", Arc::default())).await;
+    assert!(matches!(failed, Err(ReplyError::Failed(_))), "{failed:?}");
+    assert_eq!(f.perspective.memory_diagnostics().await.batches, 0);
+    assert!(f.perspective.agent_replies.lock().unwrap().is_empty());
+}
+
+/// Removing the perspective stops its running replies.
+#[tokio::test(flavor = "multi_thread")]
+async fn teardown_stops_the_replies_running_in_the_perspective() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "hello").await;
+    let (run, go) = waiting();
+    start(&f, run).await.unwrap();
+
+    f.perspective.teardown_background_tasks().await;
+    assert!(f.perspective.agent_replies.lock().unwrap().is_empty());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(go.send(()).is_err(), "the runner was dropped with its task");
+}
