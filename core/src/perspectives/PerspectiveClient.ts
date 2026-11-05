@@ -384,8 +384,10 @@ export class PerspectiveClient {
     }
 
     /**
-     * Delete a session with its replies and their steps (stopping a running one). The person's
-     * messages in it are the app's records: delete them yourself. `false` when it is no session.
+     * Delete a session you created, with your replies in it and their steps (stopping your running
+     * one). Only what you wrote is removed: another member's replies in it stay theirs. The
+     * person's messages leave the session but are the app's records: delete them yourself.
+     * `false` when it is no session or another agent created it.
      */
     async agentSessionDelete(uuid: string, session: string): Promise<boolean> {
         return this.#apiClient.call('perspective.agentSessionDelete', { uuid, session })

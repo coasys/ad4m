@@ -289,11 +289,17 @@ pub async fn cancel_reply(
     context: &AgentContext,
 ) -> anyhow::Result<bool> {
     let slot: ReplySlot = (container.trim().to_string(), caller_did.to_string());
-    let taken = perspective
-        .agent_replies
-        .lock()
-        .expect("agent replies poisoned")
-        .remove(&slot);
+    let taken = {
+        let mut running = perspective
+            .agent_replies
+            .lock()
+            .expect("agent replies poisoned");
+        // A slot held by a delete has no reply to cancel.
+        match running.get(&slot) {
+            Some(entry) if entry.reply != DELETING => running.remove(&slot),
+            _ => None,
+        }
+    };
     let Some(running) = taken else {
         return Ok(false);
     };
@@ -313,21 +319,41 @@ pub async fn cancel_reply(
     Ok(true)
 }
 
-/// Stop every reply running in `container` on this node, whoever started it, without marking
-/// them: for a caller that removes the replies next (deleting a session).
-pub(crate) fn stop_replies_in(perspective: &PerspectiveInstance, container: &str) {
-    let mut running = perspective
+/// What a slot holds while its container is being deleted: no reply, so no start gets it.
+const DELETING: &str = "";
+
+/// The caller's slot in a container, held while the container is deleted: a start in it is
+/// refused as `Busy` until the hold drops. Taking it stops the caller's running reply there,
+/// without marking it (the delete removes it), and a start still in flight finds its slot gone
+/// and stops as it does for a cancel. Another caller's reply is not touched.
+pub(crate) struct DeleteHold {
+    perspective: PerspectiveInstance,
+    slot: ReplySlot,
+}
+
+pub(crate) fn hold_for_delete(perspective: &PerspectiveInstance, slot: ReplySlot) -> DeleteHold {
+    let held = RunningReply {
+        reply: DELETING.to_string(),
+        abort: None,
+    };
+    if let Some(running) = perspective
         .agent_replies
         .lock()
-        .expect("agent replies poisoned");
-    running.retain(|(c, _), reply| {
-        if c == container {
-            reply.abort();
-            false
-        } else {
-            true
-        }
-    });
+        .expect("agent replies poisoned")
+        .insert(slot.clone(), held)
+    {
+        running.abort();
+    }
+    DeleteHold {
+        perspective: perspective.clone(),
+        slot,
+    }
+}
+
+impl Drop for DeleteHold {
+    fn drop(&mut self) {
+        release(&self.perspective, &self.slot, DELETING);
+    }
 }
 
 /// How long [`settle`] waits before it tries a failed write again.

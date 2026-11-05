@@ -12,11 +12,16 @@
 //! the session (`"local": true` in `hardwired_sdna/agent_session.json`): they are never shared.
 //! `title` and `about` are the session's content, shared with the perspective.
 //!
-//! **Delete** removes the session, its replies and their steps. The person's messages are the
-//! app's records, in the app's classes: the app deletes them.
+//! **Delete** is the session's author's: another caller's delete answers `false`, as for an id
+//! that is no session. It removes what the caller wrote: the session, the caller's replies in it
+//! and their steps. Its `has_child` links go with it, so the person's messages leave the
+//! conversation, but the messages themselves are the app's records, in the app's classes: the
+//! app deletes them. Another member's replies and links in the session are theirs and stay, and
+//! so does their running reply. The caller's slot in the session is held for the delete
+//! ([`hold_for_delete`]), so no reply of theirs starts in it meanwhile.
 
 use crate::agent::AgentContext;
-use crate::perspectives::agent_reply::{stop_replies_in, AGENT_REPLY_CLASS};
+use crate::perspectives::agent_reply::{hold_for_delete, AGENT_REPLY_CLASS};
 use crate::perspectives::agent_reply_steps::AGENT_STEP_PREDICATE;
 use crate::perspectives::hardwired_class::ensure_subject_class;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
@@ -97,11 +102,8 @@ pub async fn create_session(
     Ok(id)
 }
 
-/// The settings of the session at `id`, or `None` when `id` is no session.
-pub async fn session_settings(
-    perspective: &PerspectiveInstance,
-    id: &str,
-) -> anyhow::Result<Option<SessionSettings>> {
+/// The session at `id` as `model_query` reads it, or `None` when `id` is no session.
+async fn session_row(perspective: &PerspectiveInstance, id: &str) -> anyhow::Result<Option<Value>> {
     if !crate::perspectives::hardwired_class::subject_class_registered(
         perspective,
         AGENT_SESSION_TARGET_CLASS,
@@ -117,8 +119,18 @@ pub async fn session_settings(
         )
         .await
         .map_err(|e| anyhow::anyhow!("could not read the session: {e:#}"))?;
-    let parsed: Value = serde_json::from_str(&raw)?;
-    let Some(row) = parsed["instances"].as_array().and_then(|rows| rows.first()) else {
+    let mut parsed: Value = serde_json::from_str(&raw)?;
+    Ok(parsed["instances"]
+        .as_array_mut()
+        .and_then(|rows| (!rows.is_empty()).then(|| rows.swap_remove(0))))
+}
+
+/// The settings of the session at `id`, or `None` when `id` is no session.
+pub async fn session_settings(
+    perspective: &PerspectiveInstance,
+    id: &str,
+) -> anyhow::Result<Option<SessionSettings>> {
+    let Some(row) = session_row(perspective, id).await? else {
         return Ok(None);
     };
     let text = |name: &str| {
@@ -137,17 +149,22 @@ pub async fn session_settings(
     }))
 }
 
-/// Delete the session at `id`: stop the replies running in it, then remove the session, its
-/// replies and their steps, in one batch. `false` when `id` is no session.
+/// Delete the session at `id`, as `caller_did` acting through `context`: stop the caller's reply
+/// running in it, then remove what the caller wrote there (the session, the caller's replies in it
+/// and their steps) in one batch. `false` when `id` is no session or the caller did not create it.
 pub async fn delete_session(
     mut perspective: PerspectiveInstance,
     id: &str,
+    caller_did: &str,
     context: &AgentContext,
 ) -> anyhow::Result<bool> {
-    if session_settings(&perspective, id).await?.is_none() {
+    let Some(session) = session_row(&perspective, id).await? else {
+        return Ok(false);
+    };
+    if session["author"].as_str() != Some(caller_did) {
         return Ok(false);
     }
-    stop_replies_in(&perspective, id);
+    let _hold = hold_for_delete(&perspective, (id.to_string(), caller_did.to_string()));
 
     let replies: Vec<String> = {
         let raw = perspective
@@ -162,6 +179,7 @@ pub async fn delete_session(
             .as_array()
             .map(|rows| {
                 rows.iter()
+                    .filter(|r| r["author"].as_str() == Some(caller_did))
                     .filter_map(|r| r["id"].as_str().map(str::to_string))
                     .collect()
             })
@@ -178,9 +196,15 @@ pub async fn delete_session(
             })
             .await
             .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-        nodes.extend(steps.into_iter().map(|l| l.data.target));
+        nodes.extend(
+            steps
+                .into_iter()
+                .filter(|l| l.author == caller_did)
+                .map(|l| l.data.target),
+        );
     }
 
+    // Only the caller's own links: another member's are theirs to remove.
     let mut links = Vec::new();
     for node in &nodes {
         let from = perspective
@@ -190,7 +214,11 @@ pub async fn delete_session(
             })
             .await
             .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-        links.extend(from.into_iter().map(|l| l.into()));
+        links.extend(
+            from.into_iter()
+                .filter(|l| l.author == caller_did)
+                .map(|l| l.into()),
+        );
     }
     let batch = perspective.create_batch().await;
     perspective

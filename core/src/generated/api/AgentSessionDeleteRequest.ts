@@ -2,6 +2,7 @@
 
 export type AgentSessionDeleteRequest = { uuid: string, 
 /**
- * The session to delete, with its replies and their steps.
+ * The session to delete, with the caller's replies in it and their steps. Only the session's
+ * author can delete it.
  */
 session: string, };

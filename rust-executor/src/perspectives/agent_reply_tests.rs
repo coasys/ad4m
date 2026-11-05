@@ -3,8 +3,8 @@
 //! and the sweep of replies an earlier executor left running.
 
 use super::agent_reply::{
-    cancel_reply, conversation, ensure_agent_reply_class, reserve, start_reply, ReplyError,
-    ReplyRow, ReplySlot, ReplyStatus, Runner, Stage, StartHold, AGENT_REPLY_CLASS,
+    cancel_reply, conversation, ensure_agent_reply_class, hold_for_delete, reserve, start_reply,
+    ReplyError, ReplyRow, ReplySlot, ReplyStatus, Runner, Stage, StartHold, AGENT_REPLY_CLASS,
     MAX_RUNNING_PER_CALLER,
 };
 use super::agent_session::{AgentMessage, AgentReply, AgentSessionError};
@@ -849,7 +849,7 @@ async fn deleting_a_session_removes_it_its_replies_and_their_steps() {
         .unwrap()
         .to_string();
 
-    assert!(delete_session(f.perspective.clone(), &id, &f.ctx)
+    assert!(delete_session(f.perspective.clone(), &id, &f.did, &f.ctx)
         .await
         .unwrap());
     for node in [&id, &reply, &step] {
@@ -874,12 +874,125 @@ async fn deleting_a_session_removes_it_its_replies_and_their_steps() {
         .unwrap();
     assert!(!message.is_empty());
 
-    assert!(!delete_session(f.perspective.clone(), &id, &f.ctx)
+    assert!(!delete_session(f.perspective.clone(), &id, &f.did, &f.ctx)
         .await
         .unwrap());
-    assert!(!delete_session(f.perspective.clone(), "app://m/1", &f.ctx)
+    assert!(
+        !delete_session(f.perspective.clone(), "app://m/1", &f.did, &f.ctx)
+            .await
+            .unwrap()
+    );
+}
+
+fn running_in(f: &Fixture, container: &str, did: &str) -> bool {
+    f.perspective
+        .agent_replies
+        .lock()
+        .unwrap()
+        .contains_key(&(container.to_string(), did.to_string()))
+}
+
+async fn links_from(f: &Fixture, node: &str) -> Vec<crate::types::DecoratedLinkExpression> {
+    f.perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(node.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_is_deleted_only_by_its_author_and_only_of_what_they_wrote() {
+    let mut f = fixture().await;
+    let id = create_session(f.perspective.clone(), NewSession::default(), &f.ctx)
+        .await
+        .unwrap();
+    let bob =
+        crate::test_utils::create_test_user(&format!("bob.{}@example.org", uuid::Uuid::new_v4()));
+    let as_bob = AgentContext::managed(bob.clone());
+    let alice = f.ctx.clone();
+    say_as(&mut f.perspective, &alice, &id, "app://m/alice/1", "hi").await;
+    say_as(&mut f.perspective, &as_bob, &id, "app://m/bob/1", "hi").await;
+    let here = f.perspective.uuid.clone();
+    let (alices_run, alices_go) = waiting();
+    let alices = start_reply(
+        f.perspective.clone(),
+        &id,
+        &f.did,
+        &here,
+        alice.clone(),
+        alices_run,
+    )
+    .await
+    .unwrap();
+    let (bobs_run, bobs_go) = waiting();
+    let bobs = start_reply(
+        f.perspective.clone(),
+        &id,
+        &bob,
+        &here,
+        as_bob.clone(),
+        bobs_run,
+    )
+    .await
+    .unwrap();
+
+    // Bob can't delete Alice's session, nor stop her reply in it.
+    assert!(!delete_session(f.perspective.clone(), &id, &bob, &as_bob)
         .await
         .unwrap());
+    assert!(session_settings(&f.perspective, &id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(running_in(&f, &id, &f.did));
+
+    // Alice's delete removes what she wrote and stops her reply, and leaves Bob's alone.
+    assert!(delete_session(f.perspective.clone(), &id, &f.did, &alice)
+        .await
+        .unwrap());
+    dropped_with_its_task(alices_go).await;
+    assert!(!running_in(&f, &id, &f.did));
+    assert!(links_from(&f, &alices).await.is_empty());
+    let left = links_from(&f, &id).await;
+    assert!(left.iter().all(|l| l.author == bob), "{left:?}");
+    assert!(
+        left.iter().any(|l| l.data.target == bobs),
+        "Bob's reply stays in the conversation: {left:?}"
+    );
+    assert!(!links_from(&f, &bobs).await.is_empty());
+    assert!(running_in(&f, &id, &bob));
+    let _ = bobs_go.send(());
+    until_status(&f, &bobs, ReplyStatus::Done).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_reply_of_the_callers_starts_in_a_container_while_it_is_deleted() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "hello").await;
+    let (run, go) = waiting();
+    start(&f, run).await.unwrap();
+
+    let hold = hold_for_delete(&f.perspective, slot(&f));
+    dropped_with_its_task(go).await;
+    assert!(matches!(
+        start(&f, waiting().0).await,
+        Err(ReplyError::Busy)
+    ));
+    // A cancel has nothing to stop, and leaves the hold.
+    assert!(!cancel_reply(f.perspective.clone(), CHAT, &f.did, &f.ctx)
+        .await
+        .unwrap());
+    assert!(matches!(
+        start(&f, waiting().0).await,
+        Err(ReplyError::Busy)
+    ));
+
+    drop(hold);
+    let (run, go) = waiting();
+    start(&f, run).await.unwrap();
+    let _ = go.send(());
 }
 
 /// A link signed by `signer`, as a peer's link arrives from the link language.

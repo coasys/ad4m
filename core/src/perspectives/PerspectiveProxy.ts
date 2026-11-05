@@ -496,7 +496,7 @@ export class PerspectiveProxy {
         return await this.#client.agentSessionCreate(this.#handle.uuid, session)
     }
 
-    /** Delete a session with its replies and their steps. `false` when it is no session. */
+    /** Delete a session you created, with your replies in it and their steps. `false` when it is no session or not yours. */
     async agentSessionDelete(session: string): Promise<boolean> {
         return await this.#client.agentSessionDelete(this.#handle.uuid, session)
     }

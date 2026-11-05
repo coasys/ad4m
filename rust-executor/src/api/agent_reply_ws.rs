@@ -169,9 +169,17 @@ async fn agent_session_delete(
     let body: AgentSessionDeleteRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let perspective = guarded_perspective(&params).await?;
-    let deleted = delete_session(perspective, body.session.trim(), &ctx.acts_as())
-        .await
-        .map_err(|e| WsRpcError::internal(format!("{e:#}")))?;
+    let agent_context = ctx.acts_as();
+    let caller_did = crate::agent::did_for_context(&agent_context)
+        .map_err(|e| WsRpcError::internal(format!("could not read the caller's DID: {e:#}")))?;
+    let deleted = delete_session(
+        perspective,
+        body.session.trim(),
+        &caller_did,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(format!("{e:#}")))?;
     Ok(json!(deleted))
 }
 
@@ -277,6 +285,7 @@ pub struct AgentSessionCreated {
 #[ts(export)]
 pub struct AgentSessionDeleteRequest {
     pub uuid: String,
-    /// The session to delete, with its replies and their steps.
+    /// The session to delete, with the caller's replies in it and their steps. Only the session's
+    /// author can delete it.
     pub session: String,
 }
