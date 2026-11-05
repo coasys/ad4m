@@ -15,20 +15,29 @@ impl Ad4mDb {
     }
 
     /// The flow bookkeeping of `old` (`flow_replica_state`, `flow_fired_mark`) is `new`'s, so
-    /// `perspective.flowStates` and `perspective.flowFired` keep answering the main agent. Where
-    /// `new` already has the row, `new`'s stays and `old`'s goes, so no stale row is left for a
-    /// later re-key to carry forward.
+    /// `perspective.flowStates` and `perspective.flowFired` keep answering the main agent. A
+    /// row `new` already has is newer (the key changed before `new` wrote anything): it stays,
+    /// and the old one beside it goes, so a later re-key does not carry it over the newer one.
     pub fn move_flow_rows(&self, old: &str, new: &str) -> Ad4mDbResult<usize> {
         let tx = self.conn.unchecked_transaction()?;
         let mut moved = 0;
-        for table in ["flow_replica_state", "flow_fired_mark"] {
-            moved += tx.execute(
-                &format!("UPDATE OR IGNORE {table} SET agent_did = ?2 WHERE agent_did = ?1"),
+        for (table, key) in [
+            ("flow_replica_state", "instance"),
+            ("flow_fired_mark", "proposal"),
+        ] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE agent_did = ?1 AND EXISTS (
+                        SELECT 1 FROM {table} AS newer
+                        WHERE newer.agent_did = ?2
+                          AND newer.perspective = {table}.perspective
+                          AND newer.{key} = {table}.{key})"
+                ),
                 params![old, new],
             )?;
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE agent_did = ?1"),
-                params![old],
+            moved += tx.execute(
+                &format!("UPDATE {table} SET agent_did = ?2 WHERE agent_did = ?1"),
+                params![old, new],
             )?;
         }
         tx.commit()?;
@@ -149,25 +158,33 @@ mod tests {
             .is_some());
     }
 
-    /// Where the new DID already has the row, its row wins and the old one goes: a later re-key
-    /// cannot carry the old row forward over the newer one.
+    /// A row the new DID wrote after the key change, beside the old DID's: the newer one stays
+    /// and the old one goes, so the next re-key (both retired, the old one first) does not
+    /// carry the stale row over the newer one.
     #[test]
-    fn a_colliding_flow_row_of_the_retired_did_goes() {
+    fn a_rekey_drops_an_old_row_the_new_did_wrote_again() {
         let db = Ad4mDb::new(":memory:").unwrap();
-        db.record_flow_replica_pass("p", "did:key:a", "i", Some("open"), &[], "t")
+        db.record_flow_replica_pass("p", "did:key:old", "i", Some("stale"), &["a".into()], "t")
             .unwrap();
-        db.record_flow_replica_pass("p", "did:key:b", "i", Some("done"), &[], "t")
+        db.record_flow_replica_pass("p", "did:key:new", "i", Some("fresh"), &["a".into()], "t")
             .unwrap();
-
-        db.move_flow_rows("did:key:a", "did:key:b").unwrap();
+        assert_eq!(db.move_flow_rows("did:key:old", "did:key:new").unwrap(), 0);
         assert!(db
-            .get_flow_replica_state("p", "did:key:a", "i")
+            .get_flow_replica_state("p", "did:key:old", "i")
             .unwrap()
             .is_none());
-        // The next re-key moves both retired DIDs, the older one first.
-        db.move_flow_rows("did:key:a", "did:key:c").unwrap();
-        db.move_flow_rows("did:key:b", "did:key:c").unwrap();
-        let state = db.get_flow_replica_state("p", "did:key:c", "i").unwrap();
-        assert_eq!(state.unwrap().current_state.as_deref(), Some("done"));
+        assert_eq!(
+            db.get_flow_fired_for_instance("p", "did:key:new", "i")
+                .unwrap(),
+            vec!["a".to_string()]
+        );
+        // The next re-key: every retired DID moves to the newer one, the old one first.
+        db.move_flow_rows("did:key:old", "did:key:newer").unwrap();
+        db.move_flow_rows("did:key:new", "did:key:newer").unwrap();
+        let state = db
+            .get_flow_replica_state("p", "did:key:newer", "i")
+            .unwrap()
+            .and_then(|row| row.current_state);
+        assert_eq!(state.as_deref(), Some("fresh"));
     }
 }
