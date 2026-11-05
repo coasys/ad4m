@@ -13,6 +13,7 @@ with its own `impl Ad4mDb` block. Child modules can use the private `conn` field
 | `model_migration.rs` | The one-time move of a `models` table with `api_*` / `local_*` columns: each API model gets the endpoint with its protocol, URL and key (one is created, named by the host), each local model is deleted with one warning line (and its default), the table is rebuilt, `model_status` dropped. An import of an old export goes through the same linking. Runs only inside `Ad4mDb` (startup, import) |
 | `session_cutoffs.rs` | The users' session cutoffs (`users.sessions_valid_after`), read by `agent::revoked` |
 | `tasks.rs` | Owner-scoped reads of the `tasks` table: `get_task_owner`, `get_tasks_owned_by` |
+| `identity.rs` | `operator_record`, `identity_agents`, `identity_joins` (created in `Ad4mDb::new`), read by `identity/`. The operator record functions also take a bare connection for `ad4m-executor init --operator`, which runs before any executor. The key logs and `identity_heads`/`identity_fork_signers` are `identity::cache::KelCache`'s own connection to the same file |
 
 Task CRUD (`add_task`, `get_task`, `get_tasks`, `update_task`, `remove_task`) and every
 migration still live in `db.rs`.

@@ -43,11 +43,12 @@ pub enum Topic {
     SfuData,
     SfuRoomRoster,
     FlowStateChanged,
+    IdentityFork,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 26] = [
+    pub const ALL: [Topic; 27] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -74,6 +75,7 @@ impl Topic {
         Topic::SfuData,
         Topic::SfuRoomRoster,
         Topic::FlowStateChanged,
+        Topic::IdentityFork,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -106,6 +108,7 @@ impl Topic {
             Topic::SfuData => "sfu-data",
             Topic::SfuRoomRoster => "sfu-room-roster",
             Topic::FlowStateChanged => "flow-state-changed",
+            Topic::IdentityFork => "identity-fork",
         }
     }
 
@@ -122,8 +125,10 @@ impl Topic {
         let on_perspective = || vec![perspective.unwrap_or(caps::WILD_CARD).to_string()];
         // No `_` arm: a new topic does not compile until someone chooses its capability.
         match self {
-            // `agent.status`, `agent.get`.
-            Topic::AgentStatusChanged | Topic::AgentUpdated => caps::AGENT_READ_CAPABILITY.clone(),
+            // `agent.status`, `agent.get`; a fork shows in `identity.status`.
+            Topic::AgentStatusChanged | Topic::AgentUpdated | Topic::IdentityFork => {
+                caps::AGENT_READ_CAPABILITY.clone()
+            }
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead

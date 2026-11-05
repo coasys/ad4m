@@ -11,6 +11,7 @@ pub mod fd_limit;
 mod globals;
 pub mod helpers;
 pub mod holochain_service;
+pub mod identity;
 pub mod js_core;
 pub mod mcp;
 pub mod perspective_snapshot;
@@ -486,6 +487,36 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     )
     .expect("Failed to initialize Ad4mDb");
 
+    // The seed names the network's identity store, which the identity module reads below.
+    info!("Initializing Runtime service...");
+    RuntimeService::init_global_instance(
+        std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
+            .join("mainnet_seed.seed")
+            .to_string_lossy()
+            .into_owned(),
+    );
+
+    // The key-log cache lives in the same database file.
+    {
+        let db_path = std::path::Path::new(
+            config
+                .app_data_path
+                .as_ref()
+                .expect("App data path not set in Ad4mConfig"),
+        )
+        .join("ad4m_db.sqlite");
+        let settings = crate::identity::IdentitySettings::from_config(
+            &config,
+            RuntimeService::seed_identity_store().as_ref(),
+        );
+        if let Err(e) = settings.check() {
+            return failed_start(e);
+        }
+        if let Err(e) = crate::identity::init(&db_path, &settings) {
+            return failed_start(format!("Could not open the key-log cache: {e}"));
+        }
+    }
+
     // Set multi-user mode before starting services to avoid race condition
     if let Some(enable_multi_user) = config.enable_multi_user {
         if enable_multi_user {
@@ -550,14 +581,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
         }
     });
-
-    info!("Initializing Runtime service...");
-    RuntimeService::init_global_instance(
-        std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
-            .join("mainnet_seed.seed")
-            .to_string_lossy()
-            .into_owned(),
-    );
 
     // Grants are the allowlist of tokens: load them before the API serves.
     if let Err(e) = agent::grants::load_at_start() {
