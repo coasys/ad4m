@@ -298,6 +298,7 @@ mod tests {
     /// A profile file that is there but cannot be read (here: no read permission) is not one a
     /// crash cut short: the load serves the agent file's profile in memory and leaves the file
     /// alone, so a profile edit newer than the agent file survives a transient read error.
+    #[cfg(unix)]
     #[test]
     fn a_load_that_cannot_read_the_profile_file_leaves_it_alone() {
         use std::os::unix::fs::PermissionsExt;
@@ -321,6 +322,7 @@ mod tests {
         std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o000)).unwrap();
         if std::fs::read(&profile_path).is_ok() {
             // root reads a 0o000 file: nothing to probe here.
+            crate::test_utils::setup_agent();
             return;
         }
 
