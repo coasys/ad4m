@@ -721,7 +721,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
-    perspectives::initialize_from_db();
+    perspectives::open_at_start();
 
     // Start periodic perspective snapshots in shared mode.
     if config.wallet_backend.as_deref() == Some("shared") {

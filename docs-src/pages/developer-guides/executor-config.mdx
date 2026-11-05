@@ -215,8 +215,9 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
   (`identity.custodyStatus`) to the admin credential on a loopback listener
   only. Multi-user mode refuses it: `run` exits 78, and
   `user.setMultiUserEnabled(true)` answers 403.
-- **Local only**: `runtime.quit`, `agent.unlock`, `identity.rekey` and
-  `identity.custodyStatus` answer only the operator on a loopback listener.
+- **Local only**: `runtime.quit`, `runtime.restart`, `agent.unlock`,
+  `identity.rekey` and `identity.custodyStatus` answer only the operator on a
+  loopback listener.
   A caller without the admin credential gets 403 `Admin credential required`;
   the admin credential on a network listener gets 403 `local-only`.
   `runtime.setConfig` from such a caller writes the other keys and lists each
@@ -224,7 +225,11 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
   A listener is loopback by the address it binds, not by the
   address a caller connects from: on `--localhost false` without TLS the
   executor binds 0.0.0.0, has no loopback listener, and these calls answer
-  no one.
+  no one. On an executor with no admin credential
+  (`--insecure-no-admin-credential`), a loopback connection without a token
+  is the operator, and the WebSocket endpoint does not check `Origin`: a web
+  page in a browser on the same machine can reach these methods. Run with an
+  admin credential.
 - **`ad4m-executor rekey`**: gives the executor a new main wallet key, so a
   revoked server links again. Run it on the server itself: it calls
   `identity.rekey` on a loopback address with the admin credential from
