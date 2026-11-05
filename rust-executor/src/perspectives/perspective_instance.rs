@@ -1457,13 +1457,16 @@ impl PerspectiveInstance {
                         match link_language.commit(oldest.clone()).await {
                             Ok(_) => oldest_ids,
                             Err(refusal) => {
-                                // The batch concatenates its diffs oldest first.
-                                let rest = PerspectiveDiff {
-                                    additions: pending_diffs.additions[oldest.additions.len()..]
-                                        .to_vec(),
-                                    removals: pending_diffs.removals[oldest.removals.len()..]
-                                        .to_vec(),
-                                };
+                                // The batch's other rows, merged on their own: the
+                                // batch's merge may have cancelled the oldest's links
+                                // against them.
+                                let rest_ids: Vec<u64> = pending_ids
+                                    .iter()
+                                    .filter(|id| !oldest_ids.contains(id))
+                                    .copied()
+                                    .collect();
+                                let rest = crate::db_backend::db_backend()
+                                    .get_pending_diffs_among(&uuid, &rest_ids)?;
                                 if link_language.commit(rest).await.is_err() {
                                     return Err(e.context(format!(
                                         "a batch of {} diffs",
@@ -1479,10 +1482,7 @@ impl PerspectiveInstance {
                                 );
                                 crate::db_backend::db_backend()
                                     .park_pending_diffs(&uuid, oldest_ids.clone())?;
-                                pending_ids
-                                    .into_iter()
-                                    .filter(|id| !oldest_ids.contains(id))
-                                    .collect()
+                                rest_ids
                             }
                         }
                     }
