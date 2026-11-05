@@ -197,8 +197,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   device `did:key`. `identity.resolve` (`identity/resolver.rs`) answers a DID Core resolution
   result for a `did:scid:coasys:1` DID URL or a device `did:key`; a URL's `src` must name a
   public HTTPS host unless `identity.allowPrivateSrc` is set. `identity.rekey` (local only, or
-  `ad4m-executor rekey`) gives the main agent a new wallet key and moves every place that holds
-  its DID (`identity/rekey.rs`); tokens signed with the old key stop working.
+  `ad4m-executor rekey`) gives the main agent a new wallet key and moves the places that hold
+  its DID (`identity/rekey.rs`); tokens signed with the old key stop working. A perspective
+  that is not open at the time keeps the retired DID as owner until a later unlock moves it.
   `identity.custodyStatus` is the custody channel (`identity/custody.rs`).
 
 ## Do / don't
