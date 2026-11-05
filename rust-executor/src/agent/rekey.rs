@@ -295,6 +295,49 @@ mod tests {
         assert!(profile_file.contains(&rekeyed.new_did), "{profile_file}");
     }
 
+    /// A profile file that is there but cannot be read (here: no read permission) is not one a
+    /// crash cut short: the load serves the agent file's profile in memory and leaves the file
+    /// alone, so a profile edit newer than the agent file survives a transient read error.
+    #[test]
+    fn a_load_that_cannot_read_the_profile_file_leaves_it_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.create_new_keys();
+            svc.passphrase = Some("p".into());
+            svc.store_agent_profile();
+            svc.save("p".into());
+            // A profile edit after the save: only the profile file holds it.
+            let mut agent = svc.agent.clone().unwrap();
+            agent.direct_message_language = Some("lang://edited".into());
+            svc.save_agent_profile(agent);
+        });
+        let profile_path = dir.path().join("ad4m/agentProfile.json");
+        let edited = std::fs::read_to_string(&profile_path).unwrap();
+        std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&profile_path).is_ok() {
+            // root reads a 0o000 file: nothing to probe here.
+            return;
+        }
+
+        let loaded = AgentService::with_mutable_global_instance(|svc| {
+            svc.load();
+            svc.agent
+                .as_ref()
+                .and_then(|agent| agent.direct_message_language.clone())
+        });
+        std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let profile_file = std::fs::read_to_string(&profile_path).unwrap();
+        crate::test_utils::setup_agent();
+
+        assert_eq!(loaded, None, "the agent file's profile serves in memory");
+        assert_eq!(profile_file, edited, "the unreadable file is left alone");
+    }
+
     #[test]
     fn a_rekey_needs_the_passphrase_in_memory() {
         let dir = tempfile::tempdir().unwrap();

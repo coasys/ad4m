@@ -1262,13 +1262,22 @@ impl AgentService {
         }
 
         let profile_file_exists = std::path::Path::new(self.file_profile.as_str()).exists();
+        // A profile file that is there but cannot be read (a permission or I/O error) may hold
+        // a profile newer than the agent file's: it is left alone, and the agent file's profile
+        // serves in memory. Only a file that reads but does not parse is rewritten below.
+        let mut profile_file_readable = false;
         let file_profile: Option<Agent> = profile_file_exists
             .then(|| {
                 // Bytes, not a string: a write cut inside a multi-byte character is not UTF-8.
-                let parsed = std::fs::read(self.file_profile.as_str())
-                    .map_err(AnyError::from)
-                    .and_then(|bytes| Ok(serde_json::from_slice::<Agent>(&bytes)?));
-                match parsed {
+                let bytes = match std::fs::read(self.file_profile.as_str()) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        log::warn!("Could not read the agent profile file: {e}: using the agent file's profile");
+                        return None;
+                    }
+                };
+                profile_file_readable = true;
+                match serde_json::from_slice::<Agent>(&bytes) {
                     Ok(agent) => Some(agent),
                     // A write cut short (a crash mid-write) left no profile here.
                     Err(e) => {
@@ -1294,7 +1303,7 @@ impl AgentService {
             // agentProfile.json may not exist if the profile was only saved via save().
             (None, Some(saved)) => {
                 self.agent = Some(saved);
-                if profile_file_exists {
+                if profile_file_readable {
                     if let Err(e) = self.write_agent_profile() {
                         log::warn!("Could not rewrite the agent profile file: {e}");
                     }
