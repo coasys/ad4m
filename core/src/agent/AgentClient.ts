@@ -15,6 +15,7 @@ import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
 import type { Agent as AgentData } from "../generated/api/Agent";
 import type { AgentSignature } from "../generated/api/AgentSignature";
+import type { AgentWithIdentity } from "../generated/api/AgentWithIdentity";
 
 export interface InitializeArgs {
   did: string;
@@ -23,7 +24,7 @@ export interface InitializeArgs {
   passphrase: string;
 }
 
-function toAgent(data: AgentData | null): Agent | null {
+function toAgent(data: AgentData | AgentWithIdentity | null): Agent | null {
   return data ? Agent.fromWire(data) : null;
 }
 

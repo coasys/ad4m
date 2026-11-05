@@ -162,6 +162,16 @@ pub struct Ad4mConfig {
     /// DID of the cascade node that takes redirected joins first. Unset:
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
+    /// `identity.storeUrl`: the identity store's base URL, given to the agent language as its
+    /// `storeUrl` setting. Unset: the network seed's `identityStore`, else no store.
+    pub identity_store_url: Option<String>,
+    /// `identity.storeKeys`: the store keys (Ed25519 multikeys) a head from the store must be
+    /// signed by. A list, so the store's key can rotate. Unset: the seed's store keys when
+    /// `identity_store_url` is unset too, else none (`IdentitySettings::from_config`).
+    pub identity_store_keys: Option<Vec<String>>,
+    /// `identity.allowPrivateSrc`: let the `src` of a DID URL that `identity.resolve` reads
+    /// reach loopback and private addresses. Off by default; for tests and local development.
+    pub identity_allow_private_src: Option<bool>,
     /// The config file's `ai_endpoints`, `ai_models` and `ai_defaults`, applied at
     /// startup (`ai_service::endpoints::config::apply`).
     pub ai_settings: Option<crate::ai_service::endpoints::config::AiSettings>,
@@ -541,6 +551,9 @@ impl Ad4mConfig {
             sfu_udp_port: None,
             sfu_public_addr: None,
             sfu_preferred_node: None,
+            identity_store_url: None,
+            identity_store_keys: None,
+            identity_allow_private_src: None,
             ai_settings: None,
             wallet_backend: None,
             wallet_backend_url: None,
