@@ -1,4 +1,4 @@
-import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase } from './utils';
+import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase, adoptStoredSession } from './utils';
 import { PostMessageWebSocket } from './PostMessageWebSocket';
 import { makePostMessageFetch } from './PostMessageFetch';
 import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
@@ -99,6 +99,10 @@ export default class Ad4mConnect extends EventTarget {
     autoBind(this);
   
     this.options = options;
+    // A session an earlier version of this package stored is still the user's: read it, rather
+    // than asking them to log in again because the app was redeployed with a newer version.
+    // Not when the app names another executor than the session's: the token is not for it.
+    adoptStoredSession(options.url || undefined);
     this.port = options.port || parseInt(getLocal("ad4m-port")) || DEFAULT_PORT
     this.url = options.url || getLocal("ad4m-url") || `http://localhost:${this.port}`;
     this.token = getLocal("ad4m-token") || '';
@@ -184,6 +188,18 @@ export default class Ad4mConnect extends EventTarget {
       });
     }
 
+    // Resolves a client: not a background try, so it never gives up.
+    return this.connectStandalone() as Promise<Ad4mClient>;
+  }
+
+  /**
+   * Connect directly to `this.url`. For a background try (`retry`), `retry.wanted` is asked after
+   * each wait (the health check, the auth read): once it answers false the attempt gives up without
+   * touching the connection, closes the client it opened and resolves `undefined`. A stale retry
+   * must not replace the client, or apply the auth, of a connection the user started meanwhile.
+   */
+  private async connectStandalone(retry?: { wanted: () => boolean }): Promise<Ad4mClient | undefined> {
+    const wanted = () => retry?.wanted() ?? true;
     // Standalone mode - connect directly.
     //
     // The health check and the first authenticated call run together. The health check exists to
@@ -204,16 +220,74 @@ export default class Ad4mConnect extends EventTarget {
       await checkConnection(this.baseUrl);
     } catch (error) {
       session?.client.close();
+      if (!wanted()) return undefined;
       console.error('[Ad4m Connect] Connection failed:', error);
       this.notifyConnectionChange("error");
       throw error;
     }
+    if (!wanted()) {
+      session?.client.close();
+      return undefined;
+    }
     if (!session) session = open();
     const auth = await session.auth;
+    if (!wanted()) {
+      session.client.close();
+      return undefined;
+    }
+    // A background try has nothing to report until the executor answers about the token: a
+    // reading without a refusal (not ready yet: a timeout, or a 5xx such as "conductor not ready")
+    // is tried again, rather than leaving the user on the connection screen with a token that
+    // still works. A refusal (4xx: a dead token, or one that lacks the capabilities) is an answer,
+    // and retrying won't change it. 408 is the client's own RPC timeout, not a refusal.
+    const status = auth.error?.name === 'RpcError' ? auth.error.status : undefined;
+    const refused = status >= 400 && status < 500 && status !== 408;
+    if (retry && auth.state === 'unauthenticated' && !refused) {
+      session.client.close();
+      throw auth.error ?? new Error('the executor has not answered about the session yet');
+    }
     setLocal("ad4m-url", this.url);
     this.adoptClient(session.client);
     this.applyAuth(auth);
     return this.ad4mClient;
+  }
+
+  /**
+   * `connect()` again until the node answers, for a stored session whose node was unreachable
+   * when the app loaded: restarting, or redeploying. Without it the first failure left the user
+   * on the connection screen, looking logged out, until they reloaded the page. Waits
+   * `initialDelayMs` before the first try, doubling up to `maxDelayMs`. Resolves with the client
+   * once connected, or `undefined` when `signal` aborts, the token is gone or changed (a new login:
+   * the old token's refusal must not discard the new one), or `url` changed: the user picked
+   * another node, and the stored token is not for it. A try already under way when
+   * that happens gives up too, before it touches the connection. Embedded mode resolves
+   * `undefined` at once: its `connect` waits for the parent's postMessage, so a retry adds only
+   * ack timeouts.
+   */
+  async connectWhenReachable(
+    { signal, initialDelayMs = 2_000, maxDelayMs = 30_000 }: { signal?: AbortSignal; initialDelayMs?: number; maxDelayMs?: number } = {},
+  ): Promise<Ad4mClient | undefined> {
+    if (this.embedded) return undefined;
+    const url = this.url;
+    const token = this.token;
+    const wanted = () => !signal?.aborted && !!token && this.token === token && this.url === url;
+    for (let delay = initialDelayMs; ; delay = Math.min(delay * 2, maxDelayMs)) {
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', done);
+          resolve();
+        };
+        const timer = setTimeout(done, delay);
+        signal?.addEventListener('abort', done, { once: true });
+      });
+      if (!wanted()) return undefined;
+      try {
+        return await this.connectStandalone({ wanted });
+      } catch {
+        // Still unreachable, or not yet able to say whether the token is good: try again.
+      }
+    }
   }
 
   /** Make this client the connection, closing the one it replaces. */
