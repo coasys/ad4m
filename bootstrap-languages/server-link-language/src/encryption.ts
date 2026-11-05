@@ -72,6 +72,19 @@ export function hexToBytes(hex: string): Uint8Array {
     return out;
 }
 
+export function bytesToBase64(bytes: Uint8Array): string {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+}
+
+export function base64ToBytes(b64: string): Uint8Array {
+    const binary = atob(b64.trim());
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+}
+
 function utf8ToBytes(str: string): Uint8Array {
     return new TextEncoder().encode(str);
 }
@@ -331,7 +344,7 @@ export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array, ke
     const ciphertext = gcm(roomKey, nonce).encrypt(plaintext);
 
     return {
-        data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
+        data: { ciphertext: bytesToBase64(ciphertext), nonce: bytesToBase64(nonce) },
         link_hash: linkHash,
         ...(keyVersion !== undefined ? { key_version: keyVersion } : {}),
     };
@@ -360,8 +373,8 @@ export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKeyOrRing:
     } else {
         roomKey = roomKeyOrRing;
     }
-    const nonce = hexToBytes(wireLink.data.nonce);
-    const ciphertext = hexToBytes(wireLink.data.ciphertext);
+    const nonce = base64ToBytes(wireLink.data.nonce);
+    const ciphertext = base64ToBytes(wireLink.data.ciphertext);
     const plaintext = gcm(roomKey, nonce).decrypt(ciphertext);
     const parsed = JSON.parse(bytesToUtf8(plaintext));
 

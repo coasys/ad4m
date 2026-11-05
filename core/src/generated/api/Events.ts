@@ -10,6 +10,7 @@ import type { AutoProcessorNeighbourhoodState } from "./AutoProcessorNeighbourho
 import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { FlowStateChangedEvent } from "./FlowStateChangedEvent";
 import type { HostingUserInfo } from "./HostingUserInfo";
+import type { IdentityForkEvent } from "./IdentityForkEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
 import type { PerspectiveEvent } from "./PerspectiveEvent";
@@ -50,6 +51,7 @@ export interface EventMap {
   "sfu-data": SfuDataMessage;
   "sfu-room-roster": SfuRoomRoster;
   "flow-state-changed": FlowStateChangedEvent;
+  "identity-fork": IdentityForkEvent;
 }
 
 export type EventName = keyof EventMap;

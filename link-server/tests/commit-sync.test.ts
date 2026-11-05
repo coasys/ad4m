@@ -297,21 +297,31 @@ test("sync from an early cursor returns every later diff, past 10,000 commits", 
       }, agent.did);
     }
 
-    const syncRes = await getJson<{ diffs: PerspectiveDiff[]; sequence: number }>(
-      `${server.url}/rooms/${roomId}/sync?since=${cursor}`, token,
-    );
-    assert.equal(syncRes.status, 200);
-    assert.equal(syncRes.body.sequence, cursor + later);
-    assert.equal(syncRes.body.diffs.length, later,
-      "every diff after the cursor must still be in the log");
-    assert.equal(syncRes.body.diffs[0].additions[0].data.source, "s1",
-      "the first diff after the cursor must be the next one committed");
-    assert.equal(syncRes.body.diffs[later - 1].additions[0].data.source, `s${later}`);
+    // `/sync` is paged: follow `next` to the end of the log.
+    const syncAll = async (since: number) => {
+      const diffs: PerspectiveDiff[] = [];
+      let sequence = 0;
+      for (let next: number | null = since; next !== null; ) {
+        const res = await getJson<{ diffs: PerspectiveDiff[]; sequence: number; next: number | null }>(
+          `${server.url}/rooms/${roomId}/sync?since=${next}&limit=5000`, token,
+        );
+        assert.equal(res.status, 200);
+        diffs.push(...res.body.diffs);
+        sequence = res.body.sequence;
+        next = res.body.next;
+      }
+      return { diffs, sequence };
+    };
 
-    const all = await getJson<{ diffs: PerspectiveDiff[] }>(
-      `${server.url}/rooms/${roomId}/sync?since=0`, token,
-    );
-    assert.equal(all.body.diffs.length, later + 1);
+    const fromCursor = await syncAll(cursor);
+    assert.equal(fromCursor.sequence, cursor + later);
+    assert.equal(fromCursor.diffs.length, later,
+      "every diff after the cursor must still be in the log");
+    assert.equal(fromCursor.diffs[0].additions[0].data.source, "s1",
+      "the first diff after the cursor must be the next one committed");
+    assert.equal(fromCursor.diffs[later - 1].additions[0].data.source, `s${later}`);
+
+    assert.equal((await syncAll(0)).diffs.length, later + 1);
   });
 });
 

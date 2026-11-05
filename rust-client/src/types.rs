@@ -61,6 +61,9 @@ pub struct Agent {
     pub did: String,
     pub direct_message_language: Option<String>,
     pub perspective: Option<Perspective>,
+    /// The `did:scid` this agent speaks for (`agent.get`, so `me()`); `None` elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -278,4 +281,30 @@ impl From<Resource> for ResourceInput {
 pub struct OnlineAgent {
     pub did: String,
     pub status: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `agent.get` (so `me()`) carries `identity`; an agent without it reads as `None` and
+    /// serialises without it.
+    #[test]
+    fn an_agent_carries_its_identity() {
+        let me: Agent = serde_json::from_value(serde_json::json!({
+            "did": "did:key:z6Mk", "directMessageLanguage": null, "perspective": null,
+            "identity": "did:scid:coasys:1:QmTest",
+        }))
+        .unwrap();
+        assert_eq!(me.identity.as_deref(), Some("did:scid:coasys:1:QmTest"));
+        let other: Agent = serde_json::from_value(serde_json::json!({
+            "did": "did:key:z6Mk", "directMessageLanguage": null, "perspective": null,
+        }))
+        .unwrap();
+        assert_eq!(other.identity, None);
+        assert!(serde_json::to_value(&other)
+            .unwrap()
+            .get("identity")
+            .is_none());
+    }
 }
