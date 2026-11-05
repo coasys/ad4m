@@ -62,11 +62,12 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         WsHarnessCreditGate::new(ctx.user_did().map(str::to_string)),
     ));
     let run_context = agent_context.clone();
+    let run_work_in = work_in.clone();
     let context = body.context;
     let run: Runner = Box::new(move |messages: Vec<AgentMessage>, steps| {
         Box::pin(async move {
             let request = AgentSessionRequest {
-                perspective_uuid: &work_in,
+                perspective_uuid: &run_work_in,
                 messages: &messages,
                 context: context.as_ref(),
                 write_tools: &write_tools,
@@ -81,6 +82,7 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         perspective,
         &body.container,
         &caller_did,
+        &work_in,
         agent_context,
         run,
     )
