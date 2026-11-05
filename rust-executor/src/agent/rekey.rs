@@ -84,6 +84,7 @@ mod tests {
         let app_path = dir.path().to_string_lossy().into_owned();
         std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
         crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         AgentService::init_global_instance(app_path);
         let old_did = AgentService::with_mutable_global_instance(|svc| {
             svc.create_new_keys();
@@ -149,6 +150,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
         crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
         let refused = AgentService::with_mutable_global_instance(|svc| {
             svc.create_new_keys();
