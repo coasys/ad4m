@@ -42,12 +42,25 @@ pub(crate) struct SpeechGate {
 
 impl SpeechGate {
     pub(crate) fn new() -> Self {
-        let vad = voice_activity_detector::VoiceActivityDetector::builder()
-            .sample_rate(SAMPLE_RATE as i64)
-            .chunk_size(VAD_WINDOW)
-            .build()
-            .map_err(|e| log::warn!("Silero VAD did not load ({e:?}): this stream sends all audio"))
-            .ok();
+        // ort panics, rather than returning an error, when it loads ONNX Runtime at run time
+        // and the library is not there (macOS): caught, so the stream still opens.
+        let built = std::panic::catch_unwind(|| {
+            voice_activity_detector::VoiceActivityDetector::builder()
+                .sample_rate(SAMPLE_RATE as i64)
+                .chunk_size(VAD_WINDOW)
+                .build()
+        });
+        let vad = match built {
+            Ok(Ok(vad)) => Some(vad),
+            Ok(Err(e)) => {
+                log::warn!("Silero VAD did not load ({e:?}): this stream sends all audio");
+                None
+            }
+            Err(_) => {
+                log::warn!("Silero VAD did not load (ONNX Runtime is missing): this stream sends all audio");
+                None
+            }
+        };
         SpeechGate { vad }
     }
 
