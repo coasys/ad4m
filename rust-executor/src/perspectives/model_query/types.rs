@@ -1001,6 +1001,13 @@ pub struct ShapeRelation {
     /// node-shape URI to clients) can return the full IRI rather than the
     /// bare class name.  Empty when no `sh:class` was set on the property.
     pub(crate) target_class_uri: String,
+    /// `sh:minCount >= 1`: an instance must hold at least one value here.
+    /// The interpreter refuses to create one it could not give a value for.
+    pub(crate) required: bool,
+    /// `sh:disjoint`: predicates of sibling relations this one may share no
+    /// value with — the two ends of an edge record. Enforced by the
+    /// interpreter when it writes links.
+    pub(crate) disjoint: Vec<String>,
 }
 
 /// Complete shape of a model class — the set of all properties, relations,
