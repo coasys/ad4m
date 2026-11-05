@@ -261,6 +261,39 @@ mod tests {
         assert!(profile_file.contains(&rekeyed.new_did), "{profile_file}");
     }
 
+    /// A re-key, or a start-up repair, that stopped in the middle of writing the profile file
+    /// left a truncated one: the next load takes the profile the agent file holds, and writes
+    /// it back.
+    #[test]
+    fn a_load_after_a_profile_write_cut_short_takes_the_agent_files_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.create_new_keys();
+            svc.passphrase = Some("p".into());
+            svc.store_agent_profile();
+            svc.save("p".into());
+        });
+        let profile_path = dir.path().join("ad4m/agentProfile.json");
+
+        let rekeyed =
+            AgentService::with_mutable_global_instance(|svc| svc.rekey_main_key()).unwrap();
+        // The process stopped in the middle of the profile file write.
+        std::fs::write(&profile_path, "{\"did\":\"did:key:z").unwrap();
+        let profile_did = AgentService::with_mutable_global_instance(|svc| {
+            svc.load();
+            svc.agent.as_ref().map(|agent| agent.did.clone())
+        });
+        let profile_file = std::fs::read_to_string(&profile_path).unwrap();
+        crate::test_utils::setup_agent();
+
+        assert_eq!(profile_did, Some(rekeyed.new_did.clone()));
+        assert!(profile_file.contains(&rekeyed.new_did), "{profile_file}");
+    }
+
     #[test]
     fn a_rekey_needs_the_passphrase_in_memory() {
         let dir = tempfile::tempdir().unwrap();

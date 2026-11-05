@@ -967,13 +967,11 @@ impl AgentService {
         // is sync and cannot await).
     }
 
-    /// Writes the profile file, and says when it cannot.
-    pub(crate) fn write_agent_profile(&self) -> std::io::Result<()> {
+    /// Writes the profile file, and says when it cannot. Through `write_json_atomically`, so a
+    /// crash mid-write leaves the old file, not a truncated one.
+    pub(crate) fn write_agent_profile(&self) -> Result<(), AnyError> {
         let agent = self.agent.as_ref().expect("Agent profile not found");
-        std::fs::write(
-            self.file_profile.as_str(),
-            serde_json::to_string(&agent).unwrap(),
-        )
+        write_json_atomically(path::Path::new(self.file_profile.as_str()), agent)
     }
 
     pub fn save_agent_profile(&mut self, agent: Agent) {
@@ -1263,13 +1261,21 @@ impl AgentService {
             backend.load(&dump.keystore);
         }
 
-        let file_profile: Option<Agent> = std::path::Path::new(self.file_profile.as_str())
-            .exists()
+        let profile_file_exists = std::path::Path::new(self.file_profile.as_str()).exists();
+        let file_profile: Option<Agent> = profile_file_exists
             .then(|| {
                 let file_profile = std::fs::read_to_string(self.file_profile.as_str())
                     .expect("Failed to read agent profile file");
-                serde_json::from_str(&file_profile).expect("Failed to parse agent profile")
-            });
+                match serde_json::from_str(&file_profile) {
+                    Ok(agent) => Some(agent),
+                    // A write cut short (a crash mid-write) left no profile here.
+                    Err(e) => {
+                        log::warn!("Could not parse the agent profile file: {e}: using the agent file's profile");
+                        None
+                    }
+                }
+            })
+            .flatten();
         match (file_profile, dump.agent) {
             // A profile file with another DID than the agent file is older than it: a re-key
             // saved the agent file and stopped before the profile file. The agent file's
@@ -1284,7 +1290,14 @@ impl AgentService {
             (Some(file), _) => self.agent = Some(file),
             // Restore agent profile from agent.json (save() embeds it there).
             // agentProfile.json may not exist if the profile was only saved via save().
-            (None, Some(saved)) => self.agent = Some(saved),
+            (None, Some(saved)) => {
+                self.agent = Some(saved);
+                if profile_file_exists {
+                    if let Err(e) = self.write_agent_profile() {
+                        log::warn!("Could not rewrite the agent profile file: {e}");
+                    }
+                }
+            }
             // No profile anywhere - create a minimal placeholder with just the DID.
             // DO NOT call check_keys_and_create() here because that would initialize
             // wallet keys without a passphrase, making is_unlocked() return true
