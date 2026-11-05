@@ -382,6 +382,11 @@ macro_rules! ad4m_db_methods {
             fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
 
+            // Re-key of the main agent: the rows that move to its new DID (`db/rekey.rs`)
+            fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
+            fn move_flow_rows(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
+            fn clear_joins(&self) -> Ad4mDbResult<usize>;
+
             // Expression cache
             fn _add_expression(&self, url: &str, expression: &Expression<Value>) -> Ad4mDbResult<()>;
             fn _get_expression(&self, url: &str) -> Ad4mDbResult<Option<Expression<Value>>>;

@@ -506,6 +506,10 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
         .is_unlocked();
 
     if is_unlocked {
+        // The wallet now lists the retired keys: finish the moves of a re-key the process
+        // did not live through, once the perspectives are open.
+        crate::identity::rekey::finish_moves_at_start();
+
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
 
@@ -970,14 +974,15 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
         .long()
         .guard(Guard::Executor(AGENT_CREATE_CAPABILITY.clone()));
-    // Always fails (not implemented); the result type is the SDK's `AgentStatus`. Users get
-    // the 501 too.
+    // Always fails (not implemented); the result type is the SDK's `AgentStatus`.
     map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent)
         .guard(Guard::Cap(AGENT_CREATE_CAPABILITY.clone()));
     map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
         .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
+    // The passphrase that opens the executor's own key is typed only on this machine.
     map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
         .long()
+        .local_only()
         .guard(Guard::Executor(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message)
         .guard(Guard::Cap(AGENT_SIGN_CAPABILITY.clone()));

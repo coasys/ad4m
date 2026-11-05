@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 mod grants;
 mod identity;
+mod rekey;
 mod tasks;
 pub use grants::GrantRow;
 #[cfg(test)]
@@ -1069,8 +1070,10 @@ impl Ad4mDb {
             )));
         }
 
+        // The owner stays as stored: only a re-key moves it (`move_notification_owner`), and an
+        // update that read the owner before a re-key would otherwise write the retired DID back.
         let result = self.conn.execute(
-            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10, owner_did = ?11 WHERE id = ?1",
+            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10 WHERE id = ?1",
             params![
                 id,
                 updated_notification.description,
@@ -1083,7 +1086,6 @@ impl Ad4mDb {
                 // The database is where the executor keeps the credential.
                 updated_notification.webhook_auth.expose(),
                 updated_notification.granted,
-                updated_notification.owner_did,
             ],
         )?;
         Ok(result > 0)
