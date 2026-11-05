@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::process::exit;
 
+/// The seed type the executor reads, so a written seed always parses there.
+pub use rust_executor::runtime_service::{BootstrapSeed, IdentityStoreSeed};
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SeedProto {
     #[serde(rename = "languageLanguageRef")]
@@ -25,6 +28,14 @@ pub struct SeedProto {
     /// The files the seed is written to, relative to the working directory.
     #[serde(rename = "seedOutputs", default = "default_seed_outputs")]
     pub seed_outputs: Vec<String>,
+    /// The seed's `identityStore`: the network's identity store, copied into the seed as
+    /// given. Absent: the network has no store.
+    #[serde(
+        rename = "identityStore",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub identity_store: Option<IdentityStoreSeed>,
 }
 
 fn default_seed_outputs() -> Vec<String> {
@@ -41,6 +52,16 @@ pub fn check_seed_outputs(outputs: &[String]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// The text of the seed a publish writes: the `published` languages and trusted agents, with
+/// the proto's `identityStore`.
+pub fn seed_text(proto: &SeedProto, published: &BootstrapSeed) -> String {
+    let seed = BootstrapSeed {
+        identity_store: proto.identity_store.clone(),
+        ..published.clone()
+    };
+    serde_json::to_string_pretty(&seed).expect("a seed serialises")
 }
 
 /// The seed's `trustedAgents` for a publish signed by `publisher`. Every
@@ -74,24 +95,6 @@ pub struct ProtoMeta {
 pub struct LanguageInstance {
     meta: ProtoMeta,
     resource: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BootstrapSeed {
-    #[serde(rename = "trustedAgents")]
-    pub trusted_agents: Vec<String>,
-    #[serde(rename = "knownLinkLanguages")]
-    pub known_link_languages: Vec<String>,
-    #[serde(rename = "directMessageLanguage")]
-    pub direct_message_language: String,
-    #[serde(rename = "agentLanguage")]
-    pub agent_language: String,
-    #[serde(rename = "perspectiveLanguage")]
-    pub perspective_language: String,
-    #[serde(rename = "neighbourhoodLanguage")]
-    pub neighbourhood_language: String,
-    #[serde(rename = "languageLanguageBundle")]
-    pub language_language_bundle: String,
 }
 
 //Generates an ad4m client, unlocks the agent and then publishes the languages found in the seed proto.
@@ -137,9 +140,9 @@ pub async fn start_publishing(
     };
 
     let languages = vec![
-        seed_proto.agent_language,
-        seed_proto.perspective_language,
-        seed_proto.neighbourhood_language,
+        seed_proto.agent_language.clone(),
+        seed_proto.perspective_language.clone(),
+        seed_proto.neighbourhood_language.clone(),
     ];
 
     let mut bootstrap_seed = BootstrapSeed {
@@ -150,6 +153,7 @@ pub async fn start_publishing(
         agent_language: String::from(""),
         perspective_language: String::from(""),
         neighbourhood_language: String::from(""),
+        identity_store: None,
     };
 
     //Publish the core bootstrap languages
@@ -186,7 +190,7 @@ pub async fn start_publishing(
     }
 
     //Publish the link languages
-    for language in seed_proto.link_languages {
+    for language in seed_proto.link_languages.clone() {
         let publish_result = ad4m_client
             .languages
             .publish(
@@ -209,7 +213,7 @@ pub async fn start_publishing(
     }
 
     //Publish other supplied languages
-    for language in seed_proto.also_publish {
+    for language in seed_proto.also_publish.clone() {
         let publish_result = ad4m_client
             .languages
             .publish(
@@ -229,7 +233,7 @@ pub async fn start_publishing(
     }
 
     //Save the bootstrap seed
-    let bootstrap_seed_json = serde_json::to_string_pretty(&bootstrap_seed).unwrap();
+    let bootstrap_seed_json = seed_text(&seed_proto, &bootstrap_seed);
     for output in &seed_proto.seed_outputs {
         fs::write(output, &bootstrap_seed_json).unwrap();
         green_ln!("Bootstrap seed saved to {}", output);
@@ -243,6 +247,10 @@ mod tests {
     use super::*;
 
     const PUBLISHER: &str = "did:key:publisher";
+
+    fn repo_proto() -> SeedProto {
+        serde_json::from_str(include_str!("../seed_proto.json")).unwrap()
+    }
 
     #[test]
     fn an_empty_seed_outputs_list_is_refused() {
@@ -272,15 +280,23 @@ mod tests {
     }
 
     /// The repo's seed proto writes both seed copies with the trusted agents
-    /// of the committed seed, so a publish keeps them. `globals.rs` compiles
-    /// the `rust-executor/src` copy into the binary.
+    /// and the identity store of the committed seed, so a publish keeps them.
+    /// `globals.rs` compiles the `rust-executor/src` copy into the binary.
     #[test]
     fn the_repo_seed_proto_matches_the_committed_seed() {
-        let proto: SeedProto = serde_json::from_str(include_str!("../seed_proto.json")).unwrap();
+        let proto = repo_proto();
         let seed: BootstrapSeed =
             serde_json::from_str(include_str!("../../rust-executor/src/mainnet_seed.json"))
                 .unwrap();
         assert_eq!(proto.trusted_agents, seed.trusted_agents);
+        assert_eq!(proto.identity_store, seed.identity_store);
+        assert_eq!(
+            proto.identity_store,
+            Some(IdentityStoreSeed {
+                url: "https://store.ad4m.dev".into(),
+                keys: vec!["z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj".into()],
+            })
+        );
         assert_eq!(
             proto.seed_outputs,
             vec![
@@ -288,6 +304,19 @@ mod tests {
                 "../rust-executor/src/mainnet_seed.json"
             ]
         );
+    }
+
+    /// The committed seed is exactly what a publish of its languages writes from the proto
+    /// ([`seed_text`]), `identityStore` included; a seed whose languages came from an earlier
+    /// publish gets the proto's `identityStore` in place of its own.
+    #[test]
+    fn the_committed_seed_is_what_the_proto_writes() {
+        let committed = include_str!("../../rust-executor/src/mainnet_seed.json");
+        let published = BootstrapSeed {
+            identity_store: None,
+            ..serde_json::from_str::<BootstrapSeed>(committed).unwrap()
+        };
+        assert_eq!(seed_text(&repo_proto(), &published), committed);
     }
 
     #[test]

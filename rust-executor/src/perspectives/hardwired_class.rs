@@ -11,6 +11,8 @@
 use crate::agent::AgentContext;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SdnaType};
 use crate::types::LinkQuery;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// True once `target_class` has been registered as a SubjectClass in this
 /// perspective — the presence guard the hard-wired classes use, and the "is
@@ -76,6 +78,21 @@ pub(crate) async fn shacl_path_present(
         .any(|l| prop_nodes.contains(&l.data.source)))
 }
 
+/// One lock per perspective, by uuid, that [`ensure_subject_class`] holds while it checks and
+/// registers. Entries are a few bytes and live as long as the executor.
+async fn registration_lock(perspective: &PerspectiveInstance) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::LazyLock<
+        std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let uuid = perspective.persisted.lock().await.uuid.clone();
+    LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(uuid)
+        .or_default()
+        .clone()
+}
+
 /// Idempotently register a hard-wired subject class. A no-op once the class is
 /// present, so a continuous processor calling it on every write costs one cheap
 /// link scan rather than a SHACL rewrite.
@@ -92,6 +109,11 @@ pub(crate) async fn ensure_subject_class(
     required_path: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
+    // Check and register under one lock per perspective. Two first calls that both saw the
+    // class missing would both register it, and the second `add_sdna` purges the shape the first
+    // wrote: a `create_subject` in that gap finds no constructor.
+    let lock = registration_lock(perspective).await;
+    let _registering = lock.lock().await;
     if subject_class_registered(perspective, target_class).await? {
         let up_to_date = match required_path {
             Some(path) => shacl_path_present(perspective, target_class, path).await?,

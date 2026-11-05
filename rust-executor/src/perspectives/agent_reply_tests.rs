@@ -3,8 +3,9 @@
 //! and the sweep of replies an earlier executor left running.
 
 use super::agent_reply::{
-    cancel_reply, conversation, start_reply, ReplyError, ReplyRow, ReplySlot, ReplyStatus, Runner,
-    AGENT_REPLY_CLASS,
+    cancel_reply, conversation, ensure_agent_reply_class, reserve, start_reply, ReplyError,
+    ReplyRow, ReplySlot, ReplyStatus, Runner, Stage, StartHold, AGENT_REPLY_CLASS,
+    MAX_RUNNING_PER_CALLER,
 };
 use super::agent_session::{AgentMessage, AgentReply, AgentSessionError};
 use crate::agent::signatures::TestSigner;
@@ -50,7 +51,19 @@ async fn fixture() -> Fixture {
 }
 
 async fn say(f: &mut Fixture, id: &str, text: &str) {
-    f.perspective
+    let ctx = f.ctx.clone();
+    say_as(&mut f.perspective, &ctx, CHAT, id, text).await;
+}
+
+/// A message `ctx`'s agent writes into `container`.
+async fn say_as(
+    perspective: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    container: &str,
+    id: &str,
+    text: &str,
+) {
+    perspective
         .create_subject(
             SubjectClassOption {
                 class_name: Some("Message".into()),
@@ -59,20 +72,20 @@ async fn say(f: &mut Fixture, id: &str, text: &str) {
             id.into(),
             Some(json!({ "text": text })),
             None,
-            &f.ctx,
+            ctx,
         )
         .await
         .unwrap();
-    f.perspective
+    perspective
         .add_link(
             Link {
-                source: CHAT.into(),
+                source: container.into(),
                 predicate: Some(HAS_CHILD.into()),
                 target: id.into(),
             },
             LinkStatus::Shared,
             None,
-            &f.ctx,
+            ctx,
         )
         .await
         .unwrap();
@@ -290,7 +303,7 @@ async fn a_cancelled_reply_stops_and_says_so() {
         .unwrap());
     until_status(&f, &id, ReplyStatus::Cancelled).await;
     // The task was stopped: letting it go no longer reaches it, and nothing overwrites the status.
-    assert!(go.send(()).is_err(), "the runner was dropped with its task");
+    dropped_with_its_task(go).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(reply(&f, &id).await["status"], "cancelled");
 
@@ -353,7 +366,8 @@ async fn a_new_reply_leaves_a_running_reply_it_did_not_start_alone() {
 }
 
 /// Two people in one shared container each have their own reply: one running does not refuse
-/// the other, and each is given only their own messages.
+/// the other, each is given only their own messages, and each one's reply is written as them, so
+/// it is their agent's turn in their next conversation.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_callers_in_one_container_each_get_their_own_reply() {
     let mut f = fixture().await;
@@ -361,36 +375,56 @@ async fn two_callers_in_one_container_each_get_their_own_reply() {
     let (run, go) = waiting();
     let alices = start(&f, run).await.unwrap();
 
-    let bob = TestSigner::generate();
-    f.perspective
-        .diff_from_link_language(PerspectiveDiff::from_additions(vec![
-            peer_link(
-                &bob,
-                "app://m/bob",
-                "app://message_text",
-                "literal:string:hi",
-            ),
-            peer_link(&bob, CHAT, HAS_CHILD, "app://m/bob"),
-        ]))
-        .await
-        .unwrap();
+    let bob =
+        crate::test_utils::create_test_user(&format!("bob.{}@example.org", uuid::Uuid::new_v4()));
+    let as_bob = AgentContext::managed(bob.clone());
+    say_as(&mut f.perspective, &as_bob, CHAT, "app://m/bob/1", "hi").await;
+    let shared = f.perspective.clone();
+    let bob_reply = |answer: &str, seen: Arc<Mutex<Vec<AgentMessage>>>| {
+        start_reply(
+            shared.clone(),
+            CHAT,
+            &bob,
+            as_bob.clone(),
+            answering(answer, seen),
+        )
+    };
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let bobs = start_reply(
-        f.perspective.clone(),
-        CHAT,
-        &bob.did,
-        f.ctx.clone(),
-        answering("hello Bob", seen.clone()),
-    )
-    .await
-    .unwrap();
-    until_status(&f, &bobs, ReplyStatus::Done).await;
+    let first = bob_reply("hello Bob", seen.clone()).await.unwrap();
+    let done = until_status(&f, &first, ReplyStatus::Done).await;
     assert_eq!(
-        *seen.lock().unwrap(),
-        vec![AgentMessage {
-            role: "user".into(),
-            content: "hi".into()
-        }]
+        done["author"],
+        bob.as_str(),
+        "Bob's reply is written as Bob"
+    );
+    let turns = |seen: &Arc<Mutex<Vec<AgentMessage>>>| -> Vec<(String, String)> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect()
+    };
+    assert_eq!(turns(&seen), vec![("user".into(), "hi".into())]);
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    say_as(
+        &mut f.perspective,
+        &as_bob,
+        CHAT,
+        "app://m/bob/2",
+        "and again",
+    )
+    .await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let second = bob_reply("hello again", seen.clone()).await.unwrap();
+    until_status(&f, &second, ReplyStatus::Done).await;
+    assert_eq!(
+        turns(&seen),
+        vec![
+            ("user".into(), "hi".into()),
+            ("assistant".into(), "hello Bob".into()),
+            ("user".into(), "and again".into()),
+        ]
     );
 
     go.send(()).unwrap();
@@ -721,15 +755,26 @@ async fn a_reply_answered_at_once_is_done_not_cancelled() {
 }
 
 /// A request can be dropped at any await of `start_reply` (`request.cancel`, a session that
-/// ends). Wherever it is dropped, the caller's slot is not left taken: either the start never
-/// got far enough to hold it, or the reply's task holds it and gives it back when it ends.
+/// ends). Wherever it is dropped, nothing is left behind: not the caller's slot, not a staged
+/// batch, not a reply marked `running` that no task will end.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_start_dropped_part_way_does_not_keep_the_slot() {
     let mut f = fixture().await;
-    for step in 0..40u64 {
+    // How long a whole start takes here, so the drops land all through it. The first start also
+    // registers the class, so it is not the one timed.
+    say(&mut f, "app://m/warm", "hello").await;
+    let warm = start(&f, answering("hi", Arc::default())).await.unwrap();
+    until_status(&f, &warm, ReplyStatus::Done).await;
+    say(&mut f, "app://m/timed", "hello").await;
+    let began = std::time::Instant::now();
+    let timed = start(&f, answering("hi", Arc::default())).await.unwrap();
+    let whole = began.elapsed().as_micros() as u64;
+    until_status(&f, &timed, ReplyStatus::Done).await;
+    const DROPS: u64 = 80;
+    for step in 0..DROPS {
         say(&mut f, &format!("app://m/{step}"), "hello").await;
         let _ = tokio::time::timeout(
-            Duration::from_micros(step * 100),
+            Duration::from_micros(whole * step / DROPS),
             start(&f, answering("hi", Arc::default())),
         )
         .await;
@@ -741,10 +786,31 @@ async fn a_start_dropped_part_way_does_not_keep_the_slot() {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        assert!(freed, "dropped at step {step}: the slot stayed taken");
+        // Nor a staged batch, nor a reply left `running` with nothing to end it.
+        let mut settled = false;
+        for _ in 0..300 {
+            let batches = f.perspective.memory_diagnostics().await.batches;
+            let raw = f
+                .perspective
+                .model_query(
+                    AGENT_REPLY_CLASS,
+                    &json!({ "where": { "status": "running" } }).to_string(),
+                )
+                .await
+                .unwrap_or_else(|_| r#"{"instances":[]}"#.into());
+            let running = serde_json::from_str::<Value>(&raw).unwrap()["instances"]
+                .as_array()
+                .map_or(0, Vec::len);
+            if batches == 0 && running == 0 {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(
-            freed,
-            "dropped after {} µs: the slot stayed taken",
-            step * 100
+            settled,
+            "dropped at step {step}: a batch or a running reply was left"
         );
     }
 }
@@ -772,5 +838,171 @@ async fn teardown_stops_the_replies_running_in_the_perspective() {
     f.perspective.teardown_background_tasks().await;
     assert!(f.perspective.agent_replies.lock().unwrap().is_empty());
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(go.send(()).is_err(), "the runner was dropped with its task");
+    dropped_with_its_task(go).await;
+}
+
+/// The start's hold lets go of its perspective once the task has the slot: a started reply keeps
+/// no reference to the perspective after it ends, so a removed one can be freed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_reply_keeps_no_reference_to_its_perspective() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "hello").await;
+    let before = Arc::strong_count(&f.perspective.agent_replies);
+    let id = start(&f, answering("hi", Arc::default())).await.unwrap();
+    until_status(&f, &id, ReplyStatus::Done).await;
+    let mut after = usize::MAX;
+    for _ in 0..100 {
+        after = Arc::strong_count(&f.perspective.agent_replies);
+        if after == before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        after, before,
+        "a clone of the perspective outlived the reply"
+    );
+}
+
+/// Once teardown has begun, no reply starts: teardown has already stopped the running ones, so a
+/// later one would run on in the removed perspective.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_reply_starts_once_teardown_has_begun() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "hello").await;
+    f.perspective.teardown_background_tasks().await;
+    let refused = start(&f, answering("hi", Arc::default())).await;
+    assert!(matches!(refused, Err(ReplyError::Failed(_))), "{refused:?}");
+    assert!(f.perspective.agent_replies.lock().unwrap().is_empty());
+}
+
+/// A caller runs at most `MAX_RUNNING_PER_CALLER` replies at once, across containers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_runs_a_bounded_number_of_replies_at_once() {
+    let mut f = fixture().await;
+    let ctx = f.ctx.clone();
+    let mut go = Vec::new();
+    for i in 0..=MAX_RUNNING_PER_CALLER {
+        let chat = format!("app://chat/{i}");
+        say_as(
+            &mut f.perspective,
+            &ctx,
+            &chat,
+            &format!("app://m/{i}"),
+            "hello",
+        )
+        .await;
+        let (run, cue) = waiting();
+        let started = start_reply(f.perspective.clone(), &chat, &f.did, ctx.clone(), run).await;
+        if i < MAX_RUNNING_PER_CALLER {
+            started.unwrap();
+            go.push(cue);
+        } else {
+            assert!(matches!(started, Err(ReplyError::TooMany)), "{started:?}");
+        }
+    }
+    for cue in go {
+        let _ = cue.send(());
+    }
+}
+
+/// The sweep at load settles only this node's replies: a `running` reply another node's agent
+/// wrote is that node's to settle, and stays `running`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sweep_at_load_leaves_another_nodes_running_reply_alone() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "hello").await;
+    // Registers the class, as the first reply in a perspective does.
+    let own = start(&f, answering("hi", Arc::default())).await.unwrap();
+    until_status(&f, &own, ReplyStatus::Done).await;
+
+    let other_node = TestSigner::generate();
+    let theirs = "ad4m://agent_reply/theirs";
+    f.perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(vec![
+            peer_link(
+                &other_node,
+                theirs,
+                "ad4m://agent_reply/status",
+                "literal:string:running",
+            ),
+            peer_link(&other_node, CHAT, HAS_CHILD, theirs),
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(reply(&f, theirs).await["status"], "running");
+
+    f.perspective.agent_reply_sweep_at_load().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(reply(&f, theirs).await["status"], "running");
+}
+
+/// A start dropped while its reply was staged discards the batch and gives the slot back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_dropped_while_staged_discards_its_batch() {
+    let f = fixture().await;
+    let reply = "ad4m://agent_reply/staged".to_string();
+    reserve(&f.perspective, &slot(&f), &reply).unwrap();
+    let batch = f.perspective.create_batch().await;
+    drop(StartHold {
+        perspective: f.perspective.clone(),
+        slot: slot(&f),
+        reply,
+        context: f.ctx.clone(),
+        stage: Stage::Staged(batch),
+    });
+    assert!(f.perspective.agent_replies.lock().unwrap().is_empty());
+    for _ in 0..100 {
+        if f.perspective.memory_diagnostics().await.batches == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the staged batch was left in the store");
+}
+
+/// A start dropped while its batch was committing may leave the reply saved as `running` with no
+/// task to end it: the hold marks it `cancelled`, as the request was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_dropped_while_committing_cancels_the_saved_reply() {
+    let mut f = fixture().await;
+    ensure_agent_reply_class(&mut f.perspective, &f.ctx)
+        .await
+        .unwrap();
+    let reply = "ad4m://agent_reply/committing".to_string();
+    f.perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some(AGENT_REPLY_CLASS.into()),
+                query: None,
+            },
+            reply.clone(),
+            Some(json!({ "status": "running" })),
+            None,
+            &f.ctx,
+        )
+        .await
+        .unwrap();
+    reserve(&f.perspective, &slot(&f), &reply).unwrap();
+    drop(StartHold {
+        perspective: f.perspective.clone(),
+        slot: slot(&f),
+        reply: reply.clone(),
+        context: f.ctx.clone(),
+        stage: Stage::Committing("a batch already committed".into()),
+    });
+    assert!(f.perspective.agent_replies.lock().unwrap().is_empty());
+    until_status(&f, &reply, ReplyStatus::Cancelled).await;
+}
+
+/// The runner behind `go` was dropped with its task. An abort drops the task on the runtime, not
+/// at once, so this waits for it.
+async fn dropped_with_its_task(go: tokio::sync::oneshot::Sender<()>) {
+    for _ in 0..100 {
+        if go.is_closed() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the runner was not dropped with its task");
 }
