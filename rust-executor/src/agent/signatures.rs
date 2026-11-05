@@ -55,8 +55,18 @@ pub fn verify_by<T: Serialize>(expr: &Expression<T>, did: &str) -> Result<bool, 
 /// error a *third* verdict instead would push the "unevaluated" ambiguity that
 /// #1046 removed from storage back up into the producer.
 ///
+/// An expression with no signature is unsigned, not malformed: `false` with no
+/// warning. The executor stores unsigned links on purpose (the built-in
+/// classes' SHACL, read back through a scratch store), and a warning per link
+/// was 44 lines inside the first query that needed the built-ins, which runs
+/// under a `OnceLock`: when log output backed up on a loaded host, every caller
+/// waiting on the lock waited out those lines too.
+///
 /// `context` names the caller in the log line.
 pub fn verify_or_false<T: Serialize>(expr: &Expression<T>, context: &str) -> bool {
+    if expr.proof.signature.is_empty() {
+        return false;
+    }
     match verify(expr) {
         Ok(valid) => valid,
         Err(e) => {
@@ -167,5 +177,50 @@ impl TestSigner {
                 signature,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod verify_or_false_tests {
+    use super::*;
+
+    fn expr(timestamp: &str, signature: &str) -> Expression<String> {
+        Expression {
+            author: "did:key:z6MkTest".to_string(),
+            timestamp: timestamp.to_string(),
+            data: "data".to_string(),
+            proof: crate::types::ExpressionProof {
+                key: String::new(),
+                signature: signature.to_string(),
+            },
+        }
+    }
+
+    /// An unsigned expression (no signature, as the built-in classes' scratch
+    /// links have, often with no timestamp either) is not verified, and is
+    /// answered before `verify`, which errs on the empty timestamp.
+    #[test]
+    fn an_unsigned_expression_is_not_verified_and_skips_the_proof_check() {
+        assert!(verify(&expr("", "")).is_err());
+        assert!(!verify_or_false(&expr("", ""), "test"));
+        assert!(!verify_or_false(
+            &expr("2026-01-01T00:00:00.000Z", ""),
+            "test"
+        ));
+    }
+
+    #[test]
+    fn a_malformed_or_forged_signature_is_not_verified_and_a_real_one_is() {
+        assert!(!verify_or_false(&expr("not a time", "abcd"), "test"));
+        assert!(!verify_or_false(
+            &expr("2026-01-01T00:00:00.000Z", "zz"),
+            "test"
+        ));
+        let signer = TestSigner::generate();
+        let signed = signer.sign("data".to_string());
+        assert!(verify_or_false(&signed, "test"));
+        let mut forged = signed.clone();
+        forged.data = "other".to_string();
+        assert!(!verify_or_false(&forged, "test"));
     }
 }
