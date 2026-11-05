@@ -97,6 +97,10 @@ pub struct Manifest {
     pub runtimes: BTreeMap<String, Runtime>,
     #[serde(deserialize_with = "known_providers")]
     pub models: BTreeMap<String, ModelFile>,
+    /// Libraries the executor loads itself rather than runs: ONNX Runtime for the speech
+    /// gate where `ort` loads it at run time (macOS, `onnx_runtime.rs`).
+    #[serde(default)]
+    pub libraries: BTreeMap<String, Library>,
 }
 
 /// The entries of a manifest map whose `provider` this executor runs.
@@ -125,6 +129,15 @@ pub struct Runtime {
     pub provider: Provider,
     pub version: String,
     /// By `<os>-<arch>-<backend>`, e.g. `linux-x86_64-vulkan`.
+    pub builds: BTreeMap<String, Build>,
+}
+
+/// A library the executor loads, by build key (`macos-arm64`): each build's `binary` is the
+/// library file inside the unpacked archive.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Library {
+    pub version: String,
     pub builds: BTreeMap<String, Build>,
 }
 

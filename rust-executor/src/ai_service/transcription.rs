@@ -33,17 +33,22 @@ pub(crate) const VAD_SPEECH_PROBABILITY: f32 = 0.6;
 pub(crate) const VAD_MIN_SPEECH_RATIO: f32 = 0.33;
 
 /// The server-side speech gate of a stream: Silero VAD over each fed utterance, its state
-/// carried from one utterance to the next as dev's was. `None` when the model did not load
-/// (ONNX Runtime missing where it is loaded at run time, macOS): every utterance passes,
-/// with a warning at open, rather than the stream refusing all audio.
+/// carried from one utterance to the next as dev's was. `None` when the model did not load:
+/// on macOS, where ONNX Runtime is loaded at run time, while the first stream's download of
+/// it runs (`local::onnx_runtime`). Every utterance passes then, with a warning at open,
+/// rather than the stream refusing all audio or waiting for the download.
 pub(crate) struct SpeechGate {
     vad: Option<voice_activity_detector::VoiceActivityDetector>,
 }
 
 impl SpeechGate {
     pub(crate) fn new() -> Self {
-        // ort panics, rather than returning an error, when it loads ONNX Runtime at run time
-        // and the library is not there (macOS): caught, so the stream still opens.
+        if !super::local::onnx_runtime::ready() {
+            log::warn!("Silero VAD has no ONNX Runtime yet: this stream sends all audio");
+            return SpeechGate { vad: None };
+        }
+        // ort panics, rather than returning an error, on an ONNX Runtime it cannot load:
+        // caught, so the stream still opens.
         let built = std::panic::catch_unwind(|| {
             voice_activity_detector::VoiceActivityDetector::builder()
                 .sample_rate(SAMPLE_RATE as i64)
@@ -317,15 +322,51 @@ pub(crate) fn speech_fixture() -> Vec<f32> {
 mod tests {
     use super::*;
 
-    // The gate's model loads from the weights compiled in, and scores the recording as
-    // speech and silence as not.
+    /// The samples of a 16 kHz mono PCM16 WAV, whatever chunks precede `data`.
+    fn wav_samples(path: &str) -> Vec<f32> {
+        let wav = std::fs::read(path).unwrap();
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
+        let mut at = 12;
+        loop {
+            let size = u32::from_le_bytes(wav[at + 4..at + 8].try_into().unwrap()) as usize;
+            if &wav[at..at + 4] == b"data" {
+                return wav[at + 8..at + 8 + size]
+                    .chunks_exact(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / i16::MAX as f32)
+                    .collect();
+            }
+            at += 8 + size + size % 2;
+        }
+    }
+
+    // The gate's model loads from the weights compiled in, and scores the recordings as
+    // speech and silence as not. On macOS, with no ONNX Runtime in the store yet, the
+    // first gate is open and starts the download, as a first stream's would; the next one
+    // has the model.
     #[test]
     fn the_speech_gate_takes_speech_and_drops_silence_and_short_clicks() {
         let mut gate = SpeechGate::new();
+        if gate.vad.is_none() {
+            assert!(
+                cfg!(target_os = "macos"),
+                "linked in: the model loads at once"
+            );
+            super::super::local::onnx_runtime::wait_for_download();
+            gate = SpeechGate::new();
+        }
+        assert!(gate.vad.is_some(), "the model loaded");
         let speech = speech_fixture();
         let ratio = gate.speech_ratio(&speech);
         assert!(ratio >= VAD_MIN_SPEECH_RATIO, "speech scored {ratio}");
         assert!(gate.passes(&speech));
+        for name in ["meeting-am-michael", "weather-bf-emma"] {
+            let samples = wav_samples(&format!(
+                "{}/../ai-wind-tunnel/fixtures/audio/{name}.wav",
+                env!("CARGO_MANIFEST_DIR")
+            ));
+            let ratio = gate.speech_ratio(&samples);
+            assert!(ratio >= VAD_MIN_SPEECH_RATIO, "{name} scored {ratio}");
+        }
         assert!(!gate.passes(&vec![0.0; 16_000]));
         assert_eq!(
             gate.speech_ratio(&[0.5; VAD_WINDOW - 1]),

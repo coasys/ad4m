@@ -234,6 +234,27 @@
       }
     }
   },
+  "libraries": {
+    "onnxruntime": {
+      "version": "1.18.1",
+      "license": "MIT",
+      "source": "https://github.com/microsoft/onnxruntime/releases/tag/v1.18.1",
+      "builds": {
+        "macos-arm64": {
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-osx-arm64-1.18.1.tgz",
+          "sha256": "f3356203e9b6f5023168a12db74b1060ab397f8f3ce8f5cb2c2bd9e7f1195b01",
+          "sizeBytes": 7705611,
+          "binary": "onnxruntime-osx-arm64-1.18.1/lib/libonnxruntime.1.18.1.dylib"
+        },
+        "macos-x64": {
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-osx-x86_64-1.18.1.tgz",
+          "sha256": "938198521ecccd6fca4cadd627a57966de092feb6ea9ecb579437898d04ebad8",
+          "sizeBytes": 8714874,
+          "binary": "onnxruntime-osx-x86_64-1.18.1/lib/libonnxruntime.1.18.1.dylib"
+        }
+      }
+    }
+  },
   "models": {
     "qwen3.5-0.8b-q8_0": {
       "service": "llm",

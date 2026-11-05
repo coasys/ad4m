@@ -8,6 +8,8 @@
 //! - `plan.rs`: the pure plan (`ai.localPlan`).
 //! - `install.rs`: the store, resumable verified downloads, unpacking.
 //! - `supervisor.rs`: child processes, ports, the restart budget.
+//! - `onnx_runtime.rs`: ONNX Runtime for the speech gate where `ort` loads it at run time
+//!   (macOS), fetched into the store on first use.
 //! - here: install, start, stop, remove, status, registration, the health of managed
 //!   endpoints, autostart.
 //!
@@ -22,6 +24,7 @@
 pub mod data;
 pub mod hardware;
 pub mod install;
+pub mod onnx_runtime;
 pub mod plan;
 pub mod supervisor;
 
@@ -56,6 +59,19 @@ const NEMO_SPEECH_ENDPOINT: &str = "This device (NeMo Speech)";
 /// At most this often per item an install publishes its progress.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
+/// The shared store: `local_ai_dir` from the config, else `AD4M_LOCAL_AI_DIR`, else the
+/// per-user default.
+pub fn store_root(local_ai_dir: Option<String>) -> PathBuf {
+    local_ai_dir
+        .or_else(|| {
+            std::env::var("AD4M_LOCAL_AI_DIR")
+                .ok()
+                .filter(|d| !d.is_empty())
+        })
+        .map(PathBuf::from)
+        .unwrap_or_else(install::default_store_root)
+}
+
 /// Where local AI keeps its files: the shared store and this executor's state.
 #[derive(Debug, Clone)]
 pub struct LocalPaths {
@@ -68,16 +84,7 @@ impl LocalPaths {
     /// `AD4M_LOCAL_AI_DIR`), else the per-user default; the state in the app data path.
     pub fn from_config() -> LocalPaths {
         let config = crate::config::get_global_config();
-        let store = config
-            .local_ai_dir
-            .clone()
-            .or_else(|| {
-                std::env::var("AD4M_LOCAL_AI_DIR")
-                    .ok()
-                    .filter(|d| !d.is_empty())
-            })
-            .map(PathBuf::from)
-            .unwrap_or_else(install::default_store_root);
+        let store = store_root(config.local_ai_dir.clone());
         let state = config
             .app_data_path
             .clone()
