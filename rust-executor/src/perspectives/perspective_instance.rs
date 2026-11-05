@@ -700,8 +700,8 @@ pub struct PerspectiveInstance {
 
 /// The local Shared links the remote render lacks, without the links of the diffs the
 /// queue still holds (queued or parked). Links compare by author, timestamp, source,
-/// predicate and target; one set of those identities for remote and unsent keeps the
-/// pass linear.
+/// predicate (an empty predicate counts as none) and target; one set of those
+/// identities for remote and unsent keeps the pass linear.
 fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
@@ -712,7 +712,7 @@ fn links_missing_remotely(
             &l.author,
             &l.timestamp,
             &l.data.source,
-            l.data.predicate.as_deref(),
+            l.data.predicate.as_deref().filter(|p| !p.is_empty()),
             &l.data.target,
         )
     }
