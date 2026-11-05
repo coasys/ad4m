@@ -1,0 +1,680 @@
+//! `ad4m-hash-chain`: append-only, linear hash chains of signed JSON entries.
+//!
+//! The module knows bytes, hashes, signatures, order and forks. It does not know what an
+//! entry means: a chain type gives the meaning through [`ChainPolicy`]. The core does no
+//! I/O, reads no clock and draws no randomness; storage adapters sit behind the `store` and
+//! `sqlite` features. The key log built on it: `docs-src/identity/did-scid-coasys-1.md`.
+
+use serde::de::DeserializeOwned;
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize, Serializer};
+use serde_json::{json, Value};
+use std::fmt;
+
+mod codec;
+mod jcs;
+mod proof;
+#[cfg(feature = "store")]
+pub mod store;
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
+pub use codec::{
+    decode_ed25519_multikey, decode_hash, decode_proof_value, encode_ed25519_multikey, encode_hash,
+    encode_proof_value, hash_bytes, sha256, Hash, HashError, Multikey, ED25519_PUB, SHA2_256,
+};
+pub use jcs::{canonical_json, CanonError, MAX_SAFE_INTEGER};
+pub use proof::{
+    signing_input, signing_input_json, verify_proof, verify_proof_json, Proof, ProofError,
+    CRYPTOSUITE, PROOF_TYPE,
+};
+
+/// The id of one chain, given by the chain type: the KEL uses the SCID.
+pub type ChainId = String;
+/// The name of a chain type (`"coasys:kel"`); lets one database hold several chain types.
+pub type ChainType = &'static str;
+
+/// An entry is a JSON object with at least `seq` (integer), `prev` (hash or null) and
+/// `proof` (array; a type may leave it out when empty). Every other field belongs to the
+/// chain type and enters the hash.
+pub trait Entry: Serialize + DeserializeOwned + Clone {
+    fn seq(&self) -> u64;
+    fn prev(&self) -> Option<&Hash>;
+    fn proofs(&self) -> &[Proof];
+}
+
+/// `multihash_b58(sha256(JCS(entry without "proof")))`. Fails when the entry has no
+/// canonical form (a float, finite or not, an integer outside ±(2^53 − 1), or not an object).
+pub fn entry_hash<E: Entry>(entry: &E) -> Result<Hash, CanonError> {
+    entry_hash_json(&jcs::to_value(entry)?)
+}
+
+/// [`entry_hash`] over an entry given as JSON (any object: the module reads no field).
+pub fn entry_hash_json(entry: &Value) -> Result<Hash, CanonError> {
+    let map = entry.as_object().ok_or(CanonError::NotObject)?;
+    Ok(hash_bytes(
+        jcs::canonical_object_without(map, "proof")?.as_bytes(),
+    ))
+}
+
+/// The JCS text of a whole entry, proofs included: the form on the wire and on disk.
+pub fn entry_json<E: Entry>(entry: &E) -> Result<String, CanonError> {
+    let value = jcs::to_value(entry)?;
+    if !value.is_object() {
+        return Err(CanonError::NotObject);
+    }
+    canonical_json(&value)
+}
+
+/// Parses an entry received as text (from a peer, a file or a store). The text must be the
+/// entry's JCS text, [`entry_json`], byte for byte, else it is refused (`NotCanonical`, or
+/// the parse or float error that comes first). That refuses a duplicate member name
+/// (I-JSON, RFC 7493), a member the entry type drops on parsing (`"key": null` for a
+/// skipped `None`) and other spellings of a number (`1e2`, `-0`, `100.0`), so one accepted
+/// text has one hash on every target.
+pub fn entry_from_json<E: Entry>(text: &str) -> Result<E, CanonError> {
+    jcs::from_canonical_text(text)
+}
+
+/// The rules of one chain type. The module calls it after the order and link checks pass.
+pub trait ChainPolicy {
+    type Entry: Entry;
+    type State: Clone;
+    type Error: std::error::Error;
+    const TYPE: ChainType;
+    const DOMAIN: &'static str;
+    /// Checks entry 0 (its id rule, its proofs, who signed it) and gives the chain id and the first state.
+    fn genesis(&self, entry: &Self::Entry) -> Result<(ChainId, Self::State), Self::Error>;
+    /// The chain id that a later entry names (the KEL: `scid`).
+    fn chain_of(&self, entry: &Self::Entry) -> ChainId;
+    /// Checks one later entry against the state before it: who may sign it and what it may do.
+    fn apply(&self, state: &mut Self::State, entry: &Self::Entry) -> Result<(), Self::Error>;
+    /// [`genesis`](Self::genesis) for [`fold_stored`]: an entry the caller itself verified
+    /// before it stored it. It may leave out checks that only refuse (the proof verification
+    /// first), and must give the same id and state as `genesis` for every entry `genesis`
+    /// accepts. The default is `genesis`.
+    fn genesis_stored(&self, entry: &Self::Entry) -> Result<(ChainId, Self::State), Self::Error> {
+        self.genesis(entry)
+    }
+    /// [`apply`](Self::apply) for [`fold_stored`]: may leave out checks that only refuse (the
+    /// proof verification first), and must change the state as `apply` does for every entry
+    /// `apply` accepts. The default is `apply`.
+    fn apply_stored(
+        &self,
+        state: &mut Self::State,
+        entry: &Self::Entry,
+    ) -> Result<(), Self::Error> {
+        self.apply(state, entry)
+    }
+}
+
+/// The last entry of a chain.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Head {
+    pub seq: u64,
+    pub hash: Hash,
+}
+
+/// Why an entry or a list of entries does not continue a chain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChainError<E> {
+    Seq { want: u64, got: u64 },
+    Prev { want: Hash, got: Option<Hash> },
+    WrongChain { want: ChainId, got: ChainId },
+    Empty,
+    Malformed(String),
+    Policy(E),
+}
+
+impl<E: fmt::Display> fmt::Display for ChainError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChainError::Seq { want, got } => write!(f, "seq {got}, expected {want}"),
+            ChainError::Prev { want, got } => write!(f, "prev {got:?}, expected {want}"),
+            ChainError::WrongChain { want, got } => {
+                write!(f, "entry of chain {got}, expected {want}")
+            }
+            ChainError::Empty => write!(f, "no entries"),
+            ChainError::Malformed(reason) => write!(f, "malformed entry: {reason}"),
+            ChainError::Policy(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for ChainError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ChainError::Policy(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl<E: fmt::Display> ChainError<E> {
+    /// The TypeScript `ChainErrorCode` of this error (the JSON the wasm exports throw).
+    pub fn code(&self) -> Value {
+        match self {
+            ChainError::Seq { want, got } => json!({"code": "seq", "want": want, "got": got}),
+            ChainError::Prev { want, got } => json!({"code": "prev", "want": want, "got": got}),
+            ChainError::WrongChain { want, got } => {
+                json!({"code": "wrong-chain", "want": want, "got": got})
+            }
+            ChainError::Empty => json!({"code": "empty"}),
+            ChainError::Malformed(reason) => json!({"code": "malformed", "reason": reason}),
+            ChainError::Policy(e) => json!({"code": "policy", "reason": e.to_string()}),
+        }
+    }
+}
+
+impl<E> From<CanonError> for ChainError<E> {
+    fn from(e: CanonError) -> Self {
+        ChainError::Malformed(e.to_string())
+    }
+}
+
+/// One linear chain: its id, the hash at each seq, and the chain type's state after the head.
+pub struct Chain<P: ChainPolicy> {
+    id: ChainId,
+    hashes: Vec<Hash>,
+    state: P::State,
+}
+
+impl<P: ChainPolicy> Clone for Chain<P> {
+    fn clone(&self) -> Self {
+        Chain {
+            id: self.id.clone(),
+            hashes: self.hashes.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<P: ChainPolicy> fmt::Debug for Chain<P>
+where
+    P::State: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Chain")
+            .field("type", &P::TYPE)
+            .field("id", &self.id)
+            .field("hashes", &self.hashes)
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl<P: ChainPolicy> Chain<P> {
+    /// Starts a chain at entry 0: `seq` 0, `prev` null, then `policy.genesis`.
+    pub fn genesis(policy: &P, entry: &P::Entry) -> Result<Self, ChainError<P::Error>> {
+        Self::genesis_as(policy, entry, Proofs::Verify)
+    }
+
+    fn genesis_as(
+        policy: &P,
+        entry: &P::Entry,
+        proofs: Proofs,
+    ) -> Result<Self, ChainError<P::Error>> {
+        let hash = checked_hash(entry)?;
+        if entry.seq() != 0 {
+            return Err(ChainError::Seq {
+                want: 0,
+                got: entry.seq(),
+            });
+        }
+        if let Some(prev) = entry.prev() {
+            return Err(ChainError::Malformed(format!(
+                "entry 0 names prev {prev}; it must be null"
+            )));
+        }
+        let (id, state) = match proofs {
+            Proofs::Verify => policy.genesis(entry),
+            Proofs::Stored => policy.genesis_stored(entry),
+        }
+        .map_err(ChainError::Policy)?;
+        let named = policy.chain_of(entry);
+        if named != id {
+            return Err(ChainError::WrongChain {
+                want: id,
+                got: named,
+            });
+        }
+        Ok(Chain {
+            id,
+            hashes: vec![hash],
+            state,
+        })
+    }
+
+    /// Appends one entry: seq = head + 1, prev = head hash, same chain id, then `policy.apply`
+    /// on a copy of the state. Nothing changes when a check fails.
+    pub fn append(&mut self, policy: &P, entry: &P::Entry) -> Result<Head, ChainError<P::Error>> {
+        let mut state = self.state.clone();
+        let head = self.head();
+        let hash = step(policy, &self.id, &head, &mut state, entry, Proofs::Verify)?;
+        self.state = state;
+        self.hashes.push(hash.clone());
+        Ok(Head {
+            seq: head.seq + 1,
+            hash,
+        })
+    }
+
+    /// [`append`](Self::append) on a chain the caller owns and drops when a check fails: the
+    /// policy changes the state in place, with no copy. The chain is consumed, so a refused
+    /// entry (which may have left the state half changed) is never seen. For a batch staged on
+    /// a copy of a chain the caller keeps: one copy, then `appended` per entry, costs one copy
+    /// of the state whatever the batch's length and wherever it fails, where `append` per entry
+    /// costs one per entry.
+    pub fn appended(mut self, policy: &P, entry: &P::Entry) -> Result<Self, ChainError<P::Error>> {
+        let head = self.head();
+        let hash = step(
+            policy,
+            &self.id,
+            &head,
+            &mut self.state,
+            entry,
+            Proofs::Verify,
+        )?;
+        self.hashes.push(hash);
+        Ok(self)
+    }
+
+    pub fn id(&self) -> &ChainId {
+        &self.id
+    }
+
+    pub fn head(&self) -> Head {
+        Head {
+            seq: (self.hashes.len() - 1) as u64,
+            hash: self.hashes[self.hashes.len() - 1].clone(),
+        }
+    }
+
+    pub fn hash_at(&self, seq: u64) -> Option<&Hash> {
+        usize::try_from(seq).ok().and_then(|i| self.hashes.get(i))
+    }
+
+    /// The hash at every seq from 0 to the head, for [`compare`].
+    pub fn hashes(&self) -> &[Hash] {
+        &self.hashes
+    }
+
+    pub fn state(&self) -> &P::State {
+        &self.state
+    }
+}
+
+/// The entry's hash, after checking that its JSON is an object whose `seq` and `prev`
+/// members agree with the `Entry` accessors, whose `prev` is a sha2-256 multihash and whose
+/// `proof` list (none when left out) is canonically the list `Entry::proofs` returns.
+fn checked_hash<E: Entry, X>(entry: &E) -> Result<Hash, ChainError<X>> {
+    let value = jcs::to_value(entry)?;
+    let map = value
+        .as_object()
+        .ok_or_else(|| ChainError::Malformed("an entry must be a JSON object".into()))?;
+    if map.get("seq").and_then(Value::as_u64) != Some(entry.seq()) {
+        return Err(ChainError::Malformed(
+            "the entry's `seq` member is missing or differs from Entry::seq".into(),
+        ));
+    }
+    match (map.get("prev"), entry.prev()) {
+        (Some(Value::Null), None) => {}
+        (Some(Value::String(s)), Some(p)) if s == p => {
+            decode_hash(p).map_err(|e| ChainError::Malformed(format!("prev {p}: {e}")))?;
+        }
+        _ => {
+            return Err(ChainError::Malformed(
+                "the entry's `prev` member is missing or differs from Entry::prev".into(),
+            ))
+        }
+    }
+    let listed = match map.get("proof") {
+        None => Value::Array(Vec::new()),
+        Some(list @ Value::Array(_)) => list.clone(),
+        Some(_) => {
+            return Err(ChainError::Malformed(
+                "the entry's `proof` member must be an array".into(),
+            ))
+        }
+    };
+    // What is stored is the JSON; what is checked is `proofs()`. They must be the same list,
+    // or an entry that passes here fails to load again.
+    if canonical_json(&listed)? != canonical_json(&jcs::to_value(entry.proofs())?)? {
+        return Err(ChainError::Malformed(
+            "the entry's `proof` member differs from Entry::proofs".into(),
+        ));
+    }
+    Ok(entry_hash_json(&value)?)
+}
+
+/// Checks one entry after `head` (order, link, chain id, then the policy) on `state`.
+fn step<P: ChainPolicy>(
+    policy: &P,
+    id: &ChainId,
+    head: &Head,
+    state: &mut P::State,
+    entry: &P::Entry,
+    proofs: Proofs,
+) -> Result<Hash, ChainError<P::Error>> {
+    let hash = checked_hash(entry)?;
+    let want = head.seq + 1;
+    if entry.seq() != want {
+        return Err(ChainError::Seq {
+            want,
+            got: entry.seq(),
+        });
+    }
+    if entry.prev() != Some(&head.hash) {
+        return Err(ChainError::Prev {
+            want: head.hash.clone(),
+            got: entry.prev().cloned(),
+        });
+    }
+    let named = policy.chain_of(entry);
+    if &named != id {
+        return Err(ChainError::WrongChain {
+            want: id.clone(),
+            got: named,
+        });
+    }
+    match proofs {
+        Proofs::Verify => policy.apply(state, entry),
+        Proofs::Stored => policy.apply_stored(state, entry),
+    }
+    .map_err(ChainError::Policy)?;
+    Ok(hash)
+}
+
+/// Which policy checks a step runs: the full ones, or those for a host's own stored entries
+/// ([`fold_stored`]).
+#[derive(Clone, Copy)]
+enum Proofs {
+    Verify,
+    Stored,
+}
+
+/// [`step`] on the first of `copies` (one entry, several proof sets) that passes; the first
+/// copy's error when none does. Gives the hash and the copy that passed.
+///
+/// `state` is the caller's staged state, so a failed step may leave it changed: the last
+/// (often the only) copy steps on it in place, and only a copy with others still to try
+/// steps on a clone.
+fn step_any<'e, P: ChainPolicy>(
+    policy: &P,
+    id: &ChainId,
+    head: &Head,
+    state: &mut P::State,
+    copies: &[&'e P::Entry],
+) -> Result<(Hash, &'e P::Entry), ChainError<P::Error>> {
+    let Some((last, others)) = copies.split_last() else {
+        return Err(ChainError::Empty);
+    };
+    let mut first_error = None;
+    for entry in others {
+        let mut attempt = state.clone();
+        match step(policy, id, head, &mut attempt, entry, Proofs::Verify) {
+            Ok(hash) => {
+                *state = attempt;
+                return Ok((hash, entry));
+            }
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    match step(policy, id, head, state, last, Proofs::Verify) {
+        Ok(hash) => Ok((hash, last)),
+        Err(e) => Err(first_error.unwrap_or(e)),
+    }
+}
+
+/// Replays `entries` in the order given: `genesis` on the first, then the checks of `append` on
+/// each other. A failure fails the whole replay, so the state is changed in place, never cloned:
+/// a long chain folds in time linear in its length (`append` copies the state per entry).
+pub fn fold<P: ChainPolicy>(
+    policy: &P,
+    entries: &[P::Entry],
+) -> Result<Chain<P>, ChainError<P::Error>> {
+    fold_as(policy, entries, Proofs::Verify)
+}
+
+/// [`fold`] for a host's own stored, already-verified chain only: entries a host reads back from
+/// its own storage, each of which passed [`fold`], [`Chain::append`] or [`import`] before it was
+/// stored. It calls [`ChainPolicy::genesis_stored`] and [`ChainPolicy::apply_stored`], which may
+/// leave out checks that only refuse (the proof verification, the costly part of a replay); the
+/// canonical form, `seq`, `prev` and chain id checks still run, so storage that hands back other
+/// entries or another order still fails. For every chain `fold` accepts it gives the same chain:
+/// id, hashes and state. Never call it on entries from outside: a forged proof would pass.
+pub fn fold_stored<P: ChainPolicy>(
+    policy: &P,
+    entries: &[P::Entry],
+) -> Result<Chain<P>, ChainError<P::Error>> {
+    fold_as(policy, entries, Proofs::Stored)
+}
+
+fn fold_as<P: ChainPolicy>(
+    policy: &P,
+    entries: &[P::Entry],
+    proofs: Proofs,
+) -> Result<Chain<P>, ChainError<P::Error>> {
+    let (first, rest) = entries.split_first().ok_or(ChainError::Empty)?;
+    let mut chain = Chain::genesis_as(policy, first, proofs)?;
+    for entry in rest {
+        let head = chain.head();
+        let hash = step(policy, &chain.id, &head, &mut chain.state, entry, proofs)?;
+        chain.hashes.push(hash);
+    }
+    Ok(chain)
+}
+
+/// Two different entries at one seq of one chain. The module keeps both and picks neither.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkEvidence {
+    pub chain: ChainId,
+    pub seq: u64,
+    pub ours: Hash,
+    pub theirs: Hash,
+}
+
+/// How a peer's hashes relate to ours.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Compare {
+    /// The same hashes.
+    Same,
+    /// They hold every hash we hold, and more from seq `from` on.
+    TheyExtend { from: u64 },
+    /// We hold every hash they hold, and more from seq `from` on. Never a reason to truncate.
+    WeExtend { from: u64 },
+    /// The first seq where the hashes differ.
+    Fork(ForkEvidence),
+}
+
+/// Compares our hashes with a peer's hashes from position `from` on: `ours[i]` and
+/// `theirs[i]` are both the hash at seq `from + i`. Never truncates. `None` when the seq
+/// the answer names does not fit in a u64.
+pub fn compare(ours: &[Hash], theirs: &[Hash], from: u64, chain: &ChainId) -> Option<Compare> {
+    let seq_at = |i: usize| u64::try_from(i).ok().and_then(|i| from.checked_add(i));
+    for (i, (a, b)) in ours.iter().zip(theirs).enumerate() {
+        if a != b {
+            return Some(Compare::Fork(ForkEvidence {
+                chain: chain.clone(),
+                seq: seq_at(i)?,
+                ours: a.clone(),
+                theirs: b.clone(),
+            }));
+        }
+    }
+    Some(match ours.len().cmp(&theirs.len()) {
+        std::cmp::Ordering::Equal => Compare::Same,
+        std::cmp::Ordering::Less => Compare::TheyExtend {
+            from: seq_at(ours.len())?,
+        },
+        std::cmp::Ordering::Greater => Compare::WeExtend {
+            from: seq_at(theirs.len())?,
+        },
+    })
+}
+
+/// What [`import`] did with a batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImportOutcome<E> {
+    /// New entries continued our head. `entries` are the copies appended, owned and in seq
+    /// order, one per new seq: persist these, not the batch. Copies of one entry share a
+    /// hash, so a batch may hold one without its proof beside the one that passed; only the
+    /// one that passed is here. Never empty.
+    Appended { head: Head, entries: Vec<E> },
+    /// Every entry matches what we hold.
+    AlreadyHave,
+    /// The first new entry does not continue our head: fetch from `have + 1`.
+    Gap { have: u64, first: u64 },
+    /// An entry differs at a position we hold; nothing appended.
+    Fork(ForkEvidence),
+}
+
+/// Imports a batch of entries of `chain`. `entries` may arrive in any order within one
+/// call; the module sorts them by `seq`. Nothing changes unless the outcome is `Appended`.
+///
+/// Checks, in order: every entry has a canonical form and names this chain; an entry at a
+/// seq we hold has the hash we hold (else `Fork`); the new entries start at head + 1 (else
+/// `Gap`); then each new entry passes the order, link and policy checks of `append`. Two
+/// different entries at one new seq within the batch are `Malformed`. Copies of one entry
+/// (same hash, other proofs) are all tried, in batch order: the first that passes appends,
+/// and the batch fails only when none does.
+///
+/// `Appended` carries the copies that were appended. A caller that persists the import
+/// stores those, never its own pick from the batch: a copy stripped of its proof hashes the
+/// same as the signed one, and stored, it fails the next `fold`.
+///
+/// `Fork` is hash-only evidence: the competing entry has a canonical form and names this
+/// chain, but its proofs are not verified and the policy is not applied to it. Verify it
+/// before treating the fork as authenticated or passing it to `ChainStore::record_fork`.
+pub fn import<P: ChainPolicy>(
+    chain: &mut Chain<P>,
+    policy: &P,
+    entries: &[P::Entry],
+) -> Result<ImportOutcome<P::Entry>, ChainError<P::Error>> {
+    let mut items: Vec<(u64, Hash, &P::Entry)> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let hash = checked_hash(entry)?;
+        let named = policy.chain_of(entry);
+        if named != chain.id {
+            return Err(ChainError::WrongChain {
+                want: chain.id.clone(),
+                got: named,
+            });
+        }
+        items.push((entry.seq(), hash, entry));
+    }
+    items.sort_by_key(|(seq, _, _)| *seq);
+
+    let head = chain.head();
+    // Copies of one entry share a hash (it leaves out `proof`), so each new seq keeps every
+    // copy: the first one the checks accept is the one appended.
+    let mut new: Vec<(u64, Hash, Vec<&P::Entry>)> = Vec::new();
+    for (seq, hash, entry) in items {
+        if seq <= head.seq {
+            let ours = &chain.hashes[seq as usize];
+            if *ours != hash {
+                return Ok(ImportOutcome::Fork(ForkEvidence {
+                    chain: chain.id.clone(),
+                    seq,
+                    ours: ours.clone(),
+                    theirs: hash,
+                }));
+            }
+            continue;
+        }
+        match new.last_mut() {
+            Some((last_seq, last_hash, copies)) if *last_seq == seq => {
+                if *last_hash != hash {
+                    return Err(ChainError::Malformed(format!(
+                        "two different entries at seq {seq} in one batch"
+                    )));
+                }
+                copies.push(entry);
+            }
+            _ => new.push((seq, hash, vec![entry])),
+        }
+    }
+
+    let Some((first, _, _)) = new.first() else {
+        return Ok(ImportOutcome::AlreadyHave);
+    };
+    if *first != head.seq + 1 {
+        return Ok(ImportOutcome::Gap {
+            have: head.seq,
+            first: *first,
+        });
+    }
+
+    // One staged state for the whole batch: an error drops it, so a step may fail on it.
+    let mut state = chain.state.clone();
+    let mut at = head;
+    let mut added = Vec::with_capacity(new.len());
+    let mut accepted = Vec::with_capacity(new.len());
+    for (_, _, copies) in &new {
+        let (hash, entry) = step_any(policy, &chain.id, &at, &mut state, copies)?;
+        at = Head {
+            seq: at.seq + 1,
+            hash: hash.clone(),
+        };
+        added.push(hash);
+        accepted.push(entry);
+    }
+    chain.state = state;
+    chain.hashes.extend(added);
+    Ok(ImportOutcome::Appended {
+        head: at,
+        entries: accepted.into_iter().cloned().collect(),
+    })
+}
+
+// The TypeScript shapes the wasm exports return: `{ kind: "same" }`, `{ kind: "fork", fork }`, …
+
+impl Serialize for Compare {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            Compare::Same => map.serialize_entry("kind", "same")?,
+            Compare::TheyExtend { from } => {
+                map.serialize_entry("kind", "they-extend")?;
+                map.serialize_entry("from", from)?;
+            }
+            Compare::WeExtend { from } => {
+                map.serialize_entry("kind", "we-extend")?;
+                map.serialize_entry("from", from)?;
+            }
+            Compare::Fork(fork) => {
+                map.serialize_entry("kind", "fork")?;
+                map.serialize_entry("fork", fork)?;
+            }
+        }
+        map.end()
+    }
+}
+
+/// `{ kind: "appended", head, count }`: the vectors pin the chain after the import, so the
+/// appended entries are given as their number only.
+impl<E> Serialize for ImportOutcome<E> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            ImportOutcome::Appended { head, entries } => {
+                map.serialize_entry("kind", "appended")?;
+                map.serialize_entry("head", head)?;
+                map.serialize_entry("count", &entries.len())?;
+            }
+            ImportOutcome::AlreadyHave => map.serialize_entry("kind", "already-have")?,
+            ImportOutcome::Gap { have, first } => {
+                map.serialize_entry("kind", "gap")?;
+                map.serialize_entry("have", have)?;
+                map.serialize_entry("first", first)?;
+            }
+            ImportOutcome::Fork(fork) => {
+                map.serialize_entry("kind", "fork")?;
+                map.serialize_entry("fork", fork)?;
+            }
+        }
+        map.end()
+    }
+}
