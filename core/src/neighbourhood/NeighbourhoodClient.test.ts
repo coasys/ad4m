@@ -5,6 +5,8 @@ import { NeighbourhoodClient } from "./NeighbourhoodClient";
 /** A socket that opens at once and acknowledges every request, so the test can push server events. */
 class FakeWebSocket {
   static last: FakeWebSocket;
+  /** Every request sent, in order. */
+  static sent: { type: string; params: Record<string, unknown> }[] = [];
   readyState = 0;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
@@ -15,7 +17,8 @@ class FakeWebSocket {
     queueMicrotask(() => { this.readyState = 1; this.onopen?.(); });
   }
   send(data: string) {
-    const { id } = JSON.parse(data);
+    const { id, type, params } = JSON.parse(data);
+    FakeWebSocket.sent.push({ type, params });
     queueMicrotask(() => this.push({ id, result: true }));
   }
   close() { this.readyState = 3; }
@@ -56,5 +59,49 @@ describe("NeighbourhoodClient signal routing", () => {
     FakeWebSocket.last.push(signalEvent("uuid-C"));
     expect(receivedA).toHaveLength(1);
     expect(receivedB).toEqual([]);
+  });
+});
+
+describe("NeighbourhoodClient SFU calls", () => {
+  const api = new ApiClient("http://localhost:0", undefined, FakeWebSocket as unknown as new (url: string) => WebSocket);
+  afterAll(() => api.closeAll());
+  const url = "neighbourhood://n";
+
+  it("names the device on join and the participant on every call about the session", async () => {
+    const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
+    FakeWebSocket.sent = [];
+    await client.sfuCallJoin(url, "r", "{}", "laptop");
+    await client.sfuCallLeave(url, "r", "P1");
+    await client.sfuCallAnswerServerOffer(url, "r", "P1", "{}");
+    await client.sfuAddIceCandidate(url, "r", "P1", "candidate:1");
+    await client.sfuCallSetQualityPreference(url, "r", "P1", "low");
+    await client.sfuSendData(url, "r", "P1", "chat", "hi");
+
+    const sfu = FakeWebSocket.sent.filter((m) => m.type.startsWith("sfu."));
+    expect(sfu).toEqual([
+      { type: "sfu.callJoin", params: { neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}", deviceId: "laptop" } },
+      { type: "sfu.callLeave", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1" } },
+      { type: "sfu.callAnswerServerOffer", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", sdpAnswer: "{}" } },
+      { type: "sfu.addIceCandidate", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", candidate: "candidate:1" } },
+      { type: "sfu.callSetQualityPreference", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", preference: "low" } },
+      { type: "sfu.sendData", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", channelLabel: "chat", data: "hi", binary: false } },
+    ]);
+  });
+
+  it("delivers the executor's replaced notice and each offer with the participant it is for", async () => {
+    const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
+    const replaced: unknown[] = [];
+    const offers: unknown[] = [];
+    client.subscribeSfuSessionReplaced((event) => { replaced.push(event) });
+    client.subscribeSfuCallRenegotiationOffer("did:me", (event) => { offers.push(event) });
+    // Both watched, on no perspective in particular.
+    expect(api.watchedEvents()).toMatchObject({ "sfu-session-replaced": null, "sfu-call-renegotiation-offer": null });
+
+    const notice = { targetDid: "did:me", neighbourhoodUrl: url, roomName: "r", participantId: "P1" };
+    FakeWebSocket.last.push({ type: "sfu-session-replaced", ...notice });
+    FakeWebSocket.last.push({ type: "sfu-call-renegotiation-offer", targetDid: "did:me", participantId: "P2", neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}" });
+
+    expect(replaced).toEqual([expect.objectContaining(notice)]);
+    expect(offers).toEqual([expect.objectContaining({ participantId: "P2" })]);
   });
 });

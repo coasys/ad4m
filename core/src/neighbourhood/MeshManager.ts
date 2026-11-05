@@ -777,6 +777,8 @@ export class MeshManager {
     private handleData(from: string, message: { label: string; data: string; binary: boolean }): void {
         const msg: SfuDataMessage = {
             senderDid: from,
+            // The mesh keys its peers by DID: one session per agent.
+            senderParticipantId: from,
             neighbourhoodUrl: "",
             roomName: this.callId,
             channelLabel: message.label,
