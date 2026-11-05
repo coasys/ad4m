@@ -198,7 +198,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `identity.storeUrl` and `identity.storeKeys` become the agent language's `storeUrl` and
   `storeKeys` settings at every start (unset removes them; with neither set, the store and
   keys are the network seed's `identityStore` (the compiled-in `mainnet_seed.json` names
-  `https://store.ad4m.dev`, today's staging network), and without one there is no store; a
+  `https://store.ad4m.dev`, today's staging network; a seed file without one, as an older
+  `init` wrote, gets the compiled-in seed's), and without one there is no store; a
   `storeUrl` without `storeKeys` has no key; without a key the executor warns at start: no
   `did:scid` record verifies). A different event at a held seq that holds on the prefix
   records a fork, keeps the history and fires `identity-fork`; a store answering a shorter log

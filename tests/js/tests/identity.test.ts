@@ -60,17 +60,25 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
     let agentLanguage = "";
     const storeCopy = path.join(TEST_DIR, "identity-store-before-revoke.sqlite");
 
-    async function startNode(name: string, initArgs: string[] = []): Promise<Node> {
+    /**
+     * Starts an executor on `seedPath` (the suite's seed by default), pointed at the store by
+     * `env` (`store.executorEnv()` by default).
+     */
+    async function startNode(
+        name: string,
+        initArgs: string[] = [],
+        { seedPath = SEED_PATH, env = store.executorEnv() }: { seedPath?: string; env?: Record<string, string> } = {},
+    ): Promise<Node> {
         const ports = await getFreePorts(3);
         registerPorts(ports);
         const dataPath = path.join(TEST_DIR, "agents", `identity-${name}`);
         fs.mkdirSync(path.dirname(dataPath), { recursive: true });
         const process = await startExecutor(
-            dataPath, SEED_PATH, ports[0], ports[1], ports[2],
+            dataPath, seedPath, ports[0], ports[1], ports[2],
             false, undefined, undefined, undefined, undefined, false, undefined, undefined,
             false,          // runHolochain
             true,           // sharedStores
-            store.executorEnv(),
+            env,
             initArgs,
         );
         const client = new Ad4mClient(baseUrl(ports[0]));
@@ -405,6 +413,24 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
 
         // agent.status keeps the device's did:key document.
         expect((await d.client.agent.status()).did).to.match(/^did:key:/);
+    });
+
+    it("takes the store from the network's seed when the config names none", async () => {
+        // The suite's seed plus this store as its identityStore; no AD4M_IDENTITY_STORE_*.
+        const seedPath = path.join(TEST_DIR, "identityStoreSeed.json");
+        const seed = JSON.parse(fs.readFileSync(SEED_PATH, "utf8"));
+        seed.identityStore = { url: store.url, keys: [store.key] };
+        fs.writeFileSync(seedPath, JSON.stringify(seed));
+        const e = await startNode("e", [], { seedPath, env: {} });
+
+        expect((await e.client.identity.status()).store).to.deep.equal({ url: store.url, trusted: true });
+        // The seed's store serves the log under the seed's key: e resolves the DID at its head.
+        const resolved = await e.client.identity.resolve(did, { fresh: true });
+        const meta = resolved.didResolutionMetadata;
+        expect(meta.error, meta["coasys:message"]).to.be.undefined;
+        expect(meta["coasys:headTrusted"]).to.equal(true);
+        expect(resolved.didDocument!.id).to.equal(did);
+        expect(resolved.didDocumentMetadata.versionId).to.equal("2");
     });
 
     it("keeps A's history and raises no identity-fork when the store is restored behind it", async () => {

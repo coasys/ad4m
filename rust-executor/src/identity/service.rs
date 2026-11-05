@@ -158,6 +158,9 @@ pub struct IdentityService {
     pub cache: Arc<KelCache>,
     /// `identity.storeUrl`: the store the agent language reaches; an offer must name it.
     pub store_url: Option<String>,
+    /// Where the store keys came from (`IdentitySettings::store_keys_source`), for the
+    /// `no-store-keys` refusal.
+    pub store_keys_source: super::StoreSource,
     /// DID resolution (`identity.resolve`) over the same cache and backend.
     pub resolver: Arc<super::resolver::Resolver>,
     /// The open challenges of key logins (`user.sessionChallenge`).
@@ -388,23 +391,15 @@ impl IdentityService {
     }
 
     /// Refuses the calls that make the store commit something irreversible (`publish`, a claim)
-    /// while the executor trusts no store key (its network has no store, or a store URL is
-    /// configured without its keys): the cache then accepts no head, so the executor could
-    /// never bind the agent to the log, but the store would already hold the events and the
-    /// agent's key would be taken for every identity.
+    /// while the executor trusts no store key (no store, or a store without its keys, in the
+    /// config or the seed: `super::no_store_keys_cause`): the cache then accepts no head, so the
+    /// executor could never bind the agent to the log, but the store would already hold the
+    /// events and the agent's key would be taken for every identity.
     pub(super) fn refuse_without_store_keys(&self) -> Result<(), WsRpcError> {
         if self.cache.trusts_a_store() {
             return Ok(());
         }
-        let cause = match &self.store_url {
-            None => "this executor's network has no identity store (its bootstrap seed names \
-                     none and identity.storeUrl is unset)"
-                .to_string(),
-            Some(url) => format!(
-                "the identity store at {url} is configured without its keys (identity.storeKeys \
-                 is unset or empty)"
-            ),
-        };
+        let cause = super::no_store_keys_cause(self.store_url.as_deref(), self.store_keys_source);
         Err(error(
             503,
             format!(
@@ -713,6 +708,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            store_keys_source: crate::identity::StoreSource::Config,
         }
     }
 
@@ -747,6 +743,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            store_keys_source: crate::identity::StoreSource::Config,
         };
         assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
 
@@ -793,6 +790,7 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
+                store_keys_source: crate::identity::StoreSource::Config,
             }
         };
 
@@ -828,12 +826,12 @@ mod tests {
         );
     }
 
-    /// `no-store-keys` names its cause: a network without a store, or a store URL without its
-    /// keys.
+    /// `no-store-keys` names its cause: no store, a configured store URL without its keys, or
+    /// the seed's store without keys.
     #[test]
     fn the_no_store_keys_refusal_names_its_cause() {
         use crate::identity::cache::tests::{in_memory, FakeStore};
-        let refusal = |store_url: Option<&str>| {
+        let refusal_from = |store_url: Option<&str>, store_keys_source| {
             let backend: Arc<dyn IdentityBackend> = Arc::new(FakeStore::new(vec![]));
             let cache = Arc::new(in_memory(vec![]));
             IdentityService {
@@ -847,10 +845,13 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
+                store_keys_source,
             }
             .refuse_without_store_keys()
             .unwrap_err()
         };
+        let refusal =
+            |store_url: Option<&str>| refusal_from(store_url, crate::identity::StoreSource::Config);
         let none = refusal(None);
         assert_eq!(none.code, 503);
         assert!(
@@ -859,7 +860,7 @@ mod tests {
             none.message
         );
         assert!(
-            none.message.contains("network has no identity store"),
+            none.message.contains("has no identity store"),
             "{}",
             none.message
         );
@@ -871,9 +872,23 @@ mod tests {
         );
         assert!(
             keyless.message.contains("http://127.0.0.1:9")
-                && keyless.message.contains("without its keys"),
+                && keyless.message.contains("without its keys")
+                && keyless.message.contains("identity.storeKeys"),
             "{}",
             keyless.message
+        );
+        // The seed's store with no keys: the refusal names the seed, not identity.storeKeys.
+        let seeded = refusal_from(
+            Some("https://seed.store"),
+            crate::identity::StoreSource::Seed,
+        );
+        assert!(
+            seeded.message.starts_with("no-store-keys: ")
+                && seeded.message.contains("bootstrap seed")
+                && seeded.message.contains("https://seed.store")
+                && !seeded.message.contains("identity.storeKeys"),
+            "{}",
+            seeded.message
         );
     }
 
@@ -1087,6 +1102,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            store_keys_source: crate::identity::StoreSource::Config,
         };
         let scid = ours.scid();
         let did = did_of(&scid);
@@ -1181,6 +1197,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            store_keys_source: crate::identity::StoreSource::Config,
         }
     }
 
@@ -1321,6 +1338,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            store_keys_source: crate::identity::StoreSource::Config,
         };
         let incept = incept_listing(&agent, 53);
         let cosigned = service.cosign_incept(&agent, &incept).await.unwrap();
