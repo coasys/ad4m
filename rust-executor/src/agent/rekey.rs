@@ -281,8 +281,9 @@ mod tests {
 
         let rekeyed =
             AgentService::with_mutable_global_instance(|svc| svc.rekey_main_key()).unwrap();
-        // The process stopped in the middle of the profile file write.
-        std::fs::write(&profile_path, "{\"did\":\"did:key:z").unwrap();
+        // The process stopped in the middle of the profile file write, inside a two-byte
+        // character (`é` is 0xC3 0xA9), so the file is neither JSON nor UTF-8.
+        std::fs::write(&profile_path, b"{\"did\":\"did:key:z\xC3").unwrap();
         let profile_did = AgentService::with_mutable_global_instance(|svc| {
             svc.load();
             svc.agent.as_ref().map(|agent| agent.did.clone())

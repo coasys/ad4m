@@ -1264,9 +1264,11 @@ impl AgentService {
         let profile_file_exists = std::path::Path::new(self.file_profile.as_str()).exists();
         let file_profile: Option<Agent> = profile_file_exists
             .then(|| {
-                let file_profile = std::fs::read_to_string(self.file_profile.as_str())
-                    .expect("Failed to read agent profile file");
-                match serde_json::from_str(&file_profile) {
+                // Bytes, not a string: a write cut inside a multi-byte character is not UTF-8.
+                let parsed = std::fs::read(self.file_profile.as_str())
+                    .map_err(AnyError::from)
+                    .and_then(|bytes| Ok(serde_json::from_slice::<Agent>(&bytes)?));
+                match parsed {
                     Ok(agent) => Some(agent),
                     // A write cut short (a crash mid-write) left no profile here.
                     Err(e) => {
