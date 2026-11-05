@@ -219,8 +219,7 @@ pub fn get_others(_: ()) -> ExternResult<Vec<String>> {
 #[hdk_extern]
 pub fn get_diff_entry_reference(hash: Hash) -> ExternResult<PerspectiveDiffEntryReference> {
     use retriever::PerspectiveDiffRetreiver;
-    retriever::HolochainRetreiver::get::<PerspectiveDiffEntryReference>(hash)
-        .map_err(|error| utils::err(&format!("{}", error)))
+    retriever::HolochainRetreiver::get(hash).map_err(|error| utils::err(&format!("{}", error)))
 }
 
 //not loading from DNA properies since dna zome properties is always null for some reason
