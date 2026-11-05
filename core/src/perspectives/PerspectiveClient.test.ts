@@ -195,6 +195,13 @@ describe('PerspectiveClient RPC operations', () => {
     // signal propagates through the SDK layer instead of being silently
     // dropped.
 
+    it('discardBatch calls perspective.discardBatch and returns its answer', async () => {
+        mockCall.mockResolvedValue(true)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        await expect(client.discardBatch('uuid-b', 'batch-1')).resolves.toBe(true)
+        expect(mockCall).toHaveBeenCalledWith('perspective.discardBatch', { uuid: 'uuid-b', batchId: 'batch-1' })
+    })
+
     it('querySparql forwards options to apiClient.call', async () => {
         mockCall.mockResolvedValue(JSON.stringify([]))
         const client = new PerspectiveClient('http://localhost:12000', 'token')
