@@ -170,10 +170,13 @@ pub async fn ensure_agent_reply_class(
 
 /// Start a reply in `container`, as `caller_did` acting through `context`: create it as
 /// `running`, start `run` on the conversation, and return the reply's id without waiting.
+/// `work_in` is the perspective the agent's tools work in; its steps keep a failure's message
+/// only when that is this one.
 pub async fn start_reply(
     mut perspective: PerspectiveInstance,
     container: &str,
     caller_did: &str,
+    work_in: &str,
     context: AgentContext,
     run: Runner,
 ) -> Result<String, ReplyError> {
@@ -219,6 +222,7 @@ pub async fn start_reply(
         perspective.clone(),
         reply.clone(),
         context.clone(),
+        work_in,
     ));
     // The task waits until its abort handle is in the slot. Otherwise a runner that answers at
     // once releases the slot first, and the check below reads the empty slot as a cancel.

@@ -10,7 +10,10 @@
 //! **What a step never holds** is the call's arguments or its result. An argument can be a whole
 //! record (`template_update` sends a template), and a result can be anything in the perspective
 //! the agent works in, which may be more private than the one keeping the conversation. A step
-//! names the record it acted on by id ([`target_of`]) and keeps a failure's message, capped.
+//! names the record it acted on by id ([`target_of`]), never by a literal, whose text is the
+//! record's. A failure's message often quotes what the tool read, so a step keeps it (capped)
+//! only when the agent works in the conversation's own perspective, where nothing it read is
+//! more private than the step. Otherwise the step says `error` and the message goes to the log.
 //!
 //! A step left `running` under a reply that is no longer `running` was cut off: by a cancel, a
 //! timeout or a restart.
@@ -55,16 +58,27 @@ pub struct StepWriter {
     perspective: PerspectiveInstance,
     reply: String,
     context: AgentContext,
+    /// Whether a failure's message goes into the step: only when the agent works in this
+    /// perspective (see the module doc).
+    keeps_errors: bool,
     /// The step of the call in flight. The loop makes one call at a time.
     current: tokio::sync::Mutex<Option<String>>,
 }
 
 impl StepWriter {
-    pub fn new(perspective: PerspectiveInstance, reply: String, context: AgentContext) -> Self {
+    /// `work_in` is the perspective the agent's tools work in.
+    pub fn new(
+        perspective: PerspectiveInstance,
+        reply: String,
+        context: AgentContext,
+        work_in: &str,
+    ) -> Self {
+        let keeps_errors = perspective.uuid == work_in;
         Self {
             perspective,
             reply,
             context,
+            keeps_errors,
             current: tokio::sync::Mutex::new(None),
         }
     }
@@ -154,7 +168,11 @@ impl ToolObserver for StepWriter {
         let (outcome, error) = outcome_of(result);
         let mut values = json!({ "outcome": outcome });
         if let Some(error) = error {
-            values["error"] = error.into();
+            if self.keeps_errors {
+                values["error"] = error.into();
+            } else {
+                log::info!("agent reply {}: {name} failed: {error}", self.reply);
+            }
         }
         // A create names its record only in what it answers.
         if target_of(arguments, None).is_none() {
@@ -173,7 +191,8 @@ impl ToolObserver for StepWriter {
 
 /// The record a call acted on, by id: the `base_uri` or `parent` it names, else the `base_uri`
 /// its answer names (a create's). Only a value that reads as an id is taken, so no free text
-/// from the arguments or the answer reaches the step.
+/// from the arguments or the answer reaches the step: a literal is refused, since its text
+/// (percent-encoded, so it has no spaces) is the record's.
 pub(crate) fn target_of(arguments: &Value, result: Option<&str>) -> Option<String> {
     let from = |value: &Value| {
         ["base_uri", "parent"]
@@ -216,6 +235,7 @@ fn looks_like_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= ID_LIMIT
         && value.contains(':')
+        && !value.starts_with("literal:")
         && !value.chars().any(char::is_whitespace)
 }
 

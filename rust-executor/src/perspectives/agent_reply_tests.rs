@@ -167,7 +167,15 @@ fn slot(f: &Fixture) -> ReplySlot {
 }
 
 async fn start(f: &Fixture, run: Runner) -> Result<String, ReplyError> {
-    start_reply(f.perspective.clone(), CHAT, &f.did, f.ctx.clone(), run).await
+    start_reply(
+        f.perspective.clone(),
+        CHAT,
+        &f.did,
+        &f.perspective.uuid,
+        f.ctx.clone(),
+        run,
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -385,6 +393,7 @@ async fn two_callers_in_one_container_each_get_their_own_reply() {
             shared.clone(),
             CHAT,
             &bob,
+            &shared.uuid,
             as_bob.clone(),
             answering(answer, seen),
         )
@@ -562,11 +571,9 @@ async fn steps_of(f: &Fixture, reply: &str) -> Vec<Value> {
     steps
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn each_tool_call_is_a_step_on_the_reply_with_no_arguments_or_results() {
-    let mut f = fixture().await;
-    say(&mut f, "app://m/1", "rename it").await;
-    let run: Runner = Box::new(|_messages, steps: Arc<dyn ToolObserver>| {
+/// A run of the real tool loop: `TwoCalls` on `StubTools`.
+fn two_tool_calls() -> Runner {
+    Box::new(|_messages, steps: Arc<dyn ToolObserver>| {
         Box::pin(async move {
             let text = run_with_tools(
                 "m",
@@ -580,8 +587,14 @@ async fn each_tool_call_is_a_step_on_the_reply_with_no_arguments_or_results() {
             .await?;
             Ok(AgentReply { text })
         })
-    });
-    let id = start(&f, run).await.unwrap();
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_tool_call_is_a_step_on_the_reply_with_no_arguments_or_results() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "rename it").await;
+    let id = start(&f, two_tool_calls()).await.unwrap();
     until_status(&f, &id, ReplyStatus::Done).await;
 
     let steps = steps_of(&f, &id).await;
@@ -636,6 +649,39 @@ async fn each_tool_call_is_a_step_on_the_reply_with_no_arguments_or_results() {
     let _ = AGENT_STEP_CLASS;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_keeps_no_error_message_when_the_agent_works_elsewhere() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "rename it").await;
+    let id = start_reply(
+        f.perspective.clone(),
+        CHAT,
+        &f.did,
+        "another-perspective",
+        f.ctx.clone(),
+        two_tool_calls(),
+    )
+    .await
+    .unwrap();
+    until_status(&f, &id, ReplyStatus::Done).await;
+
+    let steps = steps_of(&f, &id).await;
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    assert_eq!(steps[1]["outcome"], "error", "{steps:?}");
+    assert!(steps[1]["error"].is_null(), "{steps:?}");
+    let everything = f
+        .perspective
+        .get_links(&crate::types::LinkQuery::default())
+        .await
+        .unwrap();
+    assert!(
+        everything
+            .iter()
+            .all(|l| !l.data.target.contains("the template changed")),
+        "the message reached the graph"
+    );
+}
+
 #[test]
 fn a_step_names_its_record_by_id_only() {
     assert_eq!(
@@ -656,6 +702,20 @@ fn a_step_names_its_record_by_id_only() {
         target_of(&json!({ "base_uri": "delete everything now" }), None),
         None
     );
+    // Nor is a literal, though its text is encoded and has no spaces.
+    for literal in [
+        "literal://string:Quarterly%20salary%20review%20for%20Ana",
+        "literal:string:secret",
+    ] {
+        assert_eq!(target_of(&json!({ "base_uri": literal }), None), None);
+        assert_eq!(
+            target_of(
+                &json!({}),
+                Some(&json!({ "base_uri": literal }).to_string())
+            ),
+            None
+        );
+    }
     assert_eq!(target_of(&json!({ "query": "app://m/1" }), None), None);
     assert_eq!(target_of(&json!({}), Some("not json")), None);
 }
@@ -893,7 +953,15 @@ async fn a_caller_runs_a_bounded_number_of_replies_at_once() {
         )
         .await;
         let (run, cue) = waiting();
-        let started = start_reply(f.perspective.clone(), &chat, &f.did, ctx.clone(), run).await;
+        let started = start_reply(
+            f.perspective.clone(),
+            &chat,
+            &f.did,
+            &f.perspective.uuid,
+            ctx.clone(),
+            run,
+        )
+        .await;
         if i < MAX_RUNNING_PER_CALLER {
             started.unwrap();
             go.push(cue);
