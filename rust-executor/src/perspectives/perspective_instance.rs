@@ -22,12 +22,12 @@ use crate::prolog_service::{
 use crate::prolog_service::{PrologMode, PROLOG_MODE};
 use crate::pubsub::get_global_pubsub;
 use crate::runtime_service::notification_access::notifications_to_fire;
+use crate::types::*;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, OnlineAgent,
     PerspectiveExpression, PerspectiveHandle, PerspectiveLinkEvent, PerspectiveLinkUpdatedEvent,
     PerspectiveState, PerspectiveStateFilter,
 };
-use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
@@ -607,7 +607,9 @@ pub struct PerspectiveInstance {
     sdna_change_mutex: Arc<Mutex<()>>,
     /// Serialises `ensure_public_links_are_shared`: a publish and the link
     /// language loop it wakes both call it, and two concurrent calls would
-    /// each find the remote empty and commit every shared link.
+    /// each find the remote empty and commit every shared link. The commit
+    /// loop holds it from sending the rest of a batch to parking the oldest
+    /// diff, so a fallback sync either runs before the rest or sees the park.
     share_links_mutex: Arc<Mutex<()>>,
     /// Serialises `register_local_agents`. server-link-language replaces its
     /// local agent list (p-diff-sync adds to it), so a registration that
@@ -696,25 +698,29 @@ pub struct PerspectiveInstance {
     force_shape_sync_wait: Arc<AtomicBool>,
 }
 
-/// The local Shared links the remote render lacks, without the links of parked diffs.
-/// Links compare by author, timestamp, source, predicate and target.
+/// The local Shared links the remote render lacks, without the links of the diffs the
+/// queue still holds (queued or parked). Links compare by author, timestamp, source,
+/// predicate and target; one set of those identities for remote and unsent keeps the
+/// pass linear.
 fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
-    parked: &[LinkExpression],
+    unsent: &[LinkExpression],
 ) -> Vec<LinkExpression> {
-    let same = |a: &LinkExpression, b: &LinkExpression| {
-        a.author == b.author
-            && a.timestamp == b.timestamp
-            && a.data.source == b.data.source
-            && a.data.target == b.data.target
-            && a.data.predicate == b.data.predicate
-    };
+    fn identity(l: &LinkExpression) -> (&str, &str, &str, Option<&str>, &str) {
+        (
+            &l.author,
+            &l.timestamp,
+            &l.data.source,
+            l.data.predicate.as_deref(),
+            &l.data.target,
+        )
+    }
+    let known: HashSet<_> = remote_links.iter().chain(unsent).map(identity).collect();
     local_links
         .iter()
         .map(|(link, _)| link)
-        .filter(|link| !remote_links.iter().any(|r| same(r, link)))
-        .filter(|link| !parked.iter().any(|p| same(p, link)))
+        .filter(|link| !known.contains(&identity(link)))
         .cloned()
         .collect()
 }
@@ -980,8 +986,9 @@ impl PerspectiveInstance {
                 }
             };
 
-            let users_result =
-                Ad4mDb::with_global_instance(|db| db.list_users()).map_err(|e| e.to_string());
+            let users_result = crate::db_backend::db_backend()
+                .list_users()
+                .map_err(|e| e.to_string());
             let user_tuples: Vec<(String, Option<i64>)> = match users_result {
                 // Keyed by agent DID: a user without an agent has no loop to run.
                 Ok(users) => users
@@ -1343,10 +1350,9 @@ impl PerspectiveInstance {
             interval.tick().await;
 
             if Instant::now() >= retry_at && self.has_link_language().await {
-                let (_, ids) = Ad4mDb::with_global_instance(|db| {
-                    db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
-                })
-                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+                let (_, ids) = crate::db_backend::db_backend()
+                    .get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
+                    .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
                 if ids.is_empty() {
                     continue;
@@ -1408,9 +1414,8 @@ impl PerspectiveInstance {
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.uuid.clone();
 
-        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
-            db.get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))
-        })?;
+        let (pending_diffs, pending_ids) = crate::db_backend::db_backend()
+            .get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))?;
 
         if !pending_ids.is_empty() {
             let link_language_clone = {
@@ -1419,6 +1424,12 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
+                // From the first send until the clear or the park lands, the fallback
+                // sync must not run: it would send the same pending links again, or,
+                // reading no parked row yet, send the oldest diff's links after the
+                // rest. It holds this lock across its read and commit, and never
+                // waits on this loop.
+                let _sharing = self.share_links_mutex.lock().await;
                 log::debug!("💾 committing {} pending diffs...", pending_ids.len());
                 let committed_ids = match link_language.commit(pending_diffs.clone()).await {
                     // Spec §5.2 splits perspective-commit (write) from
@@ -1441,9 +1452,8 @@ impl PerspectiveInstance {
                     // If it takes neither, it is down: keep the batch and back
                     // off.
                     Err(e) if pending_ids.len() > 1 => {
-                        let (oldest, oldest_ids) = Ad4mDb::with_global_instance(|db| {
-                            db.get_pending_diffs(&uuid, Some(1))
-                        })?;
+                        let (oldest, oldest_ids) =
+                            crate::db_backend::db_backend().get_pending_diffs(&uuid, Some(1))?;
                         match link_language.commit(oldest.clone()).await {
                             Ok(_) => oldest_ids,
                             Err(refusal) => {
@@ -1467,9 +1477,8 @@ impl PerspectiveInstance {
                                     pending_ids.len() - 1,
                                     refusal
                                 );
-                                Ad4mDb::with_global_instance(|db| {
-                                    db.park_pending_diffs(&uuid, oldest_ids.clone())
-                                })?;
+                                crate::db_backend::db_backend()
+                                    .park_pending_diffs(&uuid, oldest_ids.clone())?;
                                 pending_ids
                                     .into_iter()
                                     .filter(|id| !oldest_ids.contains(id))
@@ -1483,7 +1492,7 @@ impl PerspectiveInstance {
                         return Err(e.context(format!("a batch of {} diffs", pending_ids.len())))
                     }
                 };
-                Ad4mDb::with_global_instance(|db| db.clear_pending_diffs(&uuid, committed_ids))?;
+                crate::db_backend::db_backend().clear_pending_diffs(&uuid, committed_ids)?;
                 // Reset immediate commits counter after successful commit
                 self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
                 log::debug!("✅ 💾 successfully committed pending diffs");
@@ -1625,19 +1634,19 @@ impl PerspectiveInstance {
                 },
             };
 
-            // A parked diff's links stay Shared in the store, but the queue took them out
-            // for good: sending them here would put them behind their successors.
-            let parked = match Ad4mDb::with_global_instance(|db| db.get_parked_additions(&uuid)) {
-                Ok(parked) => parked,
+            // A queued or parked diff's links stay Shared in the store, but the queue owns
+            // them: a queued one would be sent twice, a parked one after its successors.
+            let unsent = match crate::db_backend::db_backend().get_unsent_additions(&uuid) {
+                Ok(unsent) => unsent,
                 Err(e) => {
                     log::warn!(
-                        "ensure_public_links_are_shared: could not read parked diffs for perspective {}: {} — skipping this sync attempt",
+                        "ensure_public_links_are_shared: could not read queued and parked diffs for perspective {}: {} — skipping this sync attempt",
                         uuid, e
                     );
                     return false;
                 }
             };
-            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &parked);
+            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &unsent);
 
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
@@ -1672,7 +1681,7 @@ impl PerspectiveInstance {
                 );
             }
 
-            //Ad4mDb::with_global_instance(|db| db.add_many_links(&self.persisted.lock().await.uuid, &remote_links)).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
+            //crate::db_backend::db_backend().add_many_links(&self.persisted.lock().await.uuid, &remote_links).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
             return true;
         }
         false
@@ -1727,9 +1736,9 @@ impl PerspectiveInstance {
         let _commit_order = self.commit_order.lock().await;
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
-        let (_, pending_ids) =
-            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
-                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+        let (_, pending_ids) = crate::db_backend::db_backend()
+            .get_pending_diffs(&handle.uuid, Some(1))
+            .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
         log::debug!(
             "commit({}): state={:?} link_language={} pending_ids={} adds={} removes={}",
@@ -1812,7 +1821,7 @@ impl PerspectiveInstance {
 
         if !ok {
             // Store diff in DB
-            Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
+            crate::db_backend::db_backend().add_pending_diff(&handle.uuid, diff)?;
             // Update or start timer
             let mut timer = self.commit_debounce_timer.lock().await;
             *timer = Some(tokio::time::Instant::now());
@@ -1834,9 +1843,7 @@ impl PerspectiveInstance {
             if let Err(e) = self_clone.commit(&diff_clone).await {
                 log::error!("PerspectiveInstance::commit() returned error: {:?}\nStoring in pending diffs for later", e);
                 let handle_clone = self_clone.persisted.lock().await.clone();
-                Ad4mDb::with_global_instance(|db|
-                    db.add_pending_diff(&handle_clone.uuid, &diff_clone)
-                ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
+                crate::db_backend::db_backend().add_pending_diff(&handle_clone.uuid, &diff_clone).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
             }
         });
     }
@@ -4569,7 +4576,7 @@ impl PerspectiveInstance {
             return Ok(BTreeMap::new());
         };
         let notifications = notifications_to_fire(
-            Ad4mDb::with_global_instance(|db| db.get_notifications())?,
+            crate::db_backend::db_backend().get_notifications()?,
             &handle,
             &main_agent_did,
         );
@@ -4875,7 +4882,8 @@ impl PerspectiveInstance {
     /// [`Self::LOCAL_ONLINE_THRESHOLD_SECS`].
     fn recently_active_users() -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
-        Ad4mDb::with_global_instance(|db| db.list_users())
+        crate::db_backend::db_backend()
+            .list_users()
             .unwrap_or_default()
             .into_iter()
             .filter(|user| {
@@ -7071,8 +7079,9 @@ mod tests {
 
         let mut pending = PerspectiveDiff::empty();
         for _ in 0..100 {
-            (pending, _) =
-                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None)).unwrap();
+            (pending, _) = crate::db_backend::db_backend()
+                .get_pending_diffs(&uuid, None)
+                .unwrap();
             if !pending.removals.is_empty() {
                 break;
             }
@@ -7143,8 +7152,9 @@ mod tests {
         // queued the unmatched one would be too.
         let mut pending = PerspectiveDiff::empty();
         for _ in 0..100 {
-            (pending, _) =
-                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None)).unwrap();
+            (pending, _) = crate::db_backend::db_backend()
+                .get_pending_diffs(&uuid, None)
+                .unwrap();
             if !pending.removals.is_empty() {
                 break;
             }

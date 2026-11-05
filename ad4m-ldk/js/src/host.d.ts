@@ -39,9 +39,12 @@ declare module "ad4m:host" {
         status: number;
         body: string;
     }
-    // Rejects on network failures and when the call (headers and body) takes
-    // longer than 10 s; the timeout error names the URL.
-    export function httpFetch(url: string, method: string, headersJson: string, body: string): Promise<HttpFetchResponse>;
+    // Rejects on network failures, when the call (headers and body) takes
+    // longer than 10 s (the timeout error names the URL), and when the reply
+    // body passes the host's limit (32 MiB) or the lower `maxBytes`: the body
+    // is read as a stream and refused as soon as it passes, with an error
+    // whose `code` is "too-large".
+    export function httpFetch(url: string, method: string, headersJson: string, body: string, maxBytes?: number): Promise<HttpFetchResponse>;
 
     // Runtime utilities (Spec section 7.7)
     // Canonical AD4M content-address hash: SHA-256 -> CIDv1 -> base58btc,
