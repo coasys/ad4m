@@ -17,6 +17,10 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+/// How many times the sweep at load runs before it gives up, and how long it waits between.
+const SWEEP_ATTEMPTS: u32 = 3;
+const SWEEP_RETRY: Duration = Duration::from_secs(5);
+
 impl PerspectiveInstance {
     pub(crate) async fn agent_reply_sweep_at_load(&self) {
         // The main agent's DID is how its replies are recognised, so wait for the agent, as the
@@ -34,8 +38,23 @@ impl PerspectiveInstance {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         };
-        if let Err(e) = self.interrupt_stale_replies(&main_did).await {
-            log::warn!("agent replies: the sweep at load failed: {e:#}");
+        // A sweep that fails (a read, a write) is tried again a few times, so a transient error
+        // does not leave this node's replies `running` until the next load.
+        for attempt in 1..=SWEEP_ATTEMPTS {
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+            match self.interrupt_stale_replies(&main_did).await {
+                Ok(()) => return,
+                Err(e) if attempt < SWEEP_ATTEMPTS => {
+                    log::warn!("agent replies: the sweep at load failed, trying again: {e:#}");
+                    tokio::time::sleep(SWEEP_RETRY).await;
+                }
+                Err(e) => log::error!(
+                    "agent replies: the sweep at load failed {SWEEP_ATTEMPTS} times; replies \
+                     left running stay so until the next load: {e:#}"
+                ),
+            }
         }
     }
 
@@ -53,6 +72,8 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Marks each stale reply `interrupted`. One that can't be written does not stop the rest;
+    /// the first such error is returned once all were tried.
     async fn interrupt_stale_replies(&self, main_did: &str) -> anyhow::Result<()> {
         if !subject_class_registered(self, AGENT_REPLY_TARGET_CLASS).await? {
             return Ok(());
@@ -62,20 +83,24 @@ impl PerspectiveInstance {
             .into_iter()
             .collect();
         hosted.insert(main_did.to_string());
+        let mut first_error = None;
         for (reply, author) in stale_running_replies(self, &hosted).await? {
             let context = if author == main_did {
                 AgentContext::main_agent()
             } else {
                 AgentContext::managed(author)
             };
-            set_reply(
+            if let Err(e) = set_reply(
                 self.clone(),
                 &reply,
                 json!({ "status": ReplyStatus::Interrupted.as_str() }),
                 &context,
             )
-            .await?;
+            .await
+            {
+                first_error.get_or_insert(e);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
