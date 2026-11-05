@@ -97,7 +97,7 @@ CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$PWD/target/wasm-tools/bin/wasm-bindg
   cargo test -p ad4m-hash-chain --target wasm32-unknown-unknown --features wasm
 ```
 
-CI runs the same in the `rust-tests` job (step `identity crates wasm tests`).
+CI runs the same in the `clippy` job (step `identity crates wasm tests`).
 
 `tests/vectors_fresh.rs` fails when the committed vectors differ from what the generator
 builds from its fixed seeds. After an intended change, regenerate and review the diff:
