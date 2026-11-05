@@ -78,8 +78,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   and `PR_SET_DUMPABLE = 0`.
 - **Local only.** A method registered `.local_only()` answers only the operator on this
   machine (`Session::is_operator_on_this_machine`: the admin credential, or no token on an
-  executor without one, on a loopback listener). Every other caller, the admin credential on
-  a network listener included, gets 403 `local-only`. It is on `agent.unlock`,
+  executor without one, on a loopback listener). The method's guard answers first (403 "Admin
+  credential required" for a caller without the credential); the admin credential on a
+  network listener gets 403 `local-only`. It is on `agent.unlock`,
   `identity.rekey`, `identity.custodyStatus` and `runtime.quit`, and `runtime.setConfig`
   refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
   An executor on `--localhost false` without TLS has no loopback listener, so these calls

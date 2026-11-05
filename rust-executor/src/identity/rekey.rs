@@ -11,8 +11,10 @@
 //! | each language's agent context (`agent.did()`, signing) | reads `AgentService` on each call |
 //! | open sessions of the main agent (event audiences) | `Session::acts_as_did` reads the DID again after a re-key |
 //! | apps on the main agent | their grants are revoked: their tokens were signed with the old key |
+//! | apps of managed agents | with the local wallet (signing key `main`), revoked too: the old key signed their tokens |
 //! | perspective owners | each retired main DID is replaced by the new one (`update_perspective_with`) |
 //! | notification owners | from each retired main DID (`DbBackend::move_notification_owner`) |
+//! | flow bookkeeping (`flow_replica_state`, `flow_fired_mark`) | from each retired main DID (`DbBackend::move_flow_rows`) |
 //! | the claims the old key made (`identity.joinStatus`) | forgotten (`DbBackend::clear_joins`) |
 //! | the published agent profile | published again under the new DID |
 //!
@@ -30,7 +32,7 @@ use crate::api::ws_handler::WsRpcError;
 use crate::db_backend::db_backend;
 use crate::events::Event;
 use crate::pubsub::get_global_pubsub_sync;
-use crate::wallet::wallet_backend;
+use crate::wallet::{wallet_backend, KEY_NAME_MAIN};
 
 use super::types::DeviceKeys;
 
@@ -69,8 +71,15 @@ async fn rekey_and_move() -> Result<DeviceKeys, WsRpcError> {
     let retired = retired_main_dids();
     let mut failed: Vec<String> = Vec::new();
 
-    if let Err(e) = Grants::global().revoke_agent(&AgentContext::main_agent()) {
-        failed.push(format!("the apps on the main agent: {e:?}"));
+    // Tokens are signed with the signing key: when that is `main` (the local wallet), the
+    // old key signed the managed agents' tokens too.
+    let revoked = if crate::agent::capabilities::signing_key_name() == KEY_NAME_MAIN {
+        Grants::global().revoke_all()
+    } else {
+        Grants::global().revoke_agent(&AgentContext::main_agent())
+    };
+    if let Err(e) = revoked {
+        failed.push(format!("the apps signed with the old key: {e:?}"));
     }
 
     for instance in crate::perspectives::all_perspectives() {
@@ -104,6 +113,9 @@ async fn rekey_and_move() -> Result<DeviceKeys, WsRpcError> {
     for did in &retired {
         if let Err(e) = db.move_notification_owner(did, new) {
             failed.push(format!("the notifications of {did}: {e}"));
+        }
+        if let Err(e) = db.move_flow_rows(did, new) {
+            failed.push(format!("the flow bookkeeping of {did}: {e}"));
         }
     }
     if let Err(e) = db.clear_joins() {
@@ -170,6 +182,14 @@ mod tests {
         });
         let app = Session::open(&app_token, &Some("admin".into()), ListenerReach::Network)
             .expect("the app's token opens a session before the re-key");
+        // A managed user's app: the old main key signed its token too.
+        let user_token = crate::test_utils::granted_token(AuthInfo {
+            app_name: "an app of a managed user".to_string(),
+            user_email: Some("rekey-user@example.test".to_string()),
+            ..AuthInfo::default()
+        });
+        let user = Session::open(&user_token, &Some("admin".into()), ListenerReach::Network)
+            .expect("the user's token opens a session before the re-key");
 
         // A perspective the main agent owns, beside a user's.
         let owned = PerspectiveHandle::new_with_owner("mine".into(), old.clone());
@@ -200,7 +220,10 @@ mod tests {
                 offer_id: "rekey-offer".into(),
                 scid: "rekey-scid".into(),
                 claimed_at: 1,
-            })
+            })?;
+            // Its flow bookkeeping on the perspective.
+            db.record_flow_replica_pass(&owned.uuid, &old, "flow", Some("open"), &[], "t")
+                .map(|_| ())
         })
         .unwrap();
 
@@ -215,6 +238,7 @@ mod tests {
         // The app's grant is revoked: its token was signed with the old key.
         assert!(app.check().is_err(), "the app's grant ends at the re-key");
         assert!(Session::open(&app_token, &Some("admin".into()), ListenerReach::Network).is_err());
+        assert!(user.check().is_err(), "a managed user's grant ends too");
         // Perspective owners: the main agent's perspective moved, the user's did not.
         let mine = crate::perspectives::get_perspective(&owned.uuid).unwrap();
         let mine = mine.persisted.lock().await.clone();
@@ -223,15 +247,22 @@ mod tests {
         let theirs = theirs.persisted.lock().await.clone();
         assert_eq!(theirs.owners, Some(vec!["did:key:rekey-user".to_string()]));
         // Notifications and claims.
-        let (owners, join) = Ad4mDb::with_global_instance(|db| {
+        let (owners, join, flow) = Ad4mDb::with_global_instance(|db| {
             let owners: Vec<String> = db
                 .get_notifications()
                 .unwrap()
                 .into_iter()
                 .map(|n| n.owner_did)
                 .collect();
-            (owners, db.join("rekey-offer").unwrap())
+            let flow = db
+                .get_flow_replica_state(&owned.uuid, &new, "flow")
+                .unwrap();
+            (owners, db.join("rekey-offer").unwrap(), flow)
         });
+        assert_eq!(
+            flow.and_then(|row| row.current_state).as_deref(),
+            Some("open")
+        );
         assert!(owners.contains(&new), "{owners:?}");
         assert!(!owners.contains(&old), "{owners:?}");
         assert_eq!(join, None);

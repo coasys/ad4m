@@ -113,7 +113,8 @@ export class IdentityClient {
     /**
      * A new main wallet key for this executor, so a revoked executor can link again. The old
      * key stays for history. Only the operator on the executor's machine (the admin credential
-     * on a loopback listener); any other caller gets 403 `local-only`.
+     * on a loopback listener). A caller without the admin credential gets 403 "Admin credential
+     * required"; the admin credential on a network listener gets 403 `local-only`.
      */
     async rekey(): Promise<DeviceKeys> {
         return this.#apiClient.call("identity.rekey", {});

@@ -130,9 +130,12 @@ fn spawn(
         .stdin(stdin)
         .stdout(out.try_clone().unwrap())
         .stderr(out)
-        .env_remove("AD4M_ADMIN_CREDENTIAL")
-        .env_remove("AD4M_ADMIN_CREDENTIAL_FILE")
         .env("RUST_LOG", "info");
+    // Only the settings a test gives: an inherited `AD4M_*` variable (a credential,
+    // `AD4M_WATCH_STDIN`) would change the start.
+    for (name, _) in std::env::vars().filter(|(name, _)| name.starts_with("AD4M_")) {
+        command.env_remove(name);
+    }
     for (name, value) in env {
         command.env(name, value);
     }
@@ -285,6 +288,23 @@ fn closing_stdin_with_watch_stdin_stops_the_executor_with_0() {
     );
 }
 
+/// A supervisor that is gone before the executor starts: with `--watch-stdin` and stdin
+/// already closed, the executor stops with 0 instead of running on without one.
+#[test]
+fn watch_stdin_with_stdin_closed_at_start_stops_the_executor_with_0() {
+    let _serial = serial();
+    let folder = DataFolder::new();
+    let port = free_port();
+    let args = run_args(
+        &folder,
+        port,
+        &["--insecure-no-admin-credential", "--watch-stdin", "true"],
+    );
+    let mut executor = spawn(&folder, port, args, Stdio::null(), "watch-closed.log", &[]);
+    let status = executor.exit_within(EXIT);
+    assert_eq!(code(status), Some(0), "{}", executor.output());
+}
+
 /// One executor per data folder: a second on the same folder exits 79 and the first keeps
 /// serving. With the same `--log-dir`, the second leaves the first's log in place: it reports
 /// to stdout and rotates nothing.
@@ -322,6 +342,38 @@ fn a_second_executor_on_the_same_data_folder_exits_79_and_the_first_keeps_runnin
     );
     let first_log = std::fs::read_to_string(&live).unwrap();
     assert!(!first_log.contains("another executor"), "{first_log}");
+}
+
+/// A log folder the executor cannot make fails the start with 1, and the output says why.
+#[test]
+fn a_log_folder_that_cannot_be_made_fails_the_start_and_says_why() {
+    let _serial = serial();
+    let folder = DataFolder::new();
+    let not_a_folder = folder.file("not-a-folder");
+    std::fs::write(&not_a_folder, "a file").unwrap();
+    let log_dir = not_a_folder.join("logs");
+    let port = free_port();
+    let args = run_args(
+        &folder,
+        port,
+        &[
+            "--insecure-no-admin-credential",
+            "--log-dir",
+            log_dir.to_str().unwrap(),
+        ],
+    );
+    let mut executor = spawn(&folder, port, args, Stdio::null(), "log-dir.log", &[]);
+    assert_eq!(
+        code(executor.exit_within(EXIT)),
+        Some(1),
+        "{}",
+        executor.output()
+    );
+    assert!(
+        executor.output().contains("Cannot write the executor log"),
+        "{}",
+        executor.output()
+    );
 }
 
 /// A start the executor refuses exits 78, whether the CLI refuses it (the custody channel with

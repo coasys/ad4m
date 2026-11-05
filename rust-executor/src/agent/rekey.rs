@@ -33,7 +33,8 @@ impl AgentService {
     /// Gives the main agent a new wallet key and keeps the old one under its retired name.
     /// Moves this service's own copies of the DID: the DID, its document, the signing key id
     /// and the profile (the profile's DID; its links stay as signed), and saves the agent
-    /// file and the profile file. Needs an unlocked agent whose passphrase is in memory, and
+    /// file and the profile file; when the agent file cannot be saved, it changes nothing
+    /// (the new key stays only as a retired key). Needs an unlocked agent whose passphrase is in memory, and
     /// a wallet that can rename keys (not the shared one).
     pub fn rekey_main_key(&mut self) -> Result<Rekeyed, AnyError> {
         self.signing_checks()?;
@@ -52,6 +53,11 @@ impl AgentService {
             .did
             .clone()
             .ok_or_else(|| anyhow!("the main agent has no DID"))?;
+        let before = (
+            self.did_document.clone(),
+            self.signing_key_id.clone(),
+            self.agent.clone(),
+        );
         backend.retire_key(KEY_NAME_MAIN, &retired_key_name(&old_did))?;
         backend.generate_keypair(KEY_NAME_MAIN)?;
         let document = did_document();
@@ -59,14 +65,24 @@ impl AgentService {
         self.did_document = Some(serde_json::to_string(&document)?);
         self.did = Some(new_did.clone());
         self.signing_key_id = Some(signing_key_id());
-        MAIN_KEY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(agent) = self.agent.as_mut() {
             agent.did = new_did.clone();
+        }
+        // The agent file holds the keystore: without it saved, the old key is `main` again
+        // and the new one, which signed nothing, stays retired.
+        if let Err(e) = self.try_save(&passphrase) {
+            (self.did_document, self.signing_key_id, self.agent) = before;
+            self.did = Some(old_did.clone());
+            backend
+                .retire_key(KEY_NAME_MAIN, &retired_key_name(&new_did))
+                .and_then(|()| backend.retire_key(&retired_key_name(&old_did), KEY_NAME_MAIN))
+                .map_err(|undo| anyhow!("{e}; and the old key is not back: {undo}"))?;
+            return Err(e);
         }
         if self.agent.is_some() {
             self.store_agent_profile();
         }
-        self.try_save(&passphrase)?;
+        MAIN_KEY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Rekeyed { old_did, new_did })
     }
 }
@@ -84,6 +100,7 @@ mod tests {
         let app_path = dir.path().to_string_lossy().into_owned();
         std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
         crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         AgentService::init_global_instance(app_path);
         let old_did = AgentService::with_mutable_global_instance(|svc| {
             svc.create_new_keys();
@@ -141,7 +158,70 @@ mod tests {
             &new_signature
         )
         .unwrap());
+
+        // A restart reads the same from the saved files: the new key signs as the new DID,
+        // and the old key is in the saved keystore under its retired name.
+        wallet_backend().lock("scratch");
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.passphrase = None;
+            svc.load();
+            svc.unlock("rekey-test".to_string())
+        })
+        .unwrap();
+        assert_eq!(
+            did_for_context(&AgentContext::main_agent()).unwrap(),
+            rekeyed.new_did
+        );
+        let reloaded_signature = crate::agent::sign_string_hex(message.clone()).unwrap();
+        assert!(crate::agent::signatures::verify_string_signed_by_did(
+            &rekeyed.new_did,
+            &message,
+            &reloaded_signature
+        )
+        .unwrap());
+        assert_eq!(
+            wallet_backend()
+                .get_did_document(&retired_key_name(&old_did))
+                .map(|document| document.id),
+            Some(old_did)
+        );
         crate::test_utils::setup_agent();
+    }
+
+    /// A re-key whose agent file cannot be saved changes nothing: the old key is `main` again,
+    /// the service keeps the old DID, and the profile file is not written.
+    #[test]
+    fn a_rekey_that_cannot_save_keeps_the_old_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        let old_did = AgentService::with_mutable_global_instance(|svc| {
+            svc.create_new_keys();
+            svc.passphrase = Some("p".into());
+            svc.store_agent_profile();
+            svc.save("p".into());
+            svc.did.clone().unwrap()
+        });
+        // A folder where the agent file is: the save cannot replace it.
+        let agent_file = dir.path().join("ad4m/agent.json");
+        std::fs::remove_file(&agent_file).unwrap();
+        std::fs::create_dir(&agent_file).unwrap();
+
+        let refused = AgentService::with_mutable_global_instance(|svc| svc.rekey_main_key());
+        let did = did_for_context(&AgentContext::main_agent()).unwrap();
+        let main_key = wallet_backend()
+            .get_did_document(KEY_NAME_MAIN)
+            .map(|d| d.id);
+        let profile_file =
+            std::fs::read_to_string(dir.path().join("ad4m/agentProfile.json")).unwrap();
+        crate::test_utils::setup_agent();
+
+        assert!(refused.is_err());
+        assert_eq!(did, old_did);
+        assert_eq!(main_key, Some(old_did.clone()));
+        assert!(profile_file.contains(&old_did), "{profile_file}");
     }
 
     #[test]
@@ -149,6 +229,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
         crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
         let refused = AgentService::with_mutable_global_instance(|svc| {
             svc.create_new_keys();

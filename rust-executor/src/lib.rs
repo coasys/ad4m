@@ -305,7 +305,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         });
     }
 
-    // Spawn the shutdown handler that waits for the signal and cleans up
+    // Spawn the shutdown handler that waits for the signal and cleans up. It reads the PID
+    // file from here: a stop may come before the global config is set.
+    let pid_file = config.pid_file.clone();
     tokio::spawn(async move {
         if let Ok(reason) = shutdown_rx.await {
             info!("Shutdown signal received ({reason:?}), cleaning up...");
@@ -321,8 +323,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
 
             // 2. Remove PID file if it was configured
-            let shutdown_config = crate::config::get_global_config();
-            if let Some(ref pid_file) = shutdown_config.pid_file {
+            if let Some(ref pid_file) = pid_file {
                 let _ = std::fs::remove_file(pid_file);
                 info!("Removed PID file: {}", pid_file);
             }
@@ -350,6 +351,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 std::path::Path::new(dir),
                 config.log_config.as_ref(),
             ) {
+                // No file logger: the reason goes to stdout.
+                crate::logging::init_cli_logging(config.log_config.as_ref());
                 return failed_start(format!("Cannot write the executor log in {dir}: {e}"));
             }
         }

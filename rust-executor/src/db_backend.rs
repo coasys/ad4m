@@ -384,6 +384,7 @@ macro_rules! ad4m_db_methods {
 
             // Re-key of the main agent: the rows that move to its new DID (`db/rekey.rs`)
             fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
+            fn move_flow_rows(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
             fn clear_joins(&self) -> Ad4mDbResult<usize>;
 
             // Expression cache
