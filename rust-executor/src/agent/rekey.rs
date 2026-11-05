@@ -79,8 +79,12 @@ impl AgentService {
                 .map_err(|undo| anyhow!("{e}; and the old key is not back: {undo}"))?;
             return Err(e);
         }
+        // The new key is saved, so the re-key stands. A profile file left behind is repaired at
+        // the next load, from the profile the agent file holds.
         if self.agent.is_some() {
-            self.store_agent_profile();
+            if let Err(e) = self.write_agent_profile() {
+                log::warn!("identity.rekey: could not write the profile file: {e}");
+            }
         }
         MAIN_KEY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Rekeyed { old_did, new_did })
@@ -222,6 +226,39 @@ mod tests {
         assert_eq!(did, old_did);
         assert_eq!(main_key, Some(old_did.clone()));
         assert!(profile_file.contains(&old_did), "{profile_file}");
+    }
+
+    /// A re-key that saved the agent file and stopped before the profile file: the next load
+    /// takes the profile the agent file holds, and writes it back to the profile file.
+    #[test]
+    fn a_load_after_a_rekey_cut_short_takes_the_agent_files_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.create_new_keys();
+            svc.passphrase = Some("p".into());
+            svc.store_agent_profile();
+            svc.save("p".into());
+        });
+        let profile_path = dir.path().join("ad4m/agentProfile.json");
+        let old_profile = std::fs::read_to_string(&profile_path).unwrap();
+
+        let rekeyed =
+            AgentService::with_mutable_global_instance(|svc| svc.rekey_main_key()).unwrap();
+        // The process stopped before the profile file was written.
+        std::fs::write(&profile_path, &old_profile).unwrap();
+        let profile_did = AgentService::with_mutable_global_instance(|svc| {
+            svc.load();
+            svc.agent.as_ref().map(|agent| agent.did.clone())
+        });
+        let profile_file = std::fs::read_to_string(&profile_path).unwrap();
+        crate::test_utils::setup_agent();
+
+        assert_eq!(profile_did, Some(rekeyed.new_did.clone()));
+        assert!(profile_file.contains(&rekeyed.new_did), "{profile_file}");
     }
 
     #[test]

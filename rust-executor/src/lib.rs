@@ -376,14 +376,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         warn!("Could not turn off core dumps for the executor: {e}");
     }
 
-    // A supervisor's pipe: when it closes, the supervisor is gone and the executor stops.
-    if config.watch_stdin == Some(true) {
-        exit::stop_when_closed(std::io::stdin(), || {
-            info!("stdin closed (--watch-stdin): stopping");
-            exit::request_shutdown(exit::ExitReason::Stopped);
-        });
-    }
-
     // Write PID file if requested via config.
     // Test harnesses can set pid_file to get a reliable PID for targeted cleanup.
     if let Some(ref pid_file) = config.pid_file {
@@ -393,6 +385,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         } else {
             info!("Wrote PID {} to {}", pid, pid_file);
         }
+    }
+
+    // A supervisor's pipe: when it closes, the supervisor is gone and the executor stops.
+    // After the PID file, so the stop that removes it never comes before it is written.
+    if config.watch_stdin == Some(true) {
+        exit::stop_when_closed(std::io::stdin(), || {
+            info!("stdin closed (--watch-stdin): stopping");
+            exit::request_shutdown(exit::ExitReason::Stopped);
+        });
     }
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it

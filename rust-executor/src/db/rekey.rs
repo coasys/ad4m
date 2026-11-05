@@ -15,8 +15,9 @@ impl Ad4mDb {
     }
 
     /// The flow bookkeeping of `old` (`flow_replica_state`, `flow_fired_mark`) is `new`'s, so
-    /// `perspective.flowStates` and `perspective.flowFired` keep answering the main agent. A
-    /// row `new` already has stays, and the old one beside it stays under `old`.
+    /// `perspective.flowStates` and `perspective.flowFired` keep answering the main agent. Where
+    /// `new` already has the row, `new`'s stays and `old`'s goes, so no stale row is left for a
+    /// later re-key to carry forward.
     pub fn move_flow_rows(&self, old: &str, new: &str) -> Ad4mDbResult<usize> {
         let tx = self.conn.unchecked_transaction()?;
         let mut moved = 0;
@@ -24,6 +25,10 @@ impl Ad4mDb {
             moved += tx.execute(
                 &format!("UPDATE OR IGNORE {table} SET agent_did = ?2 WHERE agent_did = ?1"),
                 params![old, new],
+            )?;
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE agent_did = ?1"),
+                params![old],
             )?;
         }
         tx.commit()?;
@@ -142,5 +147,27 @@ mod tests {
             .get_flow_replica_state("p", "did:key:user", "i")
             .unwrap()
             .is_some());
+    }
+
+    /// Where the new DID already has the row, its row wins and the old one goes: a later re-key
+    /// cannot carry the old row forward over the newer one.
+    #[test]
+    fn a_colliding_flow_row_of_the_retired_did_goes() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.record_flow_replica_pass("p", "did:key:a", "i", Some("open"), &[], "t")
+            .unwrap();
+        db.record_flow_replica_pass("p", "did:key:b", "i", Some("done"), &[], "t")
+            .unwrap();
+
+        db.move_flow_rows("did:key:a", "did:key:b").unwrap();
+        assert!(db
+            .get_flow_replica_state("p", "did:key:a", "i")
+            .unwrap()
+            .is_none());
+        // The next re-key moves both retired DIDs, the older one first.
+        db.move_flow_rows("did:key:a", "did:key:c").unwrap();
+        db.move_flow_rows("did:key:b", "did:key:c").unwrap();
+        let state = db.get_flow_replica_state("p", "did:key:c", "i").unwrap();
+        assert_eq!(state.unwrap().current_state.as_deref(), Some("done"));
     }
 }

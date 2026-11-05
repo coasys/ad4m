@@ -81,7 +81,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   executor without one, on a loopback listener). The method's guard answers first (403 "Admin
   credential required" for a caller without the credential); the admin credential on a
   network listener gets 403 `local-only`. It is on `agent.unlock`,
-  `identity.rekey`, `identity.custodyStatus` and `runtime.quit`, and `runtime.setConfig`
+  `identity.rekey`, `identity.custodyStatus`, `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
   refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
   An executor on `--localhost false` without TLS has no loopback listener, so these calls
   answer on no listener there.
