@@ -370,13 +370,19 @@ impl SdnaType {
 /// Parse the `shacl_json` handed to `add_sdna` / `add_sdna_batch` into links.
 /// A flow definition (`SHACLFlow`: states, transitions, no `target_class`)
 /// goes through the flow parser; everything else is a class shape (#1650).
+/// A flow whose `consensusRule` could not be read back is refused here, before
+/// `add_sdna` / `add_sdna_batch` write anything (#1144).
 fn parse_sdna_json_to_links(
     sdna_type: &SdnaType,
     json: &str,
     name: &str,
 ) -> Result<Vec<Link>, AnyError> {
     match sdna_type {
-        SdnaType::Flow => parse_flow_to_links(json, name),
+        SdnaType::Flow => {
+            let links = parse_flow_to_links(json, name)?;
+            check_consensus_rule_links(&links)?;
+            Ok(links)
+        }
         SdnaType::SubjectClass | SdnaType::Custom => parse_shacl_to_links(json, name),
     }
 }
