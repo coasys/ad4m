@@ -1,0 +1,35 @@
+{
+  "cases": [
+    {
+      "bits": 8,
+      "hash": "0034187231a3cbbf300377da014ad4f47c85ce10cb17b88a510f06e9b20bbc63",
+      "pow": {
+        "bits": 8,
+        "nonce": "1111111111111114d"
+      },
+      "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+      "zeroBits": 10
+    },
+    {
+      "bits": 12,
+      "hash": "000f3a67772535c1a35a062cf23951313afa73311fbb1e2ff5f44da68bf5f99a",
+      "pow": {
+        "bits": 12,
+        "nonce": "11111111111111oe"
+      },
+      "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+      "zeroBits": 12
+    },
+    {
+      "bits": 16,
+      "hash": "0000ba25b9ba89fe4b5bd10a94a0a03ecf86b31ac160eca4de9b6accd9cc83cf",
+      "pow": {
+        "bits": 16,
+        "nonce": "111111111111114pb"
+      },
+      "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+      "zeroBits": 16
+    }
+  ],
+  "description": "sha256(\"coasys:pow\" ‖ scid ‖ nonce) with at least `bits` leading zero bits; the solver counts nonces from 0 as 16 big-endian bytes."
+}
