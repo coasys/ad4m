@@ -187,9 +187,14 @@ commands:
           command: rm -f target/release/ad4m target/release/ad4m-executor
       - run:
           # Makes the Deno snapshot too: build-libs runs @coasys/rust-ad4m-executor#build
-          # (`build-deno-snapshot`, never cached) before the cli builds the executor.
+          # (`build-deno-snapshot`) before the cli builds the executor. The script
+          # skips the snapshot when its inputs did not change since this workdir's
+          # last build, or copies it from the host-wide cache in
+          # $CI_ARTIFACT_DIR/deno-snapshot/ when another runner built those inputs.
           name: Build ADAM (without bootstrap languages)
-          command: pnpm run build-libs
+          command: |
+            export CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            pnpm run build-libs
           no_output_timeout: 30m
       - run:
           # The identity suite's tools: the integration runners compile no Rust.
