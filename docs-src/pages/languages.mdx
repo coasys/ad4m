@@ -267,10 +267,20 @@ export default defineLanguage({
 });
 ```
 
-The ALDK also re-exports the full `ad4m:host` import surface with
+The ALDK also wraps the full `ad4m:host` import surface with
 types, so you get auto-complete on `agentDid`, `holochainCall`,
 `emitPerspectiveDiff`, etc., and the TypeScript compiler can check
-your usage.
+your usage. Each wrapper looks its host function up when it is called,
+so the Language also loads on an executor that lacks one; only a call
+to it throws.
+
+Bundle the Language into one ES module. `ad4m:host` must stay an
+import, because the executor provides it when it loads the bundle:
+
+```bash
+esbuild index.ts --bundle --format=esm --platform=neutral \
+    --external:ad4m:host --outfile=build/bundle.js
+```
 
 ### Rust with `ad4m_language!`
 
@@ -344,19 +354,25 @@ Nothing here changed with v1.0: the Language-language still stores and
 serves bundles, and the AD4M client API is unchanged.
 
 ```javascript
-// Publish: returns the language-hash that becomes your Language's address
+// Publish: returns the language-hash that becomes your Language's address.
+// The path is read by the executor, so it is a path on the executor's machine.
 const meta = await ad4m.languages.publish(
     "/path/to/bundle.js",
     { name: "note-store", description: "A simple note store" },
 );
 
-// Install on another executor (or the same one later)
-await ad4m.languages.install(meta.address);
+// Publishing does not install. Looking the Language up by its address
+// fetches, verifies and installs it, here or on any other executor.
+await ad4m.languages.byAddress(meta.address);
 
-// Use: all Expression operations go through the universal address format
-const exprAddr = await ad4m.expression.create("Hello World", meta.address);
-const expr     = await ad4m.expression.get(`${meta.address}://${exprAddr}`);
+// Use: create returns the expression's full URL, `<language>://<address>`
+const url  = await ad4m.expression.create("Hello World", meta.address);
+const expr = await ad4m.expression.get(url);
 ```
+
+The CLI does the same with `ad4m languages publish <bundle> -n <name>`,
+`ad4m languages by-address <address>` and
+`ad4m expression create <address> <content>`.
 
 A published Language is just a file whose content hash is its identity.
 Anyone with the hash can fetch it, verify it hashes to what the URL

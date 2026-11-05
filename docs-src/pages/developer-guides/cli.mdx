@@ -289,11 +289,17 @@ For development and testing:
 
 ```bash
 # Generate bootstrap seed
-ad4m dev generate-bootstrap <agent-path> <passphrase> <seed-proto>
+ad4m-executor dev generate-bootstrap <agent-path> <passphrase> <seed-proto>
 
 # Test expression language
-ad4m dev publish-and-test-expression-language <language-path> <data>
+ad4m-executor dev publish-and-test-expression-language <language-path> <data>
 ```
+
+These are subcommands of `ad4m-executor`, not `ad4m`.
+`publish-and-test-expression-language` starts an executor on the default
+network seed, so the Language is published to the public language store.
+To try a Language on your machine only, use an executor on the local
+bootstrap Languages instead (see `bootstrap-languages/local`).
 
 For a complete list of commands and their options:
 ```bash
