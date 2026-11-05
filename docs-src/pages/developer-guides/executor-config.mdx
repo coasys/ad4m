@@ -151,6 +151,27 @@ wait (default: no limit). A `model_type` is `LLM`, `EMBEDDING`,
   "ai_defaults": { "llm": "qwen" } }
 ```
 
+**`identity`** (`storeUrl`, `storeKeys`, `allowPrivateSrc`; flags
+`--identity-store-url`, `--identity-store-keys`) names the `did:scid`
+identity store and the keys its signed heads must carry. Leave both out to
+use the store of the executor's network: the `identityStore` of the seed
+`ad4m-executor init` writes into the data folder (the seed this build
+carries names `https://store.ad4m.dev`; `--network-bootstrap-seed` gives
+another network's seed, whose `identityStore` names that network's store). A
+seed without `identityStore`, such as one an older `init` wrote, uses the
+store of the seed this build carries, so an upgraded executor keeps its store
+without re-running `init`. With no store at all, `did:scid` identities are
+off: `identity.status` answers `store: null`, and `identity.publish` /
+`identity.claimOffer` refuse `no-store-keys`. A `storeUrl` without
+`storeKeys` trusts no key for it. Errors and warnings about the store name
+where the bad value came from: `identity.storeUrl` / `identity.storeKeys`, or
+the seed's `identityStore`.
+
+```json
+{ "identity": { "storeUrl": "https://store.example.org",
+  "storeKeys": ["z6Mk…"] } }
+```
+
 **`log_config`** sets a level (`error`, `warn`, `info`, `debug`, `trace`)
 per crate over the defaults `rust_executor: info`, `holochain: warn`,
 `wasmer_compiler_cranelift: warn`, `warp::server: info`.
