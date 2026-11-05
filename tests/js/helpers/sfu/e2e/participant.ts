@@ -88,6 +88,7 @@ export class Participant {
   quality(preference: SfuQualityPreference): Promise<void> { return this.send({ kind: "quality", preference }); }
   sendData(label: string, data: string, binary = false): Promise<void> { return this.send({ kind: "send", label, data, binary }); }
   snapshot(): Promise<Snapshot> { return this.send<Snapshot>({ kind: "snapshot" }); }
+  switchTo(topology: "mesh" | "sfu"): Promise<void> { return this.send({ kind: "switch", topology }); }
 
   /** End the process at once, as a closed tab or a lost device does: no leave, no goodbye. */
   kill(): void {
