@@ -338,7 +338,8 @@ export class PerspectiveClient {
      * connected. Only what the caller wrote reaches the model: their own messages and their
      * earlier finished replies, read per link, so a message another member wrote onto is left
      * out. A caller has one reply running per container: a second call while it runs is refused
-     * (409). Another person in a shared container has their own.
+     * (409), and a caller has at most 8 running across containers (429). Another person in a
+     * shared container has their own.
      */
     async agentReply(
         uuid: string,

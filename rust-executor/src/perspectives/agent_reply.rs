@@ -28,11 +28,16 @@
 //!
 //! **One at a time, per caller.** A caller has at most one reply running in a container
 //! ([`RunningReplies`], held per perspective): the conversation is the caller's, so two people
-//! in one shared container each get their own. [`cancel_reply`] stops the caller's own reply and
-//! no one else's. A reply still `running` when the executor starts again was cut off: the sweep
-//! at load marks it `interrupted` (`perspective_instance::agent_replies`). Nothing else marks a
-//! reply it did not start: a `running` reply in the container may be another node's, still
-//! working.
+//! in one shared container each get their own. A caller runs at most [`MAX_RUNNING_PER_CALLER`]
+//! across containers. [`cancel_reply`] stops the caller's own reply and no one else's. A reply
+//! still `running` when the executor starts again was cut off: the sweep at load marks it
+//! `interrupted` (`perspective_instance::agent_replies`). Nothing else marks a reply it did not
+//! start: a `running` reply in the container may be another node's, still working.
+//!
+//! **A start that does not finish leaves nothing.** A request can be dropped at any await of
+//! [`start_reply`]; its `StartHold` gives the slot back, discards a staged batch, and marks
+//! `cancelled` a reply that was saved before the drop. Teardown stops the running replies, and no
+//! reply starts once it has begun.
 
 use crate::agent::AgentContext;
 use crate::perspectives::agent_session::{AgentMessage, AgentReply, AgentSessionError};
@@ -44,6 +49,7 @@ use crate::types::{Link, LinkStatus};
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// The class's local name, as `create_subject` and `model_query` take it.
@@ -58,6 +64,10 @@ const REPLY_URI_PREFIX: &str = "ad4m://agent_reply/";
 /// How long a reply may run. Long enough for an agent that reads documentation and edits a large
 /// record over many calls, as for `perspective.runAgent`.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// How many replies one caller may have running at once in a perspective, across containers.
+/// Each runs a model session for up to [`REPLY_TIMEOUT`].
+pub const MAX_RUNNING_PER_CALLER: usize = 8;
 
 /// How many of the container's newest messages make up the conversation.
 const CONVERSATION_LIMIT: usize = 200;
@@ -122,6 +132,12 @@ pub enum ReplyError {
     /// The caller already has a reply running in this container.
     #[error("a reply is already running in this conversation: wait for it, or cancel it")]
     Busy,
+    /// The caller has [`MAX_RUNNING_PER_CALLER`] replies running.
+    #[error(
+        "{MAX_RUNNING_PER_CALLER} replies are already running for you here: wait for one to end, \
+         or cancel one"
+    )]
+    TooMany,
     #[error(transparent)]
     Failed(#[from] anyhow::Error),
 }
@@ -164,16 +180,26 @@ pub async fn start_reply(
     let reply = format!("{REPLY_URI_PREFIX}{}", uuid::Uuid::new_v4());
     reserve(&perspective, &slot, &reply)?;
     // The request can be dropped at any await from here (a client's `request.cancel`, a session
-    // that ends): the hold gives the slot back then, and on an error. The task takes it over
-    // below, with no await in between.
-    let hold = SlotHold {
+    // that ends): the hold then undoes what the start had done, and it does on an error too. The
+    // task takes over below, with no await in between.
+    let mut hold = StartHold {
         perspective: perspective.clone(),
         slot: slot.clone(),
         reply: reply.clone(),
+        context: context.clone(),
+        stage: Stage::Reserved,
     };
-    let messages =
-        prepare_and_create(&mut perspective, container, caller_did, &reply, &context).await?;
-    std::mem::forget(hold);
+    let messages = prepare_and_create(
+        &mut perspective,
+        container,
+        caller_did,
+        &reply,
+        &context,
+        &mut hold,
+    )
+    .await?;
+    hold.stage = Stage::HandedOver;
+    drop(hold);
 
     let cancel_context = context.clone();
     let task_perspective = perspective.clone();
@@ -292,18 +318,70 @@ async fn settle(
     }
 }
 
-/// Gives a reserved slot back when dropped: on an error, or when the request is dropped before
-/// the reply's task holds the slot. `std::mem::forget` it once the task does.
-struct SlotHold {
-    perspective: PerspectiveInstance,
-    slot: ReplySlot,
-    reply: String,
+/// How far a start got, for [`StartHold`] to undo.
+pub(crate) enum Stage {
+    /// The slot is reserved: give it back.
+    Reserved,
+    /// The reply is staged in this batch: discard it too.
+    Staged(String),
+    /// The batch is being committed, so the reply may exist as `running` with no task to end
+    /// it: discard the batch, and mark the reply `cancelled` (the request was).
+    Committing(String),
+    /// The reply's task holds the slot: nothing to undo.
+    HandedOver,
 }
 
-impl Drop for SlotHold {
+/// Undoes a start that did not reach its task, when dropped: on an error, or when the request is
+/// dropped part way. `Drop` can't await, so the writes run in a task of their own.
+pub(crate) struct StartHold {
+    pub(crate) perspective: PerspectiveInstance,
+    pub(crate) slot: ReplySlot,
+    pub(crate) reply: String,
+    pub(crate) context: AgentContext,
+    pub(crate) stage: Stage,
+}
+
+impl Drop for StartHold {
     fn drop(&mut self) {
+        let stage = std::mem::replace(&mut self.stage, Stage::HandedOver);
+        if matches!(stage, Stage::HandedOver) {
+            return;
+        }
         release(&self.perspective, &self.slot, &self.reply);
+        let (batch, cancel) = match stage {
+            Stage::Staged(batch) => (batch, false),
+            Stage::Committing(batch) => (batch, true),
+            _ => return,
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let perspective = self.perspective.clone();
+        let reply = self.reply.clone();
+        let context = self.context.clone();
+        runtime.spawn(async move {
+            perspective.discard_batch(&batch).await;
+            if cancel && reply_exists(&perspective, &reply).await {
+                settle(
+                    perspective,
+                    &reply,
+                    json!({ "status": ReplyStatus::Cancelled.as_str() }),
+                    &context,
+                )
+                .await;
+            }
+        });
     }
+}
+
+async fn reply_exists(perspective: &PerspectiveInstance, reply: &str) -> bool {
+    query_rows(
+        perspective,
+        AGENT_REPLY_CLASS,
+        &json!({ "where": { "id": reply } }),
+    )
+    .await
+    .is_ok_and(|rows| !rows.is_empty())
 }
 
 /// Read the conversation, refuse one with nothing to answer, and create the new reply under the
@@ -314,6 +392,7 @@ async fn prepare_and_create(
     caller_did: &str,
     reply: &str,
     context: &AgentContext,
+    hold: &mut StartHold,
 ) -> Result<Vec<AgentMessage>, ReplyError> {
     let replies = replies_in(perspective, container, caller_did).await?;
 
@@ -338,14 +417,17 @@ async fn prepare_and_create(
     }
 
     let batch = perspective.create_batch().await;
+    hold.stage = Stage::Staged(batch.clone());
     if let Err(e) = stage_reply(perspective, container, reply, &batch, context).await {
-        let _ = perspective.discard_batch(&batch).await;
+        perspective.discard_batch(&batch).await;
+        hold.stage = Stage::Reserved;
         return Err(e.into());
     }
-    perspective
-        .commit_batch(batch, context)
-        .await
-        .map_err(|e| anyhow::anyhow!("could not save the reply: {e:#}"))?;
+    hold.stage = Stage::Committing(batch.clone());
+    let committed = perspective.commit_batch(batch, context).await;
+    // A failed commit removes the batch and writes nothing.
+    hold.stage = Stage::Reserved;
+    committed.map_err(|e| anyhow::anyhow!("could not save the reply: {e:#}"))?;
     Ok(messages)
 }
 
@@ -537,7 +619,7 @@ pub(crate) async fn stale_running_replies(
         .collect())
 }
 
-fn reserve(
+pub(crate) fn reserve(
     perspective: &PerspectiveInstance,
     slot: &ReplySlot,
     reply: &str,
@@ -546,8 +628,22 @@ fn reserve(
         .agent_replies
         .lock()
         .expect("agent replies poisoned");
+    // Checked under the lock teardown drains the slots with, so no slot is taken after the drain.
+    if perspective.is_teardown.load(Ordering::Acquire) {
+        return Err(ReplyError::Failed(anyhow::anyhow!(
+            "the perspective is being removed"
+        )));
+    }
     if running.contains_key(slot) {
         return Err(ReplyError::Busy);
+    }
+    if running
+        .keys()
+        .filter(|(_, caller)| caller == &slot.1)
+        .count()
+        >= MAX_RUNNING_PER_CALLER
+    {
+        return Err(ReplyError::TooMany);
     }
     running.insert(
         slot.clone(),

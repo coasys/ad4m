@@ -89,6 +89,10 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             code: 409,
             message: e.to_string(),
         },
+        e @ ReplyError::TooMany => WsRpcError {
+            code: 429,
+            message: e.to_string(),
+        },
         ReplyError::Failed(e) => WsRpcError::internal(format!("{e:#}")),
     })?;
     Ok(serde_json::to_value(AgentReplyStarted { reply_id })?)
