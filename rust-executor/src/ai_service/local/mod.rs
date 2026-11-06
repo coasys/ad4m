@@ -2180,6 +2180,18 @@ mod tests {
             Some(("42".to_string(), 1024 * 1024 + 2 * 1024 * 1024))
         );
         assert_eq!(drm_client_bytes("pos:\t0\nflags:\t0\n"), None);
+        // From kernel 6.13 amdgpu prints `drm-resident-*` and then `drm-memory-*` again as
+        // an alias: counted once (the wind tunnel's fixture).
+        let fdinfo = "drm-driver:\tamdgpu\ndrm-client-id:\t43\ndrm-total-cpu:\t256580 KiB\n\
+                      drm-resident-cpu:\t0\ndrm-total-gtt:\t1455376 KiB\ndrm-shared-gtt:\t0\n\
+                      drm-resident-gtt:\t1455364 KiB\ndrm-purgeable-gtt:\t0\n\
+                      drm-total-vram:\t952 KiB\ndrm-resident-vram:\t952 KiB\n\
+                      drm-memory-vram:\t952 KiB\ndrm-memory-gtt: \t1455364 KiB\n\
+                      drm-memory-cpu: \t0 KiB\namd-requested-gtt:\t1455376 KiB\n";
+        assert_eq!(
+            drm_client_bytes(fdinfo),
+            Some(("43".to_string(), (1455364 + 952) * 1024))
+        );
         // This process is in its own tree.
         assert!(process_tree(std::process::id()).contains(&std::process::id()));
     }
