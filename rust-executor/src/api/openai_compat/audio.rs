@@ -26,7 +26,7 @@ use super::types::SpeechRequest;
 use crate::agent::capabilities::{AI_PROMPT_CAPABILITY, AI_TRANSCRIBE_CAPABILITY};
 use crate::ai_service::providers::audio::{AudioFile, RemoteTranscribe, TranscribeFailure};
 use crate::ai_service::transcription;
-use crate::billing::{bill_compute, check_compute_credits};
+use crate::billing::{bill_compute, check_compute_credits, check_credits_cover};
 use crate::types::{AiCapability, ModelType, RequestContext};
 
 pub async fn transcriptions(
@@ -157,15 +157,16 @@ pub async fn speech(
             ))
         })?;
 
+    // The caller must afford the input before the operator pays the endpoint for it.
+    let amount = billing_amounts::speech_amount(req.input.chars().count());
     if let Some(agent_did) = auth.user_did() {
-        check_compute_credits(agent_did)
+        check_credits_cover(agent_did, amount)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
     // Billed once the endpoint has answered: a request that failed or timed out, queued
     // or not, costs nothing.
     let audio = passthrough::forward_speech(upstream, body).await?;
     if let Some(agent_did) = auth.user_did() {
-        let amount = billing_amounts::speech_amount(req.input.chars().count());
         bill_compute(agent_did, amount, "ai_tts", Some("v1/audio/speech"))?;
     }
     Ok(audio)

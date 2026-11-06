@@ -33,10 +33,23 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
   models), Ollama `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s, a
   failure's detail names no URL), and the per-request limits: `request_timeout` (the
   endpoint's, else the route's default) and `request_slot` (a semaphore only when the
-  operator set `max_concurrent`; none by default). Every call to an endpoint holds them:
-  `/v1` forwards, embeddings, and each remote chat call of a model worker
-  (`within_endpoint_limits` in `ai_service/mod.rs`). A URL with a user name or password is
-  refused.
+  operator set `max_concurrent`; none by default). Which calls hold them:
+  - `/v1` forwards (`passthrough::send`): the slot, and the timeout from the slot wait on
+    (default 300 s for chat, 120 s for speech); a forwarded stream instead gets 30 s to its
+    first byte and the timeout between two chunks.
+  - Embeddings: the slot, and the timeout from the slot wait on (default `EMBED_TIMEOUT`,
+    60 s).
+  - The remote chat calls of a model worker (`within_endpoint_limits` in
+    `ai_service/mod.rs`): a call that is not a stream gets the slot and the timeout from
+    the slot wait on (default `CHAT_TIMEOUT`, 600 s, the provider clients' own
+    `CHAT_REQUEST_TIMEOUT`). A streaming call gets the slot only: neither its wait for the
+    slot nor the stream has `request_timeout`; the provider client's 600 s bounds the call
+    once it holds the slot.
+  - Not covered: Ollama `pull_model` (its own idle timeout, `PULL_IDLE_TIMEOUT`) and
+    `delete_upstream_model` (30 s), health checks and discovery (`PROBE_TIMEOUT`). None
+    takes a slot.
+
+  A URL with a user name or password is refused.
 - `detect.rs`: `ai.detectEndpoints`, loopback ports, classified by answer shape. Saves nothing.
 - `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
   before the service loads; idempotent by name (a new name takes over the endpoint the

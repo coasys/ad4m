@@ -53,10 +53,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// provider. Threading that through is worth doing and is not done here.
 const DEFAULT_MAX_TOKENS: u32 = 16_384;
 
-/// A completion can legitimately run for minutes on a long prompt. Without a
-/// timeout a hung upstream would park this model's worker thread forever,
-/// since the thread handles one request at a time.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// A completion can legitimately run for minutes on a long prompt.
+const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct AnthropicChat {
     http: reqwest::Client,

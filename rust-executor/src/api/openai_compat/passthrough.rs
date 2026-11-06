@@ -370,12 +370,20 @@ fn generated_text(answer: &Value) -> String {
     text
 }
 
+/// The largest completion limit [`cap_cost`] inserts into a request that set none: 4096 is
+/// the smallest output maximum among common hosted models, so every endpoint accepts a
+/// limit below it. OpenAI and vLLM answer 400 to a limit above the model's maximum, so a
+/// larger inserted limit could refuse every request of a caller with many credits.
+const MAX_INSERTED_LIMIT: u64 = 4096;
+
 /// Bound what `body` can cost a caller who can pay for `affordable` tokens of the model.
 /// The bill is tokens times the model's rate, and a request's tokens are at most its prompt
 /// plus each choice's completion limit. So every completion limit the client set
 /// (`max_tokens`, `max_completion_tokens`) is lowered to
 /// `(affordable - prompt_estimate) / choices`, where `choices` is the largest of `n`,
-/// `best_of` and 1, and `limit_key` is set to it when the client set neither.
+/// `best_of` and 1. When the client set neither, `limit_key` is set to that value only if
+/// it is below [`MAX_INSERTED_LIMIT`]; above, the field stays unset, the model's own output
+/// maximum bounds the answer, and the bill after the answer charges it.
 /// `service_tier` is dropped: the operator prices the endpoint's default tier. A request
 /// that cannot afford one token per choice is refused.
 fn cap_cost(
@@ -404,10 +412,40 @@ fn cap_cost(
             limited = true;
         }
     }
-    if !limited {
+    if !limited && per_choice < MAX_INSERTED_LIMIT {
         fields.insert(limit_key.to_string(), Value::from(per_choice));
     }
     Ok(())
+}
+
+/// For a caller who pays, check that its credits cover a prompt of `prompt_estimate`
+/// tokens of `model_id` and at least one token of answer, and return the tokens they buy.
+/// `Ok(None)`: the caller pays nothing. Every `/v1` completion path checks this before it
+/// calls the model, forwarded or answered here.
+pub(super) fn afford_prompt(
+    auth: &RequestContext,
+    model_id: &str,
+    prompt_estimate: usize,
+) -> Result<Option<usize>, OpenAIError> {
+    let Some(agent_did) = auth.user_did() else {
+        return Ok(None);
+    };
+    check_compute_credits(agent_did)
+        .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    let affordable = affordable_ai_units(agent_did, model_id)
+        .map_err(|e| OpenAIError::internal(format!("Could not read the credits: {e}")))?;
+    if affordable.is_some_and(|affordable| affordable <= prompt_estimate) {
+        return Err(OpenAIError::insufficient_quota(
+            "Insufficient compute credits for this request",
+        ));
+    }
+    Ok(affordable)
+}
+
+/// The token estimate of the prompt a completion request `body` carries: its `messages`,
+/// `prompt` and `tools`.
+pub(super) fn prompt_estimate(body: &Value) -> usize {
+    estimate_token_count(&prompt_text(body))
 }
 
 /// Forward a chat or text completion `body` for `auth` to `upstream`, the answer back with
@@ -418,19 +456,13 @@ pub async fn forward_completion(
     route: Route,
     mut body: Value,
 ) -> Result<Response, OpenAIError> {
-    let prompt_estimate = estimate_token_count(&prompt_text(&body));
-    if let Some(agent_did) = auth.user_did() {
-        check_compute_credits(agent_did)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-        let affordable = affordable_ai_units(agent_did, &upstream.model.id)
-            .map_err(|e| OpenAIError::internal(format!("Could not read the credits: {e}")))?;
-        if let Some(affordable) = affordable {
-            let limit_key = match (route, upstream.endpoint.kind) {
-                (Route::ChatCompletions, EndpointKind::OpenAi) => "max_completion_tokens",
-                _ => "max_tokens",
-            };
-            cap_cost(&mut body, limit_key, prompt_estimate, affordable)?;
-        }
+    let prompt_estimate = prompt_estimate(&body);
+    if let Some(affordable) = afford_prompt(auth, &upstream.model.id, prompt_estimate)? {
+        let limit_key = match (route, upstream.endpoint.kind) {
+            (Route::ChatCompletions, EndpointKind::OpenAi) => "max_completion_tokens",
+            _ => "max_tokens",
+        };
+        cap_cost(&mut body, limit_key, prompt_estimate, affordable)?;
     }
     let client_model = body.get("model").cloned().unwrap_or(Value::Null);
     body["model"] = Value::String(upstream.remote_model.clone());
@@ -478,14 +510,52 @@ pub async fn forward_completion(
     }
 }
 
-/// The whole body of a non-streamed answer; the request's timeout bounds the read too.
-async fn read_body(upstream: &Upstream, answer: Answer) -> Result<Bytes, OpenAIError> {
-    answer.response.bytes().await.map_err(|e| {
-        let endpoint = &upstream.endpoint;
-        let failed =
-            UpstreamUnreachable::new(endpoint.base_url.as_str(), &e, endpoint.api_key.expose());
-        upstream_failure(endpoint, &upstream.remote_model, failed.into())
-    })
+/// The most speech audio this executor reads from an endpoint: about an hour of MP3 at
+/// 128 kbit/s, more than any one speech answer holds. An endpoint that sends more is cut off.
+pub(super) const MAX_SPEECH_AUDIO: usize = 64 << 20;
+
+/// The body of a non-streamed answer, up to `limit` bytes; the request's timeout bounds
+/// the read too. An answer longer than `limit` fails.
+async fn read_body(
+    upstream: &Upstream,
+    answer: Answer,
+    limit: usize,
+) -> Result<Bytes, OpenAIError> {
+    // The slot is held until the answer is read.
+    let Answer {
+        mut response,
+        _slot,
+        ..
+    } = answer;
+    let endpoint = &upstream.endpoint;
+    let too_large = || {
+        upstream_failure(
+            endpoint,
+            &upstream.remote_model,
+            anyhow::anyhow!("the endpoint answered more than {limit} bytes"),
+        )
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    loop {
+        let chunk = response.chunk().await.map_err(|e| {
+            let failed =
+                UpstreamUnreachable::new(endpoint.base_url.as_str(), &e, endpoint.api_key.expose());
+            upstream_failure(endpoint, &upstream.remote_model, failed.into())
+        })?;
+        let Some(chunk) = chunk else {
+            return Ok(Bytes::from(body));
+        };
+        if body.len() + chunk.len() > limit {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
 }
 
 /// A non-streamed answer, with the client's `model`, billed.
@@ -621,13 +691,14 @@ fn stream_back(
                 ));
             }
         };
-        // The endpoint is done with: its slot goes to the next request, and the final event
-        // waits for no client.
+        // The endpoint is done with: its slot goes to the next request before the final
+        // event waits for a client that reads slowly, for as long as any other event may.
         drop(upstream_events);
         drop(slot);
         if let Some((kind, message)) = failure {
             let error = json!({ "error": { "message": message, "type": kind, "code": kind } });
-            let _ = tx.try_send(Ok(Bytes::from(format!("data: {error}\n\n"))));
+            let event = Ok(Bytes::from(format!("data: {error}\n\n")));
+            let _ = tokio::time::timeout(timeout, tx.send(event)).await;
         }
     });
     Response::builder()
@@ -651,6 +722,9 @@ const MAX_SSE_EVENT: usize = 8 << 20;
 struct SseEvents {
     /// The bytes of a line not yet complete.
     line: Vec<u8>,
+    /// How much of `line` holds no line end: the next chunk is searched from there, so a
+    /// long line is not searched again on every chunk.
+    scanned: usize,
     /// The `data` lines of the event not yet complete, and their length.
     data: Vec<String>,
     held: usize,
@@ -663,11 +737,12 @@ impl SseEvents {
         self.line.extend_from_slice(chunk);
         let mut complete = Vec::new();
         let mut start = 0;
-        while let Some(at) = self.line[start..]
+        let mut from = self.scanned;
+        while let Some(at) = self.line[from..]
             .iter()
             .position(|&b| b == b'\n' || b == b'\r')
         {
-            let end = start + at;
+            let end = from + at;
             let next = match self.line[end] {
                 // A CR the next chunk may follow with its LF.
                 b'\r' if end + 1 == self.line.len() => break,
@@ -687,8 +762,11 @@ impl SseEvents {
                 self.data.push(data.to_string());
             }
             start = next;
+            from = next;
         }
         self.line.drain(..start);
+        // What is left has no line end, but for a last CR the next chunk may follow with LF.
+        self.scanned = self.line.len() - usize::from(self.line.last() == Some(&b'\r'));
         complete
     }
 
@@ -709,7 +787,7 @@ pub async fn forward_speech(upstream: Upstream, mut body: Value) -> Result<Respo
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    let audio = read_body(&upstream, answer).await?;
+    let audio = read_body(&upstream, answer, MAX_SPEECH_AUDIO).await?;
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
@@ -733,6 +811,20 @@ mod tests {
             events.push(b": keep-alive\n\nevent: x\ndata: y\n\n"),
             vec!["y"]
         );
+    }
+
+    // Each chunk searched the whole unfinished line again for its end.
+    #[test]
+    fn a_line_over_many_chunks_is_searched_once_and_reads_whole() {
+        let mut events = SseEvents::default();
+        assert!(events.push(b"data: ab").is_empty());
+        assert_eq!(events.scanned, 8);
+        assert!(events.push(b"cd").is_empty());
+        assert_eq!(events.scanned, 10);
+        assert!(events.push(b"ef\r").is_empty());
+        assert_eq!(events.scanned, 12, "a last CR is searched again");
+        assert_eq!(events.push(b"\n\r\n"), vec!["abcdef"]);
+        assert_eq!(events.scanned, 0);
     }
 
     // Each network chunk was decoded on its own: a character split in two became two U+FFFD,
@@ -781,6 +873,21 @@ mod tests {
         assert_eq!(
             body,
             json!({ "max_tokens": 5, "max_completion_tokens": 90 })
+        );
+
+        // No limit sent: one is inserted only below what every model accepts.
+        let mut body = json!({});
+        cap_cost(&mut body, "max_tokens", 0, MAX_INSERTED_LIMIT as usize - 1).unwrap();
+        assert_eq!(body, json!({ "max_tokens": MAX_INSERTED_LIMIT - 1 }));
+        let mut body = json!({});
+        cap_cost(&mut body, "max_tokens", 0, MAX_INSERTED_LIMIT as usize).unwrap();
+        assert_eq!(body, json!({}));
+        let mut body = json!({ "max_tokens": 1_000_000 });
+        cap_cost(&mut body, "max_tokens", 0, 100_000).unwrap();
+        assert_eq!(
+            body,
+            json!({ "max_tokens": 100_000 }),
+            "a limit sent is clamped"
         );
 
         let error = cap_cost(&mut json!({ "n": 4 }), "max_tokens", 97, 100).unwrap_err();

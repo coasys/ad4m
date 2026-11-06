@@ -236,6 +236,12 @@ pub fn affordable_ai_units(
 /// happens after the operation via bill_compute with the exact cost.
 /// No-ops (allows) if free hosting is enabled or user has free access.
 pub fn check_compute_credits(agent_did: &str) -> Result<(), anyhow::Error> {
+    check_credits_cover(agent_did, 0.0)
+}
+
+/// [`check_compute_credits`] for an operation whose least cost is known: the balance must be
+/// above 0 and at least `amount`, the credits [`bill_compute`] will deduct.
+pub fn check_credits_cover(agent_did: &str, amount: f64) -> Result<(), anyhow::Error> {
     let global_free = crate::db_backend::db_backend().get_free_hosting_enabled()?;
     if global_free {
         return Ok(());
@@ -245,7 +251,7 @@ pub fn check_compute_credits(agent_did: &str) -> Result<(), anyhow::Error> {
         return Ok(());
     }
     let credits = crate::db_backend::db_backend().get_agent_credits(agent_did)?;
-    if credits <= 0.0 {
+    if credits <= 0.0 || credits < amount {
         return Err(anyhow::anyhow!("Insufficient compute credits"));
     }
     Ok(())
