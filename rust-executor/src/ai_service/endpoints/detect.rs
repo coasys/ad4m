@@ -75,7 +75,9 @@ async fn get_json(http: &reqwest::Client, url: String) -> Option<Value> {
     if !response.status().is_success() {
         return None;
     }
-    response.json().await.ok()
+    super::super::providers::http::read_json(response)
+        .await
+        .ok()
 }
 
 /// What answers at `base_url`, by the shape of its answers: Ollama's `/api/version`,

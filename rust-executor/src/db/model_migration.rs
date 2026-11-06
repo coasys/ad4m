@@ -206,31 +206,6 @@ impl Ad4mDb {
 }
 
 impl Ad4mDb {
-    /// Inserts one `ai_endpoints` entry of an export.
-    pub(super) fn import_endpoint(&self, entry: &serde_json::Value) -> Ad4mDbResult<()> {
-        let text = |field: &str| {
-            entry[field]
-                .as_str()
-                .map(str::to_string)
-                .ok_or_else(|| anyhow::anyhow!("{field} missing"))
-        };
-        let optional_u32 = |field: &str| entry[field].as_u64().and_then(|v| u32::try_from(v).ok());
-        let endpoint = Endpoint {
-            id: text("id")?,
-            name: text("name")?,
-            kind: serde_json::from_value(entry["kind"].clone())?,
-            base_url: Url::parse(&text("base_url")?)?,
-            api_key: Secret::new(entry["api_key"].as_str().unwrap_or_default()),
-            capabilities: serde_json::from_value(entry["capabilities"].clone())?,
-            max_num_ctx: optional_u32("max_num_ctx"),
-            request_timeout_secs: optional_u32("request_timeout_secs"),
-            max_concurrent: optional_u32("max_concurrent"),
-            managed: false,
-            health: EndpointHealth::default(),
-        };
-        self.insert_endpoint(&endpoint)
-    }
-
     /// Inserts one `models` entry of an export: `false` when it was left out. An entry of an
     /// export written before endpoints carries its connection (`api_*`): it gets the
     /// endpoint that serves it, as the migration gives one. A local model is left out.

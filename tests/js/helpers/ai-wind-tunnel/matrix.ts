@@ -25,6 +25,8 @@ export function resolveModel(
       license: m.license,
       params: m.params,
       source: m.url,
+      // The model file's hash (the install checks it): ties the evidence to the file measured.
+      sha256: m.sha256,
       ...(entry.voice ? { voice: entry.voice } : {}),
     };
   }

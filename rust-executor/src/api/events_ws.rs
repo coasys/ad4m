@@ -35,7 +35,7 @@
 //! | `exception-occurred`          | `exception`   | approval requests: the agent asked, AGENT_PERMIT; else everyone | Exception occurred |
 //! | `transcription-text`          | (inline)      | the stream owner's DID | AI transcription text                |
 //! | `model-status`                | (inline)      | everyone               | An upstream model's status, e.g. `ai.pullModel` progress |
-//! | `ai-endpoint-status`          | (inline)      | the main agent's DID   | An AI endpoint's health changed      |
+//! | `ai-endpoint-status`          | (inline)      | the main agent's DID   | An AI endpoint's health or capabilities changed |
 //! | `ai-local-progress`           | (inline)      | the operator           | `ai.localInstall` progress: bytes per item, phase |
 //! | `query-subscription-update`   | (inline)      | the subscriber among the owners, on its own connection (passes `events.watch`) | Live query delta update, or `{ lagged: true }` |
 //! | `auto-processor-event`        | (inline)      | the pass owner, if it reads the perspective | Auto-processor pass step signal |
@@ -2223,6 +2223,7 @@ mod event_spec_tests {
                 serde_json::to_value(crate::types::AiEndpointStatusEvent {
                     endpoint_id: "e".into(),
                     health: Default::default(),
+                    capabilities: vec![],
                 }),
             ),
             (

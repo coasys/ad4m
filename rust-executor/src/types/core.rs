@@ -861,7 +861,8 @@ pub struct Endpoint {
     pub base_url: Url,
     /// Empty: no key.
     pub api_key: Secret,
-    /// Probed when added without any, else the operator's. Health checks never change it.
+    /// Probed when added without any, else the operator's. A health check adds what the
+    /// models it lists do; it removes nothing.
     pub capabilities: Vec<AiCapability>,
     /// Ceiling for Ollama's `num_ctx` on every model it serves.
     pub max_num_ctx: Option<u32>,
@@ -1045,12 +1046,13 @@ pub struct ModelStatusEvent {
     pub status: ModelStatus,
 }
 
-/// The `ai-endpoint-status` event: an endpoint's health changed.
+/// The `ai-endpoint-status` event: an endpoint's health or capabilities changed.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AiEndpointStatusEvent {
     pub endpoint_id: String,
     pub health: EndpointHealth,
+    pub capabilities: Vec<AiCapability>,
 }
 
 // Internal User struct - NOT exposed via REST API

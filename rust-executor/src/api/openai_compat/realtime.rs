@@ -11,15 +11,16 @@
 //!     Matches the OpenAI Realtime default `input_audio_format: pcm16`.
 //!   - `{"type":"input_audio_buffer.commit"}` — the buffer is one utterance: it is
 //!     transcribed as one call (one upstream request on an endpoint) and emptied. The
-//!     executor does no voice-activity detection: the client decides where an
-//!     utterance ends.
+//!     client decides where an utterance ends; the executor's speech gate drops one that
+//!     is not speech. Each commit needs compute credits, as the session's opening does.
 //!   - `{"type":"session.close"}` — close the session and the socket.
 //!
 //! * **Server → client**
 //!   - `{"type":"transcription_session.created","session_id":"<uuid>"}`
 //!   - `{"type":"conversation.item.input_audio_transcription.delta","delta":"<text>"}`
 //!     for each text the stream publishes (one per committed utterance).
-//!   - `{"type":"error","error":{"message":"...","code":"..."}}`
+//!   - `{"type":"error","error":{"message":"...","code":"..."}}`; `insufficient_quota`
+//!     when the caller's user has no compute credits left.
 //!
 //! Auth: the WS extractor reads the bearer JWT from the
 //! `Authorization` header *or* a `?token=` query param (per
@@ -30,14 +31,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::Engine;
-use futures::SinkExt;
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
 use crate::agent::capabilities::AI_TRANSCRIBE_CAPABILITY;
 use crate::agent::session::{AuthError, Session};
-use crate::ai_service::AIService;
+use crate::ai_service::{AIService, FeedAnswer};
 use crate::api::errors::ApiError;
 use crate::types::{ModelType, RequestContext};
 
@@ -66,7 +67,17 @@ pub async fn realtime_ws(
     }
 }
 
-async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
+async fn handle_socket(caller: RequestContext, socket: WebSocket) {
+    let (sink, incoming) = socket.split();
+    serve(caller, sink, incoming).await;
+}
+
+/// One `/v1/realtime` session: the client's events from `incoming`, the server's to `socket`.
+pub(super) async fn serve<Si, St>(caller: RequestContext, mut socket: Si, mut incoming: St)
+where
+    Si: Sink<Message> + Unpin,
+    St: Stream<Item = Result<Message, axum::Error>> + Unpin,
+{
     if let Err(e) = caller.require(&AI_TRANSCRIBE_CAPABILITY) {
         let _ = send_error(&mut socket, "forbidden", &e).await;
         let _ = socket.close().await;
@@ -85,6 +96,9 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
     let mut audio_format = AudioFormat::Pcm16;
     // The utterance being appended, sent on commit.
     let mut buffered: Vec<f32> = Vec::new();
+    // The answers of committed utterances, awaited beside the deltas: the deltas of an
+    // utterance arrive while it is transcribed.
+    let mut answers = futures::stream::FuturesUnordered::<FeedAnswer>::new();
 
     loop {
         // Move the receiver out so select! doesn't conflict with
@@ -95,17 +109,19 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
             Over,
             Ws(Option<Result<Message, axum::Error>>),
             Delta(Result<String, broadcast::error::RecvError>),
+            Answered(crate::ai_service::Result<()>),
         }
 
         let ev = tokio::select! {
             _ = &mut over => Ev::Over,
-            msg = socket.recv() => Ev::Ws(msg),
+            msg = incoming.next() => Ev::Ws(msg),
             text = async {
                 match rx_taken.as_mut() {
                     Some(rx) => rx.recv().await,
                     None => std::future::pending().await,
                 }
             } => Ev::Delta(text),
+            Some(answered) = answers.next(), if !answers.is_empty() => Ev::Answered(answered),
         };
 
         delta_rx = rx_taken;
@@ -129,7 +145,17 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
                 }
                 continue;
             }
-            Ev::Delta(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            Ev::Delta(Err(broadcast::error::RecvError::Lagged(lost))) => {
+                let message = format!("{lost} transcript pieces were lost: the socket was busy");
+                log::warn!("/v1/realtime: {message}");
+                let _ = send_error(&mut socket, "server_error", &message).await;
+                continue;
+            }
+            Ev::Answered(Ok(())) => continue,
+            Ev::Answered(Err(e)) => {
+                let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                continue;
+            }
             Ev::Delta(Err(broadcast::error::RecvError::Closed)) => {
                 delta_rx = None;
                 continue;
@@ -215,6 +241,11 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
                         continue;
                     }
                 };
+
+                if let Err(refused) = credits_left(&caller) {
+                    let _ = send_error(&mut socket, "insufficient_quota", &refused).await;
+                    continue;
+                }
 
                 // Tear down any prior session before opening a new one.
                 if let Some(old_sid) = stream_id.take() {
@@ -315,16 +346,21 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
                     continue;
                 }
                 let utterance = std::mem::take(&mut buffered);
-                let fed = match AIService::global_instance().await {
-                    Ok(service) => {
-                        service
-                            .feed_transcription_stream(sid, utterance, &caller)
-                            .await
-                    }
+                if let Err(refused) = credits_left(&caller) {
+                    let _ = send_error(&mut socket, "insufficient_quota", &refused).await;
+                    continue;
+                }
+                // Queued here, so commits keep their order; answered in the loop, so the
+                // deltas of a long utterance are read while it is transcribed.
+                let queued = match AIService::global_instance().await {
+                    Ok(service) => service.queue_utterance(sid, utterance, &caller).await,
                     Err(e) => Err(e),
                 };
-                if let Err(e) = fed {
-                    let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                match queued {
+                    Ok(answer) => answers.push(answer),
+                    Err(e) => {
+                        let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                    }
                 }
             }
             "session.close" => {
@@ -353,6 +389,16 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
     }
 }
 
+/// Whether the caller may spend compute: `Err` with the reason when its user has no credits
+/// left. A caller without a user (the operator, an app on the main agent) pays nothing.
+fn credits_left(caller: &RequestContext) -> Result<(), String> {
+    match caller.user_did() {
+        Some(did) => crate::billing::check_compute_credits(did)
+            .map_err(|_| "Insufficient compute credits".to_string()),
+        None => Ok(()),
+    }
+}
+
 /// The frame that forwards the transcription delta `text` (`None` for an empty one), or the
 /// error of a session whose token stopped holding: a transcript goes out only while it holds.
 pub(super) fn delta_frame(session: &Session, text: &str) -> Result<Option<String>, AuthError> {
@@ -367,7 +413,11 @@ pub(super) fn delta_frame(session: &Session, text: &str) -> Result<Option<String
     Ok(Some(delta.to_string()))
 }
 
-async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> Result<(), ()> {
+async fn send_error<S: Sink<Message> + Unpin>(
+    socket: &mut S,
+    code: &str,
+    message: &str,
+) -> Result<(), ()> {
     let body = json!({
         "type": "error",
         "error": {

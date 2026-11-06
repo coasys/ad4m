@@ -229,7 +229,17 @@ impl RemoteStream {
             return Ok(());
         }
         let audio_ms = samples.len() as u64 * 1000 / SAMPLE_RATE as u64;
-        let speech_ratio = self.gate.speech_ratio(&samples);
+        // Silero takes milliseconds per second of audio: on a blocking thread, not on a
+        // worker of the runtime. The gate goes along and comes back with its state.
+        let gate = std::mem::replace(&mut self.gate, SpeechGate { vad: None });
+        let (gate, samples, speech_ratio) = tokio::task::spawn_blocking(move || {
+            let mut gate = gate;
+            let ratio = gate.speech_ratio(&samples);
+            (gate, samples, ratio)
+        })
+        .await
+        .map_err(|e| anyhow!("The speech gate failed: {e}"))?;
+        self.gate = gate;
         if speech_ratio < VAD_MIN_SPEECH_RATIO {
             log::debug!(
                 "transcription stream={} audio_ms={audio_ms} dropped by the speech gate (speech_ratio={speech_ratio:.2})",

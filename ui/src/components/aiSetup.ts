@@ -115,8 +115,8 @@ function sameUrl(a: string, b: string): boolean {
 }
 
 /**
- * The saved endpoint of `kind` at `baseUrl`, or a new one (named by its kind and port,
- * suffixed when the name is taken). The executor checks a new endpoint once before it
+ * The saved endpoint of `kind` at `baseUrl` (with `apiKey` as its key when one is given),
+ * or a new one (named by its kind and port, suffixed when the name is taken). The executor checks a new endpoint once before it
  * saves it.
  */
 export async function endpointFor(
@@ -127,7 +127,14 @@ export async function endpointFor(
 ): Promise<AiEndpoint> {
   const endpoints = await client.ai.endpoints();
   const saved = endpoints.find((e) => e.kind === kind && sameUrl(e.baseUrl, baseUrl));
-  if (saved && !apiKey) return saved;
+  if (saved) {
+    // A key typed again replaces the stored one; the other settings stay.
+    if (!apiKey) return saved;
+    return client.ai.updateEndpoint(saved.id, {
+      ...withMaxNumCtx(saved, saved.maxNumCtx ?? undefined),
+      apiKey,
+    });
+  }
   const port = new URL(baseUrl).port;
   const base = `${kindLabel(kind).split(" ")[0].toLowerCase()}${port ? `-${port}` : ""}`;
   const taken = new Set(endpoints.map((e) => e.name));

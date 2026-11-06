@@ -39,6 +39,8 @@ export interface CellModel {
   license?: string;
   params?: string;
   source?: string;
+  /** The manifest's sha256 of the model file. */
+  sha256?: string;
   /** TTS voice. */
   voice?: string;
 }

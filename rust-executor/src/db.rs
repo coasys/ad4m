@@ -2425,24 +2425,7 @@ impl Ad4mDb {
         export_data.insert("tasks".to_string(), serde_json::to_value(tasks)?);
 
         // Export AI endpoints, keys included as the database holds them.
-        let endpoints: Vec<serde_json::Value> = self
-            .get_endpoints()?
-            .iter()
-            .map(|endpoint| {
-                serde_json::json!({
-                    "id": endpoint.id,
-                    "name": endpoint.name,
-                    "kind": endpoint.kind,
-                    "base_url": endpoint.base_url.to_string(),
-                    "api_key": endpoint.api_key.expose(),
-                    "capabilities": endpoint.capabilities,
-                    "max_num_ctx": endpoint.max_num_ctx,
-                    "request_timeout_secs": endpoint.request_timeout_secs,
-                    "max_concurrent": endpoint.max_concurrent,
-                })
-            })
-            .collect();
-        export_data.insert("ai_endpoints".to_string(), serde_json::to_value(endpoints)?);
+        export_data.insert("ai_endpoints".to_string(), self.export_endpoints()?.into());
 
         // Export models
         let models: Vec<serde_json::Value> = self
@@ -2877,13 +2860,22 @@ impl Ad4mDb {
                     for default_model in default_models {
                         let model_type =
                             default_model["model_type"].as_str().unwrap_or("<unknown>");
+                        // Only a default whose model is here: a local model is left out.
                         match self.conn.execute(
-                            "INSERT INTO default_models (model_type, model_id) VALUES (?1, ?2)",
+                            "INSERT INTO default_models (model_type, model_id)
+                             SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM models WHERE id = ?2)",
                             params![
                                 default_model["model_type"].as_str().unwrap_or(""),
                                 default_model["model_id"].as_str().unwrap_or("")
                             ],
                         ) {
+                            Ok(0) => {
+                                result.default_models.omitted += 1;
+                                log::warn!(
+                                    "Default {model_type} model of the import is not on this \
+                                     executor: it is left out"
+                                )
+                            }
                             Ok(_) => result.default_models.imported += 1,
                             Err(e) => {
                                 result.default_models.failed += 1;
@@ -4605,7 +4597,7 @@ mod tests {
     }
 
     // An export written before endpoints: its API models get an endpoint as the migration
-    // gives one, its local models are left out.
+    // gives one, its local models and the defaults that name them are left out.
     #[test]
     fn an_export_from_before_endpoints_imports_its_api_models_onto_endpoints() {
         let data = serde_json::json!({
@@ -4620,7 +4612,10 @@ mod tests {
                     "local_file_name": "bert"
                 }
             ],
-            "default_models": [{ "model_type": "\"LLM\"", "model_id": "m1" }]
+            "default_models": [
+                { "model_type": "\"LLM\"", "model_id": "m1" },
+                { "model_type": "\"EMBEDDING\"", "model_id": "m2" }
+            ]
         });
         let db = Ad4mDb::new(":memory:").unwrap();
         let result = db.import_from_json(data, None).unwrap();
@@ -4641,6 +4636,15 @@ mod tests {
         assert_eq!(
             db.get_default_model(ModelType::Llm).unwrap().as_deref(),
             Some("m1")
+        );
+        // The default that named the left-out local model is left out with it.
+        assert_eq!(db.get_default_model(ModelType::Embedding).unwrap(), None);
+        assert_eq!(
+            (
+                result.default_models.imported,
+                result.default_models.omitted
+            ),
+            (1, 1)
         );
     }
 

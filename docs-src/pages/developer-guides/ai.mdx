@@ -210,12 +210,15 @@ await client.ai.feedTranscriptionStream(streamId, utteranceSamples);
 await client.ai.closeTranscriptionStream(streamId);
 ```
 
-The executor does no voice-activity detection: the caller decides where an utterance
-starts and ends (for example with an energy gate in an audio worklet) and feeds each one
-as it ends. Each utterance goes to the model's endpoint (any server with an OpenAI-shaped
+The caller decides where an utterance starts and ends (for example with an energy gate in
+an audio worklet) and feeds each one as it ends. The executor scores each utterance with
+Silero VAD and drops one that is not speech (silence, a cough, a fan) before any model
+sees it, as a model makes text up for such audio. Where ONNX Runtime is missing (it is
+loaded at run time on macOS), the gate is off and every utterance goes to the model.
+Each utterance goes to the model's endpoint (any server with an OpenAI-shaped
 `POST /v1/audio/transcriptions`: speaches, vLLM, a Parakeet wrapper, OpenAI) as one
-request; `feedTranscriptionStream` resolves once the text is published, in the order the
-utterances were fed, and rejects when the endpoint failed.
+request; `feedTranscriptionStream` then resolves once the text is published, in the order
+the utterances were fed, and rejects when the endpoint failed.
 
 Note: Transcription streams are automatically cleaned up after 30 seconds of inactivity.
 

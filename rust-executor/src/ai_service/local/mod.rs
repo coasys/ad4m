@@ -1546,14 +1546,16 @@ pub async fn managed_health(endpoint: &Endpoint) -> EndpointHealth {
     match entry {
         None => down("Local AI is not running: start it with ai.localStart".into()),
         Some((_, status, _, _, true)) if status.phase == Phase::Running => {
-            super::providers::discovery::discover_for(
-                endpoint.kind,
-                endpoint.base_url.clone(),
-                endpoint.api_key.expose(),
-                super::providers::discovery::PROBE_TIMEOUT,
+            super::providers::discovery::health_of(
+                super::providers::discovery::discover_for(
+                    endpoint.kind,
+                    endpoint.base_url.clone(),
+                    endpoint.api_key.expose(),
+                    super::providers::discovery::PROBE_TIMEOUT,
+                )
+                .list_models()
+                .await,
             )
-            .health()
-            .await
         }
         Some((port, status, readiness, served, _)) => match status.phase {
             Phase::Running if supervisor::probe(port, &readiness).await => EndpointHealth {

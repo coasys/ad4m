@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   basisNote,
   chatModels,
+  endpointFor,
   endpointLabel,
   parseMaxNumCtx,
   preselectedChat,
@@ -87,4 +88,51 @@ test("setting the ceiling keeps the endpoint's other settings and its stored key
 test("a model the wind tunnel did not measure on this hardware says so; a measured one says nothing", () => {
   assert.equal(basisNote({ basis: "default" }), "not measured on this hardware");
   assert.equal(basisNote({ basis: "measured" }), null);
+});
+
+test("a key typed again for a saved endpoint updates that endpoint, not a new one", async () => {
+  const saved = {
+    id: "e1",
+    name: "openai",
+    kind: "OPEN_AI",
+    baseUrl: "https://api.openai.com/v1/",
+    hasApiKey: true,
+    capabilities: ["chat", "embeddings"],
+    maxNumCtx: null,
+    requestTimeoutSecs: 600,
+    maxConcurrent: null,
+    health: { state: "REACHABLE", servedModels: [] },
+  };
+  const calls = [];
+  const client = {
+    ai: {
+      endpoints: async () => [saved],
+      addEndpoint: async (input) => {
+        calls.push(["add", input]);
+        return { ...saved, id: "e2", name: input.name };
+      },
+      updateEndpoint: async (id, input) => {
+        calls.push(["update", id, input]);
+        return saved;
+      },
+    },
+  };
+  const endpoint = await endpointFor(client, "OPEN_AI", "https://api.openai.com/v1", "sk-new");
+  assert.equal(endpoint.id, "e1");
+  assert.deepEqual(calls, [
+    [
+      "update",
+      "e1",
+      {
+        name: "openai",
+        kind: "OPEN_AI",
+        baseUrl: "https://api.openai.com/v1/",
+        capabilities: ["chat", "embeddings"],
+        maxNumCtx: undefined,
+        requestTimeoutSecs: 600,
+        maxConcurrent: undefined,
+        apiKey: "sk-new",
+      },
+    ],
+  ]);
 });

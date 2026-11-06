@@ -289,6 +289,36 @@ export function sttFixtures(): LoadedAudio[] {
   return (audioCache ??= loadSttFixtures().utterances.map(loadAudio));
 }
 
+/**
+ * The text a transcription stream published for one fed utterance. `feed` resolves once the
+ * executor transcribed it, after it published every piece; the pieces cross the event
+ * socket on their own, so this waits for the first and then until none arrives for
+ * `quietMs`. An upstream that streams its transcript publishes a piece per segment, with
+ * its own spacing (the executor's transcript is the pieces joined as they are), so they
+ * join with nothing. `firstSeen` is when the first piece was seen.
+ */
+export async function streamedTranscript(
+  texts: string[],
+  feed: Promise<void>,
+  { timeoutMs = 120_000, quietMs = 500 } = {},
+): Promise<{ text: string; firstSeen: number }> {
+  await feed;
+  const deadline = Date.now() + timeoutMs;
+  const tick = () => new Promise((r) => setTimeout(r, 20));
+  while (texts.length === 0 && Date.now() < deadline) await tick();
+  const firstSeen = performance.now();
+  let seen = texts.length;
+  let quietSince = Date.now();
+  while (seen > 0 && Date.now() - quietSince < quietMs && Date.now() < deadline) {
+    await tick();
+    if (texts.length !== seen) {
+      seen = texts.length;
+      quietSince = Date.now();
+    }
+  }
+  return { text: texts.join(""), firstSeen };
+}
+
 export async function sttCell(env: CellEnv): Promise<CellOutcome> {
   const { ex } = env;
   const checks: Check[] = [];
@@ -310,11 +340,8 @@ export async function sttCell(env: CellEnv): Promise<CellOutcome> {
       const streamId = await ex.client.ai.openTranscriptionStream(env.modelId, (t) => texts.push(t));
       try {
         const t0 = performance.now();
-        await ex.client.ai.feedTranscriptionStream(streamId, clip.samples);
-        const deadline = Date.now() + 120_000;
-        while (texts.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-        streamLat.push(performance.now() - t0);
-        const text = texts.join(" ");
+        const { text, firstSeen } = await streamedTranscript(texts, ex.client.ai.feedTranscriptionStream(streamId, clip.samples));
+        streamLat.push(firstSeen - t0);
         const w = wer(clip.transcript, text);
         streamWers.push(w);
         return { pass: w <= clip.maxWer, detail: `WER ${w.toFixed(3)}: ${JSON.stringify(text.trim().slice(0, 160))}`, value: Math.round(w * 1000) / 1000, threshold: clip.maxWer };

@@ -136,10 +136,11 @@ an unknown endpoint or model name) is skipped with a warning. `kind` is one
 of `OLLAMA`, `LLAMA_SERVER`, `VLLM`, `OPEN_AI`, `ANTHROPIC`,
 `OPEN_AI_AUDIO`, `OPEN_AI_COMPATIBLE`; `capabilities` (`chat`,
 `embeddings`, `transcription`, `speech`) defaults to the kind's.
-`request_timeout_secs` bounds one `/v1` request to the endpoint, queueing
-included (default 300 for chat, 60 for embeddings, 120 for speech);
-`max_concurrent` lets at most that many requests through at once, the rest
-wait (default: no limit). A `model_type` is `LLM`, `EMBEDDING`,
+`request_timeout_secs` bounds one request to the endpoint, queueing
+included (default 300 for chat, 60 for embeddings, 120 for speech); a
+stream `/v1` forwards may be silent that long between two chunks, not
+longer. `max_concurrent` lets at most that many requests through at once,
+the rest wait (default: no limit). A `model_type` is `LLM`, `EMBEDDING`,
 `TRANSCRIPTION` or `SPEECH`.
 
 ```json

@@ -543,6 +543,8 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.localStart",
   "ai.prompt",
   "ai.pullModel",
+  "ai.removeEndpoint",
+  "ai.updateEndpoint",
   "language.applyTemplate",
   "language.publish",
   "neighbourhood.join",
