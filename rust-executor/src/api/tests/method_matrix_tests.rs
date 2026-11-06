@@ -545,6 +545,14 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "transcript": [], "basePrefix": "test://", "maxToolCalls": 1 }),
     ),
     ("perspective.runAgent", || json!({ "messages": [] })),
+    (
+        "perspective.agentReply",
+        || json!({ "container": "ad4m://chat", "workIn": "w" }),
+    ),
+    (
+        "perspective.agentReplyCancel",
+        || json!({ "container": "ad4m://chat" }),
+    ),
     ("perspective.addAutoProcessor", || {
         json!({
             "processorId": "p",

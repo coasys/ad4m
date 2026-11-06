@@ -9,6 +9,9 @@ import type { AgentAddEntanglementProofsParams } from "./AgentAddEntanglementPro
 import type { AgentByDidParams } from "./AgentByDidParams";
 import type { AgentRemoveAppParams } from "./AgentRemoveAppParams";
 import type { AgentReply } from "./AgentReply";
+import type { AgentReplyCancelRequest } from "./AgentReplyCancelRequest";
+import type { AgentReplyRequest } from "./AgentReplyRequest";
+import type { AgentReplyStarted } from "./AgentReplyStarted";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
@@ -293,6 +296,8 @@ export interface RpcMethods {
   "perspective.addLinkExpression": { params: PerspectiveAddLinkExpressionParams; result: DecoratedLinkExpression };
   "perspective.addLinks": { params: PerspectiveAddLinksParams; result: Array<DecoratedLinkExpression> };
   "perspective.addSdna": { params: PerspectiveAddSdnaParams; result: PerspectiveAddSdnaResult };
+  "perspective.agentReply": { params: AgentReplyRequest; result: AgentReplyStarted };
+  "perspective.agentReplyCancel": { params: AgentReplyCancelRequest; result: boolean };
   "perspective.all": { params: Record<string, never>; result: Array<PerspectiveHandle> };
   "perspective.commitBatch": { params: PerspectiveCommitBatchParams; result: PerspectiveLinkDiff };
   "perspective.create": { params: CreatePerspectiveRequest; result: PerspectiveHandle };

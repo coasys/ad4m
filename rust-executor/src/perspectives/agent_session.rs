@@ -126,15 +126,16 @@ pub fn check_request(request: &AgentSessionRequest<'_>) -> Result<(), String> {
             bad.role
         ));
     }
-    if request.max_tool_calls == 0 {
+    check_settings(request.write_tools, request.max_tool_calls)
+}
+
+/// Refuse settings no session may have: a write tool that is not one, or no tool calls at all.
+pub fn check_settings(write_tools: &[String], max_tool_calls: u32) -> Result<(), String> {
+    if max_tool_calls == 0 {
         return Err("`maxToolCalls` must be greater than 0".into());
     }
     let writable = writable_tool_names();
-    if let Some(bad) = request
-        .write_tools
-        .iter()
-        .find(|t| !writable.contains(&t.as_str()))
-    {
+    if let Some(bad) = write_tools.iter().find(|t| !writable.contains(&t.as_str())) {
         return Err(format!(
             "{bad:?} is not a tool a session may write with. A session writes only inside its \
              perspective, with: {}",

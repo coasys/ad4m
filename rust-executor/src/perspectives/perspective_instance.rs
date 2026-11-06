@@ -75,6 +75,8 @@ mod subscription_triggers;
 mod local_agents;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
+// Agent replies left `running` by an earlier executor, swept at load.
+mod agent_replies;
 pub use expected_links::{ExpectedLinks, LinksChanged};
 
 #[cfg(test)]
@@ -670,6 +672,11 @@ pub struct PerspectiveInstance {
     /// `propose`, the engine's mint-and-sweep, the sync-triggered sweep),
     /// never inside `run_flow_consensus_pass`, which those nest.
     pub(crate) flow_pass_lock: Arc<Mutex<()>>,
+    /// The agent replies running in this perspective, one per caller in a
+    /// container (`perspectives::agent_reply`). A std mutex: held to read or swap an
+    /// entry, never across an await.
+    pub(crate) agent_replies:
+        Arc<std::sync::Mutex<crate::perspectives::agent_reply::RunningReplies>>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -792,6 +799,7 @@ impl PerspectiveInstance {
             abstract_cache: Arc::new(std::sync::RwLock::new(Default::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
+            agent_replies: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
             #[cfg(test)]
@@ -917,6 +925,7 @@ impl PerspectiveInstance {
             self.fallback_sync_loop(),
             self.auto_processor_supervisor(),
             self.flow_pass_at_load(),
+            self.agent_reply_sweep_at_load(),
         );
     }
 
@@ -1071,6 +1080,7 @@ impl PerspectiveInstance {
     pub async fn teardown_background_tasks(&self) {
         self.is_teardown.store(true, Ordering::Release);
         self.wakes.all();
+        self.abort_agent_replies();
     }
 
     /// Return diagnostic stats for this perspective's memory-relevant data structures.

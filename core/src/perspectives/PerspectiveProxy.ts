@@ -22,6 +22,7 @@ import { LiveQuery, LiveQueryStatus, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
+import type { AgentReplyStarted } from "../generated/api/AgentReplyStarted";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 import { SHACLShape } from "../shacl/SHACLShape";
@@ -469,6 +470,27 @@ export class PerspectiveProxy {
         options?: CallOptions,
     ): Promise<AgentReply> {
         return await this.#client.runAgent(this.#handle.uuid, messages, settings, options)
+    }
+
+    /**
+     * Start an agent's reply in a conversation this perspective keeps: `container` holds the
+     * conversation (write the person's message there first), and the reply is an
+     * {@link AgentReplyRecord} under it, `running` until the agent ends. Returns at once with the
+     * reply's id; follow it with a subscription. See {@link PerspectiveClient.agentReply}.
+     *
+     * @param container the node that holds the conversation
+     * @param settings `workIn` (where the agent works), `context`, `writeTools`, `model`, `maxToolCalls`
+     */
+    async agentReply(
+        container: string,
+        settings: Parameters<PerspectiveClient['agentReply']>[2],
+    ): Promise<AgentReplyStarted> {
+        return await this.#client.agentReply(this.#handle.uuid, container, settings)
+    }
+
+    /** Stop the caller's reply running in `container`. `false` when the caller had none running. */
+    async agentReplyCancel(container: string): Promise<boolean> {
+        return await this.#client.agentReplyCancel(this.#handle.uuid, container)
     }
 
     /**

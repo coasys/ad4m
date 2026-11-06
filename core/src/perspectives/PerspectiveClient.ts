@@ -17,6 +17,7 @@ import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
+import type { AgentReplyStarted } from "../generated/api/AgentReplyStarted";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
@@ -325,6 +326,47 @@ export class PerspectiveClient {
         options?: CallOptions,
     ): Promise<AgentReply> {
         return this.#apiClient.call('perspective.runAgent', { uuid, messages, ...settings }, options)
+    }
+
+    /**
+     * Start an agent's reply in a conversation this perspective keeps. `container` is the node
+     * that holds the conversation: its children that carry text (`TextContent`) are the messages,
+     * so write the person's message there first. The reply is created at once as an
+     * `AgentReplyRecord` under the container with `status: 'running'`, and the call returns its
+     * id; the agent runs on the node in `workIn`, as the caller, and the reply gets its text and
+     * `done` (or `failed`, with the error) when it ends, whether or not the caller is still
+     * connected. Only what the caller wrote reaches the model: their own messages and their
+     * earlier finished replies, read per link, so a message another member wrote onto is left
+     * out. A caller has one reply running per container: a second call while it runs is refused
+     * (409), and a caller has at most 8 running across containers (429). Another person in a
+     * shared container has their own.
+     */
+    async agentReply(
+        uuid: string,
+        container: string,
+        settings: {
+            /** The perspective the agent works in: what its tools read and may change. */
+            workIn: string,
+            /** What the person is looking at, as a hint for the model (`{ recordId }`). */
+            context?: Record<string, unknown>,
+            /** Tools that write which the model may call. Absent: the agent only reads. */
+            writeTools?: string[],
+            /** A model id; the node's default language model when absent. */
+            model?: string,
+            /** How many tool calls before the model must answer. Default 20. */
+            maxToolCalls?: number,
+        },
+    ): Promise<AgentReplyStarted> {
+        return this.#apiClient.call('perspective.agentReply', { uuid, container, ...settings })
+    }
+
+    /**
+     * Stop the caller's reply running in `container` and mark it `cancelled`. What the agent
+     * wrote before it was stopped stays written. `false` when the caller had none running;
+     * another person's reply in the same container is theirs to cancel.
+     */
+    async agentReplyCancel(uuid: string, container: string): Promise<boolean> {
+        return this.#apiClient.call('perspective.agentReplyCancel', { uuid, container })
     }
 
     /**
