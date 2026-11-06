@@ -21,6 +21,32 @@ export async function declareBot(client: any, logger: any): Promise<void> {
   }
 }
 
+/** The clients a background bot mark still holds, closed when it settles or at stop. */
+const markingClients = new Set<any>();
+
+function closeClient(client: any): void {
+  markingClients.delete(client);
+  try {
+    client?.close?.();
+  } catch {
+    // A client that fails to close was only used for agent management.
+  }
+}
+
+/**
+ * Mark the agent as a bot in the background with `client`, and close the client once the mark
+ * settles. Never rejects.
+ */
+function markInBackground(client: any, logger: any): Promise<void> {
+  markingClients.add(client);
+  return declareBot(client, logger).finally(() => closeClient(client));
+}
+
+/** Close every client a bot mark still holds (the plugin's `stop()`). */
+export function closeMarkingClients(): void {
+  for (const client of [...markingClients]) closeClient(client);
+}
+
 /**
  * External mode's mark: only an account of the plugin's own, a user on the executor
  * (`auth_status`'s principal `"user"`, which the multi-user login makes). A capability token
@@ -42,16 +68,11 @@ export async function declareBotIfOwnAccount(
   let client: any;
   try {
     client = connect();
-    await declareBot(client, logger);
   } catch (e: any) {
     logger.warn(`[ad4m] Could not mark the agent as a bot in its profile: ${e?.message ?? e}`);
-  } finally {
-    try {
-      client?.close?.();
-    } catch {
-      // A client that fails to close was only used for this one call.
-    }
+    return true;
   }
+  await markInBackground(client, logger);
   return true;
 }
 
@@ -86,6 +107,8 @@ export async function ensureAgentReady(
   const CONNECT_RETRY_DELAY_MS = 2000;
 
   let client: any = null;
+  // Set once a background mark holds the client; otherwise it is closed on the way out.
+  let handedOff = false;
 
   try {
     if (_testClient) {
@@ -104,6 +127,7 @@ export async function ensureAgentReady(
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         if (!_testClient) {
+          if (client) closeClient(client); // the last attempt's
           const { Ad4mClient } = require("@coasys/ad4m");
           client = new Ad4mClient(executorUrl, adminCredential);
         }
@@ -147,7 +171,10 @@ export async function ensureAgentReady(
         logger.info(
           `[ad4m] Agent generated successfully. DID: ${newStatus.did}`,
         );
-        if (markAsBot) void declareBot(client, logger);
+        if (markAsBot) {
+          handedOff = true;
+          void markInBackground(client, logger);
+        }
         return { did: newStatus.did, passphrase: agentPassphrase ? undefined : passphrase };
       } catch (e: any) {
         logger.error(`[ad4m] Failed to generate agent: ${e.message}`);
@@ -164,7 +191,10 @@ export async function ensureAgentReady(
           logger.info(
             `[ad4m] Agent unlocked successfully. DID: ${newStatus.did}`,
           );
-          if (markAsBot) void declareBot(client, logger);
+          if (markAsBot) {
+            handedOff = true;
+            void markInBackground(client, logger);
+          }
           return { did: newStatus.did };
         } catch (e: any) {
           logger.error(`[ad4m] Failed to unlock agent: ${e.message}`);
@@ -182,7 +212,10 @@ export async function ensureAgentReady(
     } else {
       // Already initialized and unlocked
       logger.info(`[ad4m] Agent is ready. DID: ${agentStatus.did}`);
-      if (markAsBot) void declareBot(client, logger);
+      if (markAsBot) {
+        handedOff = true;
+        void markInBackground(client, logger);
+      }
       return { did: agentStatus.did };
     }
   } catch (err: any) {
@@ -191,5 +224,7 @@ export async function ensureAgentReady(
       `[ad4m] Make sure @coasys/ad4m and dependencies are installed (npm install in the plugin directory).`,
     );
     return null;
+  } finally {
+    if (!handedOff) closeClient(client);
   }
 }

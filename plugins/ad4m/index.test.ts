@@ -30,7 +30,7 @@ function makeMockAd4mClient(agentMethods: {
   };
 }
 
-import { AGENT_KIND_BOT, declareBotIfOwnAccount } from "./agent";
+import { AGENT_KIND_BOT, closeMarkingClients, declareBotIfOwnAccount } from "./agent";
 import { AGENT_KIND_BOT as SDK_AGENT_KIND_BOT } from "../../core/src/agent/AgentKind";
 import {
   generateRandomPassphrase,
@@ -874,6 +874,46 @@ describe("ensureAgentReady", () => {
       "[test] ensureAgentReady",
     );
     expect(result).toEqual({ did: "did:key:z6MkBot" });
+  });
+
+  it("closes its client on the way out when it marks nothing", async () => {
+    const close = vi.fn();
+    const client = {
+      ...makeMockAd4mClient({
+        status: vi.fn().mockResolvedValue({ isInitialized: true, isUnlocked: true, did: "did:key:z6MkBot" }),
+      }),
+      close,
+    };
+    await ensureAgentReady("http://localhost:12000", "c", makeMockLogger(), undefined, client, false);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes its client once the background mark settles, and stop closes one still marking", async () => {
+    let answer!: () => void;
+    const close = vi.fn();
+    const ready = { isInitialized: true, isUnlocked: true, did: "did:key:z6MkBot" };
+    const settles = {
+      ...makeMockAd4mClient({
+        status: vi.fn().mockResolvedValue(ready),
+        setKind: vi.fn(() => new Promise<void>((resolve) => (answer = resolve))),
+      }),
+      close,
+    };
+    await ensureAgentReady("http://localhost:12000", "c", makeMockLogger(), undefined, settles);
+    expect(close).not.toHaveBeenCalled();
+    answer();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(close).toHaveBeenCalledTimes(1);
+
+    const closeHung = vi.fn();
+    const hangs = {
+      ...makeMockAd4mClient({ status: vi.fn().mockResolvedValue(ready), setKind: vi.fn(() => new Promise(() => {})) }),
+      close: closeHung,
+    };
+    await ensureAgentReady("http://localhost:12000", "c", makeMockLogger(), undefined, hangs);
+    expect(closeHung).not.toHaveBeenCalled();
+    closeMarkingClients();
+    expect(closeHung).toHaveBeenCalledTimes(1);
   });
 
   it("marks the agent with the SDK's own bot kind", () => {

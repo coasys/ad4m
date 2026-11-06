@@ -39,7 +39,7 @@ import {
   stopExecutor,
   downloadExecutor,
 } from "./executor";
-import { declareBotIfOwnAccount, ensureAgentReady } from "./agent";
+import { closeMarkingClients, declareBotIfOwnAccount, ensureAgentReady } from "./agent";
 import {
   extractMcpResultData,
   mcpCallTool,
@@ -1560,6 +1560,7 @@ Notes:
       }
     },
     stop() {
+      closeMarkingClients();
       stopExecutor(logger);
       logger.info("[ad4m] AD4M MCP service stopped");
     },
