@@ -381,8 +381,9 @@ const MAX_INSERTED_LIMIT: u64 = 4096;
 /// plus each choice's completion limit. So every completion limit the client set
 /// (`max_tokens`, `max_completion_tokens`) is lowered to
 /// `(affordable - prompt_estimate) / choices`, where `choices` is the largest of `n`,
-/// `best_of` and 1. When the client set neither, `limit_key` is set to that value only if
-/// it is below [`MAX_INSERTED_LIMIT`]; above, the field stays unset, the model's own output
+/// `best_of` and 1, times the prompts of a `/v1/completions` list. When the client set
+/// neither, `limit_key` is set to that value only if it is below [`MAX_INSERTED_LIMIT`];
+/// above, the field stays unset, the model's own output
 /// maximum bounds the answer, and the bill after the answer charges it.
 /// `service_tier` is dropped: the operator prices the endpoint's default tier. A request
 /// that cannot afford one token per choice is refused.
@@ -393,7 +394,15 @@ fn cap_cost(
     affordable: usize,
 ) -> Result<(), OpenAIError> {
     let count = |key: &str| body.get(key).and_then(Value::as_u64).unwrap_or(1);
-    let choices = count("n").max(count("best_of")).max(1);
+    // `/v1/completions` takes a list of prompts (texts, or token lists) and answers each
+    // with its own choices. A list of numbers is one prompt, as tokens.
+    let prompts = match body.get("prompt") {
+        Some(Value::Array(items)) if items.iter().any(|i| i.is_string() || i.is_array()) => {
+            items.len() as u64
+        }
+        _ => 1,
+    };
+    let choices = count("n").max(count("best_of")).max(1) * prompts;
     let per_choice = (affordable.saturating_sub(prompt_estimate) as u64) / choices;
     if per_choice == 0 {
         return Err(OpenAIError::insufficient_quota(
@@ -892,6 +901,26 @@ mod tests {
 
         let error = cap_cost(&mut json!({ "n": 4 }), "max_tokens", 97, 100).unwrap_err();
         assert_eq!(error.error.code.as_deref(), Some("insufficient_quota"));
+    }
+
+    // `/v1/completions` answers every prompt of a list: 100 prompts at the limit one choice
+    // can afford cost 100 times the credits.
+    #[test]
+    fn each_prompt_of_a_list_shares_the_credits() {
+        let mut body = json!({ "prompt": ["a", "b", "c", "d"], "n": 2, "max_tokens": 1000 });
+        cap_cost(&mut body, "max_tokens", 20, 100).unwrap();
+        assert_eq!(
+            body["max_tokens"], 10,
+            "80 tokens for 4 prompts x 2 choices"
+        );
+
+        let mut body = json!({ "prompt": [[1, 2], [3, 4]], "max_tokens": 1000 });
+        cap_cost(&mut body, "max_tokens", 0, 100).unwrap();
+        assert_eq!(body["max_tokens"], 50, "two prompts as tokens");
+
+        let mut body = json!({ "prompt": [1, 2, 3], "max_tokens": 1000 });
+        cap_cost(&mut body, "max_tokens", 0, 100).unwrap();
+        assert_eq!(body["max_tokens"], 100, "one prompt as tokens");
     }
 
     #[test]
