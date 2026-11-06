@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
 mod default_embedding;
+pub mod endpoints;
 mod error;
 pub mod harness;
 pub mod providers;
@@ -1494,7 +1495,7 @@ impl AIService {
             .ok()
             .flatten()
             .and_then(|model| model.api)
-            .map(|api| providers::api_type_supports_native_tools(&api.api_type))
+            .map(|api| api.uses_native_tools())
             .unwrap_or(false)
     }
 
@@ -2468,8 +2469,8 @@ impl AIService {
 
     pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
         log::info!("Updating model: {} with: {:?}", model_id, model_config);
-        // First get the existing model to determine its type
-        let existing_model = crate::db_backend::db_backend()
+        // The model must exist before the row is rewritten.
+        crate::db_backend::db_backend()
             .get_model(model_id.clone())
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
@@ -2480,7 +2481,12 @@ impl AIService {
             .update_model(&model_id, &model_config)
             .context("Failed to update model in database")?;
 
-        // Get the updated model from the database
+        self.reload_model(model_id).await
+    }
+
+    /// Builds a model's client again from its stored row, after the row changed: an update
+    /// of the model, or of the endpoint it runs on.
+    pub(crate) async fn reload_model(&self, model_id: String) -> Result<()> {
         let updated_model = crate::db_backend::db_backend()
             .get_model(model_id.clone())
             .map_err(|e| anyhow!("Database error: {}", e))?
@@ -2488,34 +2494,25 @@ impl AIService {
 
         log::info!("Updated model in DB: {:?}", updated_model);
 
-        match existing_model.model_type {
-            ModelType::Llm => {
-                // Shutdown the existing model thread
-                {
-                    let mut llm_channel = self.llm_channel.lock().await;
-                    if let Some(sender) = llm_channel.get(&model_id) {
-                        log::info!("Shutting down LLM model thread for {}", model_id);
-                        let (tx, rx) = oneshot::channel();
-                        if let Ok(()) =
-                            sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
-                                result_sender: tx,
-                            }))
-                        {
-                            // Wait for the thread to confirm shutdown
-                            let _ = rx.await;
-                            log::info!("LLM model thread for {} confirmed shutdown", model_id);
-                        }
-
-                        // Remove the channel from the map
-                        llm_channel.remove(&model_id);
-                    } else {
-                        log::info!(
-                            "LLM model thread for {} not found. Nothing to shutdown",
-                            model_id
-                        );
-                    }
+        // Shut down the model's LLM thread, whatever its type is now: a model that is no
+        // longer an LLM must not keep one.
+        {
+            let mut llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.remove(&model_id) {
+                log::info!("Shutting down LLM model thread for {}", model_id);
+                let (tx, rx) = oneshot::channel();
+                if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                    result_sender: tx,
+                })) {
+                    // Wait for the thread to confirm shutdown
+                    let _ = rx.await;
+                    log::info!("LLM model thread for {} confirmed shutdown", model_id);
                 }
+            }
+        }
 
+        match updated_model.model_type {
+            ModelType::Llm => {
                 // Spawn the model with new configuration
                 log::info!(
                     "Spawning new LLM model thread for {} with updated config",
@@ -2526,13 +2523,18 @@ impl AIService {
                     .await?;
                 model_ready_rx.await?;
 
-                // Respawn all tasks for this model
+                // Respawn all tasks for this model: by its id, or by "default" when it is
+                // the default LLM.
                 let tasks = crate::db_backend::db_backend()
                     .get_tasks()
                     .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-                for task in tasks.into_iter().filter(|t| t.model_id == model_id) {
-                    self.spawn_task(task).await?;
+                for task in tasks {
+                    if Self::replace_model_variables(&task.model_id).ok().as_ref()
+                        == Some(&model_id)
+                    {
+                        self.spawn_task(task).await?;
+                    }
                 }
             }
             ModelType::Embedding => {
@@ -2688,6 +2690,7 @@ mod tests {
             model: "claude-test".to_string(),
             api_type: ModelApiType::Anthropic,
             max_num_ctx: None,
+            native_tools: None,
         }
     }
 

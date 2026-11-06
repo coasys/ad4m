@@ -10,7 +10,7 @@ pub use core::*;
 pub use domain::{
     AIModelLoadingStatus, AIPromptExamplesInput, AITaskInput, Agent, AgentSignature, AgentStatus,
     Apps, AuthInfoInput, CapabilityInput, DateTime, DecoratedNeighbourhoodExpression,
-    DecoratedPerspectiveDiff, EntanglementProof, ExceptionInfo, ExceptionType,
+    DecoratedPerspectiveDiff, EndpointInput, EntanglementProof, ExceptionInfo, ExceptionType,
     ExpressionProofInput, ExpressionRendered, HostingUserInfo, Icon, ImportResult, ImportStats,
     InteractionCall, InteractionMeta, InteractionParameter, JsResultType, Language, LanguageHandle,
     LanguageLanguageInput, LanguageMeta, LanguageMetaInput, LinkExpressionInput,

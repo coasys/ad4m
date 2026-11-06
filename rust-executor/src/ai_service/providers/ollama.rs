@@ -29,9 +29,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use url::Url;
 
+use super::discovery::{guess_capabilities, Discover};
 use super::{
     ChatReply, ChatRequest, ChatRole, ChatTurn, ChatUsage, RemoteChat, ToolCall, ToolSpec,
 };
+use crate::types::{AiCapability, DiscoveredModel, EndpointKind};
 
 /// Default cap: never request more context than this, even if the model
 /// advertises a larger window.  131072 tokens covers the WE schema context
@@ -147,7 +149,7 @@ impl OllamaChat {
             }
         };
 
-        let json: serde_json::Value = match response.json().await {
+        let json: serde_json::Value = match super::http::read_json(response).await {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("Could not parse /api/show response for {model}: {e}");
@@ -194,37 +196,208 @@ impl OllamaChat {
     }
 }
 
-/// Ask Ollama which models are pulled — `GET {base}/api/tags`.
-///
-/// The response shape differs from OpenAI: `{"models": [{"name": …}, …]}`
-/// rather than `{"data": [{"id": …}, …]}`.  No auth required — Ollama runs
-/// without credentials by default.
-pub async fn list_models(_api_key: &str, base_url: Url) -> Result<Vec<String>> {
+/// The Ollama root: the base URL without a trailing slash or an OpenAI-compat `/v1`.
+fn ollama_root(base_url: &Url) -> String {
     let trimmed = base_url.as_str().trim_end_matches('/');
-    let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
-    let endpoint = format!("{root}/api/tags");
+    trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
+}
 
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap_or_default()
-        .get(&endpoint)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach {endpoint}: {e}"))?;
+/// Which models are pulled — `GET {base}/api/tags` — and what each does, from
+/// `POST /api/show`. No auth: Ollama runs without credentials.
+pub struct OllamaDiscover {
+    http: reqwest::Client,
+    root: String,
+}
 
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow!("Model listing failed ({status}): {body}"));
+impl OllamaDiscover {
+    pub fn new(base_url: Url, timeout: Duration) -> Self {
+        Self {
+            http: super::http::credentialed_http(timeout)
+                .build()
+                .expect("the HTTP client builds"),
+            root: ollama_root(&base_url),
+        }
     }
 
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| anyhow!("Could not read the model list: {e}"))?;
+    /// A model's capabilities and context window from `/api/show`. A model it does not
+    /// describe gets the guess from its name.
+    async fn describe(&self, name: String) -> DiscoveredModel {
+        let url = format!("{}/api/show", self.root);
+        let request = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({ "model": name }));
+        let show = super::http::fetch_json(request, &url, "").await.ok();
+        let mut capabilities: Vec<AiCapability> = show
+            .as_ref()
+            .and_then(|show| show.get("capabilities")?.as_array().cloned())
+            .into_iter()
+            .flatten()
+            .filter_map(|c| match c.as_str()? {
+                "completion" => Some(AiCapability::Chat),
+                "embedding" => Some(AiCapability::Embeddings),
+                _ => None,
+            })
+            .collect();
+        if capabilities.is_empty() {
+            capabilities = guess_capabilities(EndpointKind::Ollama, &name);
+        }
+        let context_length = show
+            .as_ref()
+            .and_then(|show| show.get("model_info")?.as_object().cloned())
+            .and_then(|info| {
+                info.iter()
+                    .find(|(key, _)| key.ends_with(".context_length"))
+                    .and_then(|(_, value)| value.as_u64())
+            })
+            .map(|n| n.min(u64::from(u32::MAX)) as u32);
+        DiscoveredModel {
+            id: name,
+            capabilities,
+            context_length,
+        }
+    }
+}
 
-    Ok(model_names_from_tags(&json))
+#[async_trait]
+impl Discover for OllamaDiscover {
+    async fn list_models(&self) -> Result<Vec<DiscoveredModel>> {
+        let url = format!("{}/api/tags", self.root);
+        let json = super::http::fetch_json(self.http.get(&url), &url, "").await?;
+        // A 200 without the list is no listing: the endpoint would count as reachable.
+        if !json.get("models").is_some_and(|models| models.is_array()) {
+            return Err(anyhow!("{url} answered without a model list"));
+        }
+        let names = model_names_from_tags(&json);
+        Ok(futures::future::join_all(names.into_iter().map(|name| self.describe(name))).await)
+    }
+}
+
+/// How long a pull may go without a progress line before it counts as stalled. A layer
+/// download reports progress many times a second; verifying a large blob can be silent
+/// for a while.
+const PULL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The longest progress line a pull reads. Ollama's are about 200 bytes.
+const MAX_PULL_LINE: usize = 64 * 1024;
+
+/// One progress line of `POST /api/pull`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PullProgress {
+    /// Ollama's step: `pulling manifest`, `downloading <digest>`, `verifying sha256 digest`,
+    /// `success`.
+    pub status: String,
+    /// 0..100 of the layer being downloaded, when the line says.
+    pub percent: Option<f64>,
+}
+
+/// Read one ndjson line of a pull. `None` for a line that is not a progress object; an
+/// `{"error": …}` line is the pull failing.
+pub fn pull_progress(line: &str) -> Result<Option<PullProgress>> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return Ok(None);
+    };
+    if let Some(error) = json.get("error").and_then(|e| e.as_str()) {
+        return Err(anyhow!("Ollama could not pull the model: {error}"));
+    }
+    let Some(status) = json.get("status").and_then(|s| s.as_str()) else {
+        return Ok(None);
+    };
+    let total = json
+        .get("total")
+        .and_then(|t| t.as_f64())
+        .filter(|t| *t > 0.0);
+    let completed = json.get("completed").and_then(|c| c.as_f64());
+    Ok(Some(PullProgress {
+        status: status.to_string(),
+        percent: total.map(|total| (completed.unwrap_or(0.0) / total * 100.0).min(100.0)),
+    }))
+}
+
+/// Pull `model` onto the Ollama at `base_url` (`POST /api/pull`), handing each progress
+/// line to `on_progress`. Done when Ollama reports `success`.
+pub async fn pull_model(
+    base_url: &Url,
+    model: &str,
+    mut on_progress: impl FnMut(PullProgress) + Send,
+) -> Result<()> {
+    use futures::StreamExt;
+
+    let url = format!("{}/api/pull", ollama_root(base_url));
+    // No overall timeout: a pull runs as long as the download does. A stall is caught
+    // before the answer starts and per line after.
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .expect("the HTTP client builds");
+    let request = http
+        .post(&url)
+        .json(&serde_json::json!({ "model": model, "stream": true }))
+        .send();
+    let response = tokio::time::timeout(PULL_IDLE_TIMEOUT, request)
+        .await
+        .map_err(|_| anyhow!("{url} did not answer the pull of {model} in {PULL_IDLE_TIMEOUT:?}"))?
+        .map_err(|e| anyhow!("Could not reach {url}: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = super::http::read_error_text(response).await;
+        return Err(super::http::UpstreamStatus { url, status, body }.into());
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+    // Moved by each progress line only: bytes that never end a line are no progress.
+    let mut deadline = tokio::time::Instant::now() + PULL_IDLE_TIMEOUT;
+    loop {
+        let next = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .map_err(|_| {
+                anyhow!("The pull of {model} stalled: no progress for {PULL_IDLE_TIMEOUT:?}")
+            })?;
+        let Some(chunk) = next else {
+            return Err(anyhow!(
+                "The pull of {model} ended before Ollama reported success"
+            ));
+        };
+        buffer.extend_from_slice(&chunk.map_err(|e| anyhow!("The pull of {model} failed: {e}"))?);
+        while let Some(newline) = buffer.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = buffer.drain(..=newline).collect();
+            if let Some(progress) = pull_progress(&String::from_utf8_lossy(&line))? {
+                deadline = tokio::time::Instant::now() + PULL_IDLE_TIMEOUT;
+                let done = progress.status == "success";
+                on_progress(progress);
+                if done {
+                    return Ok(());
+                }
+            }
+        }
+        // What is left is one unfinished line.
+        if buffer.len() > MAX_PULL_LINE {
+            return Err(anyhow!(
+                "The pull of {model} failed: a progress line is longer than {MAX_PULL_LINE} bytes"
+            ));
+        }
+    }
+}
+
+/// Delete `model` from the Ollama at `base_url` (`DELETE /api/delete`).
+pub async fn delete_model(base_url: &Url, model: &str) -> Result<()> {
+    let url = format!("{}/api/delete", ollama_root(base_url));
+    let response = super::http::credentialed_http(Duration::from_secs(30))
+        .build()
+        .expect("the HTTP client builds")
+        .delete(&url)
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .map_err(|e| anyhow!("Could not reach {url}: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = super::http::read_error_text(response).await;
+        return Err(super::http::UpstreamStatus { url, status, body }.into());
+    }
+    Ok(())
 }
 
 /// Extract model names from Ollama's `/api/tags` response.
@@ -412,6 +585,7 @@ impl RemoteChat for OllamaChat {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
+        request.refuse_openai_options("Ollama's native API")?;
         let num_ctx = self.resolve_num_ctx(&request.model).await;
         let body = ChatRequestBody {
             model: request.model,
@@ -431,12 +605,11 @@ impl RemoteChat for OllamaChat {
 
         let status = response.status();
         if !status.is_success() {
-            let err_body = response.text().await.unwrap_or_default();
+            let err_body = super::http::read_error_text(response).await;
             return Err(anyhow!("Ollama API error {status}: {err_body}"));
         }
 
-        let parsed: ChatResponse = response
-            .json()
+        let parsed: ChatResponse = super::http::read_json(response)
             .await
             .map_err(|e| anyhow!("Could not read Ollama response: {e}"))?;
 
@@ -469,6 +642,7 @@ impl RemoteChat for OllamaChat {
     ) -> Result<ChatReply> {
         use futures::StreamExt;
 
+        request.refuse_openai_options("Ollama's native API")?;
         let num_ctx = self.resolve_num_ctx(&request.model).await;
         let body = ChatRequestBody {
             model: request.model,
@@ -488,7 +662,7 @@ impl RemoteChat for OllamaChat {
 
         let status = response.status();
         if !status.is_success() {
-            let err_body = response.text().await.unwrap_or_default();
+            let err_body = super::http::read_error_text(response).await;
             return Err(anyhow!("Ollama API error {status}: {err_body}"));
         }
 
@@ -746,6 +920,7 @@ mod tests {
 #[cfg(test)]
 mod wire_tests {
     use super::*;
+    use mockito::Matcher;
     use serde_json::json;
 
     fn turns() -> Vec<ChatTurn> {
@@ -1201,6 +1376,25 @@ mod wire_tests {
     }
 
     #[tokio::test]
+    async fn a_listing_without_a_models_array_is_an_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/tags")
+            .with_status(200)
+            .with_body(r#"{"error":"nope"}"#)
+            .create_async()
+            .await;
+        let error = OllamaDiscover::new(Url::parse(&server.url()).unwrap(), Duration::from_secs(5))
+            .list_models()
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("without a model list"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn listing_models_reads_the_tags_array() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -1211,6 +1405,7 @@ mod wire_tests {
                     "models": [
                         {"name": "qwen3:32b"},
                         {"name": "llama3.1:8b"},
+                        {"name": "nomic-embed-text"},
                     ]
                 })
                 .to_string(),
@@ -1218,17 +1413,204 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let models = list_models("", Url::parse(&server.url()).unwrap())
-            .await
-            .expect("listing succeeds");
+        server
+            .mock("POST", "/api/show")
+            .match_body(Matcher::PartialJson(json!({ "model": "qwen3:32b" })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "capabilities": ["completion", "tools"],
+                    "model_info": { "qwen3.context_length": 40960 },
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/api/show")
+            .match_body(Matcher::PartialJson(json!({ "model": "nomic-embed-text" })))
+            .with_status(200)
+            .with_body(json!({ "capabilities": ["embedding"] }).to_string())
+            .create_async()
+            .await;
+        // `llama3.1:8b` has no /api/show answer: its capabilities are guessed.
+
+        let discover =
+            OllamaDiscover::new(Url::parse(&server.url()).unwrap(), Duration::from_secs(5));
+        let models = discover.list_models().await.expect("listing succeeds");
 
         mock.assert_async().await;
-        assert_eq!(models, vec!["qwen3:32b", "llama3.1:8b"]);
+        assert_eq!(
+            models,
+            vec![
+                DiscoveredModel {
+                    id: "qwen3:32b".into(),
+                    capabilities: vec![AiCapability::Chat],
+                    context_length: Some(40960),
+                },
+                DiscoveredModel {
+                    id: "llama3.1:8b".into(),
+                    capabilities: vec![AiCapability::Chat],
+                    context_length: None,
+                },
+                DiscoveredModel {
+                    id: "nomic-embed-text".into(),
+                    capabilities: vec![AiCapability::Embeddings],
+                    context_length: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn pull_progress_reads_percent_status_and_errors() {
+        assert_eq!(
+            pull_progress(r#"{"status":"pulling manifest"}"#).unwrap(),
+            Some(PullProgress {
+                status: "pulling manifest".into(),
+                percent: None
+            })
+        );
+        assert_eq!(
+            pull_progress(r#"{"status":"pulling 6a0746a1ec1a","digest":"sha256:6a07","total":200,"completed":50}"#)
+                .unwrap(),
+            Some(PullProgress { status: "pulling 6a0746a1ec1a".into(), percent: Some(25.0) })
+        );
+        assert_eq!(pull_progress("").unwrap(), None);
+        assert_eq!(pull_progress("{\"digest\":\"x\"}").unwrap(), None);
+        let error =
+            pull_progress(r#"{"error":"pull model manifest: file does not exist"}"#).unwrap_err();
+        assert!(error.to_string().contains("file does not exist"));
+    }
+
+    #[tokio::test]
+    async fn a_pull_streams_progress_until_success() {
+        let mut server = mockito::Server::new_async().await;
+        let ndjson = [
+            json!({ "status": "pulling manifest" }),
+            json!({ "status": "pulling abc", "total": 100, "completed": 40 }),
+            json!({ "status": "pulling abc", "total": 100, "completed": 100 }),
+            json!({ "status": "success" }),
+        ]
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+        let mock = server
+            .mock("POST", "/api/pull")
+            .match_body(Matcher::PartialJson(
+                json!({ "model": "qwen3:8b", "stream": true }),
+            ))
+            .with_status(200)
+            .with_body(ndjson)
+            .create_async()
+            .await;
+
+        let mut seen = Vec::new();
+        pull_model(&Url::parse(&server.url()).unwrap(), "qwen3:8b", |p| {
+            seen.push(p)
+        })
+        .await
+        .expect("the pull succeeds");
+
+        mock.assert_async().await;
+        let percents: Vec<Option<f64>> = seen.iter().map(|p| p.percent).collect();
+        assert_eq!(percents, vec![None, Some(40.0), Some(100.0), None]);
+        assert_eq!(seen.last().unwrap().status, "success");
+    }
+
+    #[tokio::test]
+    async fn a_pull_that_ends_without_success_or_with_an_error_fails() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/pull")
+            .with_status(200)
+            .with_body("{\"status\":\"pulling manifest\"}\n{\"error\":\"no such model\"}\n")
+            .create_async()
+            .await;
+        let error = pull_model(&Url::parse(&server.url()).unwrap(), "nope", |_| {})
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no such model"), "{error}");
+
+        let mut cut = mockito::Server::new_async().await;
+        cut.mock("POST", "/api/pull")
+            .with_status(200)
+            .with_body("{\"status\":\"pulling manifest\"}\n")
+            .create_async()
+            .await;
+        let error = pull_model(&Url::parse(&cut.url()).unwrap(), "m", |_| {})
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("before Ollama reported success"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pull_line_that_never_ends_fails() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/pull")
+            .with_status(200)
+            .with_body("x".repeat(MAX_PULL_LINE + 1))
+            .create_async()
+            .await;
+        let error = pull_model(&Url::parse(&server.url()).unwrap(), "m", |_| {})
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("longer than"), "{error}");
+    }
+
+    // A server that takes the connection and never answers: the pull gives up.
+    #[tokio::test(start_paused = true)]
+    async fn a_pull_with_no_answer_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let silent = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            // Hold the connection open, unanswered.
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+
+        let error = pull_model(&url, "m", |_| {}).await.unwrap_err();
+
+        assert!(error.to_string().contains("did not answer"), "{error}");
+        silent.abort();
+    }
+
+    #[tokio::test]
+    async fn a_delete_names_the_model_and_reports_a_missing_one() {
+        let mut server = mockito::Server::new_async().await;
+        let deleted = server
+            .mock("DELETE", "/api/delete")
+            .match_body(Matcher::PartialJson(json!({ "model": "qwen3:8b" })))
+            .with_status(200)
+            .create_async()
+            .await;
+        server
+            .mock("DELETE", "/api/delete")
+            .match_body(Matcher::PartialJson(json!({ "model": "gone" })))
+            .with_status(404)
+            .with_body(r#"{"error":"model 'gone' not found"}"#)
+            .create_async()
+            .await;
+        let base = Url::parse(&server.url()).unwrap();
+        delete_model(&base, "qwen3:8b").await.unwrap();
+        deleted.assert_async().await;
+        let error = delete_model(&base, "gone").await.unwrap_err();
+        assert!(error.to_string().contains("404"), "{error}");
     }
 
     #[tokio::test]
     async fn an_unreachable_endpoint_names_the_url_it_tried() {
-        let error = list_models("", Url::parse("http://127.0.0.1:1/").unwrap())
+        let discover = OllamaDiscover::new(
+            Url::parse("http://127.0.0.1:1/").unwrap(),
+            Duration::from_secs(5),
+        );
+        let error = discover
+            .list_models()
             .await
             .expect_err("nothing listens there");
 

@@ -11,8 +11,11 @@
 //! thread in `ai_service` talks to; each implementation owns its own wire
 //! format, and nothing above this module knows which one answered.
 //!
-//! Adding a provider: implement [`RemoteChat`], and construct it in
-//! [`build`] from the model's [`ModelApiType`](crate::types::ModelApiType).
+//! Adding a provider: implement [`RemoteChat`] and [`discovery::Discover`],
+//! construct the client in `AIService::build_remote_client` from the model's
+//! [`ModelApiType`](crate::types::ModelApiType), and the listing in
+//! [`discovery::discover_for`] from the endpoint's
+//! [`EndpointKind`](crate::types::EndpointKind).
 //! Do not add a variant to `LlmModel` — that enum distinguishes *local
 //! weights* from *a remote endpoint*, which is a different question.
 
@@ -21,30 +24,13 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 pub mod anthropic;
+pub mod discovery;
 pub mod http;
 pub mod ollama;
 pub mod openai;
 
 #[cfg(test)]
 mod anthropic_e2e;
-
-/// Ask a configured endpoint which models it serves, before any model has
-/// been registered against it.
-///
-/// The settings form calling this is how an operator finds out what they can
-/// pick, and — because a bad key fails here rather than on the first
-/// completion — whether their credentials work at all.
-pub async fn list_models(
-    api_type: &crate::types::ModelApiType,
-    api_key: &str,
-    base_url: url::Url,
-) -> Result<Vec<String>> {
-    match api_type {
-        crate::types::ModelApiType::OpenAi => openai::list_models(api_key, base_url).await,
-        crate::types::ModelApiType::Anthropic => anthropic::list_models(api_key, base_url).await,
-        crate::types::ModelApiType::Ollama => ollama::list_models(api_key, base_url).await,
-    }
-}
 
 /// Whether this executor's client for an API type passes tools as data.
 ///
@@ -55,17 +41,14 @@ pub async fn list_models(
 /// two agree, because two answers drifting apart would route a model down a
 /// path its client cannot serve.
 ///
-/// `OpenAi => false` is about [`openai::OpenAiChat`] and not about the OpenAI
-/// wire format, which carries tools perfectly well. That client could support
-/// them and does not yet, so every OpenAI-shaped model takes the prompt-
-/// injection path. Flipping this arm alone is not enough to make it work — it
-/// would also need building `tools[]` in `OpenAiChat::chat`, which is why that
-/// method refuses a request carrying tools instead of ignoring them.
+/// Every client can. Whether a given model is handed tools is the model's own
+/// flag on top of this (`ModelApi::uses_native_tools`): OpenAI-shaped servers
+/// differ per model in whether they honour `tools[]`.
 pub fn api_type_supports_native_tools(api_type: &crate::types::ModelApiType) -> bool {
     match api_type {
         crate::types::ModelApiType::Anthropic => true,
         crate::types::ModelApiType::Ollama => true,
-        crate::types::ModelApiType::OpenAi => false,
+        crate::types::ModelApiType::OpenAi => true,
     }
 }
 
@@ -183,6 +166,13 @@ pub struct ChatRequest {
     /// [`RemoteChat::supports_native_tools`] is true — everything else has its
     /// tools rendered into the prompt before the request is built.
     pub tools: Vec<ToolSpec>,
+    /// OpenAI's `tool_choice` (`"auto"`, `"required"`, `"none"`, or a named function),
+    /// as the caller wrote it. Only the OpenAI-shaped client sends it; the others refuse
+    /// a request carrying it rather than drop it.
+    pub tool_choice: Option<serde_json::Value>,
+    /// OpenAI's `response_format` (`json_object`, `json_schema`), as the caller wrote it.
+    /// Same rule as `tool_choice`.
+    pub response_format: Option<serde_json::Value>,
 }
 
 impl ChatRequest {
@@ -191,7 +181,20 @@ impl ChatRequest {
             model: model.into(),
             messages,
             tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
         }
+    }
+
+    /// Refuses a request carrying `tool_choice` or `response_format`, for a provider
+    /// that does not translate them: dropping either would answer a different question.
+    pub(crate) fn refuse_openai_options(&self, provider: &str) -> Result<()> {
+        if self.tool_choice.is_some() || self.response_format.is_some() {
+            return Err(anyhow::anyhow!(
+                "{provider} does not take tool_choice or response_format from this executor"
+            ));
+        }
+        Ok(())
     }
 
     pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
@@ -250,11 +253,8 @@ pub trait RemoteChat: Send + Sync {
     /// come back as data rather than as text that happens to look like data.
     ///
     /// It is a fact about *this implementation*, not about the protocol it
-    /// speaks. The OpenAI wire format carries `tools[]` and answers with
-    /// `tool_calls` — it is one of the two formats that defined the shape —
-    /// and [`super::openai::OpenAiChat`] still answers `false`, because it
-    /// does not build them. Read a `false` as "this client does not pass
-    /// tools as data", never as "this protocol cannot".
+    /// speaks. Read a `false` as "this client does not pass tools as data",
+    /// never as "this protocol cannot".
     ///
     /// Answering it wrongly is the one way a provider can break a caller: a
     /// `true` from a client that then drops `ChatRequest::tools` hands the
@@ -280,9 +280,9 @@ pub trait RemoteChat: Send + Sync {
     /// not it streamed, because the caller bills on it.
     ///
     /// Tools are *not* promised here, even on a provider whose
-    /// [`Self::supports_native_tools`] is true. Reading structured calls out of
-    /// a stream means reassembling them from partial JSON, which no
-    /// implementation does yet. An implementation that cannot must answer a
+    /// [`Self::supports_native_tools`] is true: reading structured calls out of
+    /// a stream means reassembling them from partial JSON, which only the
+    /// OpenAI-shaped client does. An implementation that cannot must answer a
     /// request carrying tools with an error rather than a reply with none —
     /// an empty `tool_calls` is indistinguishable from a model that chose not
     /// to call anything.

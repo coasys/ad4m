@@ -8,7 +8,9 @@ with its own `impl Ad4mDb` block. Child modules can use the private `conn` field
 
 | File | Content |
 |---|---|
+| `endpoints.rs` | The `ai_endpoints` table (AI model servers, key held as models' keys are) and `models.endpoint_id`: `link_models_to_endpoints` gives every remote model the endpoint with its protocol, URL and key (creating one named by the host); `update_endpoint` rewrites the `api_*` columns of the models on it. `ai_service::endpoints` calls them through `db_backend()`; `link_models_to_endpoints` runs only inside `Ad4mDb` (startup, model writes) |
 | `grants.rs` | The `grants` table: one row per token the executor issued, read by `agent::grants` |
+| `session_cutoffs.rs` | The users' session cutoffs (`users.sessions_valid_after`), read by `agent::revoked` |
 | `tasks.rs` | Owner-scoped reads of the `tasks` table: `get_task_owner`, `get_tasks_owned_by` |
 | `identity.rs` | `operator_record`, `identity_agents`, `identity_joins` (created in `Ad4mDb::new`), read by `identity/`. The operator record functions also take a bare connection for `ad4m-executor init --operator`, which runs before any executor. The key logs and `identity_heads`/`identity_fork_signers` are `identity::cache::KelCache`'s own connection to the same file |
 

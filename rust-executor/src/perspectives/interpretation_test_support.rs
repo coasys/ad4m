@@ -297,6 +297,7 @@ pub(crate) async fn setup_interpretation_e2e(
                 model,
                 api_type: crate::types::ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
         })
         .await

@@ -12,4 +12,8 @@ apiKey?: string, model: string, apiType: string,
  * Optional ceiling for the provider's context window, in tokens.
  * See [`crate::types::ModelApi::max_num_ctx`].
  */
-maxNumCtx?: number, };
+maxNumCtx?: number, 
+/**
+ * See [`crate::types::ModelApiView::native_tools`].
+ */
+nativeTools?: boolean, };

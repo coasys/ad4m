@@ -35,12 +35,14 @@ use crate::db::{
     Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinRow,
     OperatorRecordRow, PaymentRequest,
 };
+use crate::secret::Secret;
 use crate::types::{
-    AIModelLoadingStatus, AIPromptExamples, AITask, EntanglementProof, Expression, ImportResult,
-    LinkExpression, LinkStatus, Model, ModelInput, ModelType, Notification, NotificationInput,
-    PerspectiveDiff, PerspectiveExpression, PerspectiveHandle, SentMessage, UserInfo,
-    UserStatistics,
+    AIModelLoadingStatus, AIPromptExamples, AITask, AiCapability, Endpoint, EndpointHealth,
+    EntanglementProof, Expression, ImportResult, LinkExpression, LinkStatus, Model, ModelInput,
+    ModelType, Notification, NotificationInput, PerspectiveDiff, PerspectiveExpression,
+    PerspectiveHandle, SentMessage, UserInfo, UserStatistics,
 };
+use url::Url;
 
 // ── Domain methods ─────────────────────────────────────────────────────────────
 
@@ -219,6 +221,25 @@ macro_rules! ad4m_db_methods {
             fn remove_model(&self, id: &str) -> Ad4mDbResult<()>;
             fn set_default_model(&self, model_type: ModelType, model_id: &str) -> Ad4mDbResult<()>;
             fn get_default_model(&self, model_type: ModelType) -> Ad4mDbResult<Option<String>>;
+
+            // AI endpoints
+            fn get_endpoints(&self) -> Ad4mDbResult<Vec<Endpoint>>;
+            fn get_endpoint(&self, id: &str) -> Ad4mDbResult<Option<Endpoint>>;
+            fn get_endpoint_by_name(&self, name: &str) -> Ad4mDbResult<Option<Endpoint>>;
+            fn insert_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<()>;
+            fn update_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<Vec<String>>;
+            fn kept_endpoint_key(&self, id: &str, base_url: &Url) -> Ad4mDbResult<Secret>;
+            fn set_endpoint_health(
+                &self,
+                id: &str,
+                base_url: &Url,
+                health: &EndpointHealth,
+                capabilities: &[AiCapability]
+            ) -> Ad4mDbResult<bool>;
+            fn endpoint_model_ids(&self, id: &str) -> Ad4mDbResult<Vec<String>>;
+            fn endpoint_remote_models(&self, id: &str) -> Ad4mDbResult<Vec<String>>;
+            fn models_using_remote(&self, id: &str, remote_model: &str) -> Ad4mDbResult<Vec<String>>;
+            fn remove_endpoint(&self, id: &str) -> Ad4mDbResult<()>;
 
             // Notifications
             fn add_notification(

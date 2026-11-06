@@ -7,4 +7,8 @@ import type { ModelType } from "./ModelType";
  * A model as RPC results show it. Its provider key never leaves the executor:
  * `api.hasApiKey` says whether one is set.
  */
-export type Model = { id: string, name: string, api: ModelApi | null, local: LocalModel | null, modelType: ModelType, };
+export type Model = { id: string, name: string, api: ModelApi | null, local: LocalModel | null, modelType: ModelType, 
+/**
+ * The endpoint that serves `api`. `None` for a local model.
+ */
+endpointId?: string | null, };

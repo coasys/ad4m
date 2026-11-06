@@ -33,9 +33,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use url::Url;
 
+use super::discovery::Discover;
 use super::{
     ChatReply, ChatRequest, ChatRole, ChatTurn, ChatUsage, RemoteChat, ToolCall, ToolSpec,
 };
+use crate::types::{AiCapability, DiscoveredModel};
 
 /// Wire version. Anthropic requires it on every request and treats it as the
 /// contract: pinning it is what stops a server-side change reshaping our
@@ -79,36 +81,49 @@ impl AnthropicChat {
     }
 }
 
-/// Ask Anthropic which models this key can reach — `GET {base}/v1/models`.
-///
-/// Same role as the OpenAI listing (see that module for why it is standalone),
-/// with different auth: an `x-api-key` header and the pinned wire version
-/// rather than a bearer token.
-pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
-    let endpoint = super::http::versioned_endpoint(base_url, "models");
+/// Which models this key can reach — `GET {base}/v1/models`, with an `x-api-key` header
+/// and the pinned wire version rather than a bearer token.
+pub struct AnthropicDiscover {
+    http: reqwest::Client,
+    api_key: String,
+    base_url: Url,
+}
 
-    let response = super::http::credentialed_http(super::http::DISCOVERY_TIMEOUT)
-        .build()
-        .map_err(|e| anyhow!("Could not build an HTTP client: {e}"))?
-        .get(&endpoint)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach {endpoint}: {e}"))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow!("Model listing failed ({status}): {body}"));
+impl AnthropicDiscover {
+    pub fn new(api_key: &str, base_url: Url, timeout: Duration) -> Self {
+        Self {
+            http: super::http::credentialed_http(timeout)
+                .build()
+                .expect("the HTTP client builds"),
+            api_key: api_key.to_string(),
+            base_url,
+        }
     }
+}
 
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| anyhow!("Could not read the model list: {e}"))?;
-
-    Ok(super::http::model_ids_from_data(&json))
+#[async_trait]
+impl Discover for AnthropicDiscover {
+    async fn list_models(&self) -> Result<Vec<DiscoveredModel>> {
+        let endpoint = super::http::versioned_endpoint(self.base_url.clone(), "models");
+        let request = self
+            .http
+            .get(&endpoint)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION);
+        let json = super::http::fetch_json(request, &endpoint, &self.api_key).await?;
+        // A 200 without the list is no listing: the endpoint would count as reachable.
+        if !json.get("data").is_some_and(|data| data.is_array()) {
+            return Err(anyhow!("{endpoint} answered without a model list"));
+        }
+        Ok(super::http::model_ids_from_data(&json)
+            .into_iter()
+            .map(|id| DiscoveredModel {
+                id,
+                capabilities: vec![AiCapability::Chat],
+                context_length: None,
+            })
+            .collect())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +369,8 @@ impl AnthropicChat {
             // Anthropic puts the useful part in the body (`error.message`);
             // the status alone does not distinguish a bad key from a bad
             // model name, and both are things an operator has to fix.
-            let body = response.text().await.unwrap_or_default();
+            let body =
+                super::http::scrub(&super::http::read_error_text(response).await, &self.api_key);
             return Err(anyhow!("Anthropic API error {}: {}", status, body));
         }
 
@@ -433,11 +449,11 @@ impl RemoteChat for AnthropicChat {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
+        request.refuse_openai_options("Anthropic")?;
         let body = self.build_body(request, false);
         let response = self.send(&body).await?;
 
-        let parsed: MessagesResponse = response
-            .json()
+        let parsed: MessagesResponse = super::http::read_json(response)
             .await
             .map_err(|e| anyhow!("Could not read Anthropic response: {:?}", e))?;
 
@@ -492,6 +508,7 @@ impl RemoteChat for AnthropicChat {
             ));
         }
 
+        request.refuse_openai_options("Anthropic")?;
         let body = self.build_body(request, true);
         let response = self.send(&body).await?;
 
@@ -1271,6 +1288,50 @@ mod wire_tests {
         // An error body is not a stream of deltas; nothing should have been
         // pushed to a consumer that is about to be told the call failed.
         assert!(rx.try_recv().is_err());
+    }
+
+    async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
+        let discover = AnthropicDiscover::new(api_key, base_url, Duration::from_secs(5));
+        Ok(discover
+            .list_models()
+            .await?
+            .into_iter()
+            .map(|model| model.id)
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn a_listing_without_a_data_array_is_an_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_body(r#"{"type":"error"}"#)
+            .create_async()
+            .await;
+        let error = list_models("k", Url::parse(&server.url()).unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("without a model list"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_choice_or_response_format_is_refused_rather_than_dropped() {
+        let client = AnthropicChat::new("k", Url::parse("http://127.0.0.1:1").unwrap());
+        let mut format = ChatRequest::new("claude-opus-5", turns());
+        format.response_format = Some(json!({ "type": "json_object" }));
+        let mut choice = ChatRequest::new("claude-opus-5", turns());
+        choice.tool_choice = Some(json!("required"));
+        for request in [format, choice] {
+            let error = client.chat(request.clone()).await.unwrap_err();
+            assert!(error.to_string().contains("response_format"), "{error}");
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let error = client.chat_stream(request, tx).await.unwrap_err();
+            assert!(error.to_string().contains("response_format"), "{error}");
+        }
     }
 
     #[tokio::test]

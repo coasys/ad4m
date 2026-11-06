@@ -1176,6 +1176,7 @@ fn model_at(base_url: &str, api_key: &str) -> crate::types::ModelInput {
             model: "m".into(),
             api_type: "ANTHROPIC".into(),
             max_num_ctx: None,
+            native_tools: None,
         }),
         ..Default::default()
     }

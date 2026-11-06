@@ -21,6 +21,9 @@
 //! empty, and a secret file must not be readable by
 //! group or others (mode 0600 or 0400).
 
+use crate::ai_service::endpoints::config::{
+    AiDefaultsSetting, AiEndpointSetting, AiModelSetting, AiSettings,
+};
 use crate::config::{Ad4mConfig, SmtpConfig, TlsConfig, DEFAULT_PORT};
 use crate::secret::Secret;
 use serde::{Deserialize, Serialize};
@@ -227,6 +230,17 @@ pub struct ExecutorConfigFile {
     /// reaches and the keys its heads must be signed by.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentityFileSettings>,
+    /// AI endpoints registered at startup, by name. A key comes from the
+    /// environment variable an entry's `api_key_env` names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_endpoints: Option<Vec<AiEndpointSetting>>,
+    /// AI models registered at startup, by name, on an endpoint named in
+    /// `ai_endpoints` (or registered before).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_models: Option<Vec<AiModelSetting>>,
+    /// The default model per type (`llm`, `embedding`, `transcription`), by name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_defaults: Option<AiDefaultsSetting>,
 }
 
 /// `identity` in the config file.
@@ -541,6 +555,14 @@ impl ExecutorConfigFile {
             identity_store_url: self.identity.as_ref().and_then(|i| i.store_url.clone()),
             identity_store_keys: self.identity.as_ref().and_then(|i| i.store_keys.clone()),
             identity_allow_private_src: self.identity.as_ref().and_then(|i| i.allow_private_src),
+            ai_settings: (self.ai_endpoints.is_some()
+                || self.ai_models.is_some()
+                || self.ai_defaults.is_some())
+            .then(|| AiSettings {
+                endpoints: self.ai_endpoints.clone().unwrap_or_default(),
+                models: self.ai_models.clone().unwrap_or_default(),
+                defaults: self.ai_defaults.clone().unwrap_or_default(),
+            }),
             admin_credential: secrets.admin_credential.clone(),
             ..Ad4mConfig::unprepared()
         })
@@ -606,6 +628,45 @@ mod tests {
             .unwrap();
         assert_eq!(unset.sfu_udp_port, None);
         assert_eq!(unset.sfu_public_addr, None);
+    }
+
+    /// The AI keys reach the executor config; a key itself has no place in the file.
+    #[test]
+    fn ai_keys_reach_the_executor_config_and_an_inline_key_is_refused() {
+        let file = parse(
+            r#"{"ai_endpoints": [{"name": "openai", "kind": "OPEN_AI",
+                  "base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY"}],
+                "ai_models": [{"name": "gpt", "model_type": "LLM", "endpoint": "openai",
+                  "remote_model": "gpt-5"}],
+                "ai_defaults": {"llm": "gpt"}}"#,
+        )
+        .unwrap();
+        let ai = file
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap()
+            .ai_settings
+            .expect("set");
+        assert_eq!(
+            ai.endpoints[0].api_key_env.as_deref(),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(ai.models[0].endpoint, "openai");
+        assert_eq!(ai.defaults.llm.as_deref(), Some("gpt"));
+        assert!(parse("{}")
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap()
+            .ai_settings
+            .is_none());
+
+        let inline = parse(
+            r#"{"ai_endpoints": [{"name": "openai", "kind": "OPEN_AI",
+                  "base_url": "https://api.openai.com/v1", "api_key": "sk-inline"}]}"#,
+        );
+        assert!(
+            matches!(inline, Err(ConfigFileError::UnknownKey { ref key, .. }) if key.contains("api_key")),
+            "{inline:?}"
+        );
     }
 
     #[test]

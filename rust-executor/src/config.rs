@@ -172,6 +172,9 @@ pub struct Ad4mConfig {
     /// `identity.allowPrivateSrc`: let the `src` of a DID URL that `identity.resolve` reads
     /// reach loopback and private addresses. Off by default; for tests and local development.
     pub identity_allow_private_src: Option<bool>,
+    /// The config file's `ai_endpoints`, `ai_models` and `ai_defaults`, applied at
+    /// startup (`ai_service::endpoints::config::apply`).
+    pub ai_settings: Option<crate::ai_service::endpoints::config::AiSettings>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -551,6 +554,7 @@ impl Ad4mConfig {
             identity_store_url: None,
             identity_store_keys: None,
             identity_allow_private_src: None,
+            ai_settings: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,

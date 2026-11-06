@@ -15,4 +15,9 @@ export type ModelApi = { baseUrl: string, hasApiKey: boolean, model: string, api
  * not a compile-time one. Unset falls back to the provider's built-in
  * default.
  */
-maxNumCtx?: number | null, };
+maxNumCtx?: number | null, 
+/**
+ * Whether prompts with tools send them as tool definitions. Unset: yes for Anthropic
+ * and Ollama, no for an OpenAI-shaped server (see [`ModelApi::uses_native_tools`]).
+ */
+nativeTools?: boolean | null, };

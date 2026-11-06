@@ -95,6 +95,7 @@ impl AIService {
                         revision: None,
                     }),
                     api: None,
+                    endpoint_id: None,
                 };
                 let sender = (default.loader)(model).await?;
                 // A model added under this name while we loaded keeps serving it.

@@ -189,7 +189,9 @@ export default function aiTests(testContext: TestContext) {
                         huggingfaceRepo: "updated-repo",
                         revision: "main"
                     },
-                    modelType: "EMBEDDING"
+                    // An LLM loads its files on update, so bogus ones fail. The embedding
+                    // model ignores `local` and would load.
+                    modelType: "LLM"
                 }
 
                 // Update the model

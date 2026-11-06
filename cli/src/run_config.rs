@@ -797,6 +797,10 @@ pub(crate) mod tests {
                 store_keys: Some(vec!["z6MkA".into()]),
                 allow_private_src: Some(false),
             }),
+            // File-only keys with no variable or flag, so unset here.
+            ai_endpoints: None,
+            ai_models: None,
+            ai_defaults: None,
         };
         let file_json = serde_json::to_value(&file).unwrap();
         let config = write_config(&dir, &file_json.to_string());
