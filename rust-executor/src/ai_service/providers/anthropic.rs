@@ -56,7 +56,7 @@ const DEFAULT_MAX_TOKENS: u32 = 16_384;
 /// A completion can legitimately run for minutes on a long prompt. Without a
 /// timeout a hung upstream would hold its caller (and its endpoint's concurrency
 /// slot, when the endpoint caps them) forever.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct AnthropicChat {
     http: reqwest::Client,

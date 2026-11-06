@@ -174,12 +174,18 @@ impl Ad4mDb {
     }
 
     /// Refuses `endpoint` when another one has its name, or the same protocol, URL and key
-    /// (two such endpoints are one server), and a concurrency cap of 0, which would let no
-    /// request through.
+    /// (two such endpoints are one server), and a concurrency cap or a request timeout of 0,
+    /// either of which would let no request through.
     fn refuse_invalid(&self, endpoint: &Endpoint) -> Ad4mDbResult<()> {
         if endpoint.max_concurrent == Some(0) {
             return Err(InvalidEndpoint(
                 "maxConcurrent is at least 1; leave it out for no limit".into(),
+            )
+            .into());
+        }
+        if endpoint.request_timeout_secs == Some(0) {
+            return Err(InvalidEndpoint(
+                "requestTimeoutSecs is at least 1; leave it out for the default".into(),
             )
             .into());
         }
@@ -469,6 +475,23 @@ mod tests {
         let mut capped = endpoint("a", "http://127.0.0.1:9931", "");
         capped.max_concurrent = Some(0);
         let refused = db.insert_endpoint(&capped).unwrap_err();
+        assert!(refused.downcast_ref::<InvalidEndpoint>().is_some());
+    }
+
+    // A request timeout of 0 was stored, and every call to the endpoint then timed out at
+    // once.
+    #[test]
+    fn a_request_timeout_of_zero_is_refused() {
+        let db = db();
+        let mut instant = endpoint("a", "http://127.0.0.1:9931", "");
+        instant.request_timeout_secs = Some(0);
+        let refused = db.insert_endpoint(&instant).unwrap_err();
+        assert!(refused.downcast_ref::<InvalidEndpoint>().is_some());
+
+        instant.request_timeout_secs = Some(1);
+        db.insert_endpoint(&instant).unwrap();
+        instant.request_timeout_secs = Some(0);
+        let refused = db.update_endpoint(&instant).unwrap_err();
         assert!(refused.downcast_ref::<InvalidEndpoint>().is_some());
     }
 

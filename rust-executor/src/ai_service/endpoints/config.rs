@@ -105,8 +105,11 @@ fn apply_endpoint(
     env: &impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<()> {
     let api_key = match &setting.api_key_env {
+        // An empty value is no key, like an unset one: storing it would clear the key.
         Some(var) => Secret::new(
-            env(var).ok_or_else(|| anyhow::anyhow!("api_key_env names {var}, which is not set"))?,
+            env(var)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("api_key_env names {var}, which is not set"))?,
         ),
         None => Secret::new(""),
     };

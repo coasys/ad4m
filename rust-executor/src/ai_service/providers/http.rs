@@ -12,6 +12,12 @@ use std::time::Duration;
 /// model listing is one small JSON document, so half a minute is generous.
 pub(crate) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a chat client waits for one answer. A completion can run for minutes on a long
+/// prompt or a slow local model; without a bound a hung upstream would park a model's
+/// worker thread forever, since the thread handles one request at a time. The model
+/// worker's own bound on a chat call (`within_endpoint_limits`) defaults to the same.
+pub(crate) const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// An HTTP client for a request that carries a credential. It follows no
 /// redirects, and it gives up after `timeout`.
 ///

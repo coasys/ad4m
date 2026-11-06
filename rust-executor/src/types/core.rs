@@ -947,8 +947,9 @@ pub struct EndpointView {
     pub capabilities: Vec<AiCapability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_num_ctx: Option<u32>,
-    /// How long a `/v1` request to this endpoint may take, queueing included. Unset: 300 s
-    /// for chat, 60 s for embeddings, 120 s for speech.
+    /// How long a request to this endpoint may take, queueing included. Unset: 300 s for
+    /// chat `/v1` forwards, 600 s for chat the executor answers (Anthropic, Ollama, tools as
+    /// text; not bounded here when streamed), 60 s for embeddings, 120 s for speech.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u32>,
     /// At most this many requests to this endpoint at once; the rest queue. Unset: no limit.

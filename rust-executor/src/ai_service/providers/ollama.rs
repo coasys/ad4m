@@ -51,7 +51,7 @@ const FALLBACK_NUM_CTX: u32 = 2_048;
 
 /// Same reasoning as the Anthropic timeout — a long prompt on a local model
 /// can take minutes.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct OllamaChat {
     http: reqwest::Client,
