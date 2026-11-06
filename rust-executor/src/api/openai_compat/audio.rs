@@ -117,7 +117,9 @@ fn upstream_error(error: &anyhow::Error) -> OpenAIError {
             return OpenAIError::new(status, failure.to_string(), "invalid_request_error", None);
         }
         TranscribeFailure::Unauthorized => (StatusCode::BAD_GATEWAY, "upstream_auth"),
-        TranscribeFailure::Failed(_) => (StatusCode::BAD_GATEWAY, "upstream_error"),
+        TranscribeFailure::Failed(_) | TranscribeFailure::BadAnswer => {
+            (StatusCode::BAD_GATEWAY, "upstream_error")
+        }
         TranscribeFailure::Timeout => (StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
         TranscribeFailure::Unreachable => (StatusCode::SERVICE_UNAVAILABLE, "upstream_unavailable"),
     };
@@ -151,9 +153,13 @@ pub async fn speech(
     if let Some(agent_did) = auth.user_did() {
         check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    }
+    // Billed once the endpoint has answered: a request that failed or timed out, queued
+    // or not, costs nothing.
+    let audio = passthrough::forward_speech(upstream, body).await?;
+    if let Some(agent_did) = auth.user_did() {
         let amount = billing_amounts::speech_amount(req.input.chars().count());
         bill_compute(agent_did, amount, "ai_tts", Some("v1/audio/speech"))?;
     }
-
-    passthrough::forward_speech(upstream, body).await
+    Ok(audio)
 }

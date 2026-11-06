@@ -303,35 +303,53 @@ async fn a_client_that_asks_for_usage_gets_the_usage_event() {
     assert_eq!(usage["model"], "chat");
 }
 
+// Forwarded to Ollama's `/v1`, which ignores `options.num_ctx`, a long prompt with tools was
+// cut without an error. `/v1` answers Ollama through its native `/api/chat` with the model's
+// context window.
 #[tokio::test]
-async fn ollama_gets_tools_through_its_openai_compatible_api() {
-    fresh();
+async fn ollama_is_answered_through_its_native_api_with_its_context_window() {
     let mut server = mockito::Server::new_async().await;
-    let ollama = endpoint("ollama", EndpointKind::Ollama, &server.url(), "");
-    save(&ollama);
-    model("qwen", ModelType::Llm, &ollama, "qwen3:8b");
-    let tools = json!([{ "type": "function", "function": { "name": "f", "parameters": {} } }]);
-    let mock = server
-        .mock("POST", "/v1/chat/completions")
-        .match_body(Matcher::PartialJson(
-            json!({ "model": "qwen3:8b", "tools": tools, "tool_choice": "auto" }),
-        ))
-        .with_body(json!({ "model": "qwen3:8b", "choices": [] }).to_string())
+    let show = server
+        .mock("POST", "/api/show")
+        .with_body(json!({ "model_info": { "qwen3.context_length": 40960 } }).to_string())
+        .create_async()
+        .await;
+    let native = server
+        .mock("POST", "/api/chat")
+        .match_body(Matcher::PartialJson(json!({
+            "model": "m",
+            "options": { "num_ctx": 40960 },
+            "tools": [{ "type": "function", "function": { "name": "get_time" } }],
+        })))
+        .with_body(
+            json!({ "model": "m", "message": { "role": "assistant", "content": "noon" },
+                    "done": true, "prompt_eval_count": 3, "eval_count": 1 })
+            .to_string(),
+        )
         .expect(1)
         .create_async()
         .await;
+    let openai = server
+        .mock("POST", "/v1/chat/completions")
+        .expect(0)
+        .create_async()
+        .await;
+    answered_here(EndpointKind::Ollama, &server.url(), "", None).await;
 
     let response = chat(
         user(),
-        json!({ "model": "qwen", "messages": hello(), "tools": tools, "tool_choice": "auto" }),
+        json!({ "model": "chat", "messages": hello(), "tools": a_tool() }),
     )
     .await;
     assert_eq!(response.status(), 200);
-    mock.assert_async().await;
+    show.assert_async().await;
+    native.assert_async().await;
+    openai.assert_async().await;
 }
 
+// A stream that failed was billed nothing, though the upstream had generated its text.
 #[tokio::test]
-async fn a_stream_the_upstream_breaks_off_ends_with_an_error_event_and_bills_nothing() {
+async fn a_stream_the_upstream_breaks_off_ends_with_an_error_event_and_bills_what_it_generated() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     fresh();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -365,7 +383,128 @@ async fn a_stream_the_upstream_breaks_off_ends_with_an_error_event_and_bills_not
     assert_eq!(events.len(), 2, "{events:?}");
     let last: Value = serde_json::from_str(&events[1]).unwrap();
     assert_eq!(last["error"]["type"], "upstream_error");
-    assert!(test_seam::calls().is_empty(), "{:?}", test_seam::calls());
+    assert_billed_estimate("par");
+}
+
+/// The bill the test seam recorded: one call, the estimate of `hello()` plus `generated`.
+fn assert_billed_estimate(generated: &str) {
+    let expected = estimate_token_count(&hello().to_string()) + estimate_token_count(generated);
+    let calls = test_seam::calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(
+        (calls[0].amount - expected as f64).abs() < 1e-9,
+        "{calls:?}, expected {expected}"
+    );
+}
+
+/// A streaming upstream on a raw socket: `chunks` as SSE bytes, each after its delay in
+/// milliseconds, then the end of the body when `end`, else silence on an open connection.
+/// The endpoint's timeout is `timeout_secs`.
+async fn scripted_stream(chunks: Vec<(u64, String)>, end: bool, timeout_secs: u32) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 8192];
+        let _ = socket.read(&mut request).await;
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+        socket.write_all(head.as_bytes()).await.unwrap();
+        for (delay, data) in chunks {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            let frame = format!("{:x}\r\n{data}\r\n", data.len());
+            if socket.write_all(frame.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+        if end {
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        }
+        std::future::pending::<()>().await
+    });
+    let mut upstream = endpoint(
+        "scripted",
+        EndpointKind::LlamaServer,
+        &format!("http://{address}"),
+        "",
+    );
+    upstream.request_timeout_secs = Some(timeout_secs);
+    save(&upstream);
+    model("chat", ModelType::Llm, &upstream, "m");
+    rate("chat", 1.0);
+}
+
+fn sse_event(event: &Value) -> String {
+    format!("data: {event}\n\n")
+}
+
+// The request's timeout bounded the whole stream, so a long answer was cut off (and, until
+// the bill settled on failure, free). It bounds the silence between two chunks.
+#[tokio::test]
+async fn a_stream_runs_past_its_timeout_while_the_endpoint_keeps_answering() {
+    fresh();
+    scripted_stream(
+        vec![
+            (0, sse_event(&chunk("a"))),
+            (700, sse_event(&chunk("b"))),
+            (700, sse_event(&chunk("c"))),
+            (0, "data: [DONE]\n\n".into()),
+        ],
+        true,
+        1,
+    )
+    .await;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "stream": true }),
+    )
+    .await;
+    let events = events(&body_text(response).await);
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert_eq!(events[3], "[DONE]");
+    assert_billed_estimate("abc");
+}
+
+#[tokio::test]
+async fn a_stream_that_falls_silent_ends_with_a_timeout_and_bills_what_it_generated() {
+    fresh();
+    scripted_stream(vec![(0, sse_event(&chunk("par")))], false, 1).await;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "stream": true }),
+    )
+    .await;
+    let events = events(&body_text(response).await);
+    assert_eq!(events.len(), 2, "{events:?}");
+    let last: Value = serde_json::from_str(&events[1]).unwrap();
+    assert_eq!(last["error"]["type"], "upstream_timeout");
+    assert_billed_estimate("par");
+}
+
+// A session that ended mid-stream dropped the forwarding task before it billed.
+#[tokio::test]
+async fn a_stream_whose_session_ends_bills_what_it_generated() {
+    fresh();
+    scripted_stream(vec![(0, sse_event(&chunk("par")))], false, 60).await;
+    let ctx = user();
+    let session = ctx.session.clone();
+
+    let response = chat(
+        ctx,
+        json!({ "model": "chat", "messages": hello(), "stream": true }),
+    )
+    .await;
+    let mut body = response.into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("par"));
+    assert!(test_seam::calls().is_empty(), "billed only at the end");
+
+    session.grant().unwrap().ended.cancel();
+    let rest = tokio::time::timeout(std::time::Duration::from_secs(5), body.collect()).await;
+    assert!(rest.is_ok(), "the stream ends with its session");
+    assert_billed_estimate("par");
 }
 
 #[tokio::test]
@@ -394,6 +533,25 @@ async fn a_text_completion_is_forwarded_too() {
     assert_eq!(response.status(), 200);
     assert_eq!(body_json(response).await["model"], "chat");
     mock.assert_async().await;
+}
+
+// An endpoint that answers without end: the forward stops reading at `read_json`'s limit,
+// answers a 502 and bills nothing.
+#[tokio::test]
+async fn an_answer_past_the_body_limit_is_a_502_and_bills_nothing() {
+    use crate::ai_service::providers::http::MAX_BODY_BYTES;
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    openai_model(&server, "").await;
+    server
+        .mock("POST", "/v1/chat/completions")
+        .with_body(format!("[{}0]", "0,".repeat(MAX_BODY_BYTES / 2)))
+        .create_async()
+        .await;
+
+    let response = chat(user(), json!({ "model": "chat", "messages": hello() })).await;
+    assert_eq!(response.status(), 502);
+    assert!(test_seam::calls().is_empty(), "a failure bills nothing");
 }
 
 /// The client's view of each upstream answer: status, error code, and what reaches it.
@@ -598,9 +756,9 @@ fn resolved(kind: EndpointKind, native_tools: Option<bool>) -> Resolved {
     }
 }
 
-// The rule: forward unless the endpoint is Anthropic (translated by its client) or the
-// request has active tools the model does not take as definitions (rendered into the
-// prompt by the executor).
+// The rule: forward unless the endpoint is Anthropic (translated by its client) or Ollama
+// (native `/api/chat`, for `num_ctx`) or the request has active tools the model does not
+// take as definitions (rendered into the prompt by the executor).
 #[test]
 fn what_is_forwarded_and_what_the_executor_answers() {
     let tools = json!({ "tools": [{ "type": "function", "function": { "name": "f" } }] });
@@ -617,8 +775,8 @@ fn what_is_forwarded_and_what_the_executor_answers() {
 
     let ollama = resolved(EndpointKind::Ollama, None);
     assert!(
-        Upstream::for_chat(&ollama, &tools).is_some(),
-        "Ollama takes tools"
+        Upstream::of(&ollama).is_none(),
+        "Ollama's `/v1` ignores num_ctx: its native API answers"
     );
 
     let anthropic = resolved(EndpointKind::Anthropic, None);
@@ -1588,4 +1746,493 @@ async fn an_anthropic_endpoint_that_refuses_connections_is_a_503() {
         body_json(response).await["error"]["type"],
         "upstream_unavailable"
     );
+}
+
+// ── /v1/realtime on an endpoint ─────────────────────────────────────────────
+
+type RealtimeClient =
+    futures::channel::mpsc::UnboundedSender<Result<axum::extract::ws::Message, axum::Error>>;
+type RealtimeFrames = futures::channel::mpsc::UnboundedReceiver<axum::extract::ws::Message>;
+
+/// A `/v1/realtime` session of `caller`: where the client sends, and what it receives.
+fn realtime(caller: RequestContext) -> (RealtimeClient, RealtimeFrames) {
+    let (client, incoming) = futures::channel::mpsc::unbounded();
+    let (socket, frames) = futures::channel::mpsc::unbounded();
+    tokio::spawn(super::realtime::serve(caller, socket, incoming));
+    (client, frames)
+}
+
+fn send(client: &RealtimeClient, event: Value) {
+    client
+        .unbounded_send(Ok(axum::extract::ws::Message::Text(
+            event.to_string().into(),
+        )))
+        .unwrap();
+}
+
+/// The next event the client receives, within 10 s.
+async fn next_event(frames: &mut RealtimeFrames) -> Value {
+    use futures::StreamExt;
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(10), frames.next())
+        .await
+        .expect("an event within 10 s")
+        .expect("the socket is open");
+    match frame {
+        axum::extract::ws::Message::Text(text) => serde_json::from_str(&text).unwrap(),
+        other => panic!("not an event: {other:?}"),
+    }
+}
+
+/// The test recording (speech, so the gate lets it through) as one append.
+fn append_speech() -> Value {
+    use base64::Engine;
+    let wav = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/transcription_test.wav"
+    ))
+    .unwrap();
+    json!({
+        "type": "input_audio_buffer.append",
+        "audio": base64::prelude::BASE64_STANDARD.encode(&wav[44..]),
+    })
+}
+
+/// The `stt` model, a fresh database, the agent's keys and an AIService.
+async fn realtime_world(server: &mockito::ServerGuard) {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    fresh();
+    transcription_model(server);
+    crate::ai_service::AIService::init_global_instance()
+        .await
+        .unwrap();
+}
+
+async fn open_stt(client: &RealtimeClient, frames: &mut RealtimeFrames) -> Value {
+    send(
+        client,
+        json!({"type": "transcription_session.update", "session": {"model": "stt"}}),
+    );
+    next_event(frames).await
+}
+
+// /v1/realtime awaited each commit inside its socket loop, so nothing read the stream's
+// 64-piece text channel while a streaming upstream answered: the start of a long utterance
+// was dropped without notice, and the whole of it was billed.
+#[tokio::test]
+async fn realtime_passes_every_piece_a_streaming_upstream_sends() {
+    const PIECES: usize = 100;
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("POST", "/v1/audio/transcriptions")
+        .with_header("content-type", "text/event-stream")
+        .with_chunked_body(|w| {
+            for i in 0..PIECES {
+                let event = json!({"type": "transcript.text.delta", "delta": format!(" w{i}")});
+                write!(w, "data: {event}\n\n")?;
+                w.flush()?;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            w.write_all(b"data: [DONE]\n\n")
+        })
+        .create_async()
+        .await;
+    realtime_world(&server).await;
+    let (client, mut frames) = realtime(RequestContext::operator_for_test());
+
+    let created = open_stt(&client, &mut frames).await;
+    assert_eq!(
+        created["type"], "transcription_session.created",
+        "{created}"
+    );
+    send(&client, append_speech());
+    send(&client, json!({"type": "input_audio_buffer.commit"}));
+
+    let mut deltas = Vec::new();
+    while deltas.len() < PIECES {
+        let event = next_event(&mut frames).await;
+        assert_eq!(
+            event["type"], "conversation.item.input_audio_transcription.delta",
+            "{event}"
+        );
+        deltas.push(event["delta"].as_str().unwrap().to_string());
+    }
+    let sent: Vec<String> = (0..PIECES).map(|i| format!(" w{i}")).collect();
+    assert_eq!(deltas, sent);
+}
+
+// /v1/realtime opened and fed streams without the credit check of every other metered path,
+// so a user at 0 credits transcribed on the operator's key (Data, #1615 round 1).
+#[tokio::test]
+async fn realtime_refuses_a_user_without_credits_at_open_and_at_each_commit() {
+    let mut server = mockito::Server::new_async().await;
+    let upstream = server
+        .mock("POST", Matcher::Any)
+        .expect(0)
+        .create_async()
+        .await;
+    realtime_world(&server).await;
+    let did = crate::test_utils::create_test_user("realtime-broke@example.org");
+    let caller = RequestContext::for_session(
+        Session::for_test(Principal::Agent(AgentContext::managed(did)))
+            .with_caps(vec![AI_TRANSCRIBE_CAPABILITY.clone()]),
+    );
+    let paid_hosting = |paid: bool| {
+        Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(!paid)).unwrap();
+    };
+    let (client, mut frames) = realtime(caller);
+
+    // Free while the stream opens; the credits are gone by the commit.
+    paid_hosting(false);
+    let created = open_stt(&client, &mut frames).await;
+    assert_eq!(
+        created["type"], "transcription_session.created",
+        "{created}"
+    );
+    paid_hosting(true);
+    send(&client, append_speech());
+    send(&client, json!({"type": "input_audio_buffer.commit"}));
+    let refused = next_event(&mut frames).await;
+    assert_eq!(refused["error"]["code"], "insufficient_quota", "{refused}");
+
+    let refused = open_stt(&client, &mut frames).await;
+    assert_eq!(refused["error"]["code"], "insufficient_quota", "{refused}");
+
+    paid_hosting(false);
+    upstream.assert_async().await;
+}
+
+/// A caller who pays: hosting is not free, and `USER`'s account holds `credits`.
+fn paying_user(credits: f64) {
+    Ad4mDb::with_global_instance(|db| {
+        db.set_free_hosting_enabled(false)?;
+        db.add_user("payer@example.com", USER, "password")?;
+        db.set_user_credits("payer@example.com", credits)
+    })
+    .unwrap();
+}
+
+// The only gate was a balance above 0: `n`, the token limits and `service_tier` went as sent,
+// so a caller with 0.01 credits could run a request of any size on the operator's key.
+#[tokio::test]
+async fn a_paying_caller_gets_no_more_than_its_credits_buy() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    openai_model(&server, "").await;
+    rate("chat", 1.0);
+    paying_user(100.0);
+    let forwarded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let seen = forwarded.clone();
+    server
+        .mock("POST", "/v1/chat/completions")
+        .with_body_from_request(move |request| {
+            seen.lock()
+                .unwrap()
+                .push(serde_json::from_slice(request.body().unwrap()).unwrap());
+            json!({ "model": "Qwen/Qwen3-8B", "choices": [] })
+                .to_string()
+                .into()
+        })
+        .expect(2)
+        .create_async()
+        .await;
+    let left = (100 - estimate_token_count(&hello().to_string())) as u64;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "n": 2, "max_tokens": 100000,
+                "max_completion_tokens": 3, "service_tier": "priority" }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let response = chat(user(), json!({ "model": "chat", "messages": hello() })).await;
+    assert_eq!(response.status(), 200);
+
+    let forwarded = forwarded.lock().unwrap().clone();
+    assert_eq!(forwarded[0]["n"], 2);
+    assert_eq!(forwarded[0]["max_tokens"], left / 2, "{}", forwarded[0]);
+    assert_eq!(
+        forwarded[0]["max_completion_tokens"], 3,
+        "a lower limit stays"
+    );
+    assert!(
+        forwarded[0].get("service_tier").is_none(),
+        "{}",
+        forwarded[0]
+    );
+    assert_eq!(
+        forwarded[1]["max_tokens"], left,
+        "a request without a limit gets one: {}",
+        forwarded[1]
+    );
+}
+
+#[tokio::test]
+async fn a_caller_whose_credits_do_not_cover_the_prompt_is_refused_before_the_endpoint() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    openai_model(&server, "").await;
+    rate("chat", 1.0);
+    paying_user(1.0);
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .expect(0)
+        .create_async()
+        .await;
+
+    let response = chat(user(), json!({ "model": "chat", "messages": hello() })).await;
+    assert_eq!(response.status(), 429);
+    assert_eq!(
+        body_json(response).await["error"]["code"],
+        "insufficient_quota"
+    );
+    mock.assert_async().await;
+}
+
+// `/v1/models` passed the health check's detail, which names the endpoint's URL, to users.
+#[tokio::test]
+async fn the_model_list_names_no_endpoint_url() {
+    fresh();
+    let mut down = endpoint("down", EndpointKind::Vllm, "http://10.9.8.7:8000", "");
+    down.health = EndpointHealth {
+        state: EndpointState::Unreachable,
+        checked_at: Some(1),
+        detail: Some("Could not reach http://10.9.8.7:8000/v1/models: refused".into()),
+        served_models: vec![],
+    };
+    save(&down);
+    model("chat", ModelType::Llm, &down, "m");
+
+    let list = models::list_models(user()).await.unwrap().0;
+    let list = serde_json::to_value(list).unwrap();
+    assert_eq!(list["data"][0]["ad4m"]["status"]["state"], "ENDPOINT_DOWN");
+    assert!(!list.to_string().contains("10.9.8.7"), "{list}");
+}
+
+// An embedding answer the executor could not read gave a 500 whose message named the URL.
+#[tokio::test]
+async fn an_embedding_answer_the_executor_cannot_read_names_no_url() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/embeddings")
+        .with_body("{}")
+        .create_async()
+        .await;
+    let (_id, _service) = embedding_model(&server).await;
+
+    let request = serde_json::from_value(json!({ "model": "nomic", "input": ["a"] })).unwrap();
+    let error = embeddings::embeddings(user(), OpenAIJson(request))
+        .await
+        .err()
+        .expect("an unreadable answer fails");
+    mock.assert_async().await;
+    let shown = serde_json::to_string(&error.error).unwrap();
+    let address = server.host_with_port();
+    assert!(!shown.contains(&address), "{shown}");
+    assert_eq!(error.error.code.as_deref(), Some("upstream_error"));
+}
+
+// A client that left while the upstream was silent kept the upstream connection and the
+// endpoint's slot until the timeout, and was billed only then.
+#[tokio::test]
+async fn a_client_that_leaves_a_silent_stream_ends_it_and_is_billed() {
+    fresh();
+    scripted_stream(vec![(0, sse_event(&chunk("par")))], false, 60).await;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "stream": true }),
+    )
+    .await;
+    let mut body = response.into_body();
+    body.frame().await.unwrap().unwrap();
+    drop(body);
+    for _ in 0..40 {
+        if !test_seam::calls().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_billed_estimate("par");
+}
+
+// Speech was billed before it was sent, so a request that failed, or timed out waiting for
+// a slot, was charged.
+#[tokio::test]
+async fn speech_the_endpoint_does_not_answer_is_not_billed() {
+    fresh();
+    let mut speaches = endpoint(
+        "speaches",
+        EndpointKind::OpenAiAudio,
+        "http://127.0.0.1:1",
+        "",
+    );
+    speaches.capabilities = vec![AiCapability::Speech];
+    save(&speaches);
+    model("voice", ModelType::Speech, &speaches, "kokoro");
+
+    let response = audio::speech(
+        user(),
+        OpenAIJson(json!({ "model": "voice", "input": "hello" })),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), 503);
+    assert!(test_seam::calls().is_empty(), "{:?}", test_seam::calls());
+}
+
+// Remote chat the executor answers (Anthropic, Ollama, tools as text) skipped the
+// endpoint's `max_concurrent`: two models on one endpoint called it at once.
+#[tokio::test]
+async fn chat_the_executor_answers_keeps_the_endpoints_concurrency_cap() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    fresh();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (active, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (active_seen, most_seen) = (active.clone(), most.clone());
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (active, most) = (active_seen.clone(), most_seen.clone());
+            tokio::spawn(async move {
+                let mut request = [0u8; 65536];
+                let _ = socket.read(&mut request).await;
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let body = json!({ "content": [{ "type": "text", "text": "hi" }],
+                                   "stop_reason": "end_turn" })
+                .to_string();
+                active.fetch_sub(1, Ordering::SeqCst);
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(answer.as_bytes()).await;
+            });
+        }
+    });
+    let mut capped = endpoint(
+        "capped",
+        EndpointKind::Anthropic,
+        &format!("http://{address}"),
+        "sk-ant",
+    );
+    capped.max_concurrent = Some(1);
+    save(&capped);
+    let ids = [
+        model("a", ModelType::Llm, &capped, "m-a"),
+        model("b", ModelType::Llm, &capped, "m-b"),
+    ];
+    crate::ai_service::AIService::init_global_instance()
+        .await
+        .unwrap();
+    let service = crate::ai_service::AIService::global_instance()
+        .await
+        .unwrap();
+    for id in ids {
+        service.reload_model(id).await.unwrap();
+    }
+
+    let (a, b) = tokio::join!(
+        chat(user(), json!({ "model": "a", "messages": hello() })),
+        chat(user(), json!({ "model": "b", "messages": hello() })),
+    );
+    assert_eq!((a.status().as_u16(), b.status().as_u16()), (200, 200));
+    assert_eq!(most.load(Ordering::SeqCst), 1, "one call at a time");
+}
+
+// An embedding model whose endpoint became one that serves no embeddings kept its old
+// client, so `ai.embed` still sent text to the old URL with the old key.
+#[tokio::test]
+async fn an_embedder_that_cannot_be_rebuilt_stops_embedding() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/embeddings")
+        .expect(0)
+        .create_async()
+        .await;
+    let (id, service) = embedding_model(&server).await;
+    let mut changed = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name("embedder"))
+        .unwrap()
+        .unwrap();
+    changed.kind = EndpointKind::Anthropic;
+    Ad4mDb::with_global_instance(|db| db.update_endpoint(&changed)).unwrap();
+
+    assert!(service.reload_model(id.clone()).await.is_err());
+    assert!(service
+        .embed_batch(&id, vec!["a".into()], None)
+        .await
+        .is_err());
+    mock.assert_async().await;
+}
+
+// A model changed from embedding to speech kept its embedder.
+#[tokio::test]
+async fn a_model_that_stops_being_an_embedding_model_stops_embedding() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/embeddings")
+        .expect(0)
+        .create_async()
+        .await;
+    let (id, service) = embedding_model(&server).await;
+    let speech = Ad4mDb::with_global_instance(|db| db.get_model(id.clone()))
+        .unwrap()
+        .unwrap();
+    let input = ModelInput {
+        name: speech.name.clone(),
+        model_type: ModelType::Speech,
+        endpoint_id: speech.endpoint_id.clone(),
+        remote_model: speech.remote_model.clone(),
+        native_tools: None,
+    };
+    Ad4mDb::with_global_instance(|db| db.update_model(&id, &input)).unwrap();
+
+    service.reload_model(id.clone()).await.unwrap();
+    assert!(service
+        .embed_batch(&id, vec!["a".into()], None)
+        .await
+        .is_err());
+    mock.assert_async().await;
+}
+
+// Semantic dedup sent a whole class in one request, past what an endpoint takes.
+#[tokio::test]
+async fn semantic_dedup_embeds_in_bounded_batches_in_order() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/embeddings")
+        .with_body_from_request(|request| {
+            let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+            let inputs = body["input"].as_array().unwrap().clone();
+            assert!(inputs.len() <= crate::perspectives::interpretation::EMBED_BATCH);
+            let data: Vec<Value> = inputs
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let n: f32 = text.as_str().unwrap().parse().unwrap();
+                    json!({ "index": index, "embedding": [n, 1.0] })
+                })
+                .collect();
+            json!({ "data": data }).to_string().into()
+        })
+        .expect(2)
+        .create_async()
+        .await;
+    let (_id, _service) = embedding_model(&server).await;
+
+    let texts: Vec<String> = (0..70).map(|n| n.to_string()).collect();
+    let vectors = crate::perspectives::interpretation::embed_via_ai_service("nomic", &texts)
+        .await
+        .unwrap();
+    mock.assert_async().await;
+    assert_eq!(vectors.len(), 70);
+    assert!(vectors
+        .iter()
+        .enumerate()
+        .all(|(n, vector)| vector[0] == n as f32));
 }

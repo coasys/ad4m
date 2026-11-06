@@ -2425,24 +2425,7 @@ impl Ad4mDb {
         export_data.insert("tasks".to_string(), serde_json::to_value(tasks)?);
 
         // Export AI endpoints, keys included as the database holds them.
-        let endpoints: Vec<serde_json::Value> = self
-            .get_endpoints()?
-            .iter()
-            .map(|endpoint| {
-                serde_json::json!({
-                    "id": endpoint.id,
-                    "name": endpoint.name,
-                    "kind": endpoint.kind,
-                    "base_url": endpoint.base_url.to_string(),
-                    "api_key": endpoint.api_key.expose(),
-                    "capabilities": endpoint.capabilities,
-                    "max_num_ctx": endpoint.max_num_ctx,
-                    "request_timeout_secs": endpoint.request_timeout_secs,
-                    "max_concurrent": endpoint.max_concurrent,
-                })
-            })
-            .collect();
-        export_data.insert("ai_endpoints".to_string(), serde_json::to_value(endpoints)?);
+        export_data.insert("ai_endpoints".to_string(), self.export_endpoints()?.into());
 
         // Export models
         let models: Vec<serde_json::Value> = self

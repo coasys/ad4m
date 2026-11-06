@@ -2,7 +2,8 @@
 //!
 //! Listing is also the health check. An endpoint that lists its models is reachable and
 //! takes the key it was given; a 401 or 403 means the key is refused; anything else means
-//! nobody useful answered. So [`Discover::health`] is the listing, classified.
+//! nobody useful answered. So [`health_of`] is the listing, classified. One exception: an
+//! audio server without a listing ([`listing_or_registered`]).
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,10 +21,34 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 #[async_trait]
 pub trait Discover: Send + Sync {
     async fn list_models(&self) -> Result<Vec<DiscoveredModel>>;
+}
 
-    /// The listing, classified as the endpoint's health.
-    async fn health(&self) -> EndpointHealth {
-        health_of(self.list_models().await)
+/// The listing of an endpoint of `kind` on which the models `registered` run. An audio
+/// server may have no listing: whisper.cpp's answers 404 on `/v1/models` and transcribes.
+/// For `OPEN_AI_AUDIO`, that 404 is an answer, and the endpoint serves what is registered on
+/// it.
+pub fn listing_or_registered(
+    kind: EndpointKind,
+    listing: Result<Vec<DiscoveredModel>>,
+    registered: impl FnOnce() -> Vec<String>,
+) -> Result<Vec<DiscoveredModel>> {
+    match listing {
+        Err(error)
+            if kind == EndpointKind::OpenAiAudio
+                && error
+                    .downcast_ref::<UpstreamStatus>()
+                    .is_some_and(|status| status.status == reqwest::StatusCode::NOT_FOUND) =>
+        {
+            Ok(registered()
+                .into_iter()
+                .map(|id| DiscoveredModel {
+                    capabilities: guess_capabilities(kind, &id),
+                    id,
+                    context_length: None,
+                })
+                .collect())
+        }
+        listing => listing,
     }
 }
 
@@ -161,6 +186,34 @@ mod tests {
         let refused = health_of(Err(anyhow::anyhow!("connection refused")));
         assert_eq!(refused.state, EndpointState::Unreachable);
         assert_eq!(refused.detail.as_deref(), Some("connection refused"));
+    }
+
+    #[test]
+    fn an_audio_server_without_a_listing_serves_its_registered_models() {
+        let not_found = || {
+            Err(anyhow::Error::from(UpstreamStatus {
+                url: "http://h/v1/models".into(),
+                status: reqwest::StatusCode::NOT_FOUND,
+                body: "File Not Found".into(),
+                retry_after: None,
+            }))
+        };
+        let registered = || vec!["whisper-1".to_string()];
+
+        let audio = listing_or_registered(EndpointKind::OpenAiAudio, not_found(), registered);
+        let health = health_of(audio);
+        assert_eq!(health.state, EndpointState::Reachable);
+        assert_eq!(health.served_models, vec!["whisper-1"]);
+
+        // Any other kind, or any other failure, stays unreachable.
+        let vllm = listing_or_registered(EndpointKind::Vllm, not_found(), registered);
+        assert_eq!(health_of(vllm).state, EndpointState::Unreachable);
+        let down = listing_or_registered(
+            EndpointKind::OpenAiAudio,
+            Err(anyhow::anyhow!("connection refused")),
+            registered,
+        );
+        assert_eq!(health_of(down).state, EndpointState::Unreachable);
     }
 
     #[test]

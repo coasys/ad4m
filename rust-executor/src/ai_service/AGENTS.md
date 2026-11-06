@@ -43,17 +43,24 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
   save; an update reloads the models on it), `check_health` and the 60 s
   health loop (`ai-endpoint-status`, to the main agent's sessions only; a change also
   publishes `model-status`, to everyone, for each model on the endpoint whose status it
-  changes: that is how managed users see an endpoint go down or come back),
-  `after_failed_request` (a refused connection or key re-checks the endpoint at once, a
-  404 publishes the model `MISSING`; called by `/v1`, `ChatModel`, `embed_batch` and the
-  transcription stream worker, so a client keeps its connection error typed as
-  `http::UpstreamUnreachable`), Ollama
-  `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s), and the
-  per-request limits: `request_timeout` (the endpoint's, else the route's default) and
-  `request_slot` (a semaphore only when the operator set `max_concurrent`; none by default).
+  changes: that is how managed users see an endpoint go down or come back;
+  `check_health` probes an endpoint at most once per `PROBE_TIMEOUT`, a pull or delete
+  probes at once; a check adds the capabilities of the models listed, removes none, and
+  stores nothing when the URL moved meanwhile; an `OPEN_AI_AUDIO` server whose listing is
+  a 404 serves its registered models), `after_failed_request` (a refused connection or
+  key re-checks the endpoint at once, a 404 publishes the model `MISSING`; called by
+  `/v1`, `ChatModel`, `embed_batch` and the transcription stream worker, so a client
+  keeps its connection error typed as `http::UpstreamUnreachable`), Ollama `pull_model` /
+  `delete_upstream_model` (`model-status`, at most 4/s, a failure's detail names no URL),
+  and the per-request limits: `request_timeout` (the endpoint's, else the route's
+  default) and `request_slot` (a semaphore only when the operator set `max_concurrent`;
+  none by default). Every call to an endpoint holds them: `/v1` forwards, embeddings, and
+  each remote chat call of a model worker (`within_endpoint_limits` in
+  `ai_service/mod.rs`). A URL with a user name or password is refused.
 - `detect.rs`: `ai.detectEndpoints`, loopback ports, classified by answer shape. Saves nothing.
 - `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
-  before the service loads; idempotent by name, keys only from env vars.
+  before the service loads; idempotent by name (a new name takes over the endpoint the
+  start-up migration made for the same protocol, URL and key), keys only from env vars.
 
 `add_model` and `update_model` refuse (`InvalidModel`, a 400) a model whose endpoint has no
 route for its type, before anything is written: transcription and speech need an
@@ -73,7 +80,9 @@ last health check (`Endpoint::model_status`): `READY` when the endpoint lists it
   filled under the stream-map lock, so text comes out in the order fed. A feed answers
   after its transcript is published; an upstream failure is the feed's error (no URL in
   it) and publishes nothing.
-- No executor-side voice-activity detection: the client cuts utterances.
+- The client cuts utterances; the executor's Silero gate (`transcription::SpeechGate`)
+  drops one that is not speech, before the request, on a blocking thread. Without ONNX
+  Runtime (loaded at run time on macOS) the gate is off and every utterance passes.
 - `bill_transcription` is the only place transcription is billed (streams and
   `/v1/audio/transcriptions`); `publish_text` sends `transcription-text` to the owner's
   DID only. `transcription_is_billed_in_one_place` pins the first.
@@ -81,7 +90,7 @@ last health check (`Endpoint::model_status`): `READY` when the endpoint lists it
   the service (every `global_instance()` call makes one) does not stop it. A stream is idle
   30 s after its last feed or answer, and never while an utterance is upstream
   (`TranscriptionSession::in_flight`, counted by an `InFlight` guard that a dropped feed
-  releases too).
+  or a dropped `queue_utterance` answer releases too).
 - `transcription_e2e.rs`: real server, skipped unless `TRANSCRIPTION_E2E_BASE_URL` and
   `TRANSCRIPTION_E2E_MODEL` are set.
 
