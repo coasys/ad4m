@@ -1881,7 +1881,7 @@ async fn realtime_passes_every_piece_a_streaming_upstream_sends() {
 }
 
 // /v1/realtime opened and fed streams without the credit check of every other metered path,
-// so a user at 0 credits transcribed on the operator's key (Data, #1615 round 1).
+// so a user at 0 credits transcribed on the operator's key.
 #[tokio::test]
 async fn realtime_refuses_a_user_without_credits_at_open_and_at_each_commit() {
     let mut server = mockito::Server::new_async().await;
@@ -1919,6 +1919,65 @@ async fn realtime_refuses_a_user_without_credits_at_open_and_at_each_commit() {
 
     paid_hosting(false);
     upstream.assert_async().await;
+}
+
+/// An upstream that answers each transcription with `text` after `delay`.
+async fn slow_transcription(
+    server: &mut mockito::ServerGuard,
+    text: &'static str,
+    delay: std::time::Duration,
+) {
+    server
+        .mock("POST", "/v1/audio/transcriptions")
+        .with_header("content-type", "application/json")
+        .with_chunked_body(move |w| {
+            std::thread::sleep(delay);
+            write!(w, "{}", json!({ "text": text }))
+        })
+        .create_async()
+        .await;
+}
+
+// A `session.close` right after the last commit closed the socket before the commit was
+// answered: the client lost that utterance's text, and it was still billed.
+#[tokio::test]
+async fn realtime_sends_the_text_of_the_commits_before_a_close() {
+    use futures::StreamExt;
+    let mut server = mockito::Server::new_async().await;
+    slow_transcription(
+        &mut server,
+        "the last sentence",
+        std::time::Duration::from_millis(500),
+    )
+    .await;
+    realtime_world(&server).await;
+    let (client, mut frames) = realtime(RequestContext::operator_for_test());
+    let created = open_stt(&client, &mut frames).await;
+    assert_eq!(
+        created["type"], "transcription_session.created",
+        "{created}"
+    );
+
+    send(&client, append_speech());
+    send(&client, json!({"type": "input_audio_buffer.commit"}));
+    send(&client, json!({"type": "session.close"}));
+
+    let mut events = Vec::new();
+    while let Some(frame) = tokio::time::timeout(std::time::Duration::from_secs(10), frames.next())
+        .await
+        .expect("the socket closes within 10 s")
+    {
+        if let axum::extract::ws::Message::Text(text) = frame {
+            events.push(serde_json::from_str::<Value>(&text).unwrap());
+        }
+    }
+    assert_eq!(
+        events,
+        vec![json!({
+            "type": "conversation.item.input_audio_transcription.delta",
+            "delta": "the last sentence",
+        })]
+    );
 }
 
 /// A caller who pays: hosting is not free, and `USER`'s account holds `credits`.
