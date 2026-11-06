@@ -106,11 +106,13 @@ fn apply_endpoint(
 ) -> anyhow::Result<()> {
     let api_key = match &setting.api_key_env {
         // An empty value is no key, like an unset one: storing it would clear the key.
-        Some(var) => Secret::new(
-            env(var)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("api_key_env names {var}, which is not set"))?,
-        ),
+        Some(var) => match env(var) {
+            None => anyhow::bail!("api_key_env names {var}, which is not set"),
+            Some(value) if value.is_empty() => {
+                anyhow::bail!("api_key_env names {var}, which is empty")
+            }
+            Some(value) => Secret::new(value),
+        },
         None => Secret::new(""),
     };
     if setting.max_num_ctx == Some(0) {
@@ -406,6 +408,21 @@ mod tests {
         .unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(models.len(), 2);
+    }
+
+    #[test]
+    fn a_key_variable_that_is_unset_or_empty_is_refused_with_its_own_reason() {
+        let openai = &settings().endpoints[1];
+        let unset = apply_endpoint(openai, &[], &|_| None).unwrap_err();
+        assert_eq!(
+            unset.to_string(),
+            "api_key_env names AI_CONFIG_TEST_KEY, which is not set"
+        );
+        let empty = apply_endpoint(openai, &[], &|_| Some(String::new())).unwrap_err();
+        assert_eq!(
+            empty.to_string(),
+            "api_key_env names AI_CONFIG_TEST_KEY, which is empty"
+        );
     }
 
     // Model names are not unique: the file cannot say which of two it means.
