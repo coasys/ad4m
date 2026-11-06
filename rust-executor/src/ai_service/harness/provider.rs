@@ -229,14 +229,40 @@ impl<P: ToolProvider + ?Sized + 'static> ToolProvider for FilteredProvider<P> {
 ///   always replaces an argument of the same name that the LLM sent: the
 ///   binding states the scope of the pass (the perspective it runs on), and
 ///   transcript content must not steer a call outside it.
+///
+/// [`BoundArgsProvider::for_tools`] binds for the named tools only, leaving the others' schemas
+/// and arguments as they are: for a parameter only some tools take.
 pub struct BoundArgsProvider<P: ToolProvider + ?Sized> {
     inner: Arc<P>,
     bindings: std::collections::BTreeMap<String, Value>,
+    /// The tools the bindings apply to; `None` for every tool.
+    only: Option<std::collections::HashSet<String>>,
 }
 
 impl<P: ToolProvider + ?Sized> BoundArgsProvider<P> {
     pub fn new(inner: Arc<P>, bindings: std::collections::BTreeMap<String, Value>) -> Self {
-        Self { inner, bindings }
+        Self {
+            inner,
+            bindings,
+            only: None,
+        }
+    }
+
+    /// Bind for the tools named in `tools` only.
+    pub fn for_tools(
+        inner: Arc<P>,
+        bindings: std::collections::BTreeMap<String, Value>,
+        tools: &[&str],
+    ) -> Self {
+        Self {
+            inner,
+            bindings,
+            only: Some(tools.iter().map(|t| t.to_string()).collect()),
+        }
+    }
+
+    fn binds(&self, tool: &str) -> bool {
+        self.only.as_ref().is_none_or(|only| only.contains(tool))
     }
 }
 
@@ -251,14 +277,18 @@ where
             .await
             .into_iter()
             .map(|mut t| {
-                strip_bound_from_schema(&mut t.parameters, &self.bindings);
+                if self.binds(&t.name) {
+                    strip_bound_from_schema(&mut t.parameters, &self.bindings);
+                }
                 t
             })
             .collect()
     }
 
     async fn call(&self, name: &str, mut args: Value) -> Result<String> {
-        merge_bound_into_args(&mut args, &self.bindings);
+        if self.binds(name) {
+            merge_bound_into_args(&mut args, &self.bindings);
+        }
         self.inner.call(name, args).await
     }
 }
@@ -675,6 +705,29 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1["perspective_id"], "uuid-under-test");
         assert_eq!(calls[0].1["limit"], 5);
+    }
+
+    #[tokio::test]
+    async fn bound_args_for_some_tools_leave_the_others_alone() {
+        let mut other = schema_with_perspective_id();
+        other.name = "extbelief_get".into();
+        let inner = Arc::new(MockProvider::new(vec![schema_with_perspective_id(), other]));
+        let recorder = inner.clone();
+        let bound =
+            BoundArgsProvider::for_tools(inner, perspective_id_bound(), &["extbelief_query"]);
+
+        let tools = bound.tools().await;
+        let props = |name: &str| {
+            tools.iter().find(|t| t.name == name).unwrap().parameters["properties"].clone()
+        };
+        assert!(props("extbelief_query").get("perspective_id").is_none());
+        assert!(props("extbelief_get").get("perspective_id").is_some());
+
+        bound.call("extbelief_query", json!({})).await.unwrap();
+        bound.call("extbelief_get", json!({})).await.unwrap();
+        let calls = recorder.recorded_calls();
+        assert_eq!(calls[0].1["perspective_id"], "uuid-under-test");
+        assert!(calls[1].1.get("perspective_id").is_none(), "{:?}", calls[1]);
     }
 
     #[tokio::test]

@@ -865,6 +865,7 @@ async fn a_session_keeps_its_settings_on_this_node_only() {
     let f = fixture().await;
     let settings = SessionSettings {
         work_in: Some("work-perspective".into()),
+        library: Some("library-perspective".into()),
         write_tools: vec!["template_update".into()],
         model: Some("local-model".into()),
     };
@@ -901,7 +902,7 @@ async fn a_session_keeps_its_settings_on_this_node_only() {
     for link in &links {
         let predicate = link.data.predicate.clone().unwrap_or_default();
         let local = matches!(link.status, Some(LinkStatus::Local));
-        let node_local = ["work_in", "write_tools", "model"]
+        let node_local = ["work_in", "library", "write_tools", "model"]
             .iter()
             .any(|p| predicate == format!("ad4m://agent_session/{p}"));
         assert_eq!(local, node_local, "{predicate} is local: {local}");
@@ -1118,29 +1119,41 @@ async fn no_reply_of_the_callers_starts_in_a_container_while_it_is_deleted() {
 fn a_sessions_write_tools_go_with_its_perspective() {
     let saved = SessionSettings {
         work_in: Some("p1".into()),
+        library: Some("lib1".into()),
         write_tools: vec!["instance_update".into()],
         model: Some("local-model".into()),
     };
     // A call that names nothing gets the session's settings.
-    assert_eq!(saved.clone().for_reply(None, None, None), saved);
-    // A call that names another perspective gets no tool chosen for the session's.
+    assert_eq!(saved.clone().for_reply(None, None, None, None), saved);
+    // A call that names another perspective, or another library, gets no tool chosen for the
+    // session's.
     assert_eq!(
-        saved.clone().for_reply(Some("p2".into()), None, None),
+        saved.clone().for_reply(Some("p2".into()), None, None, None),
         SessionSettings {
             work_in: Some("p2".into()),
+            library: Some("lib1".into()),
             write_tools: vec![],
             model: Some("local-model".into()),
         }
+    );
+    assert_eq!(
+        saved
+            .clone()
+            .for_reply(None, Some("lib2".into()), None, None)
+            .write_tools,
+        Vec::<String>::new()
     );
     // What the call names wins.
     assert_eq!(
         saved.for_reply(
             Some("p2".into()),
+            None,
             Some(vec!["template_update".into()]),
             Some("other-model".into())
         ),
         SessionSettings {
             work_in: Some("p2".into()),
+            library: Some("lib1".into()),
             write_tools: vec!["template_update".into()],
             model: Some("other-model".into()),
         }

@@ -16,12 +16,18 @@ container: string,
  */
 workIn?: string, 
 /**
+ * The person's library: the perspective holding their own templates, where the template
+ * tools also look and `template_create` may make one. Absent: the session's, or none.
+ */
+library?: string, 
+/**
  * What the person is looking at, as a hint for the model (`{ "recordId": "…" }`).
  */
 context?: Record<string, unknown>, 
 /**
  * Tools that write which the model may call, as for `perspective.runAgent`. Absent: the
- * session's when `workIn` is the session's too, else none, an agent that only reads.
+ * session's when `workIn` and `library` are the session's too, else none, an agent that only
+ * reads.
  */
 writeTools?: Array<string>, 
 /**

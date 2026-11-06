@@ -4,7 +4,9 @@
 //! The perspective the call names (`uuid`) keeps the conversation: the guard checks the caller may
 //! write there, since the reply is written there. The agent works in `workIn`, which may be
 //! another perspective: the handler runs the same perspective guard on it, with the update
-//! capability when the agent may write and the query capability when it only reads. The run is
+//! capability when the agent may write and the query capability when it only reads. The person's
+//! library (`library`, the call's else the session's), where the template tools also look and
+//! `template_create` may make a template, is checked the same way. The run is
 //! `perspective.runAgent`'s, as the caller's session and with its credit gate, but it is not tied
 //! to the request: the call returns as soon as the reply exists.
 
@@ -41,18 +43,22 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         .unwrap_or_default();
     let SessionSettings {
         work_in,
+        library,
         write_tools,
         model,
-    } = saved.for_reply(body.work_in, body.write_tools, body.model);
+    } = saved.for_reply(body.work_in, body.library, body.write_tools, body.model);
     let work_in = work_in.ok_or_else(|| {
         WsRpcError::bad_request(
             "`workIn` is missing: name the perspective the agent works in, or reply in a session \
              that has one",
         )
     })?;
-    // `workIn` is an access check, so it runs before the handler's own checks (credits,
-    // settings): a call that fails both gets the access answer.
+    // `workIn` and the library are access checks, so they run before the handler's own checks
+    // (credits, settings): a call that fails both gets the access answer.
     admit_work_in(&ctx, &work_in, &write_tools).await?;
+    if let Some(library) = &library {
+        admit_work_in(&ctx, library, &write_tools).await?;
+    }
     check_credits(ctx.user_did())?;
     let max_tool_calls = body.max_tool_calls.unwrap_or(DEFAULT_MAX_TOOL_CALLS);
     check_settings(&write_tools, max_tool_calls).map_err(WsRpcError::bad_request)?;
@@ -66,11 +72,13 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     ));
     let run_context = agent_context.clone();
     let run_work_in = work_in.clone();
+    let run_library = library.clone();
     let context = body.context;
     let run: Runner = Box::new(move |messages: Vec<AgentMessage>, steps| {
         Box::pin(async move {
             let request = AgentSessionRequest {
                 perspective_uuid: &run_work_in,
+                library: run_library.as_deref(),
                 messages: &messages,
                 context: context.as_ref(),
                 write_tools: &write_tools,
@@ -118,8 +126,8 @@ async fn agent_reply_cancel(params: Value, ctx: Arc<RequestContext>) -> Result<V
     Ok(json!(cancelled))
 }
 
-/// The caller may let an agent work in `work_in`: query it, and update it when the agent may
-/// write. The perspective guard, run on that perspective.
+/// The caller may let an agent work in `work_in` (or in its library): query it, and update it
+/// when the agent may write. The perspective guard, run on that perspective.
 async fn admit_work_in(
     ctx: &RequestContext,
     work_in: &str,
@@ -144,8 +152,8 @@ async fn agent_session_create(
     let perspective = guarded_perspective(&params).await?;
     let write_tools = body.write_tools.unwrap_or_default();
     check_settings(&write_tools, DEFAULT_MAX_TOOL_CALLS).map_err(WsRpcError::bad_request)?;
-    if let Some(work_in) = &body.work_in {
-        admit_work_in(&ctx, work_in, &write_tools).await?;
+    for named in [&body.work_in, &body.library].into_iter().flatten() {
+        admit_work_in(&ctx, named, &write_tools).await?;
     }
     let session_id = create_session(
         perspective,
@@ -154,6 +162,7 @@ async fn agent_session_create(
             about: body.about,
             settings: SessionSettings {
                 work_in: body.work_in,
+                library: body.library,
                 write_tools,
                 model: body.model,
             },
@@ -218,11 +227,16 @@ pub struct AgentReplyRequest {
     /// Absent: the session's (`container` is an `AgentSession` created with one).
     #[ts(optional)]
     pub work_in: Option<String>,
+    /// The person's library: the perspective holding their own templates, where the template
+    /// tools also look and `template_create` may make one. Absent: the session's, or none.
+    #[ts(optional)]
+    pub library: Option<String>,
     /// What the person is looking at, as a hint for the model (`{ "recordId": "…" }`).
     #[ts(optional, type = "Record<string, unknown>")]
     pub context: Option<Value>,
     /// Tools that write which the model may call, as for `perspective.runAgent`. Absent: the
-    /// session's when `workIn` is the session's too, else none, an agent that only reads.
+    /// session's when `workIn` and `library` are the session's too, else none, an agent that only
+    /// reads.
     #[ts(optional)]
     pub write_tools: Option<Vec<String>>,
     /// A model id. Absent: the session's, else the node's default language model.
@@ -267,6 +281,10 @@ pub struct AgentSessionCreateRequest {
     /// node only.
     #[ts(optional)]
     pub work_in: Option<String>,
+    /// The person's library, where its replies' template tools also look and `template_create`
+    /// may make a template. Kept on this node only.
+    #[ts(optional)]
+    pub library: Option<String>,
     /// The tools its replies' agent may write with. Kept on this node only.
     #[ts(optional)]
     pub write_tools: Option<Vec<String>>,

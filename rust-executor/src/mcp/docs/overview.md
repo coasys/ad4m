@@ -83,9 +83,13 @@ cardinality, so fix what the error says rather than guessing.
 | --- | --- |
 | `template_read(perspective_id, base_uri, ...)` | Read a WE app's Template record: the template whole, or as an outline when it is large, and its version |
 | `template_update(perspective_id, base_uri, version, patches)` | Patch the template by WE's own rules and save it as you, all at once |
+| `template_create(perspective_id, name, place, ...)` | Make a new template by WE's rules: in the person's library (`place: library`, the default) or in the space (`place: space`), from a starting one, a fork (`base_uri`) or a whole template |
 
-Use these, not `instance_update`, for a Template: they apply WE's rules for a template — what
-makes it valid, and that its version moves with it — where a raw property write does not.
+Use these, not `instance_update` or `instance_create`, for a Template: they apply WE's rules for a
+template — what makes it valid, and that its version moves with it — where a raw property write
+does not. Each also takes `library_perspective_id`, the perspective holding the person's own
+templates: a template is looked for there too, and `place: library` makes one there. Without it,
+only the space is available.
 `get_documentation(topic="template")` is the guide; read it before a first edit.
 
 ### Tree and raw links

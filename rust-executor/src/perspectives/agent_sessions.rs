@@ -10,7 +10,9 @@
 //! ([`SessionSettings::for_reply`]).
 //!
 //! **The settings stay on this node.** Where the agent works (`workIn`, a perspective uuid that
-//! means nothing to another node), the tools it may write with and the model are `Local` links on
+//! means nothing to another node), the person's library (`library`, likewise a uuid: where the
+//! template tools look for a template too and `template_create` may make one), the tools it may
+//! write with and the model are `Local` links on
 //! the session (`"local": true` in `hardwired_sdna/agent_session.json`): they are never shared.
 //! `title` and `about` are the session's content, shared with the perspective.
 //!
@@ -39,28 +41,33 @@ const SESSION_URI_PREFIX: &str = "ad4m://agent_session/";
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionSettings {
     pub work_in: Option<String>,
+    pub library: Option<String>,
     pub write_tools: Vec<String>,
     pub model: Option<String>,
 }
 
 impl SessionSettings {
-    /// What a reply in the session runs with when the call names `work_in`, `write_tools` and
-    /// `model`: what the call names, and the session's for what it leaves out. The session's
-    /// write tools go with its perspective: a call that names its own `workIn` gets only the
-    /// write tools it names, never ones chosen for the session's perspective. The model is no
+    /// What a reply in the session runs with when the call names `work_in`, `library`,
+    /// `write_tools` and `model`: what the call names, and the session's for what it leaves out.
+    /// The session's write tools go with its perspectives (`workIn` and the library, both of
+    /// which they write in): a call that names its own `workIn` or library gets only the write
+    /// tools it names, never ones chosen for the session's perspectives. The model is no
     /// perspective's, so it falls back on its own.
     pub fn for_reply(
         self,
         work_in: Option<String>,
+        library: Option<String>,
         write_tools: Option<Vec<String>>,
         model: Option<String>,
     ) -> SessionSettings {
-        let (work_in, saved_tools) = match work_in {
-            Some(work_in) => (Some(work_in), Vec::new()),
-            None => (self.work_in, self.write_tools),
+        let saved_tools = if work_in.is_none() && library.is_none() {
+            self.write_tools
+        } else {
+            Vec::new()
         };
         SessionSettings {
-            work_in,
+            work_in: work_in.or(self.work_in),
+            library: library.or(self.library),
             write_tools: write_tools.unwrap_or(saved_tools),
             model: model.or(self.model),
         }
@@ -105,6 +112,9 @@ pub async fn create_session(
     }
     if let Some(work_in) = session.settings.work_in {
         values["workIn"] = work_in.into();
+    }
+    if let Some(library) = session.settings.library {
+        values["library"] = library.into();
     }
     if !session.settings.write_tools.is_empty() {
         values["writeTools"] = serde_json::to_string(&session.settings.write_tools)?.into();
@@ -167,6 +177,7 @@ pub async fn session_settings(
     };
     Ok(Some(SessionSettings {
         work_in: text("workIn"),
+        library: text("library"),
         write_tools: text("writeTools")
             .map(|tools| serde_json::from_str(&tools))
             .transpose()?

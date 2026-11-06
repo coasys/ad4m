@@ -15,6 +15,11 @@ about?: string,
  */
 workIn?: string, 
 /**
+ * The person's library, where its replies' template tools also look and `template_create`
+ * may make a template. Kept on this node only.
+ */
+library?: string, 
+/**
  * The tools its replies' agent may write with. Kept on this node only.
  */
 writeTools?: Array<string>, 

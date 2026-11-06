@@ -8,6 +8,7 @@ use crate::ai_service::harness::provider::{ToolProvider, ToolSchema};
 use crate::ai_service::harness::{
     CompletionSource, CreditGate, HarnessCompletion, HarnessToolCall,
 };
+use crate::mcp::tools::instances::template_tools::{LIBRARY_ARGUMENT, TEMPLATE_TOOLS};
 use crate::mcp::tools::Ad4mMcpHandler;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::{register_perspective, unregister_perspective};
@@ -162,6 +163,7 @@ fn request<'a>(
 ) -> AgentSessionRequest<'a> {
     AgentSessionRequest {
         perspective_uuid: &f.uuid,
+        library: None,
         messages,
         context: None,
         write_tools,
@@ -176,7 +178,7 @@ async fn a_session_offers_reads_and_only_the_writes_it_was_given() {
     let messages = asked("what notes are there?");
 
     let model = Scripted::new(vec![]);
-    let tools = session_tools(f.handler.clone(), &f.uuid, &[]);
+    let tools = session_tools(f.handler.clone(), &f.uuid, None, &[]);
     let reply = converse(
         &request(&f, &messages, &[]),
         tools,
@@ -220,7 +222,7 @@ async fn a_session_offers_reads_and_only_the_writes_it_was_given() {
 
     let write = vec!["instance_update".to_string()];
     let model = Scripted::new(vec![]);
-    let tools = session_tools(f.handler.clone(), &f.uuid, &write);
+    let tools = session_tools(f.handler.clone(), &f.uuid, None, &write);
     converse(
         &request(&f, &messages, &write),
         tools,
@@ -244,7 +246,7 @@ async fn a_write_it_was_not_given_is_refused_even_when_the_model_names_it() {
         "instance_update",
         json!({ "class_name": "Note", "base_uri": f.note, "properties": { "title": "renamed" } }),
     )]);
-    let tools = session_tools(f.handler.clone(), &f.uuid, &[]);
+    let tools = session_tools(f.handler.clone(), &f.uuid, None, &[]);
     converse(
         &request(&f, &messages, &[]),
         tools,
@@ -273,7 +275,7 @@ async fn a_write_it_was_given_lands_in_its_own_perspective_only() {
         // The model names the other perspective out of band; the session's binding wins.
         json!({ "perspective_id": f.other, "class_name": "Note", "base_uri": f.note, "properties": { "title": "renamed" } }),
     )]);
-    let tools = session_tools(f.handler.clone(), &f.uuid, &write);
+    let tools = session_tools(f.handler.clone(), &f.uuid, None, &write);
     let reply = converse(
         &request(&f, &messages, &write),
         tools,
@@ -303,7 +305,7 @@ async fn every_tool_a_session_can_offer_stays_in_its_perspective() {
         .into_iter()
         .map(str::to_string)
         .collect();
-    let offered = session_tools(f.handler.clone(), &f.uuid, &every_write)
+    let offered = session_tools(f.handler.clone(), &f.uuid, None, &every_write)
         .tools()
         .await;
     assert!(offered.iter().any(|t| t.name == "instance_update"));
@@ -323,8 +325,21 @@ async fn every_tool_a_session_can_offer_stays_in_its_perspective() {
             "{} is offered but is not bound to the session's perspective",
             tool.name
         );
+        // The library is the one other perspective a tool may name, and only a template tool:
+        // the caller binds it, so the model never sees it.
+        let library_tool = TEMPLATE_TOOLS.contains(&tool.name.as_str());
+        if library_tool {
+            assert!(
+                tool.parameters["properties"]
+                    .get(LIBRARY_ARGUMENT)
+                    .is_none(),
+                "{} shows the model the library argument",
+                tool.name
+            );
+        }
         let other_selector = properties.keys().find(|key| {
             *key != "perspective_id"
+                && !(library_tool && key.as_str() == LIBRARY_ARGUMENT)
                 && (key.contains("perspective") || key.contains("uuid") || key.ends_with("_url"))
         });
         assert!(
@@ -349,6 +364,28 @@ async fn every_tool_a_session_can_offer_stays_in_its_perspective() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_session_given_a_library_may_make_a_template_and_never_names_the_library() {
+    let f = fixture().await;
+    let create = vec!["template_create".to_string()];
+    let offered = session_tools(f.handler.clone(), &f.uuid, Some(&f.other), &create)
+        .tools()
+        .await;
+    let names: Vec<&str> = offered.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"template_create"), "{names:?}");
+    for tool in offered
+        .iter()
+        .filter(|t| TEMPLATE_TOOLS.contains(&t.name.as_str()))
+    {
+        let properties = &tool.parameters["properties"];
+        assert!(properties.get(LIBRARY_ARGUMENT).is_none(), "{}", tool.name);
+        assert!(properties.get("perspective_id").is_none(), "{}", tool.name);
+    }
+    let prompt = super::agent_session::system_prompt_for_test(&create);
+    assert!(prompt.contains("template_create"), "{prompt}");
+    assert!(prompt.contains("library"), "{prompt}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_session_in_one_perspective_cannot_publish_another() {
     let f = fixture().await;
     let messages = asked("share my other perspective");
@@ -357,7 +394,7 @@ async fn a_session_in_one_perspective_cannot_publish_another() {
         "neighbourhood_publish_from_perspective",
         json!({ "perspective_uuid": f.other, "link_language": "Qm" }),
     )]);
-    let tools = session_tools(f.handler.clone(), &f.uuid, &publish);
+    let tools = session_tools(f.handler.clone(), &f.uuid, None, &publish);
     let outcome = converse(
         &request(&f, &messages, &publish),
         tools,
@@ -382,7 +419,7 @@ async fn a_session_in_one_perspective_cannot_publish_another() {
         "neighbourhood_publish_from_perspective",
         json!({ "perspective_uuid": f.other, "link_language": "Qm" }),
     )]);
-    let tools = session_tools(f.handler.clone(), &f.uuid, &every_write);
+    let tools = session_tools(f.handler.clone(), &f.uuid, None, &every_write);
     converse(
         &request(&f, &messages, &every_write),
         tools,
@@ -413,7 +450,7 @@ async fn a_session_stopped_by_credits_says_so_rather_than_answering_empty() {
     let f = fixture().await;
     let messages = asked("anything");
     let model = Scripted::new(vec![]);
-    let tools = session_tools(f.handler.clone(), &f.uuid, &[]);
+    let tools = session_tools(f.handler.clone(), &f.uuid, None, &[]);
     let outcome = converse(
         &request(&f, &messages, &[]),
         tools,
@@ -427,4 +464,19 @@ async fn a_session_stopped_by_credits_says_so_rather_than_answering_empty() {
         matches!(outcome, Err(AgentSessionError::OutOfCredits)),
         "{outcome:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_without_a_library_makes_nothing_in_one_the_model_names() {
+    let f = fixture().await;
+    let create = vec!["template_create".to_string()];
+    let tools = session_tools(f.handler.clone(), &f.uuid, None, &create);
+    let answer = tools
+        .call(
+            "template_create",
+            json!({ "library_perspective_id": f.other, "name": "Planted" }),
+        )
+        .await
+        .unwrap();
+    assert!(answer.contains("No library was given"), "{answer}");
 }

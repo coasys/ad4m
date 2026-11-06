@@ -1,6 +1,6 @@
 {
   "target_class": "ad4m://AgentSession",
-  "interpretation_hint": "A conversation with an agent: the person's messages and the agent's replies are its children. It names what it is about, and the node it runs on keeps where the agent works and what it may change.",
+  "interpretation_hint": "A conversation with an agent: the person's messages and the agent's replies are its children. It names what it is about, and the node it runs on keeps where the agent works, the person's library, and what it may change.",
   "constructor_actions": [
     {"action": "addLink", "source": "this", "predicate": "ad4m://agent_session/title", "target": "placeholder"}
   ],
@@ -8,6 +8,7 @@
     {"path": "ad4m://agent_session/title",       "name": "title",      "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_session/title", "target": "value"}]},
     {"path": "ad4m://agent_session/about",       "name": "about",      "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_session/about", "target": "value"}]},
     {"path": "ad4m://agent_session/work_in",     "name": "workIn",     "min_count": 0, "max_count": 1, "local": true, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_session/work_in", "target": "value"}]},
+    {"path": "ad4m://agent_session/library",     "name": "library",    "min_count": 0, "max_count": 1, "local": true, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_session/library", "target": "value"}]},
     {"path": "ad4m://agent_session/write_tools", "name": "writeTools", "min_count": 0, "max_count": 1, "local": true, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_session/write_tools", "target": "value"}]},
     {"path": "ad4m://agent_session/model",       "name": "model",      "min_count": 0, "max_count": 1, "local": true, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_session/model", "target": "value"}]}
   ]
