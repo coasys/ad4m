@@ -329,12 +329,12 @@ async fn within_endpoint_limits<T>(
     stream: bool,
     call: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    let endpoint = endpoint_id.and_then(|id| {
-        crate::db_backend::db_backend()
-            .get_endpoint(id)
-            .ok()
-            .flatten()
-    });
+    // A read error fails the call: without its endpoint, it would run without the slot and
+    // the timeout.
+    let endpoint = match endpoint_id {
+        Some(id) => crate::db_backend::db_backend().get_endpoint(id)?,
+        None => None,
+    };
     let Some(endpoint) = endpoint else {
         return call.await;
     };
@@ -3264,6 +3264,20 @@ mod tests {
         Ad4mDb::with_global_instance(|db| db.update_endpoint(&endpoint)).unwrap();
         let past_own = super::within_endpoint_limits(Some(&endpoint.id), false, answer_after(20));
         assert!(past_own.await.is_err(), "the endpoint's own timeout wins");
+    }
+
+    // A read error of the endpoint ran the call without the endpoint's slot and timeout.
+    #[tokio::test]
+    async fn a_call_whose_endpoint_cannot_be_read_does_not_run() {
+        let _closed = crate::test_utils::DbClosed::now();
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        let call = async {
+            ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            anyhow::Ok(())
+        };
+        let result = super::within_endpoint_limits(Some("endpoint-id"), false, call).await;
+        assert!(result.is_err());
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
 
