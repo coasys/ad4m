@@ -1,6 +1,6 @@
 {
   "$schema": "https://turborepo.org/schema.json",
-  "globalPassThroughEnv": ["CARGO_PROFILE_RELEASE_STRIP"],
+  "globalPassThroughEnv": ["CARGO_PROFILE_RELEASE_STRIP", "AD4M_GIT_COMMIT", "GITHUB_SHA", "CIRCLE_SHA1"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
