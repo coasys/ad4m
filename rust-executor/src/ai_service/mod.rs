@@ -9,6 +9,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
+use std::future::Future;
+use std::pin::Pin;
+
 pub mod endpoints;
 mod error;
 pub mod harness;
@@ -86,7 +89,7 @@ struct TranscriptionSession {
     /// The worker's queue: it answers each utterance after the ones fed before it.
     utterances: mpsc::UnboundedSender<transcription::Utterance>,
     /// When the stream was last fed, or last answered an utterance.
-    last_activity: Arc<Mutex<std::time::Instant>>,
+    last_activity: Arc<Mutex<tokio::time::Instant>>,
     /// The utterances fed and not answered yet. A stream waiting for its upstream is not
     /// idle, however long the upstream takes.
     in_flight: Arc<std::sync::atomic::AtomicUsize>,
@@ -104,7 +107,7 @@ type TranscriptionStreams = Arc<Mutex<HashMap<String, TranscriptionSession>>>;
 /// idle time starts at its last answer.
 struct InFlight {
     count: Arc<std::sync::atomic::AtomicUsize>,
-    last_activity: Arc<Mutex<std::time::Instant>>,
+    last_activity: Arc<Mutex<tokio::time::Instant>>,
 }
 
 impl InFlight {
@@ -124,11 +127,14 @@ impl Drop for InFlight {
         // Before the count drops, so the reaper cannot see the stream idle in between. When
         // the reaper holds the lock, it sees the count above zero and keeps the stream.
         if let Ok(mut last_activity) = self.last_activity.try_lock() {
-            *last_activity = std::time::Instant::now();
+            *last_activity = tokio::time::Instant::now();
         }
         self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
+
+/// What a feed answers, once its utterance is transcribed.
+pub type FeedAnswer = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
 #[cfg(test)]
 impl TranscriptionSession {
@@ -138,7 +144,7 @@ impl TranscriptionSession {
         let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
         let session = TranscriptionSession {
             utterances,
-            last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+            last_activity: Arc::new(Mutex::new(tokio::time::Instant::now())),
             in_flight: Default::default(),
             text_broadcast_tx,
             agent_did: owner.map(str::to_string),
@@ -178,19 +184,18 @@ impl ChatModel {
     }
 
     /// One completion of `turns`, with `tools` as definitions and the reply constrained to
-    /// `json_schema` when given ([`ChatRequest::json_schema`]), in a slot of the endpoint's
-    /// concurrency cap when it has one.
+    /// `json_schema` when given ([`ChatRequest::json_schema`]), within the endpoint's limits
+    /// ([`within_endpoint_limits`]).
     async fn chat(
         &self,
         turns: Vec<ChatTurn>,
         tools: Vec<ToolSpec>,
         json_schema: Option<serde_json::Value>,
     ) -> Result<ChatReply> {
-        let _slot = endpoints::request_slot(&self.endpoint).await;
         let request = ChatRequest::new(self.remote_model.clone(), turns)
             .with_tools(tools)
             .with_json_schema(json_schema);
-        let reply = self.client.chat(request).await;
+        let reply = within_endpoint_limits(&self.endpoint, false, self.client.chat(request)).await;
         self.after(reply)
     }
 
@@ -201,9 +206,13 @@ impl ChatModel {
         turns: Vec<ChatTurn>,
         tokens: mpsc::UnboundedSender<String>,
     ) -> Result<ChatReply> {
-        let _slot = endpoints::request_slot(&self.endpoint).await;
         let request = ChatRequest::new(self.remote_model.clone(), turns);
-        let reply = self.client.chat_stream(request, tokens).await;
+        let reply = within_endpoint_limits(
+            &self.endpoint,
+            true,
+            self.client.chat_stream(request, tokens),
+        )
+        .await;
         self.after(reply)
     }
 
@@ -273,6 +282,36 @@ fn estimate_reply_tokens(reply: &ChatReply) -> usize {
 
     estimate_token_count(&reply.text) + calls
 }
+
+/// One remote chat call of a model under the limits the operator set on its `endpoint`: a
+/// slot by `max_concurrent`, shared with the calls `/v1` forwards, and for an answer that
+/// is not a stream, `request_timeout_secs` (default 300 s), the wait for the slot
+/// included. A stream keeps its client's own bound.
+async fn within_endpoint_limits<T>(
+    endpoint: &Endpoint,
+    stream: bool,
+    call: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let limited = async {
+        let _slot = endpoints::request_slot(endpoint).await;
+        call.await
+    };
+    if stream {
+        return limited.await;
+    }
+    let timeout = endpoints::request_timeout(endpoint, CHAT_TIMEOUT);
+    tokio::time::timeout(timeout, limited).await.map_err(|_| {
+        anyhow::Error::from(providers::http::UpstreamUnreachable {
+            url: endpoint.base_url.to_string(),
+            timed_out: true,
+            detail: format!("no answer within {}s", timeout.as_secs()),
+        })
+    })?
+}
+
+/// How long a remote chat answer may take unless its endpoint sets `request_timeout_secs`;
+/// `/v1` forwards with the same default.
+const CHAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The turn list for a task-shaped prompt: the task's system prompt, its
 /// examples as alternating user/assistant turns, then the live prompt.
@@ -980,7 +1019,10 @@ impl AIService {
             })
             .map(|model| model.id.clone())
             .ok_or_else(|| {
-                anyhow!("No EMBEDDING model has the id or name '{requested}' on this executor")
+                crate::db::InvalidModel(format!(
+                    "No EMBEDDING model has the id or name '{requested}' on this executor"
+                ))
+                .into()
             })
     }
 
@@ -1103,7 +1145,7 @@ impl AIService {
             stream_id.clone(),
             TranscriptionSession {
                 utterances,
-                last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+                last_activity: Arc::new(Mutex::new(tokio::time::Instant::now())),
                 in_flight: Default::default(),
                 text_broadcast_tx,
                 agent_did,
@@ -1122,31 +1164,47 @@ impl AIService {
         audio_samples: Vec<f32>,
         caller: &RequestContext,
     ) -> Result<()> {
-        let (outcome, _in_flight) = {
-            let map_lock = self.transcription_streams.lock().await;
-            let stream = map_lock
-                .get(stream_id)
-                .ok_or(AIServiceError::StreamNotFound)?;
-            Self::verify_stream_ownership(stream, caller)?;
-            *stream.last_activity.lock().await = std::time::Instant::now();
-            // Queued while the map is locked: two feeds keep the order they arrived in.
-            let (done, outcome) = oneshot::channel();
-            stream
-                .utterances
-                .send(transcription::Utterance {
-                    samples: audio_samples,
-                    done,
-                })
-                .map_err(|e| {
-                    AIServiceError::CrazyError(format!("Failed to feed stream {stream_id}: {e}"))
-                })?;
-            // Counted while the map is still locked, so the reaper never sees the utterance
-            // queued and not counted.
-            (outcome, InFlight::count(stream))
-        };
-        outcome
+        self.queue_utterance(stream_id, audio_samples, caller)
+            .await?
             .await
-            .map_err(|_| anyhow!("Transcription stream {stream_id} ended before it answered"))?
+    }
+
+    /// Queue one utterance (16 kHz mono) on a stream, and answer what its feed answers
+    /// ([`Self::feed_transcription_stream`]) without waiting for it: utterances keep the
+    /// order they were queued in.
+    pub async fn queue_utterance(
+        &self,
+        stream_id: &String,
+        audio_samples: Vec<f32>,
+        caller: &RequestContext,
+    ) -> Result<FeedAnswer> {
+        let map_lock = self.transcription_streams.lock().await;
+        let stream = map_lock
+            .get(stream_id)
+            .ok_or(AIServiceError::StreamNotFound)?;
+        Self::verify_stream_ownership(stream, caller)?;
+        *stream.last_activity.lock().await = tokio::time::Instant::now();
+        // Queued while the map is locked: two feeds keep the order they arrived in.
+        let (done, outcome) = oneshot::channel();
+        stream
+            .utterances
+            .send(transcription::Utterance {
+                samples: audio_samples,
+                done,
+            })
+            .map_err(|e| {
+                AIServiceError::CrazyError(format!("Failed to feed stream {stream_id}: {e}"))
+            })?;
+        // Counted while the map is still locked, so the reaper never sees the utterance
+        // queued and not counted. The answer holds it: answered or dropped, it ends.
+        let in_flight = InFlight::count(stream);
+        let stream_id = stream_id.clone();
+        Ok(Box::pin(async move {
+            let _in_flight = in_flight;
+            outcome
+                .await
+                .map_err(|_| anyhow!("Transcription stream {stream_id} ended before it answered"))?
+        }))
     }
 
     /// The text of a stream, as it is published (`/v1/realtime`).
@@ -1937,7 +1995,7 @@ mod remote_stream_tests {
     async fn backdate(service: &AIService, id: &str) {
         let streams = service.transcription_streams.lock().await;
         *streams[id].last_activity.lock().await =
-            std::time::Instant::now() - Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS + 1);
+            tokio::time::Instant::now() - Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS + 1);
     }
 
     async fn is_open(service: &AIService, id: &str) -> bool {
@@ -2003,6 +2061,37 @@ mod remote_stream_tests {
         backdate(&service, &id).await;
         AIService::close_idle_streams(&service.transcription_streams).await;
         assert!(!is_open(&service, &id).await);
+    }
+
+    // A feed set `last_activity` only when it started, and an endpoint answers an utterance
+    // only when its transcript is done: the reaper closed a stream whose upstream took longer
+    // than the idle timeout, and the next feed got `StreamNotFound`.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_is_not_idle_while_its_upstream_transcribes() {
+        let service = AIService::empty();
+        service.start_stream_reaper();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+
+        // 78 s upstream, more than the idle timeout (30 s) and a reaper interval (5 s).
+        service
+            .feed_transcription_stream(&id, utterance(78_000), &operator)
+            .await
+            .unwrap();
+        service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .expect("the stream is still open after a slow utterance");
+
+        // Idle counts from the last answer: a stream nobody feeds is still closed.
+        sleep(Duration::from_secs(
+            TRANSCRIPTION_TIMEOUT_SECS + TRANSCRIPTION_CHECK_INTERVAL_SECS + 1,
+        ))
+        .await;
+        assert!(
+            !service.transcription_streams.lock().await.contains_key(&id),
+            "an idle stream stayed open"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2387,7 +2476,7 @@ mod stream_reaper_tests {
 
         let (session, _queue) = TranscriptionSession::for_test(None);
         *session.last_activity.lock().await =
-            std::time::Instant::now() - Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS + 1);
+            tokio::time::Instant::now() - Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS + 1);
         service
             .transcription_streams
             .lock()

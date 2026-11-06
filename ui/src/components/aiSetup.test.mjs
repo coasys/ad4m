@@ -2,7 +2,13 @@
 // types). The launcher has no test runner of its own; this covers the onboarding choice.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chatModels, parseMaxNumCtx, preselectedChat, withMaxNumCtx } from "./aiSetup.ts";
+import {
+  chatModels,
+  endpointFor,
+  parseMaxNumCtx,
+  preselectedChat,
+  withMaxNumCtx,
+} from "./aiSetup.ts";
 
 const ollama = { kind: "OLLAMA", baseUrl: "http://127.0.0.1:11434" };
 const speaches = { kind: "OPEN_AI_AUDIO", baseUrl: "http://127.0.0.1:8000" };
@@ -68,4 +74,51 @@ test("setting the ceiling keeps the endpoint's other settings and its stored key
     maxConcurrent: undefined,
   });
   assert.equal("apiKey" in input, false);
+});
+
+test("a key typed again for a saved endpoint updates that endpoint, not a new one", async () => {
+  const saved = {
+    id: "e1",
+    name: "openai",
+    kind: "OPEN_AI",
+    baseUrl: "https://api.openai.com/v1/",
+    hasApiKey: true,
+    capabilities: ["chat", "embeddings"],
+    maxNumCtx: null,
+    requestTimeoutSecs: 600,
+    maxConcurrent: null,
+    health: { state: "REACHABLE", servedModels: [] },
+  };
+  const calls = [];
+  const client = {
+    ai: {
+      endpoints: async () => [saved],
+      addEndpoint: async (input) => {
+        calls.push(["add", input]);
+        return { ...saved, id: "e2", name: input.name };
+      },
+      updateEndpoint: async (id, input) => {
+        calls.push(["update", id, input]);
+        return saved;
+      },
+    },
+  };
+  const endpoint = await endpointFor(client, "OPEN_AI", "https://api.openai.com/v1", "sk-new");
+  assert.equal(endpoint.id, "e1");
+  assert.deepEqual(calls, [
+    [
+      "update",
+      "e1",
+      {
+        name: "openai",
+        kind: "OPEN_AI",
+        baseUrl: "https://api.openai.com/v1/",
+        capabilities: ["chat", "embeddings"],
+        maxNumCtx: undefined,
+        requestTimeoutSecs: 600,
+        maxConcurrent: undefined,
+        apiKey: "sk-new",
+      },
+    ],
+  ]);
 });

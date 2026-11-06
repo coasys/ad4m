@@ -551,9 +551,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Probed once before it saves.
     map.method::<EndpointInput, EndpointView>("ai.addEndpoint", add_endpoint)
         .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // Long: an update reloads the models on the endpoint, and a cascade removes them, each
+    // after the inference it runs.
     map.method::<AiUpdateEndpointParams, EndpointView>("ai.updateEndpoint", update_endpoint)
+        .long()
         .guard(Guard::Executor(AI_UPDATE_CAPABILITY.clone()));
     map.method::<AiRemoveEndpointParams, bool>("ai.removeEndpoint", remove_endpoint)
+        .long()
         .guard(Guard::Executor(AI_DELETE_CAPABILITY.clone()));
     // Requests to this machine's loopback ports; saves nothing.
     map.method::<NoParams, Vec<DetectedEndpoint>>("ai.detectEndpoints", detect_endpoints)
@@ -989,6 +993,21 @@ mod model_view_tests {
         let prompted = ai_prompt(prompt, ctx).await.unwrap_err();
         assert_eq!(prompted.code, 400, "ai.prompt: {}", prompted.message);
     }
+
+    // An embed on a model this executor does not have (Flux sends 'bert') is the caller's
+    // mistake: 400, not 500.
+    #[tokio::test]
+    async fn an_embed_on_a_model_that_does_not_exist_is_a_bad_request() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AIService::init_global_instance().await.unwrap();
+        let err = ai_embed(
+            serde_json::json!({ "modelId": "bert", "text": "hi" }),
+            Arc::new(RequestContext::operator_for_test()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, 400, "{}", err.message);
+    }
 }
 
 #[cfg(test)]
@@ -1030,6 +1049,50 @@ mod compute_credit_tests {
         assert_eq!(results.0.unwrap_err().code, 403, "a user without credits");
         assert!(results.1.is_ok(), "a user with credits");
         assert!(results.2.is_ok(), "a caller without a user pays nothing");
+    }
+
+    // Removing this check from the HTTP feed broke no test (Data, #1615 round 1): a user at 0
+    // credits is refused before any stream is fed.
+    #[tokio::test]
+    async fn the_http_feed_refuses_a_user_without_credits() {
+        use crate::agent::session::{Principal, Session};
+        use crate::agent::AgentContext;
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        let id = uuid::Uuid::new_v4();
+        let broke_did = format!("did:key:broke-feeder-{id}");
+        let was_free = Ad4mDb::with_global_instance(|db| {
+            db.add_user(&format!("broke-feeder-{id}@example.org"), &broke_did, "pw")?;
+            let was_free = db.get_free_hosting_enabled()?;
+            db.set_free_hosting_enabled(false)?;
+            Ok::<_, anyhow::Error>(was_free)
+        })
+        .unwrap();
+        let context = RequestContext::for_session(
+            Session::for_test(Principal::Agent(AgentContext::managed(broke_did)))
+                .with_caps(vec![AI_TRANSCRIBE_CAPABILITY.clone()]),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-stream-ids", "a-stream".parse().unwrap());
+
+        let fed = feed_transcription_stream(
+            State(AppState {
+                admin_credential: None,
+            }),
+            context,
+            headers,
+            axum::body::Bytes::from(vec![0u8; 8]),
+        )
+        .await;
+        crate::db_backend::db_backend()
+            .set_free_hosting_enabled(was_free)
+            .unwrap();
+
+        match fed {
+            Err(ApiError::Forbidden(message)) => assert!(message.contains("credits"), "{message}"),
+            other => panic!("a user without credits fed a stream: {other:?}"),
+        }
     }
 
     // On dev a closed database panicked the check, so the request failed. The read error

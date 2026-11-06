@@ -2,7 +2,9 @@
 //! their apply at startup.
 //!
 //! The apply is idempotent by name: an entry that exists is brought to the file's settings,
-//! one that does not is added, and nothing the file does not name is touched. It runs
+//! one that does not is added, and nothing the file does not name is touched. An endpoint
+//! entry whose name is new takes over the endpoint the start-up migration made for the same
+//! protocol, URL and key, so a model that used the server before stays on it. It runs
 //! before the AI service loads, so the models start with it, and makes no request: the
 //! health loop checks the endpoints.
 
@@ -11,7 +13,10 @@ use url::Url;
 
 use super::super::providers::http::is_transport_safe;
 use crate::secret::Secret;
-use crate::types::{AiCapability, Endpoint, EndpointHealth, EndpointKind, ModelInput, ModelType};
+use crate::types::{
+    same_endpoint, AiCapability, Endpoint, EndpointHealth, EndpointKind, Model, ModelInput,
+    ModelType,
+};
 
 /// One `ai_endpoints` entry. The key is read from the environment variable `api_key_env`
 /// names, never written in the file.
@@ -69,8 +74,9 @@ pub struct AiSettings {
 /// cannot apply (a key variable that is not set, a key over plain HTTP, an unknown
 /// endpoint or model name) is skipped with a warning naming it; the others apply.
 pub fn apply(settings: &AiSettings, env: impl Fn(&str) -> Option<String>) {
+    let named: Vec<&str> = settings.endpoints.iter().map(|e| e.name.as_str()).collect();
     for setting in &settings.endpoints {
-        if let Err(e) = apply_endpoint(setting, &env) {
+        if let Err(e) = apply_endpoint(setting, &named, &env) {
             log::warn!("Config ai_endpoints {:?} not applied: {e:#}", setting.name);
         }
     }
@@ -92,8 +98,10 @@ pub fn apply(settings: &AiSettings, env: impl Fn(&str) -> Option<String>) {
     }
 }
 
+/// `named`: the endpoint names the file gives.
 fn apply_endpoint(
     setting: &AiEndpointSetting,
+    named: &[&str],
     env: &impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<()> {
     let api_key = match &setting.api_key_env {
@@ -102,13 +110,33 @@ fn apply_endpoint(
         ),
         None => Secret::new(""),
     };
+    if setting.max_num_ctx == Some(0) {
+        anyhow::bail!("max_num_ctx must be positive");
+    }
+    if super::has_credentials(&setting.base_url) {
+        anyhow::bail!("{}", super::URL_CREDENTIALS_REFUSAL);
+    }
     if !api_key.is_empty() && !is_transport_safe(&setting.base_url) {
         anyhow::bail!(
             "refusing to send its key over plain HTTP to {}",
             setting.base_url
         );
     }
-    let existing = crate::db_backend::db_backend().get_endpoint_by_name(&setting.name)?;
+    let existing = match crate::db_backend::db_backend().get_endpoint_by_name(&setting.name)? {
+        Some(stored) => Some(stored),
+        // The start-up migration names the endpoint of an existing remote model by its
+        // host. The entry for that server takes it over (and renames it), unless another
+        // entry of the file names it: the registry refuses two endpoints for one server.
+        None => crate::db_backend::db_backend()
+            .get_endpoints()?
+            .into_iter()
+            .find(|stored| {
+                stored.kind.protocol() == setting.kind.protocol()
+                    && same_endpoint(stored.base_url.as_str(), setting.base_url.as_str())
+                    && stored.api_key.expose_for_compare(api_key.expose())
+                    && !named.contains(&stored.name.as_str())
+            }),
+    };
     let endpoint = Endpoint {
         id: existing
             .as_ref()
@@ -133,7 +161,7 @@ fn apply_endpoint(
     };
     match existing {
         None => crate::db_backend::db_backend().insert_endpoint(&endpoint),
-        Some(stored) if same_settings(&stored, &endpoint) => Ok(()),
+        Some(stored) if stored.name == endpoint.name && same_settings(&stored, &endpoint) => Ok(()),
         Some(_) => crate::db_backend::db_backend()
             .update_endpoint(&endpoint)
             .map(|_| ()),
@@ -161,10 +189,8 @@ fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {
         remote_model: setting.remote_model.clone(),
         native_tools: setting.native_tools,
     };
-    let existing = crate::db_backend::db_backend()
-        .get_models()?
-        .into_iter()
-        .find(|model| model.name == setting.name);
+    crate::ai_service::AIService::check_endpoint_serves(&input)?;
+    let existing = model_named(&setting.name, |_| true)?;
     match existing {
         None => crate::db_backend::db_backend()
             .add_model(&input)
@@ -182,12 +208,23 @@ fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {
 }
 
 fn apply_default(model_type: ModelType, name: &str) -> anyhow::Result<()> {
-    let model = crate::db_backend::db_backend()
-        .get_models()?
-        .into_iter()
-        .find(|model| model.name == name && model.model_type == model_type)
+    let model = model_named(name, |model| model.model_type == model_type)?
         .ok_or_else(|| anyhow::anyhow!("no {model_type} model is named {name:?}"))?;
     crate::db_backend::db_backend().set_default_model(model_type, &model.id)
+}
+
+/// The one model named `name` that `wanted` accepts. Model names are not unique: when two
+/// have the name, the file does not say which one it means, so neither is changed.
+fn model_named(name: &str, wanted: impl Fn(&Model) -> bool) -> anyhow::Result<Option<Model>> {
+    let mut named = crate::db_backend::db_backend()
+        .get_models()?
+        .into_iter()
+        .filter(|model| model.name == name && wanted(model));
+    let first = named.next();
+    if named.next().is_some() {
+        anyhow::bail!("more than one model is named {name:?}");
+    }
+    Ok(first)
 }
 
 #[cfg(test)]
@@ -263,6 +300,67 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_takes_over_the_endpoint_the_migration_made_for_its_server() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        // A model the launcher added before the registry: the migration gave it an
+        // endpoint named by its host.
+        let by_host = stored_endpoint(
+            "127.0.0.1:11434",
+            EndpointKind::Ollama,
+            "http://127.0.0.1:11434",
+        );
+        let launcher_model = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&ModelInput {
+                name: "launcher-qwen".into(),
+                model_type: ModelType::Llm,
+                endpoint_id: by_host.id.clone(),
+                remote_model: "qwen3:8b".into(),
+                native_tools: None,
+            })
+        })
+        .unwrap();
+        let migrated = Ad4mDb::with_global_instance(|db| db.get_endpoints()).unwrap();
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].name, "127.0.0.1:11434");
+
+        apply(&settings(), env);
+        apply(&settings(), env);
+
+        let (endpoints, models, llm) = Ad4mDb::with_global_instance(|db| {
+            Ok::<_, anyhow::Error>((
+                db.get_endpoints()?,
+                db.get_models()?,
+                db.get_default_model(ModelType::Llm)?,
+            ))
+        })
+        .unwrap();
+        assert_eq!(
+            endpoints
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ollama", "openai"]
+        );
+        let ollama = &endpoints[0];
+        assert_eq!(ollama.id, migrated[0].id, "taken over, not added");
+        assert_eq!(ollama.kind, EndpointKind::Ollama);
+        assert_eq!(ollama.max_num_ctx, Some(8192));
+        let endpoint_of = |name: &str| {
+            models
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap()
+                .endpoint_id
+                .clone()
+        };
+        assert_eq!(endpoint_of("launcher-qwen"), ollama.id);
+        assert_eq!(endpoint_of("qwen"), ollama.id);
+        let qwen = models.iter().find(|m| m.name == "qwen").unwrap();
+        assert_eq!(llm.as_deref(), Some(qwen.id.as_str()));
+        assert_ne!(qwen.id, launcher_model);
+    }
+
+    #[test]
     fn a_changed_file_updates_its_entries_in_place() {
         Ad4mDb::init_global_instance(":memory:").unwrap();
         apply(&settings(), env);
@@ -291,5 +389,102 @@ mod tests {
         .unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(models.len(), 2);
+    }
+
+    // The file's models get the check `ai.addModel` makes: Ollama serves no transcription,
+    // so the model is skipped and the endpoint does not gain the capability.
+    #[test]
+    fn a_model_its_endpoint_cannot_serve_is_skipped() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let mut with_transcription = settings();
+        with_transcription.models.push(
+            serde_json::from_value(serde_json::json!({
+                "name": "whisper", "model_type": "TRANSCRIPTION", "endpoint": "ollama",
+                "remote_model": "whisper-1"
+            }))
+            .unwrap(),
+        );
+        apply(&with_transcription, env);
+        let (endpoints, models) = Ad4mDb::with_global_instance(|db| {
+            Ok::<_, anyhow::Error>((db.get_endpoints()?, db.get_models()?))
+        })
+        .unwrap();
+        assert!(models.iter().all(|m| m.name != "whisper"), "{models:?}");
+        assert!(!endpoints[0]
+            .capabilities
+            .contains(&AiCapability::Transcription));
+    }
+
+    /// An endpoint of `kind` named `name` on `url`, without a key, stored.
+    fn stored_endpoint(name: &str, kind: EndpointKind, url: &str) -> Endpoint {
+        let endpoint = Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            kind,
+            base_url: Url::parse(url).unwrap(),
+            api_key: Secret::new(""),
+            capabilities: kind.default_capabilities(),
+            max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
+            health: EndpointHealth::default(),
+        };
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        endpoint
+    }
+
+    // Model names are not unique: the file cannot say which of two it means.
+    #[test]
+    fn a_model_name_two_models_have_is_left_alone() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let endpoint = stored_endpoint(
+            "twins",
+            EndpointKind::OpenAiCompatible,
+            "http://127.0.0.1:9931",
+        );
+        let twin = |remote_model: &str| ModelInput {
+            name: "qwen".into(),
+            model_type: ModelType::Llm,
+            endpoint_id: endpoint.id.clone(),
+            remote_model: remote_model.into(),
+            native_tools: None,
+        };
+        Ad4mDb::with_global_instance(|db| {
+            db.add_model(&twin("a"))?;
+            db.add_model(&twin("b"))
+        })
+        .unwrap();
+
+        apply(&settings(), env);
+
+        let (models, llm) = Ad4mDb::with_global_instance(|db| {
+            Ok::<_, anyhow::Error>((db.get_models()?, db.get_default_model(ModelType::Llm)?))
+        })
+        .unwrap();
+        let mut remotes: Vec<String> = models
+            .iter()
+            .filter(|m| m.name == "qwen")
+            .map(|m| m.remote_model.clone())
+            .collect();
+        remotes.sort();
+        assert_eq!(remotes, vec!["a", "b"]);
+        assert_eq!(llm, None);
+    }
+
+    #[test]
+    fn an_endpoint_with_a_credential_in_its_url_is_skipped() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let mut with_password = settings();
+        with_password.endpoints[0].base_url =
+            Url::parse("http://user:pass@127.0.0.1:11434").unwrap();
+        apply(&with_password, env);
+        let endpoints = Ad4mDb::with_global_instance(|db| db.get_endpoints()).unwrap();
+        assert_eq!(
+            endpoints
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openai"]
+        );
     }
 }

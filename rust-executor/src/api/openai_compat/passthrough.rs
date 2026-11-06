@@ -2,18 +2,21 @@
 //! that endpoint as the client wrote it (plan §5).
 //!
 //! Only `model` is rewritten, to the id the endpoint knows (`Model::remote_model`), and back to
-//! the client's name in the answer. Every other field (`tools`, `tool_choice`,
+//! the client's name in the answer, and, for a caller who pays, what bounds the cost
+//! ([`cap_cost`]). Every other field (`tools`, `tool_choice`,
 //! `response_format`, fields this executor has never heard of) reaches the upstream, and an
 //! SSE stream comes back event by event. A stream asks for
 //! `stream_options.include_usage`, so the bill is the upstream's count; the usage-only
 //! event it adds is not passed on to a client that did not ask for it. Where the upstream
-//! reports no usage, the request and the generated text are estimated.
+//! reports no usage, the request and the generated text are estimated. A stream is billed
+//! for what it generated however it ends ([`StreamBill`]).
 //!
 //! When `/v1` forwards and when the executor answers itself: [`Upstream::for_chat`] and
-//! [`Upstream::of`]. Failures map per §5.4 ([`OpenAIError::from_upstream`]); one that says
+//! [`Upstream::of`]. Failures map per §5.4 ([`OpenAIError::from_endpoint`]); one that says
 //! the endpoint is down or refuses the key re-checks its health, and a 404 marks the model
 //! `MISSING`. An endpoint with `max_concurrent` lets that many requests through at once;
-//! the wait counts against the request's timeout.
+//! the wait counts against the request's timeout. A stream may stay silent for that
+//! timeout between two chunks, not for longer.
 
 use std::time::Duration;
 
@@ -32,16 +35,17 @@ use super::model_selector::Resolved;
 use crate::ai_service::endpoints::{after_failed_request, request_slot, request_timeout};
 use crate::ai_service::estimate_token_count;
 use crate::ai_service::providers::http::{
-    credentialed_http, is_transport_safe, versioned_endpoint, UpstreamStatus, UpstreamUnreachable,
-    CLEARTEXT_KEY_REFUSAL,
+    credentialed_http, is_transport_safe, read_json, versioned_endpoint, UpstreamStatus,
+    UpstreamUnreachable, CLEARTEXT_KEY_REFUSAL,
 };
-use crate::billing::check_compute_credits;
+use crate::billing::{affordable_ai_units, check_compute_credits};
 use crate::types::{Endpoint, EndpointKind, Model, RequestContext};
 
 /// How long a stream may take to start answering (plan §5.4).
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The bound for a request whose timeout the route sets; every request sets one.
+/// The bound for a request whose timeout the route sets (every request but a stream sets
+/// one), and the longest a stream may run.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(3600);
 
 lazy_static! {
@@ -88,10 +92,14 @@ pub struct Upstream {
 
 impl Upstream {
     /// The upstream of `resolved` when `/v1` forwards to it: a model on an endpoint of any
-    /// kind but Anthropic (Ollama through its OpenAI-compatible `/v1`). `None`: the executor
-    /// answers, through the model's own client (Anthropic is translated there).
+    /// kind but Anthropic and Ollama. `None`: the executor answers, through the model's own
+    /// client (Anthropic is translated there; Ollama goes to its native `/api/chat`, as its
+    /// OpenAI-compatible `/v1` ignores `num_ctx` and cuts long prompts without an error).
     pub fn of(resolved: &Resolved) -> Option<Upstream> {
-        if resolved.endpoint.kind == EndpointKind::Anthropic {
+        if matches!(
+            resolved.endpoint.kind,
+            EndpointKind::Anthropic | EndpointKind::Ollama
+        ) {
             return None;
         }
         Some(Upstream {
@@ -172,19 +180,21 @@ pub(super) fn upstream_failure(
 ) -> OpenAIError {
     log::warn!("AI endpoint {:?} ({remote_model}): {error}", endpoint.name);
     after_failed_request(&endpoint.id, remote_model, &error);
-    OpenAIError::from_upstream(&error)
+    OpenAIError::from_endpoint(&error)
 }
 
 /// An upstream answer with a success status, and the slot it holds until it is read.
 struct Answer {
     response: reqwest::Response,
-    deadline: Instant,
+    /// The request's timeout: a stream may stay silent this long between two chunks.
+    timeout: Duration,
     _slot: Option<OwnedSemaphorePermit>,
 }
 
 /// Send `body` to `route` of `upstream`. Waits for a slot when the endpoint caps its
 /// concurrency, then for the answer: within the request timeout, or for a stream, within
-/// [`FIRST_BYTE_TIMEOUT`] too.
+/// [`FIRST_BYTE_TIMEOUT`] too. The timeout bounds the whole of an answer that is not a
+/// stream; a stream's events are timed one by one ([`stream_back`]).
 async fn send(
     upstream: &Upstream,
     route: Route,
@@ -221,10 +231,10 @@ async fn send(
         .await
         .map_err(|_| timed_out("while queued for a slot"))?;
 
-    let mut request = HTTP
-        .post(&url)
-        .json(body)
-        .timeout(deadline.saturating_duration_since(Instant::now()));
+    let mut request = HTTP.post(&url).json(body);
+    if !stream {
+        request = request.timeout(deadline.saturating_duration_since(Instant::now()));
+    }
     if !api_key.is_empty() {
         request = request.bearer_auth(api_key);
     }
@@ -254,7 +264,7 @@ async fn send(
     }
     Ok(Answer {
         response,
-        deadline,
+        timeout,
         _slot: slot,
     })
 }
@@ -302,10 +312,27 @@ impl Bill {
     }
 }
 
+/// What a stream has generated so far, billed once when it is dropped: at the stream's end,
+/// when the client leaves, when the upstream breaks off or stays silent past the timeout,
+/// and when the session ends and drops the task. The upstream has done that work in each.
+struct StreamBill {
+    bill: Bill,
+    usage: Option<Value>,
+    generated: String,
+}
+
+impl Drop for StreamBill {
+    fn drop(&mut self) {
+        self.bill.settle(self.usage.as_ref(), &self.generated);
+    }
+}
+
+/// The tokens `usage` reports: its total, else prompt plus completion. `None` when it
+/// reports neither, or only one part: the estimate counts the whole request then.
 fn usage_tokens(usage: &Value) -> Option<usize> {
     let count = |key: &str| usage.get(key).and_then(Value::as_u64);
     let total = count("total_tokens")
-        .or_else(|| Some(count("prompt_tokens").unwrap_or(0) + count("completion_tokens")?))?;
+        .or_else(|| Some(count("prompt_tokens")? + count("completion_tokens")?))?;
     usize::try_from(total).ok()
 }
 
@@ -320,8 +347,8 @@ fn prompt_text(body: &Value) -> String {
     text
 }
 
-/// The text an answer or a stream event generated: content, completion text and the
-/// arguments of tool calls.
+/// The text an answer or a stream event generated: reasoning, content, completion text and
+/// the arguments of tool calls.
 fn generated_text(answer: &Value) -> String {
     let mut text = String::new();
     let choices = answer.get("choices").and_then(Value::as_array);
@@ -330,8 +357,12 @@ fn generated_text(answer: &Value) -> String {
             .into_iter()
             .flatten()
         {
-            if let Some(content) = message.get("content").and_then(Value::as_str) {
-                text.push_str(content);
+            // `reasoning_content` (llama-server, vLLM, DeepSeek) and `reasoning`
+            // (OpenRouter, newer vLLM) are generated tokens too.
+            for key in ["reasoning_content", "reasoning", "content"] {
+                if let Some(part) = message.get(key).and_then(Value::as_str) {
+                    text.push_str(part);
+                }
             }
             let calls = message.get("tool_calls").and_then(Value::as_array);
             for call in calls.into_iter().flatten() {
@@ -348,6 +379,46 @@ fn generated_text(answer: &Value) -> String {
     text
 }
 
+/// Bound what `body` can cost a caller who can pay for `affordable` tokens of the model.
+/// The bill is tokens times the model's rate, and a request's tokens are at most its prompt
+/// plus each choice's completion limit. So every completion limit the client set
+/// (`max_tokens`, `max_completion_tokens`) is lowered to
+/// `(affordable - prompt_estimate) / choices`, where `choices` is the largest of `n`,
+/// `best_of` and 1, and `limit_key` is set to it when the client set neither.
+/// `service_tier` is dropped: the operator prices the endpoint's default tier. A request
+/// that cannot afford one token per choice is refused.
+fn cap_cost(
+    body: &mut Value,
+    limit_key: &str,
+    prompt_estimate: usize,
+    affordable: usize,
+) -> Result<(), OpenAIError> {
+    let count = |key: &str| body.get(key).and_then(Value::as_u64).unwrap_or(1);
+    let choices = count("n").max(count("best_of")).max(1);
+    let per_choice = (affordable.saturating_sub(prompt_estimate) as u64) / choices;
+    if per_choice == 0 {
+        return Err(OpenAIError::insufficient_quota(
+            "Insufficient compute credits for this request",
+        ));
+    }
+    let Some(fields) = body.as_object_mut() else {
+        return Ok(());
+    };
+    fields.remove("service_tier");
+    let mut limited = false;
+    for key in ["max_tokens", "max_completion_tokens"] {
+        if let Some(limit) = fields.get_mut(key).filter(|limit| !limit.is_null()) {
+            let asked = limit.as_u64().unwrap_or(u64::MAX);
+            *limit = Value::from(asked.min(per_choice));
+            limited = true;
+        }
+    }
+    if !limited {
+        fields.insert(limit_key.to_string(), Value::from(per_choice));
+    }
+    Ok(())
+}
+
 /// Forward a chat or text completion `body` for `auth` to `upstream`, the answer back with
 /// the client's `model`, and bill the caller's user from its usage.
 pub async fn forward_completion(
@@ -356,9 +427,19 @@ pub async fn forward_completion(
     route: Route,
     mut body: Value,
 ) -> Result<Response, OpenAIError> {
+    let prompt_estimate = estimate_token_count(&prompt_text(&body));
     if let Some(agent_did) = auth.user_did() {
         check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        let affordable = affordable_ai_units(agent_did, &upstream.model.id)
+            .map_err(|e| OpenAIError::internal(format!("Could not read the credits: {e}")))?;
+        if let Some(affordable) = affordable {
+            let limit_key = match (route, upstream.endpoint.kind) {
+                (Route::ChatCompletions, EndpointKind::OpenAi) => "max_completion_tokens",
+                _ => "max_tokens",
+            };
+            cap_cost(&mut body, limit_key, prompt_estimate, affordable)?;
+        }
     }
     let client_model = body.get("model").cloned().unwrap_or(Value::Null);
     body["model"] = Value::String(upstream.remote_model.clone());
@@ -384,7 +465,7 @@ pub async fn forward_completion(
     let bill = Bill {
         bill_to: auth.user_did().map(str::to_string),
         model_id: upstream.model.id.clone(),
-        prompt_estimate: estimate_token_count(&prompt_text(&body)),
+        prompt_estimate,
         log_label: format!(
             "/v1/{} model={} endpoint={} stream={stream}",
             route.path(),
@@ -426,13 +507,23 @@ async fn answer_back(
     client_model: Value,
     bill: Bill,
 ) -> Result<Response, OpenAIError> {
-    let bytes = read_body(&upstream, answer).await?;
-    let mut json: Value = serde_json::from_slice(&bytes).map_err(|_| {
-        upstream_failure(
-            &upstream.endpoint,
-            &upstream.remote_model,
-            anyhow::anyhow!("the endpoint answered a body that is not JSON"),
-        )
+    // The slot is held until the answer is read.
+    let Answer {
+        response, _slot, ..
+    } = answer;
+    let mut json: Value = read_json(response).await.map_err(|e| {
+        let endpoint = &upstream.endpoint;
+        let failed = match e.downcast_ref::<reqwest::Error>() {
+            Some(e) => {
+                UpstreamUnreachable::new(endpoint.base_url.as_str(), e, endpoint.api_key.expose())
+                    .into()
+            }
+            None if e.is::<serde_json::Error>() => {
+                anyhow::anyhow!("the endpoint answered a body that is not JSON")
+            }
+            None => e,
+        };
+        upstream_failure(endpoint, &upstream.remote_model, failed)
     })?;
     bill.settle(json.get("usage"), &generated_text(&json));
     if json.get("model").is_some() {
@@ -445,9 +536,9 @@ async fn answer_back(
         .map_err(|e| OpenAIError::internal(format!("Response build error: {e}")))
 }
 
-/// The upstream's SSE events as they come, each with the client's `model`. The bill is
-/// settled when the stream ends or the client leaves, not when the upstream fails; a
-/// failure is a final `data: {"error": …}` event.
+/// The upstream's SSE events as they come, each with the client's `model`. The upstream may
+/// stay silent for the request's timeout between two chunks. A failure is a final
+/// `data: {"error": …}` event; the bill is settled however the stream ends ([`StreamBill`]).
 fn stream_back(
     auth: &RequestContext,
     upstream: Upstream,
@@ -460,20 +551,25 @@ fn stream_back(
     super::chat::spawn_until_over(&auth.session, async move {
         let Answer {
             response,
-            deadline,
-            _slot,
+            timeout,
+            _slot: slot,
         } = answer;
         let mut upstream_events = response.bytes_stream();
         let mut events = SseEvents::default();
-        let mut usage: Option<Value> = None;
-        let mut generated = String::new();
+        let mut meter = StreamBill {
+            bill,
+            usage: None,
+            generated: String::new(),
+        };
         let failure = loop {
-            let chunk = match tokio::time::timeout_at(deadline, upstream_events.next()).await {
+            let next = tokio::select! {
+                // The client left while the upstream was silent: it pays for what reached it.
+                _ = tx.closed() => break None,
+                next = tokio::time::timeout(timeout, upstream_events.next()) => next,
+            };
+            let chunk = match next {
                 Err(_) => {
-                    break Some((
-                        "upstream_timeout",
-                        "The model's endpoint did not finish in time",
-                    ))
+                    break Some(("upstream_timeout", "The model's endpoint stopped answering"))
                 }
                 Ok(None) => break None,
                 Ok(Some(Err(e))) => {
@@ -500,9 +596,9 @@ fn stream_back(
                     out.push_str(&format!("data: {data}\n\n"));
                     continue;
                 };
-                generated.push_str(&generated_text(&event));
+                meter.generated.push_str(&generated_text(&event));
                 if let Some(reported) = event.get("usage").filter(|u| !u.is_null()) {
-                    usage = Some(reported.clone());
+                    meter.usage = Some(reported.clone());
                     // The event `include_usage` adds, which this client did not ask for.
                     let only_usage = event
                         .get("choices")
@@ -517,17 +613,33 @@ fn stream_back(
                 }
                 out.push_str(&format!("data: {event}\n\n"));
             }
-            if !out.is_empty() && tx.send(Ok(Bytes::from(out))).await.is_err() {
-                // The client left: it pays for what reached it.
-                break None;
+            if !out.is_empty() {
+                let sent = tokio::time::timeout(timeout, tx.send(Ok(Bytes::from(out)))).await;
+                if !matches!(sent, Ok(Ok(()))) {
+                    // The client left, or read nothing for the timeout while the slot and
+                    // the upstream waited: it pays for what reached it.
+                    break None;
+                }
+            }
+            if events.overflowing() {
+                log::warn!(
+                    "AI endpoint {:?} ({}): an SSE event outgrew {MAX_SSE_EVENT} bytes",
+                    upstream.endpoint.name,
+                    upstream.remote_model,
+                );
+                break Some((
+                    "upstream_error",
+                    "The model's endpoint sent an event too large to pass on",
+                ));
             }
         };
-        match failure {
-            None => bill.settle(usage.as_ref(), &generated),
-            Some((kind, message)) => {
-                let error = json!({ "error": { "message": message, "type": kind, "code": kind } });
-                let _ = tx.send(Ok(Bytes::from(format!("data: {error}\n\n")))).await;
-            }
+        // The endpoint is done with: its slot goes to the next request, and the final event
+        // waits for no client.
+        drop(upstream_events);
+        drop(slot);
+        if let Some((kind, message)) = failure {
+            let error = json!({ "error": { "message": message, "type": kind, "code": kind } });
+            let _ = tx.try_send(Ok(Bytes::from(format!("data: {error}\n\n"))));
         }
     });
     Response::builder()
@@ -540,31 +652,61 @@ fn stream_back(
         .expect("an SSE response builds")
 }
 
-/// Splits an SSE byte stream into the `data` of each event, across chunk boundaries.
+/// The most one SSE event may hold, read but not complete: an upstream that sends more
+/// without ending the event is cut off.
+const MAX_SSE_EVENT: usize = 8 << 20;
+
+/// Splits an SSE byte stream into the `data` of each event, across chunk boundaries. Lines
+/// end at LF, CR or CRLF; a line is decoded once it is complete, so a character or a CRLF
+/// split across two chunks reads as one.
 #[derive(Default)]
 struct SseEvents {
-    buffer: String,
+    /// The bytes of a line not yet complete.
+    line: Vec<u8>,
+    /// The `data` lines of the event not yet complete, and their length.
+    data: Vec<String>,
+    held: usize,
 }
 
 impl SseEvents {
     /// The `data` of every event `chunk` completes. Lines other than `data:` (comments,
     /// `event:`, `id:`) are dropped: OpenAI-shaped streams carry everything in `data`.
     fn push(&mut self, chunk: &[u8]) -> Vec<String> {
-        self.buffer
-            .push_str(&String::from_utf8_lossy(chunk).replace("\r\n", "\n"));
+        self.line.extend_from_slice(chunk);
         let mut complete = Vec::new();
-        while let Some(end) = self.buffer.find("\n\n") {
-            let event: String = self.buffer.drain(..end + 2).collect();
-            let data: Vec<&str> = event
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:"))
-                .map(|data| data.strip_prefix(' ').unwrap_or(data))
-                .collect();
-            if !data.is_empty() {
-                complete.push(data.join("\n"));
+        let mut start = 0;
+        while let Some(at) = self.line[start..]
+            .iter()
+            .position(|&b| b == b'\n' || b == b'\r')
+        {
+            let end = start + at;
+            let next = match self.line[end] {
+                // A CR the next chunk may follow with its LF.
+                b'\r' if end + 1 == self.line.len() => break,
+                b'\r' if self.line[end + 1] == b'\n' => end + 2,
+                _ => end + 1,
+            };
+            let line = String::from_utf8_lossy(&self.line[start..end]);
+            if line.is_empty() {
+                if !self.data.is_empty() {
+                    complete.push(self.data.join("\n"));
+                    self.data.clear();
+                    self.held = 0;
+                }
+            } else if let Some(data) = line.strip_prefix("data:") {
+                let data = data.strip_prefix(' ').unwrap_or(data);
+                self.held += data.len();
+                self.data.push(data.to_string());
             }
+            start = next;
         }
+        self.line.drain(..start);
         complete
+    }
+
+    /// Whether the event being read holds more than [`MAX_SSE_EVENT`].
+    fn overflowing(&self) -> bool {
+        self.held + self.line.len() > MAX_SSE_EVENT
     }
 }
 
@@ -605,6 +747,58 @@ mod tests {
         );
     }
 
+    // Each network chunk was decoded on its own: a character split in two became two U+FFFD,
+    // and a CRLF split as CR | LF merged two events into one.
+    #[test]
+    fn a_character_or_a_crlf_split_across_chunks_reads_as_one() {
+        let mut events = SseEvents::default();
+        assert!(events.push(b"data: caf\xC3").is_empty());
+        assert_eq!(events.push(b"\xA9\n\n"), vec!["caf\u{e9}"]);
+
+        assert!(events.push(b"data: a\r\n\r").is_empty());
+        assert_eq!(events.push(b"\ndata: b\r\n\r\n"), vec!["a", "b"]);
+
+        assert_eq!(events.push(b"data: c\r\rdata: d\n"), vec!["c"]);
+        assert_eq!(events.push(b"data: e\n\n"), vec!["d\ne"]);
+    }
+
+    #[test]
+    fn an_event_that_outgrows_the_limit_is_flagged() {
+        let mut events = SseEvents::default();
+        let line = vec![b'x'; MAX_SSE_EVENT / 2];
+        assert!(events.push(b"data: ").is_empty());
+        events.push(&line);
+        assert!(!events.overflowing());
+        events.push(b"\ndata: ");
+        events.push(&line);
+        events.push(b"xx");
+        assert!(events.overflowing(), "held across lines of one event");
+        assert_eq!(events.push(b"\n\n").len(), 1);
+        assert!(!events.overflowing(), "a complete event is let go");
+    }
+
+    #[test]
+    fn a_paying_request_is_capped_at_what_the_credits_buy() {
+        let mut body =
+            json!({ "n": 2, "best_of": 3, "max_tokens": 1000, "service_tier": "priority" });
+        cap_cost(&mut body, "max_tokens", 10, 100).unwrap();
+        assert_eq!(body, json!({ "n": 2, "best_of": 3, "max_tokens": 30 }));
+
+        let mut body = json!({ "max_completion_tokens": null });
+        cap_cost(&mut body, "max_completion_tokens", 10, 100).unwrap();
+        assert_eq!(body, json!({ "max_completion_tokens": 90 }));
+
+        let mut body = json!({ "max_tokens": 5, "max_completion_tokens": "many" });
+        cap_cost(&mut body, "max_tokens", 10, 100).unwrap();
+        assert_eq!(
+            body,
+            json!({ "max_tokens": 5, "max_completion_tokens": 90 })
+        );
+
+        let error = cap_cost(&mut json!({ "n": 4 }), "max_tokens", 97, 100).unwrap_err();
+        assert_eq!(error.error.code.as_deref(), Some("insufficient_quota"));
+    }
+
     #[test]
     fn usage_is_the_total_or_the_sum() {
         assert_eq!(usage_tokens(&json!({"total_tokens": 9})), Some(9));
@@ -613,16 +807,23 @@ mod tests {
             Some(7)
         );
         assert_eq!(usage_tokens(&json!({})), None);
+        assert_eq!(
+            usage_tokens(&json!({"completion_tokens": 3})),
+            None,
+            "a part alone is not the request's count"
+        );
     }
 
     #[test]
-    fn generated_text_reads_content_deltas_completions_and_call_arguments() {
+    fn generated_text_reads_reasoning_content_deltas_completions_and_call_arguments() {
         let answer = json!({"choices": [
             {"message": {"content": "hi", "tool_calls": [{"function": {"arguments": "{}"}}]}},
+            {"delta": {"reasoning_content": "hmm"}},
+            {"delta": {"reasoning": "so"}},
             {"delta": {"content": " there"}},
             {"text": "!"},
         ]});
-        assert_eq!(generated_text(&answer), "hi{} there!");
+        assert_eq!(generated_text(&answer), "hi{}hmmso there!");
     }
 
     #[test]
