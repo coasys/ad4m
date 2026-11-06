@@ -1238,38 +1238,43 @@ fn spawn_pid_follower(paths: LocalPaths, mut status: tokio::sync::watch::Receive
 }
 
 /// The memory one DRM client of an fdinfo holds, with the client's id: the
-/// `drm-memory-*` / `drm-resident-*` lines of vram, gtt, system and local memory (amdgpu,
-/// i915, xe). `None` for a file that is no DRM client.
+/// `drm-resident-*` lines of vram, gtt, system and local memory (amdgpu, i915, xe), else
+/// the `drm-memory-*` ones. From kernel 6.13 amdgpu prints both, the legacy key as an alias
+/// of the resident one, as the wind tunnel's `drmClientBytes` says. `None` for a file that
+/// is no DRM client.
 fn drm_client_bytes(fdinfo: &str) -> Option<(String, u64)> {
     let id = fdinfo.lines().find_map(|l| {
         l.strip_prefix("drm-client-id:")
             .map(|v| v.trim().to_string())
     })?;
-    let mut bytes = 0u64;
-    for line in fdinfo.lines() {
-        let Some(rest) = line
-            .strip_prefix("drm-memory-")
-            .or_else(|| line.strip_prefix("drm-resident-"))
-        else {
-            continue;
-        };
-        let Some((region, value)) = rest.split_once(':') else {
-            continue;
-        };
-        if !matches!(region, "vram" | "gtt" | "system" | "local") {
-            continue;
-        }
-        let mut parts = value.split_whitespace();
-        let Some(number) = parts.next().and_then(|n| n.parse::<u64>().ok()) else {
-            continue;
-        };
-        bytes += number
-            * match parts.next() {
-                Some("MiB") => 1024 * 1024,
-                Some("KiB") | Some("kB") => 1024,
-                _ => 1,
+    let sum = |prefix: &str| -> Option<u64> {
+        let mut bytes = None;
+        for line in fdinfo.lines() {
+            let Some(rest) = line.strip_prefix(prefix) else {
+                continue;
             };
-    }
+            let Some((region, value)) = rest.split_once(':') else {
+                continue;
+            };
+            if !matches!(region, "vram" | "gtt" | "system" | "local") {
+                continue;
+            }
+            let mut parts = value.split_whitespace();
+            let Some(number) = parts.next().and_then(|n| n.parse::<u64>().ok()) else {
+                continue;
+            };
+            *bytes.get_or_insert(0) += number
+                * match parts.next() {
+                    Some("MiB") => 1024 * 1024,
+                    Some("KiB") | Some("kB") => 1024,
+                    _ => 1,
+                };
+        }
+        bytes
+    };
+    let bytes = sum("drm-resident-")
+        .or_else(|| sum("drm-memory-"))
+        .unwrap_or(0);
     Some((id, bytes))
 }
 
@@ -1870,6 +1875,18 @@ mod tests {
             Some(("42".to_string(), 1024 * 1024 + 2 * 1024 * 1024))
         );
         assert_eq!(drm_client_bytes("pos:\t0\nflags:\t0\n"), None);
+        // From kernel 6.13 amdgpu prints `drm-resident-*` and then `drm-memory-*` again as
+        // an alias: counted once (the wind tunnel's fixture).
+        let fdinfo = "drm-driver:\tamdgpu\ndrm-client-id:\t43\ndrm-total-cpu:\t256580 KiB\n\
+                      drm-resident-cpu:\t0\ndrm-total-gtt:\t1455376 KiB\ndrm-shared-gtt:\t0\n\
+                      drm-resident-gtt:\t1455364 KiB\ndrm-purgeable-gtt:\t0\n\
+                      drm-total-vram:\t952 KiB\ndrm-resident-vram:\t952 KiB\n\
+                      drm-memory-vram:\t952 KiB\ndrm-memory-gtt: \t1455364 KiB\n\
+                      drm-memory-cpu: \t0 KiB\namd-requested-gtt:\t1455376 KiB\n";
+        assert_eq!(
+            drm_client_bytes(fdinfo),
+            Some(("43".to_string(), (1455364 + 952) * 1024))
+        );
         // This process is in its own tree.
         assert!(process_tree(std::process::id()).contains(&std::process::id()));
     }
