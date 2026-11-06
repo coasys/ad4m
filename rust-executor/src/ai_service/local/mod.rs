@@ -1540,9 +1540,18 @@ async fn register(
             }
             None => service.add_model(input).await?,
         };
+        // A row of this endpoint that the selection dropped is removed below, and the
+        // default it is with it: it does not count as a default.
         let has_default = crate::db_backend::db_backend()
             .get_default_model(model_type.clone())?
-            .is_some_and(|default| rows.iter().any(|r| r.id == default) || default == id);
+            .is_some_and(|default| {
+                default == id
+                    || rows.iter().any(|r| {
+                        r.id == default
+                            && (r.endpoint_id != endpoint.id
+                                || models.iter().any(|m| m.model_id == r.name))
+                    })
+            });
         if make_default || !has_default {
             service.set_default_model(model_type, id).await?;
         }
@@ -2859,6 +2868,63 @@ mod tests {
         assert_eq!(after, vec!["wt-chat"], "the dropped model's row is gone");
         assert_eq!(default_after, None, "no default names the removed model");
         assert!(chat_default.is_some());
+    }
+
+    /// A re-plan that changes the chat model (new recommendations after an upgrade, another
+    /// `local_ai_device`), on a start that does not make defaults: the new model takes the
+    /// default of the one it replaces. The old row counted as the default while the new one
+    /// registered, and its removal then left the type with none.
+    #[tokio::test]
+    async fn a_replanned_model_takes_the_default_of_the_one_it_replaces() {
+        crate::test_utils::ensure_test_db();
+        let saved = super::super::AI_SERVICE
+            .lock()
+            .await
+            .replace(AIService::empty());
+        let db = crate::db_backend::db_backend();
+        let clear = || async {
+            let service = AIService::global_instance().await.unwrap();
+            for endpoint in db.get_endpoints().unwrap() {
+                if endpoint.managed {
+                    for id in db.endpoint_model_ids(&endpoint.id).unwrap() {
+                        service.remove_model(id).await.unwrap();
+                    }
+                    db.remove_endpoint(&endpoint.id).unwrap();
+                }
+            }
+        };
+        clear().await;
+
+        let runtime = SelectedRuntime {
+            provider: Provider::LlamaServer,
+            runtime_id: "llama.cpp".into(),
+            version: "b1".into(),
+            build: "linux-x64-cpu".into(),
+            binary: PathBuf::from("/store/runtime/llama-server"),
+            lib_dirs: vec![],
+            services: vec![Service::Llm],
+            backend: Some(Backend::Cpu),
+        };
+        let selection = |model: &str| Selection {
+            runtimes: vec![runtime.clone()],
+            models: vec![selected(Service::Llm, model, Provider::LlamaServer)],
+            ports: BTreeMap::new(),
+        };
+        register(&selection("wt-chat"), &runtime, 40012, "k3y", true)
+            .await
+            .unwrap();
+        register(&selection("wt-chat-2"), &runtime, 40012, "k3y", false)
+            .await
+            .unwrap();
+        let default = db
+            .get_default_model(crate::types::ModelType::Llm)
+            .unwrap()
+            .and_then(|id| db.get_model(id).unwrap())
+            .map(|model| model.name);
+        clear().await;
+        *super::super::AI_SERVICE.lock().await = saved;
+
+        assert_eq!(default.as_deref(), Some("wt-chat-2"));
     }
 
     /// `ai.localInstall({services: ["llm"]})` after a set with transcription: the start
