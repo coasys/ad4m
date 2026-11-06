@@ -300,8 +300,9 @@ fn estimate_reply_tokens(reply: &ChatReply) -> usize {
 
 /// One remote chat call of a model under the limits the operator set on its `endpoint`: a
 /// slot by `max_concurrent`, shared with the calls `/v1` forwards, and for an answer that
-/// is not a stream, `request_timeout_secs` (default 300 s), the wait for the slot
-/// included. A stream keeps its client's own bound.
+/// is not a stream, `request_timeout_secs` (default [`CHAT_TIMEOUT`], 600 s), the wait for
+/// the slot included. A stream gets the slot but no timeout here: its wait for the slot is
+/// not bounded, and its call has only the provider client's own bound.
 async fn within_endpoint_limits<T>(
     endpoint: &Endpoint,
     stream: bool,
@@ -324,9 +325,10 @@ async fn within_endpoint_limits<T>(
     })?
 }
 
-/// How long a remote chat answer may take unless its endpoint sets `request_timeout_secs`;
-/// `/v1` forwards with the same default.
-const CHAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// How long a remote chat answer of a model worker may take unless its endpoint sets
+/// `request_timeout_secs`: what the provider clients allow, as a long prompt on a local
+/// model can take minutes.
+const CHAT_TIMEOUT: std::time::Duration = providers::http::CHAT_REQUEST_TIMEOUT;
 
 /// The turn list for a task-shaped prompt: the task's system prompt, its
 /// examples as alternating user/assistant turns, then the live prompt.
@@ -2130,6 +2132,40 @@ mod tests {
             rechecked(&endpoint).await,
             "the endpoint was not re-checked"
         );
+    }
+
+    // The wrapper cut a chat call to an endpoint with no timeout of its own at 300 s, where
+    // the provider clients allow 600 s for a long prompt on a local model.
+    #[tokio::test(start_paused = true)]
+    async fn a_chat_call_runs_as_long_as_the_provider_client_allows_unless_the_endpoint_says() {
+        use crate::types::{Endpoint, EndpointHealth, EndpointKind};
+        use std::time::Duration;
+        let mut endpoint = Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "ollama".into(),
+            kind: EndpointKind::Ollama,
+            base_url: url::Url::parse("http://127.0.0.1:9932").unwrap(),
+            api_key: crate::secret::Secret::new(""),
+            capabilities: EndpointKind::Ollama.default_capabilities(),
+            max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
+            managed: false,
+            health: EndpointHealth::default(),
+        };
+        let answer_after = |secs: u64| async move {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            anyhow::Ok(())
+        };
+
+        let long = super::within_endpoint_limits(&endpoint, false, answer_after(590));
+        assert!(long.await.is_ok(), "a 590 s answer is not cut");
+        let too_long = super::within_endpoint_limits(&endpoint, false, answer_after(610));
+        assert!(too_long.await.is_err());
+
+        endpoint.request_timeout_secs = Some(10);
+        let past_own = super::within_endpoint_limits(&endpoint, false, answer_after(20));
+        assert!(past_own.await.is_err(), "the endpoint's own timeout wins");
     }
 }
 

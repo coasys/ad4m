@@ -1,6 +1,7 @@
 /**
  * whisper-server (whisper.cpp): one process per model, from the manifest's builds, a
- * binary (AI_WT_WHISPER_SERVER) or a running server (AI_WT_WHISPER_SERVER_URL). It is
+ * binary (AI_WT_WHISPER_SERVER) or a running server (AI_WT_WHISPER_SERVER_URL, measured only
+ * for the model AI_WT_WHISPER_SERVER_MODEL names: it does not say what it loaded). It is
  * started with `--request-path /v1/audio --inference-path /transcriptions`, which serves
  * the OpenAI path the executor posts to (`/v1/audio/transcriptions`); `/inference` is
  * then gone. Servers stay up until the run ends: the TTS round trip transcribes with them.
@@ -12,7 +13,7 @@ import { platformKey } from "../fingerprint.js";
 import { installModel, installRuntime } from "../install.js";
 import { assertNotReserved, freePort, spawnLogged, waitForHttp, type Spawned } from "../procs.js";
 import { encodeWav } from "../verify.js";
-import { envUrl, type Driver, type Session } from "./types.js";
+import { assertAttachedModel, envUrl, type Driver, type Session } from "./types.js";
 
 /** Whether `baseUrl` answers a transcription upload on the OpenAI path. */
 async function servesOpenAiPath(baseUrl: string): Promise<string | null> {
@@ -47,7 +48,9 @@ export const whisperServer: Driver = {
         kind: "OPEN_AI_AUDIO",
         mode: "attach",
         async serve(model) {
-          return { baseUrl: attached, remoteModel: model.remoteModel, pids: () => [], async release() {} };
+          // It transcribes with the model it was started with, whatever the upload names.
+          assertAttachedModel(model, "AI_WT_WHISPER_SERVER_MODEL");
+          return { baseUrl: attached, remoteModel: model.remoteModel, pids: () => [], staysUp: true, async release() {} };
         },
         async close() {},
       };
@@ -80,7 +83,7 @@ export const whisperServer: Driver = {
         const readyMs = Date.now() - started;
         const problem = await servesOpenAiPath(baseUrl);
         if (problem) throw new Error(`whisper-server ${version ?? ""}: ${problem}`);
-        return { baseUrl, remoteModel: model.remoteModel, readyMs, pids: () => (s.proc.pid ? [s.proc.pid] : []), backend: () => variant.backend, flags, async release() {} };
+        return { baseUrl, remoteModel: model.remoteModel, readyMs, pids: () => (s.proc.pid ? [s.proc.pid] : []), backend: () => variant.backend, flags, staysUp: true, async release() {} };
       },
       async close() {
         await Promise.all(running.map((s) => s.stop()));

@@ -68,7 +68,6 @@ export const PROMPTS = {
   factualExpect: /\bparis\b/i,
   tool: "What is the weather in Paris right now? Use the get_weather tool.",
   stream: "Count from one to ten in words, separated by commas.",
-  streamExpect: /\bfive\b/i,
   generate: "Write a short paragraph about the history of the bicycle.",
   completion: "The capital city of France is",
   completionExpect: /\bparis\b/i,

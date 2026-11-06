@@ -58,7 +58,13 @@ export const sherpaOnnx: Driver = {
           throw e;
         }
         const readyMs = Date.now() - started;
-        const front = await startAudioFront(await freePort(), model.remoteModel, (audio) => sherpaTranscribe(`ws://127.0.0.1:${wsPort}`, wavTo16k(audio).samples));
+        let front: AudioFront;
+        try {
+          front = await startAudioFront(await freePort(), model.remoteModel, (audio) => sherpaTranscribe(`ws://127.0.0.1:${wsPort}`, wavTo16k(audio).samples));
+        } catch (e) {
+          await server.stop();
+          throw e;
+        }
         const entry = { server, front };
         running.push(entry);
         return {

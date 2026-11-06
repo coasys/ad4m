@@ -22,11 +22,18 @@ function ollamaBinary(): string | null {
   }
 }
 
-/** The compute library Ollama's runner reports, from its log: `library=ROCm` / `CUDA` / `Vulkan` / `Metal` / `cpu`. */
-export function ollamaBackendFromLog(log: string): string | undefined {
+/**
+ * The compute library Ollama's runner reports, from its log: `library=ROCm` / `CUDA` / `Vulkan` /
+ * `Metal` / `cpu`. The library line comes once, from GPU discovery at startup; what a model's
+ * load put on the GPU is in the log after `since` (where the log ended when the model was
+ * served): a load that offloaded no layer (`offloaded 0/N layers to GPU`) ran on the CPU.
+ */
+export function ollamaBackendFromLog(log: string, since = 0): string | undefined {
   const libs = [...log.matchAll(/library=(\w+)/g)].map((m) => m[1].toLowerCase());
-  const gpu = libs.find((l) => l !== "cpu");
-  return gpu ?? libs[0];
+  const lib = libs.find((l) => l !== "cpu") ?? libs[0];
+  const loads = [...log.slice(since).matchAll(/offloaded (\d+)\/\d+ layers to GPU/g)];
+  if (lib && lib !== "cpu" && loads.length && loads.every((m) => m[1] === "0")) return "cpu";
+  return lib;
 }
 
 export const ollama: Driver = {
@@ -66,13 +73,18 @@ export const ollama: Driver = {
       version,
       pullsThroughExecutor: true,
       async serve(model) {
+        // This model's load is logged after this point; the GPU discovery before it.
+        let since = 0;
+        try {
+          since = readFileSync(logFile, "utf8").length;
+        } catch {}
         return {
           baseUrl,
           remoteModel: model.remoteModel,
           pids: () => (pid ? [pid] : []),
           backend: () => {
             try {
-              return ollamaBackendFromLog(readFileSync(logFile, "utf8"));
+              return ollamaBackendFromLog(readFileSync(logFile, "utf8"), since);
             } catch {
               return undefined;
             }

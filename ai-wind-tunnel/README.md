@@ -98,6 +98,13 @@ A full run takes a while the first time (about 12 GB of models); afterwards the 
 models and speaches' Hugging Face cache. `AI_WT_FRESH=1` gives Ollama an empty model
 directory, so its pull is measured from the network.
 
+Ollama and speaches unload each model after its cells (speaches: `DELETE /api/ps/<model>`),
+so a cell's `peakRssBytes` is its own model's. speaches runs every model in one Python
+process, which need not give freed memory back to the system, and a TTS cell's round trip can
+load the STT reference into the same container, so its peak can still hold some of that.
+The speaches cells in the 2026-11-03 AMD evidence ran before the unload: their peaks add up
+from model to model.
+
 ### Providers already running
 
 Each provider can attach to a server instead of starting one. `--attach` uses only these
@@ -106,11 +113,17 @@ and starts nothing:
 | Variable | Provider |
 |---|---|
 | `AI_WT_OLLAMA_URL` | Ollama |
-| `AI_WT_LLAMA_SERVER_URL` (+ `AI_WT_LLAMA_BACKEND`) | llama-server; cells use the model it serves |
-| `AI_WT_WHISPER_SERVER_URL` | whisper-server started with `--request-path /v1/audio --inference-path /transcriptions` |
+| `AI_WT_LLAMA_SERVER_URL` (+ `AI_WT_LLAMA_BACKEND`, `AI_WT_LLAMA_SERVER_MODEL`) | llama-server |
+| `AI_WT_WHISPER_SERVER_URL` (+ `AI_WT_WHISPER_SERVER_MODEL`) | whisper-server started with `--request-path /v1/audio --inference-path /transcriptions` |
 | `AI_WT_SPEACHES_URL` | speaches |
 | `AI_WT_VLLM_URL` | vLLM |
-| `AI_WT_NEMO_SPEECH_URL` (+ `AI_WT_NEMO_SPEECH_BACKEND`) | `nemo-speech serve` |
+| `AI_WT_NEMO_SPEECH_URL` (+ `AI_WT_NEMO_SPEECH_BACKEND`, `AI_WT_NEMO_SPEECH_MODEL`) | `nemo-speech serve` |
+
+A llama-server, whisper-server or nemo-speech server serves the one model it was started
+with. Only the planned model it serves runs on it: the model its `/v1/models` lists
+(llama-server's `--alias`, nemo-speech's model) or the manifest `modelId` in its
+`AI_WT_*_MODEL` variable. The other planned models of that provider are skipped. A GPU cell
+on an attached server has no memory sample, so no offload check: it gets no recommendation.
 
 Other knobs: `AI_WT_OLLAMA_BIN`, `AI_WT_LLAMA_SERVER` / `AI_WT_WHISPER_SERVER` /
 `AI_WT_NEMO_SPEECH` / `AI_WT_SHERPA_ONNX` (a binary instead of the manifest's build),
@@ -212,7 +225,9 @@ embeddings: ≥ 10 texts/s; STT: real-time factor ≤ 0.5; TTS: ≤ 1) are ranke
 parameters, then decode rate; STT: the mean WER over the clips in 0.02 buckets, then
 real-time factor; TTS: round-trip
 WER, then real-time factor; embeddings: throughput). The first wins and cites every evidence
-file that measured it. A class with no evidence, or no candidate over the floor, has no
+file that measured it. The newest evidence for a candidate decides: if its newest run failed,
+it is not recommended. Cells measured through the harness's OpenAI-shaped front
+(`metrics.adapter`) are never candidates, because a local setup has no such front. A class with no evidence, or no candidate over the floor, has no
 recommendation; the executor's local setup then falls back to the nearest smaller measured
 class of the same family, then to the CPU classes (`fallbackClasses` in `hardware-class.ts`),
 and where none of those is measured, to the manifest's smallest model of the service, marked

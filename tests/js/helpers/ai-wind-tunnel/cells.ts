@@ -10,7 +10,7 @@ import { postJson, speech, streamCompletion, transcribe, transcribeNoHint, type 
 import type { WtExecutor } from "./executor.js";
 import { summarize } from "./stats.js";
 import type { Check, EndpointKindId, Metric, Stat } from "./types.js";
-import { checkToolCall, consistentDimension, cosine, decodeWav, encodeWav, resample, rms, scoreRetrieval, speechDurationRange, stripThinking, wer } from "./verify.js";
+import { checkToolCall, consistentDimension, cosine, countsInOrder, decodeWav, encodeWav, resample, rms, scoreRetrieval, speechDurationRange, stripThinking, wer } from "./verify.js";
 
 export interface CellEnv {
   ex: WtExecutor;
@@ -131,8 +131,8 @@ export async function llmCell(env: CellEnv): Promise<CellOutcome> {
   await attempt(checks, "streaming (/v1/chat/completions, stream)", async () => {
     const s = await streamCompletion(url, chat(PROMPTS.stream), ex.token);
     const text = stripThinking(s.content);
-    const pass = s.tokenChunks > 1 && PROMPTS.streamExpect.test(text);
-    return { pass, detail: `${s.tokenChunks} chunks, ${JSON.stringify(text.slice(0, 120))}`, value: s.tokenChunks, threshold: "> 1 chunk" };
+    const pass = s.tokenChunks > 1 && countsInOrder(text, 10);
+    return { pass, detail: `${s.tokenChunks} chunks, ${JSON.stringify(text.slice(0, 120))}`, value: s.tokenChunks, threshold: "> 1 chunk, one to ten in order" };
   });
 
   // Performance.
@@ -268,7 +268,8 @@ export async function embeddingsCell(env: CellEnv): Promise<CellOutcome> {
   for (let i = 0; i < env.repeat; i++) {
     batchMs.push((await embed(batch)).ms);
     single.push((await embed([queries[i % queries.length]])).ms);
-    if (env.directV1) direct.push((await embed(batch, `${env.directV1}/embeddings`, env.remoteModel, undefined)).ms);
+    // "" (no Authorization header): `undefined` would take the default, the executor's credential.
+    if (env.directV1) direct.push((await embed(batch, `${env.directV1}/embeddings`, env.remoteModel, "")).ms);
   }
   metrics.batchLatencyMs = summarize(batchMs);
   metrics.textsPerSec = summarize(batchMs.map((ms) => (batch.length * 1000) / ms));

@@ -244,8 +244,8 @@
         "evidence": [
           "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd-stt-nemo-speech.json"
         ],
-        "candidates": 13,
-        "overFloor": 13
+        "candidates": 6,
+        "overFloor": 6
       },
       "tts": {
         "provider": "speaches",

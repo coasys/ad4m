@@ -3,7 +3,10 @@
  * out. Per hardware class and service, among the cells that passed every check and fit
  * the machine's memory, the candidates that clear the service's floor (fast enough to
  * use), ranked by the service's order (bigger or more accurate first, then faster).
- * A class with no evidence, or no candidate over the floor, gets no recommendation.
+ * A key (provider, build, backend, model, server flags) whose newest run failed, a cell
+ * measured through a harness-only front, and a cell whose numbers are unverified (chunk-counted
+ * LLM rates, a GPU cell with no memory sample) are no candidates. A class with no evidence,
+ * or no candidate over the floor, gets no recommendation.
  */
 
 import { medianOf } from "./stats.js";
@@ -110,8 +113,9 @@ function median(xs: number[]): number {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
 
+/** What a measurement is of: provider, build, backend, model and the flags it was served with. */
 function cellKey(c: CellResult): string {
-  return [c.provider, c.runtimeBuild ?? "", c.model?.modelId ?? c.model?.remoteModel ?? ""].join("|");
+  return [c.provider, c.runtimeBuild ?? "", c.backend ?? "", c.model?.modelId ?? c.model?.remoteModel ?? "", JSON.stringify(c.serverFlags ?? [])].join("|");
 }
 
 interface Candidate {
@@ -133,7 +137,7 @@ function candidates(entries: { path: string; cell: CellResult }[]): Candidate[] 
       const xs = g.map((e) => medianOf(e.cell.metrics[name])).filter((x): x is number => x !== null);
       if (xs.length) medians[name] = Math.round(median(xs) * 1000) / 1000;
     }
-    const params = parseParams(g[0].cell.model?.params) ?? g[0].cell.model?.memoryBytes ?? null;
+    const params = parseParams(g[0].cell.model?.params);
     if (params !== null) medians.params = params;
     return { cell: g[g.length - 1].cell, medians, evidence: [...new Set(g.map((e) => e.path))].sort() };
   });
@@ -160,11 +164,45 @@ function compare(a: Candidate, b: Candidate, rule: ServiceRule): number {
   return a.evidence[0].localeCompare(b.evidence[0]);
 }
 
+/**
+ * A cell measured through something the harness put in front of the server (an
+ * OpenAI-shaped front, `metrics.adapter`) shows what server and front cost together; a
+ * local setup without that front cannot use the route. "none: ..." names the server's own route.
+ */
+function throughAdapter(c: CellResult): boolean {
+  const a = c.metrics.adapter;
+  return typeof a === "string" && !a.startsWith("none");
+}
+
+/**
+ * A cell whose numbers cannot stand for what it names: LLM rates counted in stream chunks
+ * (`tokenCountSource: "chunks"`, no token usage; a chunk can carry several tokens), or a GPU
+ * cell with no memory sample (`peakRssBytes` null: an attached server, so no offload check
+ * showed the model was on the GPU and not on a CPU fallback).
+ */
+function unverified(c: CellResult): boolean {
+  if (c.service === "llm" && c.metrics.tokenCountSource === "chunks") return true;
+  return !!c.backend && c.backend !== "cpu" && c.metrics.peakRssBytes === null;
+}
+
 export function deriveRecommendations(all: LoadedEvidence[], generatedAt: string, rules = SERVICE_RULES): Recommendations {
+  // The newest evidence that ran a key (pass or fail) decides it: a key whose newest run failed is out.
+  const newest = new Map<string, { at: string; path: string; pass: boolean }>();
+  for (const { path, evidence } of all) {
+    for (const cell of evidence.cells) {
+      if (cell.status !== "pass" && cell.status !== "fail") continue;
+      const k = `${evidence.hardwareClass}|${cell.service}|${cellKey(cell)}`;
+      const n = newest.get(k);
+      const order = n ? evidence.finishedAt.localeCompare(n.at) || path.localeCompare(n.path) : 1;
+      if (order > 0) newest.set(k, { at: evidence.finishedAt, path, pass: cell.status === "pass" });
+      else if (order === 0 && cell.status === "fail") n!.pass = false;
+    }
+  }
   const byClass = new Map<string, { path: string; cell: CellResult }[]>();
   for (const { path, evidence } of all) {
     for (const cell of evidence.cells) {
-      if (cell.status !== "pass" || cell.fit?.fits === false) continue;
+      if (cell.status !== "pass" || cell.fit?.fits === false || throughAdapter(cell) || unverified(cell)) continue;
+      if (!newest.get(`${evidence.hardwareClass}|${cell.service}|${cellKey(cell)}`)!.pass) continue;
       byClass.set(evidence.hardwareClass, [...(byClass.get(evidence.hardwareClass) ?? []), { path, cell }]);
     }
   }

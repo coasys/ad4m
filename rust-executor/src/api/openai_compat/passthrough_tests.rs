@@ -1637,15 +1637,18 @@ fn a_tool() -> Value {
         "name": "get_time", "parameters": { "type": "object", "properties": {} } } }])
 }
 
-/// What a client gets from each path the executor answers itself when the upstream
-/// answers `status`: Anthropic chat (plain and with tools, which go as native tools),
-/// Anthropic `/v1/completions`, and the text-tools path of a llama-server model.
-async fn failures_answered_here(
-    status: usize,
-    body: &str,
-) -> Vec<(String, axum::response::Response)> {
-    let mut out = Vec::new();
-    for (case, kind, path, native, request) in [
+/// The paths the executor answers itself, each with its endpoint kind, the upstream path
+/// it calls, whether the model takes tools as definitions, and a request: Anthropic chat
+/// (plain and with tools, which go as native tools), Anthropic `/v1/completions`, and the
+/// text-tools path of a llama-server model.
+fn paths_answered_here() -> [(
+    &'static str,
+    EndpointKind,
+    &'static str,
+    Option<bool>,
+    Value,
+); 4] {
+    [
         (
             "anthropic chat",
             EndpointKind::Anthropic,
@@ -1674,7 +1677,29 @@ async fn failures_answered_here(
             Some(false),
             json!({ "model": "chat", "messages": hello(), "tools": a_tool() }),
         ),
-    ] {
+    ]
+}
+
+/// `request` through the route its shape names: `/v1/completions` with a `prompt`, else
+/// `/v1/chat/completions`.
+async fn chat_or_completion(request: Value) -> axum::response::Response {
+    if request.get("prompt").is_some() {
+        chat::completions(user(), OpenAIJson(request))
+            .await
+            .into_response()
+    } else {
+        chat(user(), request).await
+    }
+}
+
+/// What a client gets from each of [`paths_answered_here`] when the upstream answers
+/// `status`.
+async fn failures_answered_here(
+    status: usize,
+    body: &str,
+) -> Vec<(String, axum::response::Response)> {
+    let mut out = Vec::new();
+    for (case, kind, path, native, request) in paths_answered_here() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", path)
@@ -1685,13 +1710,7 @@ async fn failures_answered_here(
             .create_async()
             .await;
         answered_here(kind, &server.url(), "sk-secret-key", native).await;
-        let response = if request.get("prompt").is_some() {
-            chat::completions(user(), OpenAIJson(request))
-                .await
-                .into_response()
-        } else {
-            chat(user(), request).await
-        };
+        let response = chat_or_completion(request).await;
         mock.assert_async().await;
         assert!(
             test_seam::calls().is_empty(),
@@ -1988,6 +2007,154 @@ async fn a_caller_whose_credits_do_not_cover_the_prompt_is_refused_before_the_en
         "insufficient_quota"
     );
     mock.assert_async().await;
+}
+
+// A caller who pays and set no limit got every token its credits buy as `max_tokens`. Past
+// the model's output maximum, OpenAI and vLLM answer such a request 400, so a caller with
+// many credits could not use the model at all.
+#[tokio::test]
+async fn a_paying_caller_who_sets_no_limit_gets_none_the_model_refuses() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    openai_model(&server, "").await;
+    rate("chat", 1.0);
+    paying_user(100_000.0);
+    // The model's output maximum, as the endpoint checks it.
+    let output_maximum = 4096;
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status_code_from_request(move |request| {
+            let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+            let refused = ["max_tokens", "max_completion_tokens"].iter().any(|key| {
+                body[key]
+                    .as_u64()
+                    .is_some_and(|limit| limit > output_maximum)
+            });
+            if refused {
+                400
+            } else {
+                200
+            }
+        })
+        .with_body(json!({ "model": "Qwen/Qwen3-8B", "choices": [] }).to_string())
+        .expect(1)
+        .create_async()
+        .await;
+
+    let response = chat(user(), json!({ "model": "chat", "messages": hello() })).await;
+    assert_eq!(response.status(), 200, "{}", body_text(response).await);
+    mock.assert_async().await;
+}
+
+// The paths the executor answers itself checked only a balance above 0, so a prompt the
+// credits did not cover still went to the endpoint on the operator's key.
+#[tokio::test]
+async fn a_prompt_the_credits_do_not_cover_is_refused_on_the_paths_the_executor_answers() {
+    for (case, kind, path, native, request) in paths_answered_here() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server.mock("POST", path).expect(0).create_async().await;
+        answered_here(kind, &server.url(), "sk-key", native).await;
+        rate("chat", 1.0);
+        paying_user(1.0);
+
+        let response = chat_or_completion(request).await;
+        assert_eq!(response.status(), 429, "{case}");
+        assert_eq!(
+            body_json(response).await["error"]["code"],
+            "insufficient_quota",
+            "{case}"
+        );
+        mock.assert_async().await;
+    }
+}
+
+/// A speech model `voice` on an audio endpoint at `server`.
+fn speech_model(server: &mockito::ServerGuard) {
+    let mut speaches = endpoint("speaches", EndpointKind::OpenAiAudio, &server.url(), "");
+    speaches.capabilities = vec![AiCapability::Speech];
+    save(&speaches);
+    model("voice", ModelType::Speech, &speaches, "kokoro");
+}
+
+// Speech checked only a balance above 0 before it sent, so the operator paid the endpoint
+// for audio whose bill then failed, and the audio was thrown away.
+#[tokio::test]
+async fn speech_the_credits_do_not_cover_is_refused_before_the_endpoint() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/audio/speech")
+        .expect(0)
+        .create_async()
+        .await;
+    speech_model(&server);
+    // The least speech costs is 1 credit.
+    paying_user(0.5);
+
+    let response = audio::speech(
+        user(),
+        OpenAIJson(json!({ "model": "voice", "input": "hello" })),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), 429);
+    assert_eq!(
+        body_json(response).await["error"]["code"],
+        "insufficient_quota"
+    );
+    mock.assert_async().await;
+}
+
+// The speech audio was read whole with no bound, so an endpoint that sent without end
+// filled the executor's memory.
+#[tokio::test]
+async fn speech_audio_past_the_bound_is_refused_and_not_billed() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v1/audio/speech")
+        .with_header("content-type", "audio/mpeg")
+        .with_body(vec![0u8; super::passthrough::MAX_SPEECH_AUDIO + 1])
+        .expect(1)
+        .create_async()
+        .await;
+    speech_model(&server);
+
+    let response = audio::speech(
+        user(),
+        OpenAIJson(json!({ "model": "voice", "input": "hello" })),
+    )
+    .await
+    .into_response();
+    mock.assert_async().await;
+    assert_eq!(response.status(), 502);
+    assert_eq!(body_json(response).await["error"]["type"], "upstream_error");
+    assert!(test_seam::calls().is_empty(), "{:?}", test_seam::calls());
+}
+
+// When the client had not read the stream for a while, its channel was full and the final
+// error event was dropped: the client saw a stream cut off with no error.
+#[tokio::test]
+async fn a_slow_client_still_gets_the_final_error_event() {
+    fresh();
+    // As many events as the channel to the client holds, then silence past the timeout.
+    let chunks = (0..32)
+        .map(|n| (10, sse_event(&chunk(&n.to_string()))))
+        .collect();
+    scripted_stream(chunks, false, 2).await;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "stream": true }),
+    )
+    .await;
+    // The upstream sends for about 0.3 s and is silent for 2 s: the error comes at about
+    // 2.3 s, while the client has read nothing.
+    tokio::time::sleep(std::time::Duration::from_millis(3300)).await;
+    let events = events(&body_text(response).await);
+    assert_eq!(events.len(), 33, "{events:?}");
+    let last: Value = serde_json::from_str(&events[32]).unwrap();
+    assert_eq!(last["error"]["type"], "upstream_timeout");
 }
 
 // `/v1/models` passed the health check's detail, which names the endpoint's URL, to users.

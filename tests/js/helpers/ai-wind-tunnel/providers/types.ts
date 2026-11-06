@@ -40,6 +40,12 @@ export interface Served {
   kind?: EndpointKindId;
   /** What stands between the executor and the server, when something does (an OpenAI-shaped front). */
   adapter?: string;
+  /**
+   * The server still answers for this model after `release`, until the session closes (an
+   * attached server, whisper-server, speaches). Only such a model can be the STT reference
+   * that a later TTS cell's round trip transcribes with.
+   */
+  staysUp?: boolean;
   release(): Promise<void>;
 }
 
@@ -64,6 +70,26 @@ export interface Driver {
 
 /** The provider is not usable here after all (a GPU stack that does not run): its cells are skipped, not failed. */
 export class SkipError extends Error {}
+
+/** Whether a passed STT cell's model can transcribe for later TTS cells: every check passed and its server stays up. */
+export function canBeSttReference(served: Pick<Served, "staysUp">, checks: { pass: boolean }[]): boolean {
+  return !!served.staysUp && checks.length > 0 && checks.every((k) => k.pass);
+}
+
+/**
+ * An attached server serves the model it was started with, whatever a request names. A cell
+ * for model `model` runs on it only when the server is known to serve that model: one of
+ * `listed` (its `/v1/models` ids) or the id in `envName` (a manifest modelId or the
+ * provider's model name). Any other planned model is skipped, so evidence never names a
+ * model that was not measured.
+ */
+export function assertAttachedModel(model: CellModel, envName: string, listed: string[] = []): void {
+  const named = process.env[envName];
+  const ids = [...new Set([model.modelId, model.remoteModel].filter((x): x is string => !!x))];
+  if (ids.some((id) => id === named || listed.includes(id))) return;
+  const serves = [named, ...listed].filter(Boolean).join(", ") || "an unknown model";
+  throw new SkipError(`the attached server serves ${serves}, not ${ids.join(" / ")}; set ${envName} to the model it was started with`);
+}
 
 export function envUrl(name: string): string | undefined {
   const v = process.env[name];

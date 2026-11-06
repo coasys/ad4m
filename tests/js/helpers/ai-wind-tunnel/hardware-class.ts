@@ -82,3 +82,8 @@ export function memoryFit(modelBytes: number, ramBytes: number, gpuBudgetBytes: 
   const budget = gpuBudgetBytes === null ? ramRoom : Math.min(gpuBudgetBytes - 1 * GIB, ramRoom);
   return { fits: modelBytes <= budget, modelBytes, budgetBytes: Math.max(0, budget), gpuBudgetBytes, ramBytes };
 }
+
+/** The fit of a cell that ran on `backend`: a CPU cell holds the model in RAM, so the GPU budget does not limit it. */
+export function cellFit(modelBytes: number, ramBytes: number, gpuBudgetBytes: number | null, backend: string | undefined): MemoryFit {
+  return memoryFit(modelBytes, ramBytes, backend === "cpu" ? null : gpuBudgetBytes);
+}

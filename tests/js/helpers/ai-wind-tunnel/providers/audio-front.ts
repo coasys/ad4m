@@ -66,6 +66,10 @@ export async function startAudioFront(port: number, modelId: string, transcribe:
       if (!file || typeof file === "string") return send(res, 400, { error: { message: "the upload has no file part", type: "invalid_request_error" } });
       const fields: Record<string, string> = {};
       for (const [k, v] of form.entries()) if (typeof v === "string") fields[k] = v;
+      // It serves one model: a transcript from it is no answer for another.
+      if (fields.model && fields.model !== modelId) {
+        return send(res, 404, { error: { message: `this front serves ${modelId}, not ${fields.model}`, type: "invalid_request_error", code: "model_not_found" } });
+      }
       const audio = Buffer.from(await file.arrayBuffer());
       const reply = await transcribe(audio, fields);
       const format = fields.response_format ?? "json";
