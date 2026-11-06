@@ -167,6 +167,31 @@ describe("AI wind tunnel (unit)", () => {
         expect(["llm", "embeddings", "stt", "tts"]).to.include(model.service);
       }
     });
+    it("gives every model at least the GPU peak its checked-in evidence measured", () => {
+      // The amd-igpu-uma-128 evidence of 2026-11-03 counted each amdgpu region twice
+      // (README): what the server held is half its peakGpuBytes.
+      const counted = (p: string) => (p.startsWith("ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-") ? 2 : 1);
+      for (const { path: p, evidence } of loadAllEvidence()) {
+        for (const c of evidence.cells) {
+          const model = c.model?.modelId ? m.models[c.model.modelId] : undefined;
+          const peak = Number(c.metrics?.peakGpuBytes ?? 0) / counted(p);
+          if (model && peak > 0) expect(model.memoryBytes, `${c.model!.modelId} in ${p}`).to.be.at.least(peak);
+        }
+      }
+    });
+    it("gives a model no evidence measured on a GPU at least its resident peak", () => {
+      const gpuPeak = new Set<string>();
+      const rssPeak = new Map<string, number>();
+      for (const { evidence } of loadAllEvidence()) {
+        for (const c of evidence.cells) {
+          const id = c.model?.modelId;
+          if (!id || !m.models[id]) continue;
+          if (Number(c.metrics?.peakGpuBytes ?? 0) > 0) gpuPeak.add(id);
+          rssPeak.set(id, Math.max(rssPeak.get(id) ?? 0, Number(c.metrics?.peakRssBytes ?? 0)));
+        }
+      }
+      for (const [id, rss] of rssPeak) if (!gpuPeak.has(id)) expect(m.models[id].memoryBytes, id).to.be.at.least(rss);
+    });
     it("pins every model download to a Hugging Face commit, never a branch", () => {
       // An upstream re-upload on `main` would change the file under a fixed sha256
       // and break every install; a commit URL keeps serving the hashed file.

@@ -56,8 +56,9 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
   default) and `request_slot` (a semaphore only when the operator set `max_concurrent`;
   none by default). Which calls hold them:
   - `/v1` forwards (`passthrough::send`): the slot, and the timeout from the slot wait on
-    (default 300 s for chat, 120 s for speech); a forwarded stream instead gets 30 s to its
-    first byte and the timeout between two chunks.
+    (default 300 s for chat, 120 s for speech); a forwarded stream instead gets at most 30 s
+    to its first byte (less when less of the timeout is left after the slot wait) and the
+    timeout between two chunks.
   - Embeddings: the slot, and the timeout from the slot wait on (default `EMBED_TIMEOUT`,
     60 s).
   - The remote chat calls of a model worker (`within_endpoint_limits` in
