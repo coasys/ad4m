@@ -233,6 +233,14 @@ impl Ad4mMcpHandler {
         let Some(tool) = builtin::tool(name) else {
             return error_json(format!("This executor's template tools have no '{name}'."));
         };
+        // The perspective the call works in answers first, as for every perspective tool: a
+        // caller refused there learns nothing about its other arguments.
+        if let Err(e) = self
+            .template_perspective(&p.perspective_id, tool.writes)
+            .await
+        {
+            return e;
+        }
         let base_uri = match instance_uri("base_uri", &p.base_uri) {
             Ok(uri) => uri,
             Err(e) => return e,
