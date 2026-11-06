@@ -93,7 +93,7 @@ pub(crate) fn truncate_for_log(text: &str) -> String {
 }
 
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
-static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
+pub(crate) static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
 
 lazy_static! {
