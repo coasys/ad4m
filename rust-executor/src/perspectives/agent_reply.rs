@@ -243,14 +243,18 @@ pub async fn start_reply(
             ))),
         };
         // Whoever takes the slot writes the end: this task, or a cancel that got there first.
-        if !release(&task_perspective, &task_slot, &task_reply) {
+        // The task keeps the slot until its end is written, so whoever takes it meanwhile (a
+        // cancel, a delete, teardown) stops the task, and no end lands on a reply a delete has
+        // just removed.
+        if !holds(&task_perspective, &task_slot, &task_reply) {
             return;
         }
         let values = match outcome {
             Ok(answer) => json!({ "status": ReplyStatus::Done.as_str(), "text": answer.text }),
             Err(e) => json!({ "status": ReplyStatus::Failed.as_str(), "error": e.to_string() }),
         };
-        settle(task_perspective, &task_reply, values, &context).await;
+        settle(task_perspective.clone(), &task_reply, values, &context).await;
+        release(&task_perspective, &task_slot, &task_reply);
     });
     let cancelled_meanwhile = {
         let mut running = perspective
@@ -328,11 +332,14 @@ const DELETING: &str = "";
 
 /// The caller's slot in a container, held while the container is deleted: a start in it is
 /// refused as `Busy` until the hold drops. Taking it stops the caller's running reply there,
-/// without marking it (the delete removes it), and a start still in flight finds its slot gone
-/// and stops as it does for a cancel. Another caller's reply is not touched.
+/// without marking it (the delete removes it; a delete that fails marks it with
+/// [`DeleteHold::delete_failed`]), and a start still in flight finds its slot gone and stops as it
+/// does for a cancel. Another caller's reply is not touched.
 pub(crate) struct DeleteHold {
     perspective: PerspectiveInstance,
     slot: ReplySlot,
+    /// The running reply taking the slot stopped.
+    stopped: Option<String>,
 }
 
 pub(crate) fn hold_for_delete(perspective: &PerspectiveInstance, slot: ReplySlot) -> DeleteHold {
@@ -340,17 +347,39 @@ pub(crate) fn hold_for_delete(perspective: &PerspectiveInstance, slot: ReplySlot
         reply: DELETING.to_string(),
         abort: None,
     };
-    if let Some(running) = perspective
+    let taken = perspective
         .agent_replies
         .lock()
         .expect("agent replies poisoned")
-        .insert(slot.clone(), held)
-    {
+        .insert(slot.clone(), held);
+    let mut stopped = None;
+    if let Some(running) = taken {
         running.abort();
+        // A start in flight has no task yet: it marks its own reply when it finds the slot gone.
+        if running.abort.is_some() {
+            stopped = Some(running.reply);
+        }
     }
     DeleteHold {
         perspective: perspective.clone(),
         slot,
+        stopped,
+    }
+}
+
+impl DeleteHold {
+    /// The delete failed, so the reply the hold stopped was not removed: mark it `cancelled`, or
+    /// it reads as `running` with no task until the next load's sweep.
+    pub(crate) async fn delete_failed(&self, context: &AgentContext) {
+        if let Some(reply) = &self.stopped {
+            settle(
+                self.perspective.clone(),
+                reply,
+                json!({ "status": ReplyStatus::Cancelled.as_str() }),
+                context,
+            )
+            .await;
+        }
     }
 }
 
@@ -756,6 +785,16 @@ pub(crate) fn reserve(
         },
     );
     Ok(())
+}
+
+/// Whether `reply` still holds the slot.
+fn holds(perspective: &PerspectiveInstance, slot: &ReplySlot, reply: &str) -> bool {
+    perspective
+        .agent_replies
+        .lock()
+        .expect("agent replies poisoned")
+        .get(slot)
+        .is_some_and(|entry| entry.reply == reply)
 }
 
 /// Give up the slot if `reply` still holds it. `true` if it did.

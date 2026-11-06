@@ -1147,6 +1147,23 @@ fn a_sessions_write_tools_go_with_its_perspective() {
     );
 }
 
+/// A delete that fails leaves the reply it stopped `cancelled`, not `running` with no task.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_that_fails_marks_the_reply_it_stopped_cancelled() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "hello").await;
+    let (run, go) = waiting();
+    let id = start(&f, run).await.unwrap();
+
+    let hold = hold_for_delete(&f.perspective, slot(&f));
+    dropped_with_its_task(go).await;
+    assert_eq!(reply(&f, &id).await["status"], "running");
+    hold.delete_failed(&f.ctx).await;
+    drop(hold);
+    until_status(&f, &id, ReplyStatus::Cancelled).await;
+    assert!(!running_in(&f, CHAT, &f.did));
+}
+
 /// A link signed by `signer`, as a peer's link arrives from the link language.
 fn peer_link(signer: &TestSigner, source: &str, predicate: &str, target: &str) -> LinkExpression {
     let signed = signer.sign(

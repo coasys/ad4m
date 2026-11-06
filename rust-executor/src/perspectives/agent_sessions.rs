@@ -190,8 +190,22 @@ pub async fn delete_session(
     if session["author"].as_str() != Some(caller_did) {
         return Ok(false);
     }
-    let _hold = hold_for_delete(&perspective, (id.to_string(), caller_did.to_string()));
+    let hold = hold_for_delete(&perspective, (id.to_string(), caller_did.to_string()));
+    if let Err(e) = remove_what_the_caller_wrote(&mut perspective, id, caller_did, context).await {
+        hold.delete_failed(context).await;
+        return Err(e);
+    }
+    Ok(true)
+}
 
+/// The session, the caller's replies in it and their steps: the caller's own links from each, in
+/// one batch.
+async fn remove_what_the_caller_wrote(
+    perspective: &mut PerspectiveInstance,
+    id: &str,
+    caller_did: &str,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
     let replies: Vec<String> = {
         let raw = perspective
             .model_query(
@@ -255,5 +269,5 @@ pub async fn delete_session(
         .commit_batch(batch, context)
         .await
         .map_err(|e| anyhow::anyhow!("could not delete the session: {e:#}"))?;
-    Ok(true)
+    Ok(())
 }
