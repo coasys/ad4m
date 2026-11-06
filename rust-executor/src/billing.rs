@@ -145,7 +145,7 @@ pub fn bill_ai_operation(
         rate_key,
         endpoint_id,
         rate,
-    } = AiRate::of(model_id);
+    } = AiRate::of(model_id)?;
 
     let cost = unit_count as f64 * rate;
     if cost <= 0.0 {
@@ -195,19 +195,20 @@ struct AiRate {
 }
 
 impl AiRate {
-    fn of(model_id: &str) -> AiRate {
+    /// A read error is an error, not a zero rate: a zero rate makes the operation free.
+    fn of(model_id: &str) -> Result<AiRate, anyhow::Error> {
         let db = crate::db_backend::db_backend();
-        let model = db.get_model(model_id.to_string()).ok().flatten();
+        let model = db.get_model(model_id.to_string())?;
         let (rate_key, endpoint_id) = match model {
             Some(model) => (model.name, Some(model.endpoint_id)),
             None => (model_id.to_string(), None),
         };
-        let rate = db.get_host_rate(&rate_key).ok().flatten().unwrap_or(0.0);
-        AiRate {
+        let rate = db.get_host_rate(&rate_key)?.unwrap_or(0.0);
+        Ok(AiRate {
             rate_key,
             endpoint_id,
             rate,
-        }
+        })
     }
 }
 
@@ -222,7 +223,7 @@ pub fn affordable_ai_units(
     if db.get_free_hosting_enabled()? || db.get_agent_free_access(agent_did)? {
         return Ok(None);
     }
-    let rate = AiRate::of(model_id).rate;
+    let rate = AiRate::of(model_id)?.rate;
     if rate <= 0.0 {
         return Ok(None);
     }
@@ -318,5 +319,14 @@ mod closed_db_tests {
     fn a_closed_database_is_not_free_hosting() {
         let _closed = crate::test_utils::DbClosed::now();
         assert!(super::check_compute_credits("did:key:z6MkClosedDbCompute").is_err());
+    }
+
+    // A read error of the model or its rate made the rate 0, so the operation was not billed.
+    #[test]
+    fn a_rate_that_cannot_be_read_is_not_a_zero_rate() {
+        let _closed = crate::test_utils::DbClosed::now();
+        let billed =
+            super::bill_ai_operation("did:key:z6MkClosedDbRate", "model", "chat", 10, "tokens");
+        assert!(billed.is_err());
     }
 }

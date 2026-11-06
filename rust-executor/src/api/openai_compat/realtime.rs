@@ -13,7 +13,9 @@
 //!     transcribed as one call (one upstream request on an endpoint) and emptied. The
 //!     client decides where an utterance ends; the executor's speech gate drops one that
 //!     is not speech. Each commit needs compute credits, as the session's opening does.
-//!   - `{"type":"session.close"}` — close the session and the socket.
+//!   - `{"type":"session.close"}` — close the session and the socket, once the commits sent
+//!     before it are answered and their text is sent (at most the 30 s of
+//!     `TRANSCRIPTION_TIMEOUT_SECS`).
 //!
 //! * **Server → client**
 //!   - `{"type":"transcription_session.created","session_id":"<uuid>"}`
@@ -99,8 +101,29 @@ where
     // The answers of committed utterances, awaited beside the deltas: the deltas of an
     // utterance arrive while it is transcribed.
     let mut answers = futures::stream::FuturesUnordered::<FeedAnswer>::new();
+    // Set by `session.close`: when the wait for the commits queued before it ends.
+    let mut closing: Option<tokio::time::Instant> = None;
 
     loop {
+        if closing.is_some() && answers.is_empty() {
+            // Every queued commit is answered, and its text waits in the receiver.
+            if let Some(rx) = delta_rx.as_mut() {
+                while let Ok(text) = rx.try_recv() {
+                    match delta_frame(&session, &text) {
+                        Ok(Some(frame)) => {
+                            let _ = socket.send(Message::Text(frame.into())).await;
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            token_ended = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+
         // Move the receiver out so select! doesn't conflict with
         // mutations inside the socket-message handler.
         let mut rx_taken = delta_rx.take();
@@ -110,11 +133,18 @@ where
             Ws(Option<Result<Message, axum::Error>>),
             Delta(Result<String, broadcast::error::RecvError>),
             Answered(crate::ai_service::Result<()>),
+            CloseWaited,
         }
 
         let ev = tokio::select! {
             _ = &mut over => Ev::Over,
-            msg = incoming.next() => Ev::Ws(msg),
+            msg = incoming.next(), if closing.is_none() => Ev::Ws(msg),
+            _ = async {
+                match closing {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => Ev::CloseWaited,
             text = async {
                 match rx_taken.as_mut() {
                     Some(rx) => rx.recv().await,
@@ -131,6 +161,7 @@ where
                 token_ended = true;
                 break;
             }
+            Ev::CloseWaited => break,
             Ev::Delta(Ok(text)) => {
                 match delta_frame(&session, &text) {
                     Ok(Some(frame)) => {
@@ -363,8 +394,15 @@ where
                     }
                 }
             }
+            // The text of the commits queued before the close still goes out, and they are
+            // billed: wait for their answers, at most the transcription timeout.
             "session.close" => {
-                break;
+                closing = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_secs(
+                            crate::ai_service::TRANSCRIPTION_TIMEOUT_SECS,
+                        ),
+                );
             }
             _ => {
                 let _ = send_error(

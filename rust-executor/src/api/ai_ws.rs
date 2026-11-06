@@ -1053,8 +1053,7 @@ mod compute_credit_tests {
         assert!(results.2.is_ok(), "a caller without a user pays nothing");
     }
 
-    // Removing this check from the HTTP feed broke no test (Data, #1615 round 1): a user at 0
-    // credits is refused before any stream is fed.
+    // The HTTP feed refuses a user at 0 credits before any stream is fed.
     #[tokio::test]
     async fn the_http_feed_refuses_a_user_without_credits() {
         use crate::agent::session::{Principal, Session};

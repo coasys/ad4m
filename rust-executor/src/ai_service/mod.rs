@@ -75,7 +75,7 @@ pub(crate) fn truncate_for_log(text: &str) -> String {
     format!("{head}… [+{} more chars]", total - LOG_TEXT_PREVIEW_CHARS)
 }
 
-static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
+pub(crate) static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
 
 lazy_static! {
@@ -2242,6 +2242,35 @@ mod remote_stream_tests {
             .feed_transcription_stream(&id, vec![0.1; 7], &operator)
             .await
             .is_err());
+    }
+
+    // The credit check ran only when an utterance was fed. Commits queue (`/v1/realtime`
+    // does not wait for one before the next), so a user with a few credits left could queue
+    // any number of them, and each went upstream after the first bill emptied the account.
+    #[tokio::test(start_paused = true)]
+    async fn an_utterance_whose_user_has_no_credits_left_is_not_sent() {
+        let service = AIService::empty();
+        let id = open(&service, Some("did:key:broke")).await;
+        Ad4mDb::with_global_instance(|db| {
+            db.add_user("broke@example.com", "did:key:broke", "password")?;
+            db.set_user_credits("broke@example.com", 0.0)?;
+            db.set_free_hosting_enabled(false)
+        })
+        .unwrap();
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        let error = service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .unwrap_err();
+        Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(true)).unwrap();
+
+        assert!(error.to_string().contains("credits"), "{error}");
+        assert!(text.try_recv().is_err(), "the utterance was transcribed");
     }
 }
 
