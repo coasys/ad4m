@@ -524,6 +524,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "agent.generate",
   "agent.unlock",
   "ai.addModel",
+  "ai.deleteUpstreamModel",
   "ai.embed",
   "ai.prompt",
   "ai.pullModel",
