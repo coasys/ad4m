@@ -22,7 +22,7 @@
  */
 
 import { Ad4mModel } from "../model/Ad4mModel";
-import { HasMany, Model, Property } from "../model/decorators";
+import { HasMany, Model, Property, ReadOnly } from "../model/decorators";
 
 /** Where a reply is. Only `running` changes. */
 export type AgentReplyStatus = "running" | "done" | "failed" | "cancelled" | "interrupted";
@@ -57,11 +57,19 @@ export class AgentStepRecord extends Ad4mModel {
 @Model({ name: "AgentReply" })
 export class AgentReplyRecord extends Ad4mModel {
   /**
-   * `running` from the moment the reply exists; then `done`, `failed` (see {@link error}),
-   * `cancelled`, or `interrupted` (the executor restarted while it ran).
+   * The id of the message the reply answers. Written once, when the reply is created, so the
+   * reply's `timestamp` (its earliest link) is when it started, not when it ended: a reply keeps
+   * its place in the conversation.
    *
    * First-declared, so the shape's namespace comes from its `through` (`ad4m://`) and the target
    * class is `ad4m://AgentReply`.
+   */
+  @ReadOnly({ through: "ad4m://agent_reply/answers", required: true })
+  answers: string = "";
+
+  /**
+   * `running` from the moment the reply exists; then `done`, `failed` (see {@link error}),
+   * `cancelled`, or `interrupted` (the executor restarted while it ran).
    */
   @Property({ through: "ad4m://agent_reply/status", required: true })
   status: AgentReplyStatus = "running";

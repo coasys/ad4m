@@ -8,7 +8,8 @@
 //! `Container`, #1446): an app's chat record, a channel. Its messages are its children that carry
 //! text (`TextContent`), whatever class the app writes them in. The executor writes only its own
 //! turns, as `AgentReply` records: a `TextContent` (its `text`), so any reader of the container
-//! sees them as messages, plus a `status`.
+//! sees them as messages, plus a `status` and the message it `answers`. `answers` is written once,
+//! at the start, so a reply keeps its place in the conversation when its `status` is rewritten.
 //!
 //! **A reply runs on the node.** [`start_reply`] creates the reply as `running` under the
 //! container, returns its id, and runs the agent in a task of its own. The task sets the text and
@@ -62,6 +63,9 @@ pub const AGENT_REPLY_CLASS: &str = "AgentReply";
 /// The class's URI: what a perspective registers it under.
 pub const AGENT_REPLY_TARGET_CLASS: &str = "ad4m://AgentReply";
 const AGENT_REPLY_SDNA: &str = include_str!("hardwired_sdna/agent_reply.json");
+
+/// A reply's link to the message it answers: written once, when the reply is created.
+pub const ANSWERS: &str = "ad4m://agent_reply/answers";
 
 /// Where reply ids are minted: outside any app's namespace, like the interpretation run nodes.
 const REPLY_URI_PREFIX: &str = "ad4m://agent_reply/";
@@ -423,9 +427,9 @@ async fn prepare_and_create(
     });
     let mut rows = query_rows(perspective, TEXT_CONTENT_URI, &query).await?;
     rows.reverse();
-    let messages = conversation(&rows, &replies);
-    match messages.last() {
-        Some(last) if last.role == "user" => {}
+    let turns = turns(&rows, &replies);
+    let answers = match turns.last() {
+        Some((id, last)) if last.role == "user" => id.to_string(),
         _ => {
             return Err(ReplyError::Invalid(
                 "there is nothing to answer: write the person's message into the container \
@@ -433,11 +437,12 @@ async fn prepare_and_create(
                     .into(),
             ))
         }
-    }
+    };
+    let messages = turns.into_iter().map(|(_, message)| message).collect();
 
     let batch = perspective.create_batch().await;
     hold.stage = Stage::Staged(batch.clone());
-    if let Err(e) = stage_reply(perspective, container, reply, &batch, context).await {
+    if let Err(e) = stage_reply(perspective, container, reply, &answers, &batch, context).await {
         perspective.discard_batch(&batch).await;
         hold.stage = Stage::Reserved;
         return Err(e.into());
@@ -450,11 +455,15 @@ async fn prepare_and_create(
     Ok(messages)
 }
 
-/// The reply and its place in the conversation, staged in `batch`.
+/// The reply and its place in the conversation, staged in `batch`. `answers` names the message
+/// it answers. That link is written here and never again, so the reply's earliest link, and with
+/// it its `timestamp` and its place in the conversation, stays at its start. Its `status` is
+/// rewritten when it ends, and a message written while it ran must still read after it.
 async fn stage_reply(
     perspective: &mut PerspectiveInstance,
     container: &str,
     reply: &str,
+    answers: &str,
     batch: &str,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
@@ -471,6 +480,19 @@ async fn stage_reply(
         )
         .await
         .map_err(|e| anyhow::anyhow!("could not create the reply: {e:#}"))?;
+    perspective
+        .add_link(
+            Link {
+                source: reply.to_string(),
+                predicate: Some(ANSWERS.to_string()),
+                target: answers.to_string(),
+            },
+            LinkStatus::Shared,
+            Some(batch.to_string()),
+            context,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("could not say what the reply answers: {e:#}"))?;
     perspective
         .add_link(
             Link {
@@ -564,22 +586,41 @@ pub(crate) fn conversation(
     rows: &[Value],
     replies: &HashMap<String, ReplyRow>,
 ) -> Vec<AgentMessage> {
+    turns(rows, replies)
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect()
+}
+
+/// [`conversation`], each turn with the id of the record it comes from.
+fn turns<'a>(
+    rows: &'a [Value],
+    replies: &HashMap<String, ReplyRow>,
+) -> Vec<(&'a str, AgentMessage)> {
     rows.iter()
         .filter_map(|row| {
             let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
             if let Some(reply) = replies.get(id) {
                 let finished = reply.status == ReplyStatus::Done.as_str();
                 return (reply.trusted && finished && !reply.text.trim().is_empty()).then(|| {
-                    AgentMessage {
-                        role: "assistant".into(),
-                        content: reply.text.clone(),
-                    }
+                    (
+                        id,
+                        AgentMessage {
+                            role: "assistant".into(),
+                            content: reply.text.clone(),
+                        },
+                    )
                 });
             }
             let text = string_field(row, "text");
-            (!text.trim().is_empty()).then(|| AgentMessage {
-                role: "user".into(),
-                content: text,
+            (!text.trim().is_empty()).then(|| {
+                (
+                    id,
+                    AgentMessage {
+                        role: "user".into(),
+                        content: text,
+                    },
+                )
             })
         })
         .collect()
