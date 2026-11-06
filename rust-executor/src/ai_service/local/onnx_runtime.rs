@@ -183,7 +183,10 @@ pub fn ready(may_fetch: bool) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .and_then(|c| c.local_ai_dir.clone());
-    let store = Store::new(super::store_root(configured));
+    let Ok(root) = super::store_root(configured) else {
+        return false;
+    };
+    let store = Store::new(root);
     match FETCHER.installed_or_fetch(&store, library, key, may_fetch) {
         Some(path) => *POINTED.get_or_init(|| point_ort_at(path)),
         None => false,

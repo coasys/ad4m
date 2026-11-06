@@ -287,7 +287,7 @@ pub async fn check_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
 /// serves added to its own, and publish them when they changed. Nothing is stored or
 /// published when the endpoint moved to another URL during the check. A pull or a delete
 /// calls it directly: what the endpoint serves has just changed.
-async fn probe_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
+pub(crate) async fn probe_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
     let mut capabilities = endpoint.capabilities.clone();
     // Add and update refuse such an endpoint, but a migrated or imported one can hold a
     // key for a plain-HTTP remote host, or a credential in its URL: probing it would send

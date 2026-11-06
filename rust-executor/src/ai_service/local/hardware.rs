@@ -400,7 +400,8 @@ fn cpu_features() -> Vec<String> {
 
 /// Free space on the disk that holds `dir` (or its nearest existing ancestor).
 fn disk_free(dir: &Path) -> Option<u64> {
-    let mut existing = dir.to_path_buf();
+    // Absolute first: the ancestors of a relative path that does not exist end at "".
+    let mut existing = std::path::absolute(dir).ok()?;
     while !existing.exists() {
         existing = existing.parent()?.to_path_buf();
     }
@@ -412,6 +413,19 @@ fn disk_free(dir: &Path) -> Option<u64> {
         .filter(|disk| existing.starts_with(disk.mount_point()))
         .max_by_key(|disk| disk.mount_point().as_os_str().len())
         .map(|disk| disk.available_space())
+}
+
+/// Whether the CUDA builds can run: a driver with CUDA 12 or 13 and at least one device it
+/// lists (a CUDA build with no device does not fall back to the CPU: nemo-speech gets
+/// `--device cuda`). Else why not.
+fn cuda_usable(nvml: &nvml::Nvml) -> Result<(), &'static str> {
+    match nvml.cuda_version {
+        Some(v) if v >= 12000 && !nvml.devices.is_empty() => Ok(()),
+        Some(v) if v >= 12000 => {
+            Err("The NVIDIA driver lists no device it can open: Vulkan or the CPU runs")
+        }
+        _ => Err("The NVIDIA driver supports no CUDA 12 or 13: Vulkan or the CPU runs"),
+    }
 }
 
 fn probe_gpus(ram_bytes: u64, cpu_brand: &str) -> GpuProbe {
@@ -462,11 +476,9 @@ fn probe_gpus(ram_bytes: u64, cpu_brand: &str) -> GpuProbe {
                 source: "nvml".to_string(),
             });
         }
-        match nvml.cuda_version {
-            Some(v) if v >= 12000 => probe.backends.push(Backend::Cuda),
-            _ => probe
-                .notes
-                .push("The NVIDIA driver supports no CUDA 12 or 13: Vulkan or the CPU runs".into()),
+        match cuda_usable(nvml) {
+            Ok(()) => probe.backends.push(Backend::Cuda),
+            Err(note) => probe.notes.push(note.into()),
         }
     }
 
@@ -1134,6 +1146,31 @@ mod tests {
                 gtt: Some(65945571328),
             }]
         );
+    }
+
+    /// A driver with CUDA 12 that lists no device it can open: no CUDA build.
+    #[test]
+    fn cuda_needs_a_device_the_driver_lists() {
+        let mut probe = nvml::Nvml {
+            driver: Some("580".into()),
+            cuda_version: Some(12040),
+            devices: vec![],
+        };
+        assert!(cuda_usable(&probe).is_err());
+        probe.devices.push(nvml::Device {
+            name: "g".into(),
+            total_bytes: 12 << 30,
+        });
+        assert!(cuda_usable(&probe).is_ok());
+        probe.cuda_version = Some(11080);
+        assert!(cuda_usable(&probe).is_err());
+    }
+
+    /// A relative store that does not exist yet (`--local-ai-dir ./models`) still gets a
+    /// free-space reading: the plan must not take an unknown as enough.
+    #[test]
+    fn a_relative_store_that_does_not_exist_has_a_free_space_reading() {
+        assert!(disk_free(Path::new("no-such-local-ai-dir/models")).is_some());
     }
 
     /// Detection on the machine that runs the tests: it answers, and what it answers holds

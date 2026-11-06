@@ -176,11 +176,10 @@ impl Ad4mDb {
                     // (`AIService::default_model`).
                     log::warn!(
                         "AI model {:?} ({}) ran in-process, which this executor no longer does: \
-                         it is deleted. Name the model 'default' instead (local AI sets one up \
-                         on first use), or register a model on an endpoint (Ollama, \
-                         llama-server, speaches, ...).",
+                         it is deleted. {}",
                         row.name,
                         row.model_type.trim_matches('"'),
+                        LegacyRow::in_process_advice(&row.model_type),
                     );
                     tx.execute("DELETE FROM models WHERE id = ?1", params![row.id])?;
                     tx.execute(
@@ -293,6 +292,22 @@ impl LegacyRow {
             },
             AiCapability::from(&model_type),
         ))
+    }
+
+    /// What to do instead of an in-process model of `model_type` (the column's JSON text). An
+    /// embed or a transcription stream naming `default` sets up local AI's model on first use;
+    /// a task naming `default` does not (it needs a default chat model already).
+    fn in_process_advice(model_type: &str) -> &'static str {
+        match serde_json::from_str::<ModelType>(model_type) {
+            Ok(ModelType::Embedding | ModelType::Transcription) => {
+                "Name the model 'default' instead (local AI sets one up on first use), or \
+                 register a model on an endpoint (Ollama, llama-server, speaches, ...)."
+            }
+            _ => {
+                "Install local AI (ai.localInstall), or register a model on an endpoint \
+                 (Ollama, llama-server, ...) and make it the default."
+            }
+        }
     }
 }
 
@@ -594,5 +609,18 @@ mod tests {
 
         let db = Ad4mDb::new(&path).unwrap();
         assert_eq!(db.get_model(id).unwrap().unwrap().remote_model, "qwen");
+    }
+
+    /// A deleted in-process chat model gets advice that works: a task naming 'default' does
+    /// not set up local AI, so naming 'default' is advice only for embeddings and
+    /// transcription.
+    #[test]
+    fn the_advice_for_a_deleted_model_fits_its_type() {
+        let llm = super::LegacyRow::in_process_advice("\"LLM\"");
+        assert!(llm.contains("ai.localInstall"), "{llm}");
+        assert!(!llm.contains("'default'"), "{llm}");
+        for model_type in ["\"EMBEDDING\"", "\"TRANSCRIPTION\""] {
+            assert!(super::LegacyRow::in_process_advice(model_type).contains("'default'"));
+        }
     }
 }

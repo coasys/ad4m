@@ -30,12 +30,10 @@ const INSTALLED_MARKER: &str = ".ad4m-installed";
 
 /// The store root when neither the config (`local_ai_dir`) nor `AD4M_LOCAL_AI_DIR` names
 /// one: `~/.local/share/ad4m/local-ai`, `~/Library/Application Support/ad4m/local-ai`,
-/// `%LOCALAPPDATA%\ad4m\local-ai`.
-pub fn default_store_root() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ad4m")
-        .join("local-ai")
+/// `%LOCALAPPDATA%\ad4m\local-ai`. `None` without a per-user data directory: never the
+/// shared temporary directory, where another user could put a marker and a binary first.
+pub fn default_store_root() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|dir| dir.join("ad4m").join("local-ai"))
 }
 
 /// The download's checksum or size is not the manifest's: the file is deleted.
@@ -338,6 +336,20 @@ pub async fn download(
     dest: &Path,
     progress: &(dyn Fn(u64) + Send + Sync),
 ) -> Result<()> {
+    download_within(client, url, sha256, size, dest, progress, IDLE_TIMEOUT).await
+}
+
+/// [`download`] with `idle` as the longest wait for the response's headers and for each
+/// chunk.
+async fn download_within(
+    client: &reqwest::Client,
+    url: &Url,
+    sha256: &str,
+    size: u64,
+    dest: &Path,
+    progress: &(dyn Fn(u64) + Send + Sync),
+    idle: Duration,
+) -> Result<()> {
     if let Some(dir) = dest.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
@@ -364,7 +376,17 @@ pub async fn download(
         if have > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
         }
-        let response = request.send().await.with_context(|| format!("GET {url}"))?;
+        // A server that takes the connection and sends no headers ends the download too:
+        // else the install would stay running and block every later one.
+        let response = tokio::time::timeout(idle, request.send())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "GET {url}: no answer for {}s (it resumes next time)",
+                    idle.as_secs()
+                )
+            })?
+            .with_context(|| format!("GET {url}"))?;
         let status = response.status();
         let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT
             && response
@@ -400,10 +422,10 @@ pub async fn download(
         progress(have);
         let mut stream = response.bytes_stream();
         loop {
-            let chunk = match tokio::time::timeout(IDLE_TIMEOUT, stream.next()).await {
+            let chunk = match tokio::time::timeout(idle, stream.next()).await {
                 Err(_) => bail!(
                     "GET {url}: no data for {}s (it resumes next time)",
-                    IDLE_TIMEOUT.as_secs()
+                    idle.as_secs()
                 ),
                 Ok(None) => break,
                 Ok(Some(chunk)) => {
@@ -595,6 +617,39 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), data);
         assert_eq!(seen.load(Ordering::SeqCst), data.len() as u64);
         assert!(!dir.path().join("f.bin.part").exists());
+    }
+
+    /// A server that takes the connection and never answers: the download ends after the
+    /// idle time, so the install can be tried again.
+    #[tokio::test]
+    async fn a_server_that_sends_no_headers_ends_the_download() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            download_within(
+                &http_client().unwrap(),
+                &Url::parse(&format!("http://127.0.0.1:{port}/f.bin")).unwrap(),
+                &sha(b"x"),
+                1,
+                &dir.path().join("f.bin"),
+                &|_| {},
+                Duration::from_secs(1),
+            ),
+        )
+        .await;
+        silent.abort();
+        let error = outcome.expect("the download ends").unwrap_err();
+        assert!(error.to_string().contains("no answer"), "{error:#}");
     }
 
     #[tokio::test]

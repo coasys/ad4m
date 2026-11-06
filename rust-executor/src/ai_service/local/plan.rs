@@ -264,8 +264,20 @@ pub fn plan_with_device(
     device: Option<Backend>,
     installed: &dyn Fn(&str) -> bool,
 ) -> LocalPlan {
+    plan_services_with_device(data, hardware, device, installed, &PLANNED_SERVICES)
+}
+
+/// [`plan_with_device`] for `services` only: an install of some services is held to the
+/// budget by what it installs, not by the whole set.
+pub fn plan_services_with_device(
+    data: &Data,
+    hardware: &LocalHardware,
+    device: Option<Backend>,
+    installed: &dyn Fn(&str) -> bool,
+    services: &[Service],
+) -> LocalPlan {
     let Some(device) = device else {
-        return plan(data, hardware, installed);
+        return plan_services(data, hardware, installed, services);
     };
     let mut held = hardware.clone();
     held.backends = if device == Backend::Cpu {
@@ -274,7 +286,7 @@ pub fn plan_with_device(
         vec![device, Backend::Cpu]
     };
     super::hardware::finish(&mut held, &data.classes);
-    let mut planned = plan(data, &held, installed);
+    let mut planned = plan_services(data, &held, installed, services);
     planned.device = Some(device);
     planned.reasons.insert(
         0,
@@ -300,13 +312,26 @@ type Pick = (Service, Vec<Candidate>, usize);
 /// The plan for `hardware`. `installed(sha256)` says whether a file with that digest is
 /// in the store already.
 pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> bool) -> LocalPlan {
+    plan_services(data, hardware, installed, &PLANNED_SERVICES)
+}
+
+/// [`plan`] for `services` only (of [`PLANNED_SERVICES`]).
+pub fn plan_services(
+    data: &Data,
+    hardware: &LocalHardware,
+    installed: &dyn Fn(&str) -> bool,
+    services: &[Service],
+) -> LocalPlan {
     let chain = data.classes.chain(&hardware.hardware_class);
     let mut reasons = Vec::new();
     let mut unavailable = Vec::new();
 
     // Each service: its candidates, and which one the plan is at.
     let mut picks: Vec<Pick> = Vec::new();
-    for service in PLANNED_SERVICES {
+    for service in PLANNED_SERVICES
+        .into_iter()
+        .filter(|s| services.contains(s))
+    {
         // The measured candidates when this device runs their runtime, else the default.
         let measured = candidates(data, &chain, service);
         let unrunnable = measured
@@ -318,6 +343,23 @@ pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> b
                 .into_iter()
                 .collect()
         } else {
+            // The default (the smallest model this device runs) is the last step down when
+            // it is smaller than every measured candidate: a measured model over the budget
+            // must not refuse the install while a smaller one fits.
+            let mut measured = measured;
+            let memory = |c: &Candidate| {
+                c.1.model_id
+                    .as_ref()
+                    .and_then(|id| data.manifest.models.get(id))
+                    .map(|m| m.memory_bytes)
+                    .unwrap_or(0)
+            };
+            let smallest = measured.iter().map(memory).min().unwrap_or(0);
+            if let Some(default) = default_candidate(data, hardware, service).filter(|d| {
+                memory(d) < smallest && !measured.iter().any(|c| c.1.model_id == d.1.model_id)
+            }) {
+                measured.push(default);
+            }
             measured
         };
         if found.is_empty() {
@@ -828,6 +870,57 @@ mod tests {
         assert!(plan.reasons[0].contains("steps down from big to small"));
     }
 
+    /// Only the 7 GiB model is measured and the budget is 4 GiB: the plan steps down to the
+    /// manifest's smallest chat model as a default, and does not refuse the install.
+    #[test]
+    fn a_measured_model_over_the_budget_steps_down_to_the_smaller_default() {
+        let data = data(json!({
+            "gpu-12gb": { "llm": recommendation("big", "llama-server", true) }
+        }));
+        let hardware = nvidia_12(&data, 8);
+        assert_eq!(hardware.memory_budget_bytes, 4 * GIB);
+        let plan = plan(&data, &hardware, &nothing_installed);
+        let llm = plan
+            .models
+            .iter()
+            .find(|m| m.service == Service::Llm)
+            .unwrap();
+        assert_eq!(llm.model_id, "small");
+        assert_eq!(llm.basis, Basis::Default);
+        assert!(plan.fits, "{:?}", plan.reasons);
+        assert!(plan
+            .reasons
+            .iter()
+            .any(|r| r.contains("steps down from big to small")));
+    }
+
+    /// The whole set does not fit, embeddings alone do: an install of embeddings only is
+    /// held to the budget by what it installs.
+    #[test]
+    fn a_plan_of_some_services_fits_by_those_services() {
+        let data = data(full());
+        let hardware = device(&data, 6, vec![], vec![Backend::Cpu]);
+        assert!(!plan(&data, &hardware, &nothing_installed).fits);
+        let embeddings =
+            plan_services(&data, &hardware, &nothing_installed, &[Service::Embeddings]);
+        assert!(embeddings.fits, "{:?}", embeddings.reasons);
+        let ids: Vec<_> = embeddings
+            .models
+            .iter()
+            .map(|m| m.model_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["embed"]);
+        assert_eq!(embeddings.memory_bytes, GIB / 4);
+        let held = plan_services_with_device(
+            &data,
+            &hardware,
+            Some(Backend::Cpu),
+            &nothing_installed,
+            &[Service::Embeddings],
+        );
+        assert!(held.fits, "{:?}", held.reasons);
+    }
+
     #[test]
     fn a_set_that_cannot_fit_says_so_with_the_numbers() {
         let data = data(full());
@@ -1112,6 +1205,29 @@ mod tests {
         );
         let unavailable: Vec<_> = plan.unavailable.iter().map(|u| u.service).collect();
         assert_eq!(unavailable, vec![Service::Stt]);
+    }
+
+    /// The embedded data on an 8 GB device without a GPU (cpu-8gb): the default set fits
+    /// the budget of RAM - 4 GiB, by the models' `memoryBytes` (about 2.6 GB together).
+    #[test]
+    fn the_embedded_data_plans_a_set_that_fits_8_gb() {
+        let data = crate::ai_service::local::data::embedded().unwrap();
+        let hardware = device(data, 8, vec![], vec![Backend::Cpu]);
+        assert_eq!(hardware.hardware_class, "cpu-8gb");
+        assert_eq!(hardware.memory_budget_bytes, 4 * GIB);
+        let plan = plan(data, &hardware, &nothing_installed);
+        assert!(plan.fits, "{:?}", plan.reasons);
+        let services: Vec<_> = plan.models.iter().map(|m| m.service).collect();
+        assert_eq!(
+            services,
+            vec![Service::Llm, Service::Embeddings, Service::Stt]
+        );
+        assert!(
+            plan.memory_bytes <= 3_000_000_000,
+            "the set needs {} bytes",
+            plan.memory_bytes
+        );
+        assert!(plan.memory_bytes <= plan.memory_budget_bytes);
     }
 
     /// A device of a class the wind tunnel has not measured: the RTX 3060 fixture of

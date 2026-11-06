@@ -4,6 +4,7 @@ import type {
   DiscoveredModel,
   EndpointKind,
   LocalAiPlannedModel,
+  LocalAiStatus,
   ModelType,
 } from "@coasys/ad4m";
 
@@ -171,4 +172,35 @@ export async function registerModel(
     await client.ai.setDefaultModel(modelType, id);
   }
   return id;
+}
+
+/**
+ * Whether local AI's chat model is registered here and the runtime that serves it runs. A
+ * failed or stopped runtime keeps its registered model: that alone is not ready.
+ */
+export function localChatReady(status: Pick<LocalAiStatus, "models" | "runtimes"> | null): boolean {
+  if (!status) return false;
+  const registered = status.models.some((m) => m.service === "llm" && !!m.model);
+  const runtime = status.runtimes.find((r) => r.services.includes("llm"));
+  return registered && runtime?.phase === "running";
+}
+
+/**
+ * What the local AI panel offers: `running` when every runtime of the selection runs, `start`
+ * when it is installed with its files in, else `install`. A selection without the chat model
+ * the plan has (first-use setup installed only embeddings or transcription) offers the
+ * install, also when the chat model's files are downloaded already: a start would not add it.
+ */
+export function localAction(
+  status: Pick<LocalAiStatus, "installed" | "models" | "runtimes"> | null,
+  plan: { models: Pick<LocalAiPlannedModel, "service">[]; downloadBytes: number },
+  installing: boolean
+): "running" | "start" | "install" {
+  if (!status?.installed || installing) return "install";
+  const lacksChat =
+    plan.models.some((m) => m.service === "llm") && !status.models.some((m) => m.service === "llm");
+  if (lacksChat) return "install";
+  const running = status.runtimes.filter((r) => r.phase === "running").length;
+  if (running > 0 && running === status.runtimes.length) return "running";
+  return plan.downloadBytes === 0 ? "start" : "install";
 }

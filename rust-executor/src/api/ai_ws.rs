@@ -698,11 +698,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<EmbedRequest, String>("ai.embed", ai_embed)
         .long()
         .guard(Guard::Cap(AI_PROMPT_CAPABILITY.clone()));
-    // The new stream's id.
+    // The new stream's id. Long: naming `default` on an executor without a transcription
+    // model sets up local AI first, as `ai.embed` does.
     map.method::<AiTranscriptionOpenParams, String>(
         "ai.transcriptionOpen",
         open_transcription_stream,
     )
+    .long()
     .guard(Guard::Cap(AI_TRANSCRIBE_CAPABILITY.clone()));
     // Always the string `"true"`.
     map.method::<AiTranscriptionCloseParams, String>(

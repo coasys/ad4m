@@ -472,6 +472,14 @@ mod tests {
                     continue;
                 };
                 usable += 1;
+                // A measured row names its model: without one the plan would fall back to
+                // the same model with the default flags, and no other test would see it.
+                if !recommendation.evidence.is_empty() {
+                    assert!(
+                        recommendation.model_id.is_some(),
+                        "{class}/{service:?}: measured, but no modelId"
+                    );
+                }
                 if let Some(model) = &recommendation.model_id {
                     let file = data.manifest.models.get(model).unwrap_or_else(|| {
                         panic!("{class}/{service:?}: {model} is not in the manifest")

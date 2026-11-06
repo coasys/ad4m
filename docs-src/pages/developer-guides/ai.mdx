@@ -132,6 +132,8 @@ The Docker image registers model servers from the environment: Ollama (`AD4M_AI_
 
 An image built with `--build-arg INCLUDE_MODELS=true` needs no model server and no download: the build runs the executor's own local AI installer (`ad4m-executor local-ai install --store … --state … [--device cpu|cuda|vulkan|rocm] [--services llm,embeddings,stt]`, the plan for the build machine held to `LOCAL_AI_DEVICE`, default `cpu`) into `/opt/ad4m/local-ai`, and the container's executor starts those runtimes and models at its first start and makes them the defaults. A later `ai.localInstall` in the container writes to the container's own layer, not to the `/data` volume.
 
+The image installs no GPU runtime. With `LOCAL_AI_DEVICE=cuda`, run the container with the NVIDIA Container Toolkit (`--gpus all`). With `vulkan`, add a Vulkan loader and driver to the image (`libvulkan1`, `mesa-vulkan-drivers`) and pass `/dev/dri` in. With `rocm`, add the ROCm runtime and pass `/dev/kfd` and `/dev/dri` in. Without them the runtimes do not become ready.
+
 ## Using AI in Your Application
 
 ### 1. Adding Models

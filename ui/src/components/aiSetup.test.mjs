@@ -7,6 +7,8 @@ import {
   chatModels,
   endpointFor,
   endpointLabel,
+  localAction,
+  localChatReady,
   parseMaxNumCtx,
   preselectedChat,
   withMaxNumCtx,
@@ -135,4 +137,44 @@ test("a key typed again for a saved endpoint updates that endpoint, not a new on
       },
     ],
   ]);
+});
+
+const runtime = (provider, services, phase) => ({ provider, services, phase });
+const llamaUp = runtime("llama-server", ["llm", "embeddings"], "running");
+const chatModel = { service: "llm", modelId: "qwen", model: "m1" };
+
+test("local chat is ready only with its model registered and its runtime running", () => {
+  assert.equal(localChatReady(null), false);
+  assert.equal(localChatReady({ models: [chatModel], runtimes: [llamaUp] }), true);
+  for (const phase of ["failed", "stopped", "restarting", null]) {
+    const runtimes = [runtime("llama-server", ["llm"], phase)];
+    assert.equal(localChatReady({ models: [chatModel], runtimes }), false, `${phase}`);
+  }
+  const unregistered = { ...chatModel, model: null };
+  assert.equal(localChatReady({ models: [unregistered], runtimes: [llamaUp] }), false);
+});
+
+const planWith = (services, downloadBytes = 0) => ({
+  models: services.map((service) => ({ service })),
+  downloadBytes,
+});
+
+test("the local panel offers start, install, or says local AI runs", () => {
+  const installed = (runtimes, models) => ({ installed: true, runtimes, models });
+  const all = planWith(["llm", "embeddings", "stt"]);
+  // Everything of the selection runs, chat among it.
+  assert.equal(localAction(installed([llamaUp], [chatModel]), all, false), "running");
+  // Stopped, and the files are in: start.
+  const stopped = runtime("llama-server", ["llm"], "stopped");
+  assert.equal(localAction(installed([stopped], [chatModel]), all, false), "start");
+  // Only embeddings run (first-use setup): the planned chat model is offered for install,
+  // also when its files are downloaded already.
+  const embeddingsOnly = installed(
+    [runtime("llama-server", ["embeddings"], "running")],
+    [{ service: "embeddings", modelId: "nomic", model: "m2" }]
+  );
+  assert.equal(localAction(embeddingsOnly, all, false), "install");
+  // Nothing installed, or files missing: install.
+  assert.equal(localAction({ installed: false, runtimes: [], models: [] }, all, false), "install");
+  assert.equal(localAction(installed([stopped], [chatModel]), planWith(["llm"], 10), false), "install");
 });

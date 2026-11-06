@@ -985,7 +985,10 @@ describe('long calls', () => {
         expect(lastSent().type).toBe('ai.localInstall')
         await jest.advanceTimersByTimeAsync(LONG_TIMEOUT_MS + 1000)
         expect(outcome()).toBe('pending')
-        await jest.advanceTimersByTimeAsync(LOCAL_INSTALL_TIMEOUT_MS)
+        // The deadline itself: pending a millisecond before it, rejected just after.
+        await jest.advanceTimersByTimeAsync(LOCAL_INSTALL_TIMEOUT_MS - LONG_TIMEOUT_MS - 1002)
+        expect(outcome()).toBe('pending')
+        await jest.advanceTimersByTimeAsync(2)
         expect(outcome()).toMatchObject({ name: 'RpcError', status: 408 })
     })
 })

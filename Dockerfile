@@ -7,7 +7,13 @@
 #   INCLUDE_MODELS=false  — ship local AI in the image: the llama-server and nemo-speech
 #                           runtimes and the models `ai.localInstall` picks (several GB),
 #                           started with the executor, no download at run time
-#   LOCAL_AI_DEVICE=cpu   — the device those builds are for: cpu, cuda, vulkan, rocm
+#   LOCAL_AI_DEVICE=cpu   — the device those builds are for: cpu, cuda, vulkan, rocm.
+#                           The image installs no GPU runtime: cuda needs the NVIDIA
+#                           Container Toolkit (`--gpus all`); vulkan needs a Vulkan loader
+#                           and driver (libvulkan1, mesa-vulkan-drivers) added to the image
+#                           and /dev/dri passed in; rocm needs the ROCm runtime added and
+#                           /dev/kfd and /dev/dri passed in. Without them the runtimes do not
+#                           become ready.
 #   RUN_HOLOCHAIN=true    — include Holochain conductor (false = standalone mode)
 # =============================================================================
 

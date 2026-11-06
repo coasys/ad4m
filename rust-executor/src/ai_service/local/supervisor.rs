@@ -631,6 +631,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn alive(pid: u32) -> bool {
         // SAFETY: signal 0 only checks that the process exists.
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }

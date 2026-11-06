@@ -60,16 +60,34 @@ const NEMO_SPEECH_ENDPOINT: &str = "This device (NeMo Speech)";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The shared store: `local_ai_dir` from the config, else `AD4M_LOCAL_AI_DIR`, else the
-/// per-user default.
-pub fn store_root(local_ai_dir: Option<String>) -> PathBuf {
-    local_ai_dir
-        .or_else(|| {
-            std::env::var("AD4M_LOCAL_AI_DIR")
-                .ok()
-                .filter(|d| !d.is_empty())
-        })
+/// per-user default; made absolute (a runtime starts in its own directory, where a relative
+/// path names something else). An error when none is set and there is no per-user default.
+pub fn store_root(local_ai_dir: Option<String>) -> Result<PathBuf> {
+    store_root_from(
+        local_ai_dir,
+        std::env::var("AD4M_LOCAL_AI_DIR").ok(),
+        install::default_store_root(),
+    )
+}
+
+fn store_root_from(
+    configured: Option<String>,
+    env: Option<String>,
+    user_default: Option<PathBuf>,
+) -> Result<PathBuf> {
+    let root = configured
+        .filter(|d| !d.is_empty())
+        .or_else(|| env.filter(|d| !d.is_empty()))
         .map(PathBuf::from)
-        .unwrap_or_else(install::default_store_root)
+        .or(user_default)
+        .ok_or_else(|| {
+            LocalAiRefused(
+                "This user has no data directory for local AI's files: set local_ai_dir \
+                 (--local-ai-dir, AD4M_LOCAL_AI_DIR) to a private directory"
+                    .into(),
+            )
+        })?;
+    Ok(std::path::absolute(&root)?)
 }
 
 /// Where local AI keeps its files: the shared store and this executor's state.
@@ -82,15 +100,15 @@ pub struct LocalPaths {
 impl LocalPaths {
     /// The store from the config (`local_ai_dir`, also `--local-ai-dir` and
     /// `AD4M_LOCAL_AI_DIR`), else the per-user default; the state in the app data path.
-    pub fn from_config() -> LocalPaths {
+    pub fn from_config() -> Result<LocalPaths> {
         let config = crate::config::get_global_config();
-        let store = store_root(config.local_ai_dir.clone());
+        let store = store_root(config.local_ai_dir.clone())?;
         let state = config
             .app_data_path
             .clone()
             .map(|p| PathBuf::from(p).join("local-ai"))
             .unwrap_or_else(|| store.join("state"));
-        LocalPaths { store, state }
+        Ok(LocalPaths { store, state })
     }
 }
 
@@ -258,6 +276,8 @@ impl Selection {
 struct Running {
     supervised: Supervised,
     endpoint_id: Option<String>,
+    /// The key this start gave the runtime, for a registration done again.
+    key: Secret,
 }
 
 /// What `managed_health` reads without the service lock: per port, the status and the
@@ -308,7 +328,7 @@ impl std::error::Error for LocalAiRefused {}
 
 /// This device, detected now (GPU probes once per process).
 pub async fn hardware() -> Result<LocalHardware> {
-    hardware_at(LocalPaths::from_config()).await
+    hardware_at(LocalPaths::from_config()?).await
 }
 
 async fn hardware_at(paths: LocalPaths) -> Result<LocalHardware> {
@@ -318,16 +338,26 @@ async fn hardware_at(paths: LocalPaths) -> Result<LocalHardware> {
 
 /// The plan for this device against the store's files.
 pub async fn current_plan() -> Result<LocalPlan> {
-    plan_at(&LocalPaths::from_config()).await
+    plan_at(&LocalPaths::from_config()?).await
 }
 
 async fn plan_at(paths: &LocalPaths) -> Result<LocalPlan> {
-    plan_for(paths, crate::config::get_global_config().local_ai_device).await
+    plan_for(
+        paths,
+        crate::config::get_global_config().local_ai_device,
+        None,
+    )
+    .await
 }
 
 /// The plan for this device held to `device` (`None`: the best one detected), against the
-/// store's files.
-async fn plan_for(paths: &LocalPaths, device: Option<Backend>) -> Result<LocalPlan> {
+/// store's files; of `services` only when given (an install of some services fits by
+/// them, not by the whole set).
+async fn plan_for(
+    paths: &LocalPaths,
+    device: Option<Backend>,
+    services: Option<&[Service]>,
+) -> Result<LocalPlan> {
     let data = data::embedded()?;
     let hardware = hardware_at(paths.clone()).await?;
     let store = Store::new(&paths.store);
@@ -335,9 +365,13 @@ async fn plan_for(paths: &LocalPaths, device: Option<Backend>) -> Result<LocalPl
         let manifest = data.manifest.clone();
         tokio::task::spawn_blocking(move || store.installed_digests(&manifest)).await?
     };
-    Ok(plan::plan_with_device(data, &hardware, device, &|sha| {
-        installed.contains(sha)
-    }))
+    Ok(plan::plan_services_with_device(
+        data,
+        &hardware,
+        device,
+        &|sha| installed.contains(sha),
+        services.unwrap_or(&plan::PLANNED_SERVICES),
+    ))
 }
 
 pub(crate) fn autostart_enabled() -> bool {
@@ -359,7 +393,7 @@ fn gpu_check(provider: Provider) -> GpuCheck {
 /// `ai.localStatus`.
 pub async fn status() -> LocalStatus {
     let paths = LocalPaths::from_config();
-    let selection = Selection::load(&paths);
+    let selection = paths.as_ref().ok().and_then(Selection::load);
     let running = RUNNING.lock().await;
     let models = crate::db_backend::db_backend()
         .get_models()
@@ -372,7 +406,9 @@ pub async fn status() -> LocalStatus {
     LocalStatus {
         installed: selection.is_some(),
         installing: INSTALLING.load(Ordering::SeqCst),
-        storage_dir: paths.store.to_string_lossy().into_owned(),
+        storage_dir: paths
+            .map(|p| p.store.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         autostart: autostart_enabled(),
         runtimes: selection_ref
             .map(|s| {
@@ -436,8 +472,19 @@ fn endpoint_name(provider: Provider) -> &'static str {
     }
 }
 
+/// Whether `name` is one of the names local AI registers its endpoints under.
+pub(crate) fn is_managed_endpoint_name(name: &str) -> bool {
+    [Provider::LlamaServer, Provider::NemoSpeech]
+        .iter()
+        .any(|p| endpoint_name(*p) == name)
+}
+
 async fn publish_progress(event: ProgressEvent) {
-    get_global_pubsub().await.publish_event(Event::new(
+    publish_progress_now(event);
+}
+
+fn publish_progress_now(event: ProgressEvent) {
+    crate::pubsub::get_global_pubsub_sync().publish_event(Event::new(
         Topic::AiLocalProgress,
         Audience::Operator,
         &event,
@@ -456,7 +503,7 @@ impl Drop for InstallGuard {
 /// `ai.localInstall`: download what the plan names (resuming, verified), keep the
 /// selection, then start and register, unless `start` is false.
 pub async fn install(params: InstallParams) -> Result<LocalStatus> {
-    let paths = LocalPaths::from_config();
+    let paths = LocalPaths::from_config()?;
     run_install(install_at(&paths, &params)).await
 }
 
@@ -524,6 +571,15 @@ async fn install_at(paths: &LocalPaths, params: &InstallParams) -> Result<()> {
     .await
 }
 
+/// Whether the executor has a model of `service`'s type.
+fn has_model_of(service: Service) -> Result<bool> {
+    let model_type = service.model_type();
+    Ok(crate::db_backend::db_backend()
+        .get_models()?
+        .iter()
+        .any(|m| m.model_type == model_type))
+}
+
 /// Set up local AI's `service` for an executor with no model of its type, on its first use:
 /// what dev's default models were (Bert, Whisper), downloaded when something first needed
 /// them, not at start. The selection keeps what it had and gains `service`; the runtimes
@@ -542,7 +598,12 @@ pub async fn ensure_service(service: Service) -> Result<()> {
     // Taken, not only waited for: an install that begins meanwhile makes this wait, not
     // fail; and the selection read below is the one that install left.
     let guard = take_install_flag().await;
-    let paths = LocalPaths::from_config();
+    // The install waited for (the launcher's) may have registered a model of the type: no
+    // second install, which would restart the runtimes under requests that use them.
+    if has_model_of(service)? {
+        return Ok(());
+    }
+    let paths = LocalPaths::from_config()?;
     let mut services: Vec<Service> = Selection::load(&paths)
         .map(|s| s.models.iter().map(|m| m.service).collect())
         .unwrap_or_default();
@@ -611,7 +672,7 @@ async fn install_for(
     device: Option<Backend>,
 ) -> Result<()> {
     let data = data::embedded()?;
-    let mut plan = plan_for(paths, device).await?;
+    let mut plan = plan_for(paths, device, params.services.as_deref()).await?;
     if let Some(wanted) = &params.services {
         plan.models.retain(|m| wanted.contains(&m.service));
         plan.runtimes
@@ -753,8 +814,9 @@ impl Reporter {
             due
         };
         if due {
-            let event = self.event(bytes);
-            tokio::spawn(publish_progress(event));
+            // Now, not on a task: a report published after the flush would put an older
+            // byte count after the item's last one.
+            publish_progress_now(self.event(bytes));
         }
     }
 
@@ -767,7 +829,7 @@ impl Reporter {
 /// `ai.localStart`: start the installed runtimes and register them. Defaults are set
 /// only for types that have none.
 pub async fn start() -> Result<LocalStatus> {
-    let paths = LocalPaths::from_config();
+    let paths = LocalPaths::from_config()?;
     start_at(&paths, false).await?;
     Ok(status().await)
 }
@@ -1013,8 +1075,14 @@ fn pid_file(paths: &LocalPaths) -> PathBuf {
 }
 
 async fn write_pids(paths: &LocalPaths) {
+    write_pids_with(paths, None).await
+}
+
+/// `pids.json`: the runtimes in `RUNNING`, and `starting` (a runtime a start has spawned
+/// and not handed to `RUNNING` yet, while its models load).
+async fn write_pids_with(paths: &LocalPaths, starting: Option<(u32, PathBuf)>) {
     let running = RUNNING.lock().await;
-    let pids: Vec<(u32, PathBuf)> = running
+    let mut pids: Vec<(u32, PathBuf)> = running
         .values()
         .filter_map(|r| {
             Some((
@@ -1023,6 +1091,12 @@ async fn write_pids(paths: &LocalPaths) {
             ))
         })
         .collect();
+    drop(running);
+    if let Some(starting) = starting {
+        if !pids.iter().any(|(pid, _)| *pid == starting.0) {
+            pids.push(starting);
+        }
+    }
     if let Ok(text) = serde_json::to_string(&pids) {
         let _ = std::fs::write(pid_file(paths), text);
     }
@@ -1062,6 +1136,28 @@ impl Drop for StartingPort {
     }
 }
 
+/// Whether `runtime`, running, lacks its registration: no endpoint recorded, the endpoint
+/// gone, or a model of the selection without its row on it.
+fn registration_missing(
+    selection: &Selection,
+    runtime: &SelectedRuntime,
+    endpoint_id: Option<&str>,
+) -> Result<bool> {
+    let Some(endpoint_id) = endpoint_id else {
+        return Ok(true);
+    };
+    let db = crate::db_backend::db_backend();
+    if db.get_endpoint(endpoint_id)?.is_none() {
+        return Ok(true);
+    }
+    let rows = db.get_models()?;
+    Ok(selection.models_of(runtime.provider).iter().any(|model| {
+        !rows
+            .iter()
+            .any(|row| row.endpoint_id == endpoint_id && row.name == model.model_id)
+    }))
+}
+
 async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
     let _lifecycle = LIFECYCLE.lock().await;
     let mut selection = Selection::load(paths)
@@ -1099,25 +1195,48 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
     }
     let avoid = supervisor::avoided_ports();
     for runtime in selection.runtimes.clone() {
-        {
+        // Failed (restarts spent, a binary that does not start) or stopped: start it again,
+        // as a new runtime. Running or starting: its registration, unless it is there (one
+        // that failed, or whose start was cancelled before it, nothing else repairs).
+        let registered_as = {
             let mut running = RUNNING.lock().await;
-            match running
-                .get(&runtime.provider)
-                .map(|r| r.supervised.status().phase)
-            {
-                // Failed (restarts spent, a binary that does not start) or stopped: start
-                // it again, as a new runtime.
-                Some(Phase::Failed | Phase::Stopped) => {
+            let live = running.get(&runtime.provider).map(|r| {
+                (
+                    r.supervised.status().phase,
+                    r.endpoint_id.clone(),
+                    r.key.expose().to_string(),
+                    r.supervised.spec.port,
+                )
+            });
+            match live {
+                Some((Phase::Failed | Phase::Stopped, ..)) => {
                     if let Some(old) = running.remove(&runtime.provider) {
                         MANAGED_PORTS
                             .write()
                             .unwrap_or_else(|p| p.into_inner())
                             .remove(&old.supervised.spec.port);
                     }
+                    None
                 }
-                Some(_) => continue,
-                None => {}
+                Some((_, endpoint_id, key, port)) => Some((endpoint_id, key, port)),
+                None => None,
             }
+        };
+        if let Some((endpoint_id, key, port)) = registered_as {
+            if registration_missing(&selection, &runtime, endpoint_id.as_deref())? {
+                log::info!(
+                    "Local AI: {} runs without its registration: registering it",
+                    runtime.provider.as_str()
+                );
+                let id = register(&selection, &runtime, port, &key, make_default).await?;
+                if let Some(running) = RUNNING.lock().await.get_mut(&runtime.provider) {
+                    if running.endpoint_id.as_deref() != Some(id.as_str()) {
+                        running.endpoint_id = Some(id.clone());
+                        spawn_health_follower(id, running.supervised.watch());
+                    }
+                }
+            }
+            continue;
         }
         let preferred = selection.ports.get(runtime.provider.as_str()).copied();
         let port = supervisor::choose_port(preferred, &avoid)?;
@@ -1127,7 +1246,9 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
         let key = random_key();
         let spec = child_spec(paths, &runtime, &selection, port, &key)?;
         let readiness = spec.readiness.clone();
+        let program = spec.program.clone();
         let supervised = Supervised::start(spec, Timing::default(), RestartBudget::standard());
+        spawn_pid_follower(paths.clone(), supervised.watch(), program);
         let served: Vec<String> = selection
             .models_of(runtime.provider)
             .iter()
@@ -1153,18 +1274,17 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
         let settled = supervised
             .wait_until_settled(Timing::default().start_timeout + Duration::from_secs(5))
             .await;
-        let status = supervised.watch();
         RUNNING.lock().await.insert(
             runtime.provider,
             Running {
                 supervised,
                 endpoint_id: None,
+                key: Secret::new(key.clone()),
             },
         );
         let port = port.keep();
         // Before the registration, which may fail: the child runs and must be found.
         write_pids(paths).await;
-        spawn_pid_follower(paths.clone(), status);
         if settled.phase != Phase::Running {
             log::warn!(
                 "Local AI: {} is {:?}: {}",
@@ -1184,7 +1304,11 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
             .insert(runtime.provider, (None, None));
         if let Some(model_bytes) = gpu_check_for(&runtime, &selection).await {
             if let Some(running) = RUNNING.lock().await.get(&runtime.provider) {
-                spawn_gpu_check(runtime.provider, running.supervised.watch(), model_bytes);
+                drop(spawn_gpu_check(
+                    runtime.provider,
+                    running.supervised.watch(),
+                    model_bytes,
+                ));
             }
         }
     }
@@ -1192,23 +1316,33 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
     Ok(())
 }
 
-/// Check the managed endpoint's health at every phase change of its runtime, so
-/// `ai-endpoint-status` follows a crash and a restart without waiting for the 60 s loop.
+/// Check the managed endpoint's health when the follower starts and at every phase change
+/// of its runtime, so `ai-endpoint-status` follows a crash and a restart without waiting for
+/// the 60 s loop. The first check covers a change between the registration's check and
+/// the follower's start. Probes, not debounced checks: a phase change right after another
+/// check must not answer the stored health.
 fn spawn_health_follower(
     endpoint_id: String,
     mut status: tokio::sync::watch::Receiver<ProcessStatus>,
 ) {
     tokio::spawn(async move {
-        let mut last = status.borrow().phase;
+        let probe = |endpoint_id: &str| {
+            let endpoint = crate::db_backend::db_backend().get_endpoint(endpoint_id);
+            async move {
+                if let Ok(Some(endpoint)) = endpoint {
+                    let _ = super::endpoints::probe_health(&endpoint).await;
+                }
+            }
+        };
+        let mut last = status.borrow_and_update().phase;
+        probe(&endpoint_id).await;
         while status.changed().await.is_ok() {
-            let phase = status.borrow().phase;
+            let phase = status.borrow_and_update().phase;
             if phase == last {
                 continue;
             }
             last = phase;
-            if let Ok(Some(endpoint)) = crate::db_backend::db_backend().get_endpoint(&endpoint_id) {
-                let _ = super::endpoints::check_health(&endpoint).await;
-            }
+            probe(&endpoint_id).await;
             if matches!(phase, Phase::Stopped | Phase::Failed) {
                 return;
             }
@@ -1216,12 +1350,17 @@ fn spawn_health_follower(
     });
 }
 
-/// Rewrite `pids.json` when a supervised restart gives the runtime a new pid, so a start
-/// after a crash of the executor stops the restarted child too.
-fn spawn_pid_follower(paths: LocalPaths, mut status: tokio::sync::watch::Receiver<ProcessStatus>) {
+/// Write `pids.json` when the runtime of `status` gets a pid: at its spawn, before its
+/// models load (an executor that crashes meanwhile leaves no runtime the next start
+/// misses), and when a supervised restart gives it a new one.
+fn spawn_pid_follower(
+    paths: LocalPaths,
+    mut status: tokio::sync::watch::Receiver<ProcessStatus>,
+    program: PathBuf,
+) {
     tokio::spawn(async move {
-        let mut last = status.borrow().pid;
-        while status.changed().await.is_ok() {
+        let mut last = None;
+        loop {
             let (phase, pid) = {
                 let current = status.borrow_and_update();
                 (current.phase, current.pid)
@@ -1229,48 +1368,58 @@ fn spawn_pid_follower(paths: LocalPaths, mut status: tokio::sync::watch::Receive
             if matches!(phase, Phase::Stopped | Phase::Failed) {
                 return;
             }
-            if pid.is_some() && pid != last {
-                last = pid;
-                write_pids(&paths).await;
+            if let Some(pid) = pid.filter(|pid| last != Some(*pid)) {
+                last = Some(pid);
+                write_pids_with(&paths, Some((pid, program.clone()))).await;
+            }
+            if status.changed().await.is_err() {
+                return;
             }
         }
     });
 }
 
-/// The memory one DRM client of an fdinfo holds, with the client's id: the
-/// `drm-memory-*` / `drm-resident-*` lines of vram, gtt, system and local memory (amdgpu,
-/// i915, xe). `None` for a file that is no DRM client.
+/// The memory one DRM client of an fdinfo holds, with the client's id: its vram, gtt,
+/// system and local memory (amdgpu, i915, xe). From kernel 6.13 amdgpu prints
+/// `drm-resident-<region>` and then the legacy `drm-memory-<region>` again as its alias, so
+/// the legacy keys count only where no `drm-resident-` key is printed (amdgpu up to 6.12),
+/// as the wind tunnel's `procs.ts` reads them. `None` for a file that is no DRM client.
 fn drm_client_bytes(fdinfo: &str) -> Option<(String, u64)> {
     let id = fdinfo.lines().find_map(|l| {
         l.strip_prefix("drm-client-id:")
             .map(|v| v.trim().to_string())
     })?;
-    let mut bytes = 0u64;
-    for line in fdinfo.lines() {
-        let Some(rest) = line
-            .strip_prefix("drm-memory-")
-            .or_else(|| line.strip_prefix("drm-resident-"))
-        else {
-            continue;
-        };
-        let Some((region, value)) = rest.split_once(':') else {
-            continue;
-        };
-        if !matches!(region, "vram" | "gtt" | "system" | "local") {
-            continue;
-        }
-        let mut parts = value.split_whitespace();
-        let Some(number) = parts.next().and_then(|n| n.parse::<u64>().ok()) else {
-            continue;
-        };
-        bytes += number
-            * match parts.next() {
+    let sum = |prefix: &str| -> Option<u64> {
+        let mut bytes: Option<u64> = None;
+        for line in fdinfo.lines() {
+            let Some(rest) = line.strip_prefix(prefix) else {
+                continue;
+            };
+            let Some((region, value)) = rest.split_once(':') else {
+                continue;
+            };
+            if !matches!(region, "vram" | "gtt" | "system" | "local") {
+                continue;
+            }
+            let mut parts = value.split_whitespace();
+            let Some(number) = parts.next().and_then(|n| n.parse::<u64>().ok()) else {
+                continue;
+            };
+            let unit = match parts.next() {
                 Some("MiB") => 1024 * 1024,
                 Some("KiB") | Some("kB") => 1024,
                 _ => 1,
             };
-    }
-    Some((id, bytes))
+            bytes = Some(bytes.unwrap_or(0) + number * unit);
+        }
+        bytes
+    };
+    Some((
+        id,
+        sum("drm-resident-")
+            .or_else(|| sum("drm-memory-"))
+            .unwrap_or(0),
+    ))
 }
 
 /// `root` and every process under it (llama-server's router runs a process per model).
@@ -1337,11 +1486,18 @@ fn spawn_gpu_check(
     provider: Provider,
     status: tokio::sync::watch::Receiver<ProcessStatus>,
     model_bytes: u64,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let started = Instant::now();
         let mut held = 0;
+        // A runtime that is gone (stopped, or replaced by a new start: its supervisor and
+        // the status sender end) gets no result: it would overwrite the next one's.
+        let gone =
+            |status: &tokio::sync::watch::Receiver<ProcessStatus>| status.has_changed().is_err();
         while started.elapsed() < Duration::from_secs(120) {
+            if gone(&status) {
+                return;
+            }
             let pid = {
                 let current = status.borrow();
                 (current.phase == Phase::Running)
@@ -1357,6 +1513,9 @@ fn spawn_gpu_check(
                 }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        if gone(&status) {
+            return;
         }
         let on_gpu = held * 2 >= model_bytes;
         if on_gpu {
@@ -1378,7 +1537,7 @@ fn spawn_gpu_check(
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(provider, (Some(on_gpu), Some(held)));
-    });
+    })
 }
 
 /// Whether a start of `runtime` gets the GPU check, and against how many bytes: a GPU
@@ -1433,6 +1592,19 @@ fn remote_model(
 /// (`api::openai_compat::chat::constrained_tool_calls`).
 fn native_tools(model: &SelectedModel) -> Option<bool> {
     (model.provider == Provider::LlamaServer && model.service == Service::Llm).then_some(true)
+}
+
+/// How often, and how far apart, registration asks a running nemo-speech for its listing.
+const NEMO_LISTING_TRIES: usize = 5;
+const NEMO_LISTING_WAIT: Duration = Duration::from_secs(1);
+
+/// Whether the managed runtime on `port` is running.
+fn runs_on(port: u16) -> bool {
+    MANAGED_PORTS
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&port)
+        .is_some_and(|m| m.status.borrow().phase == Phase::Running)
 }
 
 /// Register `runtime` as a managed endpoint with its models; make each the default of its
@@ -1494,11 +1666,35 @@ async fn register(
             }
         }
     }
-    let health = super::endpoints::check_health(&endpoint)
+    let mut health = super::endpoints::check_health(&endpoint)
         .await
         .map_err(|e| log::warn!("Local AI: health of {name}: {e}"))
         .ok();
+    // nemo-speech serves its model only under the id its listing names: a listing that
+    // failed once would register the manifest id, which it refuses, and nothing corrects
+    // it later. A running one gets a few more tries.
+    if runtime.provider == Provider::NemoSpeech {
+        for _ in 0..NEMO_LISTING_TRIES {
+            let listed = health.as_ref().is_some_and(|h| {
+                h.state == EndpointState::Reachable && !h.served_models.is_empty()
+            });
+            if listed || !runs_on(port) {
+                break;
+            }
+            tokio::time::sleep(NEMO_LISTING_WAIT).await;
+            health = super::endpoints::probe_health(&endpoint).await.ok();
+        }
+    }
 
+    // A model a new selection dropped (fewer services, a re-plan): its row goes, and with
+    // it a default that named it. Before the models below: a type whose default goes gets
+    // the selection's model of that type as its default, also when this start does not make
+    // its models the defaults (a re-plan from `ensure_service`, `ai.localStart`).
+    for row in crate::db_backend::db_backend().get_models()? {
+        if row.endpoint_id == endpoint.id && !models.iter().any(|m| m.model_id == row.name) {
+            service.remove_model(row.id).await?;
+        }
+    }
     let rows = crate::db_backend::db_backend().get_models()?;
     for model in &models {
         let model_type = model.service.model_type();
@@ -1540,13 +1736,6 @@ async fn register(
             .is_some_and(|default| rows.iter().any(|r| r.id == default) || default == id);
         if make_default || !has_default {
             service.set_default_model(model_type, id).await?;
-        }
-    }
-    // A model a new selection dropped (fewer services, a re-plan): its row goes, and with
-    // it a default that named it.
-    for row in crate::db_backend::db_backend().get_models()? {
-        if row.endpoint_id == endpoint.id && !models.iter().any(|m| m.model_id == row.name) {
-            service.remove_model(row.id).await?;
         }
     }
     Ok(endpoint.id)
@@ -1605,7 +1794,9 @@ async fn unregister(chosen: impl Fn(&Endpoint) -> bool) -> Result<()> {
 /// `ai.localStop`.
 pub async fn stop() -> LocalStatus {
     stop_all().await;
-    let _ = std::fs::remove_file(pid_file(&LocalPaths::from_config()));
+    if let Ok(paths) = LocalPaths::from_config() {
+        let _ = std::fs::remove_file(pid_file(&paths));
+    }
     status().await
 }
 
@@ -1618,7 +1809,7 @@ pub async fn remove(params: RemoveParams) -> Result<bool> {
     // Held to the end: a start meanwhile would register what this removes.
     let _lifecycle = LIFECYCLE.lock().await;
     stop_running().await;
-    let paths = LocalPaths::from_config();
+    let paths = LocalPaths::from_config()?;
     unregister(|_| true).await?;
     let _ = std::fs::remove_file(Selection::path(&paths));
     let _ = std::fs::remove_file(pid_file(&paths));
@@ -1703,7 +1894,13 @@ pub async fn managed_health(endpoint: &Endpoint) -> EndpointHealth {
 /// `local_ai_autostart` is off. In the background: the API serves meanwhile.
 pub fn autostart() {
     tokio::spawn(async {
-        let paths = LocalPaths::from_config();
+        let paths = match LocalPaths::from_config() {
+            Ok(paths) => paths,
+            Err(e) => {
+                log::warn!("Local AI does not start: {e:#}");
+                return;
+            }
+        };
         if Selection::load(&paths).is_none() {
             return;
         }
@@ -1713,6 +1910,11 @@ pub fn autostart() {
                 "Local AI is installed; local_ai_autostart is off, so it waits for ai.localStart"
             );
             return;
+        }
+        // The start's load of the models first: done later, it would put back the clients of
+        // the managed endpoints' settings from before this start registers them.
+        if let Ok(service) = AIService::global_instance().await {
+            service.wait_loaded().await;
         }
         log::info!("Local AI: starting the installed runtimes");
         if let Err(e) = start_at(&paths, false).await {
@@ -1732,7 +1934,9 @@ pub async fn stop_on_exit() {
     let _ = tokio::task::spawn_blocking(|| stop_children_blocking(EXIT_GRACE)).await;
     // The children are gone: this ends their supervisors and marks the endpoints down.
     stop_running().await;
-    let _ = std::fs::remove_file(pid_file(&LocalPaths::from_config()));
+    if let Ok(paths) = LocalPaths::from_config() {
+        let _ = std::fs::remove_file(pid_file(&paths));
+    }
 }
 
 /// Stop the runtimes from a thread that cannot await, right before the process exits:
@@ -1798,6 +2002,11 @@ pub fn stop_children_blocking(grace: Duration) {
 mod tests {
     use super::*;
 
+    /// One test at a time of those that use the process-wide state (`RUNNING`,
+    /// `MANAGED_PORTS`, `GPU_CHECKS`, the install flag, the global service and database):
+    /// a plain `cargo test` runs tests in parallel.
+    static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn selected(service: Service, id: &str, provider: Provider) -> SelectedModel {
         SelectedModel {
             service,
@@ -1806,6 +2015,107 @@ mod tests {
             path: PathBuf::from(format!("/store/models/{id}.gguf")),
             server_flags: vec![],
         }
+    }
+
+    fn status_in(phase: Phase) -> ProcessStatus {
+        ProcessStatus {
+            phase,
+            pid: None,
+            port: 1,
+            restarts: 0,
+            detail: None,
+        }
+    }
+
+    /// The GPU check of a runtime that is gone (stopped, or replaced by a new start) ends
+    /// and publishes nothing: it would overwrite the check of the runtime after it.
+    #[tokio::test]
+    async fn a_gpu_check_of_a_runtime_that_is_gone_publishes_nothing() {
+        let _serial = TEST_LOCK.lock().await;
+        let (supervisor, status) = tokio::sync::watch::channel(status_in(Phase::Running));
+        drop(supervisor);
+        GPU_CHECKS
+            .lock()
+            .unwrap()
+            .insert(Provider::NemoSpeech, (None, None));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            spawn_gpu_check(Provider::NemoSpeech, status, 1),
+        )
+        .await
+        .expect("the check ends with its runtime")
+        .unwrap();
+        assert_eq!(gpu_check(Provider::NemoSpeech), (None, None));
+    }
+
+    /// The health follower checks the endpoint when it starts, not only at a phase change:
+    /// a runtime that became ready between the registration's check and the follower's
+    /// start would stay down until the 60 s loop. The registration's check just before
+    /// does not hold it back.
+    #[tokio::test]
+    async fn the_health_follower_checks_the_endpoint_when_it_starts() {
+        let _serial = TEST_LOCK.lock().await;
+        crate::test_utils::ensure_test_db();
+        let endpoint = Endpoint {
+            managed: true,
+            ..Endpoint::for_test(
+                "health-follower-test",
+                EndpointKind::LlamaServer,
+                "http://127.0.0.1:1",
+                "",
+            )
+        };
+        crate::db_backend::db_backend()
+            .insert_endpoint(&endpoint)
+            .unwrap();
+        let stored_check = || {
+            crate::db_backend::db_backend()
+                .get_endpoint(&endpoint.id)
+                .unwrap()
+                .unwrap()
+                .health
+                .checked_at
+        };
+        super::super::endpoints::check_health(&endpoint)
+            .await
+            .unwrap();
+        let registration = stored_check().expect("the registration's check is stored");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let (_supervisor, status) = tokio::sync::watch::channel(status_in(Phase::Running));
+        spawn_health_follower(endpoint.id.clone(), status);
+        let checked = tokio::time::timeout(Duration::from_secs(5), async {
+            while stored_check() == Some(registration) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        crate::db_backend::db_backend()
+            .remove_endpoint(&endpoint.id)
+            .unwrap();
+        assert!(checked.is_ok(), "the follower did not check at its start");
+    }
+
+    /// Without a configured store and without a per-user data directory there is no store:
+    /// never the shared temporary directory. A relative store is made absolute.
+    #[test]
+    fn the_store_is_never_the_temporary_directory_and_always_absolute() {
+        let none = store_root_from(None, None, None).unwrap_err();
+        assert!(none.downcast_ref::<LocalAiRefused>().is_some(), "{none}");
+        assert!(store_root_from(Some(String::new()), Some(String::new()), None).is_err());
+
+        let relative = store_root_from(Some("models".into()), None, None).unwrap();
+        assert!(relative.is_absolute());
+        assert_eq!(relative, std::env::current_dir().unwrap().join("models"));
+        let user = PathBuf::from("/home/u/.local/share/ad4m/local-ai");
+        assert_eq!(
+            store_root_from(None, None, Some(user.clone())).unwrap(),
+            user
+        );
+        assert_eq!(
+            store_root_from(None, Some("/env".into()), Some(user)).unwrap(),
+            PathBuf::from("/env")
+        );
     }
 
     /// Without measured flags: chat without thinking (Qwen3.5 otherwise thinks until the
@@ -1872,6 +2182,47 @@ mod tests {
         assert_eq!(drm_client_bytes("pos:\t0\nflags:\t0\n"), None);
         // This process is in its own tree.
         assert!(process_tree(std::process::id()).contains(&std::process::id()));
+    }
+
+    /// From kernel 6.13 amdgpu prints `drm-resident-<region>` and then the legacy
+    /// `drm-memory-<region>` again as its alias: the memory counts once, by the resident keys
+    /// (as the wind tunnel's `procs.ts` reads it).
+    #[test]
+    fn amdgpu_memory_printed_twice_counts_once() {
+        let fdinfo = "drm-driver:\tamdgpu\ndrm-client-id:\t7\n\
+                      drm-resident-vram:\t1024 KiB\ndrm-resident-gtt:\t2 MiB\n\
+                      drm-memory-vram:\t1024 KiB\ndrm-memory-gtt:\t2 MiB\n";
+        assert_eq!(
+            drm_client_bytes(fdinfo),
+            Some(("7".to_string(), 1024 * 1024 + 2 * 1024 * 1024))
+        );
+        // i915 and xe print only `drm-resident-`.
+        let xe = "drm-client-id:\t8\ndrm-resident-system:\t4 MiB\n";
+        assert_eq!(
+            drm_client_bytes(xe),
+            Some(("8".to_string(), 4 * 1024 * 1024))
+        );
+    }
+
+    /// A download's progress reaches subscribers in the order it was reported: a report
+    /// published later, on a spawned task, would put an older byte count after the flush.
+    #[tokio::test]
+    async fn download_progress_is_published_in_order() {
+        let mut events = get_global_pubsub().await.subscribe_events();
+        let reporter = Reporter::new("progress-order-test".into(), 100, 0, 100);
+        reporter.report(10);
+        reporter.flush().await;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.topic != Topic::AiLocalProgress {
+                continue;
+            }
+            let step: ProgressEvent = serde_json::from_value(event.payload.clone()).unwrap();
+            if step.item.as_deref() == Some("progress-order-test") {
+                seen.push(step.item_done_bytes);
+            }
+        }
+        assert_eq!(seen, vec![10, 100]);
     }
 
     #[test]
@@ -2062,6 +2413,7 @@ mod tests {
     /// says so without a request.
     #[tokio::test]
     async fn a_running_nemo_speech_is_checked_by_its_listing() {
+        let _serial = TEST_LOCK.lock().await;
         let mut server = mockito::Server::new_async().await;
         let listing = server
             .mock("GET", "/v1/models")
@@ -2132,11 +2484,108 @@ mod tests {
         refused.assert_async().await;
     }
 
+    /// A nemo-speech whose first listing fails: registration asks again, and registers the
+    /// model under the id the listing names, not the manifest id the server refuses.
+    #[tokio::test]
+    async fn registration_asks_nemo_speech_again_for_its_listing() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _serial = TEST_LOCK.lock().await;
+        crate::test_utils::ensure_test_db();
+        let saved = super::super::AI_SERVICE
+            .lock()
+            .await
+            .replace(AIService::empty());
+        let db = crate::db_backend::db_backend();
+        let clear = || async {
+            let service = AIService::global_instance().await.unwrap();
+            for endpoint in db.get_endpoints().unwrap() {
+                if endpoint.managed {
+                    for id in db.endpoint_model_ids(&endpoint.id).unwrap() {
+                        service.remove_model(id).await.unwrap();
+                    }
+                    db.remove_endpoint(&endpoint.id).unwrap();
+                }
+            }
+        };
+        clear().await;
+        // The first request gets a 503, the ones after it the listing.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut answered = 0;
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let body = r#"{"object":"list","data":[{"id":"listed-id","object":"model"}]}"#;
+                let answer = if answered == 0 {
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                answered += 1;
+                let _ = socket.write_all(answer.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        let (_supervisor, status) = tokio::sync::watch::channel(status_in(Phase::Running));
+        MANAGED_PORTS.write().unwrap().insert(
+            port,
+            ManagedPort {
+                status,
+                readiness: Readiness::Http("/ready".into()),
+                served: vec!["parakeet-test".into()],
+                lists_models: true,
+                stop: StopHandle::default(),
+            },
+        );
+        let runtime = SelectedRuntime {
+            provider: Provider::NemoSpeech,
+            runtime_id: "nemo-speech".into(),
+            version: "0".into(),
+            build: "linux-x64-cpu".into(),
+            binary: PathBuf::from("/store/runtime/nemo-speech"),
+            lib_dirs: vec![],
+            services: vec![Service::Stt],
+            backend: Some(Backend::Cpu),
+        };
+        let selection = Selection {
+            runtimes: vec![runtime.clone()],
+            models: vec![selected(
+                Service::Stt,
+                "parakeet-test",
+                Provider::NemoSpeech,
+            )],
+            ports: BTreeMap::new(),
+        };
+        let outcome = register(&selection, &runtime, port, "k", false).await;
+        let remote = outcome.as_ref().ok().and_then(|endpoint| {
+            db.endpoint_model_ids(endpoint)
+                .unwrap()
+                .into_iter()
+                .filter_map(|id| db.get_model(id).unwrap())
+                .find(|m| m.name == "parakeet-test")
+                .map(|m| m.remote_model)
+        });
+        MANAGED_PORTS.write().unwrap().remove(&port);
+        clear().await;
+        *super::super::AI_SERVICE.lock().await = saved;
+        server.abort();
+
+        outcome.unwrap();
+        assert_eq!(remote.as_deref(), Some("listed-id"));
+    }
+
     /// The exit path of the CLI and the launcher, which cannot await: every managed child
     /// gets SIGTERM, and SIGKILL when it is still there after the grace.
     #[cfg(unix)]
     #[test]
     fn the_blocking_stop_ends_every_managed_child() {
+        let _serial = TEST_LOCK.blocking_lock();
         let mut polite = std::process::Command::new("sleep")
             .arg("60")
             .spawn()
@@ -2183,6 +2632,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_executor_shutdown_stops_the_supervised_runtimes() {
+        let _serial = TEST_LOCK.lock().await;
         use crate::config::{Ad4mConfig, GLOBAL_AD4M_CONFIG};
         let store = tempfile::tempdir().unwrap();
         let saved_config = GLOBAL_AD4M_CONFIG
@@ -2241,6 +2691,7 @@ mod tests {
                 Running {
                     supervised,
                     endpoint_id: None,
+                    key: Secret::new("k"),
                 },
             );
         }
@@ -2273,6 +2724,7 @@ mod tests {
     /// a failed one clears the flag too.
     #[tokio::test]
     async fn a_finished_install_answers_that_no_install_runs() {
+        let _serial = TEST_LOCK.lock().await;
         use crate::config::{Ad4mConfig, GLOBAL_AD4M_CONFIG};
         crate::test_utils::ensure_test_db();
         let store = tempfile::tempdir().unwrap();
@@ -2312,6 +2764,7 @@ mod tests {
     // its own; with local_ai_autostart off it says what to do instead, and downloads nothing.
     #[tokio::test]
     async fn without_autostart_a_first_use_sets_nothing_up_and_says_how() {
+        let _serial = TEST_LOCK.lock().await;
         use crate::config::{Ad4mConfig, GLOBAL_AD4M_CONFIG};
         let store = tempfile::tempdir().unwrap();
         let saved_config = GLOBAL_AD4M_CONFIG
@@ -2346,6 +2799,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_start_dropped_while_the_runtime_loads_stops_the_runtime() {
+        let _serial = TEST_LOCK.lock().await;
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let paths = LocalPaths {
@@ -2493,6 +2947,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn two_starts_at_once_spawn_one_runtime() {
+        let _serial = TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let (paths, spawned) = never_ready_llama(dir.path());
         tokio::select! {
@@ -2518,6 +2973,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_runtime_starts_again() {
+        let _serial = TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let (paths, spawned) = never_ready_llama(dir.path());
         let failed = Supervised::start(
@@ -2561,6 +3017,7 @@ mod tests {
             Running {
                 supervised: failed,
                 endpoint_id: None,
+                key: Secret::new("k"),
             },
         );
 
@@ -2587,6 +3044,7 @@ mod tests {
     /// executor's `ai.localRemove` with `deleteFiles`) starts nothing and says what to do.
     #[tokio::test]
     async fn a_selection_whose_files_are_gone_says_to_install_again() {
+        let _serial = TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let paths = LocalPaths {
             store: dir.path().join("store"),
@@ -2633,6 +3091,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_exit_stop_also_stops_a_runtime_that_is_starting() {
+        let _serial = TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let port = supervisor::choose_port(None, &[]).unwrap();
         let supervised = Supervised::start(
@@ -2691,6 +3150,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_pid_file_follows_a_restart() {
+        let _serial = TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let paths = LocalPaths {
             store: dir.path().join("store"),
@@ -2729,10 +3189,11 @@ mod tests {
             Running {
                 supervised,
                 endpoint_id: None,
+                key: Secret::new("k"),
             },
         );
         write_pids(&paths).await;
-        spawn_pid_follower(paths.clone(), status);
+        spawn_pid_follower(paths.clone(), status, PathBuf::from("/bin/sh"));
         // SAFETY: kill(2) on the fake runtime this test started.
         unsafe {
             libc::kill(first as libc::pid_t, libc::SIGKILL);
@@ -2768,6 +3229,7 @@ mod tests {
     /// managed endpoint goes, and with it the default it was.
     #[tokio::test]
     async fn registration_removes_the_models_a_new_selection_drops() {
+        let _serial = TEST_LOCK.lock().await;
         crate::test_utils::ensure_test_db();
         let saved = super::super::AI_SERVICE
             .lock()
@@ -2844,11 +3306,199 @@ mod tests {
         assert!(chat_default.is_some());
     }
 
+    /// A re-plan that changes the chat model and starts without making its models the
+    /// defaults (`ensure_service`, `ai.localStart`): the old model's row goes, and the new
+    /// model becomes the default the old one was. The executor keeps a default chat model.
+    #[tokio::test]
+    async fn a_replan_keeps_a_default_of_each_type_it_registers() {
+        let _serial = TEST_LOCK.lock().await;
+        crate::test_utils::ensure_test_db();
+        let saved = super::super::AI_SERVICE
+            .lock()
+            .await
+            .replace(AIService::empty());
+        let db = crate::db_backend::db_backend();
+        let clear = || async {
+            let service = AIService::global_instance().await.unwrap();
+            for endpoint in db.get_endpoints().unwrap() {
+                if endpoint.managed {
+                    for id in db.endpoint_model_ids(&endpoint.id).unwrap() {
+                        service.remove_model(id).await.unwrap();
+                    }
+                    db.remove_endpoint(&endpoint.id).unwrap();
+                }
+            }
+        };
+        clear().await;
+        let runtime = SelectedRuntime {
+            provider: Provider::LlamaServer,
+            runtime_id: "llama.cpp".into(),
+            version: "b1".into(),
+            build: "linux-x64-cpu".into(),
+            binary: PathBuf::from("/store/runtime/llama-server"),
+            lib_dirs: vec![],
+            services: vec![Service::Llm],
+            backend: Some(Backend::Cpu),
+        };
+        let with = |id: &str| Selection {
+            runtimes: vec![runtime.clone()],
+            models: vec![selected(Service::Llm, id, Provider::LlamaServer)],
+            ports: BTreeMap::new(),
+        };
+        let endpoint = register(&with("old-chat"), &runtime, 40014, "k", true)
+            .await
+            .unwrap();
+        register(&with("new-chat"), &runtime, 40014, "k", false)
+            .await
+            .unwrap();
+        let default = db.get_default_model(crate::types::ModelType::Llm).unwrap();
+        let new_chat = db
+            .endpoint_model_ids(&endpoint)
+            .unwrap()
+            .into_iter()
+            .find(|id| {
+                db.get_model(id.clone())
+                    .unwrap()
+                    .is_some_and(|m| m.name == "new-chat")
+            });
+        clear().await;
+        *super::super::AI_SERVICE.lock().await = saved;
+
+        assert!(new_chat.is_some(), "the new chat model is registered");
+        assert_eq!(default, new_chat, "the new chat model is the default");
+    }
+
+    /// A runtime that runs but whose registration failed (or was cancelled): the next
+    /// `ai.localStart` registers it, and does not start a second copy.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_registers_a_running_runtime_that_has_no_endpoint() {
+        let _serial = TEST_LOCK.lock().await;
+        crate::test_utils::ensure_test_db();
+        let saved = super::super::AI_SERVICE
+            .lock()
+            .await
+            .replace(AIService::empty());
+        let db = crate::db_backend::db_backend();
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, spawned) = never_ready_llama(dir.path());
+        // A runtime that answers: the port of a listener this test holds.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let supervised = Supervised::start(
+            ChildSpec {
+                name: "fake".into(),
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-c".into(), "exec sleep 60".into()],
+                env: vec![],
+                cwd: dir.path().to_path_buf(),
+                port,
+                readiness: Readiness::Tcp,
+                log_file: dir.path().join("fake.log"),
+            },
+            Timing {
+                start_timeout: Duration::from_secs(5),
+                probe_interval: Duration::from_millis(100),
+                backoff: Duration::from_millis(20),
+            },
+            RestartBudget::standard(),
+        );
+        assert_eq!(
+            supervised
+                .wait_until_settled(Duration::from_secs(10))
+                .await
+                .phase,
+            Phase::Running
+        );
+        MANAGED_PORTS.write().unwrap().insert(
+            port,
+            ManagedPort {
+                status: supervised.watch(),
+                readiness: Readiness::Tcp,
+                served: vec![],
+                lists_models: false,
+                stop: supervised.stop_handle(),
+            },
+        );
+        RUNNING.lock().await.insert(
+            Provider::LlamaServer,
+            Running {
+                supervised,
+                endpoint_id: None,
+                key: Secret::new("k3y"),
+            },
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(20), start_at(&paths, false)).await;
+        let endpoint = db.get_endpoint_by_name(LLAMA_ENDPOINT).unwrap();
+        let recorded = RUNNING
+            .lock()
+            .await
+            .get(&Provider::LlamaServer)
+            .and_then(|r| r.endpoint_id.clone());
+        if let Some(left) = RUNNING.lock().await.remove(&Provider::LlamaServer) {
+            left.supervised.stop().await;
+        }
+        MANAGED_PORTS.write().unwrap().remove(&port);
+        if let Some(endpoint) = &endpoint {
+            db.remove_endpoint(&endpoint.id).unwrap();
+        }
+        *super::super::AI_SERVICE.lock().await = saved;
+        let left = wait_gone(&spawned_pids(&spawned)).await;
+
+        outcome.expect("the start ends").unwrap();
+        let endpoint = endpoint.expect("the running runtime is registered");
+        assert!(endpoint.managed);
+        assert_eq!(endpoint.base_url.port(), Some(port));
+        assert!(endpoint.api_key.expose_for_compare("k3y"));
+        assert_eq!(recorded, Some(endpoint.id));
+        assert!(
+            spawned_pids(&spawned).is_empty(),
+            "no second copy: {left:?}"
+        );
+    }
+
+    /// `pids.json` names a runtime from its spawn, not from the end of its model load: an
+    /// executor that crashes while the models load leaves no runtime the next start misses.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_pid_file_names_a_runtime_while_it_loads() {
+        let _serial = TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, spawned) = never_ready_llama(dir.path());
+        let named = tokio::select! {
+            result = start_at(&paths, false) => Err(format!("the start ended: {result:?}")),
+            named = async {
+                while spawned_pids(&spawned).is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let pid = spawned_pids(&spawned)[0];
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline {
+                    let text = std::fs::read_to_string(pid_file(&paths)).unwrap_or_default();
+                    let pids: Vec<(u32, PathBuf)> = serde_json::from_str(&text).unwrap_or_default();
+                    if pids.iter().any(|(p, _)| *p == pid) {
+                        return true;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                false
+            } => Ok(named),
+        };
+        let left = wait_gone(&spawned_pids(&spawned)).await;
+        assert!(
+            named.unwrap(),
+            "pids.json does not name the loading runtime"
+        );
+        assert!(left.is_empty(), "still running: {left:?}");
+    }
+
     /// `ai.localInstall({services: ["llm"]})` after a set with transcription: the start
     /// does not start nemo-speech again, and its endpoint goes (its health would say to
     /// start it with `ai.localStart`, which cannot). llama.cpp's stays.
     #[tokio::test]
     async fn a_runtime_the_selection_drops_loses_its_endpoint() {
+        let _serial = TEST_LOCK.lock().await;
         crate::test_utils::ensure_test_db();
         let saved = super::super::AI_SERVICE
             .lock()
@@ -2901,6 +3551,7 @@ mod tests {
     /// install that begins in between makes it wait again, not fail.
     #[tokio::test]
     async fn a_first_use_waits_for_a_running_install_and_then_takes_the_flag() {
+        let _serial = TEST_LOCK.lock().await;
         INSTALLING.store(true, Ordering::SeqCst);
         let waiting = tokio::spawn(take_install_flag());
         tokio::time::sleep(Duration::from_millis(700)).await;
@@ -2914,6 +3565,35 @@ mod tests {
         assert!(waited, "it waits while the install runs");
         assert!(taken, "then it holds the flag");
         assert!(released, "and gives it back when done");
+    }
+
+    /// A first use that waited for an install finds the model that install registered: it
+    /// sets up nothing more.
+    #[tokio::test]
+    async fn a_first_use_after_an_install_finds_its_model() {
+        let _serial = TEST_LOCK.lock().await;
+        crate::test_utils::ensure_test_db();
+        let db = crate::db_backend::db_backend();
+        let endpoint = Endpoint::for_test(
+            "has-model-test",
+            EndpointKind::OpenAiAudio,
+            "http://127.0.0.1:2",
+            "",
+        );
+        db.insert_endpoint(&endpoint).unwrap();
+        let id = db
+            .add_model(&ModelInput {
+                name: "has-model-test".into(),
+                model_type: crate::types::ModelType::Transcription,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "m".into(),
+                native_tools: None,
+            })
+            .unwrap();
+        let after = has_model_of(Service::Stt).unwrap();
+        db.remove_model(&id).unwrap();
+        db.remove_endpoint(&endpoint.id).unwrap();
+        assert!(after, "the registered transcription model is found");
     }
 
     #[test]

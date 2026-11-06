@@ -173,6 +173,10 @@ pub struct AIService {
     local_setup: LocalSetup,
     /// One such setup at a time: a second first use waits, then finds the model.
     local_setup_lock: Arc<Mutex<()>>,
+    /// True once the models of the database have their clients ([`AIService::load`] at
+    /// start). Local AI's autostart waits for it: a load after the runtimes register would
+    /// put back the clients of the endpoint settings from before.
+    loaded: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// What sets up the model of a local AI service when an executor has none of its type.
@@ -368,13 +372,15 @@ fn transcription_stream_owner(
 
 impl AIService {
     pub fn new() -> Result<Self> {
-        let service = Self::empty();
+        let mut service = Self::empty();
+        service.loaded = Arc::new(tokio::sync::watch::channel(false).0);
 
         let clone = service.clone();
         tokio::spawn(async move {
             if let Err(e) = clone.load().await {
                 error!("AIService error while loading models: {:?}", e);
             }
+            clone.loaded.send_replace(true);
         });
 
         service.start_stream_reaper();
@@ -392,7 +398,15 @@ impl AIService {
                 futures::FutureExt::boxed(local::ensure_service(service))
             }),
             local_setup_lock: Arc::new(Mutex::new(())),
+            // Nothing to load.
+            loaded: Arc::new(tokio::sync::watch::channel(true).0),
         }
+    }
+
+    /// Returns when the start's load of the database's models has finished (at once for a
+    /// service that has none to load).
+    pub async fn wait_loaded(&self) {
+        let _ = self.loaded.subscribe().wait_for(|loaded| *loaded).await;
     }
 
     /// Close the streams nobody fed for [`TRANSCRIPTION_TIMEOUT_SECS`], every
@@ -1532,6 +1546,24 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("No EMBEDDING model"), "{error}");
+    }
+
+    /// A new service loads the database's models in the background and says when it is
+    /// done: local AI's autostart waits for that, so the load cannot overwrite the clients
+    /// the runtimes' registration builds.
+    #[tokio::test]
+    async fn a_new_service_says_when_its_models_are_loaded() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let endpoint = saved_endpoint(EndpointKind::LlamaServer, "http://127.0.0.1:9");
+        let id = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&model_on(&endpoint, ModelType::Llm, "m"))
+        })
+        .unwrap();
+        let service = AIService::new().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), service.wait_loaded())
+            .await
+            .expect("the load ends");
+        assert!(service.llms.lock().await.contains_key(&id));
     }
 
     /// A local AI setup that registers `remote` of `model_type` on `endpoint` as the

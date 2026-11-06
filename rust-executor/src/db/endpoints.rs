@@ -136,6 +136,7 @@ impl Ad4mDb {
                     "max_num_ctx": endpoint.max_num_ctx,
                     "request_timeout_secs": endpoint.request_timeout_secs,
                     "max_concurrent": endpoint.max_concurrent,
+                    "managed": endpoint.managed,
                 })
             })
             .collect())
@@ -159,11 +160,19 @@ impl Ad4mDb {
             request_timeout_secs: Option<u32>,
             #[serde(default)]
             max_concurrent: Option<u32>,
+            #[serde(default)]
+            managed: bool,
         }
         let backup: Backup = serde_json::from_value(backup.clone())?;
         if backup.max_num_ctx == Some(0) {
             return Err(InvalidEndpoint("max_num_ctx must be positive".into()).into());
         }
+        // Local AI's endpoints stay its own, else its next start refuses their names. Only
+        // its names on loopback: a backup makes no other endpoint managed (a managed
+        // endpoint skips the checks on its key).
+        let managed = backup.managed
+            && crate::ai_service::local::is_managed_endpoint_name(&backup.name)
+            && Self::is_loopback(&backup.base_url);
         self.insert_endpoint(&Endpoint {
             id: backup.id,
             name: backup.name,
@@ -174,10 +183,19 @@ impl Ad4mDb {
             max_num_ctx: backup.max_num_ctx,
             request_timeout_secs: backup.request_timeout_secs,
             max_concurrent: backup.max_concurrent,
-            // A restored endpoint is the operator's: local AI manages only what it installs.
-            managed: false,
+            managed,
             health: EndpointHealth::default(),
         })
+    }
+
+    /// Whether `url` names this machine (127.0.0.0/8, ::1, `localhost`).
+    fn is_loopback(url: &Url) -> bool {
+        match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+            None => false,
+        }
     }
 
     /// Refuses `endpoint` when another one has its name, or the same protocol, URL and key
@@ -688,5 +706,32 @@ mod tests {
         assert_eq!(model.endpoint_id, llama.id);
         assert_eq!(model.remote_model, "m-remote");
         assert_eq!(model.native_tools, Some(true));
+    }
+
+    // Local AI's endpoints stay local AI's through a backup: else its next start refuses
+    // their names as someone else's. Only local AI's names on loopback: a backup cannot
+    // make any other endpoint managed (a managed endpoint skips the checks on its key).
+    #[test]
+    fn a_backup_keeps_local_ais_endpoints_managed() {
+        let db = db();
+        let mut llama = endpoint("This device (llama.cpp)", "http://127.0.0.1:40100", "k1");
+        llama.managed = true;
+        db.insert_endpoint(&llama).unwrap();
+        let mut remote = endpoint("This device (NeMo Speech)", "https://example.org/v1", "k2");
+        remote.managed = true;
+        db.insert_endpoint(&remote).unwrap();
+        let mut other = endpoint("mine", "http://127.0.0.1:40101", "k3");
+        other.managed = true;
+        db.insert_endpoint(&other).unwrap();
+
+        let restored = Ad4mDb::new(":memory:").unwrap();
+        restored
+            .import_from_json(db.export_all_to_json().unwrap(), None)
+            .unwrap();
+
+        let managed = |id: &str| restored.get_endpoint(id).unwrap().unwrap().managed;
+        assert!(managed(&llama.id), "local AI's endpoint stays managed");
+        assert!(!managed(&remote.id), "not on loopback");
+        assert!(!managed(&other.id), "not one of local AI's names");
     }
 }

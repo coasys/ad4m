@@ -18,6 +18,8 @@ import {
   chatModels,
   endpointFor,
   kindLabel,
+  localAction,
+  localChatReady,
   preselectedChat,
   registerModel,
   serves,
@@ -34,6 +36,12 @@ const REMOTE_KINDS: { kind: EndpointKind; label: string; baseUrl: string }[] = [
   { kind: "ANTHROPIC", label: "Anthropic", baseUrl: "https://api.anthropic.com" },
   { kind: "OPEN_AI_COMPATIBLE", label: "Other", baseUrl: "https://" },
 ];
+
+/** How often the page reads local AI's status and plan again while it shows them. */
+const REFRESH_MS = 5000;
+
+/** The start of the error a failed read of the device, plan or status shows. */
+const LOAD_ERROR = "Could not check this device: ";
 
 const SERVICE_LABELS: Record<string, string> = {
   llm: "Chat",
@@ -88,6 +96,7 @@ export default function AISetup(props: {
   const [localStatus, setLocalStatus] = useState<LocalAiStatus | null>(null);
   const [progress, setProgress] = useState<LocalAiProgress | null>(null);
   const [installing, setInstalling] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   // A model server
   const [detected, setDetected] = useState<DetectedEndpoint[] | null>(null);
@@ -108,8 +117,12 @@ export default function AISetup(props: {
       setHardware(h);
       setPlan(p);
       setLocalStatus(s);
+      setLoadFailed(false);
+      // A read that failed before is answered now: its error goes.
+      setError((shown) => (shown.startsWith(LOAD_ERROR) ? "" : shown));
     } catch (e) {
-      setError(`${e}`);
+      setLoadFailed(true);
+      setError(`${LOAD_ERROR}${e}`);
     }
   }, [client]);
 
@@ -149,24 +162,51 @@ export default function AISetup(props: {
     loadLocal();
   }, [loadLocal]);
 
+  // While the page shows local AI: its status and plan again now and then, so a runtime
+  // that stops, or a setup that ends elsewhere, shows here.
+  useEffect(() => {
+    if (mode !== "Local" || installing) return;
+    const timer = setInterval(() => {
+      Promise.all([client.ai.localStatus(), client.ai.localPlan()])
+        .then(([s, p]) => {
+          setLocalStatus(s);
+          setPlan(p);
+        })
+        .catch(() => {});
+    }, REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [mode, installing, client]);
+
   const hasLlm = registered.some((r) => r.startsWith("LLM:"));
   useEffect(() => {
     if (mode === "Server" && detected === null) detect();
   }, [mode, detected, detect]);
 
-  const localChatReady = !!localStatus?.models.some((m) => m.service === "llm" && m.model);
+  const localReady = localChatReady(localStatus);
 
   useEffect(() => {
     if (mode === "Server" && serverMode === "Detected" && chatChoice) {
       onReady(() => commitChatChoice(chatChoice));
+    } else if (mode === "Local" && localReady) {
+      // Checked again on Next: the runtime may have stopped since the last refresh.
+      onReady(async () => {
+        try {
+          const status = await client.ai.localStatus();
+          setLocalStatus(status);
+          if (localChatReady(status)) return true;
+          setError("Local AI's chat model does not run: start local AI first.");
+        } catch (e) {
+          setError(`${e}`);
+        }
+        return false;
+      });
     } else {
-      const ready =
-        mode === "Skip" || (mode === "Local" && localChatReady) || (mode === "Server" && hasLlm);
+      const ready = mode === "Skip" || (mode === "Server" && hasLlm);
       onReady(ready ? async () => true : null);
     }
     // commitChatChoice reads only its argument, `client` and stable setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, serverMode, chatChoice, hasLlm, localChatReady, onReady]);
+  }, [mode, serverMode, chatChoice, hasLlm, localReady, onReady, client]);
 
   /** Register the chosen chat model on its server and make it the default chat model. */
   async function commitChatChoice({ server, remoteModel }: ChatChoice): Promise<boolean> {
@@ -276,8 +316,7 @@ export default function AISetup(props: {
   const isChosen = (server: DetectedEndpoint, remoteModel: string) =>
     chatChoice?.server.baseUrl === server.baseUrl && chatChoice.remoteModel === remoteModel;
 
-  const running = localStatus?.runtimes.filter((r) => r.phase === "running") ?? [];
-  const localUp = !!localStatus?.installed && running.length === localStatus.runtimes.length && running.length > 0;
+  const action = plan ? localAction(localStatus, plan, installing) : "install";
 
   return (
     <j-flex direction="column" a="center" gap="500" style={{ width: "100%", maxWidth: 640 }}>
@@ -303,7 +342,11 @@ export default function AISetup(props: {
 
       {mode === "Local" && (
         <j-flex direction="column" gap="400" style={{ width: "100%" }}>
-          {!hardware || !plan ? (
+          {(!hardware || !plan) && loadFailed ? (
+            <j-button variant="primary" onClick={loadLocal}>
+              Check this device again
+            </j-button>
+          ) : !hardware || !plan ? (
             <j-text>Checking this device...</j-text>
           ) : (
             <j-box className="box">
@@ -380,11 +423,11 @@ export default function AISetup(props: {
                   </j-flex>
                 )}
 
-                {localUp ? (
+                {action === "running" ? (
                   <j-text nomargin color="success-500">
                     Local AI runs: its models are the defaults.
                   </j-text>
-                ) : localStatus?.installed && plan.downloadBytes === 0 && !installing ? (
+                ) : action === "start" ? (
                   <j-button variant="primary" onClick={startLocal} loading={busy === "local-start"}>
                     Start local AI
                   </j-button>
