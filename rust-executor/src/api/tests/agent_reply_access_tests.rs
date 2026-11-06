@@ -74,3 +74,51 @@ async fn a_user_cannot_have_the_agent_work_in_another_users_perspective() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_cannot_name_another_users_perspective_as_the_library() {
+    let executor = Executor::start().await;
+    let alice = executor.user("alice");
+    let bob = executor.user("bob");
+    let alices = RegisteredPerspective::private(Some(vec![alice.did.clone()]));
+    let alices_library = RegisteredPerspective::private(Some(vec![alice.did.clone()]));
+    let bobs = RegisteredPerspective::private(Some(vec![bob.did.clone()]));
+
+    let _paid = PaidHosting::on();
+    for write_tools in [json!([]), json!(["template_create"])] {
+        // Alice's own library passes the access checks and stops at the credits.
+        for (method, extra, code) in [
+            (
+                "perspective.agentReply",
+                json!({ "container": "app://chat", "workIn": alices.uuid }),
+                403,
+            ),
+            ("perspective.runAgent", json!({ "messages": [] }), 403),
+        ] {
+            for (library, expected) in [(&alices_library.uuid, code), (&bobs.uuid, 404)] {
+                let mut params = extra.clone();
+                params["uuid"] = json!(alices.uuid);
+                params["library"] = json!(library);
+                params["writeTools"] = write_tools.clone();
+                expect_code(
+                    executor.call(method, params, &alice.session).await,
+                    expected,
+                    &format!("{method}, library {library}, writeTools {write_tools}"),
+                );
+            }
+        }
+        // A session is refused another user's library when it is made, not only per reply.
+        expect_code(
+            executor
+                .call(
+                    "perspective.agentSessionCreate",
+                    json!({ "uuid": alices.uuid, "title": "t", "workIn": alices.uuid,
+                            "library": bobs.uuid, "writeTools": write_tools }),
+                    &alice.session,
+                )
+                .await,
+            404,
+            &format!("agentSessionCreate, Bob's library, writeTools {write_tools}"),
+        );
+    }
+}

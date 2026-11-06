@@ -465,3 +465,18 @@ async fn a_session_stopped_by_credits_says_so_rather_than_answering_empty() {
         "{outcome:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_without_a_library_makes_nothing_in_one_the_model_names() {
+    let f = fixture().await;
+    let create = vec!["template_create".to_string()];
+    let tools = session_tools(f.handler.clone(), &f.uuid, None, &create);
+    let answer = tools
+        .call(
+            "template_create",
+            json!({ "library_perspective_id": f.other, "name": "Planted" }),
+        )
+        .await
+        .unwrap();
+    assert!(answer.contains("No library was given"), "{answer}");
+}

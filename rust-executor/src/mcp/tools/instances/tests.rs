@@ -4822,3 +4822,150 @@ async fn template_create_refuses_a_caller_who_may_not_write_where_it_would_go() 
     assert_eq!(parse(&refused)["status"], 403, "{refused}");
     assert_eq!(templates_in(&library).await.len(), 0);
 }
+
+/// A Template in `library`, made there as the operator: its id.
+async fn template_in(handler: &Ad4mMcpHandler, library: &str) -> String {
+    let made = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: library.to_string(),
+                class_name: "Template".into(),
+                properties: Some(props(&[
+                    ("name", json!("Mine")),
+                    ("schema", small_template()),
+                    ("version", json!(1)),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    made["base_uri"].as_str().expect("made").to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_update_saves_a_library_template_in_the_library() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+    let mine = template_in(&handler, &library).await;
+
+    let mut params = template_params(&space, &mine, rename(1, "Goodbye"));
+    params.0.library_perspective_id = Some(library.clone());
+    let saved = handler.template_update(params).await;
+    assert!(saved.starts_with("Saved as version 2."), "{saved}");
+
+    let record = templates_in(&library)
+        .await
+        .into_iter()
+        .find(|t| t["id"] == mine.as_str())
+        .expect("still in the library");
+    assert_eq!(record["version"], 2, "{record}");
+    assert_eq!(
+        templates_in(&space).await.len(),
+        1,
+        "the space keeps only its own"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_create_forks_a_library_template() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+    let mine = template_in(&handler, &library).await;
+    let made = parse(
+        &handler
+            .template_create(create_params(
+                &space,
+                Some(&library),
+                Some(&mine),
+                json!({ "name": "Shared copy", "place": "space" }),
+            ))
+            .await,
+    );
+    let base_uri = made["base_uri"].as_str().expect("made").to_string();
+    let fork = templates_in(&space)
+        .await
+        .into_iter()
+        .find(|t| t["id"] == base_uri.as_str())
+        .expect("the fork is in the space");
+    let text = schema_file_text(&fork);
+    assert!(
+        text.contains("Hello"),
+        "the fork starts from the library's: {text}"
+    );
+    assert!(text.contains("Shared copy"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_tools_do_not_reach_a_library_the_caller_does_not_own() {
+    use crate::agent::capabilities::{
+        perspective_query_capability, perspective_update_capability, WILD_CARD,
+    };
+    use crate::agent::session::{Principal, Session};
+    let (admin, space, library, theirs, _g1, _g2) = space_and_library().await;
+    let mine = template_in(&admin, &library).await;
+    // The caller owns the space; the library is another agent's (the main agent's).
+    let did = "did:key:z6MkTemplateCreateSpaceOwner";
+    crate::perspectives::get_perspective(&space)
+        .unwrap()
+        .persisted
+        .lock()
+        .await
+        .owners = Some(vec![did.to_string()]);
+    let stranger = handler_holding(
+        Session::for_test(Principal::Agent(crate::agent::AgentContext::managed(
+            did.to_string(),
+        )))
+        .with_caps(vec![
+            perspective_query_capability(vec![WILD_CARD.into()]),
+            perspective_update_capability(vec![WILD_CARD.into()]),
+        ])
+        .with_did(did),
+    );
+
+    // In its own space the caller reads its own template.
+    let own = parse(
+        &stranger
+            .template_read(template_params(&space, &theirs, json!({})))
+            .await,
+    );
+    assert_eq!(own["version"], 1, "{own}");
+
+    let mut read = template_params(&space, &mine, json!({}));
+    read.0.library_perspective_id = Some(library.clone());
+    let read = stranger.template_read(read).await;
+    assert_eq!(parse(&read)["status"], 404, "{read}");
+    assert!(!read.contains("Hello"), "{read}");
+
+    let mut update = template_params(&space, &mine, rename(1, "Goodbye"));
+    update.0.library_perspective_id = Some(library.clone());
+    let update = stranger.template_update(update).await;
+    assert_eq!(parse(&update)["status"], 404, "{update}");
+
+    let made = stranger
+        .template_create(create_params(
+            &space,
+            Some(&library),
+            None,
+            json!({ "name": "Planted" }),
+        ))
+        .await;
+    assert_eq!(parse(&made)["status"], 404, "{made}");
+
+    let forked = stranger
+        .template_create(create_params(
+            &space,
+            Some(&library),
+            Some(&mine),
+            json!({ "name": "Taken", "place": "space" }),
+        ))
+        .await;
+    assert_eq!(parse(&forked)["status"], 404, "{forked}");
+
+    let in_library = templates_in(&library).await;
+    assert_eq!(in_library.len(), 1, "{in_library:?}");
+    assert_eq!(in_library[0]["version"], 1, "{in_library:?}");
+    assert_eq!(
+        templates_in(&space).await.len(),
+        1,
+        "nothing was made in the space"
+    );
+}
