@@ -5,7 +5,9 @@
 //! like any node its messages hang off (`ad4m://has_child`), so `perspective.agentReply` answers
 //! in it as in any other conversation. What a session adds is a home a client can create, list
 //! (a model query on `AgentSession`, by `about`) and delete, and settings an agent reply reads so
-//! the client doesn't send them every time.
+//! the client doesn't send them every time. The session's write tools go with its `workIn`: a
+//! reply that names another perspective gets only the write tools it names
+//! ([`SessionSettings::for_reply`]).
 //!
 //! **The settings stay on this node.** Where the agent works (`workIn`, a perspective uuid that
 //! means nothing to another node), the tools it may write with and the model are `Local` links on
@@ -39,6 +41,30 @@ pub struct SessionSettings {
     pub work_in: Option<String>,
     pub write_tools: Vec<String>,
     pub model: Option<String>,
+}
+
+impl SessionSettings {
+    /// What a reply in the session runs with when the call names `work_in`, `write_tools` and
+    /// `model`: what the call names, and the session's for what it leaves out. The session's
+    /// write tools go with its perspective: a call that names its own `workIn` gets only the
+    /// write tools it names, never ones chosen for the session's perspective. The model is no
+    /// perspective's, so it falls back on its own.
+    pub fn for_reply(
+        self,
+        work_in: Option<String>,
+        write_tools: Option<Vec<String>>,
+        model: Option<String>,
+    ) -> SessionSettings {
+        let (work_in, saved_tools) = match work_in {
+            Some(work_in) => (Some(work_in), Vec::new()),
+            None => (self.work_in, self.write_tools),
+        };
+        SessionSettings {
+            work_in,
+            write_tools: write_tools.unwrap_or(saved_tools),
+            model: model.or(self.model),
+        }
+    }
 }
 
 /// A new session's content and settings.

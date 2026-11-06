@@ -1114,6 +1114,39 @@ async fn no_reply_of_the_callers_starts_in_a_container_while_it_is_deleted() {
     let _ = go.send(());
 }
 
+#[test]
+fn a_sessions_write_tools_go_with_its_perspective() {
+    let saved = SessionSettings {
+        work_in: Some("p1".into()),
+        write_tools: vec!["instance_update".into()],
+        model: Some("local-model".into()),
+    };
+    // A call that names nothing gets the session's settings.
+    assert_eq!(saved.clone().for_reply(None, None, None), saved);
+    // A call that names another perspective gets no tool chosen for the session's.
+    assert_eq!(
+        saved.clone().for_reply(Some("p2".into()), None, None),
+        SessionSettings {
+            work_in: Some("p2".into()),
+            write_tools: vec![],
+            model: Some("local-model".into()),
+        }
+    );
+    // What the call names wins.
+    assert_eq!(
+        saved.for_reply(
+            Some("p2".into()),
+            Some(vec!["template_update".into()]),
+            Some("other-model".into())
+        ),
+        SessionSettings {
+            work_in: Some("p2".into()),
+            write_tools: vec!["template_update".into()],
+            model: Some("other-model".into()),
+        }
+    );
+}
+
 /// A link signed by `signer`, as a peer's link arrives from the link language.
 fn peer_link(signer: &TestSigner, source: &str, predicate: &str, target: &str) -> LinkExpression {
     let signed = signer.sign(
