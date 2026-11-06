@@ -114,7 +114,7 @@ pub(crate) async fn embed_via_ai_service(
         .map_err(|e| anyhow::anyhow!("semantic dedup: AIService not ready: {e:#}"))?;
     let batch_started = std::time::Instant::now();
     let embedded = service
-        // Internal caller (SHACL dedup) — no user auth context; billing skipped.
+        // Internal caller (SHACL dedup): no user to bill, and it sets up no local AI.
         .embed_batch(model_id, texts.to_vec(), None)
         .await
         .map_err(|e| anyhow::anyhow!("semantic dedup: embed('{model_id}') failed: {e:#}"))?;

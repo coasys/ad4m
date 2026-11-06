@@ -42,8 +42,10 @@ pub(crate) struct SpeechGate {
 }
 
 impl SpeechGate {
-    pub(crate) fn new() -> Self {
-        if !super::local::onnx_runtime::ready() {
+    /// `fetch_onnx_runtime`: a missing ONNX Runtime (macOS) starts its download; else the
+    /// stream runs without the gate until the operator's stream fetched it.
+    pub(crate) fn new(fetch_onnx_runtime: bool) -> Self {
+        if !super::local::onnx_runtime::ready(fetch_onnx_runtime) {
             log::warn!("Silero VAD has no ONNX Runtime yet: this stream sends all audio");
             return SpeechGate { vad: None };
         }
@@ -345,14 +347,14 @@ mod tests {
     // has the model.
     #[test]
     fn the_speech_gate_takes_speech_and_drops_silence_and_short_clicks() {
-        let mut gate = SpeechGate::new();
+        let mut gate = SpeechGate::new(true);
         if gate.vad.is_none() {
             assert!(
                 cfg!(target_os = "macos"),
                 "linked in: the model loads at once"
             );
             super::super::local::onnx_runtime::wait_for_download();
-            gate = SpeechGate::new();
+            gate = SpeechGate::new(true);
         }
         assert!(gate.vad.is_some(), "the model loaded");
         let speech = speech_fixture();

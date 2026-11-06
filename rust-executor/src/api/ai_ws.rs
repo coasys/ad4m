@@ -468,7 +468,7 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let embedding = service
-        .embed(body.model_id, body.text, ctx.user_did().map(str::to_string))
+        .embed(body.model_id, body.text, Some(&*ctx))
         .await
         .map_err(|e| upstream_failure(&e, &ctx))?;
 

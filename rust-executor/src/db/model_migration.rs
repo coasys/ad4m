@@ -518,7 +518,11 @@ mod tests {
             },
         ));
         let error = match service
-            .embed(crate::ai_service::DEFAULT_MODEL.into(), "text".into(), None)
+            .embed(
+                crate::ai_service::DEFAULT_MODEL.into(),
+                "text".into(),
+                Some(&crate::types::RequestContext::operator_for_test()),
+            )
             .await
         {
             Ok(_) => panic!("the fake setup registers nothing"),

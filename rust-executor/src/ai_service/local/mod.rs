@@ -333,7 +333,7 @@ async fn plan_for(paths: &LocalPaths, device: Option<Backend>) -> Result<LocalPl
     }))
 }
 
-fn autostart_enabled() -> bool {
+pub(crate) fn autostart_enabled() -> bool {
     crate::config::get_global_config()
         .local_ai_autostart
         .unwrap_or(true)

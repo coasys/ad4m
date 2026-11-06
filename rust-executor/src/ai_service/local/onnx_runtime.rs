@@ -9,7 +9,9 @@
 //! before the first model is built. `ort` keeps the first library path it resolves for the
 //! life of the process, so nothing touches `ort` before the file is there: a stream that
 //! opens while the library downloads runs without the gate (with a warning) and starts the
-//! download in the background; the next stream has the gate. `ORT_DYLIB_PATH`, or a
+//! download in the background; the next stream has the gate. Only an operator's stream
+//! starts it, and only with `local_ai_autostart` on, as local AI's first-use setup; any
+//! other stream runs without the gate until the library is there. `ORT_DYLIB_PATH`, or a
 //! `libonnxruntime.dylib` beside the executable, still win: `ort` resolves those itself.
 
 use anyhow::{anyhow, bail, Result};
@@ -84,15 +86,20 @@ impl Fetcher {
 
     /// The library file when the store holds it. Else its download starts on a thread of
     /// its own (unless one is running), which outlives the stream that asked, and the
-    /// answer is `None`; a download that failed is tried again by the next call.
+    /// answer is `None`; a download that failed is tried again by the next call. Without
+    /// `may_fetch`, no download starts.
     pub fn installed_or_fetch(
         &self,
         store: &Store,
         library: &Library,
         key: &str,
+        may_fetch: bool,
     ) -> Option<PathBuf> {
         if let Some(path) = installed(store, library, key) {
             return Some(path);
+        }
+        if !may_fetch {
+            return None;
         }
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if running.as_ref().is_some_and(|h| !h.is_finished()) {
@@ -146,9 +153,9 @@ static POINTED: OnceLock<bool> = OnceLock::new();
 
 /// Whether ONNX Runtime can be loaded now. Where it is linked in, or where `ORT_DYLIB_PATH`
 /// or a library beside the executable provides it: yes. Else (macOS) yes once the store
-/// holds the pinned build and `ort` loaded it; without the build, its download starts in
-/// the background and the answer is no.
-pub fn ready() -> bool {
+/// holds the pinned build and `ort` loaded it; without the build, the answer is no, and
+/// with `may_fetch` its download starts in the background.
+pub fn ready(may_fetch: bool) -> bool {
     let Some(key) = build_key() else {
         return true;
     };
@@ -177,7 +184,7 @@ pub fn ready() -> bool {
         .as_ref()
         .and_then(|c| c.local_ai_dir.clone());
     let store = Store::new(super::store_root(configured));
-    match FETCHER.installed_or_fetch(&store, library, key) {
+    match FETCHER.installed_or_fetch(&store, library, key, may_fetch) {
         Some(path) => *POINTED.get_or_init(|| point_ort_at(path)),
         None => false,
     }
@@ -291,8 +298,42 @@ mod tests {
     fn only_macos_loads_it_at_run_time() {
         assert_eq!(build_key().is_some(), cfg!(target_os = "macos"));
         if build_key().is_none() {
-            assert!(ready(), "linked in: always ready");
+            assert!(ready(false), "linked in: always ready");
         }
+    }
+
+    /// An ask that may not fetch (`local_ai_autostart` off, or a caller other than the
+    /// operator) starts no download and answers no; the stream runs without the gate.
+    #[test]
+    fn an_ask_that_may_not_fetch_downloads_nothing() {
+        let archive = tar_gz("ort/lib/libonnxruntime.1.18.1.dylib", b"a dylib");
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/ort.tgz")
+            .with_body(&archive)
+            .expect(0)
+            .create();
+        let library = library(
+            format!("{}/ort.tgz", server.url()),
+            &archive,
+            &sha(&archive),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let fetcher = Fetcher::new();
+
+        assert_eq!(
+            fetcher.installed_or_fetch(&store, &library, "macos-arm64", false),
+            None
+        );
+        fetcher.wait();
+        assert_eq!(installed(&store, &library, "macos-arm64"), None);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no download"
+        );
+        mock.assert();
     }
 
     /// The first ask starts one download and answers no; an ask while it runs starts no
@@ -317,17 +358,17 @@ mod tests {
 
         assert_eq!(installed(&store, &library, "macos-arm64"), None);
         assert_eq!(
-            fetcher.installed_or_fetch(&store, &library, "macos-arm64"),
+            fetcher.installed_or_fetch(&store, &library, "macos-arm64", true),
             None
         );
         // Still downloading (no), or done (the library): either way no second request.
-        let meanwhile = fetcher.installed_or_fetch(&store, &library, "macos-arm64");
+        let meanwhile = fetcher.installed_or_fetch(&store, &library, "macos-arm64", true);
         fetcher.wait();
         if let Some(path) = meanwhile {
             assert_eq!(Some(path), installed(&store, &library, "macos-arm64"));
         }
         let path = fetcher
-            .installed_or_fetch(&store, &library, "macos-arm64")
+            .installed_or_fetch(&store, &library, "macos-arm64", true)
             .expect("installed after the download");
         assert_eq!(
             path,
@@ -360,7 +401,7 @@ mod tests {
         let fetcher = Fetcher::new();
         for _ in 0..2 {
             assert_eq!(
-                fetcher.installed_or_fetch(&store, &library, "macos-arm64"),
+                fetcher.installed_or_fetch(&store, &library, "macos-arm64", true),
                 None
             );
             fetcher.wait();

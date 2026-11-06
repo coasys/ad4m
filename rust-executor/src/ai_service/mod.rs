@@ -977,9 +977,9 @@ impl AIService {
         &self,
         model: String,
         text: String,
-        bill_to: Option<String>,
+        caller: Option<&RequestContext>,
     ) -> Result<EmbedResult> {
-        let batch = self.embed_batch(&model, vec![text], bill_to).await?;
+        let batch = self.embed_batch(&model, vec![text], caller).await?;
         Ok(EmbedResult {
             embeddings: batch.vectors.into_iter().next().unwrap_or_default(),
             token_count: batch.token_count,
@@ -988,9 +988,13 @@ impl AIService {
 
     /// The id of the embedding model `requested` names: a model's id, else the name of an
     /// embedding model; [`DEFAULT_MODEL`]: see [`Self::default_model`].
-    async fn embedding_model_id(&self, requested: &str) -> Result<String> {
+    async fn embedding_model_id(
+        &self,
+        requested: &str,
+        caller: Option<&RequestContext>,
+    ) -> Result<String> {
         if requested == DEFAULT_MODEL {
-            return self.default_model(ModelType::Embedding).await;
+            return self.default_model(ModelType::Embedding, caller).await;
         }
         let models = crate::db_backend::db_backend().get_models()?;
         models
@@ -1014,7 +1018,12 @@ impl AIService {
     /// the first model of that type. On an executor with no model of the type at all, local
     /// AI sets one up first ([`local::ensure_service`]), as dev's default embedding and
     /// transcription models loaded on first use; concurrent first uses wait for one setup.
-    async fn default_model(&self, model_type: ModelType) -> Result<String> {
+    /// Only for the operator's `caller`: any other caller gets an error instead.
+    async fn default_model(
+        &self,
+        model_type: ModelType,
+        caller: Option<&RequestContext>,
+    ) -> Result<String> {
         if let Some(id) = Self::default_or_first(&model_type)? {
             return Ok(id);
         }
@@ -1026,6 +1035,15 @@ impl AIService {
             .into_iter()
             .find(|s| s.model_type() == model_type)
             .ok_or_else(|| anyhow!("Local AI serves no {model_type} model"))?;
+        // It downloads, starts runtimes and sets the executor's defaults: the operator's,
+        // as `ai.localInstall` (`Guard::Operator`). An internal caller (`None`) is no operator.
+        if !caller.is_some_and(RequestContext::is_operator) {
+            return Err(local::LocalAiRefused(format!(
+                "No default {model_type} model on this executor: ask the operator to set up \
+                 local AI"
+            ))
+            .into());
+        }
         (self.local_setup)(service).await?;
         Self::default_or_first(&model_type)?
             .ok_or_else(|| anyhow!("Local AI set up no {model_type} model"))
@@ -1057,14 +1075,15 @@ impl AIService {
     }
 
     /// Embed `texts` with the embedding model `model` (an id or a name), in one request to
-    /// its endpoint, and bill `bill_to` for the input tokens.
+    /// its endpoint, and bill `caller`'s user for the input tokens. `None`: an internal
+    /// caller, billed nothing.
     pub async fn embed_batch(
         &self,
         model: &str,
         texts: Vec<String>,
-        bill_to: Option<String>,
+        caller: Option<&RequestContext>,
     ) -> Result<EmbedBatch> {
-        let model_id = self.embedding_model_id(model).await?;
+        let model_id = self.embedding_model_id(model, caller).await?;
         let estimate: usize = texts.iter().map(|t| estimate_token_count(t)).sum();
         log::debug!(
             "🤖 embed start model={} n={} tokens_in={}",
@@ -1109,7 +1128,11 @@ impl AIService {
             token_count
         );
 
-        Self::bill_embed_if_authed(bill_to.as_deref(), &model_id, token_count);
+        Self::bill_embed_if_authed(
+            caller.and_then(RequestContext::user_did),
+            &model_id,
+            token_count,
+        );
 
         Ok(EmbedBatch {
             vectors,
@@ -1129,12 +1152,16 @@ impl AIService {
         caller: &RequestContext,
     ) -> Result<String> {
         let model_id = if model_id == DEFAULT_MODEL {
-            self.default_model(ModelType::Transcription).await?
+            self.default_model(ModelType::Transcription, Some(caller))
+                .await?
         } else {
             model_id
         };
         let (client, remote_model, endpoint_id) = transcription::endpoint_transcriber(&model_id)?;
         let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
+        // Where ONNX Runtime is fetched for the speech gate (macOS), only the operator's
+        // stream fetches it, and only with `local_ai_autostart`, as first-use setup.
+        let fetch_onnx_runtime = caller.is_operator() && local::autostart_enabled();
         Ok(self
             .open_remote_stream(
                 model_id,
@@ -1143,13 +1170,14 @@ impl AIService {
                 Arc::new(client),
                 agent_did,
                 user_did,
+                fetch_onnx_runtime,
             )
             .await)
     }
 
     /// Open a stream whose utterances `client` transcribes with the upstream model
     /// `remote_model` on endpoint `endpoint_id`, billed as `model_id` to `agent_did`, its text
-    /// sent to `user_did`.
+    /// sent to `user_did`. `fetch_onnx_runtime`: see [`transcription::SpeechGate::new`].
     async fn open_remote_stream(
         &self,
         model_id: String,
@@ -1158,6 +1186,7 @@ impl AIService {
         client: Arc<dyn providers::audio::RemoteTranscribe>,
         agent_did: Option<String>,
         user_did: String,
+        fetch_onnx_runtime: bool,
     ) -> String {
         let stream_id = uuid::Uuid::new_v4().to_string();
         let (utterances, queue) = mpsc::unbounded_channel();
@@ -1172,7 +1201,7 @@ impl AIService {
             agent_did: agent_did.clone(),
             user_did,
             listeners: text_broadcast_tx.clone(),
-            gate: transcription::SpeechGate::new(),
+            gate: transcription::SpeechGate::new(fetch_onnx_runtime),
         };
         tokio::spawn(worker.run(queue));
 
@@ -1505,14 +1534,15 @@ mod tests {
             &calls,
         ));
 
+        let operator = RequestContext::operator_for_test();
         let (first, second) = tokio::join!(
-            service.embed(DEFAULT_MODEL.into(), "one".into(), None),
-            service.embed(DEFAULT_MODEL.into(), "two".into(), None),
+            service.embed(DEFAULT_MODEL.into(), "one".into(), Some(&operator)),
+            service.embed(DEFAULT_MODEL.into(), "two".into(), Some(&operator)),
         );
         assert_eq!(first.unwrap().embeddings, vec![1.0, 2.0]);
         assert_eq!(second.unwrap().embeddings, vec![1.0, 2.0]);
         service
-            .embed(DEFAULT_MODEL.into(), "three".into(), None)
+            .embed(DEFAULT_MODEL.into(), "three".into(), Some(&operator))
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1, "one setup");
@@ -1633,6 +1663,64 @@ mod tests {
             .await
             .contains_key(&stream));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // First-use setup downloads models, starts runtimes and sets the executor's defaults,
+    // as `ai.localInstall` does: only the operator causes it. An app or a user that names
+    // the default on an executor without the model gets an error, and nothing is set up.
+    #[tokio::test]
+    async fn only_the_operator_sets_up_local_ai_on_first_use() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let upstream = mockito::Server::new_async().await;
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::OpenAiAudio, &upstream.url());
+        let service = service.clone().with_local_setup(fake_setup(
+            &service,
+            &endpoint,
+            ModelType::Transcription,
+            "parakeet",
+            &calls,
+        ));
+        let transcribe = vec![crate::agent::capabilities::AI_TRANSCRIBE_CAPABILITY.clone()];
+        for caller in [
+            RequestContext::app_for_test(transcribe.clone()),
+            RequestContext::user_for_test("did:key:z6MkUser", transcribe.clone()),
+        ] {
+            let error = match service
+                .open_transcription_stream(DEFAULT_MODEL.into(), &caller)
+                .await
+            {
+                Ok(_) => panic!("only the operator sets up local AI"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("ask the operator to set up local AI"),
+                "{error}"
+            );
+        }
+        // `ai.embed` and `/v1/embeddings` as an app, and the executor's own embeds (`None`).
+        let prompt = RequestContext::app_for_test(vec![
+            crate::agent::capabilities::AI_PROMPT_CAPABILITY.clone(),
+        ]);
+        for caller in [Some(&prompt), None] {
+            let error = match service
+                .embed(DEFAULT_MODEL.into(), "text".into(), caller)
+                .await
+            {
+                Ok(_) => panic!("only the operator sets up local AI"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                "No default EMBEDDING model on this executor: ask the operator to set up \
+                 local AI"
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing set up");
     }
 
     #[tokio::test]
@@ -2176,6 +2264,7 @@ mod remote_stream_tests {
                 Arc::new(Upstream),
                 agent_did.map(str::to_string),
                 "did:key:owner".into(),
+                false,
             )
             .await
     }
@@ -2314,6 +2403,7 @@ mod remote_stream_tests {
                 Arc::new(client),
                 None,
                 "did:key:owner".into(),
+                false,
             )
             .await;
 
@@ -2430,6 +2520,7 @@ mod remote_stream_http_tests {
                 )),
                 payer.map(str::to_string),
                 "did:key:owner".into(),
+                false,
             )
             .await
     }

@@ -100,6 +100,13 @@ The executor still runs no model in-process: `local/` installs and supervises mo
 - RPCs (`api/ai_ws.rs`): `ai.localHardware` / `localPlan` / `localStatus` are
   `Executor(AI_READ)` reads; `ai.localInstall` (long) / `localStart` (long) / `localStop` /
   `localRemove` are `Guard::Operator`. Progress: the `ai-local-progress` event (operator).
+- First-use setup (`AIService::default_model`: `ai.embed` or `ai.transcriptionOpen` on
+  `"default"` with no model of the type) is the operator's too: it checks
+  `RequestContext::is_operator` before `local::ensure_service`. Any other caller, and the
+  executor's own embeds (`None`), get `LocalAiRefused` "No default <TYPE> model on this
+  executor: ask the operator to set up local AI". `/v1` never sets up (no default: 404).
+  On macOS the ONNX Runtime fetch for the speech gate (`onnx_runtime.rs`) starts only from
+  an operator's stream with `local_ai_autostart` on; other streams run ungated meanwhile.
 - Model names live in `manifest.json` and the recommendations, as data (the rule below).
   Updating a pin: new URL, `sizeBytes` and `sha256` (GitHub `digest`, HF `lfs.oid`), and an
   HF URL with a commit, never `main` (a unit test checks).
