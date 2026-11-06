@@ -303,7 +303,7 @@
       "sizeBytes": 713975456,
       "license": "CC-BY-4.0",
       "params": "0.6B",
-      "memoryBytes": 800000000
+      "memoryBytes": 900000000
     },
     "nemotron-3.5-asr-streaming-0.6b-q8_0": {
       "service": "stt",
@@ -357,7 +357,7 @@
       },
       "license": "Apache-2.0",
       "params": "0.6B",
-      "memoryBytes": 1500000000
+      "memoryBytes": 2200000000
     },
     "qwen3-asr-1.7b-q8_0": {
       "service": "stt",
@@ -374,7 +374,7 @@
       },
       "license": "Apache-2.0",
       "params": "1.7B",
-      "memoryBytes": 3200000000
+      "memoryBytes": 3700000000
     },
     "voxtral-mini-3b-2507-q4_k_m": {
       "service": "stt",

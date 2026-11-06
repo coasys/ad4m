@@ -167,6 +167,18 @@ describe("AI wind tunnel (unit)", () => {
         expect(["llm", "embeddings", "stt", "tts"]).to.include(model.service);
       }
     });
+    it("gives every model at least the GPU peak its checked-in evidence measured", () => {
+      // The amd-igpu-uma-128 evidence of 2026-11-03 counted each amdgpu region twice
+      // (README): what the server held is half its peakGpuBytes.
+      const counted = (p: string) => (p.startsWith("ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-") ? 2 : 1);
+      for (const { path: p, evidence } of loadAllEvidence()) {
+        for (const c of evidence.cells) {
+          const model = c.model?.modelId ? m.models[c.model.modelId] : undefined;
+          const peak = Number(c.metrics?.peakGpuBytes ?? 0) / counted(p);
+          if (model && peak > 0) expect(model.memoryBytes, `${c.model!.modelId} in ${p}`).to.be.at.least(peak);
+        }
+      }
+    });
     it("pins every model download to a Hugging Face commit, never a branch", () => {
       // An upstream re-upload on `main` would change the file under a fixed sha256
       // and break every install; a commit URL keeps serving the hashed file.
