@@ -540,6 +540,14 @@ describe("AI wind tunnel (unit)", () => {
       const r = deriveRecommendations([{ path: "e.json", evidence: evidence("cpu-16gb", [stt("fast-sloppy", 0.2, 0.05), stt("accurate", 0.0, 0.3), stt("accurate-faster", 0.01, 0.1), stt("too-slow", 0, 0.9)]) }], "t");
       expect(r.classes["cpu-16gb"].stt!.modelId).to.equal("accurate-faster");
     });
+    it("needs every floor metric, and ranks a candidate missing a sort key last", () => {
+      const noTps = cell({ model: { modelId: "no-tps", remoteModel: "no-tps", params: "8B" }, metrics: { ttftMs: stat(100) } });
+      const r = deriveRecommendations([{ path: "e.json", evidence: evidence("cpu-16gb", [noTps, llm("small", "1B", 30, 500)]) }], "t");
+      expect(r.classes["cpu-16gb"].llm).to.deep.include({ modelId: "small", candidates: 2, overFloor: 1 });
+      const noParams = cell({ model: { modelId: "no-params", remoteModel: "no-params" }, metrics: { decodeTps: stat(90), ttftMs: stat(100) } });
+      const r2 = deriveRecommendations([{ path: "e.json", evidence: evidence("cpu-16gb", [noParams, llm("small", "1B", 30, 500)]) }], "t");
+      expect(r2.classes["cpu-16gb"].llm!.modelId).to.equal("small");
+    });
     it("keeps a provider's own model name when there is no manifest id", () => {
       const r = deriveRecommendations(
         [{ path: "e.json", evidence: evidence("cpu-16gb", [cell({ provider: "ollama", model: { remoteModel: "qwen3.5:2b", params: "2B" }, metrics: { decodeTps: stat(40), ttftMs: stat(300) } })]) }],

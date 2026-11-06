@@ -39,7 +39,7 @@ import { llamaServer } from "./providers/llama-server.js";
 import { whisperServer } from "./providers/whisper-server.js";
 import { nemoSpeech } from "./providers/nemo-speech.js";
 import { sherpaOnnx } from "./providers/sherpa-onnx.js";
-import { speaches, vllm } from "./providers/docker.js";
+import { removeStartedContainers, speaches, vllm } from "./providers/docker.js";
 import { SkipError, type Driver, type RunContext, type Served, type Session, type Variant } from "./providers/types.js";
 import {
   EVIDENCE_SCHEMA_VERSION,
@@ -116,6 +116,7 @@ const cleanups: (() => Promise<unknown>)[] = [];
 async function cleanup(): Promise<void> {
   while (cleanups.length) await cleanups.shift()!().catch(() => {});
   await stopAllSpawned();
+  await removeStartedContainers();
 }
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.once(sig, () => {
@@ -274,7 +275,7 @@ async function main() {
               log(`${provider} ${variant.label} ${c.service} ${modelKey(model)}: running`);
               outcome = await withTimeout(CELL_FN[c.service](env), CELL_TIMEOUT_MS, `${c.service} cell`);
               if (c.service === "stt" && outcome.checks.length && outcome.checks.every((k) => k.pass)) {
-                sttPassed.push({ modelName: name, label: `${provider}/${served.remoteModel}`, wer: medianOf(outcome.metrics.wer) ?? 1 });
+                sttPassed.push({ modelName: name, label: `${provider}/${served.remoteModel}`, wer: typeof outcome.metrics.werMean === "number" ? outcome.metrics.werMean : 1 });
               }
             } catch (e: any) {
               error = String(e?.message ?? e);

@@ -111,7 +111,7 @@ function median(xs: number[]): number {
 }
 
 function cellKey(c: CellResult): string {
-  return [c.provider, c.runtimeBuild ?? "", c.model?.modelId ?? c.model?.remoteModel ?? ""].join("|");
+  return [c.provider, c.runtimeBuild ?? "", c.backend ?? "", c.model?.modelId ?? c.model?.remoteModel ?? ""].join("|");
 }
 
 interface Candidate {
@@ -133,7 +133,7 @@ function candidates(entries: { path: string; cell: CellResult }[]): Candidate[] 
       const xs = g.map((e) => medianOf(e.cell.metrics[name])).filter((x): x is number => x !== null);
       if (xs.length) medians[name] = Math.round(median(xs) * 1000) / 1000;
     }
-    const params = parseParams(g[0].cell.model?.params) ?? g[0].cell.model?.memoryBytes ?? null;
+    const params = parseParams(g[0].cell.model?.params);
     if (params !== null) medians.params = params;
     return { cell: g[g.length - 1].cell, medians, evidence: [...new Set(g.map((e) => e.path))].sort() };
   });
