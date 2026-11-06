@@ -402,7 +402,11 @@ fn cap_cost(
         }
         _ => 1,
     };
-    let choices = count("n").max(count("best_of")).max(1) * prompts;
+    // Both factors come from the client: saturate, so a huge `n` cannot wrap to a small count.
+    let choices = count("n")
+        .max(count("best_of"))
+        .max(1)
+        .saturating_mul(prompts);
     let per_choice = (affordable.saturating_sub(prompt_estimate) as u64) / choices;
     if per_choice == 0 {
         return Err(OpenAIError::insufficient_quota(
