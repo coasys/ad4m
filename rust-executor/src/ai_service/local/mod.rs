@@ -1015,6 +1015,31 @@ fn reap_from_pid_file(paths: &LocalPaths) {
     let _ = std::fs::remove_file(pid_file(paths));
 }
 
+/// The managed port of a runtime a start has not handed to `RUNNING` yet: dropped before
+/// [`StartingPort::keep`], it leaves `MANAGED_PORTS`.
+struct StartingPort {
+    port: u16,
+    kept: bool,
+}
+
+impl StartingPort {
+    fn keep(mut self) -> u16 {
+        self.kept = true;
+        self.port
+    }
+}
+
+impl Drop for StartingPort {
+    fn drop(&mut self) {
+        if !self.kept {
+            MANAGED_PORTS
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.port);
+        }
+    }
+}
+
 async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
     let mut selection = Selection::load(paths)
         .ok_or_else(|| LocalAiRefused("Local AI is not installed: call ai.localInstall".into()))?;
@@ -1053,6 +1078,10 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
                     lists_models: runtime.provider == Provider::NemoSpeech,
                 },
             );
+        // Until `RUNNING` has it, this start owns the runtime: a caller that goes away
+        // during the wait (a cancelled RPC) drops `supervised`, which stops the child, and
+        // `port`, which forgets the port.
+        let port = StartingPort { port, kept: false };
         let settled = supervised
             .wait_until_settled(Timing::default().start_timeout + Duration::from_secs(5))
             .await;
@@ -1063,6 +1092,7 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
                 endpoint_id: None,
             },
         );
+        let port = port.keep();
         if settled.phase != Phase::Running {
             log::warn!(
                 "Local AI: {} is {:?}: {}",
@@ -2183,6 +2213,85 @@ mod tests {
             0,
             "nothing was downloaded"
         );
+    }
+
+    /// A start whose caller goes away while the runtime loads (a cancelled RPC) leaves no
+    /// runtime: the child stops, and nothing says its port is managed. Else it would serve
+    /// on, out of `ai.localStop`'s reach, and the next start would run a second copy.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_dropped_while_the_runtime_loads_stops_the_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LocalPaths {
+            store: dir.path().join("store"),
+            state: dir.path().join("state"),
+        };
+        // A llama-server that says where it runs and never answers, as one loading models.
+        let binary = dir.path().join("llama-server");
+        let started = dir.path().join("started");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\necho $$ \"$@\" > '{0}.tmp'\nmv '{0}.tmp' '{0}'\nexec sleep 60\n",
+                started.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Selection {
+            runtimes: vec![SelectedRuntime {
+                provider: Provider::LlamaServer,
+                runtime_id: "fake".into(),
+                version: "0".into(),
+                build: "cpu".into(),
+                binary,
+                lib_dirs: vec![],
+                services: vec![],
+                backend: None,
+            }],
+            models: vec![],
+            ports: BTreeMap::new(),
+        }
+        .save(&paths)
+        .unwrap();
+
+        tokio::select! {
+            result = start_at(&paths, false) => panic!("the start ended: {result:?}"),
+            _ = async {
+                while !started.exists() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            } => {}
+        }
+        let line = std::fs::read_to_string(&started).unwrap();
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let pid: u32 = words[0].parse().unwrap();
+        let port: u16 = words[words.iter().position(|w| *w == "--port").unwrap() + 1]
+            .parse()
+            .unwrap();
+
+        assert!(!RUNNING.lock().await.contains_key(&Provider::LlamaServer));
+        assert!(
+            !MANAGED_PORTS.read().unwrap().contains_key(&port),
+            "the port of a start that did not finish is not managed"
+        );
+        let alive = |pid: u32| {
+            // SAFETY: signal 0 only checks that the process exists.
+            unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while alive(pid) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let left = alive(pid);
+        if left {
+            // SAFETY: kill(2) on the fake runtime this test started.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        assert!(!left, "the runtime of the dropped start still runs");
     }
 
     #[test]

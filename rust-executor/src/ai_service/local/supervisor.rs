@@ -166,7 +166,9 @@ pub struct ProcessStatus {
     pub detail: Option<String>,
 }
 
-/// A supervised child. Dropping it does not stop the child: call [`Supervised::stop`].
+/// A supervised child. It owns the child: dropping it stops the child as
+/// [`Supervised::request_stop`] does (SIGTERM, then SIGKILL after 5 s). Keep it for as long
+/// as the child is to run; [`Supervised::stop`] also waits until the child is gone.
 pub struct Supervised {
     pub spec: ChildSpec,
     status: watch::Receiver<ProcessStatus>,
@@ -272,7 +274,7 @@ async fn supervise(
         });
     };
     loop {
-        if *stop.borrow() {
+        if stop_requested(&stop) {
             set(Phase::Stopped, None, None, budget.used());
             return;
         }
@@ -339,6 +341,12 @@ async fn supervise(
     }
 }
 
+/// A stop was asked for, or the [`Supervised`] is gone: its sender is dropped, and
+/// `changed` and `wait_for` answer at once from then on, so the loops must end here.
+fn stop_requested(stop: &watch::Receiver<bool>) -> bool {
+    *stop.borrow() || stop.has_changed().is_err()
+}
+
 fn budget_used_snapshot(status: &watch::Sender<ProcessStatus>) -> u32 {
     status.borrow().restarts
 }
@@ -356,7 +364,7 @@ async fn run_once(
     let poll = Duration::from_millis(200);
     // Starting: until the first probe answers.
     loop {
-        if *stop.borrow() {
+        if stop_requested(stop) {
             return Ended::Stopped;
         }
         if let Ok(Some(exit)) = child.try_wait() {
@@ -384,7 +392,7 @@ async fn run_once(
     let mut last_probe = Instant::now();
     let mut failed_probes = 0;
     loop {
-        if *stop.borrow() {
+        if stop_requested(stop) {
             return Ended::Stopped;
         }
         if let Ok(Some(exit)) = child.try_wait() {
@@ -688,6 +696,43 @@ mod tests {
         let status = supervised.wait_until_settled(Duration::from_secs(10)).await;
         assert_eq!(status.phase, Phase::Failed);
         assert!(status.detail.unwrap().contains("did not answer"));
+    }
+
+    /// A `Supervised` dropped while its child starts stops the child, and its supervision
+    /// ends (it does not poll on without the pause, with no one left to stop it).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dropped_supervised_stops_its_child_and_its_supervision() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = choose_port(None, &[]).unwrap();
+        let supervised = Supervised::start(
+            spec(dir.path(), "exec sleep 60", port),
+            fast(),
+            RestartBudget::standard(),
+        );
+        let mut status = supervised.watch();
+        let pid =
+            tokio::time::timeout(Duration::from_secs(5), status.wait_for(|s| s.pid.is_some()))
+                .await
+                .unwrap()
+                .unwrap()
+                .pid
+                .unwrap();
+        drop(supervised);
+        let ended = tokio::time::timeout(
+            Duration::from_secs(10),
+            status.wait_for(|s| s.phase == Phase::Stopped),
+        )
+        .await
+        .is_ok_and(|r| r.is_ok());
+        let left = alive(pid);
+        if left {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        assert!(ended, "the supervision did not end: {:?}", status.borrow());
+        assert!(!left, "the child of a dropped Supervised still runs");
     }
 
     #[cfg(unix)]
