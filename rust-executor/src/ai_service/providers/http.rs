@@ -152,7 +152,7 @@ pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 /// Up to `limit` bytes of `response`'s body, and whether there was more. Stops reading at
 /// the limit.
-async fn read_capped(
+pub(crate) async fn read_capped(
     mut response: reqwest::Response,
     limit: usize,
 ) -> reqwest::Result<(Vec<u8>, bool)> {

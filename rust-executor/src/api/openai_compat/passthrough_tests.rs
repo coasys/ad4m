@@ -1053,7 +1053,7 @@ async fn transcription_form(model: &str) -> axum::extract::Multipart {
 }
 
 /// A transcription model `stt` on an audio endpoint at `server`.
-fn transcription_model(server: &mockito::ServerGuard) {
+fn transcription_model(server: &mockito::ServerGuard) -> String {
     let speaches = endpoint("speaches", EndpointKind::OpenAiAudio, &server.url(), "");
     save(&speaches);
     model(
@@ -1061,7 +1061,104 @@ fn transcription_model(server: &mockito::ServerGuard) {
         ModelType::Transcription,
         &speaches,
         "faster-whisper-small",
+    )
+}
+
+// /v1/audio/transcriptions forwarded to an endpoint whose capabilities leave out
+// transcription.
+#[tokio::test]
+async fn transcription_refuses_an_endpoint_that_does_not_declare_it() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    let upstream = server
+        .mock("POST", Matcher::Any)
+        .expect(0)
+        .create_async()
+        .await;
+    transcription_model(&server);
+    // The operator took transcription off the endpoint after the model was on it.
+    let mut speech_only = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name("speaches"))
+        .unwrap()
+        .unwrap();
+    speech_only.capabilities = vec![AiCapability::Speech];
+    Ad4mDb::with_global_instance(|db| db.update_endpoint(&speech_only)).unwrap();
+
+    let response = audio::transcriptions(transcriber(), transcription_form("stt").await)
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        body_json(response).await["error"]["code"],
+        "model_not_supported"
     );
+    upstream.assert_async().await;
+}
+
+// A stream kept the client of its model's old endpoint, URL and key, after the endpoint
+// changed.
+#[tokio::test]
+async fn the_streams_of_a_transcription_model_close_when_it_reloads() {
+    let mut server = mockito::Server::new_async().await;
+    let upstream = server
+        .mock("POST", Matcher::Any)
+        .expect(0)
+        .create_async()
+        .await;
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    fresh();
+    let id = transcription_model(&server);
+    crate::ai_service::AIService::init_global_instance()
+        .await
+        .unwrap();
+    let service = crate::ai_service::AIService::global_instance()
+        .await
+        .unwrap();
+    let operator = RequestContext::operator_for_test();
+    let stream = service
+        .open_transcription_stream(id.clone(), &operator)
+        .await
+        .unwrap();
+
+    service.reload_model(id).await.unwrap();
+    let fed = service
+        .feed_transcription_stream(
+            &stream,
+            crate::ai_service::transcription::speech_fixture(),
+            &operator,
+        )
+        .await;
+    assert!(fed.is_err(), "the stream still took audio");
+    upstream.assert_async().await;
+}
+
+// A transcription model whose endpoint can no longer serve it was published as ready. Here
+// its reload is the error, and no stream opens on it.
+#[tokio::test]
+async fn a_transcription_model_its_endpoint_cannot_serve_is_not_ready() {
+    let server = mockito::Server::new_async().await;
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    fresh();
+    let id = transcription_model(&server);
+    let mut changed = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name("speaches"))
+        .unwrap()
+        .unwrap();
+    changed.kind = EndpointKind::Ollama;
+    Ad4mDb::with_global_instance(|db| db.update_endpoint(&changed)).unwrap();
+    crate::ai_service::AIService::init_global_instance()
+        .await
+        .unwrap();
+    let service = crate::ai_service::AIService::global_instance()
+        .await
+        .unwrap();
+
+    assert!(service.reload_model(id.clone()).await.is_err());
+    assert!(service
+        .open_transcription_stream(id, &RequestContext::operator_for_test())
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -1979,6 +2076,72 @@ async fn realtime_sends_the_text_of_the_commits_before_a_close() {
             "delta": "the last sentence",
         })]
     );
+}
+
+// A commit refused for credits emptied the buffer: a commit after the credits came back
+// found nothing to send.
+#[tokio::test]
+async fn realtime_keeps_the_utterance_a_commit_was_refused_for() {
+    let mut server = mockito::Server::new_async().await;
+    slow_transcription(&mut server, "kept", std::time::Duration::ZERO).await;
+    realtime_world(&server).await;
+    let did = crate::test_utils::create_test_user("realtime-later@example.org");
+    let caller = RequestContext::for_session(
+        Session::for_test(Principal::Agent(AgentContext::managed(did)))
+            .with_caps(vec![AI_TRANSCRIBE_CAPABILITY.clone()]),
+    );
+    let paid_hosting = |paid: bool| {
+        Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(!paid)).unwrap();
+    };
+    let (client, mut frames) = realtime(caller);
+    paid_hosting(false);
+    let created = open_stt(&client, &mut frames).await;
+    assert_eq!(
+        created["type"], "transcription_session.created",
+        "{created}"
+    );
+    paid_hosting(true);
+    send(&client, append_speech());
+    send(&client, json!({"type": "input_audio_buffer.commit"}));
+    let refused = next_event(&mut frames).await;
+    assert_eq!(refused["error"]["code"], "insufficient_quota", "{refused}");
+
+    paid_hosting(false);
+    send(&client, json!({"type": "input_audio_buffer.commit"}));
+    let delta = next_event(&mut frames).await;
+    assert_eq!(delta["delta"], "kept", "{delta}");
+}
+
+// Each commit queued up to 10 MB of audio, without a bound on the commits waiting.
+#[tokio::test]
+async fn realtime_refuses_a_commit_past_the_pending_bound() {
+    use super::realtime::MAX_PENDING_COMMITS;
+    let mut server = mockito::Server::new_async().await;
+    slow_transcription(&mut server, "one", std::time::Duration::from_millis(300)).await;
+    realtime_world(&server).await;
+    let (client, mut frames) = realtime(RequestContext::operator_for_test());
+    let created = open_stt(&client, &mut frames).await;
+    assert_eq!(
+        created["type"], "transcription_session.created",
+        "{created}"
+    );
+
+    for _ in 0..=MAX_PENDING_COMMITS {
+        send(&client, append_speech());
+        send(&client, json!({"type": "input_audio_buffer.commit"}));
+    }
+    let mut refused = 0;
+    let mut deltas = 0;
+    while deltas < MAX_PENDING_COMMITS {
+        let event = next_event(&mut frames).await;
+        if event["type"] == "error" {
+            assert_eq!(event["error"]["code"], "rate_limit_exceeded", "{event}");
+            refused += 1;
+        } else {
+            deltas += 1;
+        }
+    }
+    assert_eq!(refused, 1);
 }
 
 /// A caller who pays: hosting is not free, and `USER`'s account holds `credits`.

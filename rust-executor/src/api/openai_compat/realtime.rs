@@ -13,6 +13,8 @@
 //!     transcribed as one call (one upstream request on an endpoint) and emptied. The
 //!     client decides where an utterance ends; the executor's speech gate drops one that
 //!     is not speech. Each commit needs compute credits, as the session's opening does.
+//!     At most `MAX_PENDING_COMMITS` (8) commits wait for their transcript; one more gets
+//!     `rate_limit_exceeded`. A refused commit keeps the buffer, so a later commit sends it.
 //!   - `{"type":"session.close"}` — close the session and the socket, once the commits sent
 //!     before it are answered and their text is sent (at most the 30 s of
 //!     `TRANSCRIPTION_TIMEOUT_SECS`).
@@ -46,6 +48,10 @@ use crate::types::{ModelType, RequestContext};
 
 /// The most audio one utterance may buffer: 10 MB of `f32`, as the HTTP feed accepts.
 const MAX_BUFFERED_SAMPLES: usize = 10 * 1024 * 1024 / 4;
+
+/// The most commits a session may have waiting for their answer: each holds up to
+/// [`MAX_BUFFERED_SAMPLES`] of audio until it is transcribed.
+pub(super) const MAX_PENDING_COMMITS: usize = 8;
 
 /// A token that opens no session gets the upgrade, an `unauthorized` error event and a close
 /// with 1008, before any work: a browser cannot read the HTTP status of a refused upgrade.
@@ -376,11 +382,23 @@ where
                     .await;
                     continue;
                 }
-                let utterance = std::mem::take(&mut buffered);
+                // Both refusals keep the buffer: a commit after them sends it.
                 if let Err(refused) = credits_left(&caller) {
                     let _ = send_error(&mut socket, "insufficient_quota", &refused).await;
                     continue;
                 }
+                if answers.len() >= MAX_PENDING_COMMITS {
+                    let _ = send_error(
+                        &mut socket,
+                        "rate_limit_exceeded",
+                        &format!(
+                            "{MAX_PENDING_COMMITS} commits wait for their transcript: commit again once one is answered"
+                        ),
+                    )
+                    .await;
+                    continue;
+                }
+                let utterance = std::mem::take(&mut buffered);
                 // Queued here, so commits keep their order; answered in the loop, so the
                 // deltas of a long utterance are read while it is transcribed.
                 let queued = match AIService::global_instance().await {

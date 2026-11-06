@@ -184,7 +184,15 @@ The executor still runs no model in-process: `local/` installs and supervises mo
   `providers::audio::RemoteTranscribe` call. The worker takes utterances from a channel
   filled under the stream-map lock, so text comes out in the order fed. A feed answers
   after its transcript is published; an upstream failure is the feed's error (no URL in
-  it) and publishes nothing.
+  it). A streaming upstream can fail after it sent pieces: those pieces stay published and
+  their words are billed; nothing more is published.
+- Each call takes a slot of the endpoint's `max_concurrent` and ends at its
+  `request_timeout_secs` (else 120 s). An endpoint whose capabilities leave out
+  transcription is refused (`NotATranscriptionEndpoint`; `model_not_supported` on
+  `/v1/audio/transcriptions`). A reload of the model closes its streams.
+- A stream of OpenAI events or vLLM chunks must end with `transcript.text.done` or
+  `[DONE]`; one that stops before is a bad answer. An `error` event's message stays out of
+  the error and the log. Answers are read up to `MAX_BODY_BYTES`.
 - The client cuts utterances; the executor's Silero gate (`transcription::SpeechGate`)
   drops one that is not speech, before the request, on a blocking thread. Without ONNX
   Runtime (loaded at run time on macOS) the gate is off and every utterance passes.
