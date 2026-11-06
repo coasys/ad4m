@@ -29,11 +29,21 @@ async function containerPid(name: string): Promise<number | null> {
   }
 }
 
+/** Containers this run started and has not removed yet: a start that fails or a signal removes them too. */
+const startedContainers = new Set<string>();
+
 async function removeContainer(name: string, ctx: RunContext): Promise<void> {
   try {
     await docker(["rm", "-f", name], 60_000);
+    startedContainers.delete(name);
     ctx.log(`removed container ${name}`);
   } catch {}
+}
+
+/** Remove every container this run started that is still there. */
+export async function removeStartedContainers(): Promise<void> {
+  for (const name of [...startedContainers]) await docker(["rm", "-f", name], 60_000).catch(() => {});
+  startedContainers.clear();
 }
 
 async function saveLogs(name: string, ctx: RunContext): Promise<void> {
@@ -87,8 +97,15 @@ export const speaches: Driver = {
       const args = ["run", "-d", "--name", name, "-p", `127.0.0.1:${port}:8000`, "-v", `${hfCache()}:/home/ubuntu/.cache/huggingface/hub`, ...containerMemoryArgs()];
       if (variant.backend === "cuda") args.push("--gpus", "all");
       await docker([...args, image]);
+      startedContainers.add(name);
       baseUrl = `http://127.0.0.1:${port}`;
-      await waitForHttp(`${baseUrl}/health`, { timeoutMs: 180_000, label: "speaches" });
+      try {
+        await waitForHttp(`${baseUrl}/health`, { timeoutMs: 180_000, label: "speaches" });
+      } catch (e) {
+        await saveLogs(name, ctx);
+        await removeContainer(name, ctx);
+        throw e;
+      }
     }
     const version = image ? await docker(["image", "inspect", image, "--format", "{{.Created}}"]).then((c) => `image created ${c.slice(0, 10)}`).catch(() => undefined) : undefined;
     ctx.log(`speaches at ${baseUrl}`);
@@ -187,6 +204,7 @@ export const vllm: Driver = {
           const started = Date.now();
           ctx.log(`vLLM: starting ${name} (${image}) for ${model.remoteModel}`);
           await docker([...args, ...serveArgs]);
+          startedContainers.add(name);
           const baseUrl = `http://127.0.0.1:${port}`;
           // The container's state, polled: a container that exits ends the wait.
           let running = true;
