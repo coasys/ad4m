@@ -313,7 +313,7 @@
       "sizeBytes": 742090464,
       "license": "OpenMDW-1.1",
       "params": "0.6B",
-      "memoryBytes": 800000000
+      "memoryBytes": 1300000000
     },
     "parakeet-tdt-0.6b-v3-int8-onnx": {
       "service": "stt",

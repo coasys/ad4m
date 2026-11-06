@@ -179,6 +179,19 @@ describe("AI wind tunnel (unit)", () => {
         }
       }
     });
+    it("gives a model no evidence measured on a GPU at least its resident peak", () => {
+      const gpuPeak = new Set<string>();
+      const rssPeak = new Map<string, number>();
+      for (const { evidence } of loadAllEvidence()) {
+        for (const c of evidence.cells) {
+          const id = c.model?.modelId;
+          if (!id || !m.models[id]) continue;
+          if (Number(c.metrics?.peakGpuBytes ?? 0) > 0) gpuPeak.add(id);
+          rssPeak.set(id, Math.max(rssPeak.get(id) ?? 0, Number(c.metrics?.peakRssBytes ?? 0)));
+        }
+      }
+      for (const [id, rss] of rssPeak) if (!gpuPeak.has(id)) expect(m.models[id].memoryBytes, id).to.be.at.least(rss);
+    });
     it("pins every model download to a Hugging Face commit, never a branch", () => {
       // An upstream re-upload on `main` would change the file under a fixed sha256
       // and break every install; a commit URL keeps serving the hashed file.
