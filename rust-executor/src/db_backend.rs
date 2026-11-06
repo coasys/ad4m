@@ -37,10 +37,10 @@ use crate::db::{
 };
 use crate::secret::Secret;
 use crate::types::{
-    AIModelLoadingStatus, AIPromptExamples, AITask, Endpoint, EndpointHealth, EntanglementProof,
-    Expression, ImportResult, LinkExpression, LinkStatus, Model, ModelInput, ModelType,
-    Notification, NotificationInput, PerspectiveDiff, PerspectiveExpression, PerspectiveHandle,
-    SentMessage, UserInfo, UserStatistics,
+    AIModelLoadingStatus, AIPromptExamples, AITask, AiCapability, Endpoint, EndpointHealth,
+    EntanglementProof, Expression, ImportResult, LinkExpression, LinkStatus, Model, ModelInput,
+    ModelType, Notification, NotificationInput, PerspectiveDiff, PerspectiveExpression,
+    PerspectiveHandle, SentMessage, UserInfo, UserStatistics,
 };
 use url::Url;
 
@@ -229,8 +229,15 @@ macro_rules! ad4m_db_methods {
             fn insert_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<()>;
             fn update_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<Vec<String>>;
             fn kept_endpoint_key(&self, id: &str, base_url: &Url) -> Ad4mDbResult<Secret>;
-            fn set_endpoint_health(&self, id: &str, health: &EndpointHealth) -> Ad4mDbResult<()>;
+            fn set_endpoint_health(
+                &self,
+                id: &str,
+                base_url: &Url,
+                health: &EndpointHealth,
+                capabilities: &[AiCapability]
+            ) -> Ad4mDbResult<bool>;
             fn endpoint_model_ids(&self, id: &str) -> Ad4mDbResult<Vec<String>>;
+            fn endpoint_remote_models(&self, id: &str) -> Ad4mDbResult<Vec<String>>;
             fn models_using_remote(&self, id: &str, remote_model: &str) -> Ad4mDbResult<Vec<String>>;
             fn remove_endpoint(&self, id: &str) -> Ad4mDbResult<()>;
 

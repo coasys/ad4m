@@ -149,7 +149,7 @@ impl OllamaChat {
             }
         };
 
-        let json: serde_json::Value = match response.json().await {
+        let json: serde_json::Value = match super::http::read_json(response).await {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("Could not parse /api/show response for {model}: {e}");
@@ -264,6 +264,10 @@ impl Discover for OllamaDiscover {
     async fn list_models(&self) -> Result<Vec<DiscoveredModel>> {
         let url = format!("{}/api/tags", self.root);
         let json = super::http::fetch_json(self.http.get(&url), &url, "").await?;
+        // A 200 without the list is no listing: the endpoint would count as reachable.
+        if !json.get("models").is_some_and(|models| models.is_array()) {
+            return Err(anyhow!("{url} answered without a model list"));
+        }
         let names = model_names_from_tags(&json);
         Ok(futures::future::join_all(names.into_iter().map(|name| self.describe(name))).await)
     }
@@ -273,6 +277,9 @@ impl Discover for OllamaDiscover {
 /// download reports progress many times a second; verifying a large blob can be silent
 /// for a while.
 const PULL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The longest progress line a pull reads. Ollama's are about 200 bytes.
+const MAX_PULL_LINE: usize = 64 * 1024;
 
 /// One progress line of `POST /api/pull`.
 #[derive(Debug, Clone, PartialEq)]
@@ -318,17 +325,19 @@ pub async fn pull_model(
 
     let url = format!("{}/api/pull", ollama_root(base_url));
     // No overall timeout: a pull runs as long as the download does. A stall is caught
-    // per line instead.
+    // before the answer starts and per line after.
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .build()
         .expect("the HTTP client builds");
-    let response = http
+    let request = http
         .post(&url)
         .json(&serde_json::json!({ "model": model, "stream": true }))
-        .send()
+        .send();
+    let response = tokio::time::timeout(PULL_IDLE_TIMEOUT, request)
         .await
+        .map_err(|_| anyhow!("{url} did not answer the pull of {model} in {PULL_IDLE_TIMEOUT:?}"))?
         .map_err(|e| anyhow!("Could not reach {url}: {e}"))?;
     if !response.status().is_success() {
         return Err(super::http::UpstreamStatus::read(response, &url, "")
@@ -338,8 +347,10 @@ pub async fn pull_model(
 
     let mut stream = response.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
+    // Moved by each progress line only: bytes that never end a line are no progress.
+    let mut deadline = tokio::time::Instant::now() + PULL_IDLE_TIMEOUT;
     loop {
-        let next = tokio::time::timeout(PULL_IDLE_TIMEOUT, stream.next())
+        let next = tokio::time::timeout_at(deadline, stream.next())
             .await
             .map_err(|_| {
                 anyhow!("The pull of {model} stalled: no progress for {PULL_IDLE_TIMEOUT:?}")
@@ -353,12 +364,19 @@ pub async fn pull_model(
         while let Some(newline) = buffer.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = buffer.drain(..=newline).collect();
             if let Some(progress) = pull_progress(&String::from_utf8_lossy(&line))? {
+                deadline = tokio::time::Instant::now() + PULL_IDLE_TIMEOUT;
                 let done = progress.status == "success";
                 on_progress(progress);
                 if done {
                     return Ok(());
                 }
             }
+        }
+        // What is left is one unfinished line.
+        if buffer.len() > MAX_PULL_LINE {
+            return Err(anyhow!(
+                "The pull of {model} failed: a progress line is longer than {MAX_PULL_LINE} bytes"
+            ));
         }
     }
 }
@@ -593,8 +611,7 @@ impl RemoteChat for OllamaChat {
             );
         }
 
-        let parsed: ChatResponse = response
-            .json()
+        let parsed: ChatResponse = super::http::read_json(response)
             .await
             .map_err(|e| anyhow!("Could not read Ollama response: {e}"))?;
 
@@ -1363,6 +1380,25 @@ mod wire_tests {
     }
 
     #[tokio::test]
+    async fn a_listing_without_a_models_array_is_an_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/tags")
+            .with_status(200)
+            .with_body(r#"{"error":"nope"}"#)
+            .create_async()
+            .await;
+        let error = OllamaDiscover::new(Url::parse(&server.url()).unwrap(), Duration::from_secs(5))
+            .list_models()
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("without a model list"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn listing_models_reads_the_tags_array() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -1513,6 +1549,39 @@ mod wire_tests {
             error.to_string().contains("before Ollama reported success"),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pull_line_that_never_ends_fails() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/pull")
+            .with_status(200)
+            .with_body("x".repeat(MAX_PULL_LINE + 1))
+            .create_async()
+            .await;
+        let error = pull_model(&Url::parse(&server.url()).unwrap(), "m", |_| {})
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("longer than"), "{error}");
+    }
+
+    // A server that takes the connection and never answers: the pull gives up.
+    #[tokio::test(start_paused = true)]
+    async fn a_pull_with_no_answer_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let silent = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            // Hold the connection open, unanswered.
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+
+        let error = pull_model(&url, "m", |_| {}).await.unwrap_err();
+
+        assert!(error.to_string().contains("did not answer"), "{error}");
+        silent.abort();
     }
 
     #[tokio::test]

@@ -382,6 +382,46 @@ fn estimate_reply_tokens(reply: &ChatReply) -> usize {
     estimate_token_count(&reply.text) + calls
 }
 
+/// One remote chat call of a model worker under the limits the operator set on the
+/// endpoint `endpoint_id` names (none without an endpoint): a slot by `max_concurrent`,
+/// shared with the calls `/v1` forwards, and for an answer that is not a stream,
+/// `request_timeout_secs` (default 300 s), the wait for the slot included. A stream keeps
+/// its client's own bound.
+async fn within_endpoint_limits<T>(
+    endpoint_id: Option<&str>,
+    stream: bool,
+    call: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let endpoint = endpoint_id.and_then(|id| {
+        crate::db_backend::db_backend()
+            .get_endpoint(id)
+            .ok()
+            .flatten()
+    });
+    let Some(endpoint) = endpoint else {
+        return call.await;
+    };
+    let limited = async {
+        let _slot = endpoints::request_slot(&endpoint).await;
+        call.await
+    };
+    if stream {
+        return limited.await;
+    }
+    let timeout = endpoints::request_timeout(&endpoint, CHAT_TIMEOUT);
+    tokio::time::timeout(timeout, limited).await.map_err(|_| {
+        anyhow::Error::from(providers::http::UpstreamUnreachable {
+            url: endpoint.base_url.to_string(),
+            timed_out: true,
+            detail: format!("no answer within {}s", timeout.as_secs()),
+        })
+    })?
+}
+
+/// How long a remote chat answer may take unless its endpoint sets `request_timeout_secs`;
+/// `/v1` forwards with the same default.
+const CHAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// The turn list for a task-shaped prompt: the task's system prompt, its
 /// examples as alternating user/assistant turns, then the live prompt.
 ///
@@ -1041,7 +1081,11 @@ impl AIService {
                                         ChatRequest::new(model_string.clone(), turns_request.turns)
                                             .with_tools(turns_request.tools);
 
-                                    let result = rt.block_on(remote_client.chat(request));
+                                    let result = rt.block_on(within_endpoint_limits(
+                                        model_config.endpoint_id.as_deref(),
+                                        false,
+                                        remote_client.chat(request),
+                                    ));
                                     let _ = turns_request.result_sender.send(result);
                                 }
                                 LlmModel::Local(_) => {
@@ -1069,7 +1113,11 @@ impl AIService {
                                         );
 
                                         let result = rt
-                                            .block_on(remote_client.chat(request))
+                                            .block_on(within_endpoint_limits(
+                                                model_config.endpoint_id.as_deref(),
+                                                false,
+                                                remote_client.chat(request),
+                                            ))
                                             .map(|reply| reply.text);
 
                                         let _ = prompt_request.result_sender.send(result);
@@ -1151,9 +1199,11 @@ impl AIService {
                                             turns_for_task(task, prompt_clone.clone()),
                                         );
                                         let token_sender = stream_request.token_sender.clone();
-                                        match rt.block_on(
+                                        match rt.block_on(within_endpoint_limits(
+                                            model_config.endpoint_id.as_deref(),
+                                            true,
                                             remote_client.chat_stream(request, token_sender),
-                                        ) {
+                                        )) {
                                             Err(e) => {
                                                 let _ = stream_request.done_sender.send(Err(e));
                                             }
@@ -1925,25 +1975,32 @@ impl AIService {
     // -------------------------------------
 
     /// Make `model` ready to embed, replacing what embedded for it before: the client of
-    /// its endpoint when it has one, else Bert on its own thread.
+    /// its endpoint when it has one, else Bert on its own thread. When the client cannot be
+    /// built, the old one is removed too: it would send text to the old URL with the old key.
     async fn spawn_embedding_model(&self, model_config: crate::types::Model) -> Result<()> {
-        let endpoint = match &model_config.endpoint_id {
-            Some(id) => crate::db_backend::db_backend().get_endpoint(id)?,
-            None => None,
-        };
-        let embedder = match (endpoint, &model_config.api) {
-            (Some(endpoint), Some(api)) => Embedder::Remote {
+        let embedder = match &model_config.endpoint_id {
+            Some(id) => crate::db_backend::db_backend().get_endpoint(id),
+            None => Ok(None),
+        }
+        .and_then(|endpoint| match (endpoint, &model_config.api) {
+            (Some(endpoint), Some(api)) => Ok(Embedder::Remote {
                 client: Arc::from(providers::embed::embed_client(&endpoint)?),
                 remote_model: api.model.clone(),
                 endpoint: Box::new(endpoint),
-            },
-            _ => Embedder::Bert(Self::spawn_bert(model_config.id.clone()).0),
-        };
-        self.embedding_channel
-            .lock()
-            .await
-            .insert(model_config.id, embedder);
-        Ok(())
+            }),
+            _ => Ok(Embedder::Bert(Self::spawn_bert(model_config.id.clone()).0)),
+        });
+        let mut embedders = self.embedding_channel.lock().await;
+        match embedder {
+            Ok(embedder) => {
+                embedders.insert(model_config.id, embedder);
+                Ok(())
+            }
+            Err(e) => {
+                embedders.remove(&model_config.id);
+                Err(e)
+            }
+        }
     }
 
     /// Bert on its own thread, embedding each request's texts in order. The receiver
@@ -2540,34 +2597,29 @@ impl AIService {
 
         log::info!("Updated model in DB: {:?}", updated_model);
 
+        if updated_model.model_type != ModelType::Embedding {
+            // A model that is no longer an embedding model no longer embeds.
+            self.embedding_channel.lock().await.remove(&model_id);
+        }
+        // Shut down the model's LLM thread, whatever its type is now: a model that is no
+        // longer an LLM must not keep one.
+        {
+            let mut llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.remove(&model_id) {
+                log::info!("Shutting down LLM model thread for {}", model_id);
+                let (tx, rx) = oneshot::channel();
+                if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                    result_sender: tx,
+                })) {
+                    // Wait for the thread to confirm shutdown
+                    let _ = rx.await;
+                    log::info!("LLM model thread for {} confirmed shutdown", model_id);
+                }
+            }
+        }
+
         match updated_model.model_type {
             ModelType::Llm => {
-                // Shutdown the existing model thread
-                {
-                    let mut llm_channel = self.llm_channel.lock().await;
-                    if let Some(sender) = llm_channel.get(&model_id) {
-                        log::info!("Shutting down LLM model thread for {}", model_id);
-                        let (tx, rx) = oneshot::channel();
-                        if let Ok(()) =
-                            sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
-                                result_sender: tx,
-                            }))
-                        {
-                            // Wait for the thread to confirm shutdown
-                            let _ = rx.await;
-                            log::info!("LLM model thread for {} confirmed shutdown", model_id);
-                        }
-
-                        // Remove the channel from the map
-                        llm_channel.remove(&model_id);
-                    } else {
-                        log::info!(
-                            "LLM model thread for {} not found. Nothing to shutdown",
-                            model_id
-                        );
-                    }
-                }
-
                 // Spawn the model with new configuration
                 log::info!(
                     "Spawning new LLM model thread for {} with updated config",
@@ -2578,13 +2630,18 @@ impl AIService {
                     .await?;
                 model_ready_rx.await?;
 
-                // Respawn all tasks for this model
+                // Respawn all tasks for this model: by its id, or by "default" when it is
+                // the default LLM.
                 let tasks = crate::db_backend::db_backend()
                     .get_tasks()
                     .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-                for task in tasks.into_iter().filter(|t| t.model_id == model_id) {
-                    self.spawn_task(task).await?;
+                for task in tasks {
+                    if Self::replace_model_variables(&task.model_id).ok().as_ref()
+                        == Some(&model_id)
+                    {
+                        self.spawn_task(task).await?;
+                    }
                 }
             }
             ModelType::Embedding => self.spawn_embedding_model(updated_model).await?,

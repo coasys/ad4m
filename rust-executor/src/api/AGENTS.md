@@ -562,9 +562,14 @@ Wire translation over `AIService`, and an aggregator over the AI endpoints:
 `<endpoint name>/<remote model>`). `passthrough.rs` forwards chat and text completions
 and speech to a model's endpoint as the client wrote them (only `model` rewritten, SSE
 passed event by event, billed from upstream `usage`), unless the endpoint is Anthropic
-or the request has active tools the model does not take as definitions: those, and
-models without an endpoint, the executor answers. Upstream failures map per plan §5.4
-(`OpenAIError::from_upstream`); messages name no URL. Embeddings go through
+or Ollama (its `/v1` ignores `num_ctx`; the executor uses native `/api/chat`) or the
+request has active tools the model does not take as definitions: those, and models
+without an endpoint, the executor answers. For a caller who pays, `cap_cost` lowers the
+completion limits so prompt plus `n` answers fit the caller's credits, and drops
+`service_tier`. A stream is billed when it is dropped (`StreamBill`), however it ends,
+and times out on silence, not on its length. Upstream failures map per plan §5.4
+(`OpenAIError::from_endpoint`); messages name no URL, and `/v1/models` shows no health
+`detail`. Embeddings go through
 `AIService::embed_batch`. `GET /v1/models` lists model rows by name, not upstream lists.
 Exception: `harness_bridge.rs` +
 `tool_grammar.rs` are the interpretation harness's `CompletionSource` and tool

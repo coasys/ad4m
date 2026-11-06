@@ -2606,7 +2606,7 @@ impl Ad4mDb {
 
         // Export models
         let models: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx FROM models"
+            "SELECT id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx, api_native_tools FROM models"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -2622,10 +2622,14 @@ impl Ad4mDb {
                 "local_tokenizer_repo": row.get::<_, Option<String>>(10)?,
                 "local_tokenizer_revision": row.get::<_, Option<String>>(11)?,
                 "local_tokenizer_file_name": row.get::<_, Option<String>>(12)?,
-                "api_max_num_ctx": row.get::<_, Option<u32>>(13)?
+                "api_max_num_ctx": row.get::<_, Option<u32>>(13)?,
+                "api_native_tools": row.get::<_, Option<bool>>(14)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert("models".to_string(), serde_json::to_value(models)?);
+        // The models' links to them are not exported: an import links each model again
+        // to the endpoint with its protocol, URL and key.
+        export_data.insert("ai_endpoints".to_string(), self.export_endpoints()?.into());
 
         // Export default_models
         let default_models: Vec<serde_json::Value> = self
@@ -2992,6 +2996,25 @@ impl Ad4mDb {
             }
         }
 
+        // Import AI endpoints, before the models that link to them
+        if let Some(endpoints) = data.get("ai_endpoints").and_then(|e| e.as_array()) {
+            result.ai_endpoints.total = endpoints.len() as i32;
+            for endpoint in endpoints {
+                match self.import_endpoint(endpoint) {
+                    Ok(()) => result.ai_endpoints.imported += 1,
+                    Err(e) => {
+                        let name = endpoint["name"].as_str().unwrap_or("<unknown>");
+                        result.ai_endpoints.failed += 1;
+                        result
+                            .ai_endpoints
+                            .errors
+                            .push(format!("Failed to import AI endpoint {name}: {e}"));
+                        log::warn!("Failed to import AI endpoint {name}: {e}");
+                    }
+                }
+            }
+        }
+
         // Import models
         if let Some(models) = data.get("models") {
             match serde_json::from_value::<Vec<serde_json::Value>>(models.clone()) {
@@ -3025,8 +3048,8 @@ impl Ad4mDb {
                             },
                         };
                         match self.conn.execute(
-                            "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx) 
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                            "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx, api_native_tools)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                             params![
                                 model["id"].as_str().unwrap_or(""),
                                 model["name"].as_str().unwrap_or(""),
@@ -3041,7 +3064,9 @@ impl Ad4mDb {
                                 model["local_tokenizer_repo"].as_str(),
                                 model["local_tokenizer_revision"].as_str(),
                                 model["local_tokenizer_file_name"].as_str(),
-                                max_num_ctx
+                                max_num_ctx,
+                                // Missing in exports that predate the column.
+                                model["api_native_tools"].as_bool()
                             ],
                         ) {
                             Ok(_) => result.models.imported += 1,
@@ -3061,6 +3086,15 @@ impl Ad4mDb {
                         .push(format!("Failed to parse models: {}", e));
                     log::warn!("Failed to parse models: {}", e)
                 }
+            }
+            // Each imported remote model gets its endpoint now, as at startup: endpoint
+            // management and its in-use checks see only linked models.
+            if let Err(e) = self.link_models_to_endpoints() {
+                result
+                    .models
+                    .errors
+                    .push(format!("Failed to link models to AI endpoints: {e}"));
+                log::warn!("Failed to link models to AI endpoints: {e}");
             }
         }
 

@@ -98,9 +98,15 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// The most identity strings semantic dedup sends in one embedding request. Endpoints cap
+/// a request's inputs (OpenAI at 2048) and its tokens; identity strings are short, so the
+/// count is what binds.
+pub(crate) const EMBED_BATCH: usize = 64;
+
 /// Embed `texts` through the executor's own [`AIService`] embedding model
 /// (`model_id` names a registered `ModelType::Embedding` model, by id or name: the
-/// endpoint that serves it, or a local Bert for a model without one). One batch
+/// endpoint that serves it, or a local Bert for a model without one). One request per
+/// [`EMBED_BATCH`] texts, so a large class stays within what an endpoint takes in one
 /// request; order is preserved so callers can zip results back onto their inputs.
 pub(crate) async fn embed_via_ai_service(
     model_id: &str,
@@ -113,11 +119,15 @@ pub(crate) async fn embed_via_ai_service(
         .await
         .map_err(|e| anyhow::anyhow!("semantic dedup: AIService not ready: {e:#}"))?;
     let batch_started = std::time::Instant::now();
-    let embedded = service
-        // Internal caller (SHACL dedup) — no user auth context; billing skipped.
-        .embed_batch(model_id, texts.to_vec(), None)
-        .await
-        .map_err(|e| anyhow::anyhow!("semantic dedup: embed('{model_id}') failed: {e:#}"))?;
+    let mut vectors = Vec::with_capacity(texts.len());
+    for batch in texts.chunks(EMBED_BATCH) {
+        let embedded = service
+            // Internal caller (SHACL dedup) — no user auth context; billing skipped.
+            .embed_batch(model_id, batch.to_vec(), None)
+            .await
+            .map_err(|e| anyhow::anyhow!("semantic dedup: embed('{model_id}') failed: {e:#}"))?;
+        vectors.extend(embedded.vectors);
+    }
     // One line per dedup pass; see rust-executor/LOGGING.md.
     log::info!(
         "🤖 embed batch model={} n={} latency_total={}ms (semantic-dedup)",
@@ -125,7 +135,7 @@ pub(crate) async fn embed_via_ai_service(
         texts.len(),
         batch_started.elapsed().as_millis()
     );
-    Ok(embedded.vectors)
+    Ok(vectors)
 }
 
 /// PURE (no I/O) semantic-dedup filter over pre-computed vectors — the

@@ -139,6 +139,24 @@ impl OpenAIError {
         Self::new(status, message, kind, Some(kind))
     }
 
+    /// [`Self::from_upstream`] for a failure on a registered endpoint. A failure that is not
+    /// the endpoint's answer (a body this executor could not read, a transport error) gives
+    /// a fixed message: its own text can name the endpoint's URL (a `reqwest` error does).
+    /// The executor's log keeps the text.
+    pub fn from_endpoint(error: &anyhow::Error) -> Self {
+        use crate::ai_service::providers::http::{UpstreamStatus, UpstreamUnreachable};
+        if error.downcast_ref::<UpstreamUnreachable>().is_some()
+            || error.downcast_ref::<UpstreamStatus>().is_some()
+        {
+            return Self::from_upstream(error);
+        }
+        Self::upstream_failure(
+            StatusCode::BAD_GATEWAY,
+            "The model's endpoint gave an answer this executor could not use",
+            "upstream_error",
+        )
+    }
+
     /// The client's view of a failure of the model's endpoint (plan §5.4). The messages
     /// name no URL (a user does not read endpoints), and an upstream 401 or 403 is never
     /// passed on: the client's own token was fine.

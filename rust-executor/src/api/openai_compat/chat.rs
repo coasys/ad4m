@@ -19,9 +19,10 @@
 //! A model whose provider carries tools as data skips all of that and goes
 //! through [`super::native_tools`] instead.
 //!
-//! A model on an OpenAI-shaped endpoint (Ollama included) is not answered here at
-//! all: the request goes to the endpoint as it is ([`super::passthrough`]), unless it
-//! carries tools the model does not take as definitions.
+//! A model on an OpenAI-shaped endpoint is not answered here at all: the request goes
+//! to the endpoint as it is ([`super::passthrough`]), unless it carries tools the model
+//! does not take as definitions. Ollama is answered here, through its native
+//! `/api/chat`, which honours `num_ctx`.
 
 use std::convert::Infallible;
 use std::time::SystemTime;

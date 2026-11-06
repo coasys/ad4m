@@ -65,7 +65,8 @@ fn model_info(m: Model, endpoint: Option<&Endpoint>, created: i64) -> ModelInfo 
 
 /// Where `remote_model` stands on `endpoint` by its last health check: down when the
 /// endpoint is, missing when it answered and did not list the model (Ollama lists `m` as
-/// `m:latest`). `None` before a check.
+/// `m:latest`). `None` before a check. No `detail`: the health check's names the endpoint's
+/// URL, which only the operator reads (`ai.endpoints`).
 fn status_of(endpoint: &Endpoint, remote_model: &str) -> Option<ModelStatus> {
     let state = match endpoint.health.state {
         EndpointState::Unknown => return None,
@@ -82,6 +83,6 @@ fn status_of(endpoint: &Endpoint, remote_model: &str) -> Option<ModelStatus> {
     Some(ModelStatus {
         state,
         progress: None,
-        detail: endpoint.health.detail.clone(),
+        detail: None,
     })
 }

@@ -557,9 +557,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Probed once before it saves.
     map.method::<EndpointInput, EndpointView>("ai.addEndpoint", add_endpoint)
         .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // Long: an update reloads the models on the endpoint, and a cascade removes them, each
+    // after the inference it runs.
     map.method::<AiUpdateEndpointParams, EndpointView>("ai.updateEndpoint", update_endpoint)
+        .long()
         .guard(Guard::Executor(AI_UPDATE_CAPABILITY.clone()));
     map.method::<AiRemoveEndpointParams, bool>("ai.removeEndpoint", remove_endpoint)
+        .long()
         .guard(Guard::Executor(AI_DELETE_CAPABILITY.clone()));
     // Requests to this machine's loopback ports; saves nothing.
     map.method::<NoParams, Vec<DetectedEndpoint>>("ai.detectEndpoints", detect_endpoints)
