@@ -5,7 +5,9 @@
 //! like any node its messages hang off (`ad4m://has_child`), so `perspective.agentReply` answers
 //! in it as in any other conversation. What a session adds is a home a client can create, list
 //! (a model query on `AgentSession`, by `about`) and delete, and settings an agent reply reads so
-//! the client doesn't send them every time.
+//! the client doesn't send them every time. The session's write tools go with its `workIn`: a
+//! reply that names another perspective gets only the write tools it names
+//! ([`SessionSettings::for_reply`]).
 //!
 //! **The settings stay on this node.** Where the agent works (`workIn`, a perspective uuid that
 //! means nothing to another node), the person's library (`library`, likewise a uuid: where the
@@ -42,6 +44,34 @@ pub struct SessionSettings {
     pub library: Option<String>,
     pub write_tools: Vec<String>,
     pub model: Option<String>,
+}
+
+impl SessionSettings {
+    /// What a reply in the session runs with when the call names `work_in`, `library`,
+    /// `write_tools` and `model`: what the call names, and the session's for what it leaves out.
+    /// The session's write tools go with its perspectives (`workIn` and the library, both of
+    /// which they write in): a call that names its own `workIn` or library gets only the write
+    /// tools it names, never ones chosen for the session's perspectives. The model is no
+    /// perspective's, so it falls back on its own.
+    pub fn for_reply(
+        self,
+        work_in: Option<String>,
+        library: Option<String>,
+        write_tools: Option<Vec<String>>,
+        model: Option<String>,
+    ) -> SessionSettings {
+        let saved_tools = if work_in.is_none() && library.is_none() {
+            self.write_tools
+        } else {
+            Vec::new()
+        };
+        SessionSettings {
+            work_in: work_in.or(self.work_in),
+            library: library.or(self.library),
+            write_tools: write_tools.unwrap_or(saved_tools),
+            model: model.or(self.model),
+        }
+    }
 }
 
 /// A new session's content and settings.
@@ -171,8 +201,22 @@ pub async fn delete_session(
     if session["author"].as_str() != Some(caller_did) {
         return Ok(false);
     }
-    let _hold = hold_for_delete(&perspective, (id.to_string(), caller_did.to_string()));
+    let hold = hold_for_delete(&perspective, (id.to_string(), caller_did.to_string()));
+    if let Err(e) = remove_what_the_caller_wrote(&mut perspective, id, caller_did, context).await {
+        hold.delete_failed(context).await;
+        return Err(e);
+    }
+    Ok(true)
+}
 
+/// The session, the caller's replies in it and their steps: the caller's own links from each, in
+/// one batch.
+async fn remove_what_the_caller_wrote(
+    perspective: &mut PerspectiveInstance,
+    id: &str,
+    caller_did: &str,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
     let replies: Vec<String> = {
         let raw = perspective
             .model_query(
@@ -236,5 +280,5 @@ pub async fn delete_session(
         .commit_batch(batch, context)
         .await
         .map_err(|e| anyhow::anyhow!("could not delete the session: {e:#}"))?;
-    Ok(true)
+    Ok(())
 }

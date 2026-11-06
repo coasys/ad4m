@@ -41,15 +41,18 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         .await
         .map_err(|e| WsRpcError::internal(format!("{e:#}")))?
         .unwrap_or_default();
-    let work_in = body.work_in.or(saved.work_in).ok_or_else(|| {
+    let SessionSettings {
+        work_in,
+        library,
+        write_tools,
+        model,
+    } = saved.for_reply(body.work_in, body.library, body.write_tools, body.model);
+    let work_in = work_in.ok_or_else(|| {
         WsRpcError::bad_request(
             "`workIn` is missing: name the perspective the agent works in, or reply in a session \
              that has one",
         )
     })?;
-    let library = body.library.or(saved.library);
-    let write_tools = body.write_tools.unwrap_or(saved.write_tools);
-    let model = body.model.or(saved.model);
     // `workIn` and the library are access checks, so they run before the handler's own checks
     // (credits, settings): a call that fails both gets the access answer.
     admit_work_in(&ctx, &work_in, &write_tools).await?;
@@ -232,7 +235,8 @@ pub struct AgentReplyRequest {
     #[ts(optional, type = "Record<string, unknown>")]
     pub context: Option<Value>,
     /// Tools that write which the model may call, as for `perspective.runAgent`. Absent: the
-    /// session's, or none, an agent that only reads.
+    /// session's when `workIn` and `library` are the session's too, else none, an agent that only
+    /// reads.
     #[ts(optional)]
     pub write_tools: Option<Vec<String>>,
     /// A model id. Absent: the session's, else the node's default language model.

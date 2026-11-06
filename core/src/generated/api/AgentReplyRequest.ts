@@ -26,7 +26,8 @@ library?: string,
 context?: Record<string, unknown>, 
 /**
  * Tools that write which the model may call, as for `perspective.runAgent`. Absent: the
- * session's, or none, an agent that only reads.
+ * session's when `workIn` and `library` are the session's too, else none, an agent that only
+ * reads.
  */
 writeTools?: Array<string>, 
 /**

@@ -1,10 +1,11 @@
 {
   "target_class": "ad4m://AgentReply",
-  "interpretation_hint": "An agent's reply in a conversation: what it answered, and whether it is still working on it, done, or stopped.",
+  "interpretation_hint": "An agent's reply in a conversation: the message it answers, what it answered, and whether it is still working on it, done, or stopped.",
   "constructor_actions": [
     {"action": "addLink", "source": "this", "predicate": "ad4m://agent_reply/status", "target": "running"}
   ],
   "properties": [
+    {"path": "ad4m://agent_reply/answers", "name": "answers", "min_count": 1, "max_count": 1},
     {"path": "ad4m://agent_reply/status", "name": "status", "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_reply/status", "target": "value"}]},
     {"path": "ad4m://agent_reply/text",   "name": "text",   "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_reply/text", "target": "value"}]},
     {"path": "ad4m://agent_reply/error",  "name": "error",  "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_reply/error", "target": "value"}]},
