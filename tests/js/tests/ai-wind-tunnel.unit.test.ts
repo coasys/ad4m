@@ -12,7 +12,8 @@ import { fingerprintId, gpuBudget, isIntegratedAmdName } from "../helpers/ai-win
 import { classify, fallbackClasses, memoryFit, type ClassInput } from "../helpers/ai-wind-tunnel/hardware-class.js";
 import { buildMatrix, parseList, resolveModel } from "../helpers/ai-wind-tunnel/matrix.js";
 import { DATA_DIR } from "../helpers/ai-wind-tunnel/paths.js";
-import { spawnLogged, waitForHttp } from "../helpers/ai-wind-tunnel/procs.js";
+import { streamedTranscript } from "../helpers/ai-wind-tunnel/cells.js";
+import { drmClientBytes, spawnLogged, waitForHttp } from "../helpers/ai-wind-tunnel/procs.js";
 import { chatTranscriptionRequest, parseChatTranscript, parseSherpaResult, sherpaFrame, startAudioFront } from "../helpers/ai-wind-tunnel/providers/audio-front.js";
 import { containerMemoryArgs } from "../helpers/ai-wind-tunnel/providers/docker.js";
 import { llamaVariants, sttInstruction } from "../helpers/ai-wind-tunnel/providers/llama-server.js";
@@ -108,6 +109,9 @@ describe("AI wind tunnel (unit)", () => {
 
     it("takes a manifest model's size, licence and memory", () => {
       expect(resolveModel({ modelId: "tiny-llm" }, manifest)).to.deep.include({ modelId: "tiny-llm", remoteModel: "tiny-llm", memoryBytes: 200, license: "MIT", params: "1B" });
+    });
+    it("records the download's sha256, so evidence names the file it measured", () => {
+      expect(resolveModel({ modelId: "tiny-llm" }, manifest)).to.deep.include({ source: "https://x/tiny.gguf", sha256: "0".repeat(64) });
     });
     it("uses a provider's own name, the download as the memory floor", () => {
       expect(resolveModel({ remoteModel: "tiny:1b", sizeBytes: 50 }, manifest)).to.deep.equal({ remoteModel: "tiny:1b", sizeBytes: 50, memoryBytes: 50 });
@@ -314,6 +318,15 @@ describe("AI wind tunnel (unit)", () => {
   });
 
   describe("transcription fronts", () => {
+    it("scores every piece a stream publishes for an utterance, not only the first", async () => {
+      // An upstream that streams its transcript publishes a piece per segment, with its own
+      // spacing; the pieces cross the event socket after the feed resolved.
+      const texts: string[] = [];
+      setTimeout(() => texts.push("The quick"), 10);
+      setTimeout(() => texts.push(" brown fox."), 150);
+      const { text } = await streamedTranscript(texts, Promise.resolve(), { timeoutMs: 5_000 });
+      expect(text).to.equal("The quick brown fox.");
+    });
     it("frames an utterance as sherpa-onnx's offline server reads it", () => {
       const f = sherpaFrame(new Float32Array([0.5, -0.25]), 16000);
       expect(f.length).to.equal(16);
@@ -375,6 +388,33 @@ describe("AI wind tunnel (unit)", () => {
   });
 
   describe("processes", () => {
+    // amdgpu fdinfo on 7.0 (from 6.13): drm_print_memory_stats, then the legacy keys again
+    // as an alias of drm-resident-*.
+    const fdinfo613 = [
+      "drm-driver:\tamdgpu",
+      "drm-client-id:\t43",
+      "drm-total-cpu:\t256580 KiB",
+      "drm-resident-cpu:\t0",
+      "drm-total-gtt:\t1455376 KiB",
+      "drm-shared-gtt:\t0",
+      "drm-resident-gtt:\t1455364 KiB",
+      "drm-purgeable-gtt:\t0",
+      "drm-total-vram:\t952 KiB",
+      "drm-resident-vram:\t952 KiB",
+      "drm-memory-vram:\t952 KiB",
+      "drm-memory-gtt: \t1455364 KiB",
+      "drm-memory-cpu: \t0 KiB",
+      "amd-requested-gtt:\t1455376 KiB",
+    ].join("\n");
+    // Up to 6.12: the legacy keys only.
+    const fdinfo612 = ["drm-driver:\tamdgpu", "drm-client-id:\t43", "drm-memory-vram:\t952 KiB", "drm-memory-gtt: \t1455364 KiB", "drm-memory-cpu: \t0 KiB"].join("\n");
+    it("counts a DRM client's GPU memory once on amdgpu from kernel 6.13", () => {
+      expect(drmClientBytes(fdinfo613)).to.equal((1455364 + 952) * 1024);
+    });
+    it("counts the legacy drm-memory keys where no drm-resident key is printed", () => {
+      expect(drmClientBytes(fdinfo612)).to.equal((1455364 + 952) * 1024);
+      expect(drmClientBytes("drm-client-id:\t1\ndrm-resident-local:\t2 MiB\ndrm-resident-system:\t0")).to.equal(2 * 1024 * 1024);
+    });
     it("caps a container's memory and swap alike, or not at all", () => {
       expect(containerMemoryArgs("8g")).to.deep.equal(["--memory", "8g", "--memory-swap", "8g"]);
       expect(containerMemoryArgs("")).to.deep.equal([]);

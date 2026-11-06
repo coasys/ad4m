@@ -138,8 +138,25 @@ function rssBytes(pid: number): number {
 }
 
 /**
- * GPU memory the processes' DRM clients hold, from /proc/<pid>/fdinfo (amdgpu reports
- * `drm-memory-vram` and `drm-memory-gtt`). Each client id counts once.
+ * GPU memory one DRM client's fdinfo reports, over its vram, gtt, system and local regions.
+ * From kernel 6.13 amdgpu prints `drm-resident-<region>` (drm_print_memory_stats) and then
+ * the legacy `drm-memory-<region>` again, as an alias of it; so the legacy keys count only
+ * where no `drm-resident-` key is printed (amdgpu up to 6.12).
+ */
+export function drmClientBytes(info: string): number {
+  const sum = (prefix: "resident" | "memory"): number | null => {
+    let bytes: number | null = null;
+    for (const m of info.matchAll(new RegExp(`^drm-${prefix}-(?:vram|gtt|system|local):\\s+(\\d+)\\s*(KiB|MiB|kB)?`, "gm"))) {
+      bytes = (bytes ?? 0) + Number(m[1]) * (m[2] === "MiB" ? 1024 * 1024 : m[2] ? 1024 : 1);
+    }
+    return bytes;
+  };
+  return sum("resident") ?? sum("memory") ?? 0;
+}
+
+/**
+ * GPU memory the processes' DRM clients hold, from /proc/<pid>/fdinfo (`drmClientBytes`).
+ * Each client id counts once.
  */
 function drmBytes(pids: number[]): number {
   if (process.platform !== "linux") return 0;
@@ -160,10 +177,7 @@ function drmBytes(pids: number[]): number {
       }
       const id = info.match(/^drm-client-id:\s+(\d+)/m)?.[1];
       if (!id) continue;
-      let bytes = 0;
-      for (const m of info.matchAll(/^drm-(?:memory|resident)-(vram|gtt|system|local):\s+(\d+)\s*(KiB|MiB|kB)?/gm)) {
-        bytes += Number(m[2]) * (m[3] === "MiB" ? 1024 * 1024 : m[3] ? 1024 : 1);
-      }
+      const bytes = drmClientBytes(info);
       clients.set(`${pid}:${id}`, Math.max(clients.get(`${pid}:${id}`) ?? 0, bytes));
     }
   }
