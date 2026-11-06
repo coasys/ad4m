@@ -21,6 +21,40 @@ export async function declareBot(client: any, logger: any): Promise<void> {
   }
 }
 
+/**
+ * External mode's mark: only an account of the plugin's own, a user on the executor
+ * (`auth_status`'s principal `"user"`, which the multi-user login makes). A capability token
+ * acts as the executor's main agent (`"app"`), and that agent may be a person, so it is left as
+ * it is. `connect` makes the client only when it is needed, and it is closed after. Returns
+ * whether it tried.
+ */
+export async function declareBotIfOwnAccount(
+  principal: string | undefined,
+  connect: () => any,
+  logger: any,
+): Promise<boolean> {
+  if (principal !== "user") {
+    logger.info(
+      `[ad4m] Not marking the agent as a bot: the token acts as ${principal ?? "an unknown principal"}, not an account of the plugin's own`,
+    );
+    return false;
+  }
+  let client: any;
+  try {
+    client = connect();
+    await declareBot(client, logger);
+  } catch (e: any) {
+    logger.warn(`[ad4m] Could not mark the agent as a bot in its profile: ${e?.message ?? e}`);
+  } finally {
+    try {
+      client?.close?.();
+    } catch {
+      // A client that fails to close was only used for this one call.
+    }
+  }
+  return true;
+}
+
 export interface AgentResult {
   did: string;
   passphrase?: string;
@@ -32,6 +66,9 @@ export interface AgentResult {
  * Creates an Ad4mClient connection to the executor, checks agent
  * status, and generates (first run) or unlocks (subsequent runs) as needed.
  *
+ * Once the agent is ready, marks it as a bot ({@link declareBot}) unless `markAsBot` is false
+ * (the `declareBot: false` config).
+ *
  * Returns { did, passphrase? } on success (passphrase only set when a new
  * agent was generated), or null if agent management failed.
  */
@@ -42,6 +79,7 @@ export async function ensureAgentReady(
   agentPassphrase?: string,
   /** @internal — pass a pre-built Ad4mClient for testing */
   _testClient?: any,
+  markAsBot: boolean = true,
 ): Promise<AgentResult | null> {
   const MAX_CONNECT_ATTEMPTS = 10;
   const CONNECT_RETRY_DELAY_MS = 2000;
@@ -108,7 +146,7 @@ export async function ensureAgentReady(
         logger.info(
           `[ad4m] Agent generated successfully. DID: ${newStatus.did}`,
         );
-        await declareBot(client, logger);
+        if (markAsBot) await declareBot(client, logger);
         return { did: newStatus.did, passphrase: agentPassphrase ? undefined : passphrase };
       } catch (e: any) {
         logger.error(`[ad4m] Failed to generate agent: ${e.message}`);
@@ -125,7 +163,7 @@ export async function ensureAgentReady(
           logger.info(
             `[ad4m] Agent unlocked successfully. DID: ${newStatus.did}`,
           );
-          await declareBot(client, logger);
+          if (markAsBot) await declareBot(client, logger);
           return { did: newStatus.did };
         } catch (e: any) {
           logger.error(`[ad4m] Failed to unlock agent: ${e.message}`);
@@ -143,7 +181,7 @@ export async function ensureAgentReady(
     } else {
       // Already initialized and unlocked
       logger.info(`[ad4m] Agent is ready. DID: ${agentStatus.did}`);
-      await declareBot(client, logger);
+      if (markAsBot) await declareBot(client, logger);
       return { did: agentStatus.did };
     }
   } catch (err: any) {

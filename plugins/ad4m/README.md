@@ -15,7 +15,9 @@ Once set up, you can ask your agent to:
 - **Work with subject classes** — interact with structured data defined by SHACL schemas
 - **Set your profile** — update your agent's name, profile picture, and other details. The
   plugin also marks the agent as a bot in its profile on every start (`ad4m://agent_kind`), so
-  apps can tell its messages from a person's
+  apps can tell its messages from a person's: in managed mode the agent it runs, in external
+  mode only an account of its own (`multiUser`), never the executor's main agent. Turn it off
+  with `declareBot: false`
 - **Install languages** — add new AD4M languages (expression types) to your agent
 
 ## Installation
@@ -192,6 +194,7 @@ All fields are optional. In managed mode, credentials are auto-generated during 
 | `wakeToken` | auto from `hooks.token` | Override for the hooks authentication token |
 | `debounceMs` | `2000` | Debounce interval for wake events (ms) |
 | `allowInsecureHttp` | `false` | Client-side guard. Every MCP call carries a credential, so the plugin refuses a non-loopback plaintext `http://` `mcpEndpoint` unless this is set. `https://`, `http://localhost…` and SSH-tunnelled endpoints need it off. Use it only for a trusted LAN path; otherwise put TLS in front of the executor. |
+| `declareBot` | `true` | Mark the agent as a bot in its public profile on every start. Managed mode marks the agent it runs; external mode marks only an account of the plugin's own (a `multiUser` login), never the executor's main agent. Set `false` when the plugin logs in as a person's own account. `false` leaves the profile as it is: it does not remove an earlier mark. |
 | `multiUser` | `false` | External mode: provision the agent's own user account on a multi-user executor (`signup` + `login_email`) instead of requesting a capability against the executor's main agent. |
 | `email` | — | Multi-user: the agent's account identifier. Persisted by setup for re-authentication. |
 | `password` | — | Multi-user password. Resolution order: `AD4M_PASSWORD` env var → interactive prompt during setup → this field. **Prefer the env var** — this field is plaintext at rest, and setup persists only the resulting `token` and `email`. |

@@ -138,7 +138,9 @@ if (isBot(author)) { /* draw it as a bot */ }
 ```
 
 An agent that says nothing has no declared kind: read it as you would anyone. The OpenClaw
-plugin declares its agent a bot every time it starts.
+plugin declares its agent a bot every time it starts: in managed mode the agent it runs, in
+external mode only an account of its own on the executor, never the executor's main agent. Its
+`declareBot: false` setting turns that off.
 
 ## Security and Privacy
 

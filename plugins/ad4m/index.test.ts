@@ -30,7 +30,7 @@ function makeMockAd4mClient(agentMethods: {
   };
 }
 
-import { AGENT_KIND_BOT } from "./agent";
+import { AGENT_KIND_BOT, declareBotIfOwnAccount } from "./agent";
 import { AGENT_KIND_BOT as SDK_AGENT_KIND_BOT } from "../../core/src/agent/AgentKind";
 import {
   generateRandomPassphrase,
@@ -69,6 +69,7 @@ import {
 
 import ad4mPlugin, {
   _resetModuleState,
+  _setAgentClientForTests,
   _setSubscriptionManagerForTests,
   _parkedSubscriptionsForTests,
   stateToSave,
@@ -808,6 +809,34 @@ describe("stopExecutor", () => {
 // ensureAgentReady
 // ---------------------------------------------------------------------------
 
+describe("declareBotIfOwnAccount (external mode)", () => {
+  it("marks an account of the plugin's own, and closes the client it made", async () => {
+    const setKind = vi.fn().mockResolvedValue({});
+    const close = vi.fn();
+    const tried = await declareBotIfOwnAccount("user", () => ({ agent: { setKind }, close }), makeMockLogger());
+    expect(tried).toBe(true);
+    expect(setKind).toHaveBeenCalledWith(AGENT_KIND_BOT);
+    expect(close).toHaveBeenCalled();
+  });
+
+  it.each(["app", "operator", "anonymous", undefined])(
+    "leaves a token acting as %s unmarked, without connecting",
+    async (principal) => {
+      const connect = vi.fn();
+      const tried = await declareBotIfOwnAccount(principal, connect, makeMockLogger());
+      expect(tried).toBe(false);
+      expect(connect).not.toHaveBeenCalled();
+    },
+  );
+
+  it("starts anyway when it cannot connect", async () => {
+    const logger = makeMockLogger();
+    const tried = await declareBotIfOwnAccount("user", () => { throw new Error("no executor"); }, logger);
+    expect(tried).toBe(true);
+    expect(logger.warn.mock.calls.some((c: any[]) => String(c[0]).includes("no executor"))).toBe(true);
+  });
+});
+
 describe("ensureAgentReady", () => {
   it("says in the agent's profile that it is a bot, on every start", async () => {
     const setKind = vi.fn().mockResolvedValue({});
@@ -849,6 +878,20 @@ describe("ensureAgentReady", () => {
     expect(result?.did).toBe("did:key:z6MkBot");
     expect(setKind).toHaveBeenCalledWith(AGENT_KIND_BOT);
     expect(start.mock.invocationCallOrder[0]).toBeLessThan(setKind.mock.invocationCallOrder[0]);
+  });
+
+  it.each([
+    ["generates", { isInitialized: false, isUnlocked: false }],
+    ["unlocks", { isInitialized: true, isUnlocked: false }],
+    ["finds ready", { isInitialized: true, isUnlocked: true }],
+  ] as const)("leaves the profile alone with declareBot false when it %s the agent", async (_, first) => {
+    const ready = { isInitialized: true, isUnlocked: true, did: "did:key:z6MkPerson" };
+    const status = vi.fn().mockResolvedValueOnce({ ...first, did: "did:key:z6MkPerson" }).mockResolvedValue(ready);
+    const setKind = vi.fn().mockResolvedValue({});
+    const client = makeMockAd4mClient({ status, generate: vi.fn(), unlock: vi.fn(), setKind });
+    const result = await ensureAgentReady("http://localhost:12000", "c", makeMockLogger(), "pass", client, false);
+    expect(result?.did).toBe("did:key:z6MkPerson");
+    expect(setKind).not.toHaveBeenCalled();
   });
 
   it("returns { did } when agent is already initialized and unlocked", async () => {
@@ -1849,6 +1892,43 @@ describe("ad4mPlugin", () => {
 
     waker!.stop();
     vi.doUnmock("@coasys/ad4m");
+  });
+
+  it.each([
+    ["marks an account of its own", "user", undefined, true],
+    ["leaves the executor's main agent alone", "app", undefined, false],
+    ["leaves its own account alone with declareBot false", "user", false, false],
+  ] as const)("external mode %s", async (_, principal, declareBot, marked) => {
+    const toolsCalled: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url: any, init: any) => {
+      const body = JSON.parse(init.body);
+      if (body.method === "tools/call") toolsCalled.push(body.params.name);
+      const result =
+        body.method === "tools/call" && body.params.name === "auth_status"
+          ? { content: [{ type: "text", text: JSON.stringify({ authenticated: true, principal }) }] }
+          : {};
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result }, { "mcp-session-id": "s1" });
+    });
+    const setKind = vi.fn().mockResolvedValue({});
+    const close = vi.fn();
+    _setAgentClientForTests(() => ({ agent: { setKind }, close }));
+    const registeredServices: Array<{ id: string; [k: string]: any }> = [];
+    try {
+      await ad4mPlugin({
+        pluginConfig: { mode: "external", mcpEndpoint: "http://localhost:3001/mcp", token: "test-cred", declareBot },
+        logger: makeMockLogger(),
+        registerTool: vi.fn(),
+        registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+        registerCli: vi.fn(),
+      });
+      await registeredServices.find((svc) => svc.id === "ad4m-mcp")!.start({ stateDir: undefined });
+      expect(toolsCalled.includes("auth_status")).toBe(declareBot !== false);
+      expect(setKind.mock.calls).toEqual(marked ? [[AGENT_KIND_BOT]] : []);
+      expect(close).toHaveBeenCalledTimes(marked ? 1 : 0);
+    } finally {
+      registeredServices.find((svc) => svc.id === "ad4m-mcp")?.stop?.();
+      _setAgentClientForTests(null);
+    }
   });
 
   it("withTimeout rejects a promise that never settles, and passes one that does", async () => {
