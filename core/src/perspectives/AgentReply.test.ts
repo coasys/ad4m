@@ -4,7 +4,7 @@
  */
 import * as fs from "fs";
 import * as path from "path";
-import { AgentReplyRecord, AgentStepRecord } from "./AgentReply";
+import { AgentReplyRecord, AgentSessionRecord, AgentStepRecord } from "./AgentReply";
 
 const sdna = (file: string) =>
   JSON.parse(
@@ -12,6 +12,7 @@ const sdna = (file: string) =>
   );
 const SDNA = sdna("agent_reply.json");
 const STEP_SDNA = sdna("agent_step.json");
+const SESSION_SDNA = sdna("agent_session.json");
 
 describe("AgentReplyRecord", () => {
   it("matches the executor's class", () => {
@@ -27,6 +28,14 @@ describe("AgentReplyRecord", () => {
     expect(shape.targetClass).toBe(STEP_SDNA.target_class);
     expect(shape.properties.map((p: any) => [p.path, p.name])).toEqual(
       STEP_SDNA.properties.map((p: any) => [p.path, p.name]),
+    );
+  });
+
+  it("AgentSessionRecord matches the executor's session class, settings local", () => {
+    const { shape } = (AgentSessionRecord as any).generateSHACL();
+    expect(shape.targetClass).toBe(SESSION_SDNA.target_class);
+    expect(shape.properties.map((p: any) => [p.path, p.name, !!p.local])).toEqual(
+      SESSION_SDNA.properties.map((p: any) => [p.path, p.name, !!p.local]),
     );
   });
 

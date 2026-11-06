@@ -10,7 +10,8 @@
 
 import { expect } from "chai";
 import {
-  Ad4mClient, Ad4mModel, AgentReplyRecord, Link, LinkQuery, Model, PerspectiveProxy, Property,
+  Ad4mClient, Ad4mModel, AgentReplyRecord, AgentSessionRecord, Link, LinkQuery, Model, PerspectiveProxy,
+  Property,
 } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
 import { startAgent, waitUntil } from "../../helpers/index.js";
@@ -108,6 +109,39 @@ describe("perspective.agentReply", function () {
     // The reply is a message of the conversation, a child of the container.
     const children = await p.get(new LinkQuery({ source: CHAT, predicate: "ad4m://has_child" }));
     expect(children.map((l) => l.data.target)).to.include(second);
+  });
+
+  it("replies in a session with its settings, lists it by what it is about, and deletes it", async () => {
+    const about = "replytest://template/1";
+    const { sessionId } = await p.agentSessionCreate({
+      title: "Chat 1",
+      about,
+      workIn: p.uuid,
+      model: MISSING_MODEL,
+    });
+    const listed = await AgentSessionRecord.findAll(p, { where: { about } });
+    expect(listed.map((s) => [s.id, s.title])).to.deep.equal([[sessionId, "Chat 1"]]);
+
+    const line = new ReplyTestLine(p);
+    line.text = "hello";
+    await line.save();
+    await p.add(new Link({ source: sessionId, predicate: "ad4m://has_child", target: line.id }));
+    // No settings sent: the session's are used.
+    const { replyId } = await p.agentReply(sessionId);
+    await waitUntil(
+      async () => (await AgentReplyRecord.findAll(p)).some((r) => r.id === replyId && r.status === "failed"),
+      30_000,
+      "the session's reply fails on the session's model",
+    );
+    const [reply] = (await AgentReplyRecord.findAll(p)).filter((r) => r.id === replyId);
+    expect(reply.error, "it ran with the session's model, not the node's default").to.not.contain(
+      "no model was named",
+    );
+
+    expect(await p.agentSessionDelete(sessionId)).to.equal(true);
+    expect(await AgentSessionRecord.findAll(p, { where: { about } })).to.deep.equal([]);
+    expect((await AgentReplyRecord.findAll(p)).map((r) => r.id)).to.not.include(replyId);
+    expect(await p.agentSessionDelete(sessionId), "already gone").to.equal(false);
   });
 
   it("answers false to a cancel with nothing running", async () => {

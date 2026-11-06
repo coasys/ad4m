@@ -18,6 +18,7 @@ import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { AgentReplyStarted } from "../generated/api/AgentReplyStarted";
+import type { AgentSessionCreated } from "../generated/api/AgentSessionCreated";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
@@ -345,19 +346,54 @@ export class PerspectiveClient {
         uuid: string,
         container: string,
         settings: {
-            /** The perspective the agent works in: what its tools read and may change. */
-            workIn: string,
+            /**
+             * The perspective the agent works in: what its tools read and may change. May be left
+             * out when `container` is a session created with one, as may `writeTools` and `model`.
+             */
+            workIn?: string,
             /** What the person is looking at, as a hint for the model (`{ recordId }`). */
             context?: Record<string, unknown>,
-            /** Tools that write which the model may call. Absent: the agent only reads. */
+            /**
+             * Tools that write which the model may call. Absent: the session's when `workIn` is
+             * the session's too, else none, an agent that only reads.
+             */
             writeTools?: string[],
-            /** A model id; the node's default language model when absent. */
+            /** A model id. Absent: the session's, else the node's default language model. */
             model?: string,
             /** How many tool calls before the model must answer. Default 20. */
             maxToolCalls?: number,
         },
     ): Promise<AgentReplyStarted> {
         return this.#apiClient.call('perspective.agentReply', { uuid, container, ...settings })
+    }
+
+    /**
+     * Create a conversation the executor owns (an `AgentSessionRecord`), to reply in with
+     * {@link agentReply}: its id is the `container`. `workIn`, `writeTools` and `model` become
+     * its replies' defaults and stay on this node.
+     */
+    async agentSessionCreate(
+        uuid: string,
+        session: {
+            title?: string,
+            /** The record the session is about, by id. */
+            about?: string,
+            workIn?: string,
+            writeTools?: string[],
+            model?: string,
+        } = {},
+    ): Promise<AgentSessionCreated> {
+        return this.#apiClient.call('perspective.agentSessionCreate', { uuid, ...session })
+    }
+
+    /**
+     * Delete a session you created, with your replies in it and their steps (stopping your running
+     * one). Only what you wrote is removed: another member's replies in it stay theirs. The
+     * person's messages leave the session but are the app's records: delete them yourself.
+     * `false` when it is no session or another agent created it.
+     */
+    async agentSessionDelete(uuid: string, session: string): Promise<boolean> {
+        return this.#apiClient.call('perspective.agentSessionDelete', { uuid, session })
     }
 
     /**

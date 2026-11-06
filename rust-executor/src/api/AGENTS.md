@@ -16,8 +16,9 @@ REST/WS shim. Split plan: spec item 6.
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
 handlers), `runtime`, `users`, `agent_session` (`perspective.runAgent`) and `agent_reply`
-(`perspective.agentReply` / `agentReplyCancel`: the reply is written in `uuid`, the agent works
-in `workIn`, whose perspective guard the handler runs itself). Each exposes `register_ws_handlers(&mut HandlerMap)`
+(`perspective.agentReply` / `agentReplyCancel`, `perspective.agentSessionCreate` /
+`agentSessionDelete`: the reply is written in `uuid`, the agent works in `workIn` (the call's, else
+the session's), whose perspective guard the handler runs itself). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -146,7 +147,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-207 methods: Cap 79, Executor 33, Open 5, Operator 18, Owns 70, UserOrOperator 2.
+209 methods: Cap 79, Executor 33, Open 5, Operator 18, Owns 72, UserOrOperator 2.
 
 | Method | Guard |
 |---|---|
@@ -238,6 +239,8 @@ the guard checked:
 | `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.agentReply` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.agentReplyCancel` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.agentSessionCreate` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.agentSessionDelete` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.all` | `Cap(perspective:READ)` |
 | `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
