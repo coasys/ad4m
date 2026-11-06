@@ -241,6 +241,12 @@ impl RemoteStream {
             );
             return Ok(());
         }
+        // Checked again here, not only when the utterance was fed: utterances queue, and the
+        // bill of one lands before the next is sent.
+        if let Some(agent_did) = self.agent_did.as_deref() {
+            crate::billing::check_compute_credits(agent_did)
+                .map_err(|_| anyhow!("Insufficient compute credits"))?;
+        }
         let audio = AudioFile {
             bytes: wav_pcm16(&samples),
             file_name: "utterance.wav".into(),
