@@ -123,7 +123,16 @@ export const speaches: Driver = {
           if (!res.ok && res.status !== 409) throw new Error(`speaches could not download ${model.remoteModel}: HTTP ${res.status} ${await res.text()}`);
         }
         const pid = name ? await containerPid(name) : null;
-        return { baseUrl, remoteModel: model.remoteModel, pids: () => (pid ? [pid] : []), backend: () => variant.backend, async release() {} };
+        return {
+          baseUrl,
+          remoteModel: model.remoteModel,
+          pids: () => (pid ? [pid] : []),
+          backend: () => variant.backend,
+          async release() {
+            // Unload from the container this run started, so the next model's memory peak is its own.
+            if (name) await fetch(`${baseUrl}/api/ps/${model.remoteModel}`, { method: "DELETE" }).catch(() => {});
+          },
+        };
       },
       async close() {
         if (name) {

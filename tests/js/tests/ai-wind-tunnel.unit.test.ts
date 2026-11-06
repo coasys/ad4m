@@ -588,6 +588,37 @@ describe("AI wind tunnel (unit)", () => {
       const r2 = deriveRecommendations([{ path: "e.json", evidence: evidence("cpu-16gb", [noParams, llm("small", "1B", 30, 500)]) }], "t");
       expect(r2.classes["cpu-16gb"].llm!.modelId).to.equal("small");
     });
+    it("leaves out cells measured through a harness-only adapter", () => {
+      const stt = (id: string, rtf: number, adapter?: string) =>
+        cell({ service: "stt", provider: "llama-server", model: { modelId: id, remoteModel: id }, metrics: { werMean: 0, rtf: stat(rtf), ...(adapter ? { adapter } : {}) } });
+      const r = deriveRecommendations(
+        [{ path: "e.json", evidence: evidence("cpu-16gb", [stt("fronted", 0.01, "OpenAI-shaped front: x -> y"), stt("native", 0.1, "none: llama-server's own /v1/audio/transcriptions"), stt("plain", 0.2)]) }],
+        "t",
+      );
+      expect(r.classes["cpu-16gb"].stt).to.deep.include({ modelId: "native", candidates: 2 });
+      const only = deriveRecommendations([{ path: "e.json", evidence: evidence("cpu-16gb", [stt("fronted", 0.01, "OpenAI-shaped front: x -> y")]) }], "t");
+      expect(only.classes).to.deep.equal({});
+    });
+    it("lets the newest evidence for a key decide: a newer failure withdraws it", () => {
+      const r = deriveRecommendations(
+        [
+          { path: "old.json", evidence: evidence("cpu-16gb", [llm("big", "4B", 30, 500), llm("small", "1B", 30, 500)], "2026-11-03T00:00:00.000Z") },
+          { path: "new.json", evidence: evidence("cpu-16gb", [llm("big", "4B", 30, 500, { status: "fail", reason: "wrong answer" })], "2026-12-01T00:00:00.000Z") },
+        ],
+        "t",
+      );
+      expect(r.classes["cpu-16gb"].llm).to.deep.include({ modelId: "small", candidates: 1 });
+      // A newer pass after the failure brings it back, citing the passing files.
+      const back = deriveRecommendations(
+        [
+          { path: "a.json", evidence: evidence("cpu-16gb", [llm("big", "4B", 30, 500)], "2026-11-03T00:00:00.000Z") },
+          { path: "b.json", evidence: evidence("cpu-16gb", [llm("big", "4B", 30, 500, { status: "fail", reason: "x" })], "2026-11-10T00:00:00.000Z") },
+          { path: "c.json", evidence: evidence("cpu-16gb", [llm("big", "4B", 30, 500)], "2026-12-01T00:00:00.000Z") },
+        ],
+        "t",
+      );
+      expect(back.classes["cpu-16gb"].llm).to.deep.include({ modelId: "big", evidence: ["a.json", "c.json"] });
+    });
     it("keeps a provider's own model name when there is no manifest id", () => {
       const r = deriveRecommendations(
         [{ path: "e.json", evidence: evidence("cpu-16gb", [cell({ provider: "ollama", model: { remoteModel: "qwen3.5:2b", params: "2B" }, metrics: { decodeTps: stat(40), ttftMs: stat(300) } })]) }],

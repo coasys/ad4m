@@ -3,7 +3,8 @@
  * out. Per hardware class and service, among the cells that passed every check and fit
  * the machine's memory, the candidates that clear the service's floor (fast enough to
  * use), ranked by the service's order (bigger or more accurate first, then faster).
- * A class with no evidence, or no candidate over the floor, gets no recommendation.
+ * A key whose newest run failed, and a cell measured through a harness-only front, is no
+ * candidate. A class with no evidence, or no candidate over the floor, gets no recommendation.
  */
 
 import { medianOf } from "./stats.js";
@@ -160,11 +161,34 @@ function compare(a: Candidate, b: Candidate, rule: ServiceRule): number {
   return a.evidence[0].localeCompare(b.evidence[0]);
 }
 
+/**
+ * A cell measured through something the harness put in front of the server (an
+ * OpenAI-shaped front, `metrics.adapter`) shows what server and front cost together; a
+ * local setup without that front cannot use the route. "none: ..." names the server's own route.
+ */
+function throughAdapter(c: CellResult): boolean {
+  const a = c.metrics.adapter;
+  return typeof a === "string" && !a.startsWith("none");
+}
+
 export function deriveRecommendations(all: LoadedEvidence[], generatedAt: string, rules = SERVICE_RULES): Recommendations {
+  // The newest evidence that ran a key (pass or fail) decides it: a key whose newest run failed is out.
+  const newest = new Map<string, { at: string; path: string; pass: boolean }>();
+  for (const { path, evidence } of all) {
+    for (const cell of evidence.cells) {
+      if (cell.status !== "pass" && cell.status !== "fail") continue;
+      const k = `${evidence.hardwareClass}|${cell.service}|${cellKey(cell)}`;
+      const n = newest.get(k);
+      const order = n ? evidence.finishedAt.localeCompare(n.at) || path.localeCompare(n.path) : 1;
+      if (order > 0) newest.set(k, { at: evidence.finishedAt, path, pass: cell.status === "pass" });
+      else if (order === 0 && cell.status === "fail") n!.pass = false;
+    }
+  }
   const byClass = new Map<string, { path: string; cell: CellResult }[]>();
   for (const { path, evidence } of all) {
     for (const cell of evidence.cells) {
-      if (cell.status !== "pass" || cell.fit?.fits === false) continue;
+      if (cell.status !== "pass" || cell.fit?.fits === false || throughAdapter(cell)) continue;
+      if (!newest.get(`${evidence.hardwareClass}|${cell.service}|${cellKey(cell)}`)!.pass) continue;
       byClass.set(evidence.hardwareClass, [...(byClass.get(evidence.hardwareClass) ?? []), { path, cell }]);
     }
   }
