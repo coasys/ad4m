@@ -172,8 +172,21 @@ pub struct ProcessStatus {
 pub struct Supervised {
     pub spec: ChildSpec,
     status: watch::Receiver<ProcessStatus>,
-    stop: watch::Sender<bool>,
+    /// The only strong reference: dropping the `Supervised` closes the channel.
+    stop: std::sync::Arc<watch::Sender<bool>>,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// See [`Supervised::stop_handle`]. The default handle stops nothing.
+#[derive(Clone, Default)]
+pub struct StopHandle(std::sync::Weak<watch::Sender<bool>>);
+
+impl StopHandle {
+    pub fn request_stop(&self) {
+        if let Some(stop) = self.0.upgrade() {
+            let _ = stop.send(true);
+        }
+    }
 }
 
 impl Supervised {
@@ -186,6 +199,7 @@ impl Supervised {
             detail: None,
         });
         let (stop, stop_rx) = watch::channel(false);
+        let stop = std::sync::Arc::new(stop);
         let task = tokio::spawn(supervise(spec.clone(), timing, budget, status_tx, stop_rx));
         Supervised {
             spec,
@@ -216,6 +230,12 @@ impl Supervised {
     /// Ask the supervision to stop the child and not restart it, without waiting.
     pub fn request_stop(&self) {
         let _ = self.stop.send(true);
+    }
+
+    /// A handle that asks for the stop as [`Supervised::request_stop`] does, without
+    /// keeping the child: once the `Supervised` is dropped, the handle does nothing.
+    pub fn stop_handle(&self) -> StopHandle {
+        StopHandle(std::sync::Arc::downgrade(&self.stop))
     }
 
     /// Stop the child (SIGTERM, then SIGKILL after 5 s) and the supervision.

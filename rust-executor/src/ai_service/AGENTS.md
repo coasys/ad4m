@@ -80,16 +80,32 @@ The executor still runs no model in-process: `local/` installs and supervises mo
 | File | Does |
 |---|---|
 | `data.rs` | embeds `local/manifest.json` (runtime builds and model files: URL, size, sha256, memory) and `ai-wind-tunnel/{recommendations,hardware-classes}.json` (schema v1); `classify` (passes `ai-wind-tunnel/hardware-class-fixtures.json`, as the wind tunnel's TS `classify` does) and `chain` (its `fallbackClasses`: the family's smaller tiers, then the cpu family); `Recommendations::get` skips rows the executor cannot run (`completion`, speech on speaches); the manifest keeps only runtimes and models of a `Provider` (llama-server, nemo-speech): whisper-server and sherpa-onnx are the wind tunnel's baselines. The wind tunnel owns these files |
-| `hardware.rs` | `ai.localHardware`: sysinfo (RAM, CPU, disk), std CPU features, NVML and the Vulkan loader opened with `libloading` when present (no `wgpu`), amdgpu sysfs, macOS sysctl. GPU probes run once per process. `memory_budget` = min(GPU − 1 GiB, RAM − 4 GiB) |
+| `hardware.rs` | `ai.localHardware`: sysinfo (RAM, CPU, disk), std CPU features, NVML and the Vulkan loader opened with `libloading` when present (no `wgpu`), amdgpu sysfs, macOS sysctl. GPU probes run once per process. `memory_budget` = min(GPU − 1 GiB, RAM − 4 GiB); the GPU is `primary_gpu`: the largest discrete GPU of the vendor the preferred GPU backend runs on (CUDA: NVIDIA, ROCm: AMD, Metal: Apple; Vulkan: any), so with two vendors the budget is the GPU's the build uses |
 | `plan.rs` | pure `plan()`: per service the recommendation of the class or the nearest smaller measured one (no evidence = unmeasured), else the manifest's smallest model of the service whose runtime runs here (`basis: default`, also when the measured provider has no build here), memory sum vs budget with step-down, build per provider (recommended, else CUDA > Metal > Vulkan > ROCm > CPU; a recommended ROCm build becomes Vulkan where Vulkan runs: the ROCm build silently runs on the CPU without the system ROCm libraries), each model's `serverFlags` (measured, else `default_flags`: `--reasoning off` for chat), disk check |
-| `install.rs` | the store (`downloads/`, `runtime/<id>/<version>-<build>/`, `models/`), `download` (`.part` + `Range` resume, sha256 and size before rename), `unpack` (tar.gz, zip; no path escapes), macOS quarantine strip |
+| `install.rs` | the store (`downloads/`, `runtime/<id>/<version>-<build>/`, `models/`), `download` (`.part` + `Range` resume, sha256 and size before rename; a redirect only to https), `unpack` (tar.gz, zip; no path escapes) into `<version>-<build>.partial` (the whole name: `with_extension` would cut at the version's last dot), macOS quarantine strip |
 | `supervisor.rs` | `Supervised` child (owns it: dropping it stops the child, so a start cancelled before `RUNNING` has it leaves nothing running): loopback port (`choose_port`, never the `detect.rs` ports), readiness (llama `/health`, nemo-speech `/ready`), `RestartBudget` (3, reset after 5 healthy min), SIGTERM then SIGKILL, Linux `PR_SET_PDEATHSIG` from one long-lived spawner thread, `reap_stale` by pid + exe path |
 | `mod.rs` | `install` / `start` / `stop` / `remove` / `status`, `register` (endpoints `This device (llama.cpp)` / `This device (NeMo Speech)`, models named by manifest id; a nemo-speech model's `remote_model` is the id its `/v1/models` lists, `parakeet-tdt-0.6b-v3.oss-align.q8_0`, since it refuses any other; the chat model `native_tools: true`; defaults), `managed_health` (what `check_health` uses for a managed endpoint: the supervisor's phase, then llama-server's liveness or nemo-speech's listing), `autostart` (`local_ai_autostart`), `stop_on_exit` (run by the executor's shutdown, `clean_up_before_exit` in `lib.rs`, and by `runtime.quit`: SIGTERM to all at once, SIGKILL after 2 s, inside the 4 s a signal leaves the shutdown), `stop_children_blocking` (the same from a thread that cannot await: the launcher's Quit, which exits without the executor's shutdown) |
 
 - Storage: the store is per user, shared by agents (`local_ai_dir` / `AD4M_LOCAL_AI_DIR`,
   else `dirs::data_local_dir()/ad4m/local-ai`); per-executor state (`selection.json`,
   `pids.json`, `llama-models.ini`, `<provider>.log`) is `<app_data_path>/local-ai/`. Tests set
-  the directories explicitly; never let one write to `~/.local/share/ad4m`.
+  the directories explicitly; never let one write to `~/.local/share/ad4m`. Docker: an image
+  without local AI sets `AD4M_LOCAL_AI_DIR=/data/local-ai/store` (`docker/ai-env.sh`
+  `seed_local_ai`), so the store stays in the volume beside the selection. `start_at` checks
+  that the selection's binaries and models exist; when one is gone it starts nothing and
+  refuses "run ai.localInstall again".
+- Lifecycle: `LIFECYCLE` (one `tokio::sync::Mutex`) is held by `start_at`, `stop_all`
+  (`ai.localStop`, the install paths) and all of `remove`, so they run one at a time: a
+  second start waits and finds the runtime in `RUNNING`. `stop_on_exit` does not take it
+  (an exit must not wait for a start); every `ManagedPort` holds the supervisor's
+  `StopHandle` (weak: a dropped `Supervised` still stops its child), so
+  `stop_children_blocking` stops a runtime that is still starting too. `start_at` starts
+  again a runtime whose entry is `Failed` or `Stopped`, removes the managed endpoints whose
+  runtime the selection does not have, and writes `pids.json` after each `RUNNING.insert`;
+  `spawn_pid_follower` writes it again when a restart gives the runtime a new pid.
+  `register` removes the model rows on its endpoint that the selection does not name (and
+  so the defaults that named them). `ensure_service` takes the install flag
+  (`take_install_flag`, waiting while an install runs) before it reads the selection.
 - llama-server runs in router mode: `--models-preset` names the chat and embedding models
   (`embeddings = true` on the latter, `load-on-startup`), each model's server flags become its preset keys (`-c 8192` is `c = 8192`), chat runs
   with `reasoning = off` (Qwen3.5 otherwise thinks until the context is full and `ai.prompt`

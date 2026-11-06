@@ -31,7 +31,7 @@ use super::data::{Data, Provider, Recommendation, Service};
 use super::hardware::{Backend, LocalHardware, GIB};
 
 /// Backends best first.
-const BACKEND_PREFERENCE: [Backend; 5] = [
+pub(crate) const BACKEND_PREFERENCE: [Backend; 5] = [
     Backend::Cuda,
     Backend::Metal,
     Backend::Vulkan,

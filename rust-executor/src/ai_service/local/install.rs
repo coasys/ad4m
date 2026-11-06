@@ -103,6 +103,13 @@ impl Store {
             .join(format!("{version}-{build}"))
     }
 
+    /// Where a build of `dir` unpacks before it takes `dir`'s name: `<dir name>.partial`
+    /// beside it, so each version and build stages in a folder of its own.
+    pub fn staging_dir(dir: &Path) -> PathBuf {
+        let name = dir.file_name().unwrap_or_default().to_string_lossy();
+        dir.with_file_name(format!("{name}.partial"))
+    }
+
     pub fn model_path(&self, model: &ModelFile) -> PathBuf {
         self.models_dir().join(model.file_name())
     }
@@ -230,7 +237,7 @@ impl Store {
             files.push(path);
         }
 
-        let staging = dir.with_extension("partial");
+        let staging = Store::staging_dir(&dir);
         let target = dir.clone();
         let shas: Vec<String> = archives.iter().map(|a| a.1.to_string()).collect();
         let named: Vec<String> = build.extras.iter().map(|e| e.lib_dir.clone()).collect();
@@ -278,6 +285,17 @@ impl Store {
 pub fn http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
+        // The manifest's URLs are https; a redirect does not leave it.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("more than 10 redirects")
+            } else if attempt.url().scheme() != "https" {
+                let to = attempt.url().to_string();
+                attempt.error(format!("a redirect to {to}, which is not https"))
+            } else {
+                attempt.follow()
+            }
+        }))
         .user_agent(concat!(
             "ad4m-executor/",
             env!("CARGO_PKG_VERSION"),
@@ -504,6 +522,52 @@ mod tests {
 
     fn url(server: &mockito::ServerGuard, path: &str) -> Url {
         Url::parse(&format!("{}{path}", server.url())).unwrap()
+    }
+
+    /// A version with dots stages under its whole name: 0.3.0 and 0.3.1 do not share (and
+    /// destroy) one staging folder.
+    #[test]
+    fn each_build_stages_in_a_folder_of_its_own() {
+        let store = Store::new(Path::new("/s"));
+        let a = store.runtime_dir("nemo-speech", "0.3.0", "linux-x64-cpu");
+        let b = store.runtime_dir("nemo-speech", "0.3.1", "linux-x64-cpu");
+        assert_eq!(
+            Store::staging_dir(&a),
+            PathBuf::from("/s/runtime/nemo-speech/0.3.0-linux-x64-cpu.partial")
+        );
+        assert_ne!(Store::staging_dir(&a), Store::staging_dir(&b));
+    }
+
+    /// The hash would catch a changed file, but a download does not leave https.
+    #[tokio::test]
+    async fn a_redirect_to_http_is_refused() {
+        let data = body(1000);
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/moved.bin")
+            .with_status(302)
+            .with_header("location", &format!("{}/f.bin", server.url()))
+            .create_async()
+            .await;
+        let file = server
+            .mock("GET", "/f.bin")
+            .with_body(&data)
+            .expect(0)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let error = download(
+            &http_client().unwrap(),
+            &url(&server, "/moved.bin"),
+            &sha(&data),
+            data.len() as u64,
+            &dir.path().join("f.bin"),
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("not https"), "{error:#}");
+        file.assert_async().await;
     }
 
     #[tokio::test]

@@ -42,7 +42,7 @@ use self::hardware::{Backend, LocalHardware};
 use self::install::Store;
 use self::plan::LocalPlan;
 use self::supervisor::{
-    ChildSpec, Phase, ProcessStatus, Readiness, RestartBudget, Supervised, Timing,
+    ChildSpec, Phase, ProcessStatus, Readiness, RestartBudget, StopHandle, Supervised, Timing,
 };
 use super::AIService;
 use crate::events::{Audience, Event, Topic};
@@ -270,11 +270,18 @@ struct ManagedPort {
     /// health is that listing, as for any endpoint. Else (llama-server) the liveness probe
     /// and `served`.
     lists_models: bool,
+    /// Asks the supervision to stop, also for a start that has not reached `RUNNING`.
+    stop: StopHandle,
 }
 
 lazy_static! {
     static ref RUNNING: tokio::sync::Mutex<BTreeMap<Provider, Running>> =
         tokio::sync::Mutex::new(BTreeMap::new());
+    /// Held by a start, a stop and a remove for all of their work: they run one at a time.
+    /// A second start waits for the first and finds its runtimes in `RUNNING`; a stop
+    /// during a start stops what the start started. Not by the exit stop, which must not
+    /// wait for a start (the runtime's stop handle reaches a start in progress).
+    static ref LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
     static ref MANAGED_PORTS: std::sync::RwLock<BTreeMap<u16, ManagedPort>> =
         std::sync::RwLock::new(BTreeMap::new());
     /// Per runtime, the GPU check of its last start: on the GPU, and the bytes it held.
@@ -459,7 +466,22 @@ async fn run_install(work: impl std::future::Future<Output = Result<()>>) -> Res
     if INSTALLING.swap(true, Ordering::SeqCst) {
         return Err(LocalAiRefused("A local AI install is running already".into()).into());
     }
-    let guard = InstallGuard;
+    run_installing(InstallGuard, work).await
+}
+
+/// The install flag, once no install runs: waits for one that does.
+async fn take_install_flag() -> InstallGuard {
+    while INSTALLING.swap(true, Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    InstallGuard
+}
+
+/// [`run_install`] with the flag taken.
+async fn run_installing(
+    guard: InstallGuard,
+    work: impl std::future::Future<Output = Result<()>>,
+) -> Result<LocalStatus> {
     let outcome = work.await;
     // Done before the answer: the status it carries says no install runs.
     drop(guard);
@@ -517,9 +539,9 @@ pub async fn ensure_service(service: Service) -> Result<()> {
         ))
         .into());
     }
-    while INSTALLING.load(Ordering::SeqCst) {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    // Taken, not only waited for: an install that begins meanwhile makes this wait, not
+    // fail; and the selection read below is the one that install left.
+    let guard = take_install_flag().await;
     let paths = LocalPaths::from_config();
     let mut services: Vec<Service> = Selection::load(&paths)
         .map(|s| s.models.iter().map(|m| m.service).collect())
@@ -540,7 +562,7 @@ pub async fn ensure_service(service: Service) -> Result<()> {
         services: Some(services),
         start: Some(false),
     };
-    run_install(async {
+    run_installing(guard, async {
         install_at(&paths, &params).await?;
         stop_all().await;
         start_at(&paths, false).await
@@ -1041,16 +1063,61 @@ impl Drop for StartingPort {
 }
 
 async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
+    let _lifecycle = LIFECYCLE.lock().await;
     let mut selection = Selection::load(paths)
         .ok_or_else(|| LocalAiRefused("Local AI is not installed: call ai.localInstall".into()))?;
+    // The store may have lost them (a Docker container recreated with the store outside
+    // its volume, another executor's `ai.localRemove` with `deleteFiles`).
+    let missing: Vec<String> = selection
+        .runtimes
+        .iter()
+        .map(|r| &r.binary)
+        .chain(selection.models.iter().map(|m| &m.path))
+        .filter(|p| !p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if !missing.is_empty() {
+        return Err(LocalAiRefused(format!(
+            "Local AI's files are missing from the store ({}): run ai.localInstall again",
+            missing.join(", ")
+        ))
+        .into());
+    }
     std::fs::create_dir_all(&paths.state)?;
     if RUNNING.lock().await.is_empty() {
         reap_from_pid_file(paths);
     }
+    // A runtime the selection no longer has (`ai.localInstall` with fewer services) is not
+    // started again: its endpoint and models go.
+    let kept: Vec<&str> = selection
+        .runtimes
+        .iter()
+        .map(|r| endpoint_name(r.provider))
+        .collect();
+    if let Err(e) = unregister(|endpoint| !kept.contains(&endpoint.name.as_str())).await {
+        log::warn!("Local AI: the endpoints of dropped runtimes stay: {e:#}");
+    }
     let avoid = supervisor::avoided_ports();
     for runtime in selection.runtimes.clone() {
-        if RUNNING.lock().await.contains_key(&runtime.provider) {
-            continue;
+        {
+            let mut running = RUNNING.lock().await;
+            match running
+                .get(&runtime.provider)
+                .map(|r| r.supervised.status().phase)
+            {
+                // Failed (restarts spent, a binary that does not start) or stopped: start
+                // it again, as a new runtime.
+                Some(Phase::Failed | Phase::Stopped) => {
+                    if let Some(old) = running.remove(&runtime.provider) {
+                        MANAGED_PORTS
+                            .write()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .remove(&old.supervised.spec.port);
+                    }
+                }
+                Some(_) => continue,
+                None => {}
+            }
         }
         let preferred = selection.ports.get(runtime.provider.as_str()).copied();
         let port = supervisor::choose_port(preferred, &avoid)?;
@@ -1076,6 +1143,7 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
                     readiness,
                     served,
                     lists_models: runtime.provider == Provider::NemoSpeech,
+                    stop: supervised.stop_handle(),
                 },
             );
         // Until `RUNNING` has it, this start owns the runtime: a caller that goes away
@@ -1085,6 +1153,7 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
         let settled = supervised
             .wait_until_settled(Timing::default().start_timeout + Duration::from_secs(5))
             .await;
+        let status = supervised.watch();
         RUNNING.lock().await.insert(
             runtime.provider,
             Running {
@@ -1093,6 +1162,9 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
             },
         );
         let port = port.keep();
+        // Before the registration, which may fail: the child runs and must be found.
+        write_pids(paths).await;
+        spawn_pid_follower(paths.clone(), status);
         if settled.phase != Phase::Running {
             log::warn!(
                 "Local AI: {} is {:?}: {}",
@@ -1117,7 +1189,6 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
         }
     }
     selection.save(paths)?;
-    write_pids(paths).await;
     Ok(())
 }
 
@@ -1140,6 +1211,27 @@ fn spawn_health_follower(
             }
             if matches!(phase, Phase::Stopped | Phase::Failed) {
                 return;
+            }
+        }
+    });
+}
+
+/// Rewrite `pids.json` when a supervised restart gives the runtime a new pid, so a start
+/// after a crash of the executor stops the restarted child too.
+fn spawn_pid_follower(paths: LocalPaths, mut status: tokio::sync::watch::Receiver<ProcessStatus>) {
+    tokio::spawn(async move {
+        let mut last = status.borrow().pid;
+        while status.changed().await.is_ok() {
+            let (phase, pid) = {
+                let current = status.borrow_and_update();
+                (current.phase, current.pid)
+            };
+            if matches!(phase, Phase::Stopped | Phase::Failed) {
+                return;
+            }
+            if pid.is_some() && pid != last {
+                last = pid;
+                write_pids(&paths).await;
             }
         }
     });
@@ -1408,7 +1500,7 @@ async fn register(
         .ok();
 
     let rows = crate::db_backend::db_backend().get_models()?;
-    for model in models {
+    for model in &models {
         let model_type = model.service.model_type();
         let row = rows.iter().find(|row| row.name == model.model_id);
         let input = ModelInput {
@@ -1450,11 +1542,24 @@ async fn register(
             service.set_default_model(model_type, id).await?;
         }
     }
+    // A model a new selection dropped (fewer services, a re-plan): its row goes, and with
+    // it a default that named it.
+    for row in crate::db_backend::db_backend().get_models()? {
+        if row.endpoint_id == endpoint.id && !models.iter().any(|m| m.model_id == row.name) {
+            service.remove_model(row.id).await?;
+        }
+    }
     Ok(endpoint.id)
 }
 
 /// Stop every runtime this executor runs. Endpoints and models stay registered (down).
 async fn stop_all() {
+    let _lifecycle = LIFECYCLE.lock().await;
+    stop_running().await;
+}
+
+/// [`stop_all`] for a caller that holds [`LIFECYCLE`] or must not wait for it.
+async fn stop_running() {
     let running: Vec<Running> = std::mem::take(&mut *RUNNING.lock().await)
         .into_values()
         .collect();
@@ -1475,6 +1580,28 @@ async fn stop_all() {
     }
 }
 
+/// Remove the managed endpoints `chosen` picks, with their models (and the defaults that
+/// named them).
+async fn unregister(chosen: impl Fn(&Endpoint) -> bool) -> Result<()> {
+    let db = crate::db_backend::db_backend();
+    let dropped: Vec<Endpoint> = db
+        .get_endpoints()?
+        .into_iter()
+        .filter(|e| e.managed && chosen(e))
+        .collect();
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    let service = AIService::global_instance().await?;
+    for endpoint in dropped {
+        for model_id in db.endpoint_model_ids(&endpoint.id)? {
+            service.remove_model(model_id).await?;
+        }
+        db.remove_endpoint(&endpoint.id)?;
+    }
+    Ok(())
+}
+
 /// `ai.localStop`.
 pub async fn stop() -> LocalStatus {
     stop_all().await;
@@ -1488,18 +1615,11 @@ pub async fn remove(params: RemoveParams) -> Result<bool> {
     if INSTALLING.load(Ordering::SeqCst) {
         return Err(LocalAiRefused("A local AI install is running".into()).into());
     }
-    stop_all().await;
+    // Held to the end: a start meanwhile would register what this removes.
+    let _lifecycle = LIFECYCLE.lock().await;
+    stop_running().await;
     let paths = LocalPaths::from_config();
-    let service = AIService::global_instance().await?;
-    for endpoint in crate::db_backend::db_backend().get_endpoints()? {
-        if !endpoint.managed {
-            continue;
-        }
-        for model_id in crate::db_backend::db_backend().endpoint_model_ids(&endpoint.id)? {
-            service.remove_model(model_id).await?;
-        }
-        crate::db_backend::db_backend().remove_endpoint(&endpoint.id)?;
-    }
+    unregister(|_| true).await?;
     let _ = std::fs::remove_file(Selection::path(&paths));
     let _ = std::fs::remove_file(pid_file(&paths));
     if params.delete_files.unwrap_or(false) {
@@ -1611,7 +1731,7 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 pub async fn stop_on_exit() {
     let _ = tokio::task::spawn_blocking(|| stop_children_blocking(EXIT_GRACE)).await;
     // The children are gone: this ends their supervisors and marks the endpoints down.
-    stop_all().await;
+    stop_running().await;
     let _ = std::fs::remove_file(pid_file(&LocalPaths::from_config()));
 }
 
@@ -1622,21 +1742,21 @@ pub async fn stop_on_exit() {
 /// would not.
 pub fn stop_children_blocking(grace: Duration) {
     use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
-    let pids: Vec<Pid> = MANAGED_PORTS
-        .read()
-        .unwrap_or_else(|p| p.into_inner())
-        .values()
-        .filter_map(|m| m.status.borrow().pid)
-        .map(Pid::from_u32)
-        .collect();
+    let pids: Vec<Pid> = {
+        let ports = MANAGED_PORTS.read().unwrap_or_else(|p| p.into_inner());
+        // No restart of a child that exits now: also one a start has not handed to
+        // `RUNNING` yet.
+        for port in ports.values() {
+            port.stop.request_stop();
+        }
+        ports
+            .values()
+            .filter_map(|m| m.status.borrow().pid)
+            .map(Pid::from_u32)
+            .collect()
+    };
     if pids.is_empty() {
         return;
-    }
-    // No restart of a child that exits now.
-    if let Ok(running) = RUNNING.try_lock() {
-        for r in running.values() {
-            r.supervised.request_stop();
-        }
     }
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
@@ -1973,6 +2093,7 @@ mod tests {
                 readiness: Readiness::Http("/ready".into()),
                 served: vec!["parakeet-tdt-0.6b-v3-q8_0".into()],
                 lists_models: true,
+                stop: StopHandle::default(),
             },
         );
         let endpoint = |key: &str| Endpoint {
@@ -2043,6 +2164,7 @@ mod tests {
                     readiness: Readiness::Tcp,
                     served: vec![],
                     lists_models: false,
+                    stop: StopHandle::default(),
                 },
             );
         }
@@ -2111,6 +2233,7 @@ mod tests {
                     readiness: Readiness::Tcp,
                     served: vec![],
                     lists_models: false,
+                    stop: supervised.stop_handle(),
                 },
             );
             RUNNING.lock().await.insert(
@@ -2294,6 +2417,503 @@ mod tests {
             }
         }
         assert!(!left, "the runtime of the dropped start still runs");
+    }
+
+    /// A llama-server that adds its pid to `spawned` and never answers, as one loading
+    /// models, installed as the selection of `dir`'s state.
+    #[cfg(unix)]
+    fn never_ready_llama(dir: &Path) -> (LocalPaths, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let paths = LocalPaths {
+            store: dir.join("store"),
+            state: dir.join("state"),
+        };
+        let binary = dir.join("llama-server");
+        let spawned = dir.join("spawned");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\necho $$ >> '{}'\nexec sleep 60\n",
+                spawned.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Selection {
+            runtimes: vec![SelectedRuntime {
+                provider: Provider::LlamaServer,
+                runtime_id: "fake".into(),
+                version: "0".into(),
+                build: "cpu".into(),
+                binary,
+                lib_dirs: vec![],
+                services: vec![],
+                backend: None,
+            }],
+            models: vec![],
+            ports: BTreeMap::new(),
+        }
+        .save(&paths)
+        .unwrap();
+        (paths, spawned)
+    }
+
+    #[cfg(unix)]
+    fn spawned_pids(spawned: &Path) -> Vec<u32> {
+        std::fs::read_to_string(spawned)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect()
+    }
+
+    /// Wait up to 10 s for `pids` to end; SIGKILL what is left. Answers the pids left.
+    #[cfg(unix)]
+    async fn wait_gone(pids: &[u32]) -> Vec<u32> {
+        let alive = |pid: u32| {
+            // SAFETY: signal 0 only checks that the process exists.
+            unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pids.iter().any(|p| alive(*p)) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let left: Vec<u32> = pids.iter().copied().filter(|p| alive(*p)).collect();
+        for pid in &left {
+            // SAFETY: kill(2) on a fake runtime this test started.
+            unsafe {
+                libc::kill(*pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        left
+    }
+
+    /// Two starts at once (autostart, and a click on "Start local AI" while it loads): one
+    /// runtime. The second waits for the first, and does not spawn a second copy.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_starts_at_once_spawn_one_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, spawned) = never_ready_llama(dir.path());
+        tokio::select! {
+            result = async { tokio::join!(start_at(&paths, false), start_at(&paths, false)) } => {
+                panic!("a start ended: {result:?}")
+            }
+            _ = async {
+                while spawned_pids(&spawned).is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            } => {}
+        }
+        // Both starts are dropped: their runtimes stop.
+        let pids = spawned_pids(&spawned);
+        let left = wait_gone(&pids).await;
+        assert_eq!(pids.len(), 1, "runtimes spawned: {pids:?}");
+        assert!(left.is_empty(), "still running: {left:?}");
+    }
+
+    /// A runtime whose restarts are spent stays in `RUNNING`, failed: the next start
+    /// replaces it, and forgets its port.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_runtime_starts_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, spawned) = never_ready_llama(dir.path());
+        let failed = Supervised::start(
+            ChildSpec {
+                name: "fake".into(),
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-c".into(), "exit 3".into()],
+                env: vec![],
+                cwd: dir.path().to_path_buf(),
+                port: supervisor::choose_port(None, &[]).unwrap(),
+                readiness: Readiness::Tcp,
+                log_file: dir.path().join("failed.log"),
+            },
+            Timing {
+                start_timeout: Duration::from_secs(5),
+                probe_interval: Duration::from_millis(100),
+                backoff: Duration::from_millis(20),
+            },
+            RestartBudget::new(0, Duration::from_secs(300)),
+        );
+        assert_eq!(
+            failed
+                .wait_until_settled(Duration::from_secs(10))
+                .await
+                .phase,
+            Phase::Failed
+        );
+        let old_port = failed.spec.port;
+        MANAGED_PORTS.write().unwrap().insert(
+            old_port,
+            ManagedPort {
+                status: failed.watch(),
+                readiness: Readiness::Tcp,
+                served: vec![],
+                lists_models: false,
+                stop: failed.stop_handle(),
+            },
+        );
+        RUNNING.lock().await.insert(
+            Provider::LlamaServer,
+            Running {
+                supervised: failed,
+                endpoint_id: None,
+            },
+        );
+
+        let started = tokio::select! {
+            result = start_at(&paths, false) => Err(format!("the start ended: {result:?}")),
+            _ = async {
+                while spawned_pids(&spawned).is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            } => Ok(()),
+        };
+        let old_port_kept = MANAGED_PORTS.write().unwrap().remove(&old_port).is_some();
+        if let Some(left) = RUNNING.lock().await.remove(&Provider::LlamaServer) {
+            left.supervised.stop().await;
+        }
+        let left = wait_gone(&spawned_pids(&spawned)).await;
+
+        started.unwrap();
+        assert!(!old_port_kept, "the failed runtime's port is forgotten");
+        assert!(left.is_empty(), "still running: {left:?}");
+    }
+
+    /// A selection whose files are gone (a container recreated without its store, another
+    /// executor's `ai.localRemove` with `deleteFiles`) starts nothing and says what to do.
+    #[tokio::test]
+    async fn a_selection_whose_files_are_gone_says_to_install_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LocalPaths {
+            store: dir.path().join("store"),
+            state: dir.path().join("state"),
+        };
+        Selection {
+            runtimes: vec![SelectedRuntime {
+                provider: Provider::LlamaServer,
+                runtime_id: "llama.cpp".into(),
+                version: "b1".into(),
+                build: "linux-x64-cpu".into(),
+                binary: dir.path().join("store/runtime/llama-server"),
+                lib_dirs: vec![],
+                services: vec![Service::Llm],
+                backend: Some(Backend::Cpu),
+            }],
+            models: vec![selected(Service::Llm, "chat", Provider::LlamaServer)],
+            ports: BTreeMap::new(),
+        }
+        .save(&paths)
+        .unwrap();
+
+        let outcome = start_at(&paths, false).await;
+        let supervised = RUNNING.lock().await.remove(&Provider::LlamaServer);
+        if let Some(left) = supervised {
+            MANAGED_PORTS
+                .write()
+                .unwrap()
+                .remove(&left.supervised.spec.port);
+            left.supervised.stop().await;
+            panic!("a runtime was started: {outcome:?}");
+        }
+        let error = outcome.unwrap_err();
+        assert!(error.downcast_ref::<LocalAiRefused>().is_some(), "{error}");
+        let text = error.to_string();
+        assert!(
+            text.contains("ai.localInstall") && text.contains("llama-server"),
+            "{text}"
+        );
+    }
+
+    /// The executor's exit during a start: the runtime that is loading gets its stop too,
+    /// so its supervisor does not restart it after the SIGTERM.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_exit_stop_also_stops_a_runtime_that_is_starting() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = supervisor::choose_port(None, &[]).unwrap();
+        let supervised = Supervised::start(
+            ChildSpec {
+                name: "fake".into(),
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-c".into(), "exec sleep 60".into()],
+                env: vec![],
+                cwd: dir.path().to_path_buf(),
+                port,
+                readiness: Readiness::Tcp,
+                log_file: dir.path().join("fake.log"),
+            },
+            Timing {
+                start_timeout: Duration::from_secs(30),
+                probe_interval: Duration::from_millis(100),
+                backoff: Duration::from_millis(20),
+            },
+            RestartBudget::standard(),
+        );
+        let mut status = supervised.watch();
+        let first = tokio::time::timeout(
+            Duration::from_secs(10),
+            status.wait_for(|s| s.pid.is_some()),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .pid
+        .unwrap();
+        // As a start in progress has it: in `MANAGED_PORTS`, not yet in `RUNNING`.
+        MANAGED_PORTS.write().unwrap().insert(
+            port,
+            ManagedPort {
+                status: supervised.watch(),
+                readiness: Readiness::Tcp,
+                served: vec![],
+                lists_models: false,
+                stop: supervised.stop_handle(),
+            },
+        );
+        stop_children_blocking(Duration::from_millis(500));
+        MANAGED_PORTS.write().unwrap().remove(&port);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let after = supervised.status();
+        let pids: Vec<u32> = [Some(first), after.pid].into_iter().flatten().collect();
+        supervised.stop().await;
+        let left = wait_gone(&pids).await;
+
+        assert_eq!(after.phase, Phase::Stopped, "{after:?}");
+        assert!(left.is_empty(), "still running: {left:?}");
+    }
+
+    /// A supervised restart spawns a new pid: `pids.json` names it, so a start after a
+    /// crash of the executor finds it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_pid_file_follows_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LocalPaths {
+            store: dir.path().join("store"),
+            state: dir.path().join("state"),
+        };
+        std::fs::create_dir_all(&paths.state).unwrap();
+        // The fake runtime does not listen itself: the test holds the port, so it answers.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let supervised = Supervised::start(
+            ChildSpec {
+                name: "fake".into(),
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-c".into(), "exec sleep 60".into()],
+                env: vec![],
+                cwd: dir.path().to_path_buf(),
+                port,
+                readiness: Readiness::Tcp,
+                log_file: dir.path().join("fake.log"),
+            },
+            Timing {
+                start_timeout: Duration::from_secs(5),
+                probe_interval: Duration::from_millis(100),
+                backoff: Duration::from_millis(20),
+            },
+            RestartBudget::standard(),
+        );
+        let first = supervised
+            .wait_until_settled(Duration::from_secs(10))
+            .await
+            .pid
+            .unwrap();
+        let status = supervised.watch();
+        RUNNING.lock().await.insert(
+            Provider::LlamaServer,
+            Running {
+                supervised,
+                endpoint_id: None,
+            },
+        );
+        write_pids(&paths).await;
+        spawn_pid_follower(paths.clone(), status);
+        // SAFETY: kill(2) on the fake runtime this test started.
+        unsafe {
+            libc::kill(first as libc::pid_t, libc::SIGKILL);
+        }
+        let read = || -> Vec<u32> {
+            std::fs::read_to_string(pid_file(&paths))
+                .ok()
+                .and_then(|t| serde_json::from_str::<Vec<(u32, PathBuf)>>(&t).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(pid, _)| pid)
+                .collect()
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while read().iter().all(|p| *p == first) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let written = read();
+        let running = RUNNING.lock().await.remove(&Provider::LlamaServer).unwrap();
+        let now = running.supervised.status().pid;
+        running.supervised.stop().await;
+        drop(listener);
+
+        assert!(now.is_some_and(|p| p != first), "restarted: {now:?}");
+        assert_eq!(
+            written,
+            vec![now.unwrap()],
+            "the pid file names the restarted runtime"
+        );
+    }
+
+    /// A new selection that drops a model (`services` given, or a re-plan): its row on the
+    /// managed endpoint goes, and with it the default it was.
+    #[tokio::test]
+    async fn registration_removes_the_models_a_new_selection_drops() {
+        crate::test_utils::ensure_test_db();
+        let saved = super::super::AI_SERVICE
+            .lock()
+            .await
+            .replace(AIService::empty());
+        let db = crate::db_backend::db_backend();
+        let clear = || async {
+            let service = AIService::global_instance().await.unwrap();
+            for endpoint in db.get_endpoints().unwrap() {
+                if endpoint.managed {
+                    for id in db.endpoint_model_ids(&endpoint.id).unwrap() {
+                        service.remove_model(id).await.unwrap();
+                    }
+                    db.remove_endpoint(&endpoint.id).unwrap();
+                }
+            }
+        };
+        clear().await;
+
+        let runtime = SelectedRuntime {
+            provider: Provider::LlamaServer,
+            runtime_id: "llama.cpp".into(),
+            version: "b1".into(),
+            build: "linux-x64-cpu".into(),
+            binary: PathBuf::from("/store/runtime/llama-server"),
+            lib_dirs: vec![],
+            services: vec![Service::Llm, Service::Embeddings],
+            backend: Some(Backend::Cpu),
+        };
+        let chat = selected(Service::Llm, "wt-chat", Provider::LlamaServer);
+        let embed = selected(Service::Embeddings, "wt-embed", Provider::LlamaServer);
+        let both = Selection {
+            runtimes: vec![runtime.clone()],
+            models: vec![chat.clone(), embed],
+            ports: BTreeMap::new(),
+        };
+        let names = |endpoint: &str| -> Vec<String> {
+            let mut names: Vec<String> = db
+                .endpoint_model_ids(endpoint)
+                .unwrap()
+                .into_iter()
+                .filter_map(|id| db.get_model(id).unwrap().map(|m| m.name))
+                .collect();
+            names.sort();
+            names
+        };
+
+        let endpoint = register(&both, &runtime, 40011, "k3y", true).await.unwrap();
+        let before = names(&endpoint);
+        let default_before = db
+            .get_default_model(crate::types::ModelType::Embedding)
+            .unwrap();
+        let chat_only = Selection {
+            runtimes: vec![runtime.clone()],
+            models: vec![chat],
+            ports: BTreeMap::new(),
+        };
+        let again = register(&chat_only, &runtime, 40011, "k3y", true)
+            .await
+            .unwrap();
+        let after = names(&endpoint);
+        let default_after = db
+            .get_default_model(crate::types::ModelType::Embedding)
+            .unwrap();
+        let chat_default = db.get_default_model(crate::types::ModelType::Llm).unwrap();
+        clear().await;
+        *super::super::AI_SERVICE.lock().await = saved;
+
+        assert_eq!(again, endpoint);
+        assert_eq!(before, vec!["wt-chat", "wt-embed"]);
+        assert!(default_before.is_some());
+        assert_eq!(after, vec!["wt-chat"], "the dropped model's row is gone");
+        assert_eq!(default_after, None, "no default names the removed model");
+        assert!(chat_default.is_some());
+    }
+
+    /// `ai.localInstall({services: ["llm"]})` after a set with transcription: the start
+    /// does not start nemo-speech again, and its endpoint goes (its health would say to
+    /// start it with `ai.localStart`, which cannot). llama.cpp's stays.
+    #[tokio::test]
+    async fn a_runtime_the_selection_drops_loses_its_endpoint() {
+        crate::test_utils::ensure_test_db();
+        let saved = super::super::AI_SERVICE
+            .lock()
+            .await
+            .replace(AIService::empty());
+        let db = crate::db_backend::db_backend();
+        let managed = |name: &str, port: u16| Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            kind: EndpointKind::LlamaServer,
+            base_url: Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+            api_key: Secret::new("k"),
+            capabilities: vec![],
+            max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
+            managed: true,
+            health: Default::default(),
+        };
+        for endpoint in db.get_endpoints().unwrap() {
+            if endpoint.managed {
+                db.remove_endpoint(&endpoint.id).unwrap();
+            }
+        }
+        db.insert_endpoint(&managed(LLAMA_ENDPOINT, 40012)).unwrap();
+        db.insert_endpoint(&managed(NEMO_SPEECH_ENDPOINT, 40013))
+            .unwrap();
+
+        let kept = [LLAMA_ENDPOINT];
+        let outcome = unregister(|e| !kept.contains(&e.name.as_str())).await;
+        let names: Vec<String> = db
+            .get_endpoints()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.managed)
+            .map(|e| e.name)
+            .collect();
+        for endpoint in db.get_endpoints().unwrap() {
+            if endpoint.managed {
+                db.remove_endpoint(&endpoint.id).unwrap();
+            }
+        }
+        *super::super::AI_SERVICE.lock().await = saved;
+
+        outcome.unwrap();
+        assert_eq!(names, vec![LLAMA_ENDPOINT.to_string()]);
+    }
+
+    /// A first use while an install runs waits for it and then takes the flag itself: an
+    /// install that begins in between makes it wait again, not fail.
+    #[tokio::test]
+    async fn a_first_use_waits_for_a_running_install_and_then_takes_the_flag() {
+        INSTALLING.store(true, Ordering::SeqCst);
+        let waiting = tokio::spawn(take_install_flag());
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let waited = !waiting.is_finished();
+        INSTALLING.store(false, Ordering::SeqCst);
+        let guard = tokio::time::timeout(Duration::from_secs(5), waiting).await;
+        let taken = INSTALLING.load(Ordering::SeqCst);
+        drop(guard);
+        let released = !INSTALLING.load(Ordering::SeqCst);
+
+        assert!(waited, "it waits while the install runs");
+        assert!(taken, "then it holds the flag");
+        assert!(released, "and gives it back when done");
     }
 
     #[test]

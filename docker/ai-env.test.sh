@@ -171,8 +171,17 @@ empty=$(
     seed_local_ai "${seed_dir}/none" "${seed_dir}/store" "${seed_dir}/data3"
     echo "dir=${AD4M_LOCAL_AI_DIR:-}"
 )
-check "an image without local AI changes nothing" "dir=" "${empty}"
+check "an image without local AI keeps the store in the data volume" \
+    "dir=${seed_dir}/data3/store" "${empty}"
 check "  and makes no state" "no" "$([ -e "${seed_dir}/data3" ] && echo yes || echo no)"
+kept=$(
+    export AD4M_LOCAL_AI_DIR=/elsewhere
+    # shellcheck source=/dev/null
+    . "${script}"
+    seed_local_ai "${seed_dir}/none" "${seed_dir}/store" "${seed_dir}/data4"
+    echo "dir=${AD4M_LOCAL_AI_DIR:-}"
+)
+check "  unless AD4M_LOCAL_AI_DIR names another" "dir=/elsewhere" "${kept}"
 
 # ── Nothing set: nothing is asked ───────────────────────────────────────────
 unset_ai_env

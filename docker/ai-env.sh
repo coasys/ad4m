@@ -115,10 +115,15 @@ setup_ai_models() {
 # image build kept in $1. Points the executor at the store (unless AD4M_LOCAL_AI_DIR
 # names another) and gives the executor's state $3 the selection once, so local AI
 # starts with the executor (local_ai_autostart) with no download. A selection the
-# executor has already (a later ai.localInstall) is kept.
+# executor has already (a later ai.localInstall) is kept. An image without local AI
+# keeps the store in the data volume ($3/store), next to the selection: the default
+# store (~/.local/share) is in the container layer, which a recreated container loses.
 seed_local_ai() {
     local image_state="$1" image_store="$2" state="$3"
-    [ -f "${image_state}/selection.json" ] || return 0
+    if [ ! -f "${image_state}/selection.json" ]; then
+        export AD4M_LOCAL_AI_DIR="${AD4M_LOCAL_AI_DIR:-${state}/store}"
+        return 0
+    fi
     export AD4M_LOCAL_AI_DIR="${AD4M_LOCAL_AI_DIR:-${image_store}}"
     if [ ! -f "${state}/selection.json" ]; then
         mkdir -p "${state}"

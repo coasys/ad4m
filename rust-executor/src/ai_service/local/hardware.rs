@@ -189,14 +189,29 @@ pub struct LocalHardware {
 }
 
 impl LocalHardware {
-    /// The GPU a GPU backend would use: the discrete one with the most VRAM, else the
-    /// first integrated or unified one.
+    /// The GPU a GPU backend would use: among the GPUs of the vendor the preferred GPU
+    /// backend runs on (CUDA: NVIDIA, ROCm: AMD, Metal: Apple; Vulkan: any), the discrete
+    /// one with the most VRAM, else the first integrated or unified one. With GPUs of two
+    /// vendors, the budget is thus the GPU's the plan's build runs on.
     pub fn primary_gpu(&self) -> Option<&GpuInfo> {
-        self.gpus
+        let vendor = super::plan::BACKEND_PREFERENCE
             .iter()
+            .find(|b| **b != Backend::Cpu && self.backends.contains(b))
+            .and_then(|backend| match backend {
+                Backend::Cuda => Some(GpuVendor::Nvidia),
+                Backend::Rocm => Some(GpuVendor::Amd),
+                Backend::Metal => Some(GpuVendor::Apple),
+                Backend::Vulkan | Backend::Cpu => None,
+            })
+            .filter(|v| self.gpus.iter().any(|g| g.vendor == *v));
+        let mut gpus = self
+            .gpus
+            .iter()
+            .filter(|g| vendor.is_none_or(|v| g.vendor == v));
+        gpus.clone()
             .filter(|g| g.kind == GpuType::Discrete)
             .max_by_key(|g| g.vram_bytes.unwrap_or(0))
-            .or_else(|| self.gpus.first())
+            .or_else(|| gpus.next())
     }
 
     /// What the class rules read.
@@ -1045,6 +1060,58 @@ mod tests {
         );
         assert_eq!(hardware.gpu_budget_bytes, None);
         assert_eq!(hardware.memory_budget_bytes, 28 * GIB);
+    }
+
+    /// A 16 GiB AMD card beside a 4 GiB NVIDIA card: the plan runs the CUDA build, which
+    /// uses the NVIDIA card, so the budget is that card's, not the larger AMD card's.
+    #[test]
+    fn the_budget_is_the_gpu_of_the_backend_the_plan_runs() {
+        let mut hardware = LocalHardware {
+            os: "linux".into(),
+            arch: "x64".into(),
+            cpu: CpuInfo {
+                brand: "c".into(),
+                physical_cores: Some(8),
+                logical_cores: 16,
+                features: vec![],
+            },
+            ram_bytes: 64 * GIB,
+            available_ram_bytes: 32 * GIB,
+            gpus: vec![
+                gpu(
+                    GpuVendor::Amd,
+                    GpuType::Discrete,
+                    Some(16 * GIB),
+                    None,
+                    "sysfs+vulkan",
+                ),
+                gpu(
+                    GpuVendor::Nvidia,
+                    GpuType::Discrete,
+                    Some(4 * GIB),
+                    None,
+                    "nvml",
+                ),
+            ],
+            backends: vec![Backend::Cpu, Backend::Vulkan, Backend::Cuda],
+            gpu_budget_bytes: None,
+            memory_budget_bytes: 0,
+            disk_free_bytes: None,
+            storage_dir: "/x".into(),
+            hardware_class: String::new(),
+            notes: vec![],
+        };
+        let classes = &super::super::data::embedded().unwrap().classes;
+        finish(&mut hardware, classes);
+        assert_eq!(hardware.primary_gpu().unwrap().vendor, GpuVendor::Nvidia);
+        assert_eq!(hardware.gpu_budget_bytes, Some(4 * GIB));
+        assert_eq!(hardware.memory_budget_bytes, 3 * GIB);
+
+        // Without CUDA the Vulkan build runs, on the larger card.
+        hardware.backends = vec![Backend::Cpu, Backend::Vulkan];
+        finish(&mut hardware, classes);
+        assert_eq!(hardware.primary_gpu().unwrap().vendor, GpuVendor::Amd);
+        assert_eq!(hardware.gpu_budget_bytes, Some(16 * GIB));
     }
 
     #[test]
