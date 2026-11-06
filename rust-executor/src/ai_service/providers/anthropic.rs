@@ -369,7 +369,8 @@ impl AnthropicChat {
             // Anthropic puts the useful part in the body (`error.message`);
             // the status alone does not distinguish a bad key from a bad
             // model name, and both are things an operator has to fix.
-            let body = super::http::read_error_text(response).await;
+            let body =
+                super::http::scrub(&super::http::read_error_text(response).await, &self.api_key);
             return Err(anyhow!("Anthropic API error {}: {}", status, body));
         }
 

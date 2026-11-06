@@ -574,7 +574,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AiUpstreamModelParams, bool>("ai.pullModel", pull_model)
         .long()
         .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // An Ollama delete then a health probe can outlast the default RPC timeout.
     map.method::<AiUpstreamModelParams, bool>("ai.deleteUpstreamModel", delete_upstream_model)
+        .long()
         .guard(Guard::Executor(AI_DELETE_CAPABILITY.clone()));
     map.method::<AiGetDefaultModelParams, Option<ModelView>>(
         "ai.getDefaultModel",
