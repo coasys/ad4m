@@ -26,7 +26,7 @@ use super::{ChatReply, ChatRequest, ChatRole, ChatTurn, ChatUsage, RemoteChat, T
 use crate::types::{DiscoveredModel, EndpointKind};
 
 /// A completion can run for minutes on a long prompt or a slow local model.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct OpenAiChat {
     http: reqwest::Client,
