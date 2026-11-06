@@ -980,7 +980,10 @@ impl AIService {
             })
             .map(|model| model.id.clone())
             .ok_or_else(|| {
-                anyhow!("No EMBEDDING model has the id or name '{requested}' on this executor")
+                crate::db::InvalidModel(format!(
+                    "No EMBEDDING model has the id or name '{requested}' on this executor"
+                ))
+                .into()
             })
     }
 

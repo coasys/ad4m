@@ -403,47 +403,29 @@ pub async fn resolve_already_present_semantic(
 }
 
 /// The strategy a pass runs: `strategy`, except a semantic one whose embedding model is not
-/// registered on this executor, which embeds with the default EMBEDDING model instead, else
-/// with the first one registered (dev's default embedding model answered such a pass), and
-/// compares normalized strings only when the executor has no embedding model at all.
+/// registered on this executor, which compares normalized strings. Its threshold was set
+/// for that model: another model's similarities do not compare to it, and could drop real
+/// proposals as duplicates.
 fn effective_strategy(strategy: &DedupStrategy) -> std::borrow::Cow<'_, DedupStrategy> {
     use std::borrow::Cow;
-    let DedupStrategy::Semantic { model, threshold } = strategy else {
+    let DedupStrategy::Semantic { model, .. } = strategy else {
         return Cow::Borrowed(strategy);
     };
-    let embedding_models: Vec<crate::types::Model> = crate::db_backend::db_backend()
+    let registered = crate::db_backend::db_backend()
         .get_models()
         .map(|models| {
-            models
-                .into_iter()
-                .filter(|m| m.model_type == crate::types::ModelType::Embedding)
-                .collect()
+            models.into_iter().any(|m| {
+                m.model_type == crate::types::ModelType::Embedding
+                    && (m.id == *model || m.name == *model)
+            })
         })
-        .unwrap_or_default();
-    if embedding_models
-        .iter()
-        .any(|m| m.id == *model || m.name == *model)
-    {
+        .unwrap_or(false);
+    if registered {
         return Cow::Borrowed(strategy);
     }
-    let default = crate::db_backend::db_backend()
-        .get_default_model(crate::types::ModelType::Embedding)
-        .ok()
-        .flatten()
-        .filter(|id| embedding_models.iter().any(|m| m.id == *id));
-    if let Some(instead) = default.or_else(|| embedding_models.first().map(|m| m.id.clone())) {
-        log::info!(
-            "Semantic dedup: no EMBEDDING model '{model}' on this executor; embedding with \
-             '{instead}' instead"
-        );
-        return Cow::Owned(DedupStrategy::Semantic {
-            model: instead,
-            threshold: *threshold,
-        });
-    }
     log::warn!(
-        "Semantic dedup: no EMBEDDING model on this executor; comparing normalized strings \
-         instead"
+        "Semantic dedup: no EMBEDDING model '{model}' on this executor; comparing normalized \
+         strings instead"
     );
     Cow::Owned(DedupStrategy::NormalizedString)
 }
@@ -920,11 +902,11 @@ mod tests {
         (id, mock)
     }
 
-    // dev's default embedding model answered a semantic pass whatever model the pass named.
-    // Here the default EMBEDDING model does (else the only one there is); strings are
-    // compared only when the executor has no embedding model at all (the test above).
+    // A threshold is set for the model a pass names: another model's similarities do not
+    // compare to it. So a pass whose model is missing compares strings, even when other
+    // embedding models are there, and never drops a proposal by another model's vectors.
     #[tokio::test]
-    async fn a_semantic_pass_without_its_model_embeds_with_the_default_one() {
+    async fn a_semantic_pass_without_its_model_compares_strings_not_another_models_vectors() {
         crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
         crate::ai_service::AIService::init_global_instance()
             .await
@@ -939,10 +921,6 @@ mod tests {
         let existing = existing_by_identity(&[("Task", "ship the MVP")]);
         let mut identity_props = HashMap::new();
         identity_props.insert("Task".to_string(), "title".to_string());
-        let semantic = DedupStrategy::Semantic {
-            model: "interpretation-embed".into(),
-            threshold: 0.9,
-        };
         let titles = |kept: &[ProposedInstance]| -> Vec<String> {
             kept.iter()
                 .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
@@ -950,38 +928,40 @@ mod tests {
                 .collect()
         };
 
-        // One embedding model, no default: it embeds. Every text has the same vector, so
-        // "Write the docs" is a duplicate too, which no string comparison would say.
-        let mut first_server = mockito::Server::new_async().await;
-        let (_first, first) = same_vector_embedder(&mut first_server, "first", 1).await;
+        // The default embedding model embeds every text to one vector, so with it
+        // "Write the docs" would be a duplicate too. It is called once: by the pass that
+        // names it.
+        let mut server = mockito::Server::new_async().await;
+        let (id, embedder) = same_vector_embedder(&mut server, "embed", 1).await;
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_default_model(crate::types::ModelType::Embedding, &id)
+        })
+        .unwrap();
+
+        let missing = DedupStrategy::Semantic {
+            model: "interpretation-embed".into(),
+            threshold: 0.9,
+        };
         let kept = filter_already_present_with_strategy(
             proposed.clone(),
             &existing,
             &identity_props,
-            &semantic,
+            &missing,
         )
         .await
         .unwrap();
-        assert!(titles(&kept).is_empty(), "{:?}", titles(&kept));
-        first.assert_async().await;
+        assert_eq!(titles(&kept), vec!["Write the docs"]);
 
-        // Two, one of them the default: the default embeds.
-        let mut second_server = mockito::Server::new_async().await;
-        let (second_id, second) = same_vector_embedder(&mut second_server, "second", 1).await;
-        crate::db::Ad4mDb::with_global_instance(|db| {
-            db.set_default_model(crate::types::ModelType::Embedding, &second_id)
-        })
-        .unwrap();
-        let tagged =
-            resolve_already_present_with_strategy(proposed, &existing, &identity_props, &semantic)
+        let named = DedupStrategy::Semantic {
+            model: "embed".into(),
+            threshold: 0.9,
+        };
+        let kept =
+            filter_already_present_with_strategy(proposed, &existing, &identity_props, &named)
                 .await
                 .unwrap();
-        assert!(
-            tagged.iter().all(|(_, r)| *r != Resolution::Keep),
-            "{tagged:?}"
-        );
-        second.assert_async().await;
-        first.assert_async().await;
+        assert!(titles(&kept).is_empty(), "{:?}", titles(&kept));
+        embedder.assert_async().await;
     }
 
     #[tokio::test]

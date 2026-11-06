@@ -161,6 +161,7 @@ fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {
         remote_model: setting.remote_model.clone(),
         native_tools: setting.native_tools,
     };
+    crate::ai_service::AIService::check_endpoint_serves(&input)?;
     let existing = crate::db_backend::db_backend()
         .get_models()?
         .into_iter()
@@ -291,5 +292,29 @@ mod tests {
         .unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(models.len(), 2);
+    }
+
+    // The file's models get the check `ai.addModel` makes: Ollama serves no transcription,
+    // so the model is skipped and the endpoint does not gain the capability.
+    #[test]
+    fn a_model_its_endpoint_cannot_serve_is_skipped() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let mut with_transcription = settings();
+        with_transcription.models.push(
+            serde_json::from_value(serde_json::json!({
+                "name": "whisper", "model_type": "TRANSCRIPTION", "endpoint": "ollama",
+                "remote_model": "whisper-1"
+            }))
+            .unwrap(),
+        );
+        apply(&with_transcription, env);
+        let (endpoints, models) = Ad4mDb::with_global_instance(|db| {
+            Ok::<_, anyhow::Error>((db.get_endpoints()?, db.get_models()?))
+        })
+        .unwrap();
+        assert!(models.iter().all(|m| m.name != "whisper"), "{models:?}");
+        assert!(!endpoints[0]
+            .capabilities
+            .contains(&AiCapability::Transcription));
     }
 }

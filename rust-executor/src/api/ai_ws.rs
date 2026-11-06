@@ -989,6 +989,21 @@ mod model_view_tests {
         let prompted = ai_prompt(prompt, ctx).await.unwrap_err();
         assert_eq!(prompted.code, 400, "ai.prompt: {}", prompted.message);
     }
+
+    // An embed on a model this executor does not have (Flux sends 'bert') is the caller's
+    // mistake: 400, not 500.
+    #[tokio::test]
+    async fn an_embed_on_a_model_that_does_not_exist_is_a_bad_request() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AIService::init_global_instance().await.unwrap();
+        let err = ai_embed(
+            serde_json::json!({ "modelId": "bert", "text": "hi" }),
+            Arc::new(RequestContext::operator_for_test()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, 400, "{}", err.message);
+    }
 }
 
 #[cfg(test)]
