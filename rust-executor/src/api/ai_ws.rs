@@ -1079,6 +1079,50 @@ mod compute_credit_tests {
         assert!(results.2.is_ok(), "a caller without a user pays nothing");
     }
 
+    // Removing this check from the HTTP feed broke no test (Data, #1615 round 1): a user at 0
+    // credits is refused before any stream is fed.
+    #[tokio::test]
+    async fn the_http_feed_refuses_a_user_without_credits() {
+        use crate::agent::session::{Principal, Session};
+        use crate::agent::AgentContext;
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        let id = uuid::Uuid::new_v4();
+        let broke_did = format!("did:key:broke-feeder-{id}");
+        let was_free = Ad4mDb::with_global_instance(|db| {
+            db.add_user(&format!("broke-feeder-{id}@example.org"), &broke_did, "pw")?;
+            let was_free = db.get_free_hosting_enabled()?;
+            db.set_free_hosting_enabled(false)?;
+            Ok::<_, anyhow::Error>(was_free)
+        })
+        .unwrap();
+        let context = RequestContext::for_session(
+            Session::for_test(Principal::Agent(AgentContext::managed(broke_did)))
+                .with_caps(vec![AI_TRANSCRIBE_CAPABILITY.clone()]),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-stream-ids", "a-stream".parse().unwrap());
+
+        let fed = feed_transcription_stream(
+            State(AppState {
+                admin_credential: None,
+            }),
+            context,
+            headers,
+            axum::body::Bytes::from(vec![0u8; 8]),
+        )
+        .await;
+        crate::db_backend::db_backend()
+            .set_free_hosting_enabled(was_free)
+            .unwrap();
+
+        match fed {
+            Err(ApiError::Forbidden(message)) => assert!(message.contains("credits"), "{message}"),
+            other => panic!("a user without credits fed a stream: {other:?}"),
+        }
+    }
+
     // On dev a closed database panicked the check, so the request failed. The read error
     // must not count as free hosting: the request would run without a credit check.
     #[test]

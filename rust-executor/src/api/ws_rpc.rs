@@ -128,7 +128,8 @@ pub(crate) async fn close_refused(mut socket: WebSocket, code: u16, reason: Stri
 }
 
 /// Closes a socket whose token stopped working while it was open.
-pub(crate) async fn close_token_ended(socket: &mut WebSocket) {
+pub(crate) async fn close_token_ended<S: futures::Sink<Message> + Unpin>(socket: &mut S) {
+    use futures::SinkExt;
     let _ = socket.send(Message::Close(Some(token_ended_frame()))).await;
 }
 

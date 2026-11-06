@@ -48,12 +48,15 @@ model's connection fields without going through the endpoint when it has one.
   filled under the stream-map lock, so text comes out in the order fed. A feed answers
   after its transcript is published; an upstream failure is the feed's error (no URL in
   it) and publishes nothing. A model without `api` stays on local Whisper (until P4).
-- No executor-side voice-activity detection: the client cuts utterances.
+- The client cuts utterances; the executor's Silero gate (`transcription::SpeechGate`)
+  drops one that is not speech, before the request and before local Whisper. Without
+  ONNX Runtime (loaded at run time on macOS) the gate is off and every utterance passes.
 - `bill_transcription` is the only place transcription is billed (streams and
   `/v1/audio/transcriptions`); `publish_text` sends `transcription-text` to the owner's
   DID only. `transcription_is_billed_in_one_place` pins the first.
 - The idle reaper (`start_stream_reaper`) holds the stream map weakly: dropping a clone of
-  the service (every `global_instance()` call makes one) does not stop it.
+  the service (every `global_instance()` call makes one) does not stop it. A stream with
+  an utterance still upstream (`Waiting`) is not idle; idle counts from its last answer.
 - `transcription_e2e.rs`: real server, skipped unless `TRANSCRIPTION_E2E_BASE_URL` and
   `TRANSCRIPTION_E2E_MODEL` are set.
 

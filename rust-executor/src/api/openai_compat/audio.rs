@@ -124,7 +124,9 @@ fn upstream_error(error: &anyhow::Error) -> OpenAIError {
             return OpenAIError::new(status, failure.to_string(), "invalid_request_error", None);
         }
         TranscribeFailure::Unauthorized => (StatusCode::BAD_GATEWAY, "upstream_auth"),
-        TranscribeFailure::Failed(_) => (StatusCode::BAD_GATEWAY, "upstream_error"),
+        TranscribeFailure::Failed(_) | TranscribeFailure::BadAnswer => {
+            (StatusCode::BAD_GATEWAY, "upstream_error")
+        }
         TranscribeFailure::Timeout => (StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"),
         TranscribeFailure::Unreachable => (StatusCode::SERVICE_UNAVAILABLE, "upstream_unavailable"),
     };

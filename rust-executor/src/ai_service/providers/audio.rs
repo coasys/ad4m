@@ -327,8 +327,8 @@ fn stream_event(line: &str) -> Result<StreamEvent> {
         .map_or(StreamEvent::Nothing, StreamEvent::Piece))
 }
 
-/// The transcript in an answer: `text` of a JSON answer (`json`, `verbose_json`), else the
-/// body itself (`text`, `srt`, `vtt`).
+/// The transcript in an answer: `text` of a JSON answer (`json`, `verbose_json`), the text of
+/// an event stream (a client's `stream=true`), else the body itself (`text`, `srt`, `vtt`).
 fn transcript_of(body: &[u8], content_type: &str) -> Result<String> {
     if content_type.starts_with("application/json") {
         let json: Value = serde_json::from_slice(body)?;
@@ -337,6 +337,18 @@ fn transcript_of(body: &[u8], content_type: &str) -> Result<String> {
             .and_then(Value::as_str)
             .map(|text| text.trim().to_string())
             .ok_or_else(|| anyhow!("the answer has no `text`"));
+    }
+    if content_type.starts_with("text/event-stream") {
+        let mut pieces = String::new();
+        let mut done = None;
+        for line in String::from_utf8_lossy(body).lines() {
+            match stream_event(line.trim())? {
+                StreamEvent::Piece(piece) => pieces.push_str(&piece),
+                StreamEvent::Done(text) => done = Some(text),
+                StreamEvent::Nothing => {}
+            }
+        }
+        return Ok(done.unwrap_or(pieces).trim().to_string());
     }
     Ok(String::from_utf8_lossy(body).trim().to_string())
 }
@@ -353,6 +365,9 @@ pub enum TranscribeFailure {
     Unauthorized,
     /// The upstream failed (5xx).
     Failed(reqwest::StatusCode),
+    /// The upstream answered, but the answer reported a failure (an `error` event) or could
+    /// not be read.
+    BadAnswer,
     Timeout,
     Unreachable,
 }
@@ -369,12 +384,17 @@ impl TranscribeFailure {
                 _ => Self::Failed(upstream.status),
             };
         }
-        let timed_out = error
-            .chain()
-            .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
-            .any(reqwest::Error::is_timeout);
-        if timed_out {
+        let http = || {
+            error
+                .chain()
+                .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        };
+        if http().any(reqwest::Error::is_timeout) {
             Self::Timeout
+        } else if http().next().is_none() || http().any(|e| e.is_body() || e.is_decode()) {
+            // No transport error (an `error` event, an answer that does not parse), or one
+            // while the answer was read: the endpoint was reached.
+            Self::BadAnswer
         } else {
             Self::Unreachable
         }
@@ -394,6 +414,9 @@ impl std::fmt::Display for TranscribeFailure {
                 f.write_str("The transcription endpoint refused this executor's key")
             }
             Self::Failed(status) => write!(f, "The transcription endpoint failed ({status})"),
+            Self::BadAnswer => {
+                f.write_str("The transcription endpoint's answer was a failure or unreadable")
+            }
             Self::Timeout => f.write_str("The transcription endpoint did not answer in time"),
             Self::Unreachable => f.write_str("The transcription endpoint is unreachable"),
         }
@@ -568,6 +591,75 @@ mod tests {
             TranscribeFailure::of(&error),
             TranscribeFailure::Unreachable
         );
+    }
+
+    // A client's `stream=true` on /v1/audio/transcriptions: the transcript of the event
+    // stream was its whole body, keys and event names too, and was billed at about 3x.
+    #[tokio::test]
+    async fn the_transcript_of_a_streamed_answer_is_its_text() {
+        let sse = concat!(
+            "data: {\"type\":\"transcript.text.delta\",\"delta\":\"Hello\"}\n\n",
+            "data: {\"type\":\"transcript.text.delta\",\"delta\":\" world\"}\n\n",
+            "data: {\"type\":\"transcript.text.done\",\"text\":\"Hello world\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let client = OpenAiTranscribe::new("", Url::parse(&server.url()).unwrap());
+        let reply = client
+            .transcribe("m", wav(), vec![("stream".into(), "true".into())])
+            .await
+            .unwrap();
+        assert_eq!(reply.text, "Hello world");
+        assert_eq!(
+            reply.body,
+            sse.as_bytes(),
+            "the client gets the events as sent"
+        );
+    }
+
+    // An answer that failed or could not be read was "unreachable": the endpoint answered.
+    #[tokio::test]
+    async fn a_failed_or_unreadable_answer_is_not_unreachable() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "text/event-stream")
+            .with_body("data: {\"error\":{\"message\":\"engine failed\"}}\n\n")
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/unreadable/v1/audio/transcriptions")
+            .with_header("content-type", "application/json")
+            .with_body("not json")
+            .create_async()
+            .await;
+        let base = Url::parse(&server.url()).unwrap();
+        let (pieces, _) = mpsc::unbounded_channel();
+
+        let streamed = OpenAiTranscribe::new("", base.clone());
+        let error = streamed
+            .transcribe_pieces("m", wav(), &pieces)
+            .await
+            .unwrap_err();
+        assert_eq!(TranscribeFailure::of(&error), TranscribeFailure::BadAnswer);
+        let error = streamed
+            .transcribe("m", wav(), vec![("stream".into(), "true".into())])
+            .await
+            .unwrap_err();
+        assert_eq!(TranscribeFailure::of(&error), TranscribeFailure::BadAnswer);
+
+        let unreadable = OpenAiTranscribe::new("", base.join("unreadable/").unwrap());
+        let error = unreadable.transcribe("m", wav(), vec![]).await.unwrap_err();
+        assert_eq!(TranscribeFailure::of(&error), TranscribeFailure::BadAnswer);
+        assert!(!TranscribeFailure::BadAnswer
+            .to_string()
+            .contains(&server.url()));
     }
 
     #[test]

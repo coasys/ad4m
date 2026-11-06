@@ -1109,3 +1109,157 @@ async fn an_anthropic_endpoint_that_refuses_connections_is_a_503() {
         "upstream_unavailable"
     );
 }
+
+// ── /v1/realtime on an endpoint ─────────────────────────────────────────────
+
+type RealtimeClient =
+    futures::channel::mpsc::UnboundedSender<Result<axum::extract::ws::Message, axum::Error>>;
+type RealtimeFrames = futures::channel::mpsc::UnboundedReceiver<axum::extract::ws::Message>;
+
+/// A `/v1/realtime` session of `caller`: where the client sends, and what it receives.
+fn realtime(caller: RequestContext) -> (RealtimeClient, RealtimeFrames) {
+    let (client, incoming) = futures::channel::mpsc::unbounded();
+    let (socket, frames) = futures::channel::mpsc::unbounded();
+    tokio::spawn(super::realtime::serve(caller, socket, incoming));
+    (client, frames)
+}
+
+fn send(client: &RealtimeClient, event: Value) {
+    client
+        .unbounded_send(Ok(axum::extract::ws::Message::Text(
+            event.to_string().into(),
+        )))
+        .unwrap();
+}
+
+/// The next event the client receives, within 10 s.
+async fn next_event(frames: &mut RealtimeFrames) -> Value {
+    use futures::StreamExt;
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(10), frames.next())
+        .await
+        .expect("an event within 10 s")
+        .expect("the socket is open");
+    match frame {
+        axum::extract::ws::Message::Text(text) => serde_json::from_str(&text).unwrap(),
+        other => panic!("not an event: {other:?}"),
+    }
+}
+
+/// The test recording (speech, so the gate lets it through) as one append.
+fn append_speech() -> Value {
+    use base64::Engine;
+    let wav = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/transcription_test.wav"
+    ))
+    .unwrap();
+    json!({
+        "type": "input_audio_buffer.append",
+        "audio": base64::prelude::BASE64_STANDARD.encode(&wav[44..]),
+    })
+}
+
+/// The `stt` model, a fresh database, the agent's keys and an AIService.
+async fn realtime_world(server: &mockito::ServerGuard) {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    fresh();
+    transcription_model(server);
+    crate::ai_service::AIService::init_global_instance()
+        .await
+        .unwrap();
+}
+
+async fn open_stt(client: &RealtimeClient, frames: &mut RealtimeFrames) -> Value {
+    send(
+        client,
+        json!({"type": "transcription_session.update", "session": {"model": "stt"}}),
+    );
+    next_event(frames).await
+}
+
+// /v1/realtime awaited each commit inside its socket loop, so nothing read the stream's
+// 64-piece text channel while a streaming upstream answered: the start of a long utterance
+// was dropped without notice, and the whole of it was billed.
+#[tokio::test]
+async fn realtime_passes_every_piece_a_streaming_upstream_sends() {
+    const PIECES: usize = 100;
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("POST", "/v1/audio/transcriptions")
+        .with_header("content-type", "text/event-stream")
+        .with_chunked_body(|w| {
+            for i in 0..PIECES {
+                let event = json!({"type": "transcript.text.delta", "delta": format!(" w{i}")});
+                write!(w, "data: {event}\n\n")?;
+                w.flush()?;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            w.write_all(b"data: [DONE]\n\n")
+        })
+        .create_async()
+        .await;
+    realtime_world(&server).await;
+    let (client, mut frames) = realtime(RequestContext::operator_for_test());
+
+    let created = open_stt(&client, &mut frames).await;
+    assert_eq!(
+        created["type"], "transcription_session.created",
+        "{created}"
+    );
+    send(&client, append_speech());
+    send(&client, json!({"type": "input_audio_buffer.commit"}));
+
+    let mut deltas = Vec::new();
+    while deltas.len() < PIECES {
+        let event = next_event(&mut frames).await;
+        assert_eq!(
+            event["type"], "conversation.item.input_audio_transcription.delta",
+            "{event}"
+        );
+        deltas.push(event["delta"].as_str().unwrap().to_string());
+    }
+    let sent: Vec<String> = (0..PIECES).map(|i| format!(" w{i}")).collect();
+    assert_eq!(deltas, sent);
+}
+
+// /v1/realtime opened and fed streams without the credit check of every other metered path,
+// so a user at 0 credits transcribed on the operator's key (Data, #1615 round 1).
+#[tokio::test]
+async fn realtime_refuses_a_user_without_credits_at_open_and_at_each_commit() {
+    let mut server = mockito::Server::new_async().await;
+    let upstream = server
+        .mock("POST", Matcher::Any)
+        .expect(0)
+        .create_async()
+        .await;
+    realtime_world(&server).await;
+    let did = crate::test_utils::create_test_user("realtime-broke@example.org");
+    let caller = RequestContext::for_session(
+        Session::for_test(Principal::Agent(AgentContext::managed(did)))
+            .with_caps(vec![AI_TRANSCRIBE_CAPABILITY.clone()]),
+    );
+    let paid_hosting = |paid: bool| {
+        Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(!paid)).unwrap();
+    };
+    let (client, mut frames) = realtime(caller);
+
+    // Free while the stream opens; the credits are gone by the commit.
+    paid_hosting(false);
+    let created = open_stt(&client, &mut frames).await;
+    assert_eq!(
+        created["type"], "transcription_session.created",
+        "{created}"
+    );
+    paid_hosting(true);
+    send(&client, append_speech());
+    send(&client, json!({"type": "input_audio_buffer.commit"}));
+    let refused = next_event(&mut frames).await;
+    assert_eq!(refused["error"]["code"], "insufficient_quota", "{refused}");
+
+    let refused = open_stt(&client, &mut frames).await;
+    assert_eq!(refused["error"]["code"], "insufficient_quota", "{refused}");
+
+    paid_hosting(false);
+    upstream.assert_async().await;
+}

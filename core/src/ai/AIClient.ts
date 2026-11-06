@@ -162,8 +162,9 @@ export class AIClient {
 
     /**
      * Open a transcription stream on a TRANSCRIPTION model. Feed it one utterance at a time
-     * (the caller decides where speech starts and ends: the executor runs no voice-activity
-     * detection); each utterance's text arrives at `streamCallback`, in the order fed.
+     * (the caller decides where speech starts and ends; the executor drops an utterance its
+     * speech gate does not take as speech); each utterance's text arrives at
+     * `streamCallback`, in the order fed.
      */
     async openTranscriptionStream(
         modelId: string,
