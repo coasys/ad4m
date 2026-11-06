@@ -728,9 +728,18 @@ fn a_step_names_its_record_by_id_only() {
         target_of(&json!({ "parent": "app://chat/1" }), None).as_deref(),
         Some("app://chat/1")
     );
-    // A create names its record in what it answers.
+    // A create names its record in what it answers, and under a parent that record is still
+    // what it acted on.
     assert_eq!(
         target_of(&json!({}), Some(r#"{"base_uri":"app://new/1"}"#)).as_deref(),
+        Some("app://new/1")
+    );
+    assert_eq!(
+        target_of(
+            &json!({ "parent": "app://chat/1" }),
+            Some(r#"{"base_uri":"app://new/1"}"#)
+        )
+        .as_deref(),
         Some("app://new/1")
     );
     // Free text is never taken for an id.
@@ -767,8 +776,82 @@ fn a_step_fails_on_the_loops_error_or_the_tools_error_and_caps_the_message() {
         outcome_of(r#"{"error":"Perspective p not found","status":404}"#),
         ("error", Some("Perspective p not found".into()))
     );
+    // A record read back is a success, whatever its own `error` says.
+    assert_eq!(
+        outcome_of(r#"{"id":"ad4m://agent_reply/1","status":"failed","error":"timed out"}"#),
+        ("ok", None)
+    );
     let (_, long) = outcome_of(&format!("error: {}", "x".repeat(1000)));
     assert!(long.unwrap().chars().count() <= 301);
+}
+
+/// What the steps say of a create under a parent and of a read of a record with an `error`
+/// property: the created record, and `ok`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_names_the_record_a_create_made_and_a_read_of_a_failed_record_is_ok() {
+    let mut f = fixture().await;
+    say(
+        &mut f,
+        "app://m/1",
+        "add a card, then look at the failed reply",
+    )
+    .await;
+    let run: Runner = Box::new(|_messages, steps: Arc<dyn ToolObserver>| {
+        Box::pin(async move {
+            let create = json!({ "class_name": "Card", "parent": "app://board/1" });
+            steps.tool_called("instance_create", &create).await;
+            steps
+                .tool_returned(
+                    "instance_create",
+                    &create,
+                    r#"{"success":true,"base_uri":"app://card/1"}"#,
+                )
+                .await;
+            let get = json!({ "class_name": "AgentReply", "base_uri": "ad4m://agent_reply/old" });
+            steps.tool_called("instance_get", &get).await;
+            steps
+                .tool_returned(
+                    "instance_get",
+                    &get,
+                    r#"{"id":"ad4m://agent_reply/old","status":"failed","error":"timed out"}"#,
+                )
+                .await;
+            Ok(AgentReply {
+                text: "done".into(),
+            })
+        })
+    });
+    let here = f.perspective.uuid.clone();
+    let id = start_reply(
+        f.perspective.clone(),
+        CHAT,
+        &f.did,
+        &here,
+        f.ctx.clone(),
+        run,
+    )
+    .await
+    .unwrap();
+    until_status(&f, &id, ReplyStatus::Done).await;
+
+    let steps = steps_of(&f, &id).await;
+    let seen: Vec<(Value, Value, Value)> = steps
+        .iter()
+        .map(|s| (s["tool"].clone(), s["target"].clone(), s["outcome"].clone()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (json!("instance_create"), json!("app://card/1"), json!("ok")),
+            (
+                json!("instance_get"),
+                json!("ad4m://agent_reply/old"),
+                json!("ok")
+            ),
+        ],
+        "{steps:?}"
+    );
+    assert!(steps[1]["error"].is_null(), "{steps:?}");
 }
 
 /// A link signed by `signer`, as a peer's link arrives from the link language.

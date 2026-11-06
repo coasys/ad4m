@@ -85,6 +85,9 @@ export class AgentReplyRecord extends Ad4mModel {
   /**
    * Its tool calls, as they happen. Read them with `include: { steps: true }` (oldest first by
    * `createdAt`); a subscription with that include follows new steps and their outcomes.
+   *
+   * In a shared perspective another member can add a step to a reply or rewrite one's `outcome`.
+   * A view that shows steps should keep only those the reply's author wrote.
    */
   @HasMany(() => AgentStepRecord, { through: "ad4m://agent_step" })
   steps: AgentStepRecord[] = [];
