@@ -127,6 +127,9 @@ enum StreamBackend {
     /// utterance after the ones fed before it.
     Remote {
         utterances: mpsc::UnboundedSender<transcription::Utterance>,
+        /// The model the stream transcribes with: a reload of it closes the stream, whose
+        /// worker holds the endpoint's URL and key as they were.
+        model_id: String,
     },
 }
 
@@ -2334,6 +2337,14 @@ impl AIService {
                             if audio_chunk.is_empty() || !gate.passes(&audio_chunk) {
                                 continue;
                             }
+                            // Checked again here, not only when the audio was fed: feeds queue,
+                            // and the bill of one lands before the next is transcribed.
+                            if let Some(agent_did) = billing_agent.as_deref() {
+                                if crate::billing::check_compute_credits(agent_did).is_err() {
+                                    log::info!("transcription stream={stream_id_clone}: dropped an utterance, no compute credits left");
+                                    continue;
+                                }
+                            }
                             let buffer = rodio::buffer::SamplesBuffer::new(1, transcription::SAMPLE_RATE, audio_chunk);
                             let mut segments = match whisper.transcribe(buffer) {
                                 Ok(segments) => segments,
@@ -2399,20 +2410,23 @@ impl AIService {
         log::info!("Opening transcription stream {stream_id} on model {model_id} ({remote_model})");
         let worker = transcription::RemoteStream {
             stream_id: stream_id.clone(),
-            model_id,
+            model_id: model_id.clone(),
             remote_model,
             client,
             agent_did: agent_did.clone(),
             user_did,
             listeners: text_broadcast_tx.clone(),
-            gate: transcription::SpeechGate::new(),
+            gate: Some(transcription::SpeechGate::new()),
         };
         tokio::spawn(worker.run(queue));
 
         self.transcription_streams.lock().await.insert(
             stream_id.clone(),
             TranscriptionSession {
-                backend: StreamBackend::Remote { utterances },
+                backend: StreamBackend::Remote {
+                    utterances,
+                    model_id,
+                },
                 last_activity: Arc::new(Mutex::new(tokio::time::Instant::now())),
                 waiting: Default::default(),
                 text_broadcast_tx,
@@ -2425,8 +2439,9 @@ impl AIService {
     /// Feed one utterance (16 kHz mono) to a stream.
     ///
     /// On an endpoint this answers once the utterance is transcribed and its text published,
-    /// after every utterance fed before it; an upstream failure is the error, and nothing is
-    /// published. On local Whisper it answers once the audio is queued.
+    /// after every utterance fed before it; an upstream failure is the error. The pieces a
+    /// streaming upstream sent before it failed stay published, and nothing more is. On
+    /// local Whisper it answers once the audio is queued.
     pub async fn feed_transcription_stream(
         &self,
         stream_id: &String,
@@ -2464,7 +2479,7 @@ impl AIService {
                 Ok(Box::pin(futures::future::ready(Ok(()))))
             }
             // Queued while the map is locked: two feeds keep the order they arrived in.
-            StreamBackend::Remote { utterances } => {
+            StreamBackend::Remote { utterances, .. } => {
                 let (done, outcome) = oneshot::channel();
                 utterances
                     .send(transcription::Utterance {
@@ -2545,11 +2560,19 @@ impl AIService {
         }
     }
 
-    /// Download a local Whisper model's weights. A model on an endpoint has none to fetch.
+    /// Download a local Whisper model's weights. A model on an endpoint has none to fetch:
+    /// it is ready when its endpoint serves it.
     async fn load_transcriber_model(model: &Model) {
         let model_id = model.id.clone();
         if model.api.is_some() {
-            publish_model_status(model_id, 100.0, "Ready", true, true).await;
+            match transcription::endpoint_transcriber(&model_id) {
+                Ok(Some(_)) => publish_model_status(model_id, 100.0, "Ready", true, true).await,
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("Transcription model {model_id} cannot run on its endpoint: {e:#}");
+                    publish_model_status(model_id, 0.0, "Not loaded", false, false).await;
+                }
+            }
             return;
         }
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
@@ -2599,6 +2622,11 @@ impl AIService {
 
         log::info!("Updated model in DB: {:?}", updated_model);
 
+        // A stream on the model keeps the client it opened with: closed, so no more audio
+        // goes to the endpoint as it was. The utterances it already took are answered.
+        self.transcription_streams.lock().await.retain(|_, stream| {
+            !matches!(&stream.backend, StreamBackend::Remote { model_id: of, .. } if *of == model_id)
+        });
         if updated_model.model_type != ModelType::Embedding {
             // A model that is no longer an embedding model no longer embeds.
             self.embedding_channel.lock().await.remove(&model_id);
@@ -3673,6 +3701,37 @@ mod remote_stream_http_tests {
             assert_eq!(calls.len(), 1, "{shape}: {calls:?}");
             assert_eq!(calls[0].amount, 4.0, "{shape}: 8 words at 0.5");
         }
+    }
+
+    // A piece that was only a space was not published, so a listener that joins the pieces
+    // ran the words on each side of it together.
+    #[tokio::test]
+    async fn a_piece_that_is_only_spacing_is_published() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "text/event-stream")
+            .with_body(concat!(
+                "data: {\"type\":\"transcript.text.delta\",\"delta\":\"Hello\"}\n\n",
+                "data: {\"type\":\"transcript.text.delta\",\"delta\":\" \"}\n\n",
+                "data: {\"type\":\"transcript.text.delta\",\"delta\":\"world\"}\n\n",
+                "data: [DONE]\n\n",
+            ))
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        service
+            .feed_transcription_stream(&id, speech(), &operator)
+            .await
+            .unwrap();
+        assert_eq!(texts(&mut text).concat(), "Hello world");
     }
 
     // A server that takes `stream` and answers JSON anyway (nemo-speech's transcription
