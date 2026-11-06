@@ -5,7 +5,7 @@
 use super::agent_reply::{
     cancel_reply, conversation, ensure_agent_reply_class, hold_for_delete, reserve, start_reply,
     ReplyError, ReplyRow, ReplySlot, ReplyStatus, Runner, Stage, StartHold, AGENT_REPLY_CLASS,
-    MAX_RUNNING_PER_CALLER,
+    ANSWERS, MAX_RUNNING_PER_CALLER,
 };
 use super::agent_session::{AgentMessage, AgentReply, AgentSessionError};
 use crate::agent::signatures::TestSigner;
@@ -248,6 +248,42 @@ async fn the_next_reply_is_given_the_conversation_so_far() {
             ("user".into(), "rename the board".into()),
             ("assistant".into(), "Renamed it.".into()),
             ("user".into(), "now undo that".into()),
+        ]
+    );
+}
+
+/// A reply's place in the conversation is its start, not its end: a message written while it ran
+/// reads after it, and is the next one answered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_written_while_a_reply_runs_is_answered_next() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "rename the board").await;
+    let (run, go) = answering_on_cue("Renamed it.", Arc::default());
+    let first = start(&f, run).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    // The person writes again while the agent works (another device, a queued message).
+    say(&mut f, "app://m/2", "and archive the old one").await;
+    go.send(()).unwrap();
+    let done = until_status(&f, &first, ReplyStatus::Done).await;
+    assert_eq!(done["answers"], "app://m/1");
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let second = start(&f, answering("Archived.", seen.clone())).await;
+    let second = second.unwrap();
+    until_status(&f, &second, ReplyStatus::Done).await;
+    assert_eq!(reply(&f, &second).await["answers"], "app://m/2");
+    let turns: Vec<(String, String)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|m| (m.role.clone(), m.content.clone()))
+        .collect();
+    assert_eq!(
+        turns,
+        vec![
+            ("user".into(), "rename the board".into()),
+            ("assistant".into(), "Renamed it.".into()),
+            ("user".into(), "and archive the old one".into()),
         ]
     );
 }
@@ -692,9 +728,18 @@ fn a_step_names_its_record_by_id_only() {
         target_of(&json!({ "parent": "app://chat/1" }), None).as_deref(),
         Some("app://chat/1")
     );
-    // A create names its record in what it answers.
+    // A create names its record in what it answers, and under a parent that record is still
+    // what it acted on.
     assert_eq!(
         target_of(&json!({}), Some(r#"{"base_uri":"app://new/1"}"#)).as_deref(),
+        Some("app://new/1")
+    );
+    assert_eq!(
+        target_of(
+            &json!({ "parent": "app://chat/1" }),
+            Some(r#"{"base_uri":"app://new/1"}"#)
+        )
+        .as_deref(),
         Some("app://new/1")
     );
     // Free text is never taken for an id.
@@ -731,8 +776,82 @@ fn a_step_fails_on_the_loops_error_or_the_tools_error_and_caps_the_message() {
         outcome_of(r#"{"error":"Perspective p not found","status":404}"#),
         ("error", Some("Perspective p not found".into()))
     );
+    // A record read back is a success, whatever its own `error` says.
+    assert_eq!(
+        outcome_of(r#"{"id":"ad4m://agent_reply/1","status":"failed","error":"timed out"}"#),
+        ("ok", None)
+    );
     let (_, long) = outcome_of(&format!("error: {}", "x".repeat(1000)));
     assert!(long.unwrap().chars().count() <= 301);
+}
+
+/// What the steps say of a create under a parent and of a read of a record with an `error`
+/// property: the created record, and `ok`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_names_the_record_a_create_made_and_a_read_of_a_failed_record_is_ok() {
+    let mut f = fixture().await;
+    say(
+        &mut f,
+        "app://m/1",
+        "add a card, then look at the failed reply",
+    )
+    .await;
+    let run: Runner = Box::new(|_messages, steps: Arc<dyn ToolObserver>| {
+        Box::pin(async move {
+            let create = json!({ "class_name": "Card", "parent": "app://board/1" });
+            steps.tool_called("instance_create", &create).await;
+            steps
+                .tool_returned(
+                    "instance_create",
+                    &create,
+                    r#"{"success":true,"base_uri":"app://card/1"}"#,
+                )
+                .await;
+            let get = json!({ "class_name": "AgentReply", "base_uri": "ad4m://agent_reply/old" });
+            steps.tool_called("instance_get", &get).await;
+            steps
+                .tool_returned(
+                    "instance_get",
+                    &get,
+                    r#"{"id":"ad4m://agent_reply/old","status":"failed","error":"timed out"}"#,
+                )
+                .await;
+            Ok(AgentReply {
+                text: "done".into(),
+            })
+        })
+    });
+    let here = f.perspective.uuid.clone();
+    let id = start_reply(
+        f.perspective.clone(),
+        CHAT,
+        &f.did,
+        &here,
+        f.ctx.clone(),
+        run,
+    )
+    .await
+    .unwrap();
+    until_status(&f, &id, ReplyStatus::Done).await;
+
+    let steps = steps_of(&f, &id).await;
+    let seen: Vec<(Value, Value, Value)> = steps
+        .iter()
+        .map(|s| (s["tool"].clone(), s["target"].clone(), s["outcome"].clone()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (json!("instance_create"), json!("app://card/1"), json!("ok")),
+            (
+                json!("instance_get"),
+                json!("ad4m://agent_reply/old"),
+                json!("ok")
+            ),
+        ],
+        "{steps:?}"
+    );
+    assert!(steps[1]["error"].is_null(), "{steps:?}");
 }
 
 // ── Sessions ────────────────────────────────────────────────────────────────
@@ -1038,6 +1157,7 @@ async fn another_members_writes_never_reach_the_model() {
                 "literal:string:done",
             ),
             peer_link(&mallory, forged, "ad4m://agent_reply/text", injected),
+            peer_link(&mallory, forged, ANSWERS, "app://m/1"),
             peer_link(&mallory, CHAT, HAS_CHILD, forged),
             peer_link(&mallory, "app://m/1", "app://message_text", injected),
             peer_link(&mallory, &first, "ad4m://agent_reply/text", injected),
@@ -1254,6 +1374,7 @@ async fn the_sweep_at_load_leaves_another_nodes_running_reply_alone() {
                 "ad4m://agent_reply/status",
                 "literal:string:running",
             ),
+            peer_link(&other_node, theirs, ANSWERS, "app://m/1"),
             peer_link(&other_node, CHAT, HAS_CHILD, theirs),
         ]))
         .await
@@ -1306,6 +1427,19 @@ async fn a_start_dropped_while_committing_cancels_the_saved_reply() {
             },
             reply.clone(),
             Some(json!({ "status": "running" })),
+            None,
+            &f.ctx,
+        )
+        .await
+        .unwrap();
+    f.perspective
+        .add_link(
+            Link {
+                source: reply.clone(),
+                predicate: Some(ANSWERS.into()),
+                target: "app://m/1".into(),
+            },
+            LinkStatus::Shared,
             None,
             &f.ctx,
         )

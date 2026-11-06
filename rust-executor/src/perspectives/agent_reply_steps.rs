@@ -17,6 +17,13 @@
 //!
 //! A step left `running` under a reply that is no longer `running` was cut off: by a cancel, a
 //! timeout or a restart.
+//!
+//! **Readers check a step's author.** A reply's `steps` is every `ad4m://agent_step` link from
+//! it, and a step's fields read their latest link, whoever wrote it. In a shared perspective
+//! another member can hang a step on the caller's reply or rewrite one's `outcome`. Steps never
+//! reach the model (they are no turns of the conversation), so this can only mislead a view that
+//! shows them: a reader that shows steps keeps those whose links the reply's author wrote alone,
+//! as the conversation does for messages (`written_only_by` in `agent_reply.rs`).
 
 use crate::agent::AgentContext;
 use crate::ai_service::harness::ToolObserver;
@@ -174,8 +181,9 @@ impl ToolObserver for StepWriter {
                 log::info!("agent reply {}: {name} failed: {error}", self.reply);
             }
         }
-        // A create names its record only in what it answers.
-        if target_of(arguments, None).is_none() {
+        // A create names its record only in what it answers, and that record, not the parent
+        // the call named, is what it acted on.
+        if names_no_record(arguments) {
             if let Some(target) = target_of(&Value::Null, Some(result)) {
                 values["target"] = target.into();
             }
@@ -189,36 +197,47 @@ impl ToolObserver for StepWriter {
     }
 }
 
-/// The record a call acted on, by id: the `base_uri` or `parent` it names, else the `base_uri`
-/// its answer names (a create's). Only a value that reads as an id is taken, so no free text
-/// from the arguments or the answer reaches the step: a literal is refused, since its text
-/// (percent-encoded, so it has no spaces) is the record's.
+/// The record a call acted on, by id: the `base_uri` it names, else the `base_uri` its answer
+/// names (a create's, even under a `parent`), else the `parent` it names. Only a value that reads
+/// as an id is taken, so no free text from the arguments or the answer reaches the step: a
+/// literal is refused, since its text (percent-encoded, so it has no spaces) is the record's.
 pub(crate) fn target_of(arguments: &Value, result: Option<&str>) -> Option<String> {
-    let from = |value: &Value| {
-        ["base_uri", "parent"]
-            .iter()
-            .filter_map(|key| value.get(key).and_then(Value::as_str))
-            .find(|id| looks_like_id(id))
-            .map(str::to_string)
-    };
-    from(arguments).or_else(|| {
-        let answer: Value = serde_json::from_str(result?).ok()?;
-        answer
-            .get("base_uri")
+    let id_at = |value: &Value, key: &str| {
+        value
+            .get(key)
             .and_then(Value::as_str)
             .filter(|id| looks_like_id(id))
             .map(str::to_string)
-    })
+    };
+    id_at(arguments, "base_uri")
+        .or_else(|| {
+            let answer: Value = serde_json::from_str(result?).ok()?;
+            id_at(&answer, "base_uri")
+        })
+        .or_else(|| id_at(arguments, "parent"))
+}
+
+/// The call names no record of its own: what it acted on may be in its answer.
+fn names_no_record(arguments: &Value) -> bool {
+    !arguments
+        .get("base_uri")
+        .and_then(Value::as_str)
+        .is_some_and(looks_like_id)
 }
 
 /// How a call went, from what it answered: `error` with the message when the call failed (the
-/// loop's `error: …`) or the tool answered `{ "error": … }`; `ok` otherwise.
+/// loop's `error: …`) or the tool answered `{ "error": … }`; `ok` otherwise. An answer with an
+/// `id` is a record (`instance_get` answers with the record itself), and a record's own `error`
+/// property (a failed reply's, a step's, an app's) says nothing about the call.
 pub(crate) fn outcome_of(result: &str) -> (&'static str, Option<String>) {
     let message = result
         .strip_prefix("error:")
         .map(|m| m.trim().to_string())
         .or_else(|| {
             let answer: Value = serde_json::from_str(result).ok()?;
+            if answer.get("id").is_some() {
+                return None;
+            }
             match answer.get("error")? {
                 Value::String(s) => Some(s.clone()),
                 Value::Null => None,
