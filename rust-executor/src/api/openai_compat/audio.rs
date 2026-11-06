@@ -23,7 +23,9 @@ use super::model_selector::{resolve, resolve_model};
 use super::passthrough::{self, Upstream};
 use super::types::SpeechRequest;
 use crate::agent::capabilities::{AI_PROMPT_CAPABILITY, AI_TRANSCRIBE_CAPABILITY};
-use crate::ai_service::providers::audio::{AudioFile, RemoteTranscribe, TranscribeFailure};
+use crate::ai_service::providers::audio::{
+    AudioFile, NotATranscriptionEndpoint, RemoteTranscribe, TranscribeFailure,
+};
 use crate::ai_service::transcription;
 use crate::billing::{bill_compute, check_compute_credits, check_credits_cover};
 use crate::types::{AiCapability, ModelType, RequestContext};
@@ -82,7 +84,10 @@ pub async fn transcriptions(
     let model_id = resolve_model(&model, ModelType::Transcription).await?;
     // The model resolved: what is left to refuse is an endpoint that cannot transcribe.
     let (client, remote_model, _endpoint_id) = transcription::endpoint_transcriber(&model_id)
-        .map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
+        .map_err(|e| match e.downcast_ref::<NotATranscriptionEndpoint>() {
+            Some(refused) => OpenAIError::model_not_supported(refused.to_string()),
+            None => OpenAIError::invalid_request(e.to_string()),
+        })?;
 
     if let Some(agent_did) = auth.user_did() {
         check_compute_credits(agent_did)

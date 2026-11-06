@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use super::providers::audio::{AudioFile, OpenAiTranscribe, RemoteTranscribe, TranscribeFailure};
+use super::providers::audio::{
+    require_transcription, AudioFile, OpenAiTranscribe, RemoteTranscribe, TranscribeFailure,
+};
 use super::Result;
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
@@ -112,6 +114,7 @@ pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<(OpenAiTranscribe, 
                 model.name
             )
         })?;
+    require_transcription(&endpoint)?;
     Ok((
         OpenAiTranscribe::for_endpoint(&endpoint)?,
         model.remote_model,
@@ -198,7 +201,8 @@ pub(super) struct RemoteStream {
     pub agent_did: Option<String>,
     pub user_did: String,
     pub listeners: broadcast::Sender<String>,
-    pub gate: SpeechGate,
+    /// `None` once the gate failed.
+    pub gate: Option<SpeechGate>,
 }
 
 impl RemoteStream {
@@ -223,8 +227,13 @@ impl RemoteStream {
         }
         let audio_ms = samples.len() as u64 * 1000 / SAMPLE_RATE as u64;
         // Silero takes milliseconds per second of audio: on a blocking thread, not on a
-        // worker of the runtime. The gate goes along and comes back with its state.
-        let gate = std::mem::replace(&mut self.gate, SpeechGate { vad: None });
+        // worker of the runtime. The gate goes along and comes back with its state; when it
+        // panicked it does not come back, and the stream sends no more audio.
+        let Some(gate) = self.gate.take() else {
+            return Err(anyhow!(
+                "The speech gate of this stream failed: it transcribes no more audio"
+            ));
+        };
         let (gate, samples, speech_ratio) = tokio::task::spawn_blocking(move || {
             let mut gate = gate;
             let ratio = gate.speech_ratio(&samples);
@@ -232,7 +241,7 @@ impl RemoteStream {
         })
         .await
         .map_err(|e| anyhow!("The speech gate failed: {e}"))?;
-        self.gate = gate;
+        self.gate = Some(gate);
         if speech_ratio < VAD_MIN_SPEECH_RATIO {
             log::debug!(
                 "transcription stream={} audio_ms={audio_ms} dropped by the speech gate (speech_ratio={speech_ratio:.2})",
@@ -302,10 +311,10 @@ impl RemoteStream {
         Ok(())
     }
 
-    /// Publish one streamed piece (as the upstream sent it, its spacing kept), skipping
-    /// empty ones.
+    /// Publish one streamed piece as the upstream sent it, its spacing kept: a piece that is
+    /// only a space separates the words on each side of it. Empty ones are skipped.
     async fn publish_piece(&self, piece: &str, published: &mut String) {
-        if piece.trim().is_empty() {
+        if piece.is_empty() {
             return;
         }
         published.push_str(piece);
@@ -348,6 +357,40 @@ mod tests {
             0.0,
             "under one window"
         );
+    }
+
+    /// An upstream that must not be called.
+    struct NoUpstream;
+
+    #[async_trait::async_trait]
+    impl RemoteTranscribe for NoUpstream {
+        async fn transcribe(
+            &self,
+            _model: &str,
+            _audio: AudioFile,
+            _fields: Vec<(String, String)>,
+        ) -> anyhow::Result<super::super::providers::audio::TranscribeReply> {
+            panic!("the upstream was called");
+        }
+    }
+
+    // A gate that panicked left the stream with no gate, and every later utterance, silence
+    // too, went to the upstream.
+    #[tokio::test]
+    async fn a_stream_whose_gate_failed_sends_nothing_more() {
+        let (listeners, _) = broadcast::channel(4);
+        let mut stream = RemoteStream {
+            stream_id: "s".into(),
+            model_id: "m".into(),
+            remote_model: "r".into(),
+            endpoint_id: "e".into(),
+            client: Arc::new(NoUpstream),
+            agent_did: None,
+            user_did: "did:key:owner".into(),
+            listeners,
+            gate: None,
+        };
+        assert!(stream.transcribe(vec![0.0; 16_000]).await.is_err());
     }
 
     #[test]
