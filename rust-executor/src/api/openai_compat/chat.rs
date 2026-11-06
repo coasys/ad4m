@@ -49,7 +49,6 @@ use super::types::{
 use crate::agent::capabilities::AI_PROMPT_CAPABILITY;
 use crate::agent::session::Session;
 use crate::ai_service::AIService;
-use crate::billing::check_compute_credits;
 use crate::types::{ModelType, RequestContext};
 
 /// `POST /v1/chat/completions` — handles both streaming (`stream: true`)
@@ -66,6 +65,12 @@ pub async fn chat_completions(
         return passthrough::forward_completion(&auth, upstream, Route::ChatCompletions, body)
             .await;
     }
+    // Answered here: a caller who pays must cover the prompt, as a forwarded request must.
+    passthrough::afford_prompt(
+        &auth,
+        &resolved.model.id,
+        passthrough::prompt_estimate(&body),
+    )?;
     let req: ChatCompletionRequest =
         serde_json::from_value(body).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
     let model_id = resolved.model.id.clone();
@@ -150,6 +155,11 @@ pub async fn completions(
     if let Some(upstream) = Upstream::of(&resolved) {
         return passthrough::forward_completion(&auth, upstream, Route::Completions, body).await;
     }
+    passthrough::afford_prompt(
+        &auth,
+        &resolved.model.id,
+        passthrough::prompt_estimate(&body),
+    )?;
     let req: CompletionRequest =
         serde_json::from_value(body).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
     let model_id = resolved.model.id.clone();
@@ -158,11 +168,6 @@ pub async fn completions(
         .into_single()
         .map_err(OpenAIError::invalid_request)?;
     let messages = vec![("user".to_string(), prompt)];
-
-    if let Some(agent_did) = auth.user_did() {
-        check_compute_credits(agent_did)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-    }
 
     let service = AIService::global_instance()
         .await
@@ -217,11 +222,7 @@ async fn chat_oneshot(
     // NOTE: WS-RPC `ai.prompt` on dev does not bill today (only pre-checks).
     // /v1 billing is correct for the public API surface; the WS-RPC gap
     // should be aligned in a separate PR against dev.
-    if let Some(agent_did) = auth.user_did() {
-        check_compute_credits(agent_did)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-    }
-
+    // The credits were checked against the prompt in `chat_completions`.
     let service = AIService::global_instance()
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
@@ -290,11 +291,7 @@ async fn chat_stream(
     constraint: Option<ArcParser<()>>,
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(agent_did) = auth.user_did() {
-        check_compute_credits(agent_did)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-    }
-
+    // The credits were checked against the prompt in `chat_completions`.
     let service = AIService::global_instance()
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
