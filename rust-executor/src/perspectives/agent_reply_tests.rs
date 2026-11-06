@@ -4,7 +4,7 @@
 
 use super::agent_reply::{
     cancel_reply, conversation, ensure_agent_reply_class, reserve, start_reply, ReplyError,
-    ReplyRow, ReplySlot, ReplyStatus, Runner, Stage, StartHold, AGENT_REPLY_CLASS,
+    ReplyRow, ReplySlot, ReplyStatus, Runner, Stage, StartHold, AGENT_REPLY_CLASS, ANSWERS,
     MAX_RUNNING_PER_CALLER,
 };
 use super::agent_session::{AgentMessage, AgentReply, AgentSessionError};
@@ -240,6 +240,42 @@ async fn the_next_reply_is_given_the_conversation_so_far() {
             ("user".into(), "rename the board".into()),
             ("assistant".into(), "Renamed it.".into()),
             ("user".into(), "now undo that".into()),
+        ]
+    );
+}
+
+/// A reply's place in the conversation is its start, not its end: a message written while it ran
+/// reads after it, and is the next one answered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_written_while_a_reply_runs_is_answered_next() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "rename the board").await;
+    let (run, go) = answering_on_cue("Renamed it.", Arc::default());
+    let first = start(&f, run).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    // The person writes again while the agent works (another device, a queued message).
+    say(&mut f, "app://m/2", "and archive the old one").await;
+    go.send(()).unwrap();
+    let done = until_status(&f, &first, ReplyStatus::Done).await;
+    assert_eq!(done["answers"], "app://m/1");
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let second = start(&f, answering("Archived.", seen.clone())).await;
+    let second = second.unwrap();
+    until_status(&f, &second, ReplyStatus::Done).await;
+    assert_eq!(reply(&f, &second).await["answers"], "app://m/2");
+    let turns: Vec<(String, String)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|m| (m.role.clone(), m.content.clone()))
+        .collect();
+    assert_eq!(
+        turns,
+        vec![
+            ("user".into(), "rename the board".into()),
+            ("assistant".into(), "Renamed it.".into()),
+            ("user".into(), "and archive the old one".into()),
         ]
     );
 }
@@ -518,6 +554,7 @@ async fn another_members_writes_never_reach_the_model() {
                 "literal:string:done",
             ),
             peer_link(&mallory, forged, "ad4m://agent_reply/text", injected),
+            peer_link(&mallory, forged, ANSWERS, "app://m/1"),
             peer_link(&mallory, CHAT, HAS_CHILD, forged),
             peer_link(&mallory, "app://m/1", "app://message_text", injected),
             peer_link(&mallory, &first, "ad4m://agent_reply/text", injected),
@@ -726,6 +763,7 @@ async fn the_sweep_at_load_leaves_another_nodes_running_reply_alone() {
                 "ad4m://agent_reply/status",
                 "literal:string:running",
             ),
+            peer_link(&other_node, theirs, ANSWERS, "app://m/1"),
             peer_link(&other_node, CHAT, HAS_CHILD, theirs),
         ]))
         .await
@@ -778,6 +816,19 @@ async fn a_start_dropped_while_committing_cancels_the_saved_reply() {
             },
             reply.clone(),
             Some(json!({ "status": "running" })),
+            None,
+            &f.ctx,
+        )
+        .await
+        .unwrap();
+    f.perspective
+        .add_link(
+            Link {
+                source: reply.clone(),
+                predicate: Some(ANSWERS.into()),
+                target: "app://m/1".into(),
+            },
+            LinkStatus::Shared,
             None,
             &f.ctx,
         )
