@@ -18,16 +18,20 @@ function makeMockAd4mClient(agentMethods: {
   status: ReturnType<typeof vi.fn>;
   generate?: ReturnType<typeof vi.fn>;
   unlock?: ReturnType<typeof vi.fn>;
+  setKind?: ReturnType<typeof vi.fn>;
 }) {
   return {
     agent: {
       status: agentMethods.status,
       generate: agentMethods.generate ?? vi.fn(),
       unlock: agentMethods.unlock ?? vi.fn(),
+      setKind: agentMethods.setKind ?? vi.fn().mockResolvedValue({}),
     },
   };
 }
 
+import { AGENT_KIND_BOT } from "./agent";
+import { AGENT_KIND_BOT as SDK_AGENT_KIND_BOT } from "../../core/src/agent/AgentKind";
 import {
   generateRandomPassphrase,
   loadWakerState,
@@ -805,6 +809,33 @@ describe("stopExecutor", () => {
 // ---------------------------------------------------------------------------
 
 describe("ensureAgentReady", () => {
+  it("says in the agent's profile that it is a bot, on every start", async () => {
+    const setKind = vi.fn().mockResolvedValue({});
+    const client = makeMockAd4mClient({
+      status: vi.fn().mockResolvedValue({ isInitialized: true, isUnlocked: true, did: "did:key:z6MkBot" }),
+      setKind,
+    });
+    const result = await ensureAgentReady("http://localhost:12000", "c", makeMockLogger(), undefined, client);
+    expect(result).toEqual({ did: "did:key:z6MkBot" });
+    expect(setKind).toHaveBeenCalledWith(AGENT_KIND_BOT);
+  });
+
+  it("starts anyway when the profile cannot be marked", async () => {
+    const logger = makeMockLogger();
+    const client = makeMockAd4mClient({
+      status: vi.fn().mockResolvedValue({ isInitialized: true, isUnlocked: true, did: "did:key:z6MkBot" }),
+      setKind: vi.fn().mockRejectedValue(new Error("older executor")),
+    });
+    const result = await ensureAgentReady("http://localhost:12000", "c", logger, undefined, client);
+    expect(result).toEqual({ did: "did:key:z6MkBot" });
+    const warnings = logger.warn.mock.calls.map((c: any[]) => c[0]);
+    expect(warnings.some((m: string) => m.includes("older executor"))).toBe(true);
+  });
+
+  it("marks the agent with the SDK's own bot kind", () => {
+    expect(AGENT_KIND_BOT).toBe(SDK_AGENT_KIND_BOT);
+  });
+
   it("returns { did } when agent is already initialized and unlocked", async () => {
     const mockStatus = vi.fn().mockResolvedValue({
       isInitialized: true,

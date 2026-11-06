@@ -13,7 +13,9 @@ Once set up, you can ask your agent to:
 - **Watch channels** — subscribe to new messages in specific channels and wake up automatically
 - **Manage perspectives** — create, list, and query local or shared knowledge graphs
 - **Work with subject classes** — interact with structured data defined by SHACL schemas
-- **Set your profile** — update your agent's name, profile picture, and other details
+- **Set your profile** — update your agent's name, profile picture, and other details. The
+  plugin also marks the agent as a bot in its profile on every start (`ad4m://agent_kind`), so
+  apps can tell its messages from a person's
 - **Install languages** — add new AD4M languages (expression types) to your agent
 
 ## Installation

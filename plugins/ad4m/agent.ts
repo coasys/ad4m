@@ -1,5 +1,26 @@
 import { generateRandomPassphrase } from "./config";
 
+/**
+ * The kind this plugin's agent says it is in its public profile: a bot. The same value as
+ * `@coasys/ad4m`'s `AGENT_KIND_BOT`, kept here because the plugin's tests load the last released
+ * SDK, which predates it; a test checks the two agree.
+ */
+export const AGENT_KIND_BOT = "ad4m://bot";
+
+/**
+ * Say in the agent's public profile that it is a bot, so apps can tell its messages from a
+ * person's. Idempotent (`setKind` changes nothing when the profile already says so), and never
+ * fatal: an executor that cannot do it leaves the agent usable, unmarked.
+ */
+export async function declareBot(client: any, logger: any): Promise<void> {
+  try {
+    await client.agent.setKind(AGENT_KIND_BOT);
+    logger.info(`[ad4m] Agent's profile says it is a bot`);
+  } catch (e: any) {
+    logger.warn(`[ad4m] Could not mark the agent as a bot in its profile: ${e?.message ?? e}`);
+  }
+}
+
 export interface AgentResult {
   did: string;
   passphrase?: string;
@@ -87,6 +108,7 @@ export async function ensureAgentReady(
         logger.info(
           `[ad4m] Agent generated successfully. DID: ${newStatus.did}`,
         );
+        await declareBot(client, logger);
         return { did: newStatus.did, passphrase: agentPassphrase ? undefined : passphrase };
       } catch (e: any) {
         logger.error(`[ad4m] Failed to generate agent: ${e.message}`);
@@ -103,6 +125,7 @@ export async function ensureAgentReady(
           logger.info(
             `[ad4m] Agent unlocked successfully. DID: ${newStatus.did}`,
           );
+          await declareBot(client, logger);
           return { did: newStatus.did };
         } catch (e: any) {
           logger.error(`[ad4m] Failed to unlock agent: ${e.message}`);
@@ -120,6 +143,7 @@ export async function ensureAgentReady(
     } else {
       // Already initialized and unlocked
       logger.info(`[ad4m] Agent is ready. DID: ${agentStatus.did}`);
+      await declareBot(client, logger);
       return { did: agentStatus.did };
     }
   } catch (err: any) {
