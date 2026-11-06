@@ -10,6 +10,7 @@ import {
 } from "./Agent";
 import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
 import { AgentStatus } from "./AgentStatus";
+import { AGENT_KIND } from "./AgentKind";
 import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
@@ -184,6 +185,25 @@ export class AgentClient {
     const { perspective } = await this.me();
     const kept = (perspective?.links ?? []).filter(link => !removals.some(r => linkEqual(link, r as LinkExpression)));
     return this.updatePublicPerspective({ links: [...kept, ...added] } as PerspectiveInput);
+  }
+
+  /**
+   * Say what kind of agent this is in its public perspective (`AGENT_KIND`; a bot is
+   * `AGENT_KIND_BOT`), replacing any kind it said before, or say none with `null`. Changes
+   * nothing when the perspective already says exactly that, so it can be called on every start.
+   */
+  async setKind(kind: string | null): Promise<Agent> {
+    const me = await this.me();
+    const said = (me.perspective?.links ?? []).filter(
+      (l) => l.data.source === me.did && l.data.predicate === AGENT_KIND,
+    );
+    if ((kind === null && said.length === 0) || (said.length === 1 && said[0].data.target === kind)) {
+      return me;
+    }
+    return this.mutatePublicPerspective({
+      additions: kind === null ? [] : [{ source: me.did, predicate: AGENT_KIND, target: kind } as LinkInput],
+      removals: said as LinkMutations['removals'],
+    });
   }
 
   /** Has the executor sign `links` as this agent, in a throwaway perspective. */
