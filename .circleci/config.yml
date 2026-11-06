@@ -553,19 +553,21 @@ jobs:
           command: cd rust-executor && cargo test --release -- --test-threads=1
           no_output_timeout: 30m
       - run:
-          name: cli tests
-          command: cd cli && cargo test --release
+          # The cli and the identity client in one cargo run: the client's ws feature needs
+          # OpenSSL, which only `ad4m`'s graph vendors, and one run builds `ad4m` once, with
+          # one feature set. Testing them apart builds `ad4m` twice.
+          name: cli and identity client tests
+          command: |
+            cargo test --release -p ad4m -p ad4m-identity-client \
+              --features ad4m-identity-client/ws,ad4m-identity-client/test-vault
           no_output_timeout: 30m
       - run:
-          # The identity crates: one run per crate, because each tests its own feature set.
+          # The other identity crates: one run per crate, because each tests its own feature set.
           name: identity crates tests
           command: |
             cargo test --release -p ad4m-hash-chain --all-features
             cargo test --release -p ad4m-identity-core --all-features
             cargo test --release -p identity-store
-            # With `ad4m`, whose graph vendors OpenSSL for the client's ws feature.
-            cargo test --release -p ad4m -p ad4m-identity-client \
-              --features ad4m-identity-client/ws,ad4m-identity-client/test-vault
           no_output_timeout: 30m
       - run:
           # ad4m-hash-chain on wasm32 under Node: the shared vectors, the RFC 8785 data, the
