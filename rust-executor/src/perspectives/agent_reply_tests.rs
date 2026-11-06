@@ -746,6 +746,7 @@ async fn a_session_keeps_its_settings_on_this_node_only() {
     let f = fixture().await;
     let settings = SessionSettings {
         work_in: Some("work-perspective".into()),
+        library: Some("library-perspective".into()),
         write_tools: vec!["template_update".into()],
         model: Some("local-model".into()),
     };
@@ -782,7 +783,7 @@ async fn a_session_keeps_its_settings_on_this_node_only() {
     for link in &links {
         let predicate = link.data.predicate.clone().unwrap_or_default();
         let local = matches!(link.status, Some(LinkStatus::Local));
-        let node_local = ["work_in", "write_tools", "model"]
+        let node_local = ["work_in", "library", "write_tools", "model"]
             .iter()
             .any(|p| predicate == format!("ad4m://agent_session/{p}"));
         assert_eq!(local, node_local, "{predicate} is local: {local}");

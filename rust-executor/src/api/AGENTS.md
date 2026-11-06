@@ -18,7 +18,9 @@ REST/WS shim. Split plan: spec item 6.
 handlers), `runtime`, `users`, `agent_session` (`perspective.runAgent`) and `agent_reply`
 (`perspective.agentReply` / `agentReplyCancel`, `perspective.agentSessionCreate` /
 `agentSessionDelete`: the reply is written in `uuid`, the agent works in `workIn` (the call's, else
-the session's), whose perspective guard the handler runs itself). Each exposes `register_ws_handlers(&mut HandlerMap)`
+the session's), whose perspective guard the handler runs itself, and so on the person's `library`
+when one is named, where the template tools may also act; `perspective.runAgent` runs the guard on
+its `library` too). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):

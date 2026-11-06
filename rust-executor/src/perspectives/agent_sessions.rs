@@ -8,7 +8,9 @@
 //! the client doesn't send them every time.
 //!
 //! **The settings stay on this node.** Where the agent works (`workIn`, a perspective uuid that
-//! means nothing to another node), the tools it may write with and the model are `Local` links on
+//! means nothing to another node), the person's library (`library`, likewise a uuid: where the
+//! template tools look for a template too and `template_create` may make one), the tools it may
+//! write with and the model are `Local` links on
 //! the session (`"local": true` in `hardwired_sdna/agent_session.json`): they are never shared.
 //! `title` and `about` are the session's content, shared with the perspective.
 //!
@@ -37,6 +39,7 @@ const SESSION_URI_PREFIX: &str = "ad4m://agent_session/";
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionSettings {
     pub work_in: Option<String>,
+    pub library: Option<String>,
     pub write_tools: Vec<String>,
     pub model: Option<String>,
 }
@@ -79,6 +82,9 @@ pub async fn create_session(
     }
     if let Some(work_in) = session.settings.work_in {
         values["workIn"] = work_in.into();
+    }
+    if let Some(library) = session.settings.library {
+        values["library"] = library.into();
     }
     if !session.settings.write_tools.is_empty() {
         values["writeTools"] = serde_json::to_string(&session.settings.write_tools)?.into();
@@ -141,6 +147,7 @@ pub async fn session_settings(
     };
     Ok(Some(SessionSettings {
         work_in: text("workIn"),
+        library: text("library"),
         write_tools: text("writeTools")
             .map(|tools| serde_json::from_str(&tools))
             .transpose()?

@@ -1,4 +1,5 @@
-//! `template_read` + `template_update` — a WE template, read and edited by WE's own rules.
+//! `template_read`, `template_update` and `template_create` — a WE template, read, edited and made
+//! by WE's own rules.
 //!
 //! The rules are WE's, compiled into the executor (`tool_bundles::builtin`); this side reads and
 //! writes. A call reads the Template record as the model query returns it (its schema file
@@ -7,6 +8,14 @@
 //! path and the same schema check `instance_update` takes, so the schema is stored as a file
 //! expression, a value of the wrong type or cardinality is refused, and the schema and its version
 //! change together. Each call runs in a fresh isolate, so a record is seen by that call alone.
+//!
+//! **Where a template is.** A call names the perspective it works in (`perspective_id`) and may
+//! name the caller's library (`library_perspective_id`), the perspective that holds the person's
+//! own templates. A record is looked for in the first, then in the library. `template_create`
+//! makes its record where the bundle's answer says (`create.place`): `space` is `perspective_id`,
+//! `library` the library, which the caller has to have named. The executor has no rule of its own
+//! for which perspective is a caller's library: the caller says, as it says where the agent works.
+//! An agent session binds both, so the model never names a perspective.
 //!
 //! The bundle also gets the perspective's models ([`models`]): a template may query any class
 //! the perspective defines, and WE's rules refuse a `$query` naming one they were not told of.
@@ -21,6 +30,7 @@
 //! follow WE when `build.rs` is pinned to a newer WE release.
 
 use super::{check_setters, class_properties, error_json, fetch_instance, instance_uri};
+use super::{generate_instance_uri, pretty};
 use super::{resolve_class, subject_class, validate_properties, Ad4mMcpHandler, WriteMode};
 use crate::agent::did_for_context;
 use crate::perspectives::perspective_instance::{ExpectedLinks, LinksChanged, PerspectiveInstance};
@@ -60,6 +70,13 @@ async fn lock_record(perspective_id: &str, base_uri: &str) -> OwnedMutexGuard<()
     lock.lock_owned().await
 }
 
+/// The argument naming the caller's library, as every template tool takes it. An agent session
+/// binds it ([`crate::perspectives::agent_session`]), so its model never sees it.
+pub const LIBRARY_ARGUMENT: &str = "library_perspective_id";
+
+/// The template tools, which an agent session binds [`LIBRARY_ARGUMENT`] for.
+pub const TEMPLATE_TOOLS: &[&str] = &["template_read", "template_update", "template_create"];
+
 /// Parameters for a template tool: the record, and the tool's own arguments beside them
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TemplateToolParams {
@@ -67,30 +84,48 @@ pub struct TemplateToolParams {
     pub perspective_id: String,
     /// URI of the Template record
     pub base_uri: String,
+    /// The caller's library, where the record is looked for when `perspective_id` has none
+    #[serde(default)]
+    pub library_perspective_id: Option<String>,
     /// The tool's own arguments
     #[serde(flatten)]
     pub arguments: Map<String, Value>,
 }
 
-/// Tools the bundle declares that MCP does not offer yet. Every other tool the bundle declares has a
-/// `#[tool]` method below; a test fails on one that is in neither place.
-///
-/// - `template_create` makes a new Template record, and its `place` argument chooses where: the
-///   caller's own `library` or the `space`. The executor has no rule yet for which perspective is
-///   a caller's library, so the tool waits for one. The bundle's documentation says the tool is
-///   there only where the host offers it.
+/// Parameters for a template tool that makes a new record: where it may go, what it may start
+/// from, and the tool's own arguments
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct TemplateCreateParams {
+    /// Perspective UUID: where the caller works, and where a new template goes when the tool's
+    /// `place` is `space`
+    pub perspective_id: String,
+    /// The caller's library: where a new template goes when the tool's `place` is `library`
+    #[serde(default)]
+    pub library_perspective_id: Option<String>,
+    /// URI of a Template record to start from (a fork), in `perspective_id` or the library
+    #[serde(default)]
+    pub base_uri: Option<String>,
+    /// The tool's own arguments
+    #[serde(flatten)]
+    pub arguments: Map<String, Value>,
+}
+
+/// Tools the bundle declares that MCP does not offer yet, each with the reason. Every other tool
+/// the bundle declares has a `#[tool]` method below; a test fails on one that is in neither place.
+/// Empty: every tool the pinned bundle declares is offered.
 ///
 /// Only the test reads it: a tool without a `#[tool]` method is never listed anyway.
 #[cfg(test)]
-pub(crate) const NOT_OFFERED: &[&str] = &["template_create"];
+pub(crate) const NOT_OFFERED: &[&str] = &[];
 
-/// A template tool as MCP lists it: the bundle's description, and its arguments with the two that
-/// name the record. The attribute the `#[tool]` macro generates stands only if the bundle has no
-/// tool of that name, which the tests rule out.
+/// A template tool as MCP lists it: the bundle's description, and its arguments with the ones that
+/// say where the record is. The attribute the `#[tool]` macro generates stands only if the bundle
+/// has no tool of that name, which the tests rule out.
 pub(crate) fn from_bundle(mut attr: Tool) -> Tool {
     let Some(tool) = builtin::tool(&attr.name) else {
         return attr;
     };
+    let creates = tool.creates.is_some();
     let mut schema = tool.parameters.as_object().cloned().unwrap_or_default();
     let properties = schema
         .entry("properties")
@@ -103,9 +138,25 @@ pub(crate) fn from_bundle(mut attr: Tool) -> Tool {
     );
     properties.insert(
         "base_uri".into(),
-        json!({ "type": "string", "description": "URI of the Template record" }),
+        if creates {
+            json!({ "type": "string", "description": "URI of a Template record to start from (a fork)" })
+        } else {
+            json!({ "type": "string", "description": "URI of the Template record" })
+        },
     );
-    let mut required = vec![json!("perspective_id"), json!("base_uri")];
+    properties.insert(
+        LIBRARY_ARGUMENT.into(),
+        json!({
+            "type": "string",
+            "description": "UUID of the perspective that holds the person's own templates: \
+                            a template is looked for there too, and one made with place \
+                            `library` goes there"
+        }),
+    );
+    let mut required = vec![json!("perspective_id")];
+    if !creates {
+        required.push(json!("base_uri"));
+    }
     if let Some(Value::Array(own)) = schema.get("required") {
         required.extend(own.iter().cloned());
     }
@@ -130,20 +181,67 @@ impl Ad4mMcpHandler {
         self.call_template_tool("template_update", params.0).await
     }
 
+    /// Make a new WE template. Description and arguments: [`from_bundle`].
+    #[tool(description = "Make a new WE template and save it.")]
+    pub async fn template_create(&self, params: Parameters<TemplateCreateParams>) -> String {
+        self.create_template("template_create", params.0).await
+    }
+
+    /// The perspective a template tool may act on in `uuid`: readable for a tool that only reads,
+    /// writable for one that writes. A tool that writes checks the write rule before it reads
+    /// anything, as the other write tools do: a caller who may only read is refused as the RPC
+    /// guard would refuse it.
+    async fn template_perspective(
+        &self,
+        uuid: &str,
+        writes: bool,
+    ) -> Result<PerspectiveInstance, String> {
+        if writes {
+            self.get_writable_perspective(uuid)
+                .await
+                .map(|(perspective, _)| perspective)
+        } else {
+            self.get_readable_perspective(uuid).await
+        }
+    }
+
+    /// Where the record at `base_uri` is: the perspective the call works in, else the caller's
+    /// library. The perspective's uuid, and the perspective as the tool may act on it.
+    async fn locate_template(
+        &self,
+        name: &str,
+        perspective_id: &str,
+        library: Option<&str>,
+        base_uri: &str,
+        writes: bool,
+    ) -> Result<(String, PerspectiveInstance), String> {
+        let mut places = vec![perspective_id];
+        places.extend(library.filter(|l| *l != perspective_id));
+        for uuid in places {
+            let perspective = self.template_perspective(uuid, writes).await?;
+            if find_template(&perspective, base_uri).await.is_some() {
+                return Ok((uuid.to_string(), perspective));
+            }
+        }
+        Err(error_json(format!(
+            "'{name}' works on {}, and there is no such record at '{base_uri}'.",
+            builtin::declared().applies_to.join(" or ")
+        )))
+    }
+
     async fn call_template_tool(&self, name: &str, p: TemplateToolParams) -> String {
         let Some(tool) = builtin::tool(name) else {
             return error_json(format!("This executor's template tools have no '{name}'."));
         };
-        // A tool that writes checks the write rule before it reads anything, as the other write
-        // tools do: a caller who may only read is refused as the RPC guard would refuse it.
-        let perspective = if tool.writes {
-            self.get_writable_perspective(&p.perspective_id)
-                .await
-                .map(|(perspective, _)| perspective)
-        } else {
-            self.get_readable_perspective(&p.perspective_id).await
+        let base_uri = match instance_uri("base_uri", &p.base_uri) {
+            Ok(uri) => uri,
+            Err(e) => return e,
         };
-        let perspective = match perspective {
+        let library = named(&p.library_perspective_id);
+        let (uuid, perspective) = match self
+            .locate_template(name, &p.perspective_id, library, &base_uri, tool.writes)
+            .await
+        {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -151,33 +249,18 @@ impl Ad4mMcpHandler {
             Ok(v) => v,
             Err(e) => return error_json(e),
         };
-        let base_uri = match instance_uri("base_uri", &p.base_uri) {
-            Ok(uri) => uri,
-            Err(e) => return e,
-        };
 
+        // Read again under the lock: the version a write moves on is the one read while no
+        // other template tool may write the record.
         let _writing = if tool.writes {
-            Some(lock_record(&p.perspective_id, &base_uri).await)
+            Some(lock_record(&uuid, &base_uri).await)
         } else {
             None
         };
-        let applies_to = &builtin::declared().applies_to;
-        let mut record = None;
-        for class_name in applies_to {
-            match fetch_instance(&perspective, class_name, &base_uri).await {
-                Ok(Some(instance)) => {
-                    record = Some((class_name.clone(), instance));
-                    break;
-                }
-                Ok(None) => {}
-                // A class this perspective does not define is simply not this record's.
-                Err(_) => {}
-            }
-        }
-        let Some((class_name, instance)) = record else {
+        let Some((class_name, instance)) = find_template(&perspective, &base_uri).await else {
             return error_json(format!(
                 "'{name}' works on {}, and there is no such record at '{base_uri}'.",
-                applies_to.join(" or ")
+                builtin::declared().applies_to.join(" or ")
             ));
         };
 
@@ -218,19 +301,190 @@ impl Ad4mMcpHandler {
         pause::after_last_read(&base_uri).await;
 
         match self
-            .write_record(
-                &p.perspective_id,
-                &class_name,
-                &base_uri,
-                properties,
-                expected,
-            )
+            .write_record(&uuid, &class_name, &base_uri, properties, expected)
             .await
         {
             Ok(()) => text,
             Err(WriteError::Changed) => error_json(record_changed(name)),
             Err(WriteError::Refused(e)) => error_json(format!("{e} The tool had said: {text}")),
         }
+    }
+
+    /// A tool that makes a record: where it may go, what it starts from, the bundle's answer, and
+    /// the new record, made where the answer says in one batch.
+    async fn create_template(&self, name: &str, p: TemplateCreateParams) -> String {
+        let Some(tool) = builtin::tool(name) else {
+            return error_json(format!("This executor's template tools have no '{name}'."));
+        };
+        let Some(creates) = &tool.creates else {
+            return error_json(format!(
+                "'{name}' makes nothing: it changes a record it is given."
+            ));
+        };
+        let library = named(&p.library_perspective_id);
+
+        // Where the new record goes is the call's to choose, among the places the tool allows:
+        // the bundle answers with the same place, or refuses.
+        let place = p
+            .arguments
+            .get("place")
+            .and_then(Value::as_str)
+            .unwrap_or("library")
+            .to_string();
+        if !creates.places.contains(&place) {
+            return error_json(format!(
+                "'{name}' makes a {} in {}, not in '{place}'.",
+                creates.entity,
+                creates.places.join(" or ")
+            ));
+        }
+        // The perspective the call works in answers first, as for every perspective tool, with
+        // the access the call needs there: it is written to for `space`, and only read (for a
+        // template to start from) for `library`. A caller refused learns nothing else here.
+        if let Err(e) = self
+            .template_perspective(&p.perspective_id, place == "space")
+            .await
+        {
+            return e;
+        }
+        let target = match place.as_str() {
+            "library" => match library {
+                Some(library) => library.to_string(),
+                None => {
+                    return error_json(
+                        "No library was given here, so nothing can be made in the person's \
+                         library. Make it in the space (`place: space`) only if the person \
+                         asked for it to be there.",
+                    )
+                }
+            },
+            _ if library == Some(p.perspective_id.as_str()) => {
+                return error_json(
+                    "What is being worked on is in the person's library, not in a space, so \
+                     there is no space to make this in. Make it in the library.",
+                )
+            }
+            _ => p.perspective_id.clone(),
+        };
+        let target_perspective = match self.template_perspective(&target, true).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let agent_context = match self.get_agent_context().await {
+            Ok(v) => v,
+            Err(e) => return error_json(e),
+        };
+
+        // The template to start from, when the call names one: a fork.
+        let mut input = json!({
+            "args": Value::Object(p.arguments),
+            "models": models(&target_perspective).await,
+            "author": did_for_context(&agent_context).ok(),
+        });
+        if let Some(source) = p.base_uri.as_deref().filter(|s| !s.trim().is_empty()) {
+            let base_uri = match instance_uri("base_uri", source) {
+                Ok(uri) => uri,
+                Err(e) => return e,
+            };
+            let (_, perspective) = match self
+                .locate_template(name, &p.perspective_id, library, &base_uri, false)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let Some((class_name, instance)) = find_template(&perspective, &base_uri).await else {
+                return error_json(format!(
+                    "There is no template at '{base_uri}' to start from."
+                ));
+            };
+            input["record"] =
+                json!({ "id": base_uri, "className": class_name, "properties": instance });
+        }
+
+        let answer = match builtin::call(name, input).await {
+            Ok(answer) => answer,
+            Err(e) => return error_json(format!("'{name}' failed: {e}")),
+        };
+        let text = answer["text"].as_str().unwrap_or_default().to_string();
+        let properties = match answer.get("properties") {
+            Some(Value::Object(map)) if !map.is_empty() => map.clone(),
+            // A refusal, or a dry run: nothing to make.
+            _ => return text,
+        };
+        let made = &answer["create"];
+        if made["entity"].as_str() != Some(creates.entity.as_str())
+            || made["place"].as_str() != Some(place.as_str())
+        {
+            return error_json(format!(
+                "'{name}' answered with a record to make that is not the {} in {place} it was \
+                 asked for; nothing was made.",
+                creates.entity
+            ));
+        }
+
+        match self
+            .create_record(&target, &creates.entity, properties)
+            .await
+        {
+            Ok(base_uri) => pretty(&json!({
+                "text": text,
+                "base_uri": base_uri,
+                "perspective_id": target,
+                "place": place,
+            })),
+            Err(e) => error_json(format!("{e} The tool had said: {text}")),
+        }
+    }
+
+    /// Make a record of `class_name` in `perspective_id` with what a tool answered, through the
+    /// class's setters and the checks `instance_create` makes, in one batch. Its new URI.
+    async fn create_record(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        properties: Map<String, Value>,
+    ) -> Result<String, String> {
+        let (mut perspective, agent_context) =
+            self.get_writable_perspective(perspective_id).await?;
+        let (class_name, shape) = resolve_class(&perspective, class_name).await?;
+        let refused = |problems: Vec<super::ValidationError>| {
+            format!(
+                "Nothing was made: {class_name} cannot hold {}.",
+                problems
+                    .iter()
+                    .map(|m| format!("{}: {}", m.property, m.problem))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        };
+        let validated =
+            validate_properties(&shape, &properties, WriteMode::Create).map_err(&refused)?;
+        let missing = check_setters(&perspective, &shape, &validated.scalars).await;
+        if !missing.is_empty() {
+            return Err(refused(missing));
+        }
+
+        let base_uri = generate_instance_uri();
+        let batch_id = perspective.create_batch().await;
+        if let Err(e) = perspective
+            .create_subject(
+                subject_class(&class_name),
+                base_uri.clone(),
+                Some(Value::Object(validated.scalars)),
+                Some(batch_id.clone()),
+                &agent_context,
+            )
+            .await
+        {
+            perspective.discard_batch(&batch_id).await;
+            return Err(format!("Nothing was made: {e:#}."));
+        }
+        perspective
+            .commit_batch(batch_id, &agent_context)
+            .await
+            .map_err(|e| format!("The new record was not committed: {e:#}."))?;
+        Ok(base_uri)
     }
     /// Write what a tool answered with through the class's setters, every property in one batch,
     /// committed only if the store still holds `expected`.
@@ -287,6 +541,28 @@ impl Ad4mMcpHandler {
             Err(e) => Err(format!("The write was not committed: {e:#}.").into()),
         }
     }
+}
+
+/// A perspective argument that names one: absent and blank are the same.
+fn named(uuid: &Option<String>) -> Option<&str> {
+    uuid.as_deref().map(str::trim).filter(|u| !u.is_empty())
+}
+
+/// The template at `base_uri` in `perspective`, as a class the tools work on: its class and
+/// properties, or `None` when there is none.
+async fn find_template(
+    perspective: &PerspectiveInstance,
+    base_uri: &str,
+) -> Option<(String, Value)> {
+    for class_name in &builtin::declared().applies_to {
+        match fetch_instance(perspective, class_name, base_uri).await {
+            Ok(Some(instance)) => return Some((class_name.clone(), instance)),
+            Ok(None) => {}
+            // A class this perspective does not define is simply not this record's.
+            Err(_) => {}
+        }
+    }
+    None
 }
 
 /// Why [`Ad4mMcpHandler::write_record`] wrote nothing.

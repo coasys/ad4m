@@ -92,8 +92,8 @@ export class AgentReplyRecord extends Ad4mModel {
  * Create and delete them with `perspective.agentSessionCreate` / `agentSessionDelete`: the
  * executor writes these, an app does not.
  *
- * `workIn`, `writeTools` and `model` are kept on the node that created the session only (local
- * links): `workIn` is a perspective uuid, which means nothing to another node.
+ * `workIn`, `library`, `writeTools` and `model` are kept on the node that created the session only
+ * (local links): `workIn` and `library` are perspective uuids, which mean nothing to another node.
  */
 @Model({ name: "AgentSession" })
 export class AgentSessionRecord extends Ad4mModel {
@@ -108,6 +108,13 @@ export class AgentSessionRecord extends Ad4mModel {
   /** The perspective its replies' agent works in. Local to the node. */
   @Property({ through: "ad4m://agent_session/work_in", local: true })
   workIn: string = "";
+
+  /**
+   * The person's library: where its replies' template tools also look, and where
+   * `template_create` may make a template. Local to the node.
+   */
+  @Property({ through: "ad4m://agent_session/library", local: true })
+  library: string = "";
 
   /** The tools its replies' agent may write with, as a JSON array. Local to the node. */
   @Property({ through: "ad4m://agent_session/write_tools", local: true })
