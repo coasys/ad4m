@@ -30,6 +30,8 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
   `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s), and the
   per-request limits: `request_timeout` (the endpoint's, else the route's default) and
   `request_slot` (a semaphore only when the operator set `max_concurrent`; none by default).
+  Every call to an endpoint holds them: `/v1` forwards, embeddings, and each remote chat
+  call of a model worker (`within_endpoint_limits` in `ai_service/mod.rs`).
 - `detect.rs`: `ai.detectEndpoints`, loopback ports, classified by answer shape. Saves nothing.
 - `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
   before the service loads; idempotent by name, keys only from env vars.

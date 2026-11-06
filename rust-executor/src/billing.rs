@@ -141,20 +141,11 @@ pub fn bill_ai_operation(
         return Ok(());
     }
 
-    let model = crate::db_backend::db_backend()
-        .get_model(model_id.to_string())
-        .ok()
-        .flatten();
-    let endpoint_id = model.as_ref().and_then(|m| m.endpoint_id.clone());
-    let rate_key = model
-        .map(|m| m.name)
-        .unwrap_or_else(|| model_id.to_string());
-
-    let rate = crate::db_backend::db_backend()
-        .get_host_rate(&rate_key)
-        .ok()
-        .flatten()
-        .unwrap_or(0.0);
+    let AiRate {
+        rate_key,
+        endpoint_id,
+        rate,
+    } = AiRate::of(model_id);
 
     let cost = unit_count as f64 * rate;
     if cost <= 0.0 {
@@ -193,6 +184,51 @@ pub fn bill_ai_operation(
             Err(e)
         }
     }
+}
+
+/// What a unit of an AI model costs: `host_rates` keyed by the model's name (by `model_id`
+/// when the model has no row), 0 when the operator has not priced it.
+struct AiRate {
+    rate_key: String,
+    endpoint_id: Option<String>,
+    rate: f64,
+}
+
+impl AiRate {
+    fn of(model_id: &str) -> AiRate {
+        let db = crate::db_backend::db_backend();
+        let model = db.get_model(model_id.to_string()).ok().flatten();
+        let endpoint_id = model.as_ref().and_then(|m| m.endpoint_id.clone());
+        let rate_key = model
+            .map(|m| m.name)
+            .unwrap_or_else(|| model_id.to_string());
+        let rate = db.get_host_rate(&rate_key).ok().flatten().unwrap_or(0.0);
+        AiRate {
+            rate_key,
+            endpoint_id,
+            rate,
+        }
+    }
+}
+
+/// How many units of `model_id` the agent `agent_did` can pay for at the rate
+/// [`bill_ai_operation`] bills: its credits divided by the model's rate. `None` when it
+/// pays nothing: free hosting, free access, or a model without a price.
+pub fn affordable_ai_units(
+    agent_did: &str,
+    model_id: &str,
+) -> Result<Option<usize>, anyhow::Error> {
+    let db = crate::db_backend::db_backend();
+    if db.get_free_hosting_enabled()? || db.get_agent_free_access(agent_did)? {
+        return Ok(None);
+    }
+    let rate = AiRate::of(model_id).rate;
+    if rate <= 0.0 {
+        return Ok(None);
+    }
+    let credits = db.get_agent_credits(agent_did)?.max(0.0);
+    // `as` saturates: a balance beyond usize::MAX units is usize::MAX.
+    Ok(Some((credits / rate).floor() as usize))
 }
 
 /// Read-only credit check for the account that owns the agent `agent_did`. Returns Ok(()) if
