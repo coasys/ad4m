@@ -51,6 +51,11 @@ impl OpenAiChat {
         }
     }
 
+    /// `error` without the key: an upstream's error or refusal text may echo it.
+    fn scrubbed(&self, error: anyhow::Error) -> anyhow::Error {
+        anyhow!(super::http::scrub(&error.to_string(), &self.api_key))
+    }
+
     async fn send(&self, body: &Value) -> Result<reqwest::Response> {
         let mut request = self.http.post(&self.endpoint).json(body);
         // A local server takes no key, and some refuse an empty `Bearer `.
@@ -309,11 +314,11 @@ impl RemoteChat for OpenAiChat {
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
         let response = self.send(&build_body(request, false)).await?;
-        let json: Value = response
-            .json()
+        let json: Value = super::http::read_json(response)
             .await
             .map_err(|e| anyhow!("Could not read the completion: {e}"))?;
-        read_reply(&json)
+        // A refusal is the upstream's text, which may echo the key.
+        read_reply(&json).map_err(|e| self.scrubbed(e))
     }
 
     async fn chat_stream(
@@ -329,6 +334,9 @@ impl RemoteChat for OpenAiChat {
         // multi-byte character.
         let mut buffer: Vec<u8> = Vec::new();
         let mut state = StreamState::default();
+        // `[DONE]`, or a chunk with a `finish_reason`: a stream that stops before either
+        // was cut, and its reply is not whole.
+        let mut finished = false;
 
         'read: while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| anyhow!("The stream failed: {e}"))?;
@@ -340,18 +348,28 @@ impl RemoteChat for OpenAiChat {
                     continue;
                 };
                 if payload == "[DONE]" {
+                    finished = true;
                     break 'read;
                 }
                 let Ok(event) = serde_json::from_str::<Value>(payload) else {
                     continue;
                 };
-                if let Some(text) = state.apply(&event)? {
+                if event
+                    .pointer("/choices/0/finish_reason")
+                    .is_some_and(|reason| !reason.is_null())
+                {
+                    finished = true;
+                }
+                if let Some(text) = state.apply(&event).map_err(|e| self.scrubbed(e))? {
                     if tokens.send(text).is_err() {
                         // The consumer hung up: nobody reads the rest.
-                        break 'read;
+                        return Ok(state.into_reply());
                     }
                 }
             }
+        }
+        if !finished {
+            return Err(anyhow!("The stream ended before the reply did"));
         }
         Ok(state.into_reply())
     }
@@ -397,11 +415,14 @@ impl Discover for OpenAiDiscover {
             request = request.bearer_auth(&self.api_key);
         }
         let json = super::http::fetch_json(request, &url, &self.api_key).await?;
-        Ok(json
+        // A 200 without the list (a gateway's error object) is no listing: the endpoint
+        // would count as reachable.
+        let entries = json
             .get("data")
             .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
+            .ok_or_else(|| anyhow!("{url} answered without a model list"))?;
+        Ok(entries
+            .iter()
             .filter_map(|entry| {
                 // An entry without an id is skipped, not the whole listing.
                 let id = entry.get("id")?.as_str()?.to_string();
@@ -681,6 +702,61 @@ mod wire_tests {
         assert_eq!(reply.usage.output_tokens, Some(3));
     }
 
+    #[tokio::test]
+    async fn a_refusal_or_stream_error_that_echoes_the_key_is_scrubbed() {
+        let mut streaming = mockito::Server::new_async().await;
+        streaming
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body("data: {\"error\":{\"message\":\"bad key sk-echo\"}}\n\n")
+            .create_async()
+            .await;
+        let mut refusing = mockito::Server::new_async().await;
+        refusing
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_body(r#"{"choices":[{"message":{"refusal":"not for sk-echo"}}]}"#)
+            .create_async()
+            .await;
+
+        let refusal = OpenAiChat::new("sk-echo", url(&refusing.url()))
+            .chat(ChatRequest::new("m", vec![ChatTurn::user("hi")]))
+            .await
+            .unwrap_err();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let stream = OpenAiChat::new("sk-echo", url(&streaming.url()))
+            .chat_stream(ChatRequest::new("m", vec![ChatTurn::user("hi")]), tx)
+            .await
+            .unwrap_err();
+
+        for error in [refusal, stream] {
+            assert!(!error.to_string().contains("sk-echo"), "{error}");
+            assert!(error.to_string().contains("<redacted>"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_stops_before_it_finishes_fails() {
+        let cut = "data: {\"choices\":[{\"delta\":{\"content\":\"Hal\"}}]}\n\n";
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(cut)
+            .create_async()
+            .await;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let error = OpenAiChat::new("", url(&server.url()))
+            .chat_stream(ChatRequest::new("m", vec![ChatTurn::user("hi")]), tx)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("ended before"), "{error}");
+    }
+
     #[test]
     fn a_streamed_refusal_or_error_chunk_fails_the_stream() {
         let mut state = StreamState::default();
@@ -700,6 +776,22 @@ mod wire_tests {
         .unwrap();
         assert!(reply.tool_calls[0].id.starts_with("call_"));
         assert_eq!(reply.tool_calls[0].arguments, json!("not json"));
+    }
+
+    #[tokio::test]
+    async fn a_listing_without_a_data_array_is_an_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_body(r#"{"error":"no such route"}"#)
+            .create_async()
+            .await;
+        let error = discover(&server, "").list_models().await.unwrap_err();
+        assert!(
+            error.to_string().contains("without a model list"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

@@ -545,6 +545,25 @@ async fn a_text_completion_is_forwarded_too() {
     mock.assert_async().await;
 }
 
+// An endpoint that answers without end: the forward stops reading at `read_json`'s limit,
+// answers a 502 and bills nothing.
+#[tokio::test]
+async fn an_answer_past_the_body_limit_is_a_502_and_bills_nothing() {
+    use crate::ai_service::providers::http::MAX_BODY_BYTES;
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    openai_model(&server, "").await;
+    server
+        .mock("POST", "/v1/chat/completions")
+        .with_body(format!("[{}0]", "0,".repeat(MAX_BODY_BYTES / 2)))
+        .create_async()
+        .await;
+
+    let response = chat(user(), json!({ "model": "chat", "messages": hello() })).await;
+    assert_eq!(response.status(), 502);
+    assert!(test_seam::calls().is_empty(), "a failure bills nothing");
+}
+
 /// The client's view of each upstream answer: status, error code, and what reaches it.
 async fn failure(
     status: usize,

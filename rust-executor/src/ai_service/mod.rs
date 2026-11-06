@@ -2642,34 +2642,25 @@ impl AIService {
             // A model that is no longer an embedding model no longer embeds.
             self.embedding_channel.lock().await.remove(&model_id);
         }
+        // Shut down the model's LLM thread, whatever its type is now: a model that is no
+        // longer an LLM must not keep one.
+        {
+            let mut llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.remove(&model_id) {
+                log::info!("Shutting down LLM model thread for {}", model_id);
+                let (tx, rx) = oneshot::channel();
+                if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                    result_sender: tx,
+                })) {
+                    // Wait for the thread to confirm shutdown
+                    let _ = rx.await;
+                    log::info!("LLM model thread for {} confirmed shutdown", model_id);
+                }
+            }
+        }
+
         match updated_model.model_type {
             ModelType::Llm => {
-                // Shutdown the existing model thread
-                {
-                    let mut llm_channel = self.llm_channel.lock().await;
-                    if let Some(sender) = llm_channel.get(&model_id) {
-                        log::info!("Shutting down LLM model thread for {}", model_id);
-                        let (tx, rx) = oneshot::channel();
-                        if let Ok(()) =
-                            sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
-                                result_sender: tx,
-                            }))
-                        {
-                            // Wait for the thread to confirm shutdown
-                            let _ = rx.await;
-                            log::info!("LLM model thread for {} confirmed shutdown", model_id);
-                        }
-
-                        // Remove the channel from the map
-                        llm_channel.remove(&model_id);
-                    } else {
-                        log::info!(
-                            "LLM model thread for {} not found. Nothing to shutdown",
-                            model_id
-                        );
-                    }
-                }
-
                 // Spawn the model with new configuration
                 log::info!(
                     "Spawning new LLM model thread for {} with updated config",
@@ -2680,13 +2671,18 @@ impl AIService {
                     .await?;
                 model_ready_rx.await?;
 
-                // Respawn all tasks for this model
+                // Respawn all tasks for this model: by its id, or by "default" when it is
+                // the default LLM.
                 let tasks = crate::db_backend::db_backend()
                     .get_tasks()
                     .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-                for task in tasks.into_iter().filter(|t| t.model_id == model_id) {
-                    self.spawn_task(task).await?;
+                for task in tasks {
+                    if Self::replace_model_variables(&task.model_id).ok().as_ref()
+                        == Some(&model_id)
+                    {
+                        self.spawn_task(task).await?;
+                    }
                 }
             }
             ModelType::Embedding => self.spawn_embedding_model(updated_model).await?,

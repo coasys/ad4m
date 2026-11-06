@@ -37,8 +37,8 @@ use crate::ai_service::endpoints::{
 };
 use crate::ai_service::estimate_token_count;
 use crate::ai_service::providers::http::{
-    credentialed_http, is_transport_safe, versioned_endpoint, UpstreamStatus, UpstreamUnreachable,
-    CLEARTEXT_KEY_REFUSAL,
+    credentialed_http, is_transport_safe, read_json, versioned_endpoint, UpstreamStatus,
+    UpstreamUnreachable, CLEARTEXT_KEY_REFUSAL,
 };
 use crate::billing::{affordable_ai_units, check_compute_credits};
 use crate::types::{Endpoint, EndpointKind, Model, ModelState, ModelStatus, RequestContext};
@@ -495,13 +495,23 @@ async fn answer_back(
     client_model: Value,
     bill: Bill,
 ) -> Result<Response, OpenAIError> {
-    let bytes = read_body(&upstream, answer).await?;
-    let mut json: Value = serde_json::from_slice(&bytes).map_err(|_| {
-        upstream_failure(
-            &upstream.endpoint,
-            &upstream.remote_model,
-            anyhow::anyhow!("the endpoint answered a body that is not JSON"),
-        )
+    // The slot is held until the answer is read.
+    let Answer {
+        response, _slot, ..
+    } = answer;
+    let mut json: Value = read_json(response).await.map_err(|e| {
+        let endpoint = &upstream.endpoint;
+        let failed = match e.downcast_ref::<reqwest::Error>() {
+            Some(e) => {
+                UpstreamUnreachable::new(endpoint.base_url.as_str(), e, endpoint.api_key.expose())
+                    .into()
+            }
+            None if e.is::<serde_json::Error>() => {
+                anyhow::anyhow!("the endpoint answered a body that is not JSON")
+            }
+            None => e,
+        };
+        upstream_failure(endpoint, &upstream.remote_model, failed)
     })?;
     bill.settle(json.get("usage"), &generated_text(&json));
     if json.get("model").is_some() {
