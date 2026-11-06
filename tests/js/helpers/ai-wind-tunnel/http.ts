@@ -48,8 +48,13 @@ export async function streamCompletion(url: string, body: Record<string, unknown
   const out: StreamResult = { ttftMs: null, totalMs: 0, tokenChunks: 0, content: "", reasoning: "", usage: null, chunkTimes: [] };
   const decoder = new TextDecoder();
   let buf = "";
+  // A stream that ends before `[DONE]` or a `finish_reason` was cut off: its text is partial.
+  let finished = false;
   const handle = (data: string) => {
-    if (data === "[DONE]") return;
+    if (data === "[DONE]") {
+      finished = true;
+      return;
+    }
     let j: any;
     try {
       j = JSON.parse(data);
@@ -59,6 +64,7 @@ export async function streamCompletion(url: string, body: Record<string, unknown
     if (j.error) throw new Error(`stream error: ${JSON.stringify(j.error).slice(0, 300)}`);
     if (j.usage) out.usage = j.usage;
     for (const ch of j.choices ?? []) {
+      if (ch.finish_reason) finished = true;
       const d = ch.delta ?? {};
       const text = (d.content ?? ch.text ?? "") as string;
       const reasoning = (d.reasoning_content ?? d.reasoning ?? "") as string;
@@ -82,6 +88,7 @@ export async function streamCompletion(url: string, body: Record<string, unknown
     }
   }
   if (buf.trim().startsWith("data:")) handle(buf.trim().slice(5).trim());
+  if (!finished) throw new Error(`${url}: the stream ended before the server said it finished (no finish_reason, no [DONE])`);
   out.totalMs = performance.now() - t0;
   return out;
 }

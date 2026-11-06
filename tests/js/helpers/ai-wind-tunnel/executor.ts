@@ -6,7 +6,7 @@
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Ad4mClient } from "@coasys/ad4m";
@@ -43,14 +43,36 @@ function gitCommit(): string | null {
   }
 }
 
+function gitHead(): { commit: string; committedMs: number } | null {
+  try {
+    const [commit, secs] = execFileSync("git", ["log", "-1", "--format=%H %ct"], { cwd: REPO_ROOT, encoding: "utf8" }).trim().split(" ");
+    return { commit, committedMs: Number(secs) * 1000 };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The commit the executor binary was built from: AI_WT_EXECUTOR_COMMIT, else this checkout's
- * HEAD when the binary is this checkout's own build, else unknown (a binary does not say).
+ * HEAD when the binary is this checkout's own build and was built after HEAD was committed
+ * (an older binary was built from an older commit: the checkout moved on without a rebuild),
+ * else unknown (a binary does not say).
  */
-function executorCommit(binary: string): string {
-  if (process.env.AI_WT_EXECUTOR_COMMIT) return process.env.AI_WT_EXECUTOR_COMMIT;
-  if (path.resolve(binary).startsWith(path.join(REPO_ROOT, "target"))) return gitCommit() ?? "unknown";
-  return "unknown";
+export function executorCommit(
+  binary: string,
+  explicit = process.env.AI_WT_EXECUTOR_COMMIT,
+  head: () => { commit: string; committedMs: number } | null = gitHead,
+  builtMs: (file: string) => number = (f) => statSync(f).mtimeMs,
+): string {
+  if (explicit) return explicit;
+  if (!path.resolve(binary).startsWith(path.join(REPO_ROOT, "target"))) return "unknown";
+  const h = head();
+  if (!h) return "unknown";
+  try {
+    return builtMs(binary) >= h.committedMs ? h.commit : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 export async function startExecutor(log: (s: string) => void): Promise<WtExecutor> {
@@ -58,23 +80,38 @@ export async function startExecutor(log: (s: string) => void): Promise<WtExecuto
   const apiPort = await freePort();
   const token = `wind-tunnel-${randomUUID()}`;
   const dataPath = mkdtempSync(path.join(os.tmpdir(), "ai-wt-executor-"));
-  execFileSync(binary, ["init", "--data-path", dataPath, "--network-bootstrap-seed", BOOTSTRAP_SEED], { stdio: "ignore" });
-  // The executor seeds endpoints from AD4M_AI_* variables: none may leak in from the shell.
-  const env: Record<string, string> = {};
-  for (const k of Object.keys(process.env)) if (k.startsWith("AD4M_AI_")) env[k] = "";
-  const proc = await spawnExecutor(
-    ["run", "--app-data-path", dataPath, "--port", String(apiPort), "--language-language-only", "false", "--run-dapp-server", "false", "--run-holochain", "false", "--admin-credential", token],
-    apiPort,
-    { env },
-  );
-  const client = new Ad4mClient(baseUrl(apiPort), token);
-  await client.agent.generate("wind-tunnel");
+  const removeData = () => rmSync(dataPath, { recursive: true, force: true });
+  let proc: Awaited<ReturnType<typeof spawnExecutor>> | undefined;
+  let client: Ad4mClient | undefined;
+  try {
+    execFileSync(binary, ["init", "--data-path", dataPath, "--network-bootstrap-seed", BOOTSTRAP_SEED], { stdio: "ignore" });
+    // The executor seeds endpoints from AD4M_AI_* variables: none may leak in from the shell.
+    const env: Record<string, string> = {};
+    for (const k of Object.keys(process.env)) if (k.startsWith("AD4M_AI_")) env[k] = "";
+    proc = await spawnExecutor(
+      ["run", "--app-data-path", dataPath, "--port", String(apiPort), "--language-language-only", "false", "--run-dapp-server", "false", "--run-holochain", "false", "--admin-credential", token],
+      apiPort,
+      { env },
+    );
+    client = new Ad4mClient(baseUrl(apiPort), token);
+    await client.agent.generate("wind-tunnel");
+  } catch (e) {
+    // Nothing of a failed start stays behind: no executor, no data directory.
+    try {
+      client?.close();
+    } catch {}
+    if (proc) await quitExecutor(proc, apiPort, token).catch(() => {});
+    removeData();
+    throw e;
+  }
+  const started = proc;
+  const ad4m = client;
   log(`executor ${binary} on port ${apiPort}, data ${dataPath}`);
 
   const endpoints = new Map<string, AiEndpoint>();
   const models = new Map<string, string>();
   return {
-    client,
+    client: ad4m,
     apiPort,
     token,
     v1: `http://127.0.0.1:${apiPort}/v1`,
@@ -89,12 +126,12 @@ export async function startExecutor(log: (s: string) => void): Promise<WtExecuto
       }
     })(),
     dataPath,
-    pid: proc.pid!,
+    pid: started.pid!,
     async endpoint(name, kind, url) {
       const key = `${kind}|${url}`;
       const known = endpoints.get(key);
       if (known) return known;
-      const ep = await client.ai.addEndpoint({ name, kind, baseUrl: url, requestTimeoutSecs: 900 });
+      const ep = await ad4m.ai.addEndpoint({ name, kind, baseUrl: url, requestTimeoutSecs: 900 });
       endpoints.set(key, ep);
       return ep;
     },
@@ -102,15 +139,17 @@ export async function startExecutor(log: (s: string) => void): Promise<WtExecuto
       const key = `${type}|${endpointId}|${remoteModel}`;
       const known = models.get(key);
       if (known) return known;
-      const id = await client.ai.addModel({ name, modelType: type, endpointId, remoteModel });
+      const id = await ad4m.ai.addModel({ name, modelType: type, endpointId, remoteModel });
       models.set(key, id);
       return id;
     },
     async stop() {
       try {
-        client.close();
+        ad4m.close();
       } catch {}
-      await quitExecutor(proc, apiPort, token);
+      await quitExecutor(started, apiPort, token);
+      // Each run's executor state is its own and is not read again.
+      removeData();
     },
   };
 }

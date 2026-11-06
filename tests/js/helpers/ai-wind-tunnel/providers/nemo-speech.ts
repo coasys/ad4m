@@ -5,14 +5,14 @@
  * from the manifest's builds (every build whose backend this machine has, CPU included:
  * the CPU real-time factor is what a machine without a GPU gets), a binary
  * (AI_WT_NEMO_SPEECH, backend in AI_WT_NEMO_SPEECH_BACKEND) or a running server
- * (AI_WT_NEMO_SPEECH_URL).
+ * (AI_WT_NEMO_SPEECH_URL, measured only for the model AI_WT_NEMO_SPEECH_MODEL names or it lists).
  */
 
 import path from "node:path";
 import { platformKey } from "../fingerprint.js";
 import { installModel, installRuntime } from "../install.js";
 import { assertNotReserved, freePort, spawnLogged, waitForHttp, type Spawned } from "../procs.js";
-import { envUrl, type Driver, type RunContext, type Session, type Variant } from "./types.js";
+import { assertAttachedModel, envUrl, type Driver, type RunContext, type Session, type Variant } from "./types.js";
 
 /** Every manifest build of runtime `id` for this platform whose backend the machine can use, GPU ones first. */
 export function runtimeVariants(ctx: Pick<RunContext, "fp" | "manifest">, id: string): Variant[] {
@@ -49,8 +49,10 @@ export const nemoSpeech: Driver = {
       return {
         kind: "OPEN_AI_AUDIO",
         mode: "attach",
-        async serve() {
-          return { baseUrl: attached, remoteModel: remote, pids: () => [], async release() {} };
+        async serve(model) {
+          // It hosts the one ASR model it was started with.
+          assertAttachedModel(model, "AI_WT_NEMO_SPEECH_MODEL", [remote]);
+          return { baseUrl: attached, remoteModel: remote, pids: () => [], staysUp: true, async release() {} };
         },
         async close() {},
       };

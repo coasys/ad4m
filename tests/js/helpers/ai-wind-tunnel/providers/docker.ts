@@ -128,6 +128,8 @@ export const speaches: Driver = {
           remoteModel: model.remoteModel,
           pids: () => (pid ? [pid] : []),
           backend: () => variant.backend,
+          // Unloaded on release, it loads the model again when a later request names it.
+          staysUp: true,
           async release() {
             // Unload from the container this run started, so the next model's memory peak is its own.
             if (name) await fetch(`${baseUrl}/api/ps/${model.remoteModel}`, { method: "DELETE" }).catch(() => {});

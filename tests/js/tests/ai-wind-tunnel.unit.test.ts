@@ -3,17 +3,23 @@
 // derivation. No executor and no model server: `pnpm run test-ai-wind-tunnel-unit`.
 
 import { expect } from "chai";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { loadHardwareClasses, loadManifest, loadMatrixPlan, type Manifest, type MatrixPlan } from "../helpers/ai-wind-tunnel/data.js";
 import { evidenceRelPath, loadAllEvidence, validateEvidence } from "../helpers/ai-wind-tunnel/evidence.js";
-import { fingerprintId, gpuBudget, isIntegratedAmdName } from "../helpers/ai-wind-tunnel/fingerprint.js";
-import { classify, fallbackClasses, memoryFit, type ClassInput } from "../helpers/ai-wind-tunnel/hardware-class.js";
+import { executorCommit } from "../helpers/ai-wind-tunnel/executor.js";
+import { fingerprintId, gpuBudget, isIntegratedAmdName, rocmUsable } from "../helpers/ai-wind-tunnel/fingerprint.js";
+import { cellFit, classify, fallbackClasses, memoryFit, type ClassInput } from "../helpers/ai-wind-tunnel/hardware-class.js";
+import { streamCompletion } from "../helpers/ai-wind-tunnel/http.js";
+import { runtimeLibDirs } from "../helpers/ai-wind-tunnel/install.js";
 import { buildMatrix, parseList, resolveModel } from "../helpers/ai-wind-tunnel/matrix.js";
-import { DATA_DIR } from "../helpers/ai-wind-tunnel/paths.js";
+import { DATA_DIR, REPO_ROOT } from "../helpers/ai-wind-tunnel/paths.js";
 import { streamedTranscript } from "../helpers/ai-wind-tunnel/cells.js";
-import { drmClientBytes, spawnLogged, waitForHttp } from "../helpers/ai-wind-tunnel/procs.js";
+import { drmClientBytes, MemorySampler, once, spawnLogged, waitForHttp } from "../helpers/ai-wind-tunnel/procs.js";
+import { assertAttachedModel, canBeSttReference, SkipError } from "../helpers/ai-wind-tunnel/providers/types.js";
 import { chatTranscriptionRequest, parseChatTranscript, parseSherpaResult, sherpaFrame, startAudioFront } from "../helpers/ai-wind-tunnel/providers/audio-front.js";
 import { containerMemoryArgs } from "../helpers/ai-wind-tunnel/providers/docker.js";
 import { llamaVariants, sttInstruction } from "../helpers/ai-wind-tunnel/providers/llama-server.js";
@@ -28,6 +34,7 @@ import {
   checkToolCall,
   consistentDimension,
   cosine,
+  countsInOrder,
   decodeWav,
   encodeWav,
   normalizeForWer,
@@ -287,6 +294,24 @@ describe("AI wind tunnel (unit)", () => {
       expect(f.samples[0]).to.be.closeTo(0.5, 1e-6);
       expect(() => decodeWav(Buffer.from("not audio at all"))).to.throw(/RIFF/);
     });
+    it("refuses WAV encodings other than PCM and 32-bit float", () => {
+      const pcm = encodeWav(new Float32Array(160), 16000);
+      const alaw = Buffer.from(pcm);
+      alaw.writeUInt16LE(6, 20); // WAVE_FORMAT_ALAW
+      alaw.writeUInt16LE(8, 34);
+      expect(() => decodeWav(alaw)).to.throw(/unsupported WAV sample format 6\/8/);
+      const float16 = Buffer.from(pcm);
+      float16.writeUInt16LE(3, 20); // IEEE float at 16 bits
+      expect(() => decodeWav(float16)).to.throw(/unsupported WAV sample format 3\/16/);
+      expect(decodeWav(pcm).samples.length).to.equal(160);
+    });
+    it("checks a streamed count from one to ten in order, not one number of it", () => {
+      expect(countsInOrder("One, two, three, four, five, six, seven, eight, nine, ten.")).to.be.true;
+      expect(countsInOrder("1, 2, 3, 4, 5, 6, 7, 8, 9, 10")).to.be.true;
+      expect(countsInOrder("four, five")).to.be.false;
+      expect(countsInOrder("one, two, three, five, four, six, seven, eight, nine, ten")).to.be.false;
+      expect(countsInOrder("one, two, three, four, five, six, seven, eight, nine, fourteen")).to.be.false;
+    });
     it("resamples to the target rate", () => {
       expect(resample(new Float32Array(24000), 24000, 16000).length).to.equal(16000);
       const same = new Float32Array([1, 2]);
@@ -378,6 +403,14 @@ describe("AI wind tunnel (unit)", () => {
         expect(await upload("verbose_json").then((r) => r.json())).to.deep.equal({ task: "transcribe", language: "en", duration: 0.1, text: "1600 samples" });
         expect(await upload("text").then((r) => r.text())).to.equal("1600 samples");
         expect(seen[1]).to.deep.include({ model: "asr-model", response_format: "verbose_json" });
+        // A request for another model gets no transcript from this one.
+        const other = new FormData();
+        other.append("file", new Blob([new Uint8Array(encodeWav(new Float32Array(1600), 16000))], { type: "audio/wav" }), "a.wav");
+        other.append("model", "other-model");
+        const refused = await fetch(`${front.baseUrl}/v1/audio/transcriptions`, { method: "POST", body: other });
+        expect(refused.status).to.equal(404);
+        expect(((await refused.json()) as any).error.message).to.match(/serves asr-model, not other-model/);
+        expect(seen).to.have.length(3);
         const missing = await fetch(`${front.baseUrl}/v1/audio/transcriptions`, { method: "POST", body: new FormData() });
         expect(missing.status).to.equal(400);
         expect((await fetch(`${front.baseUrl}/v1/chat/completions`, { method: "POST" })).status).to.equal(404);
@@ -421,7 +454,9 @@ describe("AI wind tunnel (unit)", () => {
       expect(containerMemoryArgs(undefined)).to.deep.equal([]);
       expect(() => containerMemoryArgs("lots")).to.throw(/not a docker memory size/);
     });
-    it("stops waiting for a server that a signal killed", async () => {
+    it("stops waiting for a server that a signal killed", async function () {
+      // POSIX signals through `sh`: none on Windows.
+      if (process.platform === "win32") this.skip();
       // An aborting server (a GGML_ASSERT) ends by SIGABRT: no exit code, only a signal code.
       const s = spawnLogged("sh", ["-c", "kill -ABRT $$"], path.join(mkdtempSync(path.join(os.tmpdir(), "ai-wt-unit-")), "abort.log"));
       await s.exited;
@@ -432,6 +467,103 @@ describe("AI wind tunnel (unit)", () => {
       await waitForHttp("http://127.0.0.1:9/", { timeoutMs: 30_000, alive: s.running, label: "aborted" }).catch((e) => (error = e.message));
       expect(error).to.match(/aborted exited before it answered/);
       expect(Date.now() - t0).to.be.below(5_000);
+    });
+    it("keeps the memory sample in progress when a cell ends during it", async () => {
+      // `cuda` on: a CUDA query (nvidia-smi, or its failure where there is none) is asynchronous,
+      // so the first sample is still in progress when `stop` is called.
+      const sampler = new MemorySampler(() => [process.pid], true).start();
+      const peak = await sampler.stop();
+      expect(peak.peakRssBytes).to.be.a("number").and.greaterThan(0);
+    });
+    it("runs a shared cleanup once, a concurrent call waiting for the same run", async () => {
+      let runs = 0;
+      let finish!: () => void;
+      const cleanup = once(() => {
+        runs++;
+        return new Promise<void>((r) => (finish = r));
+      });
+      const first = cleanup();
+      const second = cleanup();
+      expect(second).to.equal(first);
+      let secondDone = false;
+      void second.then(() => (secondDone = true));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(secondDone).to.be.false;
+      finish();
+      await second;
+      expect(runs).to.equal(1);
+    });
+    it("refuses a completion stream that ends before the server said it finished", async () => {
+      let body = "";
+      const server = createServer((_req, res) => {
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.end(body);
+      });
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/chat/completions`;
+      const chunk = (j: unknown) => `data: ${JSON.stringify(j)}\n\n`;
+      try {
+        body = chunk({ choices: [{ delta: { content: "one," } }] }) + chunk({ choices: [{ delta: { content: " two" } }] });
+        let error = "";
+        await streamCompletion(url, {}).catch((e) => (error = e.message));
+        expect(error).to.match(/ended before the server said it finished/);
+        body += chunk({ choices: [{ delta: {}, finish_reason: "stop" }] });
+        expect((await streamCompletion(url, {})).content).to.equal("one, two");
+        body = chunk({ choices: [{ delta: { content: "x" } }] }) + "data: [DONE]\n\n";
+        expect((await streamCompletion(url, {})).tokenChunks).to.equal(1);
+      } finally {
+        await new Promise((r) => server.close(r));
+      }
+    });
+    it("measures an attached server only for the model it serves", () => {
+      const model = { modelId: "whisper-small", remoteModel: "whisper-small" };
+      const env = "AI_WT_UNIT_ATTACHED_MODEL";
+      delete process.env[env];
+      expect(() => assertAttachedModel(model, env)).to.throw(SkipError, /serves an unknown model, not whisper-small; set AI_WT_UNIT_ATTACHED_MODEL/);
+      expect(() => assertAttachedModel(model, env, ["whisper-small"])).to.not.throw();
+      expect(() => assertAttachedModel(model, env, ["qwen3-asr"])).to.throw(SkipError, /serves qwen3-asr, not whisper-small/);
+      process.env[env] = "whisper-small";
+      try {
+        expect(() => assertAttachedModel(model, env)).to.not.throw();
+        expect(() => assertAttachedModel({ modelId: "whisper-base", remoteModel: "whisper-base" }, env)).to.throw(SkipError);
+      } finally {
+        delete process.env[env];
+      }
+    });
+    it("takes the TTS round trip's STT reference only from a server that stays up", () => {
+      const passed = [{ pass: true }, { pass: true }];
+      expect(canBeSttReference({ staysUp: true }, passed)).to.be.true;
+      expect(canBeSttReference({}, passed)).to.be.false;
+      expect(canBeSttReference({ staysUp: true }, [{ pass: true }, { pass: false }])).to.be.false;
+      expect(canBeSttReference({ staysUp: true }, [])).to.be.false;
+    });
+    it("puts every directory of an extracted runtime on the library path, its extras' too", () => {
+      const x = path.join(mkdtempSync(path.join(os.tmpdir(), "ai-wt-unit-")), "x");
+      mkdirSync(path.join(x, "llama-b1"), { recursive: true });
+      mkdirSync(path.join(x, "cudart-llama-b1-bin-ubuntu-cuda-12.8-x64"));
+      writeFileSync(path.join(x, "cudart-llama-b1-bin-ubuntu-cuda-12.8-x64", "libcudart.so.12"), "");
+      writeFileSync(path.join(x, "README.md"), "");
+      expect(runtimeLibDirs(x)).to.deep.equal([x, path.join(x, "cudart-llama-b1-bin-ubuntu-cuda-12.8-x64"), path.join(x, "llama-b1")]);
+      expect(runtimeLibDirs(path.join(x, "missing"))).to.deep.equal([]);
+    });
+    it("offers ROCm only with a usable /dev/kfd and a HIP runtime", () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "ai-wt-unit-"));
+      const ld = "\tlibamdhip64.so.7 (libc6,x86-64) => /opt/rocm/lib/libamdhip64.so.7";
+      expect(rocmUsable(true, ld, [])).to.be.true;
+      expect(rocmUsable(false, ld, [])).to.be.false;
+      expect(rocmUsable(true, "\tlibvulkan.so.1 (libc6,x86-64) => /usr/lib/libvulkan.so.1", [dir])).to.be.false;
+      writeFileSync(path.join(dir, "libamdhip64.so.7"), "");
+      expect(rocmUsable(true, "", ["/nonexistent", dir])).to.be.true;
+    });
+    it("names the executor's commit only for a build at least as new as HEAD", () => {
+      const binary = path.join(REPO_ROOT, "target", "release", "ad4m-executor");
+      const head = () => ({ commit: "abc123", committedMs: 1_000 });
+      expect(executorCommit(binary, "given", head, () => 0)).to.equal("given");
+      expect(executorCommit(binary, undefined, head, () => 2_000)).to.equal("abc123");
+      expect(executorCommit(binary, undefined, head, () => 500)).to.equal("unknown");
+      expect(executorCommit("/usr/local/bin/ad4m-executor", undefined, head, () => 2_000)).to.equal("unknown");
+      expect(executorCommit(binary, undefined, () => null, () => 2_000)).to.equal("unknown");
+      expect(executorCommit(binary, undefined, head, () => { throw new Error("ENOENT"); })).to.equal("unknown");
     });
   });
 
@@ -481,6 +613,11 @@ describe("AI wind tunnel (unit)", () => {
       expect(memoryFit(10 * GIB, 12 * GIB, 64 * GIB)).to.deep.include({ fits: false, budgetBytes: 8 * GIB });
       expect(memoryFit(20 * GIB, 32 * GIB, null)).to.deep.include({ fits: true, budgetBytes: 28 * GIB });
     });
+    it("fits a CPU cell in RAM, whatever the GPU budget", () => {
+      expect(cellFit(10 * GIB, 32 * GIB, 8 * GIB, "cpu")).to.deep.include({ fits: true, budgetBytes: 28 * GIB, gpuBudgetBytes: null });
+      expect(cellFit(10 * GIB, 32 * GIB, 8 * GIB, "cuda").fits).to.be.false;
+      expect(cellFit(10 * GIB, 32 * GIB, 8 * GIB, undefined).fits).to.be.false;
+    });
     it("budgets a GPU by its kind", () => {
       expect(gpuBudget([{ vendor: "nvidia", name: "x", vramBytes: 12 * GIB, unified: false }], ["cpu", "cuda"], 64 * GIB)).to.equal(12 * GIB);
       expect(gpuBudget([{ vendor: "amd", name: "x", vramBytes: 0.5 * GIB, gttBytes: 61 * GIB, unified: true }], ["cpu", "vulkan"], 122 * GIB)).to.equal(61.5 * GIB);
@@ -503,6 +640,17 @@ describe("AI wind tunnel (unit)", () => {
       expect(ollamaBackendFromLog("... library=cpu ...\n... inference compute id=0 library=ROCm compute=gfx1151")).to.equal("rocm");
       expect(ollamaBackendFromLog("library=cpu")).to.equal("cpu");
       expect(ollamaBackendFromLog("nothing")).to.equal(undefined);
+    });
+    it("reads each Ollama model's own placement after the GPU discovery", () => {
+      const discovery = 'msg="inference compute" id=0 library=ROCm compute=gfx1151\n';
+      const gpuLoad = "load_tensors: offloaded 25/25 layers to GPU\n";
+      const cpuLoad = "load_tensors: offloaded 0/25 layers to GPU\n";
+      const log = discovery + gpuLoad + cpuLoad;
+      // The first model went to the GPU; the second, served after it, did not.
+      expect(ollamaBackendFromLog(log, discovery.length)).to.equal("rocm");
+      expect(ollamaBackendFromLog(log, discovery.length + gpuLoad.length)).to.equal("cpu");
+      // No load logged yet: the discovered library.
+      expect(ollamaBackendFromLog(discovery, discovery.length)).to.equal("rocm");
     });
   });
 
@@ -618,6 +766,34 @@ describe("AI wind tunnel (unit)", () => {
         "t",
       );
       expect(back.classes["cpu-16gb"].llm).to.deep.include({ modelId: "big", evidence: ["a.json", "c.json"] });
+    });
+    it("keeps runs served with other flags apart, each with its own numbers and flags", () => {
+      const r = deriveRecommendations(
+        [
+          { path: "a.json", evidence: evidence("cpu-16gb", [llm("m", "1B", 20, 400, { serverFlags: ["-c", "8192"] })]) },
+          { path: "b.json", evidence: evidence("cpu-16gb", [llm("m", "1B", 40, 600, { serverFlags: ["-c", "4096"] })]) },
+        ],
+        "t",
+      );
+      expect(r.classes["cpu-16gb"].llm).to.deep.include({ serverFlags: ["-c", "4096"], metrics: { decodeTps: 40, ttftMs: 600 }, evidence: ["b.json"], candidates: 2 });
+    });
+    it("leaves out LLM rates counted in chunks, and GPU cells with no memory sample", () => {
+      const chunked = llm("chunked", "8B", 90, 100);
+      chunked.metrics.tokenCountSource = "chunks";
+      const attachedGpu = llm("attached", "8B", 90, 100, { backend: "rocm" });
+      attachedGpu.metrics.peakRssBytes = null;
+      const sampledGpu = llm("sampled", "4B", 30, 500, { backend: "rocm" });
+      sampledGpu.metrics.peakRssBytes = 1e9;
+      sampledGpu.metrics.tokenCountSource = "usage";
+      const r = deriveRecommendations([{ path: "e.json", evidence: evidence("cpu-16gb", [chunked, attachedGpu, sampledGpu, llm("small", "1B", 30, 500)]) }], "t");
+      expect(r.classes["cpu-16gb"].llm).to.deep.include({ modelId: "sampled", candidates: 2 });
+    });
+    it("gives every LLM and completion model a parameter count to rank by size", () => {
+      const m = loadManifest();
+      const plan = loadMatrixPlan();
+      const cells = buildMatrix(plan, m, [...PROVIDERS], ["llm", "completion"]).filter((c) => c.model);
+      expect(cells.length).to.be.greaterThan(0);
+      for (const c of cells) expect(parseParams(c.model!.params), `${c.provider} ${c.model!.modelId ?? c.model!.remoteModel}`).to.be.a("number");
     });
     it("keeps a provider's own model name when there is no manifest id", () => {
       const r = deriveRecommendations(

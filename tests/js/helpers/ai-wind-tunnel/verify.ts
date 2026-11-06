@@ -31,6 +31,20 @@ export function numberWords(n: number): string {
   return `${numberWords(Math.floor(n / 1000))} thousand` + (n % 1000 ? ` ${numberWords(n % 1000)}` : "");
 }
 
+/** Whether `text` counts from one to `n` in order, in words or digits ("one, two, ... ten"). */
+export function countsInOrder(text: string, n = 10): boolean {
+  const lower = text.toLowerCase();
+  let at = 0;
+  for (let i = 1; i <= n; i++) {
+    const re = new RegExp(`\\b(${ONES[i]}|${i})\\b`, "g");
+    re.lastIndex = at;
+    const m = re.exec(lower);
+    if (!m) return false;
+    at = m.index + m[0].length;
+  }
+  return true;
+}
+
 /** Word-level edit distance (substitutions + deletions + insertions). */
 export function wordEditDistance(ref: string[], hyp: string[]): number {
   let prev = Array.from({ length: hyp.length + 1 }, (_, j) => j);
@@ -162,6 +176,11 @@ export function decodeWav(buf: Buffer): DecodedWav {
       fmt = { format, channels: buf.readUInt16LE(body + 2), sampleRate: buf.readUInt32LE(body + 4), bits: buf.readUInt16LE(body + 14) };
     } else if (id === "data") {
       if (!fmt) throw new Error("data chunk before fmt chunk");
+      // PCM (1) at 8/16/24/32 bits or IEEE float (3) at 32: other encodings (A-law, mu-law,
+      // ADPCM, 64-bit float) would decode as noise.
+      const pcm = fmt.format === 1 && [8, 16, 24, 32].includes(fmt.bits);
+      const float = fmt.format === 3 && fmt.bits === 32;
+      if (!pcm && !float) throw new Error(`unsupported WAV sample format ${fmt.format}/${fmt.bits}`);
       if (size === 0 || size === 0xffffffff || body + size > buf.length) size = buf.length - body;
       const bytes = fmt.bits / 8;
       const frames = Math.floor(size / (bytes * fmt.channels));

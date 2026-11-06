@@ -5,7 +5,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -53,7 +53,8 @@ export async function fetchVerified(src: RuntimeArchive, dest: string, log: (s: 
   }
   mkdirSync(path.dirname(dest), { recursive: true });
   log(`downloading ${src.url} (${(src.sizeBytes / 1e6).toFixed(0)} MB)`);
-  const part = `${dest}.part`;
+  // Its own temporary file: two runs fetching the same file do not hash or move each other's.
+  const part = `${dest}.${process.pid}.part`;
   await download(src.url, part);
   const got = await sha256File(part);
   const size = statSync(part).size;
@@ -77,8 +78,23 @@ async function extract(archive: string, into: string): Promise<void> {
   }
 }
 
+/**
+ * The directories of an extracted runtime (`x`) that hold its shared libraries: `x` and each
+ * directory directly in it. A build's extras extract beside the binary's own directory
+ * (llama.cpp's Linux CUDA runtime: `x/cudart-llama-...-cuda-12.8-x64/libcudart.so.12`), so
+ * the binary's directory alone misses them.
+ */
+export function runtimeLibDirs(x: string): string[] {
+  if (!existsSync(x)) return [];
+  const subdirs = readdirSync(x, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => path.join(x, d.name))
+    .sort();
+  return [x, ...subdirs];
+}
+
 /** The server binary of runtime `id`, build `build` (`linux-x64-rocm`), installed into the cache. */
-export async function installRuntime(manifest: Manifest, id: string, build: string, log: (s: string) => void): Promise<{ binary: string; version: string }> {
+export async function installRuntime(manifest: Manifest, id: string, build: string, log: (s: string) => void): Promise<{ binary: string; version: string; libDirs: string[] }> {
   const rt = manifest.runtimes[id];
   if (!rt) throw new Error(`the manifest has no runtime '${id}'`);
   const b = rt.builds[build];
@@ -94,7 +110,7 @@ export async function installRuntime(manifest: Manifest, id: string, build: stri
     if (!existsSync(binary)) throw new Error(`${b.url} has no ${b.binary}`);
     writeFileSync(done, new Date().toISOString());
   }
-  return { binary, version: rt.version };
+  return { binary, version: rt.version, libDirs: runtimeLibDirs(path.join(root, "x")) };
 }
 
 /** The file of manifest model `modelId`, downloaded into the cache. */

@@ -7,7 +7,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Backend, Fingerprint, GpuInfo } from "./types.js";
@@ -101,6 +101,42 @@ function linuxHasVulkan(): boolean {
   return /libvulkan\.so\.1\b/.test(ld) && existsSync("/dev/dri");
 }
 
+/**
+ * Whether ROCm can run here: this user can open `/dev/kfd` read-write (the `render` group) and
+ * the HIP runtime a ROCm build links is installed (`libamdhip64` on the loader's path, in
+ * `libDirs`, or in AI_WT_ROCM_LIB). Without either a ROCm build finds no device and runs on
+ * the CPU, so the backend is not offered.
+ */
+export function rocmUsable(kfdReadWrite: boolean, ldconfig: string, libDirs: string[]): boolean {
+  if (!kfdReadWrite) return false;
+  if (/\blibamdhip64\.so\b/.test(ldconfig)) return true;
+  return libDirs.some((d) => {
+    try {
+      return readdirSync(d).some((f) => /^libamdhip64\.so/.test(f));
+    } catch {
+      return false;
+    }
+  });
+}
+
+function canReadWrite(file: string): boolean {
+  try {
+    accessSync(file, constants.R_OK | constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Where a ROCm install keeps its libraries: AI_WT_ROCM_LIB, /opt/rocm/lib and each /opt/rocm/core-x.y/lib. */
+function rocmLibCandidates(): string[] {
+  const dirs = [...(process.env.AI_WT_ROCM_LIB?.split(":") ?? []), "/opt/rocm/lib"];
+  try {
+    for (const d of readdirSync("/opt/rocm")) if (/^core-[\d.]+$/.test(d)) dirs.push(path.join("/opt/rocm", d, "lib"));
+  } catch {}
+  return dirs;
+}
+
 function linuxFingerprint(): Omit<Fingerprint, "id"> {
   const osRelease = read("/etc/os-release") ?? "";
   const pretty = osRelease.match(/^PRETTY_NAME="?([^"\n]*)"?/m)?.[1] ?? "Linux";
@@ -122,7 +158,8 @@ function linuxFingerprint(): Omit<Fingerprint, "id"> {
     const cuda = run("nvidia-smi", [])?.match(/CUDA Version:\s*([\d.]+)/)?.[1];
     if (cuda) drivers.cuda = cuda;
   }
-  if (gpus.some((g) => g.vendor === "amd") && existsSync("/dev/kfd")) {
+  const ldconfig = run("ldconfig", ["-p"]) ?? run("/sbin/ldconfig", ["-p"]) ?? "";
+  if (gpus.some((g) => g.vendor === "amd") && rocmUsable(canReadWrite("/dev/kfd"), ldconfig, rocmLibCandidates())) {
     backends.push("rocm");
     let rocm = read("/opt/rocm/.info/version");
     if (!rocm && existsSync("/opt/rocm")) {

@@ -113,11 +113,17 @@ and starts nothing:
 | Variable | Provider |
 |---|---|
 | `AI_WT_OLLAMA_URL` | Ollama |
-| `AI_WT_LLAMA_SERVER_URL` (+ `AI_WT_LLAMA_BACKEND`) | llama-server; cells use the model it serves |
-| `AI_WT_WHISPER_SERVER_URL` | whisper-server started with `--request-path /v1/audio --inference-path /transcriptions` |
+| `AI_WT_LLAMA_SERVER_URL` (+ `AI_WT_LLAMA_BACKEND`, `AI_WT_LLAMA_SERVER_MODEL`) | llama-server |
+| `AI_WT_WHISPER_SERVER_URL` (+ `AI_WT_WHISPER_SERVER_MODEL`) | whisper-server started with `--request-path /v1/audio --inference-path /transcriptions` |
 | `AI_WT_SPEACHES_URL` | speaches |
 | `AI_WT_VLLM_URL` | vLLM |
-| `AI_WT_NEMO_SPEECH_URL` (+ `AI_WT_NEMO_SPEECH_BACKEND`) | `nemo-speech serve` |
+| `AI_WT_NEMO_SPEECH_URL` (+ `AI_WT_NEMO_SPEECH_BACKEND`, `AI_WT_NEMO_SPEECH_MODEL`) | `nemo-speech serve` |
+
+A llama-server, whisper-server or nemo-speech server serves the one model it was started
+with. Only the planned model it serves runs on it: the model its `/v1/models` lists
+(llama-server's `--alias`, nemo-speech's model) or the manifest `modelId` in its
+`AI_WT_*_MODEL` variable. The other planned models of that provider are skipped. A GPU cell
+on an attached server has no memory sample, so no offload check: it gets no recommendation.
 
 Other knobs: `AI_WT_OLLAMA_BIN`, `AI_WT_LLAMA_SERVER` / `AI_WT_WHISPER_SERVER` /
 `AI_WT_NEMO_SPEECH` / `AI_WT_SHERPA_ONNX` (a binary instead of the manifest's build),

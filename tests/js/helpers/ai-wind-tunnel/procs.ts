@@ -28,6 +28,16 @@ export function assertNotReserved(url: string): void {
   if (RESERVED_PORTS.has(port)) throw new Error(`${url} uses reserved port ${port} (AI_WT_RESERVED_PORTS)`);
 }
 
+/**
+ * `fn` run at most once: every call, also a concurrent one, gets the same promise. The run's
+ * cleanup goes through it, so a signal that arrives while `finally` cleans up waits for that
+ * cleanup instead of starting a second one and exiting before the first has stopped everything.
+ */
+export function once<T>(fn: () => Promise<T>): () => Promise<T> {
+  let p: Promise<T> | null = null;
+  return () => (p ??= fn());
+}
+
 export interface Spawned {
   proc: ChildProcess;
   /** Resolves when the process has exited. */
@@ -210,32 +220,36 @@ export class MemorySampler {
   #rss = 0;
   #gpu = 0;
   #samples = 0;
-  #busy = false;
+  /** The sample being taken (a CUDA query can take a while), so `stop` can wait for it. */
+  #active: Promise<void> | null = null;
   constructor(private roots: () => number[], private cuda = existsSync("/dev/nvidiactl")) {}
 
+  async #sample(): Promise<void> {
+    const pids = this.roots().flatMap((p) => processTree(p));
+    if (!pids.length) return;
+    this.#rss = Math.max(this.#rss, pids.reduce((a, p) => a + rssBytes(p), 0));
+    const gpu = drmBytes(pids) + (this.cuda ? await cudaBytes(pids) : 0);
+    this.#gpu = Math.max(this.#gpu, gpu);
+    this.#samples++;
+  }
+
   start(): this {
-    const tick = async () => {
-      if (this.#busy) return;
-      this.#busy = true;
-      try {
-        const pids = this.roots().flatMap((p) => processTree(p));
-        if (pids.length) {
-          this.#rss = Math.max(this.#rss, pids.reduce((a, p) => a + rssBytes(p), 0));
-          const gpu = drmBytes(pids) + (this.cuda ? await cudaBytes(pids) : 0);
-          this.#gpu = Math.max(this.#gpu, gpu);
-          this.#samples++;
-        }
-      } finally {
-        this.#busy = false;
-      }
+    const tick = () => {
+      if (this.#active) return;
+      this.#active = this.#sample()
+        .catch(() => {})
+        .finally(() => (this.#active = null));
     };
-    void tick();
+    tick();
     this.#timer = setInterval(tick, 250);
     return this;
   }
 
-  stop(): MemoryPeak {
+  /** Stops sampling once the sample in progress has finished, and answers the peaks. */
+  async stop(): Promise<MemoryPeak> {
     if (this.#timer) clearInterval(this.#timer);
+    this.#timer = null;
+    if (this.#active) await this.#active;
     if (this.#samples === 0) return { peakRssBytes: null, peakGpuBytes: null };
     // 0 is a reading (nothing on the GPU) where GPU memory is readable; elsewhere there is none.
     const readable = process.platform === "linux" && (existsSync("/dev/dri") || this.cuda);

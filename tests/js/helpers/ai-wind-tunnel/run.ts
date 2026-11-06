@@ -28,10 +28,10 @@ import { loadHardwareClasses, loadManifest, loadMatrixPlan } from "./data.js";
 import { evidenceRelPath, validateEvidence } from "./evidence.js";
 import { startExecutor, type WtExecutor } from "./executor.js";
 import { collectFingerprint } from "./fingerprint.js";
-import { classify, classInput, memoryFit } from "./hardware-class.js";
+import { cellFit, classify, classInput } from "./hardware-class.js";
 import { buildMatrix, parseList } from "./matrix.js";
 import { REPO_ROOT } from "./paths.js";
-import { MemorySampler, stopAllSpawned } from "./procs.js";
+import { MemorySampler, once, stopAllSpawned } from "./procs.js";
 import { medianOf } from "./stats.js";
 import { checkOffload } from "./verify.js";
 import { ollama } from "./providers/ollama.js";
@@ -40,7 +40,7 @@ import { whisperServer } from "./providers/whisper-server.js";
 import { nemoSpeech } from "./providers/nemo-speech.js";
 import { sherpaOnnx } from "./providers/sherpa-onnx.js";
 import { removeStartedContainers, speaches, vllm } from "./providers/docker.js";
-import { SkipError, type Driver, type RunContext, type Served, type Session, type Variant } from "./providers/types.js";
+import { canBeSttReference, SkipError, type Driver, type RunContext, type Served, type Session, type Variant } from "./providers/types.js";
 import {
   EVIDENCE_SCHEMA_VERSION,
   PROVIDERS,
@@ -111,13 +111,16 @@ function table(cells: CellResult[]): string {
     .join("\n");
 }
 
-/** Providers first, then the executor; each at most once, also when a signal ends the run. */
+/**
+ * Providers first, then the executor. One cleanup for the run: a signal during the `finally`
+ * cleanup waits for it rather than racing it to `process.exit`.
+ */
 const cleanups: (() => Promise<unknown>)[] = [];
-async function cleanup(): Promise<void> {
+const cleanup = once(async (): Promise<void> => {
   while (cleanups.length) await cleanups.shift()!().catch(() => {});
   await stopAllSpawned();
   await removeStartedContainers();
-}
+});
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.once(sig, () => {
     console.error(`\n${sig}: stopping the servers and containers this run started`);
@@ -274,14 +277,14 @@ async function main() {
               };
               log(`${provider} ${variant.label} ${c.service} ${modelKey(model)}: running`);
               outcome = await withTimeout(CELL_FN[c.service](env), CELL_TIMEOUT_MS, `${c.service} cell`);
-              if (c.service === "stt" && outcome.checks.length && outcome.checks.every((k) => k.pass)) {
+              if (c.service === "stt" && canBeSttReference(served, outcome.checks)) {
                 sttPassed.push({ modelName: name, label: `${provider}/${served.remoteModel}`, wer: typeof outcome.metrics.werMean === "number" ? outcome.metrics.werMean : 1 });
               }
             } catch (e: any) {
               error = String(e?.message ?? e);
               outcome = { checks: [], metrics: {} };
             }
-            const peak = sampler.stop();
+            const peak = await sampler.stop();
             const metrics: Record<string, Metric> = { ...outcome.metrics, peakRssBytes: peak.peakRssBytes, peakGpuBytes: peak.peakGpuBytes };
             if (served.readyMs !== undefined) metrics.serverReadyMs = served.readyMs;
             if (served.adapter) metrics.adapter = served.adapter;
@@ -305,7 +308,7 @@ async function main() {
               ...(served.flags ? { serverFlags: served.flags } : {}),
               checks: outcome.checks,
               metrics,
-              ...(modelBytes ? { fit: memoryFit(modelBytes, fp.memoryBytes, fp.gpuBudgetBytes) } : {}),
+              ...(modelBytes ? { fit: cellFit(modelBytes, fp.memoryBytes, fp.gpuBudgetBytes, served.backend?.() ?? variant.backend) } : {}),
               durationMs: Date.now() - started + (c === group[0] ? started - t0 : 0),
             };
             results.push(result);

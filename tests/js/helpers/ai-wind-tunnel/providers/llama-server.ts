@@ -2,7 +2,8 @@
  * llama-server (llama.cpp): one process per model, from the manifest's builds for this
  * platform (downloaded and checked like the executor's local setup will), from a binary
  * (AI_WT_LLAMA_SERVER, backend in AI_WT_LLAMA_BACKEND), or a running server
- * (AI_WT_LLAMA_SERVER_URL, serving whatever model it was started with).
+ * (AI_WT_LLAMA_SERVER_URL; only the model it lists on /v1/models or names in
+ * AI_WT_LLAMA_SERVER_MODEL is measured on it, the other planned models are skipped).
  */
 
 import { existsSync, readdirSync } from "node:fs";
@@ -13,7 +14,8 @@ import { postJson } from "../http.js";
 import { installModelFiles, installRuntime } from "../install.js";
 import { assertNotReserved, freePort, spawnLogged, waitForHttp } from "../procs.js";
 import { chatTranscriptionRequest, parseChatTranscript, startAudioFront, type AudioFront, type SttPrompt } from "./audio-front.js";
-import { envUrl, type Driver, type RunContext, type Session, type Variant } from "./types.js";
+import type { CellModel } from "../types.js";
+import { assertAttachedModel, envUrl, type Driver, type RunContext, type Served, type Session, type Variant } from "./types.js";
 
 /**
  * How an audio model is asked to transcribe. Qwen3-ASR only transcribes and takes the audio
@@ -60,6 +62,52 @@ export function llamaVariants(ctx: Pick<RunContext, "fp" | "manifest" | "llamaBu
   return gpu.length ? gpu : all;
 }
 
+/**
+ * An STT model on llama-server at `server` (serving it as `remote`), as the executor reaches
+ * it. llama-server's own `POST /v1/audio/transcriptions` (b11669) answers `json` only, sends
+ * the audio with no instruction and returns the model's raw text: Qwen3-ASR's carries its
+ * `language X<asr_text>` prefix, Voxtral answers the speech instead of transcribing it.
+ * AI_WT_LLAMA_STT_ROUTE=native measures that route as the executor would get it, with
+ * nothing in between; by default the cells go through an OpenAI-shaped front, where an audio
+ * model transcribes from an input_audio part, the front strips Qwen3-ASR's language prefix
+ * and tells Voxtral to transcribe. `stop` stops the server, when the run started it.
+ */
+async function sttServed(server: string, remote: string, model: CellModel, base: Omit<Served, "baseUrl" | "remoteModel" | "release">, stop?: () => Promise<void>): Promise<Served> {
+  if (process.env.AI_WT_LLAMA_STT_ROUTE === "native") {
+    return {
+      ...base,
+      baseUrl: server,
+      remoteModel: remote,
+      kind: "OPEN_AI_AUDIO",
+      adapter: "none: llama-server's own /v1/audio/transcriptions",
+      staysUp: !stop,
+      release: async () => stop?.(),
+    };
+  }
+  const prompt = sttInstruction(model.modelId ?? remote);
+  let front: AudioFront;
+  try {
+    front = await startAudioFront(await freePort(), remote, async (audio) => {
+      const r = await postJson(`${server}/v1/chat/completions`, chatTranscriptionRequest(remote, audio, prompt), undefined, 120_000);
+      return parseChatTranscript(String(r.value?.choices?.[0]?.message?.content ?? ""));
+    });
+  } catch (e) {
+    await stop?.();
+    throw e;
+  }
+  return {
+    ...base,
+    baseUrl: front.baseUrl,
+    remoteModel: remote,
+    kind: "OPEN_AI_AUDIO",
+    adapter: `OpenAI-shaped front: /v1/audio/transcriptions -> /v1/chat/completions with an input_audio part${prompt ? `, the system message ${JSON.stringify(prompt.system)} and the instruction ${JSON.stringify(prompt.instruction)}` : ""}`,
+    async release() {
+      await front.close().catch(() => {});
+      await stop?.();
+    },
+  };
+}
+
 export const llamaServer: Driver = {
   id: "llama-server",
   async plan(ctx) {
@@ -75,19 +123,26 @@ export const llamaServer: Driver = {
     if (attached) {
       assertNotReserved(attached);
       const listed: any = await fetch(`${attached}/v1/models`).then((r) => r.json());
-      const remote = listed?.data?.[0]?.id ?? "default";
+      const ids: string[] = (listed?.data ?? []).map((m: any) => m?.id).filter((id: unknown): id is string => typeof id === "string");
+      const remote = ids[0] ?? "default";
       return {
         kind: "LLAMA_SERVER",
         mode: "attach",
-        async serve() {
-          return { baseUrl: attached, remoteModel: remote, pids: () => [], async release() {} };
+        async serve(model, service) {
+          // It serves the model it was started with (`--alias` names it in /v1/models).
+          assertAttachedModel(model, "AI_WT_LLAMA_SERVER_MODEL", ids);
+          const base = { pids: () => [], backend: () => variant.backend };
+          if (service === "stt") return sttServed(attached, remote, model, base);
+          return { ...base, baseUrl: attached, remoteModel: remote, staysUp: true, async release() {} };
         },
         async close() {},
       };
     }
     let binary = process.env.AI_WT_LLAMA_SERVER;
     let version: string | undefined;
-    if (!binary) ({ binary, version } = await installRuntime(ctx.manifest, "llama-server", variant.runtimeBuild!, ctx.log));
+    // The runtime's library directories, its extras' (the CUDA runtime) included.
+    let libDirs: string[] = [];
+    if (!binary) ({ binary, version, libDirs } = await installRuntime(ctx.manifest, "llama-server", variant.runtimeBuild!, ctx.log));
     const gpu = variant.backend !== "cpu";
     return {
       kind: "LLAMA_SERVER",
@@ -113,7 +168,7 @@ export const llamaServer: Driver = {
         }
         const started = Date.now();
         const s = spawnLogged(binary!, args, path.join(ctx.runDir, `llama-server-${variant.label}-${model.modelId}.log`), {
-          LD_LIBRARY_PATH: [path.dirname(binary!), ...(variant.backend === "rocm" ? rocmLibDirs() : []), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
+          LD_LIBRARY_PATH: [path.dirname(binary!), ...libDirs, ...(variant.backend === "rocm" ? rocmLibDirs() : []), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
         });
         try {
           // 503 while the model loads, 200 once it serves.
@@ -127,51 +182,7 @@ export const llamaServer: Driver = {
         if (service !== "stt") {
           return { baseUrl: server, remoteModel: model.remoteModel, readyMs, pids: () => (s.proc.pid ? [s.proc.pid] : []), backend: () => variant.backend, flags, release: () => s.stop() };
         }
-        // llama-server's own `POST /v1/audio/transcriptions` (b11669) answers `json` only, sends
-        // the audio with no instruction and returns the model's raw text: Qwen3-ASR's carries its
-        // `language X<asr_text>` prefix, Voxtral answers the speech instead of transcribing it.
-        // AI_WT_LLAMA_STT_ROUTE=native measures that route as the executor would get it, with
-        // nothing in between; by default the cells go through the front below.
-        if (process.env.AI_WT_LLAMA_STT_ROUTE === "native") {
-          return {
-            baseUrl: server,
-            remoteModel: model.remoteModel,
-            readyMs,
-            pids: () => (s.proc.pid ? [s.proc.pid] : []),
-            backend: () => variant.backend,
-            flags,
-            kind: "OPEN_AI_AUDIO",
-            adapter: "none: llama-server's own /v1/audio/transcriptions",
-            release: () => s.stop(),
-          };
-        }
-        // Through chat: an audio model transcribes from an input_audio part, and the front
-        // strips Qwen3-ASR's language prefix and tells Voxtral to transcribe.
-        const prompt = sttInstruction(model.modelId);
-        let front: AudioFront;
-        try {
-          front = await startAudioFront(await freePort(), model.remoteModel, async (audio) => {
-            const r = await postJson(`${server}/v1/chat/completions`, chatTranscriptionRequest(model.remoteModel, audio, prompt), undefined, 120_000);
-            return parseChatTranscript(String(r.value?.choices?.[0]?.message?.content ?? ""));
-          });
-        } catch (e) {
-          await s.stop();
-          throw e;
-        }
-        return {
-          baseUrl: front.baseUrl,
-          remoteModel: model.remoteModel,
-          readyMs,
-          pids: () => (s.proc.pid ? [s.proc.pid] : []),
-          backend: () => variant.backend,
-          flags,
-          kind: "OPEN_AI_AUDIO",
-          adapter: `OpenAI-shaped front: /v1/audio/transcriptions -> /v1/chat/completions with an input_audio part${prompt ? `, the system message ${JSON.stringify(prompt.system)} and the instruction ${JSON.stringify(prompt.instruction)}` : ""}`,
-          async release() {
-            await front.close().catch(() => {});
-            await s.stop();
-          },
-        };
+        return sttServed(server, model.remoteModel, model, { readyMs, pids: () => (s.proc.pid ? [s.proc.pid] : []), backend: () => variant.backend, flags }, () => s.stop());
       },
       async close() {},
     };
