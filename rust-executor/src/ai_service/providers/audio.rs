@@ -250,8 +250,11 @@ impl RemoteTranscribe for OpenAiTranscribe {
                     "{} refused `stream` ({e}); transcribing per utterance",
                     self.endpoint
                 );
+                // A 400 about the audio itself fails the retry too: only a retry that
+                // succeeds shows the refusal was about `stream`.
+                let text = self.transcribe(model, again, vec![]).await?.text;
                 self.streaming.store(streaming::NO, Ordering::Relaxed);
-                return Ok(self.transcribe(model, again, vec![]).await?.text);
+                return Ok(text);
             }
             Err(e) => return Err(e),
         };
@@ -303,8 +306,10 @@ fn stream_event(line: &str) -> Result<StreamEvent> {
     if data.is_empty() || data == "[DONE]" {
         return Ok(StreamEvent::Nothing);
     }
-    let event: Value =
-        serde_json::from_str(data).map_err(|e| anyhow!("Unreadable transcription event: {e}"))?;
+    let Ok(event) = serde_json::from_str::<Value>(data) else {
+        log::debug!("Skipped a transcription event that is not JSON: {data}");
+        return Ok(StreamEvent::Nothing);
+    };
     if let Some(error) = event.get("error") {
         let message = error
             .get("message")
@@ -660,6 +665,48 @@ mod tests {
         assert!(!TranscribeFailure::BadAnswer
             .to_string()
             .contains(&server.url()));
+    }
+
+    // A 400 about the audio turned streaming off for the whole stream.
+    #[tokio::test]
+    async fn a_refusal_of_the_audio_keeps_streaming_on() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_status(400)
+            .with_body("audio too short")
+            .expect(2)
+            .create_async()
+            .await;
+        let client = OpenAiTranscribe::new("", Url::parse(&server.url()).unwrap());
+        let (pieces, _) = mpsc::unbounded_channel();
+        assert!(client.transcribe_pieces("m", wav(), &pieces).await.is_err());
+        assert_eq!(
+            client.streaming.load(Ordering::Relaxed),
+            streaming::UNKNOWN,
+            "one rejected utterance does not settle whether the server streams"
+        );
+    }
+
+    // One `data:` line that is not JSON failed the whole utterance.
+    #[tokio::test]
+    async fn a_stream_line_that_is_not_json_is_skipped() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "text/event-stream")
+            .with_body(concat!(
+                "data: {\"type\":\"transcript.text.delta\",\"delta\":\"Hello\"}\n\n",
+                "data: keep-alive\n\n",
+                "data: {\"type\":\"transcript.text.delta\",\"delta\":\" world\"}\n\n",
+                "data: [DONE]\n\n",
+            ))
+            .create_async()
+            .await;
+        let client = OpenAiTranscribe::new("", Url::parse(&server.url()).unwrap());
+        let (pieces, _) = mpsc::unbounded_channel();
+        let text = client.transcribe_pieces("m", wav(), &pieces).await.unwrap();
+        assert_eq!(text, "Hello world");
     }
 
     #[test]
