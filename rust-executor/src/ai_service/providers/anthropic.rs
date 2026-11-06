@@ -111,6 +111,10 @@ impl Discover for AnthropicDiscover {
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION);
         let json = super::http::fetch_json(request, &endpoint, &self.api_key).await?;
+        // A 200 without the list is no listing: the endpoint would count as reachable.
+        if !json.get("data").is_some_and(|data| data.is_array()) {
+            return Err(anyhow!("{endpoint} answered without a model list"));
+        }
         Ok(super::http::model_ids_from_data(&json)
             .into_iter()
             .map(|id| DiscoveredModel {
@@ -365,7 +369,7 @@ impl AnthropicChat {
             // Anthropic puts the useful part in the body (`error.message`);
             // the status alone does not distinguish a bad key from a bad
             // model name, and both are things an operator has to fix.
-            let body = response.text().await.unwrap_or_default();
+            let body = super::http::read_error_text(response).await;
             return Err(anyhow!("Anthropic API error {}: {}", status, body));
         }
 
@@ -448,8 +452,7 @@ impl RemoteChat for AnthropicChat {
         let body = self.build_body(request, false);
         let response = self.send(&body).await?;
 
-        let parsed: MessagesResponse = response
-            .json()
+        let parsed: MessagesResponse = super::http::read_json(response)
             .await
             .map_err(|e| anyhow!("Could not read Anthropic response: {:?}", e))?;
 
@@ -1297,14 +1300,37 @@ mod wire_tests {
     }
 
     #[tokio::test]
-    async fn tool_choice_or_response_format_is_refused_rather_than_dropped() {
-        let mut request = ChatRequest::new("claude-opus-5", turns());
-        request.response_format = Some(json!({ "type": "json_object" }));
-        let error = AnthropicChat::new("k", Url::parse("http://127.0.0.1:1").unwrap())
-            .chat(request)
+    async fn a_listing_without_a_data_array_is_an_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_body(r#"{"type":"error"}"#)
+            .create_async()
+            .await;
+        let error = list_models("k", Url::parse(&server.url()).unwrap())
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("response_format"), "{error}");
+        assert!(
+            error.to_string().contains("without a model list"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_choice_or_response_format_is_refused_rather_than_dropped() {
+        let client = AnthropicChat::new("k", Url::parse("http://127.0.0.1:1").unwrap());
+        let mut format = ChatRequest::new("claude-opus-5", turns());
+        format.response_format = Some(json!({ "type": "json_object" }));
+        let mut choice = ChatRequest::new("claude-opus-5", turns());
+        choice.tool_choice = Some(json!("required"));
+        for request in [format, choice] {
+            let error = client.chat(request.clone()).await.unwrap_err();
+            assert!(error.to_string().contains("response_format"), "{error}");
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let error = client.chat_stream(request, tx).await.unwrap_err();
+            assert!(error.to_string().contains("response_format"), "{error}");
+        }
     }
 
     #[tokio::test]

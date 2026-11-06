@@ -9,8 +9,8 @@ through here — `LlmModel::Local` is a different thing entirely.
 | File | Content |
 |---|---|
 | `mod.rs` | `RemoteChat` trait, the neutral `ChatRole`/`ChatTurn`/`ChatRequest`/`ChatReply`/`ChatUsage`/`ToolSpec`/`ToolCall` types, and `api_type_supports_native_tools`. No wire format. |
-| `discovery.rs` | `Discover` (list models; health = the listing, classified), `discover_for(kind, …)`, capability guesses per model id, `PROBE_TIMEOUT`. |
-| `http.rs` | Sending a credential over HTTP: `credentialed_http` (no redirects, a timeout), `is_transport_safe`, `fetch_json` + `UpstreamStatus` (error status with the key scrubbed), and the endpoint helpers the providers share. |
+| `discovery.rs` | `Discover` (list models; `health_of` = the listing, classified; `listing_or_registered`: an audio server's 404 listing), `discover_for(kind, …)`, capability guesses per model id, `PROBE_TIMEOUT`. |
+| `http.rs` | Sending a credential over HTTP: `credentialed_http` (no redirects, a timeout), `is_transport_safe`, `fetch_json` + `UpstreamStatus` (error status with the key scrubbed), `read_json` / `read_error_text` (every non-streamed body read: 16 MiB answers, 64 KiB error reasons), and the endpoint helpers the providers share. |
 | `openai.rs` | OpenAI-shaped HTTP on `reqwest`: OpenAI, Groq, OpenRouter, Google compat, Ollama `/v1`, vLLM, llama-server. `tools`, `tool_choice`, `response_format`, SSE with tool-call assembly and `usage`. `OpenAiDiscover` for every OpenAI-shaped kind. |
 | `anthropic.rs` | Messages API on `reqwest`: prompt caching, SSE streaming, native `tool_use`/`tool_result`. `AnthropicDiscover`. |
 | `ollama.rs` | Ollama native `/api/chat`: native tools, `num_ctx`, ndjson streaming. `OllamaDiscover` (`/api/tags` + `/api/show` capabilities), `pull_model` (ndjson progress), `delete_model`. |

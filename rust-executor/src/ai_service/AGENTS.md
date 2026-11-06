@@ -26,11 +26,16 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
 
 - `mod.rs`: `ai.addEndpoint` / `updateEndpoint` / `removeEndpoint` (probe once before a
   save; an update rewrites and reloads the models on it), `check_health` and the 60 s
-  health loop (`ai-endpoint-status`, to the main agent's sessions only), Ollama
-  `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s).
+  health loop (`ai-endpoint-status`, to the main agent's sessions only; `check_health`
+  probes an endpoint at most once per `PROBE_TIMEOUT`, a pull or delete probes at once; a check adds the
+  capabilities of the models listed, removes none, and stores nothing when the URL moved
+  meanwhile; an `OPEN_AI_AUDIO` server whose listing is a 404 serves its registered
+  models), Ollama `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s, a
+  failure's detail names no URL). A URL with a user name or password is refused.
 - `detect.rs`: `ai.detectEndpoints`, loopback ports, classified by answer shape. Saves nothing.
 - `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
-  before the service loads; idempotent by name, keys only from env vars.
+  before the service loads; idempotent by name (a new name takes over the endpoint the
+  start-up migration made for the same protocol, URL and key), keys only from env vars.
 
 A remote model still carries its own `api` (URL, key, protocol) and gets an `endpoint_id`
 from `Ad4mDb::link_models_to_endpoints` (startup and every model write). Never set a

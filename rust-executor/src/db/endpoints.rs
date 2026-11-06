@@ -129,6 +129,56 @@ impl Ad4mDb {
             .optional()?)
     }
 
+    /// The registry as a backup carries it: each endpoint with its key, as the backup
+    /// carries the models' keys. Health is not kept.
+    pub(super) fn export_endpoints(&self) -> Ad4mDbResult<Vec<serde_json::Value>> {
+        Ok(self
+            .get_endpoints()?
+            .iter()
+            .map(|endpoint| {
+                serde_json::json!({
+                    "id": endpoint.id,
+                    "name": endpoint.name,
+                    "kind": kind_column(endpoint.kind),
+                    "base_url": endpoint.base_url.as_str(),
+                    "api_key": endpoint.api_key.expose(),
+                    "capabilities": endpoint.capabilities,
+                    "max_num_ctx": endpoint.max_num_ctx,
+                })
+            })
+            .collect())
+    }
+
+    /// Adds one endpoint of a backup, with unknown health. Refused as any insert is: a
+    /// name or server already taken.
+    pub(super) fn import_endpoint(&self, backup: &serde_json::Value) -> Ad4mDbResult<()> {
+        #[derive(serde::Deserialize)]
+        struct Backup {
+            id: String,
+            name: String,
+            kind: EndpointKind,
+            base_url: Url,
+            #[serde(default)]
+            api_key: String,
+            capabilities: Vec<AiCapability>,
+            max_num_ctx: Option<u32>,
+        }
+        let backup: Backup = serde_json::from_value(backup.clone())?;
+        if backup.max_num_ctx == Some(0) {
+            return Err(InvalidEndpoint("max_num_ctx must be positive".into()).into());
+        }
+        self.insert_endpoint(&Endpoint {
+            id: backup.id,
+            name: backup.name,
+            kind: backup.kind,
+            base_url: backup.base_url,
+            api_key: Secret::new(backup.api_key),
+            capabilities: backup.capabilities,
+            max_num_ctx: backup.max_num_ctx,
+            health: EndpointHealth::default(),
+        })
+    }
+
     /// Refuses `endpoint` when another one has its name, or the same protocol, URL and key:
     /// a model links to the endpoint its `api` names, so two such endpoints could not be
     /// told apart.
@@ -182,7 +232,9 @@ impl Ad4mDb {
     /// be built again.
     pub fn update_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<Vec<String>> {
         self.refuse_duplicate(endpoint)?;
-        self.conn.execute(
+        // One transaction: a model never keeps the old URL or key once its endpoint moved.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE ai_endpoints SET name = ?2, kind = ?3, base_url = ?4, api_key = ?5,
                 capabilities = ?6, max_num_ctx = ?7, health = ?8
              WHERE id = ?1",
@@ -197,7 +249,7 @@ impl Ad4mDb {
                 serde_json::to_string(&endpoint.health)?,
             ],
         )?;
-        self.conn.execute(
+        tx.execute(
             "UPDATE models SET api_base_url = ?2, api_key = ?3, api_type = ?4, api_max_num_ctx = ?5
              WHERE endpoint_id = ?1",
             params![
@@ -208,6 +260,7 @@ impl Ad4mDb {
                 endpoint.max_num_ctx,
             ],
         )?;
+        tx.commit()?;
         self.endpoint_model_ids(&endpoint.id)
     }
 
@@ -224,12 +277,27 @@ impl Ad4mDb {
         Ok(stored.api_key)
     }
 
-    pub fn set_endpoint_health(&self, id: &str, health: &EndpointHealth) -> Ad4mDbResult<()> {
-        self.conn.execute(
-            "UPDATE ai_endpoints SET health = ?2 WHERE id = ?1",
-            params![id, serde_json::to_string(health)?],
+    /// Stores what a check of endpoint `id` at `base_url` found: its health and capabilities.
+    /// Answers false, storing nothing, when the endpoint has moved to another URL since: an
+    /// update probed the new one while the health loop checked the old.
+    pub fn set_endpoint_health(
+        &self,
+        id: &str,
+        base_url: &Url,
+        health: &EndpointHealth,
+        capabilities: &[AiCapability],
+    ) -> Ad4mDbResult<bool> {
+        let updated = self.conn.execute(
+            "UPDATE ai_endpoints SET health = ?3, capabilities = ?4
+             WHERE id = ?1 AND base_url = ?2",
+            params![
+                id,
+                base_url.to_string(),
+                serde_json::to_string(health)?,
+                serde_json::to_string(capabilities)?
+            ],
         )?;
-        Ok(())
+        Ok(updated > 0)
     }
 
     /// The models that run on endpoint `id`.
@@ -241,13 +309,43 @@ impl Ad4mDb {
         Ok(ids.collect::<Result<_, _>>()?)
     }
 
-    /// The names of the models that use `remote_model` on endpoint `id`.
-    pub fn models_using_remote(&self, id: &str, remote_model: &str) -> Ad4mDbResult<Vec<String>> {
+    /// The upstream model ids the models on endpoint `id` use, each once.
+    pub fn endpoint_remote_models(&self, id: &str) -> Ad4mDbResult<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name FROM models WHERE endpoint_id = ?1 AND model = ?2 ORDER BY name",
+            "SELECT DISTINCT model FROM models
+                 WHERE endpoint_id = ?1 AND model IS NOT NULL ORDER BY model",
         )?;
-        let names = stmt.query_map(params![id, remote_model], |row| row.get(0))?;
-        Ok(names.collect::<Result<_, _>>()?)
+        let models = stmt.query_map(params![id], |row| row.get(0))?;
+        Ok(models.collect::<Result<_, _>>()?)
+    }
+
+    /// The names of the models that use `remote_model` on endpoint `id`. A name without a
+    /// tag is the `:latest` tag, as Ollama reads it: `qwen3` and `qwen3:latest` are one model.
+    pub fn models_using_remote(&self, id: &str, remote_model: &str) -> Ad4mDbResult<Vec<String>> {
+        fn tagged(model: &str) -> String {
+            let name = model.rsplit('/').next().unwrap_or(model);
+            if name.contains(':') {
+                model.to_string()
+            } else {
+                format!("{model}:latest")
+            }
+        }
+        let wanted = tagged(remote_model);
+        let mut stmt = self.conn.prepare(
+            "SELECT name, model FROM models
+             WHERE endpoint_id = ?1 AND model IS NOT NULL ORDER BY name",
+        )?;
+        let rows = stmt.query_map(params![id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut names = Vec::new();
+        for row in rows {
+            let (name, model) = row?;
+            if tagged(&model) == wanted {
+                names.push(name);
+            }
+        }
+        Ok(names)
     }
 
     /// Removes endpoint `id`. Refused while a model runs on it.
@@ -570,6 +668,68 @@ mod tests {
         assert!(db.get_endpoint(&endpoint_id).unwrap().is_none());
     }
 
+    // Ollama reads a name without a tag as `:latest`.
+    #[test]
+    fn a_remote_model_in_use_is_found_with_or_without_its_latest_tag() {
+        let db = db();
+        let mut untagged = remote("a", "http://127.0.0.1:11434", None, "OLLAMA");
+        untagged.api.as_mut().unwrap().model = "qwen3".into();
+        let mut tagged = remote("b", "http://127.0.0.1:11434", None, "OLLAMA");
+        tagged.api.as_mut().unwrap().model = "qwen3:latest".into();
+        let mut other = remote("c", "http://127.0.0.1:11434", None, "OLLAMA");
+        other.api.as_mut().unwrap().model = "qwen3:8b".into();
+        let id = db.add_model(&untagged).unwrap();
+        db.add_model(&tagged).unwrap();
+        db.add_model(&other).unwrap();
+        let endpoint_id = db.get_model(id).unwrap().unwrap().endpoint_id.unwrap();
+
+        assert_eq!(
+            db.models_using_remote(&endpoint_id, "qwen3:latest")
+                .unwrap(),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            db.models_using_remote(&endpoint_id, "qwen3").unwrap(),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            db.models_using_remote(&endpoint_id, "qwen3:8b").unwrap(),
+            vec!["c"]
+        );
+    }
+
+    // The health loop checked the old URL while an update moved the endpoint.
+    #[test]
+    fn health_checked_at_an_old_url_is_not_stored() {
+        let db = db();
+        let mut stored = endpoint("e", "http://127.0.0.1:8000", "");
+        db.insert_endpoint(&stored).unwrap();
+        let old_url = stored.base_url.clone();
+        stored.base_url = Url::parse("http://127.0.0.1:9931").unwrap();
+        db.update_endpoint(&stored).unwrap();
+
+        let stale = EndpointHealth {
+            state: EndpointState::Unreachable,
+            checked_at: Some(1),
+            detail: Some("old".into()),
+            served_models: vec![],
+        };
+        let capabilities = vec![AiCapability::Embeddings];
+        assert!(!db
+            .set_endpoint_health(&stored.id, &old_url, &stale, &capabilities)
+            .unwrap());
+        let read = db.get_endpoint(&stored.id).unwrap().unwrap();
+        assert_eq!(read.health, EndpointHealth::default());
+        assert_eq!(read.capabilities, vec![AiCapability::Chat]);
+
+        assert!(db
+            .set_endpoint_health(&stored.id, &stored.base_url, &stale, &capabilities)
+            .unwrap());
+        let read = db.get_endpoint(&stored.id).unwrap().unwrap();
+        assert_eq!(read.health, stale);
+        assert_eq!(read.capabilities, capabilities);
+    }
+
     #[test]
     fn a_model_moved_to_another_url_moves_to_its_endpoint() {
         let db = db();
@@ -583,5 +743,40 @@ mod tests {
         assert_ne!(before, after);
         let endpoint = db.get_endpoint(&after.unwrap()).unwrap().unwrap();
         assert_eq!(endpoint.base_url.as_str(), "http://127.0.0.1:8000/");
+    }
+
+    // A backup restored into a fresh executor keeps the registry: an endpoint no model
+    // uses, each endpoint's id, name, kind and capabilities, and the models' links.
+    #[test]
+    fn a_backup_restores_the_endpoints_and_links_the_models_to_them() {
+        let db = db();
+        let mut unused = endpoint("unused", "https://api.example.org/v1", "sk-unused");
+        unused.capabilities = vec![AiCapability::Embeddings];
+        db.insert_endpoint(&unused).unwrap();
+        let llama = endpoint("llama", "http://127.0.0.1:9931", "");
+        db.insert_endpoint(&llama).unwrap();
+        let mut model = remote("m", "http://127.0.0.1:9931", None, "OPEN_AI");
+        model.api.as_mut().unwrap().native_tools = Some(true);
+        db.add_model(&model).unwrap();
+
+        let restored = Ad4mDb::new(":memory:").unwrap();
+        let result = restored
+            .import_from_json(db.export_all_to_json().unwrap(), None)
+            .unwrap();
+
+        assert_eq!(
+            (result.ai_endpoints.imported, result.ai_endpoints.failed),
+            (2, 0)
+        );
+        let endpoints = restored.get_endpoints().unwrap();
+        assert_eq!(endpoints.len(), 2);
+        let unused_back = restored.get_endpoint(&unused.id).unwrap().unwrap();
+        assert_eq!(unused_back.name, "unused");
+        assert_eq!(unused_back.kind, EndpointKind::LlamaServer);
+        assert_eq!(unused_back.capabilities, vec![AiCapability::Embeddings]);
+        assert!(unused_back.api_key.expose_for_compare("sk-unused"));
+        let model = restored.get_models().unwrap().remove(0);
+        assert_eq!(model.endpoint_id.as_deref(), Some(llama.id.as_str()));
+        assert_eq!(model.api.unwrap().native_tools, Some(true));
     }
 }

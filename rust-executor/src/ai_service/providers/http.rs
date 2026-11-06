@@ -89,6 +89,51 @@ pub(crate) fn scrub(text: &str, api_key: &str) -> String {
     }
 }
 
+/// The most of an answer a provider call reads: far more than a model list or a
+/// non-streamed completion, so a server that sends without end cannot fill the memory.
+pub(crate) const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// The most of an error answer kept as its reason.
+pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Up to `limit` bytes of `response`'s body, and whether there was more. Stops reading at
+/// the limit.
+async fn read_capped(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> reqwest::Result<(Vec<u8>, bool)> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let room = limit - body.len();
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
+}
+
+/// `response`'s body as JSON. Refused past [`MAX_BODY_BYTES`].
+pub(crate) async fn read_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> anyhow::Result<T> {
+    let (body, more) = read_capped(response, MAX_BODY_BYTES).await?;
+    if more {
+        anyhow::bail!("the answer is longer than {MAX_BODY_BYTES} bytes");
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+/// An error answer's body as text: its first [`MAX_ERROR_BODY_BYTES`], empty when it cannot
+/// be read.
+pub(crate) async fn read_error_text(response: reqwest::Response) -> String {
+    read_capped(response, MAX_ERROR_BODY_BYTES)
+        .await
+        .map(|(body, _)| String::from_utf8_lossy(&body).into_owned())
+        .unwrap_or_default()
+}
+
 /// Send `request` to `url` and read the JSON answer. A failure names the URL and carries
 /// the upstream's reason ([`UpstreamStatus`] for an error status), never `api_key`.
 pub(crate) async fn fetch_json(
@@ -101,7 +146,7 @@ pub(crate) async fn fetch_json(
     })?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = read_error_text(response).await;
         return Err(UpstreamStatus {
             url: url.to_string(),
             status,
@@ -109,8 +154,7 @@ pub(crate) async fn fetch_json(
         }
         .into());
     }
-    response
-        .json()
+    read_json(response)
         .await
         .map_err(|e| anyhow::anyhow!("Could not read the answer of {url}: {e}"))
 }
@@ -270,6 +314,42 @@ mod tests {
         assert_eq!(status.status.as_u16(), 401);
         assert!(!error.to_string().contains("sk-echoed-123"), "{error}");
         assert!(error.to_string().contains("bad key <redacted>"), "{error}");
+    }
+
+    // A server that answers without end: the answer is refused at the limit, and an
+    // error's reason keeps only its start.
+    #[tokio::test]
+    async fn an_answer_past_the_limit_is_refused_and_an_error_body_is_cut() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/big")
+            .with_status(200)
+            .with_body(format!("[{}0]", "0,".repeat(MAX_BODY_BYTES / 2)))
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/big-error")
+            .with_status(500)
+            .with_body("e".repeat(MAX_ERROR_BODY_BYTES * 2))
+            .create_async()
+            .await;
+        let http = credentialed_http(Duration::from_secs(30)).build().unwrap();
+
+        let url = format!("{}/big", server.url());
+        // `err()`, not `unwrap_err`: a failure must not print 16 MiB.
+        let error = fetch_json(http.get(&url), &url, "")
+            .await
+            .err()
+            .expect("refused");
+        assert!(error.to_string().contains("longer than"), "{error}");
+
+        let url = format!("{}/big-error", server.url());
+        let error = fetch_json(http.get(&url), &url, "")
+            .await
+            .err()
+            .expect("refused");
+        let status = error.downcast_ref::<UpstreamStatus>().unwrap();
+        assert_eq!(status.body.len(), MAX_ERROR_BODY_BYTES);
     }
 
     #[test]
