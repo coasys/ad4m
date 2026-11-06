@@ -96,7 +96,7 @@ async fn say_as(
 /// A runner that answers `answer` and records the conversation it was given.
 fn answering(answer: &str, seen: Arc<Mutex<Vec<AgentMessage>>>) -> Runner {
     let answer = answer.to_string();
-    Box::new(move |messages| {
+    Box::new(move |messages, _steps| {
         Box::pin(async move {
             *seen.lock().unwrap() = messages;
             Ok(AgentReply { text: answer })
@@ -111,10 +111,10 @@ fn answering_on_cue(
 ) -> (Runner, tokio::sync::oneshot::Sender<()>) {
     let (go, wait) = tokio::sync::oneshot::channel::<()>();
     let answer = answering(answer, seen);
-    let run: Runner = Box::new(move |messages| {
+    let run: Runner = Box::new(move |messages, steps| {
         Box::pin(async move {
             let _ = wait.await;
-            answer(messages).await
+            answer(messages, steps).await
         })
     });
     (run, go)
@@ -123,7 +123,7 @@ fn answering_on_cue(
 /// A runner that answers only when told to.
 fn waiting() -> (Runner, tokio::sync::oneshot::Sender<()>) {
     let (go, wait) = tokio::sync::oneshot::channel::<()>();
-    let run: Runner = Box::new(move |_| {
+    let run: Runner = Box::new(move |_, _| {
         Box::pin(async move {
             let _ = wait.await;
             Ok(AgentReply {
@@ -167,7 +167,15 @@ fn slot(f: &Fixture) -> ReplySlot {
 }
 
 async fn start(f: &Fixture, run: Runner) -> Result<String, ReplyError> {
-    start_reply(f.perspective.clone(), CHAT, &f.did, f.ctx.clone(), run).await
+    start_reply(
+        f.perspective.clone(),
+        CHAT,
+        &f.did,
+        &f.perspective.uuid,
+        f.ctx.clone(),
+        run,
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -355,7 +363,7 @@ async fn a_cancelled_reply_stops_and_says_so() {
 async fn a_run_that_fails_leaves_a_failed_reply_with_the_error() {
     let mut f = fixture().await;
     say(&mut f, "app://m/1", "hello").await;
-    let run: Runner = Box::new(|_| Box::pin(async { Err(AgentSessionError::OutOfCredits) }));
+    let run: Runner = Box::new(|_, _| Box::pin(async { Err(AgentSessionError::OutOfCredits) }));
     let id = start(&f, run).await.unwrap();
     let failed = until_status(&f, &id, ReplyStatus::Failed).await;
     assert_eq!(failed["error"], AgentSessionError::OutOfCredits.to_string());
@@ -421,6 +429,7 @@ async fn two_callers_in_one_container_each_get_their_own_reply() {
             shared.clone(),
             CHAT,
             &bob,
+            &shared.uuid,
             as_bob.clone(),
             answering(answer, seen),
         )
@@ -509,6 +518,340 @@ fn finished_replies_the_caller_wrote_are_the_agents_turns_and_no_other_reply_is(
             ("user".into(), "and again".into()),
         ]
     );
+}
+
+// ── Steps ───────────────────────────────────────────────────────────────────
+
+use super::agent_reply_steps::{outcome_of, target_of, AGENT_STEP_CLASS};
+use crate::ai_service::harness::provider::{SideEffect, ToolProvider, ToolSchema};
+use crate::ai_service::harness::{
+    run_with_tools, CompletionSource, HarnessCompletion, HarnessConfig, HarnessToolCall,
+    ToolObserver,
+};
+
+/// A model that makes two tool calls, one that works and one that fails, then answers.
+struct TwoCalls(Mutex<u32>);
+
+#[async_trait::async_trait]
+impl CompletionSource for TwoCalls {
+    async fn complete(
+        &self,
+        _model_id: &str,
+        _messages: &[Value],
+        _tools: Vec<ToolSchema>,
+    ) -> anyhow::Result<HarnessCompletion> {
+        let mut round = self.0.lock().unwrap();
+        *round += 1;
+        let call = |id: &str, name: &str, arguments: Value| HarnessCompletion {
+            content: String::new(),
+            tool_calls: vec![HarnessToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments,
+            }],
+        };
+        Ok(match *round {
+            1 => call(
+                "c1",
+                "instance_update",
+                json!({ "base_uri": "app://m/1", "properties": { "text": "SECRET-ARGUMENT" } }),
+            ),
+            2 => call("c2", "template_update", json!({ "base_uri": "app://t/1" })),
+            _ => HarnessCompletion {
+                content: "Updated it.".into(),
+                tool_calls: vec![],
+            },
+        })
+    }
+}
+
+/// Tools that answer the first call and refuse the second.
+struct StubTools;
+
+#[async_trait::async_trait]
+impl ToolProvider for StubTools {
+    async fn tools(&self) -> Vec<ToolSchema> {
+        ["instance_update", "template_update"]
+            .iter()
+            .map(|name| ToolSchema {
+                name: (*name).into(),
+                description: String::new(),
+                parameters: json!({ "type": "object" }),
+                side_effect: SideEffect::Write,
+            })
+            .collect()
+    }
+    async fn call(&self, name: &str, _args: Value) -> anyhow::Result<String> {
+        match name {
+            "instance_update" => Ok(json!({ "ok": true, "value": "SECRET-RESULT" }).to_string()),
+            _ => Err(anyhow::anyhow!("the template changed since it was read")),
+        }
+    }
+}
+
+async fn steps_of(f: &Fixture, reply: &str) -> Vec<Value> {
+    let raw = f
+        .perspective
+        .model_query(
+            AGENT_REPLY_CLASS,
+            &json!({ "where": { "id": reply }, "include": { "steps": true } }).to_string(),
+        )
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_str(&raw).unwrap();
+    let mut steps = parsed["instances"][0]["steps"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    steps.sort_by_key(|s| s["createdAt"].as_i64().or_else(|| s["timestamp"].as_i64()));
+    steps
+}
+
+/// A run of the real tool loop: `TwoCalls` on `StubTools`.
+fn two_tool_calls() -> Runner {
+    Box::new(|_messages, steps: Arc<dyn ToolObserver>| {
+        Box::pin(async move {
+            let text = run_with_tools(
+                "m",
+                vec![json!({ "role": "user", "content": "rename it" })],
+                Arc::new(StubTools),
+                Arc::new(TwoCalls(Mutex::new(0))),
+                HarnessConfig::default(),
+                Some(steps.as_ref()),
+                None,
+            )
+            .await?;
+            Ok(AgentReply { text })
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_tool_call_is_a_step_on_the_reply_with_no_arguments_or_results() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "rename it").await;
+    let id = start(&f, two_tool_calls()).await.unwrap();
+    until_status(&f, &id, ReplyStatus::Done).await;
+
+    let steps = steps_of(&f, &id).await;
+    let seen: Vec<(Value, Value, Value)> = steps
+        .iter()
+        .map(|s| (s["tool"].clone(), s["target"].clone(), s["outcome"].clone()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (json!("instance_update"), json!("app://m/1"), json!("ok")),
+            (json!("template_update"), json!("app://t/1"), json!("error")),
+        ],
+        "{steps:?}"
+    );
+    assert!(
+        steps[1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("the template changed"),
+        "{steps:?}"
+    );
+
+    // Nothing the call sent or got back is in the graph.
+    let everything = f
+        .perspective
+        .get_links(&crate::types::LinkQuery::default())
+        .await
+        .unwrap();
+    for link in &everything {
+        let text = format!(
+            "{} {:?} {}",
+            link.data.source, link.data.predicate, link.data.target
+        );
+        assert!(
+            !text.contains("SECRET-ARGUMENT") && !text.contains("SECRET-RESULT"),
+            "{text}"
+        );
+    }
+
+    // Steps are not children of the reply: the reply is no container.
+    let children = f
+        .perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(id.clone()),
+            predicate: Some(HAS_CHILD.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(children.is_empty(), "{children:?}");
+    let _ = AGENT_STEP_CLASS;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_keeps_no_error_message_when_the_agent_works_elsewhere() {
+    let mut f = fixture().await;
+    say(&mut f, "app://m/1", "rename it").await;
+    let id = start_reply(
+        f.perspective.clone(),
+        CHAT,
+        &f.did,
+        "another-perspective",
+        f.ctx.clone(),
+        two_tool_calls(),
+    )
+    .await
+    .unwrap();
+    until_status(&f, &id, ReplyStatus::Done).await;
+
+    let steps = steps_of(&f, &id).await;
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    assert_eq!(steps[1]["outcome"], "error", "{steps:?}");
+    assert!(steps[1]["error"].is_null(), "{steps:?}");
+    let everything = f
+        .perspective
+        .get_links(&crate::types::LinkQuery::default())
+        .await
+        .unwrap();
+    assert!(
+        everything
+            .iter()
+            .all(|l| !l.data.target.contains("the template changed")),
+        "the message reached the graph"
+    );
+}
+
+#[test]
+fn a_step_names_its_record_by_id_only() {
+    assert_eq!(
+        target_of(&json!({ "base_uri": "app://m/1" }), None).as_deref(),
+        Some("app://m/1")
+    );
+    assert_eq!(
+        target_of(&json!({ "parent": "app://chat/1" }), None).as_deref(),
+        Some("app://chat/1")
+    );
+    // A create names its record in what it answers, and under a parent that record is still
+    // what it acted on.
+    assert_eq!(
+        target_of(&json!({}), Some(r#"{"base_uri":"app://new/1"}"#)).as_deref(),
+        Some("app://new/1")
+    );
+    assert_eq!(
+        target_of(
+            &json!({ "parent": "app://chat/1" }),
+            Some(r#"{"base_uri":"app://new/1"}"#)
+        )
+        .as_deref(),
+        Some("app://new/1")
+    );
+    // Free text is never taken for an id.
+    assert_eq!(
+        target_of(&json!({ "base_uri": "delete everything now" }), None),
+        None
+    );
+    // Nor is a literal, though its text is encoded and has no spaces.
+    for literal in [
+        "literal://string:Quarterly%20salary%20review%20for%20Ana",
+        "literal:string:secret",
+    ] {
+        assert_eq!(target_of(&json!({ "base_uri": literal }), None), None);
+        assert_eq!(
+            target_of(
+                &json!({}),
+                Some(&json!({ "base_uri": literal }).to_string())
+            ),
+            None
+        );
+    }
+    assert_eq!(target_of(&json!({ "query": "app://m/1" }), None), None);
+    assert_eq!(target_of(&json!({}), Some("not json")), None);
+}
+
+#[test]
+fn a_step_fails_on_the_loops_error_or_the_tools_error_and_caps_the_message() {
+    assert_eq!(outcome_of(r#"{"ok":true}"#), ("ok", None));
+    assert_eq!(
+        outcome_of("error: no such tool"),
+        ("error", Some("no such tool".into()))
+    );
+    assert_eq!(
+        outcome_of(r#"{"error":"Perspective p not found","status":404}"#),
+        ("error", Some("Perspective p not found".into()))
+    );
+    // A record read back is a success, whatever its own `error` says.
+    assert_eq!(
+        outcome_of(r#"{"id":"ad4m://agent_reply/1","status":"failed","error":"timed out"}"#),
+        ("ok", None)
+    );
+    let (_, long) = outcome_of(&format!("error: {}", "x".repeat(1000)));
+    assert!(long.unwrap().chars().count() <= 301);
+}
+
+/// What the steps say of a create under a parent and of a read of a record with an `error`
+/// property: the created record, and `ok`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_names_the_record_a_create_made_and_a_read_of_a_failed_record_is_ok() {
+    let mut f = fixture().await;
+    say(
+        &mut f,
+        "app://m/1",
+        "add a card, then look at the failed reply",
+    )
+    .await;
+    let run: Runner = Box::new(|_messages, steps: Arc<dyn ToolObserver>| {
+        Box::pin(async move {
+            let create = json!({ "class_name": "Card", "parent": "app://board/1" });
+            steps.tool_called("instance_create", &create).await;
+            steps
+                .tool_returned(
+                    "instance_create",
+                    &create,
+                    r#"{"success":true,"base_uri":"app://card/1"}"#,
+                )
+                .await;
+            let get = json!({ "class_name": "AgentReply", "base_uri": "ad4m://agent_reply/old" });
+            steps.tool_called("instance_get", &get).await;
+            steps
+                .tool_returned(
+                    "instance_get",
+                    &get,
+                    r#"{"id":"ad4m://agent_reply/old","status":"failed","error":"timed out"}"#,
+                )
+                .await;
+            Ok(AgentReply {
+                text: "done".into(),
+            })
+        })
+    });
+    let here = f.perspective.uuid.clone();
+    let id = start_reply(
+        f.perspective.clone(),
+        CHAT,
+        &f.did,
+        &here,
+        f.ctx.clone(),
+        run,
+    )
+    .await
+    .unwrap();
+    until_status(&f, &id, ReplyStatus::Done).await;
+
+    let steps = steps_of(&f, &id).await;
+    let seen: Vec<(Value, Value, Value)> = steps
+        .iter()
+        .map(|s| (s["tool"].clone(), s["target"].clone(), s["outcome"].clone()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (json!("instance_create"), json!("app://card/1"), json!("ok")),
+            (
+                json!("instance_get"),
+                json!("ad4m://agent_reply/old"),
+                json!("ok")
+            ),
+        ],
+        "{steps:?}"
+    );
+    assert!(steps[1]["error"].is_null(), "{steps:?}");
 }
 
 /// A link signed by `signer`, as a peer's link arrives from the link language.
@@ -730,7 +1073,15 @@ async fn a_caller_runs_a_bounded_number_of_replies_at_once() {
         )
         .await;
         let (run, cue) = waiting();
-        let started = start_reply(f.perspective.clone(), &chat, &f.did, ctx.clone(), run).await;
+        let started = start_reply(
+            f.perspective.clone(),
+            &chat,
+            &f.did,
+            &f.perspective.uuid,
+            ctx.clone(),
+            run,
+        )
+        .await;
         if i < MAX_RUNNING_PER_CALLER {
             started.unwrap();
             go.push(cue);

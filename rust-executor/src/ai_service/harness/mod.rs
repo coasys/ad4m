@@ -51,18 +51,53 @@ fn truncate_for_event(text: &str) -> String {
     format!("{head}…[truncated for event]")
 }
 
-/// Emit one `ToolCall` / `ToolResult` event on the auto-processor topic
-/// when `ctx` is set. Fire-and-forget; no-op when `ctx` is `None`.
+/// What the loop tells about each tool call as it makes it: interpretation's live debug events,
+/// an agent reply's steps. Called in order, one call at a time: `tool_called` before the call
+/// runs, then `tool_returned` with what it answered.
+#[async_trait::async_trait]
+pub trait ToolObserver: Send + Sync {
+    /// The model asked for `name` with `arguments`. The call has not run yet.
+    async fn tool_called(&self, name: &str, arguments: &Value);
+    /// The call answered `result`: the tool's text, or `error: …` when it failed.
+    async fn tool_returned(&self, name: &str, arguments: &Value, result: &str);
+}
+
+/// Interpretation's observer: one `ToolCall` / `ToolResult` event each on the auto-processor
+/// topic, the result truncated to a bounded prefix.
+#[async_trait::async_trait]
+impl ToolObserver for events::InterpretationEmitContext {
+    async fn tool_called(&self, name: &str, arguments: &Value) {
+        emit_tool_event(
+            self,
+            events::AutoProcessorStep::ToolCall,
+            name,
+            Some(arguments.to_string()),
+            None,
+        )
+        .await;
+    }
+
+    async fn tool_returned(&self, name: &str, _arguments: &Value, result: &str) {
+        emit_tool_event(
+            self,
+            events::AutoProcessorStep::ToolResult,
+            name,
+            None,
+            Some(truncate_for_event(result)),
+        )
+        .await;
+    }
+}
+
+/// Emit one `ToolCall` / `ToolResult` event on the auto-processor topic.
+/// Fire-and-forget.
 async fn emit_tool_event(
-    ctx: Option<&events::InterpretationEmitContext>,
+    ctx: &events::InterpretationEmitContext,
     step: events::AutoProcessorStep,
     tool_name: &str,
     tool_args_json: Option<String>,
     tool_result: Option<String>,
 ) {
-    let Some(ctx) = ctx else {
-        return;
-    };
     let mut ev = events::AutoProcessorEvent::new(&ctx.perspective_uuid, &ctx.processor_id, step)
         .with_agent_did(&ctx.agent_did)
         .with_items(&ctx.item_ids)
@@ -425,19 +460,19 @@ pub trait CreditGate: Send + Sync {
 /// the caller's system prompt (design v2 §Q6: "the harness passes tools
 /// verbatim; per-task guidance lives in the caller").
 ///
-/// `emit_ctx` opts into the auto-processor event stream for observability:
-/// when set (typically by an auto-processor pass whose config has
-/// `emit_debug_events: true`), every `ToolCall` + `ToolResult` fires a
-/// `AutoProcessorEvent` on the global topic so a subscribed UI can render
-/// the loop live (which tool was called, with what args, what came back).
-/// `None` skips all telemetry — the fast path stays fast for headless runs.
+/// `observer` is told about every tool call as the loop makes it
+/// ([`ToolObserver`]). Interpretation passes its emit context when an
+/// auto-processor pass has `emit_debug_events: true`, so every `ToolCall` +
+/// `ToolResult` fires an `AutoProcessorEvent` a subscribed UI renders live; an
+/// agent reply passes the writer of its steps. `None` skips all of it — the
+/// fast path stays fast for headless runs.
 pub async fn run_with_tools(
     model_id: &str,
     initial_messages: Vec<Value>,
     provider: Arc<dyn ToolProvider>,
     completions: Arc<dyn CompletionSource>,
     config: HarnessConfig,
-    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    observer: Option<&dyn ToolObserver>,
     credit_gate: Option<Arc<dyn CreditGate>>,
 ) -> Result<String> {
     let mut messages = initial_messages;
@@ -593,18 +628,12 @@ pub async fn run_with_tools(
         };
         messages.push(assistant_tool_calls_message(&effective_completion));
         for tc in &effective_completion.tool_calls {
-            // Emit `ToolCall` before dispatch — a UI subscribed to the
-            // auto-processor event topic renders "LLM asked for <tool>"
-            // live, without waiting for the tool to return. Gated on
-            // `emit_ctx`: the fast headless path pays no telemetry cost.
-            emit_tool_event(
-                emit_ctx,
-                events::AutoProcessorStep::ToolCall,
-                &tc.name,
-                Some(tc.arguments.to_string()),
-                None,
-            )
-            .await;
+            // Told before dispatch, so a UI renders "LLM asked for <tool>"
+            // live, without waiting for the tool to return. The fast
+            // headless path (no observer) pays nothing.
+            if let Some(observer) = observer {
+                observer.tool_called(&tc.name, &tc.arguments).await;
+            }
             let result = if calls_used < config.max_tool_calls as usize {
                 calls_used += 1;
                 match provider.call(&tc.name, tc.arguments.clone()).await {
@@ -617,18 +646,14 @@ pub async fn run_with_tools(
                     config.max_tool_calls
                 )
             };
-            // Emit `ToolResult` after dispatch. Result is truncated to a
-            // bounded prefix so a `_query` returning MBs doesn't inflate
-            // every event — the UI can request the full text separately
-            // if it needs it.
-            emit_tool_event(
-                emit_ctx,
-                events::AutoProcessorStep::ToolResult,
-                &tc.name,
-                None,
-                Some(truncate_for_event(&result)),
-            )
-            .await;
+            // Told after dispatch, with the whole result: interpretation's
+            // events truncate it to a bounded prefix so a `_query` returning
+            // MBs doesn't inflate every event.
+            if let Some(observer) = observer {
+                observer
+                    .tool_returned(&tc.name, &tc.arguments, &result)
+                    .await;
+            }
             messages.push(tool_result_message(&tc.id, &result));
         }
     }
@@ -1402,7 +1427,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig::default(),
-            Some(&ctx),
+            Some(&ctx as &dyn ToolObserver),
             None,
         )
         .await

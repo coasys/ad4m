@@ -1,0 +1,13 @@
+{
+  "target_class": "ad4m://AgentStep",
+  "interpretation_hint": "One tool call an agent made while writing a reply: the tool, the record it acted on, and how it went.",
+  "constructor_actions": [
+    {"action": "addLink", "source": "this", "predicate": "ad4m://agent_step/tool", "target": "placeholder"}
+  ],
+  "properties": [
+    {"path": "ad4m://agent_step/tool",    "name": "tool",    "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_step/tool", "target": "value"}]},
+    {"path": "ad4m://agent_step/target",  "name": "target",  "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_step/target", "target": "value"}]},
+    {"path": "ad4m://agent_step/outcome", "name": "outcome", "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_step/outcome", "target": "value"}]},
+    {"path": "ad4m://agent_step/error",   "name": "error",   "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://agent_step/error", "target": "value"}]}
+  ]
+}

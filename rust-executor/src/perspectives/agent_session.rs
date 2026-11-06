@@ -23,7 +23,9 @@ use crate::agent::AgentContext;
 use crate::ai_service::harness::provider::{
     BoundArgsProvider, FilteredProvider, ToolProvider, ToolSchema,
 };
-use crate::ai_service::harness::{run_with_tools, CompletionSource, CreditGate, HarnessConfig};
+use crate::ai_service::harness::{
+    run_with_tools, CompletionSource, CreditGate, HarnessConfig, ToolObserver,
+};
 use crate::types::ModelType;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -217,6 +219,7 @@ pub async fn run_agent_session(
     agent_context: &AgentContext,
     caller: Arc<crate::agent::session::Session>,
     credit_gate: Option<Arc<dyn CreditGate>>,
+    observer: Option<Arc<dyn ToolObserver>>,
 ) -> Result<AgentReply, AgentSessionError> {
     check_request(&request).map_err(AgentSessionError::Invalid)?;
 
@@ -259,7 +262,15 @@ pub async fn run_agent_session(
         ),
     );
 
-    converse(&request, tools, model, &model_id, credit_gate).await
+    converse(
+        &request,
+        tools,
+        model,
+        &model_id,
+        credit_gate,
+        observer.as_deref(),
+    )
+    .await
 }
 
 /// The tools a session offers: every tool in [`SESSION_READS`] and the writes named that are in
@@ -298,6 +309,7 @@ pub(crate) async fn converse(
     model: Arc<dyn CompletionSource>,
     model_id: &str,
     credit_gate: Option<Arc<dyn CreditGate>>,
+    observer: Option<&dyn ToolObserver>,
 ) -> Result<AgentReply, AgentSessionError> {
     check_request(request).map_err(AgentSessionError::Invalid)?;
     let mut messages = vec![json!({
@@ -327,7 +339,7 @@ pub(crate) async fn converse(
         HarnessConfig {
             max_tool_calls: request.max_tool_calls,
         },
-        None,
+        observer,
         gate,
     )
     .await?;

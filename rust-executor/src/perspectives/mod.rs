@@ -1,4 +1,5 @@
 pub(crate) mod agent_reply;
+pub(crate) mod agent_reply_steps;
 #[cfg(test)]
 mod agent_reply_tests;
 pub(crate) mod agent_session;

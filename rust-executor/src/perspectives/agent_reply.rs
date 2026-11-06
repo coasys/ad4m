@@ -41,6 +41,10 @@
 //! reply starts once it has begun.
 
 use crate::agent::AgentContext;
+use crate::ai_service::harness::ToolObserver;
+use crate::perspectives::agent_reply_steps::{
+    ensure_agent_step_class, StepWriter, AGENT_STEP_PREDICATE,
+};
 use crate::perspectives::agent_session::{AgentMessage, AgentReply, AgentSessionError};
 use crate::perspectives::hardwired_class::ensure_subject_class;
 use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
@@ -51,6 +55,7 @@ use futures::future::BoxFuture;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The class's local name, as `create_subject` and `model_query` take it.
@@ -121,10 +126,13 @@ pub type ReplySlot = (String, String);
 /// read or swap an entry, never across an await.
 pub type RunningReplies = HashMap<ReplySlot, RunningReply>;
 
-/// Runs the agent on the conversation: in the executor, `run_agent_session` with the caller's
-/// session; in tests, a script.
+/// Runs the agent on the conversation, telling `observer` about each tool call (the reply's
+/// steps): in the executor, `run_agent_session` with the caller's session; in tests, a script.
 pub type Runner = Box<
-    dyn FnOnce(Vec<AgentMessage>) -> BoxFuture<'static, Result<AgentReply, AgentSessionError>>
+    dyn FnOnce(
+            Vec<AgentMessage>,
+            Arc<dyn ToolObserver>,
+        ) -> BoxFuture<'static, Result<AgentReply, AgentSessionError>>
         + Send,
 >;
 
@@ -146,7 +154,8 @@ pub enum ReplyError {
     Failed(#[from] anyhow::Error),
 }
 
-/// Register the class in the perspective, once.
+/// Register the classes in the perspective, once: the reply and its steps. A reply class
+/// registered before it had `steps` is refreshed.
 pub async fn ensure_agent_reply_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -156,18 +165,22 @@ pub async fn ensure_agent_reply_class(
         AGENT_REPLY_CLASS,
         AGENT_REPLY_TARGET_CLASS,
         AGENT_REPLY_SDNA,
-        None,
+        Some(AGENT_STEP_PREDICATE),
         context,
     )
-    .await
+    .await?;
+    ensure_agent_step_class(perspective, context).await
 }
 
 /// Start a reply in `container`, as `caller_did` acting through `context`: create it as
 /// `running`, start `run` on the conversation, and return the reply's id without waiting.
+/// `work_in` is the perspective the agent's tools work in; its steps keep a failure's message
+/// only when that is this one.
 pub async fn start_reply(
     mut perspective: PerspectiveInstance,
     container: &str,
     caller_did: &str,
+    work_in: &str,
     context: AgentContext,
     run: Runner,
 ) -> Result<String, ReplyError> {
@@ -209,6 +222,12 @@ pub async fn start_reply(
     let task_perspective = perspective.clone();
     let task_slot = slot.clone();
     let task_reply = reply.clone();
+    let steps: Arc<dyn ToolObserver> = Arc::new(StepWriter::new(
+        perspective.clone(),
+        reply.clone(),
+        context.clone(),
+        work_in,
+    ));
     // The task waits until its abort handle is in the slot. Otherwise a runner that answers at
     // once releases the slot first, and the check below reads the empty slot as a cancel.
     let (registered, until_registered) = tokio::sync::oneshot::channel::<()>();
@@ -216,7 +235,7 @@ pub async fn start_reply(
         if until_registered.await.is_err() {
             return;
         }
-        let outcome = match tokio::time::timeout(REPLY_TIMEOUT, run(messages)).await {
+        let outcome = match tokio::time::timeout(REPLY_TIMEOUT, run(messages, steps)).await {
             Ok(outcome) => outcome,
             Err(_) => Err(AgentSessionError::Failed(anyhow::anyhow!(
                 "the agent did not answer within {} s",
