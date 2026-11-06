@@ -1095,6 +1095,25 @@ mod tests {
             .all(|m| m.from_class == "amd-igpu-uma-128"));
     }
 
+    /// Windows: nemo-speech has no Windows build, and llama-server's audio models need a
+    /// projector the executor does not fetch, so transcription is unavailable rather than
+    /// planned on a model that cannot take audio.
+    #[test]
+    fn the_embedded_data_plans_no_transcription_on_windows() {
+        let data = crate::ai_service::local::data::embedded().unwrap();
+        let mut hardware = device(data, 32, vec![], vec![Backend::Cpu]);
+        hardware.os = "windows".into();
+        crate::ai_service::local::hardware::finish(&mut hardware, &data.classes);
+        let plan = plan(data, &hardware, &nothing_installed);
+        assert!(
+            plan.models.iter().all(|m| m.service != Service::Stt),
+            "{:?}",
+            plan.models
+        );
+        let unavailable: Vec<_> = plan.unavailable.iter().map(|u| u.service).collect();
+        assert_eq!(unavailable, vec![Service::Stt]);
+    }
+
     /// A device of a class the wind tunnel has not measured: the RTX 3060 fixture of
     /// `hardware-class-fixtures.json`. It gets the manifest's smallest chat model, nomic and
     /// Parakeet v3, marked `default`, on CUDA; held to the CPU, on the CPU builds.

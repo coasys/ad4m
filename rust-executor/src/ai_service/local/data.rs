@@ -88,14 +88,15 @@ impl Provider {
 
 /// The runtimes and models the executor runs. The manifest also lists the wind tunnel's
 /// baselines and candidates (whisper-server, sherpa-onnx, llama-server audio models): an entry
-/// whose provider is not a [`Provider`] is left out; any other malformed entry is an error.
+/// whose provider is not a [`Provider`] is left out, and so is a model with files beside its
+/// weights (an audio model's `mmproj`); any other malformed entry is an error.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
     pub schema_version: u32,
     #[serde(deserialize_with = "known_providers")]
     pub runtimes: BTreeMap<String, Runtime>,
-    #[serde(deserialize_with = "known_providers")]
+    #[serde(deserialize_with = "runnable_models")]
     pub models: BTreeMap<String, ModelFile>,
     /// Libraries the executor loads itself rather than runs: ONNX Runtime for the speech
     /// gate where `ort` loads it at run time (macOS, `onnx_runtime.rs`).
@@ -109,11 +110,36 @@ where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned,
 {
+    entries_where(deserializer, |_| true)
+}
+
+/// The models this executor runs: a known provider, and no `files` beside the weights. The
+/// executor downloads only the weights and passes no other file to its runtime, so a model
+/// that needs one (a llama-server audio model's `mmproj`) would be installed unable to work.
+fn runnable_models<'de, D>(deserializer: D) -> Result<BTreeMap<String, ModelFile>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    entries_where(deserializer, |entry| entry.get("files").is_none())
+}
+
+/// The entries of a manifest map whose `provider` this executor runs and that `runnable`
+/// keeps.
+fn entries_where<'de, D, T>(
+    deserializer: D,
+    runnable: impl Fn(&serde_json::Value) -> bool,
+) -> Result<BTreeMap<String, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
     use serde::de::Error;
     let raw = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
     let mut known = BTreeMap::new();
     for (id, entry) in raw {
-        if serde_json::from_value::<Provider>(entry["provider"].clone()).is_err() {
+        if serde_json::from_value::<Provider>(entry["provider"].clone()).is_err()
+            || !runnable(&entry)
+        {
             continue;
         }
         let parsed =
@@ -555,6 +581,14 @@ mod tests {
             .models
             .contains_key("parakeet-tdt-0.6b-v3-q8_0"));
         assert!(!data.manifest.models.contains_key("whisper-small-q5_1"));
+        // llama-server's audio models need their `mmproj`, which the executor does not fetch.
+        for audio in [
+            "qwen3-asr-0.6b-q8_0",
+            "qwen3-asr-1.7b-q8_0",
+            "voxtral-mini-3b-2507-q4_k_m",
+        ] {
+            assert!(!data.manifest.models.contains_key(audio), "{audio}");
+        }
         assert!(data
             .manifest
             .models
