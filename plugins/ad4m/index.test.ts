@@ -836,6 +836,21 @@ describe("ensureAgentReady", () => {
     expect(AGENT_KIND_BOT).toBe(SDK_AGENT_KIND_BOT);
   });
 
+  it.each([
+    ["generates", { isInitialized: false, isUnlocked: false }, "generate"],
+    ["unlocks", { isInitialized: true, isUnlocked: false }, "unlock"],
+  ] as const)("says it is a bot after it %s the agent", async (_, first, method) => {
+    const ready = { isInitialized: true, isUnlocked: true, did: "did:key:z6MkBot" };
+    const status = vi.fn().mockResolvedValueOnce({ ...first, did: "did:key:z6MkBot" }).mockResolvedValue(ready);
+    const start = vi.fn().mockResolvedValue(undefined);
+    const setKind = vi.fn().mockResolvedValue({});
+    const client = makeMockAd4mClient({ status, [method]: start, setKind });
+    const result = await ensureAgentReady("http://localhost:12000", "c", makeMockLogger(), "pass", client);
+    expect(result?.did).toBe("did:key:z6MkBot");
+    expect(setKind).toHaveBeenCalledWith(AGENT_KIND_BOT);
+    expect(start.mock.invocationCallOrder[0]).toBeLessThan(setKind.mock.invocationCallOrder[0]);
+  });
+
   it("returns { did } when agent is already initialized and unlocked", async () => {
     const mockStatus = vi.fn().mockResolvedValue({
       isInitialized: true,

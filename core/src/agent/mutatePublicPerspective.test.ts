@@ -152,6 +152,25 @@ describe('AgentClient.setKind', () => {
     client.close();
   });
 
+  it('leaves one kind when the profile says two', async () => {
+    const executor = new Executor();
+    executor.profile = {
+      links: [
+        L1,
+        signed({ source: DID, predicate: AGENT_KIND, target: AGENT_KIND_BOT }, 2),
+        signed({ source: DID, predicate: AGENT_KIND, target: 'app://other-kind' }, 3),
+      ],
+    };
+    (globalThis as any).WebSocket = makeFakeWebSocket(executor);
+    const client = new Ad4mClient('http://localhost:12000', 'token');
+
+    const agent = await client.agent.setKind(AGENT_KIND_BOT);
+
+    const kinds = agent.perspective!.links.filter((l) => l.data.predicate === AGENT_KIND);
+    expect(kinds.map((l) => l.data.target)).toEqual([AGENT_KIND_BOT]);
+    client.close();
+  });
+
   it('reads only the kind an agent says of itself', () => {
     const someoneElse = {
       did: DID,
