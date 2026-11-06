@@ -69,6 +69,7 @@ import {
 
 import ad4mPlugin, {
   _resetModuleState,
+  _botMarkForTests,
   _setAgentClientForTests,
   _setSubscriptionManagerForTests,
   _parkedSubscriptionsForTests,
@@ -857,8 +858,22 @@ describe("ensureAgentReady", () => {
     });
     const result = await ensureAgentReady("http://localhost:12000", "c", logger, undefined, client);
     expect(result).toEqual({ did: "did:key:z6MkBot" });
+    await new Promise((resolve) => setTimeout(resolve, 0)); // the mark runs in the background
     const warnings = logger.warn.mock.calls.map((c: any[]) => c[0]);
     expect(warnings.some((m: string) => m.includes("older executor"))).toBe(true);
+  });
+
+  it("returns without waiting for a profile write that never answers", async () => {
+    const client = makeMockAd4mClient({
+      status: vi.fn().mockResolvedValue({ isInitialized: true, isUnlocked: true, did: "did:key:z6MkBot" }),
+      setKind: vi.fn(() => new Promise(() => {})),
+    });
+    const result = await withTimeout(
+      ensureAgentReady("http://localhost:12000", "c", makeMockLogger(), undefined, client),
+      1000,
+      "[test] ensureAgentReady",
+    );
+    expect(result).toEqual({ did: "did:key:z6MkBot" });
   });
 
   it("marks the agent with the SDK's own bot kind", () => {
@@ -1900,9 +1915,11 @@ describe("ad4mPlugin", () => {
     ["leaves its own account alone with declareBot false", "user", false, false],
   ] as const)("external mode %s", async (_, principal, declareBot, marked) => {
     const toolsCalled: string[] = [];
+    const askedWith: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url: any, init: any) => {
       const body = JSON.parse(init.body);
       if (body.method === "tools/call") toolsCalled.push(body.params.name);
+      if (body.params?.name === "auth_status") askedWith.push(new Headers(init.headers).get("Authorization") ?? "");
       const result =
         body.method === "tools/call" && body.params.name === "auth_status"
           ? { content: [{ type: "text", text: JSON.stringify({ authenticated: true, principal }) }] }
@@ -1922,12 +1939,38 @@ describe("ad4mPlugin", () => {
         registerCli: vi.fn(),
       });
       await registeredServices.find((svc) => svc.id === "ad4m-mcp")!.start({ stateDir: undefined });
+      await _botMarkForTests();
       expect(toolsCalled.includes("auth_status")).toBe(declareBot !== false);
+      expect(askedWith).toEqual(declareBot === false ? [] : ["Bearer test-cred"]);
       expect(setKind.mock.calls).toEqual(marked ? [[AGENT_KIND_BOT]] : []);
       expect(close).toHaveBeenCalledTimes(marked ? 1 : 0);
     } finally {
       registeredServices.find((svc) => svc.id === "ad4m-mcp")?.stop?.();
       _setAgentClientForTests(null);
+    }
+  });
+
+  it("external mode starts without waiting for an executor that never answers the bot check", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url: any, init: any) => {
+      const body = JSON.parse(init.body);
+      if (body.method === "tools/call" && body.params.name === "auth_status") return new Promise<Response>(() => {});
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} }, { "mcp-session-id": "s1" });
+    });
+    const registeredServices: Array<{ id: string; [k: string]: any }> = [];
+    await ad4mPlugin({
+      pluginConfig: { mode: "external", mcpEndpoint: "http://localhost:3001/mcp", token: "test-cred" },
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
+    });
+    const mcp = registeredServices.find((svc) => svc.id === "ad4m-mcp")!;
+    try {
+      const started = Date.now();
+      await mcp.start({ stateDir: undefined });
+      expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      mcp.stop?.();
     }
   });
 
@@ -2784,6 +2827,8 @@ describe("ad4mPlugin", () => {
         mode: "external",
         mcpEndpoint: "http://localhost:3001/mcp",
         token: "test-cred",
+        // This counts the plugin's own session; the bot mark opens one of its own.
+        declareBot: false,
       },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),

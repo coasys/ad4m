@@ -67,7 +67,8 @@ export interface AgentResult {
  * status, and generates (first run) or unlocks (subsequent runs) as needed.
  *
  * Once the agent is ready, marks it as a bot ({@link declareBot}) unless `markAsBot` is false
- * (the `declareBot: false` config).
+ * (the `declareBot: false` config). The mark runs in the background, so an executor slow to
+ * answer delays no start; it never rejects.
  *
  * Returns { did, passphrase? } on success (passphrase only set when a new
  * agent was generated), or null if agent management failed.
@@ -146,7 +147,7 @@ export async function ensureAgentReady(
         logger.info(
           `[ad4m] Agent generated successfully. DID: ${newStatus.did}`,
         );
-        if (markAsBot) await declareBot(client, logger);
+        if (markAsBot) void declareBot(client, logger);
         return { did: newStatus.did, passphrase: agentPassphrase ? undefined : passphrase };
       } catch (e: any) {
         logger.error(`[ad4m] Failed to generate agent: ${e.message}`);
@@ -163,7 +164,7 @@ export async function ensureAgentReady(
           logger.info(
             `[ad4m] Agent unlocked successfully. DID: ${newStatus.did}`,
           );
-          if (markAsBot) await declareBot(client, logger);
+          if (markAsBot) void declareBot(client, logger);
           return { did: newStatus.did };
         } catch (e: any) {
           logger.error(`[ad4m] Failed to unlock agent: ${e.message}`);
@@ -181,7 +182,7 @@ export async function ensureAgentReady(
     } else {
       // Already initialized and unlocked
       logger.info(`[ad4m] Agent is ready. DID: ${agentStatus.did}`);
-      if (markAsBot) await declareBot(client, logger);
+      if (markAsBot) void declareBot(client, logger);
       return { did: agentStatus.did };
     }
   } catch (err: any) {

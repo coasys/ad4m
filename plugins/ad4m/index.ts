@@ -455,6 +455,14 @@ const connectRealAgentClient: ConnectAgentClient = (executorUrl, token) =>
 /** The client external mode marks the agent with; tests replace it (`_setAgentClientForTests`). */
 let _connectAgentClient: ConnectAgentClient = connectRealAgentClient;
 
+/** External mode's bot mark, running in the background after a start. */
+let _botMark: Promise<void> = Promise.resolve();
+
+/** @internal The last start's external-mode bot mark, for tests to wait on. */
+export function _botMarkForTests(): Promise<void> {
+  return _botMark;
+}
+
 /** @internal Inject the client external mode marks the agent with; `null` restores the real one. */
 export function _setAgentClientForTests(connect: ConnectAgentClient | null): void {
   _connectAgentClient = connect ?? connectRealAgentClient;
@@ -475,6 +483,7 @@ export function _resetModuleState(): void {
   _wakerClient = null;
   _subscriptionManager = null;
   _sessionId = "";
+  _botMark = Promise.resolve();
   _registeredTools = new Set<string>();
   _wakerStopped = false;
   if (_wakerRetryTimer) clearTimeout(_wakerRetryTimer);
@@ -822,24 +831,24 @@ export default function ad4mPlugin(api: any) {
   }
 
   /**
-   * External mode marks the agent as a bot only when the token is an account of the plugin's
-   * own ({@link declareBotIfOwnAccount}), asked of `auth_status` on every start, so a token from
-   * the config counts as one from a fresh login. Never fatal.
+   * External mode marks the agent as a bot only when `token` is an account of the plugin's own
+   * ({@link declareBotIfOwnAccount}), asked of `auth_status` on every start, so a token from the
+   * config counts as one from a fresh login. The question goes over a session of its own opened
+   * with `token`, and the client that marks uses `token` too: the plugin's session may be an
+   * older one (it survives a reload) and act as someone else. Never rejects.
    */
-  async function declareBotInExternalMode(): Promise<void> {
+  async function declareBotInExternalMode(token: string): Promise<void> {
     let principal: string | undefined;
     try {
-      // On the plugin's own MCP session, which the tools then use.
-      principal = extractMcpResultData(await callToolWithRetry("auth_status", {}))?.principal;
+      const init = await mcpInitialize(endpoint, token);
+      principal = extractMcpResultData(
+        await mcpCallTool(endpoint, "auth_status", {}, init.sessionId, token),
+      )?.principal;
     } catch (e: any) {
       logger.warn(`[ad4m] Could not ask who the token acts as, so the agent is not marked as a bot: ${e?.message ?? e}`);
       return;
     }
-    await declareBotIfOwnAccount(
-      principal,
-      () => _connectAgentClient(executorUrl, _authToken),
-      logger,
-    );
+    await declareBotIfOwnAccount(principal, () => _connectAgentClient(executorUrl, token), logger);
   }
 
   /**
@@ -1427,7 +1436,8 @@ Notes:
             logger.info("[ad4m] JWT obtained");
           }
         }
-        if (_authToken && markAsBot) await declareBotInExternalMode();
+        // In the background: an executor slow to answer delays no start.
+        if (_authToken && markAsBot) _botMark = declareBotInExternalMode(_authToken);
       } else {
         // Managed mode: generate ephemeral admin credential (not persisted)
         const adminCredential = generateRandomPassphrase(24);
