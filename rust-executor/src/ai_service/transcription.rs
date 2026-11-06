@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use super::providers::audio::{AudioFile, OpenAiTranscribe, RemoteTranscribe, TranscribeFailure};
+use super::providers::audio::{
+    require_transcription, AudioFile, OpenAiTranscribe, RemoteTranscribe, TranscribeFailure,
+};
 use super::Result;
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
@@ -117,6 +119,7 @@ pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<Option<(OpenAiTrans
                 model.name
             )
         })?;
+    require_transcription(&endpoint)?;
     Ok(Some((
         OpenAiTranscribe::for_endpoint(&endpoint)?,
         api.model,

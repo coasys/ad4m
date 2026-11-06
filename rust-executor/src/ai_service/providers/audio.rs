@@ -75,6 +75,18 @@ impl std::fmt::Display for NotATranscriptionEndpoint {
 
 impl std::error::Error for NotATranscriptionEndpoint {}
 
+/// Refuses an endpoint whose capabilities leave out transcription: it gets no audio.
+pub fn require_transcription(endpoint: &Endpoint) -> Result<()> {
+    if endpoint.capabilities.contains(&AiCapability::Transcription) {
+        return Ok(());
+    }
+    Err(NotATranscriptionEndpoint(format!(
+        "Endpoint '{}' does not declare the transcription capability",
+        endpoint.name
+    ))
+    .into())
+}
+
 pub struct OpenAiTranscribe {
     http: reqwest::Client,
     api_key: String,
@@ -123,20 +135,13 @@ impl OpenAiTranscribe {
 
     /// The client for a registered endpoint, held to its `request_timeout_secs` and
     /// `max_concurrent`. Refused: Ollama and Anthropic, which have no transcription route,
-    /// an endpoint whose capabilities leave transcription out, and a key over a transport
-    /// other than https or loopback.
+    /// and a key over a transport other than https or loopback. Whether the endpoint
+    /// declares transcription is [`require_transcription`]'s to check.
     pub fn for_endpoint(endpoint: &Endpoint) -> Result<Self> {
         if endpoint.kind.protocol() != ModelApiType::OpenAi {
             return Err(NotATranscriptionEndpoint(format!(
                 "Endpoint '{}' ({:?}) serves no /v1/audio/transcriptions",
                 endpoint.name, endpoint.kind
-            ))
-            .into());
-        }
-        if !endpoint.capabilities.contains(&AiCapability::Transcription) {
-            return Err(NotATranscriptionEndpoint(format!(
-                "Endpoint '{}' does not declare the transcription capability",
-                endpoint.name
             ))
             .into());
         }
@@ -927,10 +932,16 @@ mod tests {
     fn an_endpoint_that_does_not_declare_transcription_is_refused() {
         let mut speech_only = endpoint(EndpointKind::OpenAiAudio, "http://127.0.0.1:8000", "");
         speech_only.capabilities = vec![AiCapability::Speech];
-        let refused = OpenAiTranscribe::for_endpoint(&speech_only).err().unwrap();
+        let refused = require_transcription(&speech_only).unwrap_err();
         assert!(refused
             .downcast_ref::<NotATranscriptionEndpoint>()
             .is_some());
+        speech_only.capabilities.push(AiCapability::Transcription);
+        assert!(require_transcription(&speech_only).is_ok());
+        assert!(
+            OpenAiTranscribe::for_endpoint(&speech_only).is_ok(),
+            "the route and the key are for_endpoint's"
+        );
     }
 
     // `reply` read the whole of a successful answer, however long.
