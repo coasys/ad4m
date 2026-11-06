@@ -353,9 +353,12 @@ export class PerspectiveClient {
             workIn?: string,
             /** What the person is looking at, as a hint for the model (`{ recordId }`). */
             context?: Record<string, unknown>,
-            /** Tools that write which the model may call. Absent: the agent only reads. */
+            /**
+             * Tools that write which the model may call. Absent: the session's, or none, an agent
+             * that only reads.
+             */
             writeTools?: string[],
-            /** A model id; the node's default language model when absent. */
+            /** A model id. Absent: the session's, else the node's default language model. */
             model?: string,
             /** How many tool calls before the model must answer. Default 20. */
             maxToolCalls?: number,
