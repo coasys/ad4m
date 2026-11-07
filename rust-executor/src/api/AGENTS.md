@@ -176,7 +176,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-228 methods: Cap 87, Executor 33, Open 8, Operator 30, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 10.
+228 methods: Cap 87, Executor 33, Open 8, Operator 30, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 11.
 
 | Method | Guard |
 |---|---|
@@ -354,7 +354,7 @@ the guard checked:
 | `runtime.quit` | `Executor(runtime:QUIT)`, local only |
 | `runtime.removeFriends` | `Executor(runtime.friends:DELETE)` |
 | `runtime.removeLinkLanguageTemplates` | `Executor(runtime.known_link_languages:DELETE)` |
-| `runtime.restart` | `Operator` |
+| `runtime.restart` | `Operator`, local only |
 | `runtime.restartHolochain` | `Operator` |
 | `runtime.sendFriendMessage` | `Executor(runtime.messages:CREATE)` |
 | `runtime.setConfig` | `Operator` |
