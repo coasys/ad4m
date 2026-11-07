@@ -4879,6 +4879,132 @@ async fn two_apps_rotating_at_once_keep_the_key_of_the_one_that_landed() {
     assert_eq!(unlocked.signer(0).unwrap().index(), 1);
 }
 
+/// Logout removes the master key from this computer: a key staged at the log's current master
+/// (a rotation cut off after its publish leaves one there) goes with the kept key, so the next
+/// `refresh_master` has nothing to promote and the key does not come back.
+#[tokio::test]
+async fn removing_the_master_key_discards_a_key_staged_at_the_current_master() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 54).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let seed = words::seed(&words::from_entropy(&[54; 16]));
+    let zero = words::master_key(&seed, 0).unwrap();
+    vault
+        .stage_master(
+            &scid,
+            0,
+            ad4m_identity_client::Secret::new(zero.to_bytes()),
+            &StageToken::new(&OsRandom),
+        )
+        .unwrap();
+
+    remove_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert_eq!(
+        vault.master_index(&scid).unwrap(),
+        None,
+        "kept key forgotten"
+    );
+    assert_eq!(vault.staged_index(&scid).unwrap(), None, "stage discarded");
+
+    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert!(
+        !matches!(refreshed, Refreshed::Promoted { .. }),
+        "the removed key came back: {refreshed:?}"
+    );
+    assert_eq!(vault.master_index(&scid).unwrap(), None);
+    assert_eq!(vault.staged_index(&scid).unwrap(), None);
+    assert!(matches!(
+        vault.unlock(&scid, MasterUse::Link, 0),
+        Err(ad4m_identity_client::VaultError::NotFound)
+    ));
+}
+
+/// Logout in one app while another app sharing the vault rotates: the other app staged #1 (one
+/// ahead of the log) with its own token and its publish is on its way. Removing the master key
+/// leaves that stage: the rotation lands, its owner promotes #1, and the vault holds #1.
+#[tokio::test]
+async fn removing_the_master_key_leaves_a_rotation_in_flight_in_another_app() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let other_app = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &shared, 55).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    link_app(
+        &a,
+        &shared,
+        &did,
+        &other_app,
+        entry("Other app", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    // Another holder of master #0, so this computer may remove its copy.
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[55; 16]);
+    let (mine, theirs) = (SharedVault(shared.clone()), SharedVault(shared.clone()));
+
+    let held = ViaExecutor::new(HeldPublish::new(other_app.rpc(), true));
+    let (rotated, removed) = tokio::join!(
+        rotate(&held, &theirs, &did, &words, &[], &SystemClock, &OsRandom),
+        async {
+            held.rpc().until_held().await;
+            assert_eq!(shared.staged_index(&scid).unwrap(), Some(1), "staged");
+            let removed = remove_master(&a, &mine, &did, &OsRandom).await;
+            assert_eq!(
+                shared.master_index(&scid).unwrap(),
+                None,
+                "kept key forgotten"
+            );
+            assert_eq!(
+                shared.staged_index(&scid).unwrap(),
+                Some(1),
+                "the rotation's stage stays"
+            );
+            held.rpc().release.set(true);
+            removed
+        }
+    );
+    removed.unwrap();
+    let rotated = rotated.unwrap();
+    assert_eq!(rotated.index, 1);
+    assert!(rotated.kept.is_ok(), "{:?}", rotated.kept);
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().masters.len(), 2, "the rotation landed");
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(1));
+    assert_eq!(shared.staged_index(&scid).unwrap(), None);
+    let unlocked = shared.unlock(&scid, MasterUse::Link, 0).unwrap();
+    assert_eq!(unlocked.signer(0).unwrap().index(), 1);
+    drop(unlocked);
+    assert!(matches!(
+        refresh_master(&a, &mine, &did, &OsRandom).await.unwrap(),
+        Refreshed::Current
+    ));
+}
+
 /// An executor whose `identity.publish` calls are each held before they reach the store until
 /// `opened` counts past them: the first waits for `opened >= 1`, the second for `opened >= 2`.
 /// `reached` counts the publishes that reached their hold.

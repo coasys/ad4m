@@ -171,8 +171,10 @@ pub trait Vault: Send + Sync {
         index: u32,
         owner: Option<&StageToken>,
     ) -> Result<(), VaultError>;
-    /// Forgets the master key of `scid` (no error when it keeps none): the person removed it
-    /// from this device, or it was replaced by a rotation.
+    /// Forgets the kept master key of `scid` (no error when it keeps none): the person removed it
+    /// from this device, or it was replaced by a rotation. A staged key stays: it may belong to a
+    /// rotation in flight in another app sharing the vault, and only [`Vault::discard_staged`]
+    /// removes it.
     fn forget_master(&self, scid: &str) -> Result<(), VaultError>;
     /// One unlock (one prompt where the OS needs it) for a flow that uses the master key `why`.
     /// `now` starts the unlock's [`MasterUse::ttl_s`] (pass `why` to [`Unlocked::new`]).
@@ -510,6 +512,28 @@ mod memory {
                 vault.unlock("Qm", MasterUse::Revoke, 0),
                 Err(VaultError::NotFound)
             ));
+        }
+
+        /// Forgetting the master key forgets the kept key only: a staged key (another app's
+        /// rotation in flight) stays until it is promoted or discarded.
+        #[test]
+        fn forgetting_the_master_key_leaves_a_staged_key() {
+            let vault = MemoryVault::new();
+            let owner = StageToken([4; 16]);
+            vault.store_master("Qm", 0, Secret::new([3; 32])).unwrap();
+            vault
+                .stage_master("Qm", 1, Secret::new([5; 32]), &owner)
+                .unwrap();
+            vault.forget_master("Qm").unwrap();
+            assert_eq!(vault.master_index("Qm").unwrap(), None);
+            assert_eq!(vault.staged_index("Qm").unwrap(), Some(1));
+            vault.promote_master("Qm", 1).unwrap();
+            let unlocked = vault.unlock("Qm", MasterUse::Link, 0).unwrap();
+            assert_eq!(unlocked.signer(0).unwrap().index(), 1);
+            assert_eq!(
+                unlocked.signer(0).unwrap().key(),
+                Signer::key(&ed25519_dalek::SigningKey::from_bytes(&[5; 32]))
+            );
         }
 
         /// A link's unlock lasts until the store's confirm grace ends, so the `add` can be

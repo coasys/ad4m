@@ -456,7 +456,7 @@ pub async fn remove_master<R: ExecutorRpc>(
         executor.status().await?.key_id.ok_or_else(|| {
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
-    let (events, _) = log_of(executor, did).await?;
+    let (events, log_chain) = log_of(executor, did).await?;
     let check = |record: Option<&PrivateRecord>, chain: &KelChain| {
         // The events may lag the chain the write read; a key `add`ed since is no copy yet.
         if record.is_some_and(|r| another_copy(r, &events, chain, &own)) {
@@ -477,6 +477,14 @@ pub async fn remove_master<R: ExecutorRpc>(
     )
     .await?;
     vault.forget_master(&scid)?;
+    // A stage at or behind the log would be promoted or kept by the next refresh, bringing back
+    // the key the person just removed. One ahead is a rotation in flight: its owner decides.
+    let current = log_chain.state().masters.len().saturating_sub(1);
+    if let Some(staged) = vault.staged_index(&scid)? {
+        if usize::try_from(staged).is_ok_and(|staged| staged <= current) {
+            vault.discard_staged(&scid, staged, None)?;
+        }
+    }
     for push in vault.pending_pushes()? {
         if push.scid == scid {
             vault.push_done(&push)?;
