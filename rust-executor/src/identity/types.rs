@@ -114,6 +114,31 @@ pub struct LogParams {
     pub fresh: Option<bool>,
 }
 
+/// `identity.keyOwner` params.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyOwnerParams {
+    /// An Ed25519 multikey (`z6Mk…`): a device key or a master key.
+    pub key: String,
+}
+
+/// `identity.keyOwner`: the identity whose log lists a key, by the store's key index. A hint
+/// only: a caller reads the named log and checks the key there.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyOwner {
+    /// The owner's `did:scid:coasys:1:…`.
+    pub did: String,
+    /// The key's id in that log (`m0`, `d3`).
+    pub key_id: String,
+    /// The seq of the event that added it.
+    #[ts(type = "number")]
+    pub added: u64,
+    /// The seq of the revoke or rotate that ended it.
+    #[ts(type = "number | null")]
+    pub revoked: Option<u64>,
+}
+
 /// `identity.resetLog` params.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]

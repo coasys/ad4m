@@ -7,6 +7,10 @@
 //! Then the private record is written again: the revoked devices leave it, with any pending
 //! revocation of theirs, and the new version's record key is wrapped to the remaining devices
 //! only, so a revoked device cannot read it.
+//!
+//! "Also replace my master key" ([`revoke_and_rotate`]): the keys are revoked in a `rotate`
+//! instead, which needs the 12 words. A device that may have held the master key is revoked
+//! this way, so the key it held signs nothing more.
 
 use ad4m_identity_core::build::revoke as revoke_event;
 use ad4m_identity_core::{KelChain, KeyId};
@@ -50,9 +54,31 @@ pub async fn revoke<R: ExecutorRpc>(
     .await
 }
 
+/// Revokes the device keys `key_ids` of `did` in a rotation to master *n*+1 from the 12
+/// `words` ("Also replace my master key"): [`super::rotate::rotate`] with these keys.
+#[allow(clippy::too_many_arguments)]
+pub async fn revoke_and_rotate<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    key_ids: &[KeyId],
+    words: &ad4m_identity_core::words::Words,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<super::rotate::Rotated, ClientError> {
+    if key_ids.is_empty() {
+        return Err(ClientError::Protocol("a revocation names a key".into()));
+    }
+    super::rotate::rotate(executor, vault, did, words, key_ids, clock, random).await
+}
+
 /// Every key of `key_ids` is a key of the log: checked before the unlock, so the person is not
 /// asked for a revocation that cannot pass.
-fn check_keys(chain: &KelChain, did: &str, key_ids: &[KeyId]) -> Result<(), ClientError> {
+pub(crate) fn check_keys(
+    chain: &KelChain,
+    did: &str,
+    key_ids: &[KeyId],
+) -> Result<(), ClientError> {
     match key_ids
         .iter()
         .find(|id| !chain.state().keys.contains_key(*id))

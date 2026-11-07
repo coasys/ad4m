@@ -18,6 +18,18 @@
 //! The device's side ([`take_master`]): its custody service takes the key its executor opened
 //! (`identity.takeMaster`), checks it against its own fold of the log, keeps it in the vault,
 //! acknowledges the message, and marks itself `holdsMaster: true` in the record.
+//!
+//! **After a rotation** ([`refresh_master`]): a device whose vault keeps a master key the log
+//! has replaced takes the new one when the rotating app sent it; when none waits (the push
+//! failed, or the device was offline past it), it forgets the replaced key and asks for the
+//! new one with a `send-master` request, which a holder answers ([`super::requests::answer`]).
+//!
+//! **Removing the master key from a device** ([`remove_master`]): refused when no other
+//! device valid at the head holds it: one the record lists as `holdsMaster: true` and the log
+//! lets keep it ([`may_keep_master`], never the record's kind; a key only offered, or the 12
+//! words, do not count). Otherwise the record marks this device
+//! `holdsMaster: false` first, then the vault forgets the key and its retry list for the
+//! identity.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{InboxAddress, InboxError};
@@ -65,7 +77,7 @@ pub struct Taken {
 }
 
 /// A refusal that a later try may pass: the store or the executor unreachable or busy.
-fn transient(e: &ClientError) -> bool {
+pub(crate) fn transient(e: &ClientError) -> bool {
     matches!(e, ClientError::Rpc(RpcError { code, .. }) if *code >= 500 || *code == 429)
 }
 
@@ -307,4 +319,101 @@ pub async fn take_master<R: ExecutorRpc>(
         index: taken.index,
         record,
     }))
+}
+
+/// What [`refresh_master`] found.
+#[derive(Debug)]
+pub enum Refreshed {
+    /// The vault keeps the current master key.
+    Current,
+    /// The current master key was waiting in this device's inbox: the vault keeps it now.
+    Taken(Taken),
+    /// None waited: the vault forgot the replaced key, and a `send-master` request (its id)
+    /// asks a holder for the current one.
+    Asked(String),
+}
+
+/// A device whose vault may keep a replaced master key of `did`, its executor's identity:
+/// nothing to do when the vault keeps the current one; else takes the current one from the
+/// inbox ([`take_master`]), or, when none waits, forgets the replaced key and posts a
+/// `send-master` request. Refused with [`VaultError::NotFound`](crate::VaultError::NotFound)
+/// when the vault keeps no master key of `did` (a device that never held it asks with
+/// [`super::requests::ask_for_master`]).
+pub async fn refresh_master<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    random: &dyn Random,
+) -> Result<Refreshed, ClientError> {
+    let scid = scid_of(did)?;
+    let kept = vault
+        .master_index(&scid)?
+        .ok_or(crate::VaultError::NotFound)?;
+    let chain = chain_of(executor, did).await?;
+    let current = chain.state().masters.len().saturating_sub(1);
+    if kept as usize == current && chain.state().current_master().is_some() {
+        return Ok(Refreshed::Current);
+    }
+    if let Some(taken) = take_master(executor, vault, random).await? {
+        if taken.did == did {
+            return Ok(Refreshed::Taken(taken));
+        }
+    }
+    vault.forget_master(&scid)?;
+    let id = executor
+        .post_request(&ad4m_ldk::identity::DeviceRequestBody::SendMaster {}, None)
+        .await?;
+    Ok(Refreshed::Asked(id))
+}
+
+/// Removes the master key of `did`, its executor's identity, from this device. Refused with
+/// [`ClientError::OnlyCopy`] unless another device valid at the head holds it: the record lists
+/// it as `holdsMaster: true` and the log lets it keep the master key ([`may_keep_master`]; the
+/// record's device kind grants nothing, any linked device can write the record). Writes the record (this device
+/// `holdsMaster: false`) before the vault forgets the key, so a failed write leaves the key
+/// where it was. Answers the record version written.
+pub async fn remove_master<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    let scid = scid_of(did)?;
+    let own =
+        executor.status().await?.key_id.ok_or_else(|| {
+            ClientError::Protocol("the executor's device key is in no log".into())
+        })?;
+    let (events, chain) = log_of(executor, did).await?;
+    let state = chain.state();
+    let head = chain.head().seq;
+    let record = record::read(executor, did).await?;
+    let elsewhere = record.is_some_and(|opened| {
+        opened.record.devices.iter().any(|(id, entry)| {
+            *id != own
+                && entry.holds_master == HoldsMaster::Yes
+                && state.keys.contains_key(id)
+                && state.key_valid_at(id, head)
+                && may_keep_master(&events, id)
+        })
+    });
+    if !elsewhere {
+        return Err(ClientError::OnlyCopy);
+    }
+    let version = record::write(
+        executor,
+        did,
+        &[Change::HoldsMaster {
+            key_id: own,
+            holds: HoldsMaster::No,
+        }],
+        random,
+    )
+    .await?;
+    vault.forget_master(&scid)?;
+    for push in vault.pending_pushes()? {
+        if push.scid == scid {
+            vault.push_done(&push)?;
+        }
+    }
+    Ok(version)
 }

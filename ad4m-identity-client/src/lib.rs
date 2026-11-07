@@ -11,9 +11,16 @@
 //!   the device's key, its ticket in the device's pre-join inbox.
 //! - [`flows::master`]: the master key sealed to a device that keeps it, the retry list of
 //!   pushes that failed, and the device's side that takes it from its executor.
-//! - [`flows::revoke`]: a `revoke` signed by the current master key, published.
+//! - [`flows::revoke`]: a `revoke` signed by the current master key, published; or, with the
+//!   12 words, a `rotate` that revokes the keys too ("Also replace my master key").
+//! - [`flows::rotate`]: master *n*+1 from the 12 words, rebuilt on the new head when another
+//!   event lands first, sent to every app that kept the master key, and the record written.
+//! - [`flows::restore`]: the 12 words alone find the identity, lock out lost devices with a
+//!   rotation to a fresh master on this device, and link this device again.
 //! - [`flows::requests`]: the holder's answer to a device's request (send the master key,
-//!   confirm a revocation).
+//!   confirm a revocation, with the words when it asks for a rotation) and the device's post.
+//! - [`flows::master`] also removes the master key from a device that is not its only holder,
+//!   and gets a device whose key a rotation replaced the new one.
 //! - [`record`]: the private details record, opened, merged and written in one place.
 //!
 //! No custody key: no service keeps a copy of a master key for the person. The library has no
@@ -137,6 +144,19 @@ pub enum ClientError {
     /// The record's version moved under every write tried.
     #[error("the private record kept changing; try again")]
     RecordBusy,
+    /// The words derive no master key of the identity: the key index lists no identity whose
+    /// master #0 they derive, or they do not derive its current master. A word that passes the
+    /// checksum can still be the wrong one.
+    #[error("these words are not the identity's: {0}")]
+    NotTheseWords(String),
+    /// Another event landed first on every rotation tried (each `409` rebuilt it on the new
+    /// head).
+    #[error("the log kept changing under the rotation; try again")]
+    LogBusy,
+    /// This device holds the only usable copy of the master key: no other device valid at the
+    /// head that the log lets keep it holds it (per the record). Removing it would leave only the 12 words.
+    #[error("this device holds the only copy of the master key")]
+    OnlyCopy,
     #[error("{0}")]
     Protocol(String),
 }

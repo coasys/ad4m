@@ -565,6 +565,8 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
     const nodes: Node[] = [];
     let home: Node, desk: Node;
     let did = "";
+    // The 12 words the holder made the identity with.
+    let words = "";
 
     async function start(
         name: string,
@@ -615,7 +617,7 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         home = await start("inbox-home");
         holder = new Holder();
         await holder.send({ cmd: "connect", url: baseUrl(home.ports[0]), token: "" });
-        did = (await holder.send({ cmd: "create" })).did;
+        ({ did, words } = await holder.send({ cmd: "create" }));
     });
 
     after(async () => {
@@ -658,7 +660,8 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         // The custody channel lets the desktop's executor say it may keep the master key.
         expect(claimed.canKeepMaster).to.be.true;
         const confirmed = await holder.send({ cmd: "confirm", name: "Desk", kind: "desktop-app" });
-        expect(confirmed).to.deep.equal({ seq: 1, keyId: "d2", master: null, record: 1 });
+        // Creating the identity wrote record version 1; the link writes version 2.
+        expect(confirmed).to.deep.equal({ seq: 1, keyId: "d2", master: null, record: 2 });
 
         await pollUntil(
             async () => (await desk.client.identity.joinStatus(pushed.offerId)).state === "spent",
@@ -669,7 +672,7 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         expect(joined.keyId).to.equal("d2");
         // The record lists the desktop, read through the holder's executor.
         const opened = await holder.send({ cmd: "record", did });
-        expect(opened.version).to.equal(1);
+        expect(opened.version).to.equal(2);
         expect(opened.record.devices.d2).to.include({ name: "Desk", kind: "desktop-app", holdsMaster: false });
     });
 
@@ -677,7 +680,7 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         const announced: any[] = [];
         desk.client.on("inbox-message", (event) => announced.push(event));
         const sealed = await holder.send({ cmd: "sendMaster", did, keyId: "d2" });
-        expect(sealed.record).to.equal(2);
+        expect(sealed.record).to.equal(3);
         expect((await holder.send({ cmd: "record", did })).record.devices.d2.holdsMaster).to.equal("offered");
 
         const listed = await desk.client.identity.inbox();
@@ -750,5 +753,58 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         // A claim saying it keeps the master key is refused there too.
         expect(await refused(home.client.identity.claimOffer("coasys:offer:1:x", undefined, true)))
             .to.contain("no-custody-channel");
+    });
+
+    it("rotates the master key with the words and the desktop's custody service takes the new one", async () => {
+        const rotated = await holder.send({ cmd: "rotate", did });
+        expect(rotated).to.include({ index: 1, tries: 1 });
+        expect(rotated.revoked).to.deep.equal([]);
+        expect(rotated.pushes.d2).to.be.a("string");
+        expect((await holder.send({ cmd: "record", did })).record.devices.d1.holdsMaster).to.equal(true);
+
+        // The custody service still keeps master #0: it takes #1 from its inbox.
+        const refreshed = await custody.send({ cmd: "refreshMaster", did });
+        expect(refreshed).to.include({ refreshed: "taken", index: 1 });
+        expect(await custody.send({ cmd: "refreshMaster", did })).to.deep.equal({ refreshed: "current" });
+        expect((await holder.send({ cmd: "record", did })).record.devices.d2.holdsMaster).to.equal(true);
+    });
+
+    it("removes the master key from one device, and refuses on the device left as its only holder", async () => {
+        const removed = await holder.send({ cmd: "removeMaster", did });
+        expect(removed.record).to.be.a("number");
+        expect((await holder.send({ cmd: "record", did })).record.devices.d1.holdsMaster).to.equal(false);
+        expect(await refused(custody.send({ cmd: "removeMaster", did }))).to.contain("only copy");
+    });
+
+    it("restores the identity from the 12 words on a new device, locking out the lost one", async () => {
+        const laptop = await start("inbox-restored", { initArgs: ["--operator", did] });
+        const restorer = new Holder();
+        try {
+            await restorer.send({ cmd: "connect", url: baseUrl(laptop.ports[0]), token: "" });
+            // A wrong word is named by its position.
+            const typo = words.split(" ").map((w: string, i: number) => (i === 4 ? "zebrra" : w)).join(" ");
+            expect(await refused(restorer.send({ cmd: "restore", words: typo }))).to.contain("word 5 (\"zebrra\")");
+
+            const restored = await restorer.send({ cmd: "restore", words, name: "Laptop", kind: "desktop-app", lockOut: ["d1"] });
+            expect(restored.did).to.equal(did);
+            expect(restored.devices.map((d: any) => d.keyId)).to.deep.equal(["d1", "d2"]);
+            expect(restored).to.include({ index: 2, keyId: "d3" });
+            expect(restored.revoked).to.deep.equal(["d1"]);
+            expect(restored.pushes.d2).to.be.a("string");
+
+            const status = await laptop.client.identity.status();
+            expect(status.did).to.equal(did);
+            expect(status.keyId).to.equal("d3");
+            const devices = await laptop.client.identity.devices();
+            expect(devices.find((d) => d.keyId === "d1")!.revokedSeq).to.equal(restored.seq);
+            const opened = await restorer.send({ cmd: "record", did });
+            expect(opened.record.devices.d3).to.include({ name: "Laptop", kind: "desktop-app", holdsMaster: true });
+            expect(opened.record.devices.d1).to.be.undefined;
+
+            // The kept desktop takes master #2.
+            expect(await custody.send({ cmd: "refreshMaster", did })).to.include({ refreshed: "taken", index: 2 });
+        } finally {
+            await restorer.stop();
+        }
     });
 });

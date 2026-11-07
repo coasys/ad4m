@@ -131,6 +131,37 @@ impl IdentityService {
         }
     }
 
+    /// The identity and the store request of a record read or write. A caller's request names
+    /// its identity, so it serves an executor that speaks for no one yet (an app restoring with
+    /// the words signs with the master key the words derive); the store checks its signature.
+    /// Without one, `agent`'s device key signs at its position.
+    async fn record_request(
+        &self,
+        agent: &AgentContext,
+        given: Option<&SignedRequest>,
+        method: &str,
+        body: &[u8],
+    ) -> Result<(String, ad4m_ldk::identity::SignedRequest), WsRpcError> {
+        if let Some(given) = given {
+            let request: ad4m_ldk::identity::SignedRequest =
+                convert(given).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+            let did = request.req.did.clone();
+            let scid = ad4m_identity_core::scid_of(&did).ok_or_else(|| {
+                WsRpcError::bad_request(format!("{did} is not a did:scid:coasys:1"))
+            })?;
+            if request.req.path != format!("/v1/private/{scid}") || request.req.method != method {
+                return Err(WsRpcError::bad_request(
+                    "invalid: the request is not for this identity's record",
+                ));
+            }
+            return Ok((did, request));
+        }
+        let position = self.bound_position(agent).await?;
+        let path = format!("/v1/private/{}", position.scid);
+        let request = position.request(method, &path, body)?;
+        Ok((position.did, request))
+    }
+
     /// `identity.record`: the sealed private record of `agent`'s identity; `null` before the
     /// first write.
     pub async fn record(
@@ -138,12 +169,12 @@ impl IdentityService {
         agent: &AgentContext,
         params: &RecordParams,
     ) -> Result<Option<SealedRecord>, WsRpcError> {
-        let position = self.bound_position(agent).await?;
-        let path = format!("/v1/private/{}", position.scid);
-        let request = self.request_for(&position, params.request.as_ref(), "GET", &path, b"")?;
+        let (did, request) = self
+            .record_request(agent, params.request.as_ref(), "GET", b"")
+            .await?;
         let record = self
             .backend
-            .get_record(&position.did, &request)
+            .get_record(&did, &request)
             .await
             .map_err(backend_error)?;
         wire(&record)
@@ -155,15 +186,15 @@ impl IdentityService {
         agent: &AgentContext,
         params: &RecordPutParams,
     ) -> Result<RecordStored, WsRpcError> {
-        let position = self.bound_position(agent).await?;
         let record: ad4m_ldk::identity::SealedRecord =
             convert(&params.record).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-        let path = format!("/v1/private/{}", position.scid);
         let body = body_bytes(&record).map_err(WsRpcError::internal)?;
-        let request = self.request_for(&position, params.request.as_ref(), "PUT", &path, &body)?;
+        let (did, request) = self
+            .record_request(agent, params.request.as_ref(), "PUT", &body)
+            .await?;
         let stored = self
             .backend
-            .put_record(&position.did, &record, &request)
+            .put_record(&did, &record, &request)
             .await
             .map_err(backend_error)?;
         wire(&stored)
@@ -450,8 +481,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// An agent bound to no identity gets 409 `no-identity`, and a caller's own request is
-    /// passed as it is.
+    /// An agent bound to no identity gets 409 `no-identity` for its own record, but a caller's
+    /// own request is passed as it is, for the identity it names: an app restoring with the
+    /// words reads and writes the record before its executor speaks for anyone. A request for
+    /// another path is refused before the store.
     #[tokio::test]
     async fn an_unbound_agent_has_no_record_and_a_given_request_passes_unchanged() {
         let world = Bound::new(72).await;
@@ -459,9 +492,10 @@ pub(crate) mod tests {
             "unbound-{}@example.org",
             uuid::Uuid::new_v4().simple()
         ));
+        let unbound = AgentContext::managed(user);
         let refused = world
             .service
-            .record(&AgentContext::managed(user), &RecordParams::default())
+            .record(&unbound, &RecordParams::default())
             .await
             .unwrap_err();
         assert_eq!(refused.code, 409);
@@ -471,18 +505,14 @@ pub(crate) mod tests {
             refused.message
         );
 
-        let given = world
-            .service
-            .bound_position(&world.agent)
-            .await
-            .unwrap()
-            .request("GET", "/v1/private/elsewhere", b"")
-            .unwrap();
+        let position = world.service.bound_position(&world.agent).await.unwrap();
+        let path = format!("/v1/private/{}", position.scid);
+        let given = position.request("GET", &path, b"").unwrap();
         let mirror: SignedRequest = convert(&given).unwrap();
         world
             .service
             .record(
-                &world.agent,
+                &unbound,
                 &RecordParams {
                     request: Some(mirror),
                 },
@@ -491,6 +521,22 @@ pub(crate) mod tests {
             .unwrap();
         let seen = world.store.requests.lock().unwrap().clone();
         assert_eq!(seen.last().unwrap().1, given);
+
+        let elsewhere = position
+            .request("GET", "/v1/private/elsewhere", b"")
+            .unwrap();
+        let refused = world
+            .service
+            .record(
+                &world.agent,
+                &RecordParams {
+                    request: Some(convert(&elsewhere).unwrap()),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 400, "{}", refused.message);
+        assert_eq!(world.store.requests.lock().unwrap().len(), seen.len());
     }
 
     /// The record key of the agent's entry opens in the wallet and decrypts that version; an
