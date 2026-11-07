@@ -165,7 +165,7 @@ export class IdentityClient {
 
     /**
      * The custody channel: the master key a holder sealed to this computer, checked against
-     * the log, or `null`. Only the custody credential (`AD4M_CUSTODY_CREDENTIAL`) on a loopback
+     * the log, or `null`. Only the custody credential (the first line of the executor's stdin) on a loopback
      * listener of an executor started with `--custody-channel`; any other caller, the admin
      * credential included, gets 403. Acknowledge the message
      * (`inboxAck`) once the key is stored.
@@ -220,7 +220,7 @@ export class IdentityClient {
 
     /**
      * The custody channel: the device keys a master key for this computer is sealed to. Only
-     * the custody credential (`AD4M_CUSTODY_CREDENTIAL`) on a loopback listener of an executor
+     * the custody credential (the first line of the executor's stdin) on a loopback listener of an executor
      * started with `--custody-channel`; any other caller, the admin credential included, gets
      * 403.
      */

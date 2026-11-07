@@ -389,6 +389,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     // A supervisor's pipe: when it closes, the supervisor is gone and the executor stops.
     // After the PID file, so the stop that removes it never comes before it is written.
+    // `std::io::stdin()` is the process's one buffered reader: with `--custody-channel` the CLI
+    // took the credential line from it (`config::read_custody_credential`), and the watcher
+    // reads on from what is left in the same buffer.
     if config.watch_stdin == Some(true) {
         exit::stop_when_closed(std::io::stdin(), || {
             info!("stdin closed (--watch-stdin): stopping");
