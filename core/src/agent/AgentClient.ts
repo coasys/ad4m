@@ -319,7 +319,10 @@ export class AgentClient {
 
   /**
    * A one-use challenge (60 s) for a key statement, the executor's DID (the statement's
-   * `executor`) and the challenge's expiry by the executor's clock.
+   * `executor`) and the challenge's expiry by the executor's clock. Each address holds at
+   * most 100 open challenges (`too-many-challenges` past that). On a key session the
+   * challenge is the session's renewal challenge: one per session, so asking again closes the
+   * one before.
    */
   async sessionChallenge(): Promise<SessionChallenge> {
     return this.#apiClient.call('user.sessionChallenge', {});
