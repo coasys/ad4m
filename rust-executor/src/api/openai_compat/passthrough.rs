@@ -332,7 +332,8 @@ impl Drop for StreamBill {
 fn usage_tokens(usage: &Value) -> Option<usize> {
     let count = |key: &str| usage.get(key).and_then(Value::as_u64);
     let total = count("total_tokens")
-        .or_else(|| Some(count("prompt_tokens")? + count("completion_tokens")?))?;
+        // Counts that overflow are not a usable figure: the bill falls back to the estimate.
+        .or_else(|| count("prompt_tokens")?.checked_add(count("completion_tokens")?))?;
     usize::try_from(total).ok()
 }
 
@@ -823,6 +824,14 @@ pub async fn forward_speech(upstream: Upstream, mut body: Value) -> Result<Respo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_parts_that_overflow_are_no_usage() {
+        let usage = serde_json::json!({"prompt_tokens": u64::MAX, "completion_tokens": 2});
+        assert_eq!(usage_tokens(&usage), None);
+        let usage = serde_json::json!({"prompt_tokens": 3, "completion_tokens": 4});
+        assert_eq!(usage_tokens(&usage), Some(7));
+    }
 
     #[test]
     fn sse_events_are_split_across_chunks_and_crlf() {
