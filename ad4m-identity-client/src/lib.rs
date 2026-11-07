@@ -123,8 +123,9 @@ pub enum ClientError {
     /// The offer ended before it was claimed or confirmed.
     #[error("the offer is {0}")]
     OfferEnded(String),
-    /// The master key goes only to an app that may keep it: a claim with `canKeepMaster` on a
-    /// `device` offer, or a device the record lists as a desktop or phone app.
+    /// The master key goes only to a device key, valid at the head, that the key log lets keep
+    /// it: a standing key of the incept, or one whose `add` carries a claim that said
+    /// `canKeepMaster` (and at a link, only on a `device` offer). Never by the record's kind.
     #[error("{0} may not keep the master key")]
     NotAKeeper(String),
     /// A request asks for a rotation, which needs the 12 words.

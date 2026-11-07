@@ -482,6 +482,49 @@ pub fn verify_claim_view(offer: &Offer, view: &ClaimView) -> Result<(), LinkErro
     Ok(())
 }
 
+/// Whether the log `events` (the identity's log from #0) lets device key `key_id` keep the
+/// master key: a standing key of the `incept` (a device that made the identity), or a standing
+/// key whose `add` carries the device's co-signature over a claim that said
+/// `canKeepMaster: true` (the co-signature covers the flag, so the log proves it). A key the log
+/// does not list is not let. Whether the key is still valid is the caller's check.
+///
+/// The private record's device kind never enters this: any linked device can write the record.
+pub fn may_keep_master(events: &[Event], key_id: &str) -> bool {
+    events.iter().any(|event| match &event.op {
+        Op::Incept { add, .. } => add
+            .iter()
+            .any(|k| k.id == key_id && k.life == KeyLife::Standing),
+        Op::Add { add, offer, co_sig } => add.iter().any(|k| {
+            k.id == key_id
+                && k.life == KeyLife::Standing
+                && claimed_can_keep_master(&event.scid, offer, &k.sign, &k.enc, co_sig)
+        }),
+        _ => false,
+    })
+}
+
+/// Whether `co_sig` is device key `sign`'s signature over its claim on `offer_id` of `scid`,
+/// with `enc`, that said `canKeepMaster: true`.
+fn claimed_can_keep_master(
+    scid: &str,
+    offer_id: &str,
+    sign: &str,
+    enc: &str,
+    co_sig: &str,
+) -> bool {
+    let Some(sig) = decode_proof_value(co_sig) else {
+        return false;
+    };
+    let body = ClaimBody {
+        scid,
+        offer_id,
+        device_key: sign,
+        enc_key: enc,
+        can_keep_master: true,
+    };
+    verify_signed(CLAIM_DOMAIN, &body, sign, &sig)
+}
+
 /// True when the claim's `s` hashes to the offer's commit.
 pub fn check_secret(offer: &Offer, c: &Claim) -> bool {
     decode_secret(&c.s).is_some_and(|s| offer_commit(&s) == offer.commit)

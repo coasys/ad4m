@@ -750,9 +750,13 @@ a new string ends the read of the last one.
   signed by the master key and sealed to the string's `enc`, at the string's pre-join address
   with `bind {scid, offerId, sign, r}`. Then it waits for the claim and confirms with the match
   code as for any link.
-- *Gives the master key to a device that keeps it*, only for a claim with `canKeepMaster` on a
-  `device` offer, or to a device the record lists as a desktop or phone app: after the `add`,
-  the master key seals itself into a `master` body, signed by itself, to the `enc` key the log
+- *Gives the master key to a device that keeps it*, only to a device key valid at the head
+  that the log lets keep it: a standing key of the `incept`, or a standing key whose `add`
+  carries a co-signature over a claim that said `canKeepMaster: true` (the co-signature covers
+  the flag, so the log proves it; at a link, only on a `device` offer). A key the log does not
+  list, or a revoked one, gets nothing. The record's device kind decides nothing here: any
+  linked device can write the record, so its kind is shown to people and grants nothing. After
+  the `add`, the master key seals itself into a `master` body, signed by itself, to the `enc` key the log
   lists for the device key, and writes it to the device's joined inbox. Before the write the
   app keeps the push on a retry list of its own; it forgets it once the host takes it, or when
   the host refuses it for good, or when the device key has left the log, and retries what is
