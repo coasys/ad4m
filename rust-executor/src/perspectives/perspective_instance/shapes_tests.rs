@@ -165,6 +165,47 @@ async fn refresh_keeps_foreign_annotations() {
     assert_eq!(stored[0].shape, stored_form(&note_with_integer_title()));
 }
 
+/// A type link other apps put on a class's nodes is an annotation too:
+/// only the types the writer gives are the class's own.
+#[tokio::test]
+async fn refresh_keeps_foreign_type_links() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    let title = property_node("title");
+    for source in ["ns://Note", "ns://NoteShape", title.as_str()] {
+        perspective
+            .add_link(
+                Link {
+                    source: source.into(),
+                    predicate: Some("rdf://type".into()),
+                    target: "app://Tagged".into(),
+                },
+                LinkStatus::Shared,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+    }
+
+    let result = perspective
+        .register_shapes(vec![note_with_integer_title()], &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(result.written, vec!["Note".to_string()]);
+    for source in ["ns://Note", "ns://NoteShape", title.as_str()] {
+        assert_eq!(
+            count(&perspective, source, "rdf://type", "app://Tagged"),
+            1,
+            "the type link on {source} stays"
+        );
+    }
+}
+
 #[tokio::test]
 async fn shapes_equals_the_stored_shape() {
     let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
