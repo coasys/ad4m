@@ -25,8 +25,9 @@
 //! new one with a `send-master` request, which a holder answers ([`super::requests::answer`]).
 //!
 //! **Removing the master key from a device** ([`remove_master`]): refused when no other
-//! desktop or phone app of the log holds it (`holdsMaster: true` in the record; a key only
-//! offered, or the 12 words, do not count). Otherwise the record marks this device
+//! device valid at the head holds it: one the record lists as `holdsMaster: true` and the log
+//! lets keep it ([`may_keep_master`], never the record's kind; a key only offered, or the 12
+//! words, do not count). Otherwise the record marks this device
 //! `holdsMaster: false` first, then the vault forgets the key and its retry list for the
 //! identity.
 
@@ -366,8 +367,9 @@ pub async fn refresh_master<R: ExecutorRpc>(
 }
 
 /// Removes the master key of `did`, its executor's identity, from this device. Refused with
-/// [`ClientError::OnlyCopy`] unless another desktop or phone app the log lists at its head
-/// holds it (`holdsMaster: true` in the record). Writes the record (this device
+/// [`ClientError::OnlyCopy`] unless another device valid at the head holds it: the record lists
+/// it as `holdsMaster: true` and the log lets it keep the master key ([`may_keep_master`]; the
+/// record's device kind grants nothing, any linked device can write the record). Writes the record (this device
 /// `holdsMaster: false`) before the vault forgets the key, so a failed write leaves the key
 /// where it was. Answers the record version written.
 pub async fn remove_master<R: ExecutorRpc>(
@@ -381,7 +383,7 @@ pub async fn remove_master<R: ExecutorRpc>(
         executor.status().await?.key_id.ok_or_else(|| {
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
-    let chain = chain_of(executor, did).await?;
+    let (events, chain) = log_of(executor, did).await?;
     let state = chain.state();
     let head = chain.head().seq;
     let record = record::read(executor, did).await?;
@@ -389,9 +391,9 @@ pub async fn remove_master<R: ExecutorRpc>(
         opened.record.devices.iter().any(|(id, entry)| {
             *id != own
                 && entry.holds_master == HoldsMaster::Yes
-                && matches!(entry.kind, DeviceKind::DesktopApp | DeviceKind::PhoneApp)
                 && state.keys.contains_key(id)
                 && state.key_valid_at(id, head)
+                && may_keep_master(&events, id)
         })
     });
     if !elsewhere {

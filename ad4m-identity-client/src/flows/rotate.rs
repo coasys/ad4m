@@ -12,16 +12,18 @@
 //!    the next master on), and revokes only the listed keys still valid there. A rotation that
 //!    landed while its answer was lost is found in the log by its hash and not published again.
 //! 3. This device's vault keeps master *n*+1 in place of master *n*.
-//! 4. Master *n*+1 goes to every other app that kept the master key: each desktop or phone app
-//!    the record lists as holding it (`true` or `"offered"`) and the log lists at the head, sealed
-//!    to its `enc` key in its joined inbox ([`super::master`], with the retry list). The store
+//! 4. Master *n*+1 goes to every other device that kept the master key: each device the record
+//!    lists as holding it (`true` or `"offered"`), valid at the head, that the log after the
+//!    rotation lets keep it ([`ad4m_identity_core::link::may_keep_master`]; the record's device
+//!    kind grants nothing, any linked device can write the record), sealed to its `enc` key in its joined inbox ([`super::master`], with the retry list). The store
 //!    drops every message master *n* wrote when the rotation lands, so no device takes the
 //!    replaced key after it.
-//! 5. The record is written: each app sent the key is `holdsMaster: "offered"`, this device
+//! 5. The record is written: each device sent the key is `holdsMaster: "offered"`, this device
 //!    `true`, revoked devices leave it, and a record without the recovery key gets it.
 
 use ad4m_identity_core::build::{rotate as rotate_event, Signer};
-use ad4m_identity_core::record::{DeviceEntry, DeviceKind, HoldsMaster, PrivateRecord};
+use ad4m_identity_core::link::may_keep_master;
+use ad4m_identity_core::record::{DeviceEntry, HoldsMaster, PrivateRecord};
 use ad4m_identity_core::words::{self, Seed, Words};
 use ad4m_identity_core::{event_hash, x25519_multikey_of, Event, KelChain, KeyId, Multikey};
 use ad4m_ldk::identity::SignedHead;
@@ -30,7 +32,7 @@ use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::flows::master::{self, transient};
 use crate::flows::revoke::check_keys;
 use crate::record::{self, Change, Reader};
-use crate::request::{chain_of, scid_of};
+use crate::request::{self, chain_of, scid_of};
 use crate::secret::Secret;
 use crate::vault::{KeySigner, MasterSigner, Vault};
 use crate::{fold, ClientError, Clock, Random};
@@ -184,10 +186,13 @@ pub(crate) async fn publish_rotation<R: ExecutorRpc>(
     }
 }
 
-/// The apps of `record` besides `own` that kept the master key: desktop or phone apps listed
-/// as holding it (`true` or `"offered"`) whose keys are valid at `chain`'s head.
+/// The devices of `record` besides `own` that kept the master key: listed as holding it (`true`
+/// or `"offered"`), valid at `chain`'s head, and let keep it by the log `events` (`chain`'s
+/// events, [`may_keep_master`]). The record's device kind grants nothing: any linked device can
+/// write the record.
 pub(crate) fn kept_holders(
     record: &PrivateRecord,
+    events: &[Event],
     chain: &KelChain,
     own: Option<&str>,
 ) -> Vec<KeyId> {
@@ -198,10 +203,10 @@ pub(crate) fn kept_holders(
         .iter()
         .filter(|(id, entry)| {
             Some(id.as_str()) != own
-                && matches!(entry.kind, DeviceKind::DesktopApp | DeviceKind::PhoneApp)
                 && matches!(entry.holds_master, HoldsMaster::Yes | HoldsMaster::Offered)
                 && state.keys.contains_key(*id)
                 && state.key_valid_at(id, head)
+                && may_keep_master(events, id)
         })
         .map(|(id, _)| id.clone())
         .collect()
@@ -231,8 +236,9 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     Vec<(KeyId, Result<String, ClientError>)>,
     Result<u64, ClientError>,
 ) {
-    let chain = match chain_of(executor, did).await {
-        Ok(chain) => chain,
+    // Read after the rotation landed: the keeper check sees the post-rotation log.
+    let (events, chain) = match request::log_of(executor, did).await {
+        Ok(log) => log,
         Err(e) => return (Vec::new(), Err(e)),
     };
     let opened = match record::read_as(executor, did, &chain, reader, random).await {
@@ -241,12 +247,15 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     };
     let own = this.as_ref().map(|t| t.key_id.as_str());
     let holders = opened
-        .map(|o| kept_holders(&o.record, &chain, own))
+        .map(|o| kept_holders(&o.record, &events, &chain, own))
         .unwrap_or_default();
     let mut pushes = Vec::new();
     let mut changes = Vec::new();
     for key_id in holders {
-        let sent = master::push(executor, vault, &chain, did, signer, &key_id, clock, random).await;
+        let sent = master::push(
+            executor, vault, &events, &chain, did, signer, &key_id, clock, random,
+        )
+        .await;
         let holds = match &sent {
             Ok(_) => HoldsMaster::Offered,
             // On the retry list: it goes when the store takes it.

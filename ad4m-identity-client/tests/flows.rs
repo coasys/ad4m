@@ -2615,7 +2615,7 @@ async fn holding_app(
     b_vault: &MemoryVault,
     entry: DeviceEntry,
 ) -> String {
-    let key_id = link_app(a, vault, did, b, entry).await;
+    let key_id = link_app(a, vault, did, b, entry, true).await;
     let asked = ask_for_master(b, None).await.unwrap();
     let listed = a.requests(0).await.unwrap();
     let request = listed.iter().find(|r| r.id == asked).unwrap();
@@ -2836,6 +2836,66 @@ async fn removing_the_master_key_is_refused_on_its_only_holder() {
     assert_eq!(desk_vault.master_index(&scid).unwrap(), Some(0));
 }
 
+/// The record's device kind grants nothing: a desktop app whose claim said it does not keep the
+/// master key writes `holdsMaster: true` for itself in the record. It does not count as another
+/// holder for `remove_master`, and a rotation does not send it the new master.
+#[tokio::test]
+async fn a_device_the_log_does_not_let_keep_the_master_key_is_no_holder() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 29).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    record::write(
+        &desk,
+        &did,
+        &[Change::HoldsMaster {
+            key_id: d2.clone(),
+            holds: HoldsMaster::Yes,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            opened.record.devices[&d2].kind,
+            opened.record.devices[&d2].holds_master
+        ),
+        (DeviceKind::DesktopApp, HoldsMaster::Yes)
+    );
+
+    assert!(matches!(
+        remove_master(&a, &vault, &did, &OsRandom).await,
+        Err(ClientError::OnlyCopy)
+    ));
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(0));
+
+    let words = words::from_entropy(&[29; 16]);
+    let rotated = rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(rotated.pushes.is_empty(), "{:?}", rotated.pushes);
+    assert!(vault.pending_pushes().unwrap().is_empty());
+    rotated.record.unwrap();
+    assert!(matches!(
+        remove_master(&a, &vault, &did, &OsRandom).await,
+        Err(ClientError::OnlyCopy)
+    ));
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
+}
+
 /// What [`Racing`] appends before the next publish reaches the store.
 enum Race {
     /// Another app rotates with the same words.
@@ -2904,6 +2964,7 @@ async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
         &did,
         &host,
         entry("host", DeviceKind::CommunityHost),
+        false,
     )
     .await;
     let d3 = link_app(
@@ -2912,6 +2973,7 @@ async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
         &did,
         &server,
         entry("server", DeviceKind::Server),
+        false,
     )
     .await;
     let words = words::from_entropy(&[25; 16]);
@@ -2988,6 +3050,7 @@ async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
         &did,
         &extra,
         entry("server 2", DeviceKind::Server),
+        false,
     )
     .await;
     let publishes = a.rpc().publishes.get();
@@ -3029,6 +3092,7 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
         &did,
         &phone,
         entry("Phone", DeviceKind::PhoneApp),
+        true,
     )
     .await;
     let d3 = link_app(
@@ -3037,6 +3101,7 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
         &did,
         &host,
         entry("host", DeviceKind::CommunityHost),
+        false,
     )
     .await;
     let words = words::from_entropy(&[26; 16]);
@@ -3157,6 +3222,7 @@ async fn the_words_restore_the_identity_on_a_new_device() {
         &did,
         &host,
         entry("host", DeviceKind::CommunityHost),
+        false,
     )
     .await;
     let words = words::from_entropy(&[27; 16]);

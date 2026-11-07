@@ -153,8 +153,8 @@ pub enum ClientError {
     /// head).
     #[error("the log kept changing under the rotation; try again")]
     LogBusy,
-    /// This device holds the only usable copy of the master key: no other desktop or phone app
-    /// of the log holds it. Removing it would leave only the 12 words.
+    /// This device holds the only usable copy of the master key: no other device valid at the
+    /// head that the log lets keep it holds it (per the record). Removing it would leave only the 12 words.
     #[error("this device holds the only copy of the master key")]
     OnlyCopy,
     #[error("{0}")]
