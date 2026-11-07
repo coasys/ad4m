@@ -6,27 +6,42 @@
 //! key of the log without the bot mark, and to the recovery key the words derive, when the
 //! record has one ([`seal_record`]). A writer reads the `enc` keys from the log, so it wraps to
 //! every device even with no copy of the old record, and a revoked or removed device cannot
-//! read a later version. The store keeps only the [`SealedRecord`] and checks its shape and
-//! that it is wrapped to exactly those keys ([`check_sealed`]).
+//! read a later version.
+//!
+//! The writer signs the whole envelope ([`envelope_signing_bytes`], domain
+//! `coasys:private-record`) with its device key, or with the current master key for a
+//! master-signed write; the envelope names the signer's key id. A reader ([`open_record`]) and
+//! the store ([`check_sealed`]) verify that signature against the identity's log before they
+//! trust any metadata or recipient key: anyone can seal to the log's public keys, only the
+//! identity's keys can sign. The store keeps only the [`SealedRecord`] and checks its shape, its
+//! signature and that it is wrapped to exactly the log's readers.
+//!
+//! Every version is a whole envelope, so a store can serve back an older one: a reader keeps the
+//! highest version it has read per identity and refuses a lower one.
 //!
 //! Pure functions: no I/O, no clock, and the caller's RNG for the record key and the nonce.
 
 use std::collections::BTreeMap;
 
-use ad4m_hash_chain::{canonical_json, Multikey};
+use ad4m_hash_chain::{canonical_json, decode_proof_value, Multikey};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+#[cfg(feature = "build")]
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::json;
+use serde_json::{json, Value};
+#[cfg(feature = "build")]
 use zeroize::Zeroizing;
 
+use crate::domain::{signing_bytes, verify_signed};
 use crate::keys::{is_x25519_multikey, X25519Secret};
 use crate::seal::{self, b64, is_base64url};
 use crate::{KelChain, KeyId, KeyState};
 
 /// The `info` label of a wrapped record key: `"coasys:record" ‖ 0x00 ‖ scid`.
 pub const RECORD_LABEL: &str = "coasys:record";
+/// The signing domain of a record envelope.
+pub const RECORD_DOMAIN: &str = "coasys:private-record";
 /// The entry of `wrapped` for the recovery key.
 pub const RECOVERY_ENTRY: &str = "recovery";
 /// Bytes of the record key.
@@ -51,6 +66,20 @@ pub struct SealedRecord {
     pub nonce: String,
     /// base64url of XChaCha20-Poly1305(recordKey, nonce, JCS(PrivateRecord), aad = [`record_aad`]).
     pub ciphertext: String,
+    /// The writer's key id: a device key without the bot mark valid at the head (`"d3"`), or
+    /// the current master (`"m0"`).
+    pub signer: KeyId,
+    /// That key over [`envelope_signing_bytes`], base58btc (`z…`).
+    pub sig: String,
+}
+
+/// Who wrote a record whose signature verified ([`verify_envelope`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Writer {
+    /// A device key without the bot mark, valid at the head.
+    Device(KeyId),
+    /// The log's current master key.
+    Master(KeyId),
 }
 
 /// The record's plaintext. It holds no person setting: settings stay per executor.
@@ -179,6 +208,12 @@ pub enum RecordError {
     NoEntry(String),
     #[error("the record is not wrapped to exactly the log's device keys: {0}")]
     Wrapped(String),
+    #[error(
+        "{0} is neither a device key without the bot mark valid at the head nor the current master"
+    )]
+    Signer(String),
+    #[error("the record's signature does not verify")]
+    Signature,
 }
 
 impl RecordError {
@@ -189,6 +224,8 @@ impl RecordError {
             RecordError::Open => "open",
             RecordError::NoEntry(_) => "not-found",
             RecordError::Wrapped(_) => "wrapped",
+            RecordError::Signer(_) => "signer",
+            RecordError::Signature => "signature",
         }
     }
 }
@@ -197,12 +234,74 @@ fn malformed(what: impl Into<String>) -> RecordError {
     RecordError::Malformed(what.into())
 }
 
-/// The record ciphertext's AAD: `JCS({"scid": scid, "version": version})`, so a ciphertext of
-/// one identity or version does not pass as another. A version above 2^53 − 1 is malformed.
-pub fn record_aad(scid: &str, version: u64) -> Result<Vec<u8>, RecordError> {
-    canonical_json(&json!({ "scid": scid, "version": version }))
+/// The record ciphertext's AAD: `JCS({"scid": scid, "version": version, "recoveryKey":
+/// recoveryKey or null})`, so a ciphertext of one identity or version, or under another recovery
+/// key, does not pass as another. A version above 2^53 − 1 is malformed.
+pub fn record_aad(
+    scid: &str,
+    version: u64,
+    recovery_key: Option<&str>,
+) -> Result<Vec<u8>, RecordError> {
+    canonical_json(&json!({ "scid": scid, "version": version, "recoveryKey": recovery_key }))
         .map(String::into_bytes)
         .map_err(|_| malformed("version is not a safe integer"))
+}
+
+/// The value the writer signs for `sealed` of identity `scid`: every field of the envelope but
+/// `sig`, an absent one as `null`.
+fn envelope_value(scid: &str, sealed: &SealedRecord) -> Value {
+    json!({
+        "scid": scid,
+        "version": sealed.version,
+        "wrapped": sealed.wrapped,
+        "recoveryKey": sealed.recovery_key,
+        "nonce": sealed.nonce,
+        "ciphertext": sealed.ciphertext,
+        "signer": sealed.signer,
+    })
+}
+
+/// The bytes the writer signs: `signing_bytes("coasys:private-record", {scid, version, wrapped,
+/// recoveryKey, nonce, ciphertext, signer})`, an absent `recoveryKey` as `null`.
+pub fn envelope_signing_bytes(scid: &str, sealed: &SealedRecord) -> Result<Vec<u8>, RecordError> {
+    signing_bytes(RECORD_DOMAIN, &envelope_value(scid, sealed))
+        .map_err(|e| malformed(e.to_string()))
+}
+
+/// The writer of `sealed` when its signature verifies against `chain` at its head: `signer`
+/// must name a device key without the bot mark valid at the head, or the current master, and
+/// `sig` must be that key over [`envelope_signing_bytes`]. A key revoked, removed or replaced
+/// before the head no longer counts, nor does a bot key.
+pub fn verify_envelope(sealed: &SealedRecord, chain: &KelChain) -> Result<Writer, RecordError> {
+    if sealed.version > ad4m_hash_chain::MAX_SAFE_INTEGER {
+        return Err(malformed("version is not a safe integer"));
+    }
+    let (writer, key) = writer_of(&sealed.signer, chain)?;
+    let sig = decode_proof_value(&sealed.sig).ok_or(RecordError::Signature)?;
+    if !verify_signed(
+        RECORD_DOMAIN,
+        &envelope_value(chain.id(), sealed),
+        key,
+        &sig,
+    ) {
+        return Err(RecordError::Signature);
+    }
+    Ok(writer)
+}
+
+/// The writer `signer` names and its signing key, when the log at its head lets it write: the
+/// current master, or a device key without the bot mark valid at the head.
+fn writer_of<'a>(signer: &str, chain: &'a KelChain) -> Result<(Writer, &'a Multikey), RecordError> {
+    let state = chain.state();
+    if let Some(m) = state.current_master().filter(|m| m.id == signer) {
+        return Ok((Writer::Master(m.id.clone()), &m.sign));
+    }
+    match state.keys.get(signer) {
+        Some(r) if r.scopes.is_empty() && state.key_valid_at(&r.id, chain.head().seq) => {
+            Ok((Writer::Device(r.id.clone()), &r.sign))
+        }
+        _ => Err(RecordError::Signer(signer.to_string())),
+    }
 }
 
 /// The `info` of a wrapped record key: `"coasys:record" ‖ 0x00 ‖ scid`.
@@ -230,24 +329,33 @@ pub fn readers(
     out
 }
 
-/// Encrypts `record` as `version` under a fresh record key and wraps that key to every reader
-/// of the log at its head ([`readers`]).
+/// Encrypts `record` as `version` under a fresh record key, wraps that key to every reader of
+/// the log at its head ([`readers`]), and signs the envelope with `signer`: a device key without
+/// the bot mark valid at the head, or the current master.
+#[cfg(feature = "build")]
 pub fn seal_record<R: CryptoRng + RngCore>(
     chain: &KelChain,
     version: u64,
     record: &PrivateRecord,
     recovery_key: Option<Multikey>,
+    signer: &dyn crate::build::Signer,
     rng: &mut R,
 ) -> Result<SealedRecord, RecordError> {
     use base64::Engine;
     let scid = chain.id();
-    let aad = record_aad(scid, version)?;
     if recovery_key
         .as_deref()
         .is_some_and(|k| !is_x25519_multikey(k))
     {
         return Err(malformed("recoveryKey is an X25519 multikey"));
     }
+    let aad = record_aad(scid, version, recovery_key.as_deref())?;
+    let state = chain.state();
+    let signer_key = signer.key();
+    let signer_id = state
+        .key_id_of(&signer_key)
+        .cloned()
+        .ok_or_else(|| RecordError::Signer(signer_key.to_string()))?;
     let value = serde_json::to_value(record).map_err(|e| malformed(e.to_string()))?;
     let text = canonical_json(&value).map_err(|e| malformed(e.to_string()))?;
     let mut key = Zeroizing::new([0u8; RECORD_KEY_LEN]);
@@ -266,29 +374,43 @@ pub fn seal_record<R: CryptoRng + RngCore>(
         .map_err(|_| malformed("the record does not encrypt"))?;
     let info = wrap_info(scid);
     let mut wrapped = BTreeMap::new();
-    for (entry, enc) in readers(chain.state(), chain.head().seq, recovery_key.as_ref()) {
+    for (entry, enc) in readers(state, chain.head().seq, recovery_key.as_ref()) {
         let sealed = seal::seal(&enc, &info, key.as_ref(), rng)
             .map_err(|_| malformed(format!("the enc key of {entry} is not X25519")))?;
         wrapped.insert(entry, sealed);
     }
-    Ok(SealedRecord {
+    let mut sealed = SealedRecord {
         version,
         wrapped,
         recovery_key,
         nonce: bs58::encode(nonce).into_string(),
         ciphertext: b64().encode(ciphertext),
-    })
+        signer: signer_id,
+        sig: String::new(),
+    };
+    writer_of(&sealed.signer, chain)?;
+    let bytes = envelope_signing_bytes(scid, &sealed)?;
+    sealed.sig = ad4m_hash_chain::encode_proof_value(&signer.sign(&bytes));
+    Ok(sealed)
 }
 
-/// Opens `sealed` of identity `scid` through its `wrapped[entry]` (a key id, or `"recovery"`)
-/// with that reader's X25519 `secret`.
+/// Opens `sealed` of the identity whose log is `chain` through its `wrapped[entry]` (a key id,
+/// or `"recovery"`) with that reader's X25519 `secret`. The envelope's signature is checked
+/// against the log first ([`verify_envelope`]): a record no key of the identity signed is
+/// refused before any of its fields is used.
+///
+/// It does not know which versions the caller read before: a store can serve back an older
+/// envelope whole, so a reader keeps the highest version it has read per identity and refuses
+/// a lower one.
 pub fn open_record(
     sealed: &SealedRecord,
-    scid: &str,
+    chain: &KelChain,
     entry: &str,
     secret: &X25519Secret,
 ) -> Result<PrivateRecord, RecordError> {
     use base64::Engine;
+    verify_envelope(sealed, chain)?;
+    let scid = chain.id();
     let wrapped = sealed
         .wrapped
         .get(entry)
@@ -297,7 +419,7 @@ pub fn open_record(
     if key.len() != RECORD_KEY_LEN {
         return Err(RecordError::Open);
     }
-    let aad = record_aad(scid, sealed.version)?;
+    let aad = record_aad(scid, sealed.version, sealed.recovery_key.as_deref())?;
     let nonce = decode_nonce(&sealed.nonce)?;
     let ciphertext = b64()
         .decode(&sealed.ciphertext)
@@ -326,11 +448,12 @@ fn decode_nonce(text: &str) -> Result<[u8; NONCE_LEN], RecordError> {
         .ok_or_else(|| malformed("nonce is 24 bytes of base58btc"))
 }
 
-/// The store's check of a record it is asked to keep for the log `chain`: well-formed, and
-/// wrapped to exactly [`readers`] of the log at its head (a key that left the log, a bot key
-/// or a missing device is refused), with `wrapped["recovery"]` exactly when `recoveryKey` is
-/// set. The store cannot open it, so this is all it can check of the wraps.
-pub fn check_sealed(sealed: &SealedRecord, chain: &KelChain) -> Result<(), RecordError> {
+/// The store's check of a record it is asked to keep for the log `chain`: well-formed, signed
+/// by a writer the log lets write ([`verify_envelope`]), and wrapped to exactly [`readers`] of
+/// the log at its head (a key that left the log, a bot key or a missing device is refused),
+/// with `wrapped["recovery"]` exactly when `recoveryKey` is set. The store cannot open it, so
+/// this is all it can check of the wraps. Answers the writer.
+pub fn check_sealed(sealed: &SealedRecord, chain: &KelChain) -> Result<Writer, RecordError> {
     if sealed.version > ad4m_hash_chain::MAX_SAFE_INTEGER {
         return Err(malformed("version is not a safe integer"));
     }
@@ -348,6 +471,7 @@ pub fn check_sealed(sealed: &SealedRecord, chain: &KelChain) -> Result<(), Recor
     if let Some((entry, _)) = sealed.wrapped.iter().find(|(_, w)| !is_base64url(w)) {
         return Err(malformed(format!("wrapped[{entry}] is base64url")));
     }
+    let writer = verify_envelope(sealed, chain)?;
     let want = readers(
         chain.state(),
         chain.head().seq,
@@ -360,5 +484,5 @@ pub fn check_sealed(sealed: &SealedRecord, chain: &KelChain) -> Result<(), Recor
             "wrapped to {have:?}, the log's readers are {want:?}"
         )));
     }
-    Ok(())
+    Ok(writer)
 }

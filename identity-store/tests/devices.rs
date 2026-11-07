@@ -684,7 +684,7 @@ async fn a_record_is_kept_with_rising_versions_and_read_by_the_identitys_keys() 
         ("d2", phone.enc_secret()),
         ("recovery", recovery.clone()),
     ] {
-        let record = open_record(&read, &alice.scid(), entry, &secret).unwrap();
+        let record = open_record(&read, &alice.chain, entry, &secret).unwrap();
         assert_eq!(record.devices["d1"].name, RECORD_DEVICE_NAME);
     }
 
@@ -746,6 +746,63 @@ async fn the_first_record_is_version_one() {
     let reply = signed_body(&t, &alice, "PUT", &path, &v1, d1).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert_eq!(reply.body, json!({"version": 1}));
+}
+
+#[tokio::test]
+async fn a_record_no_writer_of_the_identity_signed_is_refused() {
+    let t = TestStore::with_identity_burst(100);
+    let (mut alice, phone) = alice_with_phone(&t).await;
+    let path = format!("/v1/private/{}", alice.scid());
+    let d1 = ("d1", &alice.device_key(1));
+    // No signature, or a signature by a key outside the log naming d1: 400 signature, though
+    // the request itself is d1's.
+    let mut unsigned = serde_json::to_value(alice.sealed_record(1, None)).unwrap();
+    unsigned["sig"] = json!("");
+    let reply = signed_body(&t, &alice, "PUT", &path, &unsigned, d1).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signature");
+    let stranger = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let mut forged = alice.sealed_record_by(1, None, &alice.device_key(1));
+    let bytes = ad4m_identity_core::record::envelope_signing_bytes(&alice.scid(), &forged).unwrap();
+    forged.sig = ad4m_hash_chain::encode_proof_value(
+        &ed25519_dalek::Signer::sign(&stranger, &bytes).to_bytes(),
+    );
+    let reply = signed_body(
+        &t,
+        &alice,
+        "PUT",
+        &path,
+        &serde_json::to_value(&forged).unwrap(),
+        d1,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signature");
+    // A swapped recovery key under the writer's signature over the original.
+    let mut swapped = serde_json::to_value(
+        alice.sealed_record(1, Some(x25519_multikey_of(&X25519Secret::from([5u8; 32])))),
+    )
+    .unwrap();
+    swapped["recoveryKey"] = json!(x25519_multikey_of(&X25519Secret::from([7u8; 32])));
+    let reply = signed_body(&t, &alice, "PUT", &path, &swapped, d1).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signature");
+    // The phone signs version 1; once revoked, its envelope is refused even when d1 sends it.
+    let by_phone = serde_json::to_value(alice.sealed_record_by(1, None, &phone.key)).unwrap();
+    let revoke = alice.revoke(&["d2"]);
+    let reply = t.append_push(&mut alice, revoke).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let reply = signed_body(&t, &alice, "PUT", &path, &by_phone, d1).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signer");
+    assert_eq!(
+        signed(&t, &alice, "GET", &path, d1).await.status,
+        StatusCode::NOT_FOUND
+    );
+    // Signed by d1, it is kept.
+    let good = serde_json::to_value(alice.sealed_record(1, None)).unwrap();
+    let reply = signed_body(&t, &alice, "PUT", &path, &good, d1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
 }
 
 #[tokio::test]

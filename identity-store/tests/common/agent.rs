@@ -468,8 +468,18 @@ impl Person {
     }
 
     /// A private record of `version`, wrapped to the readers of the person's log at its head
-    /// (and to `recovery`, when given).
+    /// (and to `recovery`, when given), signed by d1.
     pub fn sealed_record(&self, version: u64, recovery: Option<String>) -> SealedRecord {
+        self.sealed_record_by(version, recovery, &self.device_key(1))
+    }
+
+    /// [`Person::sealed_record`] signed by `signer`, a device key or a master key of the log.
+    pub fn sealed_record_by(
+        &self,
+        version: u64,
+        recovery: Option<String>,
+        signer: &SigningKey,
+    ) -> SealedRecord {
         let mut record = PrivateRecord::default();
         record.devices.insert(
             "d1".into(),
@@ -488,6 +498,7 @@ impl Person {
             version,
             &record,
             recovery,
+            signer,
             &mut rand::rngs::OsRng,
         )
         .unwrap()

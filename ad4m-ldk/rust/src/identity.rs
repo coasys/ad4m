@@ -452,6 +452,10 @@ pub struct SealedRecord {
     pub recovery_key: Option<String>,
     pub nonce: String,
     pub ciphertext: String,
+    /// The writer's key id: a device key without the bot mark, or the current master.
+    pub signer: String,
+    /// That key over the envelope (`coasys:private-record`).
+    pub sig: String,
 }
 
 /// The answer of a record write.

@@ -639,7 +639,7 @@ Ed25519 (the value is an object without a `domain` member). The registry is
 `ad4m_identity_core::domain::SIGNING_DOMAINS`:
 `coasys:kel`, `coasys:link`, `coasys:agent-record`, `coasys:store-request`, `coasys:head`,
 `coasys:vouch`, `coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`,
-`coasys:session`, `coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
+`coasys:private-record`, `coasys:session`, `coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
 derivation and are never signing domains; every signing API refuses them: `coasys:pow`,
 `coasys:pair-id:1`, `coasys:pair-key:1`, `coasys:match`, `coasys:wrap:1`, `coasys:auth:1`,
 `coasys:record`. Two signing domains also serve as a hash or `info` prefix: `coasys:offer`
@@ -678,7 +678,9 @@ valid at `by.kelSeq`, a position its log holds with hash `by.kelHash`; and the s
 verifies. An offer ticket's `signedOffer` must verify against the log at the head, name the
 ticket's offer, be signed by the same master key, be bound to `to`, and commit to `s`. A
 `master` body's `secret` must be the key `masters[index]` of the log of `did`; when `index` is
-not the current master the message is stale: the device acknowledges it and drops it.
+not the current master the message is stale: the device acknowledges it and drops it. A payload
+has no single-use mark, so a host can deliver an exact copy again and, while its master is
+current, the copy passes these checks: a device acts on a message idempotently.
 
 **Pre-join reads.** A device whose key is in no log yet reads its pre-join inbox with
 `PreInboxAuth { address, sign, r, store, method, path, nonce, expires, sig }`, `sig` by `sign`
@@ -689,10 +691,17 @@ replayed to a second host. A host checks the store, the method, the path (withou
 `expires` (at most 5 minutes ahead) and that the nonce is new.
 
 **The private details record.** `SealedRecord { version, wrapped, recoveryKey?, nonce,
-ciphertext }`. The record (`PrivateRecord { devices, wordsCheckedAt, pendingRevocations,
+ciphertext, signer, sig }`. The record (`PrivateRecord { devices, wordsCheckedAt, pendingRevocations,
 safeguards }`, no other field: person settings stay per device) is encrypted with
 XChaCha20-Poly1305 under a fresh 32-byte record key for every version, nonce 24 bytes
-(base58btc), `aad = JCS({"scid": scid, "version": version})`, ciphertext in base64url. The record
+(base58btc), `aad = JCS({"scid": scid, "version": version, "recoveryKey": recoveryKey or
+null})`, ciphertext in base64url. The writer signs the whole envelope: `signer` is its key id,
+a device key without the bot mark valid at the head or the current master, and `sig` (base58btc
+multibase) is that key over `signing_bytes("coasys:private-record", {scid, version, wrapped,
+recoveryKey, nonce, ciphertext, signer})`, an absent `recoveryKey` as `null`. A reader and a
+host check the signature against the log at its head before they use any field: anyone can seal
+to the log's public keys, so an unsigned or wrongly signed envelope, or one by a key revoked,
+replaced or with the bot mark, is refused. The record
 key is sealed (above) with `info = "coasys:record" ‖ 0x00 ‖ scid` to the `enc` key of every
 device key valid at the head without the bot mark (`wrapped[keyId]`), and to `recoveryKey` when
 set (`wrapped["recovery"]`). A writer reads the `enc` keys from the log, so a removed or revoked

@@ -1,7 +1,8 @@
 //! The private details record: one encrypted record per identity, read and written by any
 //! device key of the identity without the bot mark, valid at the head, and by the current
-//! master key (the restoring app). The store cannot open it; it checks that the record is
-//! wrapped to exactly the log's readers (`record::check_sealed`: every valid device key
+//! master key (the restoring app). The store cannot open it; it checks that the envelope is
+//! signed by a writer the log lets write (`record::verify_envelope`), that it is wrapped to
+//! exactly the log's readers (`record::check_sealed`: every valid device key
 //! without the bot mark, plus `"recovery"` exactly when `recoveryKey` is set), that its
 //! version is the stored one plus one, an absent record counting as version 0 so the first
 //! write is version 1 (`409 {version}` otherwise; a jump would let one write take the version

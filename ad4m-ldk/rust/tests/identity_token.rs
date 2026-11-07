@@ -559,6 +559,8 @@ fn identity_inbox_record_and_request_calls() {
         recovery_key: None,
         nonce: "zNonce".into(),
         ciphertext: "BBBB".into(),
+        signer: "d1".into(),
+        sig: "zSig".into(),
     };
     assert_eq!(
         block_on(lang.identity_put_record(did(), record, request()))
@@ -649,8 +651,10 @@ fn inbox_record_and_request_wire_types_use_the_stores_field_names() {
             recovery_key: Some("z6LSRec".into()),
             nonce: "zNonce".into(),
             ciphertext: "BBBB".into(),
+            signer: "d1".into(),
+            sig: "zSig".into(),
         },
-        json!({"version": 2, "wrapped": {"d1": "AAAA"}, "recoveryKey": "z6LSRec", "nonce": "zNonce", "ciphertext": "BBBB"}),
+        json!({"version": 2, "wrapped": {"d1": "AAAA"}, "recoveryKey": "z6LSRec", "nonce": "zNonce", "ciphertext": "BBBB", "signer": "d1", "sig": "zSig"}),
     );
     wire(
         &PostedRequest {

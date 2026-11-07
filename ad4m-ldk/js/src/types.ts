@@ -406,6 +406,10 @@ export interface SealedRecord {
     recoveryKey?: string;
     nonce: string;
     ciphertext: string;
+    /** The writer's key id: a device key without the bot mark, or the current master. */
+    signer: string;
+    /** That key over the envelope (`coasys:private-record`). */
+    sig: string;
 }
 
 export interface RecordStored {

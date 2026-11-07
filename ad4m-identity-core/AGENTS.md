@@ -21,7 +21,7 @@ request box), is informative.
 | `src/keys.rs` | X25519 multikeys; key-type checks; `X25519Secret`, `x25519_multikey_of`, `x25519_secret_of_ed25519` (an executor key's `enc` secret) |
 | `src/seal.rs` | the one HPKE construction (RFC 9180 base mode, X25519/HKDF-SHA256/ChaCha20-Poly1305, `base64url(enc ‖ ct)`), crate-private; used by `inbox` and `record` |
 | `src/inbox.rs` | the device inbox (spec section 17): `InboxAddress`, `pre_address`, `InboxPayload`, `InboxBody` (`OfferTicket`, `Master`), `sign_payload`, `seal`/`open`, `check_payload` → `Accept` (`ClaimOffer`, `KeepMaster`, `Stale`), `PreInboxAuth` (`sign_pre_auth`, `verify_pre_auth`), `check_sealed` (the store's shape check), the limits |
-| `src/record.rs` | the private details record: `SealedRecord`, `PrivateRecord`, `DeviceEntry`, `DeviceKind`, `Place`, `HoldsMaster`, `PendingRevocation`, `RevocationReason`; `readers` (who a record is wrapped to), `seal_record`, `open_record`, `check_sealed` (the store's check), `record_aad`, `wrap_info` |
+| `src/record.rs` | the private details record: `SealedRecord`, `PrivateRecord`, `DeviceEntry`, `DeviceKind`, `Place`, `HoldsMaster`, `PendingRevocation`, `RevocationReason`; `readers` (who a record is wrapped to), `seal_record` (signs the envelope), `open_record` (verifies it first), `verify_envelope` → `Writer`, `envelope_signing_bytes`, `check_sealed` (the store's check), `record_aad`, `wrap_info` |
 | `src/requests.rs` | the request box: `DeviceRequestBody` (`SendMaster`, `ConfirmRevoke`), `PostedRequest`, `check_post`, `REQUEST_TTL_S`, `MAX_OPEN_REQUESTS` |
 | `src/document.rs` | `did_document(chain, version, also_known_as)`: `DidDocument`, `VerificationMethod`, `DocumentMetadata`, `DocumentError` (spec section 9); the contexts `DID_CONTEXT`, `MULTIKEY_CONTEXT`, `COASYS_CONTEXT` |
 | `src/domain.rs` | the signing-domain registry and labels (spec sections 7 and 16); `signing_bytes`, `verify_signed`, `check_domain`; `LINK_DOMAIN`, `AGENT_RECORD_DOMAIN`, `HEAD_DOMAIN`, `REQUEST_DOMAIN`, `SESSION_DOMAIN` (key statements: a device key's login on an executor); `HeadStatement` (what the store signs for a head; the store signs it, executors verify it) |
@@ -47,6 +47,11 @@ request box), is informative.
 - **A record is wrapped to `record::readers`**: every device key valid at the head without the
   bot mark, plus `"recovery"` exactly when `recoveryKey` is set; a fresh record key and nonce
   every version. The store checks the set with `record::check_sealed`.
+- **A record is signed by its writer** (`coasys:private-record`, `record::verify_envelope`): a
+  device key without the bot mark valid at the head, or the current master. `open_record` and
+  `check_sealed` verify the signature against the log before any field counts; the AAD binds
+  `scid`, `version` and `recoveryKey`. A store can serve back an older envelope whole, so a
+  reader keeps the highest version it has read per identity and refuses a lower one.
 - An internally tagged unit variant ignores extra fields under `deny_unknown_fields`; a kind
   with no fields is an empty struct variant (`DeviceRequestBody::SendMaster {}`).
 - The executor and the store enable `build`, never `words`: no node can make the words. Only
