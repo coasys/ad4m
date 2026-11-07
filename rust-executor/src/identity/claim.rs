@@ -6,16 +6,17 @@
 //! (`operator::first_link_check`): every path that claims for the main agent calls it, the
 //! `identity.claimOffer` handler and the pre-join ticket path of `identity.prepareDevice`
 //! (`inbox`), so the rule never depends on an RPC guard. On a desktop app's executor at its first
-//! run (`--custody-channel`, no operator record, the main agent of no identity) the first claim
-//! the store takes records the offer's identity as the operator (`OperatorSetBy::FirstRun`). Claims for a hosted tenant's agent
-//! are not here yet.
+//! run (`--custody-channel`, no operator record, the main agent of no identity) a claim goes
+//! ahead and records nothing; the identity the main agent joins (`join_status` binds it once the
+//! holder's add lists the key) becomes the operator (`OperatorSetBy::FirstRun`). Until then the
+//! desktop may claim again, for any identity. Claims for a hosted tenant's agent are not here yet.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::did_of;
 use ad4m_identity_core::link::{self, OfferString};
 
 use super::device::{device_key, enc_key_of, WalletSigner};
-use super::operator::{first_link_check, FirstLink, FirstLinkRefusal};
+use super::operator::{first_link_check, FirstLink};
 use super::service::{
     backend_error, cache_error, db, error, first_link_error, now, store_base, IdentityService,
 };
@@ -59,8 +60,8 @@ impl ClaimService<'_> {
     /// recorded operator; `already-linked` while the main key speaks for an
     /// identity (a revoked key needs a new main key: `identity.rekey`). With no record on a
     /// `--custody-channel` executor whose main agent speaks for no identity (a desktop app's
-    /// first run) the claim goes ahead, and once the store takes it the offer's identity is
-    /// recorded as the operator (`OperatorSetBy::FirstRun`). `can_keep_master` goes
+    /// first run) the claim goes ahead and records nothing: the operator is recorded only when
+    /// the main agent joins (`join_status`). `can_keep_master` goes
     /// into the claim the main key co-signs.
     pub async fn claim_for_main(
         &self,
@@ -127,18 +128,7 @@ impl ClaimService<'_> {
             .await
             .map_err(backend_error)?;
         if first_link == FirstLink::FirstRun {
-            // Only while the record is still empty: of two first claims at once, the first
-            // recorded wins and the other is refused as any offer of another identity is.
-            let recorded = db(|db| {
-                db.set_operator_record_if_empty(&offer_did, now(), OperatorSetBy::FirstRun)
-            })?;
-            if recorded.scid != offer_did {
-                return Err(first_link_error(FirstLinkRefusal::FirstLink {
-                    operator: recorded.scid,
-                    offer: offer_did,
-                }));
-            }
-            log::info!("identity: the first claim of this desktop executor records {offer_did} as its operator");
+            log::info!("identity: this desktop executor claimed an offer of {offer_did}; it becomes the operator when the holder confirms and the main agent joins");
         }
         Ok(ClaimOfferResult {
             did: offer_did,
@@ -151,7 +141,8 @@ impl ClaimService<'_> {
 
     /// `identity.joinStatus`: the state of a claim this executor made for its main agent (the
     /// only agent that claims today); on `spent`, takes the log and records that the main
-    /// agent speaks for the identity. A managed agent has no claims.
+    /// agent speaks for the identity, and on a desktop's first link that the identity is the
+    /// operator. A managed agent has no claims.
     pub async fn join_status(
         &self,
         agent: &AgentContext,
@@ -184,7 +175,34 @@ impl ClaimService<'_> {
                 .identity
                 .record_agent_if_listed(agent, &join.scid)
                 .await?;
+            self.record_first_run_operator(agent, &join.scid)?;
         }
         Ok(status)
+    }
+
+    /// The end of a desktop app's first link: once the main agent speaks for `scid` (the holder
+    /// confirmed the match code and the add listing the main key landed), a still-empty
+    /// operator record takes that identity (`OperatorSetBy::FirstRun`). A claim alone records
+    /// nothing, so a claim that never completes (the wrong code scanned, the holder said No)
+    /// leaves the desktop free to claim again. With no record, the join row can only come from
+    /// a first-run claim (`first_link_check` refuses every other claim without one).
+    fn record_first_run_operator(
+        &self,
+        agent: &AgentContext,
+        scid: &str,
+    ) -> Result<(), WsRpcError> {
+        let (agent_did, _) = device_key(agent).map_err(WsRpcError::internal)?;
+        if db(|db| db.agent_identity(&agent_did))?.as_deref() != Some(scid)
+            || db(|db| db.operator_record())?.is_some()
+        {
+            return Ok(());
+        }
+        let did = did_of(scid);
+        let recorded =
+            db(|db| db.set_operator_record_if_empty(&did, now(), OperatorSetBy::FirstRun))?;
+        if recorded.scid == did {
+            log::info!("identity: this desktop executor joined {did}, its operator from now on");
+        }
+        Ok(())
     }
 }

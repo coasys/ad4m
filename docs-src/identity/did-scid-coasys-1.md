@@ -737,8 +737,10 @@ a new string ends the read of the last one.
 - A master key in a pre-join inbox is dropped: a master key never travels before the device
   joined. A valid offer ticket is claimed under the executor's first-link rule (a record
   naming another identity refuses it; so does no record, except on a desktop's first run: an
-  executor with the custody channel, no record and no identity claims the first offer and records
-  its identity as operator, `FirstRun`), with `canKeepMaster` exactly when the
+  executor with the custody channel, no record and no identity may claim any offer, and records
+  an identity as operator, `FirstRun`, only when its main agent joins it: the holder confirmed
+  the match code and the add listing the device key is in the log; until then it may claim
+  again, for the same or another identity), with `canKeepMaster` exactly when the
   executor has the custody channel; only a claim made shows the identity and the match code
   (`link-ticket`). The ticket is deleted either way; one whose log cannot be read now waits
   for the next read.

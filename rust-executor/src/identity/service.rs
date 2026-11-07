@@ -1675,12 +1675,13 @@ mod tests {
     }
 
     /// A desktop app's executor at its first run (`--custody-channel`, no operator record, the
-    /// main agent of no identity) claims; once the store takes the claim the offer's identity is
-    /// the operator (`first-run`), and once the add spends the offer the main agent is a device
-    /// of it. A claim for another identity is then refused `first-link`. Without the custody
-    /// channel a missing record stays `no-operator`, before the store.
+    /// main agent of no identity) claims. A claim the store took records nothing, so before the
+    /// join the desktop may claim again, for another identity. Once the add spends the offer and
+    /// the main agent binds to the identity, that identity is the operator (`first-run`), and an
+    /// offer of another identity is refused `first-link`. Without the custody channel a missing
+    /// record stays `no-operator`, before the store.
     #[tokio::test]
-    async fn a_desktop_with_no_operator_record_records_its_first_claims_identity() {
+    async fn a_desktop_with_no_operator_record_records_the_identity_it_joins() {
         use crate::db::OperatorSetBy;
         use ad4m_identity_core::link::OfferString;
         crate::test_utils::setup_wallet();
@@ -1726,28 +1727,21 @@ mod tests {
             .await
             .expect("a desktop's first claim goes ahead");
         assert_eq!(claims(), 1);
-        let recorded = record().expect("the claim recorded the operator");
-        assert_eq!(
-            (recorded.scid.as_str(), recorded.set_by),
-            (did_of(&incept.scid).as_str(), OperatorSetBy::FirstRun)
-        );
+        // The store took the claim, but the holder has not confirmed it: nothing is recorded.
+        assert_eq!(record(), None, "a claim alone records no operator");
 
-        // The record exists now: an offer of another identity is refused before the store.
+        // Before the join a desktop may claim again, for another identity (the person
+        // scanned the wrong code, or the holder pressed No).
         let other = TestLog::new(60).scid();
-        let refused = service
+        service
             .claims()
             .claim_for_main(&offer(&other, 7), true, None)
             .await
-            .expect_err("another identity");
-        assert!(
-            refused.message.starts_with("first-link"),
-            "{}",
-            refused.message
-        );
-        assert_eq!(refused.code, 403);
-        assert_eq!(claims(), 1);
-        assert_eq!(record().unwrap().scid, did_of(&incept.scid));
+            .expect("a second claim before the join goes ahead");
+        assert_eq!((claims(), record()), (2, None));
 
+        // The holder confirms the first claim: the add lands and the main agent binds to its
+        // identity, which becomes the operator.
         *backend.offer.lock().unwrap() = "spent".into();
         let status = service
             .claims()
@@ -1759,6 +1753,39 @@ mod tests {
             db(|db| db.agent_identity(&main_did)).unwrap(),
             Some(incept.scid.clone())
         );
+        let recorded = record().expect("the join recorded the operator");
+        assert_eq!(
+            (recorded.scid.as_str(), recorded.set_by),
+            (did_of(&incept.scid).as_str(), OperatorSetBy::FirstRun)
+        );
+
+        // Bound: every offer is `already-linked`.
+        let refused = service
+            .claims()
+            .claim_for_main(&offer(&other, 8), true, None)
+            .await
+            .expect_err("linked");
+        assert!(
+            refused.message.starts_with("already-linked"),
+            "{}",
+            refused.message
+        );
+        // With the main key in no log again (as after a revocation), the record stands: an
+        // offer of another identity is refused `first-link` before the store.
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+        let refused = service
+            .claims()
+            .claim_for_main(&offer(&other, 9), true, None)
+            .await
+            .expect_err("another identity");
+        assert!(
+            refused.message.starts_with("first-link"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.code, 403);
+        assert_eq!(claims(), 2);
+        assert_eq!(record().unwrap().scid, did_of(&incept.scid));
 
         drop(channel);
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();

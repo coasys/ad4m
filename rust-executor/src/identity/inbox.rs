@@ -1195,7 +1195,9 @@ mod tests {
 
     /// "Show my code" on a desktop app's executor at its first run (`--custody-channel`, no
     /// operator record, the main agent of no identity): the ticket is claimed, not refused
-    /// `no-operator`, and the claim records the ticket's identity as the operator (`first-run`).
+    /// `no-operator`, and the claim records no operator: until the main agent joins, "Show my
+    /// code" again takes a ticket of another identity (the record is written at the join,
+    /// `joinStatus`, as on the RPC path).
     #[tokio::test]
     async fn a_desktop_with_no_operator_record_claims_its_first_ticket() {
         let log = TestLog::new(88);
@@ -1211,11 +1213,22 @@ mod tests {
 
         until("the claim", || !store.claims.lock().unwrap().is_empty()).await;
         assert_eq!(store.claims.lock().unwrap()[0].0, offer_id);
-        let recorded = Ad4mDb::with_global_instance(|db| db.operator_record())
-            .unwrap()
-            .expect("the claim recorded the operator");
-        assert_eq!(recorded.scid, did_of(&log.scid()));
-        assert_eq!(recorded.set_by, crate::db::OperatorSetBy::FirstRun);
+        let record = || Ad4mDb::with_global_instance(|db| db.operator_record()).unwrap();
+        assert_eq!(record(), None, "a claim alone records no operator");
+
+        // The wrong code was scanned: "Show my code" again, and a ticket of another identity
+        // is claimed, not refused `first-link`.
+        let other = TestLog::new(89);
+        *store.events.lock().unwrap() = other.events.clone();
+        let prepared = prepare_device(&service, true).await.unwrap();
+        let device = DeviceString::parse(&prepared.device).unwrap();
+        let second = push_ticket(&other, &store, &device);
+        until("the second claim", || {
+            store.claims.lock().unwrap().len() == 2
+        })
+        .await;
+        assert_eq!(store.claims.lock().unwrap()[1].0, second);
+        assert_eq!(record(), None);
         ends(&service);
     }
 

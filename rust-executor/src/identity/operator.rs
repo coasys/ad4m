@@ -7,9 +7,11 @@
 //! [`first_link_check`] (in `ClaimService::claim_for_main`): only an offer of the recorded
 //! identity passes. The one exception is a desktop app's executor at its first run
 //! (`--custody-channel`, no record, the main agent of no identity yet): the desktop never runs
-//! `init --operator` and does not know its person before the first offer arrives, so its first
-//! claim the store takes records the offer's identity as the operator (`OperatorSetBy::FirstRun`),
-//! and from then on the rule holds as for every executor. While the key is valid in a log, `claim_for_main` refuses every offer
+//! `init --operator` and does not know its person before the first offer arrives, so it may claim
+//! any offer, and the identity its main agent joins (the holder confirmed, the add landed:
+//! `ClaimService::join_status`) is recorded as the operator (`OperatorSetBy::FirstRun`). A claim
+//! that never completes records nothing. From then on the rule holds as for every executor.
+//! While the key is valid in a log, `claim_for_main` refuses every offer
 //! (`already-linked`).
 //!
 //! The same rule holds for a new identity: with an operator record the main key may speak only
@@ -48,8 +50,8 @@ pub fn admits_first_link(record: Option<&OperatorRecordRow>, offer_did: &str) ->
 pub enum FirstLink {
     /// The offer is of the recorded operator.
     Operator,
-    /// A desktop app's executor at its first run, with no record: the claim, once the store
-    /// takes it, records the offer's identity as the operator (`OperatorSetBy::FirstRun`).
+    /// A desktop app's executor at its first run, with no record: the claim goes ahead, and the
+    /// identity the main agent joins through it becomes the operator (`OperatorSetBy::FirstRun`).
     FirstRun,
 }
 
@@ -172,7 +174,7 @@ mod tests {
             first_link_check(None, A, false),
             Err(FirstLinkRefusal::NoOperator)
         );
-        // A desktop app's executor at its first run: the first claim records its person.
+        // A desktop app's executor at its first run: any offer may be claimed; the join records.
         assert_eq!(first_link_check(None, A, true), Ok(FirstLink::FirstRun));
     }
 
