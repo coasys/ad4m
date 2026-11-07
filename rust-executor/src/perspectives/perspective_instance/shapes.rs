@@ -23,6 +23,7 @@ use ts_rs::TS;
 
 use super::PerspectiveInstance;
 use crate::agent::AgentContext;
+use crate::perspectives::model_query::shape::find_class;
 use crate::perspectives::shacl_parser::{
     canonical_json, class_name_of, is_own_link, shape_from_links, shape_links, SHACLShape,
     ShapeNode, SHAPE_PREDICATE, SUBJECT_CLASS,
@@ -202,7 +203,7 @@ impl PerspectiveInstance {
     /// Refuses, before writing anything: a shape the encoder refuses, two
     /// shapes for one target class, a shape URI another class holds, and a
     /// class name (`class_name_of` its target class) another class has, in
-    /// the call or stored: readers find a class by its name.
+    /// the call or stored as the class readers find by that name.
     pub async fn register_shapes(
         &mut self,
         shapes: Vec<SHACLShape>,
@@ -270,33 +271,20 @@ impl PerspectiveInstance {
         }
 
         // A class is found by its name (`model_query::shape::find_class`):
-        // two classes of one name would make every query and create read
-        // whichever the store yields. A stored class is one a reader finds,
-        // a SubjectClass with a shape.
-        for stored in self.sparql_store.query_links(
-            None,
-            Some("rdf://type"),
-            Some(SUBJECT_CLASS),
-            None,
-            None,
-            None,
-        )? {
-            let stored = stored.data.source;
-            let Some(target_class) = names.get(class_name_of(&stored).as_str()) else {
-                continue;
-            };
-            if stored != *target_class
-                && !self
-                    .sparql_store
-                    .query_links(Some(&stored), Some(SHAPE_PREDICATE), None, None, None, None)?
-                    .is_empty()
-            {
-                return Err(anyhow!(
-                    "Class '{stored}' is already registered under the name '{}': class \
-                     '{target_class}' needs another name, a class name is unique in a \
-                     perspective.",
-                    class_name_of(&stored)
-                ));
+        // a second class of a name would move every query and create of it.
+        // The class `find_class` reads for a name may register again, also
+        // when two peers each registered one before they synced and both
+        // are stored: refusing it too would lock its app out on every peer.
+        for (name, target_class) in &names {
+            if let Some(found) = find_class(&self.sparql_store, name)? {
+                if found.target_class != *target_class {
+                    return Err(anyhow!(
+                        "Class '{}' is already registered under the name '{name}': class \
+                         '{target_class}' needs another name, a class name is unique in a \
+                         perspective.",
+                        found.target_class
+                    ));
+                }
             }
         }
 

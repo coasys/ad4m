@@ -932,3 +932,73 @@ async fn two_concurrent_registrations_of_one_shape_write_once() {
         stored_form(&note())
     );
 }
+
+/// Two peers register a class of one name, each before it saw the other's,
+/// and sync brings each the other's links. `find_class` reads the class of
+/// the least IRI, `a://Task`, on both: registering it again answers, so an
+/// app that registers its classes on every start still starts. Registering
+/// `b://Task` is refused, and so is a new class that would take the name
+/// from the stored one, though its IRI sorts first.
+#[tokio::test]
+async fn a_class_name_two_peers_registered_answers_for_the_class_readers_find() {
+    let (mut a_side, _, a_ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut b_side, _, b_ctx) = setup_perspective_no_llm(&[]).await;
+    a_side
+        .register_shapes(vec![task("a://")], &a_ctx)
+        .await
+        .unwrap();
+    b_side
+        .register_shapes(vec![task("b://")], &b_ctx)
+        .await
+        .unwrap();
+    // Sync: each side receives the other peer's registration.
+    for (side, ns) in [(&a_side, "b://"), (&b_side, "a://")] {
+        side.diff_from_link_language(crate::types::PerspectiveDiff {
+            additions: shape_links(task(ns), "Task")
+                .unwrap()
+                .iter()
+                .map(peer_copy)
+                .collect(),
+            removals: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    for (side, ctx) in [(&mut a_side, &a_ctx), (&mut b_side, &b_ctx)] {
+        assert_eq!(side.get_shape("Task").unwrap().target_class, "a://Task");
+        let before = all_links(side);
+
+        let again = side.register_shapes(vec![task("a://")], ctx).await.unwrap();
+        assert_eq!(again.unchanged, vec!["Task".to_string()]);
+
+        let err = side
+            .register_shapes(vec![task("b://")], ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Class 'a://Task' is already registered under the name 'Task'"),
+            "{err}"
+        );
+        assert_eq!(all_links(side), before, "nothing is written");
+    }
+
+    // Stored `b://Task` holds the name: `a://Task` sorts first, but taking
+    // the name would move every reader of `Task` to another class.
+    let (mut fresh, _, ctx) = setup_perspective_no_llm(&[]).await;
+    fresh
+        .register_shapes(vec![task("b://")], &ctx)
+        .await
+        .unwrap();
+    let err = fresh
+        .register_shapes(vec![task("a://")], &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Class 'b://Task' is already registered under the name 'Task'"),
+        "{err}"
+    );
+    assert_eq!(fresh.get_shape("Task").unwrap().target_class, "b://Task");
+}
