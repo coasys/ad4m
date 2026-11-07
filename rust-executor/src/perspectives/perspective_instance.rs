@@ -4431,7 +4431,8 @@ impl PerspectiveInstance {
     /// changed. `Signers` runs once per verdict change, so it pages through every link of
     /// those signers, [`RECHECK_BATCH`] at a time. `CantCheck` runs every tick: one page per
     /// call, continuing after the last one, so links that stay unresolvable rotate to the
-    /// back and every one is reached.
+    /// back and every one is reached. The rewritten links go out as a remote diff does
+    /// (`update_prolog_engines`): Prolog, notifications and subscriptions see the new verdict.
     pub async fn recheck_links(&self, scope: &super::Recheck) -> Result<usize, AnyError> {
         self.recheck_links_paged(scope, RECHECK_BATCH).await
     }
@@ -4479,6 +4480,13 @@ impl PerspectiveInstance {
         let changed = rewritten.len();
         if changed > 0 {
             self.clear_shape_cache();
+            // As for a remote diff: Prolog, notifications and subscriptions see the new
+            // verdicts.
+            self.update_prolog_engines(DecoratedPerspectiveDiff {
+                additions: rewritten,
+                removals: vec![],
+            })
+            .await;
         }
         Ok(changed)
     }
@@ -8474,6 +8482,70 @@ mod tests {
         assert_eq!(recheck().await, 2, "back to the start");
         assert_eq!(valid(), order);
         assert_eq!(recheck().await, 0);
+        crate::identity::cache::global_key_map().forget(&log.scid());
+    }
+
+    /// A verdict the re-check rewrites wakes the subscriptions as a link change does: a live
+    /// query over counted links sees a `cantCheck` link turn `valid`.
+    #[tokio::test]
+    async fn a_verdict_the_recheck_rewrites_reaches_the_subscriptions() {
+        use crate::identity::cache::tests::TestLog;
+        let perspective = setup().await;
+        let log = TestLog::new(101);
+        five_unchecked_links(&perspective, &log).await;
+        let watched = perspective.sparql_store.get_all_links().unwrap()[0].clone();
+        let query = format!(
+            r#"SELECT ?t WHERE {{
+            ?s <{predicate}> ?t .
+            ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?s <{predicate}> ?t )>> .
+            ?r <ad4m://ontology/linkVerdict> ?verdict .
+            FILTER(?verdict = "valid")
+        }}"#,
+            predicate = watched.data.predicate.clone().unwrap()
+        );
+        let (id, _, first) = perspective
+            .subscribe_and_query(query, "c".into(), None)
+            .await
+            .unwrap();
+        let target = watched.data.target.clone();
+        assert!(!first.contains(target.as_str()), "not counted yet: {first}");
+
+        reach_seq_one(&log);
+        let signers = std::collections::BTreeSet::from([watched.author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap(),
+            5
+        );
+
+        // The subscription loop runs the check when woken; run it here too, so the test
+        // does not wait on its debounce.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if perspective
+                .trigger_subscription_check
+                .swap(false, Ordering::SeqCst)
+            {
+                let changed = std::mem::replace(
+                    &mut *perspective.changed_predicates.lock().await,
+                    ChangedPredicates::NoneRecorded,
+                );
+                perspective.check_subscribed_queries(changed).await;
+            }
+            if perspective.subscribed_queries.lock().await[&id]
+                .last_result
+                .contains(target.as_str())
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the subscription never saw the link turn valid"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         crate::identity::cache::global_key_map().forget(&log.scid());
     }
 
