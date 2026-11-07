@@ -330,6 +330,39 @@ pub(crate) mod tests {
         }
     }
 
+    /// The executor relays the signed envelope whole: the writer's key id and signature and the
+    /// recovery key's master attestation reach the store and come back from a read unchanged.
+    /// A field it dropped would break the envelope signature the store and every reader check.
+    #[tokio::test]
+    async fn the_record_passes_the_signed_envelope_and_the_recovery_attestation_unchanged() {
+        let world = Bound::new(72).await;
+        let service = &world.service;
+        let wire_record = serde_json::json!({
+            "version": 1,
+            "wrapped": {"d2": "AAAA", "recovery": "RRRR"},
+            "recoveryKey": "z6LSRec",
+            "recoveryAttestation": {"keyId": "m0", "sig": "zAtt"},
+            "nonce": "zN",
+            "ciphertext": "CCCC",
+            "signer": "d2",
+            "sig": "zSig",
+        });
+        let params: RecordPutParams =
+            serde_json::from_value(serde_json::json!({ "record": wire_record })).unwrap();
+        service.record_put(&world.agent, &params).await.unwrap();
+        let read = service
+            .record(&world.agent, &RecordParams::default())
+            .await
+            .unwrap()
+            .expect("the stored record");
+        assert_eq!(serde_json::to_value(&read).unwrap(), wire_record);
+        let seen = world.store.requests.lock().unwrap().clone();
+        let (call, put) = &seen[0];
+        assert_eq!(*call, "put_record");
+        let ldk: ad4m_ldk::identity::SealedRecord = serde_json::from_value(wire_record).unwrap();
+        assert_eq!(put.req.body_hash, hash_bytes(&body_bytes(&ldk).unwrap()));
+    }
+
     /// Without a request from the caller, each call signs one with the agent's device key at
     /// the trusted head, for the store that signed it, over the route and body it sends.
     #[tokio::test]
@@ -346,8 +379,11 @@ pub(crate) mod tests {
             version: 1,
             wrapped: [("d1".to_string(), "AAAA".to_string())].into(),
             recovery_key: None,
+            recovery_attestation: None,
             nonce: "zN".into(),
             ciphertext: "CCCC".into(),
+            signer: "d1".into(),
+            sig: "zSig".into(),
         };
         let stored = service
             .record_put(

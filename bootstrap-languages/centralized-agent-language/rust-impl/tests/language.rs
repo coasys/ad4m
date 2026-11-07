@@ -1850,7 +1850,7 @@ fn the_record_calls_keep_the_record_byte_for_byte_and_refuse_a_stale_version() {
             reason: "version".into()
         }
     );
-    // A record wrapped for another key set.
+    // A record changed after its writer signed it (another key set): the signature fails.
     let mut wrong = record.clone();
     wrong.version = 2;
     wrong.wrapped.insert("d9".into(), "AAAA".into());
@@ -1859,7 +1859,7 @@ fn the_record_calls_keep_the_record_byte_for_byte_and_refuse_a_stale_version() {
     assert_eq!(
         refusal(block_on(store.put_record(did, &wrong, &req))),
         IdentityErrorCode::Invalid {
-            reason: "wrapped".into()
+            reason: "signature".into()
         }
     );
 }

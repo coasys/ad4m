@@ -224,8 +224,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   that is not open at the time keeps the retired DID as owner until a later unlock moves it.
   `identity.custodyStatus` and `identity.takeMaster` are the custody channel
   (`identity/custody.rs`): only the custody credential (a session with
-  `OperatorSource::Custody`) on a loopback listener opens it, never the admin credential,
-  which an app's window may hold. The credential arrives as the first line of stdin
+  `Principal::Custody`) on a loopback listener opens it, never the admin credential,
+  which an app's window may hold. The custody credential is no operator: off a loopback
+  listener `Session::open` refuses it, and it reaches only `custody::CUSTODY_METHODS`. With the
+  channel on, `identity.inboxAck` is the custody service's alone too. The credential arrives as the first line of stdin
   (`config::read_custody_credential`, read by `ad4m-executor run` before anything else reads
   stdin; `--watch-stdin` then reads on from the same buffered `Stdin`), never from the
   environment or a flag: both are files another process, or the admin credential's host file

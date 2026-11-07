@@ -290,6 +290,11 @@ pub enum Accept {
 /// (`link::verify_offer`), names the ticket's offer, is signed by the same master key, is
 /// bound to `me`, and its commit is the ticket's `s`. A `Master` secret must be
 /// `masters[index]` of the log; `index` must be the current master, or the answer is `Stale`.
+///
+/// A payload carries no single-use mark: a store can deliver an exact copy of a message again,
+/// and while its master is still current the copy passes as the first did. A consumer acts
+/// idempotently: keeping a master key it already keeps changes nothing, and a ticket whose
+/// offer it already claimed fails at the store's claim.
 pub fn check_payload(
     p: &InboxPayload,
     me: &str,

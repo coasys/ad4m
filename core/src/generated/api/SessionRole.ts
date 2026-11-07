@@ -3,4 +3,4 @@
 /**
  * The role of a session.
  */
-export type SessionRole = "operator" | "tenant" | "app" | "anonymous";
+export type SessionRole = "operator" | "tenant" | "app" | "custody" | "anonymous";

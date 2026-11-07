@@ -95,6 +95,18 @@ pub const SIGNING_DOMAINS: &[Domain] = &[
         scheme: Scheme::DomainField,
     },
     Domain {
+        name: "coasys:private-record",
+        signs: "private record envelopes, by a device key or the current master",
+        owner: "device linking",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
+        name: "coasys:recovery-key",
+        signs: "the private record's recovery key, by the current master",
+        owner: "device linking",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
         name: "coasys:session",
         signs: "key statements for a login on an executor, and the executor's sign-in to the hosting index",
         owner: "executor hosting",

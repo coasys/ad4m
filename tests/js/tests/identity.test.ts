@@ -673,7 +673,7 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         expect(opened.record.devices.d2).to.include({ name: "Desk", kind: "desktop-app", holdsMaster: false });
     });
 
-    it("hands the master key sealed to the desktop to its custody service only, once", async () => {
+    it("hands the master key sealed to the desktop to its custody service only, until the custody service acknowledges it", async () => {
         const announced: any[] = [];
         desk.client.on("inbox-message", (event) => announced.push(event));
         const sealed = await holder.send({ cmd: "sendMaster", did, keyId: "d2" });
@@ -696,9 +696,15 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         const service = new Ad4mClient(baseUrl(desk.ports[0]), CUSTODY);
         const taken = await service.identity.takeMaster();
         expect(taken).to.deep.equal({ messageId: sealed.id, did, index: 0, secret: sealed.secret });
-        // It waits until the custody service acknowledges it.
+        // It waits until the custody service acknowledges it: handed out again until then, and
+        // the admin credential (the renderer's) cannot delete it before custody stored it.
         expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
-        expect(await desk.client.identity.inboxAck(sealed.id)).to.be.true;
+        expect(await custody.identity.takeMaster()).to.deep.equal(taken);
+        expect(await refused(desk.client.identity.inboxAck(sealed.id))).to.contain("no-custody-channel");
+        expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
+        // The custody credential reaches the custody calls only.
+        expect(await refused(custody.agent.status())).to.contain("not-a-custody-call");
+        expect(await custody.identity.inboxAck(sealed.id)).to.be.true;
         expect(await desk.client.identity.inbox()).to.deep.equal([]);
         expect(await service.identity.takeMaster()).to.be.null;
     });

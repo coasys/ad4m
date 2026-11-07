@@ -16,7 +16,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner`, `store_request` (a store request signed by a device key at a store-signed head) and `body_bytes` (the JCS bytes its `bodyHash` covers) |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
-| `custody.rs` | The custody channel's guard `admit` (the custody credential = `OperatorSource::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`). The credential is the first line of stdin at start (`config::read_custody_credential`), held in memory only and wiped on drop: never the environment or a flag, which `/proc/<pid>/environ` and `/proc/<pid>/cmdline` show to other processes and to the admin credential's host file reads. `run` exits 78 without the line, with an empty line, with the admin credential's value, or with `AD4M_CUSTODY_CREDENTIAL`/`_FILE` set, and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
+| `custody.rs` | The custody channel's guard `admit` (the custody credential = `Principal::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`) and `CUSTODY_METHODS` with `admit_call`: the custody credential is no operator and holds no capability; dispatch lets it reach only the calls on that list (403 `not-a-custody-call` for any other), and `Session::open` refuses it off a loopback listener. The credential is the first line of stdin at start (`config::read_custody_credential`), held in memory only and wiped on drop: never the environment or a flag, which `/proc/<pid>/environ` and `/proc/<pid>/cmdline` show to other processes and to the admin credential's host file reads. `run` exits 78 without the line, with an empty line, with the admin credential's value, or with `AD4M_CUSTODY_CREDENTIAL`/`_FILE` set, and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
 | `inbox.rs` | The device inbox: `Inbox` (the joined messages opened here, by id and type, never a body; one read of the joined inbox at a time; the open pre-join read; the pull's wake-up), `pull_inbox` (`identity.inbox`), `take_master` (`identity.takeMaster`), `inbox_ack`, `inbox_put`, `prepare_device` (`identity.prepareDevice`: the device string and the pre-join read; `take_ticket` claims and, once claimed, sends `link-ticket`), `run_pull` / `run_schedule` / `wake` (at start, at unlock and binding, every 15 minutes) |
 | `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `unwrapRecordKey`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
@@ -178,9 +178,12 @@ the offer's state).
   the trusted seq, `no-operator` without a record, `first-link` for another identity. One
   exception (`FirstLink::FirstRun`): a `--custody-channel` executor (a desktop app, which never
   runs `init --operator`) with no record and no identity for its main agent may claim any
-  offer. The claim records nothing: only when the main agent joins (`join_status` on `spent`
-  binds it, then `record_first_run_operator`) is that identity recorded as operator
-  (`OperatorSetBy::FirstRun`, `set_operator_record_if_empty`). So a claim that never completes
+  offer. The claim records nothing: only when the main agent joins (`join_status` on `spent`,
+  `bind_agent_if_listed` with `first_run_operator`) is that identity recorded as operator
+  (`OperatorSetBy::FirstRun`). The binding and the record are one transaction
+  (`set_agent_identity_and_first_run_operator`): a process that stops between them leaves
+  neither, and the next `joinStatus` writes both. That is why `identity.joinStatus` is a
+  write, not a `.read()`. So a claim that never completes
   (the wrong code scanned, the holder said No) leaves the desktop free to claim again, for the
   same or another identity. From then on the rule applies as above: a claim for any other
   identity is `first-link`. Both the ticket path and `identity.claimOffer` (a pasted link) go
@@ -192,7 +195,8 @@ the offer's state).
   not bound by the record.
 - `cosignIncept` and `publish` bind the caller's agent for good, and every app holds
   `agent:SIGN` and `agent:UPDATE` by default, so their guard is `Guard::UserOrOperator`: for
-  the main agent only the operator (the admin or the custody credential), never an
+  the main agent only the operator (the admin credential; the custody credential reaches them
+  through `CUSTODY_METHODS`, acting as the main agent), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
   managed agent.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through
@@ -418,7 +422,9 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
 - **`identity.takeMaster`** (custody channel, `custody::admit`) refreshes the log, opens the
   joined messages oldest first and runs `check_payload` against the cached log: `KeepMaster`
   answers `TakenMaster {messageId, did, index, secret}` (wiped when dropped, never cloned,
-  `Debug` without the secret) and leaves the message for `identity.inboxAck`; `Stale` and a
+  `Debug` without the secret) and leaves the message for `identity.inboxAck`, which with the
+  custody channel on also passes `custody::admit` (only the custody service, which stored the
+  key, says it may go; the admin credential gets 403 `no-custody-channel`); `Stale` and a
   failed check are deleted and the next one is tried; none answers `null`; a locked wallet is
   503 `unavailable`. The secret goes into the RPC answer only: no store, log line, event or
   language sees it.

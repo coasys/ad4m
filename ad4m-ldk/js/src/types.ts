@@ -404,8 +404,21 @@ export interface SealedRecord {
     /** Key id or "recovery" → the record key sealed to that reader. */
     wrapped: Record<string, string>;
     recoveryKey?: string;
+    /** The current master's attestation of `recoveryKey`; present exactly when it is. */
+    recoveryAttestation?: RecoveryAttestation;
     nonce: string;
     ciphertext: string;
+    /** The writer's key id: a device key without the bot mark, or the current master. */
+    signer: string;
+    /** That key over the envelope (`coasys:private-record`). */
+    sig: string;
+}
+
+/** A master key over `{scid, recoveryKey, keyId}` (`coasys:recovery-key`). */
+export interface RecoveryAttestation {
+    /** The master key's id ("m0"). */
+    keyId: string;
+    sig: string;
 }
 
 export interface RecordStored {
