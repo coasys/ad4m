@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_ad4m-executor");
 const ADMIN: &str = "run-contract-admin-credential";
+const CUSTODY: &str = "run-contract-custody-credential";
 /// How long an executor may take to answer `/health`.
 const READY: Duration = Duration::from_secs(120);
 /// How long a stop, or a refused start, may take to exit.
@@ -377,8 +378,8 @@ fn a_log_folder_that_cannot_be_made_fails_the_start_and_says_why() {
 }
 
 /// A start the executor refuses exits 78, whether the CLI refuses it (the custody channel with
-/// multi-user mode on the command line, a config file with an unknown key, an empty `AD4M_*`
-/// variable) or `run` does (the custody channel with multi-user mode left on in the database
+/// multi-user mode on the command line, the custody channel without `AD4M_CUSTODY_CREDENTIAL`, a
+/// config file with an unknown key, an empty `AD4M_*` variable) or `run` does (the custody channel with multi-user mode left on in the database
 /// by an earlier run).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_start_exits_78() {
@@ -403,6 +404,30 @@ async fn a_refused_start_exits_78() {
         flags.output().contains("custody channel"),
         "{}",
         flags.output()
+    );
+
+    let port = free_port();
+    let args = run_args(&folder, port, &["--custody-channel"]);
+    let mut no_custody_credential = spawn(
+        &folder,
+        port,
+        args,
+        Stdio::null(),
+        "no-custody-credential.log",
+        &credential,
+    );
+    assert_eq!(
+        code(no_custody_credential.exit_within(EXIT)),
+        Some(78),
+        "{}",
+        no_custody_credential.output()
+    );
+    assert!(
+        no_custody_credential
+            .output()
+            .contains("AD4M_CUSTODY_CREDENTIAL"),
+        "{}",
+        no_custody_credential.output()
     );
 
     let config = folder.file("config.json");
@@ -481,7 +506,10 @@ async fn a_refused_start_exits_78() {
         args,
         Stdio::null(),
         "custody.log",
-        &credential,
+        &[
+            ("AD4M_ADMIN_CREDENTIAL", ADMIN),
+            ("AD4M_CUSTODY_CREDENTIAL", CUSTODY),
+        ],
     );
     assert_eq!(
         code(custody.exit_within(READY)),
@@ -497,25 +525,38 @@ async fn a_refused_start_exits_78() {
 }
 
 /// The custody channel over a real WebSocket on a loopback listener: with `--custody-channel`
-/// the admin credential gets the main agent's device keys; an app's token and no token are
-/// refused by the method's `Operator` guard; the tokenless operator of an executor without an
-/// admin credential, and the admin credential without the flag, get `no-custody-channel`.
+/// the custody credential gets the main agent's device keys; the admin credential gets
+/// `no-custody-channel` (an app's window may hold it); an app's token and no token are refused
+/// by the method's `Operator` guard; the tokenless operator of an executor without an admin
+/// credential, and the admin credential without the flag, get `no-custody-channel`.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_custody_channel_answers_only_the_admin_credential_on_loopback_with_the_flag() {
+async fn the_custody_channel_answers_only_the_custody_credential_on_loopback_with_the_flag() {
     let _serial = SERIAL.lock().await;
     let folder = DataFolder::new();
     let credential = [("AD4M_ADMIN_CREDENTIAL", ADMIN)];
+    let with_custody = [
+        ("AD4M_ADMIN_CREDENTIAL", ADMIN),
+        ("AD4M_CUSTODY_CREDENTIAL", CUSTODY),
+    ];
 
     let port = free_port();
     let args = run_args(&folder, port, &["--custody-channel"]);
-    let mut on = spawn(&folder, port, args, Stdio::null(), "on.log", &credential);
+    let mut on = spawn(&folder, port, args, Stdio::null(), "on.log", &with_custody);
     on.ready();
     let admin = WsRpcClient::connect(&on.url(), ADMIN).await.unwrap();
     let _: Value = admin
         .call("agent.generate", json!({ "passphrase": "run-contract" }))
         .await
         .unwrap();
-    let keys: Value = admin
+    for method in ["identity.custodyStatus", "identity.takeMaster"] {
+        let refused = refusal(admin.call::<Value>(method, json!({})).await);
+        assert!(
+            refused.starts_with("RPC error 403: no-custody-channel"),
+            "{method}: {refused}"
+        );
+    }
+    let custody = WsRpcClient::connect(&on.url(), CUSTODY).await.unwrap();
+    let keys: Value = custody
         .call("identity.custodyStatus", json!({}))
         .await
         .unwrap();
@@ -537,7 +578,7 @@ async fn the_custody_channel_answers_only_the_admin_credential_on_loopback_with_
             .await,
     );
     assert_eq!(refused, "RPC error 403: Admin credential required");
-    drop((admin, app, anonymous));
+    drop((admin, custody, app, anonymous));
     drop(on);
 
     // No admin credential: the tokenless operator passes the guard but not the channel.
@@ -547,7 +588,14 @@ async fn the_custody_channel_answers_only_the_admin_credential_on_loopback_with_
         port,
         &["--custody-channel", "--insecure-no-admin-credential"],
     );
-    let mut tokenless = spawn(&folder, port, args, Stdio::null(), "tokenless.log", &[]);
+    let mut tokenless = spawn(
+        &folder,
+        port,
+        args,
+        Stdio::null(),
+        "tokenless.log",
+        &[("AD4M_CUSTODY_CREDENTIAL", CUSTODY)],
+    );
     tokenless.ready();
     let operator = WsRpcClient::connect(&tokenless.url(), "").await.unwrap();
     let refused = refusal(

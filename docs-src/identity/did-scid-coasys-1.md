@@ -722,14 +722,17 @@ a new string ends the read of the last one.
   against its refreshed copy of the log as above, and answers the first current master key
   (`{messageId, did, index, secret}`) or `null`. A stale key, or one that fails a check, is
   deleted. The message stays until the custody service acknowledges it
-  (`identity.inboxAck`) after storing the key. Only the admin credential on a loopback
-  listener of an executor started with `--custody-channel` gets this answer; an app, a network
-  listener, a device-key login and an operator without a credential are refused (403
+  (`identity.inboxAck`) after storing the key. Only the custody credential
+  (`AD4M_CUSTODY_CREDENTIAL`, which only the custody service holds) on a loopback listener of
+  an executor started with `--custody-channel` gets this answer; the admin credential, an app,
+  a network listener, a device-key login and an operator without a credential are refused (403
   `no-custody-channel`). The key reaches the answer only: no log line, event, store or
   language, and the executor wipes its copy.
 - A master key in a pre-join inbox is dropped: a master key never travels before the device
-  joined. A valid offer ticket is claimed under the executor's first-link rule (no operator
-  record, or one naming another identity, refuses it), with `canKeepMaster` exactly when the
+  joined. A valid offer ticket is claimed under the executor's first-link rule (a record
+  naming another identity refuses it; so does no record, except on a desktop's first run: an
+  executor with the custody channel, no record and no identity claims the first offer and records
+  its identity as operator, `FirstRun`), with `canKeepMaster` exactly when the
   executor has the custody channel; only a claim made shows the identity and the match code
   (`link-ticket`). The ticket is deleted either way; one whose log cannot be read now waits
   for the next read.

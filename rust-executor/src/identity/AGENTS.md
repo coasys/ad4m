@@ -8,7 +8,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 |---|---|
 | `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`, else the network seed's `identityStore`; `identity.allowPrivateSrc`), `write_agent_language_settings`, the `identity-fork` publisher; re-exports `verify_expression` |
 | `resolver.rs` | The one place that decides what a log says. `key_valid_at_anchor` and `verify_expression` (both up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author with its `proof.record`, for `LanguageController::verify_expression_proof`; the record anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Links: `check_signed_with` (the verdict and person of a signed link from the key map, no I/O), `Resolver::author_of` / `lookup_signer` (key map, then the key index confirmed against the log), `Resolver::prepare` (fills the key map before links are stored). Sessions: `Resolver::session_key` / `cached_session_key` (`SessionKey`: a device key's verdict and bot mark in a named log at its trusted seq, the log read from the store when older than the caller allows; `SessionKeyError::StoreUnavailable` fails closed) |
-| `key_login.rs` | Login with a device key: `Challenges` (one use, 60 s, at most 10 000 open), `login` (challenge, audience, signature over `signing_bytes("coasys:session", statement)`, key, role: the operator record's identity gets the operator role, else the local agent that speaks for it, else `not-known`), `renew`, `session_info`, `end_all_sessions`, `sign_statement` (`agent.signSessionStatement`, `.local_only()`: a key-login operator is never "on this machine", on a loopback listener too, so it and every other local-only method refuse it; every other method admits it as the operator, `agent.generate`, `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` included), `run_key_session_watch` (ends a key's grants on its `VerdictChange`, and the 5-minute re-check) |
+| `key_login.rs` | Login with a device key: `Challenges` (one use, 60 s, at most 10 000 open), `login` (challenge, executor DID, `audience` origin against `Audiences`, signature over `signing_bytes("coasys:session", statement)`, key, role: the operator record's identity gets the operator role, else the local agent that speaks for it, else `not-known`), `renew`, `session_info`, `end_all_sessions`, `sign_statement` (`agent.signSessionStatement`, `.local_only()`: a key-login operator is never "on this machine", on a loopback listener too, so it and every other local-only method refuse it; every other method admits it as the operator, `agent.generate`, `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` included), `run_key_session_watch` (ends a key's grants on its `VerdictChange`, and the 5-minute re-check) |
 | `verdict.rs` | `LinkVerdict` (`Valid`, `Invalid(reason)`, `CantCheck`, `Flagged`) and `judge`, a pure function of the signature, the anchor, the signer's log and the space order; `KeyVerdict`, `VerdictChange`, `key_verdict` |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
@@ -16,7 +16,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner`, `store_request` (a store request signed by a device key at a store-signed head) and `body_bytes` (the JCS bytes its `bodyHash` covers) |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
-| `custody.rs` | The custody channel's guard `admit` (the admin credential on a loopback listener of an executor started with `--custody-channel`; else 403 `no-custody-channel`), and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
+| `custody.rs` | The custody channel's guard `admit` (the custody credential, `AD4M_CUSTODY_CREDENTIAL` = `OperatorSource::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`; `run` refuses the flag without the variable, exit 78), and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
 | `inbox.rs` | The device inbox: `Inbox` (the joined messages opened here, by id and type, never a body; one read of the joined inbox at a time; the open pre-join read; the pull's wake-up), `pull_inbox` (`identity.inbox`), `take_master` (`identity.takeMaster`), `inbox_ack`, `inbox_put`, `prepare_device` (`identity.prepareDevice`: the device string and the pre-join read; `take_ticket` claims and, once claimed, sends `link-ticket`), `run_pull` / `run_schedule` / `wake` (at start, at unlock and binding, every 15 minutes) |
 | `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `unwrapRecordKey`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
@@ -37,6 +37,20 @@ the offer's state).
   over the did:scid host profile (`src_fetch.rs`), where the address policy can be enforced at
   connect time; its events are folded in memory for that one answer and never cached, its head
   is only a paging hint. Nothing else here speaks HTTP.
+- **A key statement names the origin it was signed for.** `KeyStatement.audience` is the
+  origin the client dialed (`scheme://host[:port]`), signed under `coasys:session` with the
+  rest; `agent.signSessionStatement` signs it as given, so the person's app shows and signs
+  the server it talks to. `login` and `renew` accept it only when, normalised
+  (`normalise_origin`: `ws`/`wss` read as `http`/`https`, host lowercase, default port
+  dropped), it is one of `Audiences`: the configured `public_origins` (`--public-origin`),
+  else this executor's own loopback origins (`http://127.0.0.1:<port>`,
+  `http://localhost:<port>`, `http://[::1]:<port>`). Without `public_origins` a non-loopback
+  audience is refused as `no-public-origin`, a reason that names the setting; any other
+  mismatch is `audience`. Nothing from the connection (`Host`, `Origin`, the listener) is
+  read: the caller controls those. This is what stops a relay: a server the person added
+  hands the app this executor's challenge and DID, but the app signs the server's own
+  origin, and this executor refuses that. The executor-DID check stays as well. The
+  challenge is spent before any of these checks, so a refused statement cannot be retried.
 - The cache only extends a log. A different event at a held seq that holds (below) records a
   fork, appends nothing and fires `identity-fork` once per fork, to the sessions of the
   identity's local agents.
@@ -161,7 +175,13 @@ the offer's state).
   call `invalid` (`store-url`), which reaches callers as an error, never a panic.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
   first-link rule itself: `already-linked` while the main key is valid in its identity's log at
-  the trusted seq, `no-operator` without a record, `first-link` for another identity.
+  the trusted seq, `no-operator` without a record, `first-link` for another identity. One
+  exception (`FirstLink::FirstRun`): a `--custody-channel` executor (a desktop app, which never
+  runs `init --operator`) with no record and no identity for its main agent claims the first
+  offer, and once the store accepts that claim records the offer's identity as operator
+  (`OperatorSetBy::FirstRun`, `set_operator_record_if_empty`). From then on the rule applies as
+  above: a claim for any other identity is `first-link`. Both the ticket path and
+  `identity.claimOffer` (a pasted link) go through `claim_for_main`, so both get it.
 - With an operator record the main key may speak only for the operator's identity:
   `cosignIncept` for the main agent runs `main_incept_check` and refuses (`first-link`) an
   incept of any other identity, and `publish` of an incept by the main agent runs it again
@@ -169,7 +189,7 @@ the offer's state).
   not bound by the record.
 - `cosignIncept` and `publish` bind the caller's agent for good, and every app holds
   `agent:SIGN` and `agent:UPDATE` by default, so their guard is `Guard::UserOrOperator`: for
-  the main agent only the operator (the admin credential the custody service holds), never an
+  the main agent only the operator (the admin or the custody credential), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
   managed agent.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through

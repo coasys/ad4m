@@ -232,13 +232,22 @@ impl LinkExpression {
     /// Normalizing `data` first is not optional: the signature was produced over the
     /// normalized link.
     pub fn check(&self) -> crate::identity::resolver::CheckedLink {
+        self.check_entered(None)
+    }
+
+    /// [`LinkExpression::check`] with what the caller knows of where the link entered the
+    /// space against its key's revocation ([`crate::identity::check_signed_entered`]).
+    pub fn check_entered(
+        &self,
+        entered_after_revoke: Option<bool>,
+    ) -> crate::identity::resolver::CheckedLink {
         let link_expr = Expression::<Link> {
             author: self.author.clone(),
             timestamp: self.timestamp.clone(),
             data: self.data.normalize(),
             proof: self.proof.clone(),
         };
-        crate::identity::check_signed(&link_expr)
+        crate::identity::check_signed_entered(&link_expr, entered_after_revoke)
     }
 }
 

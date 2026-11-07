@@ -11,7 +11,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 /// How the operator record was set (`operator_record.set_by`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperatorSetBy {
-    /// The desktop app's first run (`runtime.setOperator` on an empty record).
+    /// A desktop app's executor at its first run: its first claim the store took, on a
+    /// `--custody-channel` executor with an empty record (`ClaimService::claim_for_main`).
     FirstRun,
     /// `ad4m-executor init --operator`.
     Cli,
@@ -137,6 +138,17 @@ impl Ad4mDb {
     /// The operator record, if set.
     pub fn operator_record(&self) -> Ad4mDbResult<Option<OperatorRecordRow>> {
         operator_record_in(&self.conn)
+    }
+
+    /// Sets the operator record only while it is empty; answers the record as it stands
+    /// afterwards, so the caller sees whether its value or an earlier one holds.
+    pub fn set_operator_record_if_empty(
+        &self,
+        scid: &str,
+        set_at: u64,
+        set_by: OperatorSetBy,
+    ) -> Ad4mDbResult<OperatorRecordRow> {
+        set_operator_record_if_empty_in(&self.conn, scid, set_at, set_by)
     }
 
     /// Tests on the shared database: sets the operator record (`Some`) or clears it (`None`).

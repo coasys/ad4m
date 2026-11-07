@@ -18,6 +18,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { ChildProcess, execSync } from "child_process";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
+import WebSocket from "ws";
 import {
     baseUrl, executorBinary, executorDataPath, pollUntil, quitExecutor, spawnExecutor, startExecutor,
 } from "../utils/utils";
@@ -253,6 +254,8 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
             v: 1,
             purpose: "login",
             executor: challenge.executor,
+            // The origin the client dials: the target's API.
+            audience: baseUrl(target.ports[0]),
             challenge: challenge.challenge,
             client: { kind: "native" },
             issuedAt: Math.floor(Date.now() / 1000),
@@ -302,6 +305,69 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
             { timeoutMs: 10_000, label: "the logged-out key session refused" },
         );
         expect((await client.agent.currentSession()).grantId).to.equal(session.grantId);
+    });
+
+    // A relay: a server the person added takes a challenge from A and has the person's executor
+    // sign it. The app names the origin it dialed, the relay's, so A refuses the statement
+    // whatever Host the relay's own connection to A sends. A runs without public_origins, so
+    // only its own loopback origins are accepted.
+    it("refuses a key statement signed for another origin, whatever Host the connection sends", async () => {
+        const port = a.ports[0];
+        const call = (host: string, type: string, params: unknown) =>
+            new Promise<any>((resolve, reject) => {
+                const ws = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws`, { headers: { Host: host } });
+                ws.on("open", () => ws.send(JSON.stringify({ id: "relay", type, params })));
+                ws.on("message", (data) => {
+                    const reply = JSON.parse(String(data));
+                    if (reply.id === "relay") {
+                        ws.close();
+                        resolve(reply);
+                    }
+                });
+                ws.on("error", reject);
+            });
+        const signed = async (audience: string) => {
+            const challenge = await a.client.agent.sessionChallenge();
+            return b.client.agent.signSessionStatement({
+                v: 1,
+                purpose: "login",
+                executor: challenge.executor,
+                audience,
+                challenge: challenge.challenge,
+                client: { kind: "native" },
+                issuedAt: Math.floor(Date.now() / 1000),
+            });
+        };
+        const app = {
+            appName: "relay",
+            appDesc: "key login relay test",
+            appDomain: "coasys.org",
+            capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
+        };
+        const login = async (host: string, audience: string) =>
+            call(host, "user.loginWithKey", { proof: await signed(audience), app });
+
+        // The relay's origin, with the Host the relay forges to match it: refused, naming the setting.
+        for (const [host, audience] of [
+            ["e.example", "https://e.example"],
+            ["e.example", "http://e.example"],
+            [`127.0.0.1:${port}`, "https://e.example"],
+        ]) {
+            const refused = await login(host, audience);
+            expect(refused.result, `${host} ${audience}`).to.be.undefined;
+            expect(refused.error.code).to.equal(403);
+            expect(refused.error.message).to.contain("no-public-origin");
+            expect(refused.error.message).to.contain("public_origins");
+        }
+        // A loopback origin on another port is another executor: refused.
+        const other = await login(`127.0.0.1:${port + 1}`, `http://127.0.0.1:${port + 1}`);
+        expect(other.error.message).to.equal("audience");
+        // A's own origin logs in, whatever the Host: the Host plays no part.
+        for (const audience of [baseUrl(port), `http://localhost:${port}`, `ws://127.0.0.1:${port}`]) {
+            const own = await login("e.example", audience);
+            expect(own.error, audience).to.be.undefined;
+            expect(own.result.role).to.equal("app");
+        }
     });
 
     it("refuses a claim on an executor started without --operator, and a stranger's first link", async () => {
@@ -480,15 +546,17 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
 
 /**
  * The device inbox end to end, on a store of its own: a desktop executor (started with an admin
- * credential and the custody channel) shows its device string, the holder scans it and pushes
- * an offer ticket into its pre-join inbox, and the executor claims it; then the holder seals the
- * master key to the desktop's key, and only the custody service takes it. The private record
- * lists the desktop and whether it holds the master key; the desktop asks for the master key
- * through the request box and the holder answers.
+ * credential, the custody channel and its custody credential) shows its device string, the
+ * holder scans it and pushes an offer ticket into its pre-join inbox, and the executor claims it;
+ * then the holder seals the master key to the desktop's key, and only the custody service (the
+ * custody credential, never the admin credential) takes it. The private record lists the desktop
+ * and whether it holds the master key; the desktop asks for the master key through the request
+ * box and the holder answers.
  */
 describe("Identity: the device inbox, a ticket in the pre-join inbox and a master key for the custody service", function () {
     this.timeout(600_000);
-    const CREDENTIAL = "custody-service-credential";
+    const CREDENTIAL = "desktop-admin-credential";
+    const CUSTODY = "custody-service-credential";
 
     let store: IdentityStore;
     let holder: Holder;
@@ -557,7 +625,7 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
     it("links a desktop through its device string: its claim, then link-ticket with the match code", async () => {
         desk = await start("inbox-desktop", {
             credential: CREDENTIAL,
-            env: { AD4M_CUSTODY_CHANNEL: "true" },
+            env: { AD4M_CUSTODY_CHANNEL: "true", AD4M_CUSTODY_CREDENTIAL: CUSTODY },
             initArgs: ["--operator", did],
         });
         const tickets: any[] = [];
@@ -611,17 +679,20 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         expect(announced[0]).to.include({ id: sealed.id, kind: "master" });
         expect(JSON.stringify(announced)).to.not.contain(sealed.secret);
 
-        // A caller without the admin credential is not the custody service.
+        // A caller without a credential is not the custody service, and neither is the admin
+        // credential (an app's window may hold it).
         const stranger = new Ad4mClient(baseUrl(desk.ports[0]));
         expect(await refused(stranger.identity.takeMaster())).to.match(/Admin credential required|403/);
+        expect(await refused(desk.client.identity.takeMaster())).to.contain("no-custody-channel");
 
-        const taken = await desk.client.identity.takeMaster();
+        const custody = new Ad4mClient(baseUrl(desk.ports[0]), CUSTODY);
+        const taken = await custody.identity.takeMaster();
         expect(taken).to.deep.equal({ messageId: sealed.id, did, index: 0, secret: sealed.secret });
         // It waits until the custody service acknowledges it.
         expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
         expect(await desk.client.identity.inboxAck(sealed.id)).to.be.true;
         expect(await desk.client.identity.inbox()).to.deep.equal([]);
-        expect(await desk.client.identity.takeMaster()).to.be.null;
+        expect(await custody.identity.takeMaster()).to.be.null;
     });
 
     it("the desktop's custody service takes the master key and the record shows it holds it", async () => {

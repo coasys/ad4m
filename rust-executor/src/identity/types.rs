@@ -905,8 +905,16 @@ pub struct KeyStatement {
     pub scid: String,
     /// The signing device key, a multikey (`z6Mk…`).
     pub key: String,
-    /// The audience: the executor's DID, from `user.sessionChallenge`.
+    /// The executor's DID, from `user.sessionChallenge`.
     pub executor: String,
+    /// The origin the client dialed, `scheme://host[:port]` (e.g. `https://ad4m.example.org`):
+    /// chosen by the client, never taken from the server's answers. The executor accepts the
+    /// statement only when this is one of its configured `public_origins`, or, with none
+    /// configured, one of its own loopback origins (`http://127.0.0.1:<port>`,
+    /// `http://localhost:<port>`, `http://[::1]:<port>`); so a server that relays the
+    /// statement to another executor gets a refusal. Compared after normalising: `ws`/`wss`
+    /// read as `http`/`https`, the host lowercase, a default port left out.
+    pub audience: String,
     /// The challenge from `user.sessionChallenge`.
     pub challenge: String,
     pub client: SessionClient,
@@ -1013,7 +1021,7 @@ pub struct SessionInfo {
     pub grant_id: Option<String>,
     #[ts(type = "number | null")]
     pub expires_at: Option<u64>,
-    /// `credential`, `loopback` or `key`, for the operator.
+    /// `credential`, `loopback`, `key` or `custody`, for the operator.
     pub operator_source: Option<String>,
 }
 
@@ -1044,6 +1052,8 @@ pub struct UnsignedKeyStatement {
     pub v: u8,
     pub purpose: KeyPurpose,
     pub executor: String,
+    /// The origin the client dialed (see [`KeyStatement::audience`]), signed as given.
+    pub audience: String,
     pub challenge: String,
     pub client: SessionClient,
     #[serde(default, skip_serializing_if = "Option::is_none")]
