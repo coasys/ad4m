@@ -4878,3 +4878,156 @@ async fn two_apps_rotating_at_once_keep_the_key_of_the_one_that_landed() {
     let unlocked = shared.unlock(&scid, MasterUse::Link, 0).unwrap();
     assert_eq!(unlocked.signer(0).unwrap().index(), 1);
 }
+
+/// An executor whose `identity.publish` calls are each held before they reach the store until
+/// `opened` counts past them: the first waits for `opened >= 1`, the second for `opened >= 2`.
+/// `reached` counts the publishes that reached their hold.
+struct GatedPublishes<'a> {
+    inner: &'a dyn ExecutorRpc,
+    reached: Cell<usize>,
+    opened: Cell<usize>,
+}
+
+impl<'a> GatedPublishes<'a> {
+    fn new(inner: &'a dyn ExecutorRpc) -> Self {
+        GatedPublishes {
+            inner,
+            reached: Cell::new(0),
+            opened: Cell::new(0),
+        }
+    }
+
+    async fn until_reached(&self, publishes: usize) {
+        while self.reached.get() < publishes {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for GatedPublishes<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.publish" {
+            let nth = self.reached.get();
+            self.reached.set(nth + 1);
+            while self.opened.get() <= nth {
+                tokio::task::yield_now().await;
+            }
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Two apps on one computer rotate at once through the shared vault and both stage #1. B's
+/// publish lands; A's (it revokes a host, so it is not B's event) is answered `409`, so A
+/// rebuilds on the new head and stages #2, which replaces B's staged #1 before B promotes it.
+/// B's promote finds nothing staged at #1: B still keeps #1 (from the words, as a restore does)
+/// and leaves A's #2 staged for A to promote.
+#[tokio::test]
+async fn a_rotation_whose_staged_key_another_rebuild_replaced_still_keeps_the_landed_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &shared, 53).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    link_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        entry("Other app", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    let d3 = link_app(
+        &a,
+        &shared,
+        &did,
+        &host,
+        entry("host", DeviceKind::CommunityHost),
+        false,
+    )
+    .await;
+    let words = words::from_entropy(&[53; 16]);
+    let (vault_a, vault_b) = (SharedVault(shared.clone()), SharedVault(shared.clone()));
+
+    let gated_a = ViaExecutor::new(GatedPublishes::new(a.rpc()));
+    // B's publish reaches the store and lands; its answer is held.
+    let held_b = ViaExecutor::new(HeldPublish::new(b.rpc(), false));
+    let b_done = Cell::new(false);
+    let (by_a, by_b, ()) = tokio::join!(
+        rotate(
+            &gated_a,
+            &vault_a,
+            &did,
+            &words,
+            std::slice::from_ref(&d3),
+            &SystemClock,
+            &OsRandom,
+        ),
+        async {
+            gated_a.rpc().until_reached(1).await;
+            let rotated = rotate(
+                &held_b,
+                &vault_b,
+                &did,
+                &words,
+                &[],
+                &SystemClock,
+                &OsRandom,
+            )
+            .await;
+            b_done.set(true);
+            rotated
+        },
+        async {
+            gated_a.rpc().until_reached(1).await;
+            held_b.rpc().until_held().await;
+            let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+            assert_eq!(chain.state().masters.len(), 2, "B's rotation to #1 landed");
+            assert_eq!(
+                shared.staged_index(&scid).unwrap(),
+                Some(1),
+                "both staged #1"
+            );
+            // A's first publish is answered 409; A rebuilds on #1 and stages #2 over B's #1.
+            gated_a.rpc().opened.set(1);
+            gated_a.rpc().until_reached(2).await;
+            assert_eq!(
+                shared.staged_index(&scid).unwrap(),
+                Some(2),
+                "A's rebuild re-staged the slot"
+            );
+            assert_eq!(shared.master_index(&scid).unwrap(), Some(0));
+            // B's answer comes back and B promotes #1, which is no longer staged.
+            held_b.rpc().release.set(true);
+            while !b_done.get() {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                shared.master_index(&scid).unwrap(),
+                Some(1),
+                "B keeps the key that landed"
+            );
+            assert_eq!(
+                shared.staged_index(&scid).unwrap(),
+                Some(2),
+                "A's #2 stays staged"
+            );
+            // A's rotation to #2 goes and lands; A promotes it.
+            gated_a.rpc().opened.set(2);
+        }
+    );
+    let by_b = by_b.unwrap();
+    assert_eq!(by_b.index, 1);
+    assert!(by_b.kept.is_ok(), "{:?}", by_b.kept);
+    let by_a = by_a.unwrap();
+    assert_eq!((by_a.index, by_a.revoked.clone()), (2, vec![d3]));
+    assert!(by_a.kept.is_ok(), "{:?}", by_a.kept);
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(2));
+    assert_eq!(shared.staged_index(&scid).unwrap(), None);
+    let unlocked = shared.unlock(&scid, MasterUse::Link, 0).unwrap();
+    assert_eq!(unlocked.signer(0).unwrap().index(), 2);
+}

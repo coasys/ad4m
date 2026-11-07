@@ -425,7 +425,19 @@ pub async fn rotate<R: ExecutorRpc>(
     let published = publish_rotation(executor, vault, &scid, did, &seed, revoke, random).await?;
     let index = published.signer.index();
     // The rotation is public from here: what fails after it is reported, not returned.
-    let kept = promote(vault, &scid, index).map_err(ClientError::from);
+    // Promoted here or by another app's refresh first ([`promote`]). Nothing staged at `index`
+    // and not kept (another app's rotation re-staged the slot): the words make the same key, so
+    // it is stored as the restore stores it. `store_master` leaves a staged key in place.
+    let kept = match promote(vault, &scid, index) {
+        Err(VaultError::NotFound) => words::master_key(&seed, index)
+            .map_err(ClientError::from)
+            .and_then(|key| {
+                vault
+                    .store_master(&scid, index, Secret::new(key.to_bytes()))
+                    .map_err(ClientError::from)
+            }),
+        promoted => promoted.map_err(ClientError::from),
+    };
     let (pushes, record) = hand_over(
         executor,
         vault,
