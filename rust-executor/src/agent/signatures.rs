@@ -291,6 +291,7 @@ mod verify_or_false_tests {
             proof: crate::types::ExpressionProof {
                 key: String::new(),
                 signature: signature.to_string(),
+                anchor: None,
             },
         }
     }
