@@ -656,7 +656,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "identity.recordPut",
-        || json!({ "record": { "version": 1, "wrapped": {}, "nonce": "n", "ciphertext": "c" } }),
+        || json!({ "record": { "version": 1, "wrapped": {}, "nonce": "n", "ciphertext": "c", "signer": "d1", "sig": "z" } }),
     ),
     (
         "identity.postRequest",

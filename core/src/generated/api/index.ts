@@ -132,6 +132,7 @@ export type { PreparedDevice } from "./PreparedDevice";
 export type { RecordParams } from "./RecordParams";
 export type { RecordPutParams } from "./RecordPutParams";
 export type { RecordStored } from "./RecordStored";
+export type { RecoveryAttestation } from "./RecoveryAttestation";
 export type { RequestPosted } from "./RequestPosted";
 export type { RequestsParams } from "./RequestsParams";
 export type { SealedRecord } from "./SealedRecord";
