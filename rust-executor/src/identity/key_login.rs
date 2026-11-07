@@ -20,6 +20,7 @@
 //! [`STORE_OUTAGE_GRACE`] (fail closed).
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,8 +49,11 @@ use crate::api::ws_handler::WsRpcError;
 pub const KEY_SESSION_TTL: u64 = 60 * 60;
 /// How long a challenge stays open.
 pub const CHALLENGE_TTL: u64 = 60;
-/// The most challenges open at once.
+/// The most challenges open at once for callers other than key sessions renewing (each of
+/// those has its own slot).
 pub const MAX_OPEN_CHALLENGES: usize = 10_000;
+/// The most challenges one address holds open at once.
+pub const CHALLENGES_PER_SOURCE: usize = 100;
 /// How far a statement's `issuedAt` may be from the executor's clock.
 pub const CLOCK_SKEW: u64 = 120;
 /// The oldest read of a key's log a login takes; an older one goes to the store. A renewal
@@ -138,31 +142,147 @@ impl From<KeyLoginError> for WsRpcError {
     }
 }
 
-/// The open challenges, each with its expiry (Unix seconds). In memory only: a restart drops
-/// them, and a challenge never outlives [`CHALLENGE_TTL`] anyway.
+/// Who a challenge is for, which decides the budget it draws from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ChallengeSource {
+    /// A key session renewing: its grant's one slot, outside the shared pool. A new challenge
+    /// for the grant replaces the one still open.
+    Grant(String),
+    /// Any other caller, by the address it connects from ([`ChallengeSource::peer`]): at most
+    /// [`CHALLENGES_PER_SOURCE`] open, all of them together at most [`MAX_OPEN_CHALLENGES`].
+    /// `None` when the address is unknown (a server without connect info, in-process calls).
+    Peer(Option<IpAddr>),
+}
+
+impl ChallengeSource {
+    /// The source of a `user.sessionChallenge` call: the grant of a key session, else the
+    /// address the caller connects from.
+    pub fn of(session: &Session, peer: Option<IpAddr>) -> ChallengeSource {
+        match session.grant() {
+            Some(grant) if grant.key.is_some() => ChallengeSource::Grant(grant.id.0.clone()),
+            _ => ChallengeSource::peer(peer),
+        }
+    }
+
+    /// The budget of the address `peer`: every loopback address is one source (127.0.0.1), an
+    /// IPv4-mapped IPv6 address is its IPv4 address, and an IPv6 address counts by its /64,
+    /// the block one host gets.
+    pub fn peer(peer: Option<IpAddr>) -> ChallengeSource {
+        ChallengeSource::Peer(peer.map(|ip| {
+            let ip = match ip {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+                v4 => v4,
+            };
+            match ip {
+                ip if ip.is_loopback() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(v6) => {
+                    let s = v6.segments();
+                    IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+                }
+                v4 => v4,
+            }
+        }))
+    }
+}
+
+struct OpenChallenge {
+    expires: u64,
+    source: ChallengeSource,
+}
+
+#[derive(Default)]
+struct Open {
+    challenges: HashMap<String, OpenChallenge>,
+    /// How many challenges each address holds; their sum is the shared pool's use.
+    per_peer: HashMap<Option<IpAddr>, usize>,
+    /// The open challenge of each grant.
+    slots: HashMap<String, String>,
+}
+
+impl Open {
+    fn pool(&self) -> usize {
+        self.challenges.len() - self.slots.len()
+    }
+
+    fn take(&mut self, challenge: &str) -> Option<u64> {
+        let open = self.challenges.remove(challenge)?;
+        match &open.source {
+            ChallengeSource::Grant(grant) => {
+                self.slots.remove(grant);
+            }
+            ChallengeSource::Peer(peer) => {
+                if let Some(held) = self.per_peer.get_mut(peer) {
+                    *held -= 1;
+                    if *held == 0 {
+                        self.per_peer.remove(peer);
+                    }
+                }
+            }
+        }
+        Some(open.expires)
+    }
+}
+
+/// The open challenges, each with its expiry (Unix seconds) and source. In memory only: a
+/// restart drops them, and a challenge never outlives [`CHALLENGE_TTL`] anyway.
 #[derive(Default)]
 pub struct Challenges {
-    open: Mutex<HashMap<String, u64>>,
+    open: Mutex<Open>,
 }
 
 impl Challenges {
-    /// A new challenge, open until the expiry it answers with.
-    pub fn issue(&self, now: u64) -> Result<(String, u64), KeyLoginError> {
+    /// A new challenge for `source`, open until the expiry it answers with. Expired challenges
+    /// go first. An address at its [`CHALLENGES_PER_SOURCE`], or a full pool, gets
+    /// `TooManyChallenges`; a grant always gets one, and its previous one closes.
+    pub fn issue(
+        &self,
+        source: &ChallengeSource,
+        now: u64,
+    ) -> Result<(String, u64), KeyLoginError> {
         let mut open = self
             .open
             .lock()
             .map_err(|_| KeyLoginError::Internal("the challenge store is poisoned".into()))?;
-        if open.len() >= MAX_OPEN_CHALLENGES {
-            open.retain(|_, expires| *expires >= now);
+        let expired: Vec<String> = open
+            .challenges
+            .iter()
+            .filter(|(_, c)| c.expires < now)
+            .map(|(challenge, _)| challenge.clone())
+            .collect();
+        for challenge in expired {
+            open.take(&challenge);
         }
-        if open.len() >= MAX_OPEN_CHALLENGES {
-            return Err(KeyLoginError::TooManyChallenges);
+        match source {
+            ChallengeSource::Grant(grant) => {
+                if let Some(previous) = open.slots.get(grant).cloned() {
+                    open.take(&previous);
+                }
+            }
+            ChallengeSource::Peer(peer) => {
+                if open.pool() >= MAX_OPEN_CHALLENGES
+                    || open.per_peer.get(peer).copied().unwrap_or(0) >= CHALLENGES_PER_SOURCE
+                {
+                    return Err(KeyLoginError::TooManyChallenges);
+                }
+            }
         }
         let mut bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
         let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let expires = now + CHALLENGE_TTL;
-        open.insert(challenge.clone(), expires);
+        match source {
+            ChallengeSource::Grant(grant) => {
+                open.slots.insert(grant.clone(), challenge.clone());
+            }
+            ChallengeSource::Peer(peer) => *open.per_peer.entry(*peer).or_default() += 1,
+        }
+        open.challenges.insert(
+            challenge.clone(),
+            OpenChallenge {
+                expires,
+                source: source.clone(),
+            },
+        );
         Ok((challenge, expires))
     }
 
@@ -172,13 +292,13 @@ impl Challenges {
         self.open
             .lock()
             .ok()
-            .and_then(|mut open| open.remove(challenge))
+            .and_then(|mut open| open.take(challenge))
             .is_some_and(|expires| now <= expires)
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.open.lock().unwrap().len()
+        self.open.lock().unwrap().challenges.len()
     }
 }
 
@@ -188,10 +308,14 @@ pub fn executor_did() -> Result<String, KeyLoginError> {
         .map_err(|e| KeyLoginError::Internal(e.to_string()))
 }
 
-/// `user.sessionChallenge`.
-pub fn challenge(service: &IdentityService, now: u64) -> Result<SessionChallenge, KeyLoginError> {
+/// `user.sessionChallenge`, for `source` ([`ChallengeSource::of`]).
+pub fn challenge(
+    service: &IdentityService,
+    source: &ChallengeSource,
+    now: u64,
+) -> Result<SessionChallenge, KeyLoginError> {
     let executor = executor_did()?;
-    let (challenge, expires_at) = service.challenges.issue(now)?;
+    let (challenge, expires_at) = service.challenges.issue(source, now)?;
     Ok(SessionChallenge {
         challenge,
         executor,
@@ -968,7 +1092,7 @@ mod tests {
         }
 
         fn challenge(&self) -> SessionChallenge {
-            challenge(&self.service, now()).unwrap()
+            challenge(&self.service, &ChallengeSource::peer(None), now()).unwrap()
         }
 
         /// A login statement of `key` for this executor on a fresh challenge.
@@ -1079,12 +1203,13 @@ mod tests {
     #[test]
     fn a_challenge_works_once_and_not_after_a_minute() {
         let challenges = Challenges::default();
-        let (c, expires) = challenges.issue(1_000).unwrap();
+        let here = ChallengeSource::peer(None);
+        let (c, expires) = challenges.issue(&here, 1_000).unwrap();
         assert_eq!(expires, 1_000 + CHALLENGE_TTL);
         assert!(challenges.consume(&c, 1_010));
         assert!(!challenges.consume(&c, 1_010), "a second use");
 
-        let (late, _) = challenges.issue(1_000).unwrap();
+        let (late, _) = challenges.issue(&here, 1_000).unwrap();
         assert!(
             !challenges.consume(&late, 1_000 + CHALLENGE_TTL + 1),
             "after 60 s"
@@ -1092,8 +1217,8 @@ mod tests {
         assert!(!challenges.consume(&late, 1_000), "gone after the late use");
         assert!(!challenges.consume("never-issued", 1_000));
 
-        let (a, _) = challenges.issue(1_000).unwrap();
-        let (b, _) = challenges.issue(1_000).unwrap();
+        let (a, _) = challenges.issue(&here, 1_000).unwrap();
+        let (b, _) = challenges.issue(&here, 1_000).unwrap();
         assert_ne!(a, b);
         assert_eq!(
             base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1107,15 +1232,160 @@ mod tests {
     #[test]
     fn at_most_ten_thousand_challenges_are_open_and_expired_ones_make_room() {
         let challenges = Challenges::default();
-        for _ in 0..MAX_OPEN_CHALLENGES {
-            challenges.issue(1_000).unwrap();
+        for i in 0..MAX_OPEN_CHALLENGES {
+            challenges
+                .issue(&address(i / CHALLENGES_PER_SOURCE), 1_000)
+                .unwrap();
         }
         assert_eq!(
-            challenges.issue(1_000).unwrap_err(),
+            challenges
+                .issue(&address(MAX_OPEN_CHALLENGES), 1_000)
+                .unwrap_err(),
             KeyLoginError::TooManyChallenges
         );
-        assert!(challenges.issue(1_000 + CHALLENGE_TTL + 1).is_ok());
+        // A grant's slot is outside the pool.
+        assert!(challenges
+            .issue(&ChallengeSource::Grant("g".into()), 1_000)
+            .is_ok());
+        assert!(challenges
+            .issue(&address(0), 1_000 + CHALLENGE_TTL + 1)
+            .is_ok());
         assert_eq!(challenges.len(), 1);
+    }
+
+    /// A distinct public IPv4 address for each `n`.
+    fn address(n: usize) -> ChallengeSource {
+        ChallengeSource::peer(Some(IpAddr::V4(Ipv4Addr::from(0xc633_6400 + n as u32))))
+    }
+
+    // Expired challenges go on every issue, not only at the cap: an address's budget frees as
+    // its challenges expire.
+    #[test]
+    fn expired_challenges_go_on_every_issue() {
+        let challenges = Challenges::default();
+        challenges.issue(&address(1), 1_000).unwrap();
+        challenges.issue(&address(2), 1_000).unwrap();
+        challenges
+            .issue(&ChallengeSource::Grant("g".into()), 1_000)
+            .unwrap();
+        challenges
+            .issue(&address(3), 1_000 + CHALLENGE_TTL + 1)
+            .unwrap();
+        assert_eq!(challenges.len(), 1);
+
+        for _ in 0..CHALLENGES_PER_SOURCE {
+            challenges.issue(&address(4), 2_000).unwrap();
+        }
+        assert_eq!(
+            challenges.issue(&address(4), 2_000).unwrap_err(),
+            KeyLoginError::TooManyChallenges
+        );
+        assert!(challenges
+            .issue(&address(4), 2_000 + CHALLENGE_TTL + 1)
+            .is_ok());
+    }
+
+    // Every loopback address is one source, an IPv4-mapped address is its IPv4 address, and an
+    // IPv6 address counts by its /64. A key session's challenge comes from its grant's slot,
+    // and a new one for the grant closes the one before.
+    #[test]
+    fn challenges_are_budgeted_by_address_and_by_grant() {
+        let peer = |s: &str| ChallengeSource::peer(Some(s.parse().unwrap()));
+        for local in ["127.0.0.2", "::1", "::ffff:127.0.0.1"] {
+            assert_eq!(peer(local), peer("127.0.0.1"), "{local}");
+        }
+        assert_eq!(peer("::ffff:198.51.100.7"), peer("198.51.100.7"));
+        assert_eq!(peer("2001:db8:1:2::1"), peer("2001:db8:1:2:ffff::9"));
+        assert_ne!(peer("2001:db8:1:2::1"), peer("2001:db8:1:3::1"));
+        assert_ne!(peer("198.51.100.7"), peer("198.51.100.8"));
+        assert_ne!(peer("127.0.0.1"), ChallengeSource::peer(None));
+
+        let challenges = Challenges::default();
+        for _ in 0..CHALLENGES_PER_SOURCE {
+            challenges.issue(&peer("127.0.0.1"), 1_000).unwrap();
+        }
+        assert_eq!(
+            challenges.issue(&peer("::1"), 1_000).unwrap_err(),
+            KeyLoginError::TooManyChallenges,
+            "loopback is one source"
+        );
+
+        let grant = ChallengeSource::Grant("g".into());
+        let (first, _) = challenges.issue(&grant, 1_000).unwrap();
+        let (second, _) = challenges.issue(&grant, 1_000).unwrap();
+        assert!(!challenges.consume(&first, 1_000), "replaced on reissue");
+        assert!(challenges.consume(&second, 1_000));
+        assert_eq!(challenges.len(), CHALLENGES_PER_SOURCE);
+
+        let anonymous = Session::for_test(Principal::Anonymous);
+        assert_eq!(
+            ChallengeSource::of(&anonymous, Some("::1".parse().unwrap())),
+            peer("127.0.0.1")
+        );
+    }
+
+    // One address that asks for challenges and never uses them runs out of its own budget
+    // only: a caller from another address still gets a challenge and logs in.
+    #[tokio::test]
+    async fn one_address_exhausting_its_budget_does_not_block_another_login() {
+        let world = world(205).await;
+        world.operate();
+        let greedy = ChallengeSource::peer(Some("203.0.113.9".parse().unwrap()));
+        for _ in 0..CHALLENGES_PER_SOURCE {
+            challenge(&world.service, &greedy, now()).unwrap();
+        }
+        assert_eq!(
+            challenge(&world.service, &greedy, now()).unwrap_err(),
+            KeyLoginError::TooManyChallenges
+        );
+
+        let other = ChallengeSource::peer(Some("198.51.100.20".parse().unwrap()));
+        let mut statement = world.statement(&world.phone);
+        statement.challenge = challenge(&world.service, &other, now()).unwrap().challenge;
+        let result = login(
+            &world.service,
+            params(signed(statement, &world.phone)),
+            now(),
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        no_operator();
+    }
+
+    // A key session's renewal challenge comes from its grant's slot: a pool that anonymous
+    // callers filled does not stop the renewal.
+    #[tokio::test]
+    async fn a_full_pool_does_not_stop_a_renewal() {
+        let world = world(215).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // The statement's own challenge (from the pool) is replaced below.
+        let mut statement = world.statement(&world.phone);
+        statement.purpose = KeyPurpose::Renew;
+        statement.grant = Some(result.grant_id.clone());
+        for i in 0..MAX_OPEN_CHALLENGES - 1 {
+            challenge(&world.service, &address(i / CHALLENGES_PER_SOURCE), now()).unwrap();
+        }
+        let from = Some("198.51.100.30".parse().unwrap());
+        assert_eq!(
+            challenge(&world.service, &ChallengeSource::peer(from), now()).unwrap_err(),
+            KeyLoginError::TooManyChallenges,
+            "the pool is full"
+        );
+
+        let source = ChallengeSource::of(&session, from);
+        assert_eq!(source, ChallengeSource::Grant(result.grant_id.clone()));
+        statement.challenge = challenge(&world.service, &source, now()).unwrap().challenge;
+        let renewed = renew(
+            &world.service,
+            &session,
+            signed(statement, &world.phone),
+            now(),
+        )
+        .await;
+        assert!(renewed.is_ok(), "{renewed:?}");
+        no_operator();
     }
 
     // A device key of the operator record's identity gets the operator role: the token opens an
@@ -1528,7 +1798,12 @@ mod tests {
         // Renewed half an hour on: the expiry moves by the session's life from then.
         let later = now() + 30 * 60;
         let mut statement = renew_statement(&world, &world.phone, &result.grant_id);
-        statement.challenge = world.service.challenges.issue(later).unwrap().0;
+        statement.challenge = world
+            .service
+            .challenges
+            .issue(&ChallengeSource::Grant(result.grant_id.clone()), later)
+            .unwrap()
+            .0;
         statement.issued_at = later;
         let renewed = renew(
             &world.service,
@@ -1965,7 +2240,12 @@ mod tests {
             let mut statement = world.statement(&world.phone);
             statement.purpose = KeyPurpose::Renew;
             statement.grant = Some(result.grant_id.clone());
-            statement.challenge = world.service.challenges.issue(at).unwrap().0;
+            statement.challenge = world
+                .service
+                .challenges
+                .issue(&ChallengeSource::Grant(result.grant_id.clone()), at)
+                .unwrap()
+                .0;
             statement.issued_at = at;
             signed(statement, &world.phone)
         };
@@ -2015,7 +2295,12 @@ mod tests {
             let mut statement = world.statement(&world.phone);
             statement.purpose = KeyPurpose::Renew;
             statement.grant = Some(result.grant_id.clone());
-            statement.challenge = world.service.challenges.issue(at).unwrap().0;
+            statement.challenge = world
+                .service
+                .challenges
+                .issue(&ChallengeSource::Grant(result.grant_id.clone()), at)
+                .unwrap()
+                .0;
             statement.issued_at = at;
             signed(statement, &world.phone)
         };
