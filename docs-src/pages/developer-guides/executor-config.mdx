@@ -211,7 +211,7 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
 |---|---|---|
 | 0 | stopped: `runtime.quit`, SIGTERM, SIGINT, or stdin closed with `--watch-stdin true` | nothing |
 | 75 | `runtime.restart` | start the executor again with the same arguments |
-| 78 | the config or a flag is refused (also `--custody-channel` with multi-user mode, without a custody credential on the first line of stdin, or with `AD4M_CUSTODY_CREDENTIAL` set) | do not retry: it fails the same way |
+| 78 | the config or a flag is refused (also `--custody-channel` with multi-user mode, without a custody credential on the first line of stdin, or with `AD4M_CUSTODY_CREDENTIAL` or `AD4M_CUSTODY_CREDENTIAL_FILE` set) | do not retry: it fails the same way |
 | 79 | another executor holds this data folder (`<app_data_path>/executor.lock`) | report it |
 | 80 | the API port does not bind | pick another port and start again |
 | other, or a signal | a crash | restart with a delay |

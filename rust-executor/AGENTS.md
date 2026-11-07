@@ -69,7 +69,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   codes: 0 stopped (`runtime.quit`, SIGTERM, SIGINT, stdin closed with `--watch-stdin true`),
   75 `runtime.restart`, 78 a refused config (the CLI's resolve, the admin-credential check,
   `--custody-channel` with multi-user mode, without a custody credential on stdin's first line,
-  or with `AD4M_CUSTODY_CREDENTIAL` set), 79 another
+  or with `AD4M_CUSTODY_CREDENTIAL` or `AD4M_CUSTODY_CREDENTIAL_FILE` set), 79 another
   executor holds
   `<app_data_path>/executor.lock`, 80 the API port does not bind; any other code is a crash.
   `run` returns a refused start through its handle as a `StartRefused`, and

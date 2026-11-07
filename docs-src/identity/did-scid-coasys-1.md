@@ -728,7 +728,7 @@ a new string ends the read of the last one.
   credential as the first line of its stdin at start, and the executor keeps it in memory
   only: never in its environment or on its command line, which other processes of the user
   can read (`/proc/<pid>/environ`), as can the admin credential, which reads host files. An
-  executor with `AD4M_CUSTODY_CREDENTIAL` set refuses to start. The admin credential, an app,
+  executor with `AD4M_CUSTODY_CREDENTIAL` or `AD4M_CUSTODY_CREDENTIAL_FILE` set refuses to start. The admin credential, an app,
   a network listener, a device-key login and an operator without a credential are refused (403
   `no-custody-channel`). The key reaches the answer only: no log line, event, store or
   language, and the executor wipes its copy.
