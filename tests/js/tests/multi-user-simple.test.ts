@@ -599,8 +599,8 @@ describe("Multi-User Simple integration tests", () => {
             // User 1 creates perspective and ensures SDNA subject class
             const p1 = await client1.perspective.add("User 1 Subject Test Perspective");
             
-            // User 1 ensures SDNA subject class
-            await TestSubject.register(p1);
+            // User 1 registers the subject class
+            await p1.registerShapes([TestSubject.generateSHACL().shape]);
 
 
             // User 1 creates a subject instance
@@ -621,8 +621,8 @@ describe("Multi-User Simple integration tests", () => {
             // User 2 creates perspective and does similar operations
             const p2 = await client2.perspective.add("User 2 Subject Test Perspective");
             
-            // User 2 ensures the same SDNA subject class
-            await TestSubject.register(p2);
+            // User 2 registers the same subject class
+            await p2.registerShapes([TestSubject.generateSHACL().shape]);
 
             // User 2 creates a subject instance
             await p2.createSubject(new TestSubject(), "test://subject2", {name: "Test Subject 2"});
