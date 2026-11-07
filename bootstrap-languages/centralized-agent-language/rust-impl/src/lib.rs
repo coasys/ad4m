@@ -23,7 +23,7 @@ use ad4m_ldk::identity::{
     AgentRecord, AppendRequest, Claim, ClaimReceipt, DeviceRequest, InboxAddress, InboxAuth,
     InboxMessage, InboxStored, InboxWrite, KeyIndexEntry, LogPage, OfferListing, OfferOpened,
     OfferProgress, PostedRequest, PowParams, RecordStored, RequestPosted, SealedRecord, SignedHead,
-    SignedOffer, SignedRequest, VouchNote,
+    SignedOffer, SignedRequest, StoredRecord, VouchNote,
 };
 use ad4m_ldk::imports as rt;
 use ad4m_ldk::prelude::*;
@@ -232,7 +232,7 @@ impl IdentityCapability for CentralizedAgentLanguage {
         &mut self,
         did: String,
         req: SignedRequest,
-    ) -> LanguageResult<Option<SealedRecord>> {
+    ) -> LanguageResult<Option<StoredRecord>> {
         self.store.get_record(&did, &req).await
     }
 

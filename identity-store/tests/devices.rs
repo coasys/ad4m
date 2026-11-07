@@ -6,7 +6,9 @@ mod common;
 use ad4m_hash_chain::{canonical_json, hash_bytes};
 use ad4m_identity_core::inbox::{check_payload, Accept, InboxAddress, JOINED_TTL_S};
 use ad4m_identity_core::link::OfferKind;
-use ad4m_identity_core::record::{self, open_record, RecoveryAttestation, SealedRecord};
+use ad4m_identity_core::record::{
+    self, open_record, verify_receipt, RecordReceipt, RecoveryAttestation, SealedRecord, Writer,
+};
 use ad4m_identity_core::requests::REQUEST_TTL_S;
 use ad4m_identity_core::{x25519_multikey_of, BotScope, X25519Secret};
 use axum::http::StatusCode;
@@ -674,23 +676,43 @@ async fn a_record_is_kept_with_rising_versions_and_read_by_the_identitys_keys() 
     let v1_json = serde_json::to_value(&v1).unwrap();
     let reply = signed_body(&t, &alice, "PUT", &path, &v1_json, d1).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    assert_eq!(reply.body, json!({"version": 1}));
+    assert_eq!(reply.body["version"], 1);
+    // The store's receipt: the envelope it accepted, at the head it checked it against, by its
+    // head key.
+    let receipt: RecordReceipt = serde_json::from_value(reply.body["receipt"].clone()).unwrap();
+    assert_eq!(
+        reply.body.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["receipt", "version"]
+    );
+    assert_eq!(receipt.seq, alice.chain.head().seq);
+    assert_eq!(receipt.store, format!("did:key:{}", t.store_key()));
+    let read: SealedRecord = serde_json::from_value(v1_json.clone()).unwrap();
+    assert_eq!(
+        verify_receipt(&read, &receipt, &alice.chain, &[t.store_key()]),
+        Ok(Writer::Master(alice.master_id()))
+    );
 
-    // Every device key and the current master read it back as written.
+    // Every device key and the current master read it back as written, with the receipt.
     let master = alice.current_master();
     for signer in [d1, ("d2", &phone.key), (&alice.master_id(), &master)] {
         let reply = signed(&t, &alice, "GET", &path, signer).await;
         assert_eq!(reply.status, StatusCode::OK);
-        assert_eq!(reply.body, v1_json);
+        assert_eq!(reply.body, json!({"record": v1_json, "receipt": receipt}));
     }
-    let read: ad4m_identity_core::record::SealedRecord =
-        serde_json::from_value(v1_json.clone()).unwrap();
     for (entry, secret) in [
         ("d1", person_enc_secret(&alice, 1)),
         ("d2", phone.enc_secret()),
         ("recovery", recovery.clone()),
     ] {
-        let record = open_record(&read, &alice.chain, entry, &secret).unwrap();
+        let record = open_record(
+            &read,
+            &receipt,
+            &alice.chain,
+            &[t.store_key()],
+            entry,
+            &secret,
+        )
+        .unwrap();
         assert_eq!(record.devices["d1"].name, RECORD_DEVICE_NAME);
     }
 
@@ -751,7 +773,143 @@ async fn the_first_record_is_version_one() {
     let v1 = serde_json::to_value(alice.sealed_record(1, None)).unwrap();
     let reply = signed_body(&t, &alice, "PUT", &path, &v1, d1).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    assert_eq!(reply.body, json!({"version": 1}));
+    assert_eq!(reply.body["version"], 1);
+}
+
+/// The record a device wrote before its revocation, and the one the master wrote before a
+/// rotation, still open for their readers through the store's receipt; the revoked key cannot
+/// write again, and a surviving device rewrites the record at the head.
+#[tokio::test]
+async fn a_stored_record_outlives_its_writers_revocation_or_rotation() {
+    let t = TestStore::with_identity_burst(100);
+    let (mut alice, phone) = alice_with_phone(&t).await;
+    let path = format!("/v1/private/{}", alice.scid());
+    let d1_key = alice.device_key(1);
+    let d1 = ("d1", &d1_key);
+    let stores = [t.store_key()];
+    let read = |reply: &Reply| -> (SealedRecord, RecordReceipt) {
+        (
+            serde_json::from_value(reply.body["record"].clone()).unwrap(),
+            serde_json::from_value(reply.body["receipt"].clone()).unwrap(),
+        )
+    };
+
+    // The master installs the recovery key and writes; then it rotates.
+    let recovery = X25519Secret::from([5u8; 32]);
+    let v1 = alice.sealed_record_by(
+        1,
+        Some(alice.attest_recovery(x25519_multikey_of(&recovery))),
+        &alice.current_master(),
+    );
+    let reply = signed_body(
+        &t,
+        &alice,
+        "PUT",
+        &path,
+        &serde_json::to_value(&v1).unwrap(),
+        d1,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let accepted_at = alice.chain.head().seq;
+    let rotate = alice.rotate(&[]);
+    let reply = t.append_push(&mut alice, rotate).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let (sealed, receipt) = read(&signed(&t, &alice, "GET", &path, d1).await);
+    assert_eq!((sealed.clone(), receipt.seq), (v1, accepted_at));
+    for (entry, secret) in [
+        ("d1", person_enc_secret(&alice, 1)),
+        ("d2", phone.enc_secret()),
+        ("recovery", recovery.clone()),
+    ] {
+        let record = open_record(&sealed, &receipt, &alice.chain, &stores, entry, &secret);
+        assert_eq!(
+            record.map(|r| r.devices["d1"].name.clone()),
+            Ok(RECORD_DEVICE_NAME.to_string()),
+            "{entry} after the rotation"
+        );
+    }
+    // The recovery key needs the new master's attestation to count again.
+    assert_eq!(record::recovery_of(&sealed, &alice.chain), None);
+
+    // The new master attests it again and rewrites; then the phone writes the latest version
+    // and is revoked.
+    let v2 = alice.sealed_record_by(
+        2,
+        Some(alice.attest_recovery(x25519_multikey_of(&recovery))),
+        &alice.current_master(),
+    );
+    let reply = signed_body(
+        &t,
+        &alice,
+        "PUT",
+        &path,
+        &serde_json::to_value(&v2).unwrap(),
+        d1,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let kept = record::recovery_of(&v2, &alice.chain);
+    assert!(kept.is_some());
+    let v3 = alice.sealed_record_by(3, kept.clone(), &phone.key);
+    let by_phone = ("d2", &phone.key);
+    let reply = signed_body(
+        &t,
+        &alice,
+        "PUT",
+        &path,
+        &serde_json::to_value(&v3).unwrap(),
+        by_phone,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // What the phone would write next, sealed while it still could.
+    let v4_by_phone = serde_json::to_value(alice.sealed_record_by(4, kept, &phone.key)).unwrap();
+    let revoke = alice.revoke(&["d2"]);
+    let reply = t.append_push(&mut alice, revoke).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    // d1 still opens the phone's record.
+    let (sealed, receipt) = read(&signed(&t, &alice, "GET", &path, d1).await);
+    assert_eq!(sealed.signer, "d2");
+    let record = open_record(
+        &sealed,
+        &receipt,
+        &alice.chain,
+        &stores,
+        "d1",
+        &person_enc_secret(&alice, 1),
+    )
+    .unwrap();
+    assert_eq!(record.devices["d1"].name, RECORD_DEVICE_NAME);
+
+    // The revoked phone's new write is refused, sent by itself or by d1.
+    let reply = signed_body(&t, &alice, "PUT", &path, &v4_by_phone, by_phone).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    let reply = signed_body(&t, &alice, "PUT", &path, &v4_by_phone, d1).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signer");
+
+    // d1 rewrites it at the head, wrapped to the readers left.
+    let v4 = alice.sealed_record(4, Some(x25519_multikey_of(&recovery)));
+    assert_eq!(v4.wrapped.keys().collect::<Vec<_>>(), ["d1", "recovery"]);
+    let reply = signed_body(
+        &t,
+        &alice,
+        "PUT",
+        &path,
+        &serde_json::to_value(&v4).unwrap(),
+        d1,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let (sealed, receipt) = read(&signed(&t, &alice, "GET", &path, d1).await);
+    assert_eq!(sealed, v4);
+    assert_eq!(receipt.seq, alice.chain.head().seq);
+    assert_eq!(
+        verify_receipt(&sealed, &receipt, &alice.chain, &stores),
+        Ok(Writer::Device("d1".into()))
+    );
 }
 
 #[tokio::test]
