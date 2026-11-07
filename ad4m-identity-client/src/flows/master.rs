@@ -20,10 +20,13 @@
 //! acknowledges the message, and marks itself `holdsMaster: true` with the key's
 //! `masterIndex` in the record.
 //!
-//! **After a rotation** ([`refresh_master`]): a device whose vault keeps a master key the log
-//! has replaced takes the new one when the rotating app sent it; when none waits (the push
+//! **After a rotation** ([`refresh_master`]): a device whose own rotation was cut off after
+//! its publish promotes the key its vault staged; a device whose vault keeps a master key the
+//! log has replaced takes the new one when the rotating app sent it; when none waits (the push
 //! failed, or the device was offline past it), it forgets the replaced key and asks for the
 //! new one with a `send-master` request, which a holder answers ([`super::requests::answer`]).
+//! It forgets a key only when the vault's authenticated index ([`Vault::master_index`]) is
+//! known and behind the log's current master: never on an unknown index.
 //!
 //! **Removing the master key from a device** ([`remove_master`]): refused when no other
 //! device valid at the head holds the current master key: one the record lists as
@@ -329,19 +332,38 @@ pub async fn take_master<R: ExecutorRpc>(
 pub enum Refreshed {
     /// The vault keeps the current master key.
     Current,
+    /// A rotation of this device had staged the current master key and was cut off before it
+    /// promoted it: the vault keeps it now, and the record marks this device holding it.
+    Promoted {
+        index: u32,
+        /// The record write (`holdsMaster: true` with `index`). The key is kept either way.
+        record: Result<u64, ClientError>,
+    },
     /// The current master key was waiting in this device's inbox: the vault keeps it now.
     Taken(Taken),
     /// None waited: the vault forgot the replaced key, and a `send-master` request (its id)
     /// asks a holder for the current one.
     Asked(String),
+    /// None waited, and the vault keeps no master key of the identity or cannot tell which
+    /// one it keeps ([`Vault::master_index`] is `None`): nothing was forgotten and nothing
+    /// asked. A device that never held it asks with [`super::requests::ask_for_master`].
+    Unknown,
 }
 
-/// A device whose vault may keep a replaced master key of `did`, its executor's identity:
-/// nothing to do when the vault keeps the current one; else takes the current one from the
-/// inbox ([`take_master`]), or, when none waits, forgets the replaced key and posts a
-/// `send-master` request. Refused with [`VaultError::NotFound`](crate::VaultError::NotFound)
-/// when the vault keeps no master key of `did` (a device that never held it asks with
-/// [`super::requests::ask_for_master`]).
+/// A device whose vault may keep a replaced master key of `did`, its executor's identity, or a
+/// staged one: brings the vault to the log's current master where it can, in this order.
+///
+/// 1. A key staged by a rotation of this device (cut off between its publish and its promote,
+///    or whose publish answer was lost): promoted when it is the log's current master
+///    ([`Refreshed::Promoted`]), discarded when it is not (an older one, or one the log does
+///    not name: that rotation did not land).
+/// 2. The vault keeps the current master: [`Refreshed::Current`].
+/// 3. The current master waits in the inbox: taken ([`take_master`], [`Refreshed::Taken`]).
+/// 4. The vault's key is **known** to be replaced ([`Vault::master_index`], authenticated,
+///    names an index behind the log's current master, or the identity has ended): the vault
+///    forgets it and a `send-master` request asks a holder for the current one
+///    ([`Refreshed::Asked`]). An unknown index (`None`) never forgets a key:
+///    [`Refreshed::Unknown`].
 pub async fn refresh_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -349,12 +371,39 @@ pub async fn refresh_master<R: ExecutorRpc>(
     random: &dyn Random,
 ) -> Result<Refreshed, ClientError> {
     let scid = scid_of(did)?;
-    let kept = vault
-        .master_index(&scid)?
-        .ok_or(crate::VaultError::NotFound)?;
     let chain = chain_of(executor, did).await?;
-    let current = chain.state().masters.len().saturating_sub(1);
-    if kept as usize == current && chain.state().current_master().is_some() {
+    let state = chain.state();
+    let live = state.current_master().is_some();
+    let current = u32::try_from(state.masters.len().saturating_sub(1))
+        .map_err(|_| ClientError::Protocol("the log lists too many masters".into()))?;
+    if let Some(staged) = vault.staged_index(&scid)? {
+        if live && staged == current {
+            vault.promote_master(&scid, staged)?;
+            let record = async {
+                let key_id = executor.status().await?.key_id.ok_or_else(|| {
+                    ClientError::Protocol("the executor's device key is in no log".into())
+                })?;
+                record::write(
+                    executor,
+                    did,
+                    &[Change::Holds {
+                        key_id,
+                        index: staged,
+                    }],
+                    random,
+                )
+                .await
+            }
+            .await;
+            return Ok(Refreshed::Promoted {
+                index: staged,
+                record,
+            });
+        }
+        vault.discard_staged(&scid, staged)?;
+    }
+    let kept = vault.master_index(&scid)?;
+    if live && kept == Some(current) {
         return Ok(Refreshed::Current);
     }
     if let Some(taken) = take_master(executor, vault, random).await? {
@@ -362,11 +411,16 @@ pub async fn refresh_master<R: ExecutorRpc>(
             return Ok(Refreshed::Taken(taken));
         }
     }
-    vault.forget_master(&scid)?;
-    let id = executor
-        .post_request(&ad4m_ldk::identity::DeviceRequestBody::SendMaster {}, None)
-        .await?;
-    Ok(Refreshed::Asked(id))
+    match kept {
+        Some(index) if index < current || !live => {
+            vault.forget_master(&scid)?;
+            let id = executor
+                .post_request(&ad4m_ldk::identity::DeviceRequestBody::SendMaster {}, None)
+                .await?;
+            Ok(Refreshed::Asked(id))
+        }
+        _ => Ok(Refreshed::Unknown),
+    }
 }
 
 /// Removes the master key of `did`, its executor's identity, from this device. Refused with

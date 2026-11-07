@@ -11,12 +11,19 @@
 //!    the record does not name) are ticked by default; servers, community hosts, Coasys cloud
 //!    and bots are not.
 //! 3. [`RestoreFlow::finish`]: one `rotate` to a fresh master *n*+1 revokes the ticked devices
-//!    ([`super::rotate`], with its rebuild after a `409`), and this device's vault keeps it.
-//!    Then this device is linked as a device: an offer bound to this executor's device key,
+//!    ([`super::rotate`], with its rebuild after a `409`); the vault stages *n*+1 before the
+//!    publish (a vault that refuses leaves nothing public) and promotes it after. Then this
+//!    device is enrolled ([`RestoreFlow::enrol`]): linked as a device: an offer bound to this executor's device key,
 //!    claimed by this executor and spent by an `add` signed by master *n*+1. A device whose key
 //!    the log already lists is not linked again.
 //! 4. Master *n*+1 goes to every app that kept the master key and was not locked out, and the
 //!    record is written with the recovery key: this device listed as holding the master key.
+//!
+//! Once the rotation is published, `finish` answers [`Restored`] whatever comes after: the
+//! rotation stands (the locked-out devices are revoked, *n*+1 is current). An enrolment that
+//! failed (the vault, the link, the store) is [`Restored::enrolled`]'s error, and
+//! [`RestoreFlow::enrol`] retries it on the same flow, without the words typed again and
+//! without another rotation.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::link::OfferKind;
@@ -28,10 +35,11 @@ use ad4m_ldk::identity::SignedHead;
 use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::flows::link::LinkFlow;
 use crate::flows::rotate::{
-    current_index, hand_over, keep, master_of, publish_rotation, recovery_key_of, ThisDevice,
+    current_index, hand_over, master_of, publish_rotation, recovery_key_of, ThisDevice,
 };
 use crate::record::{self, Reader};
 use crate::request::{chain_of, scid_of};
+use crate::secret::Secret;
 use crate::vault::{MasterSigner, Vault};
 use crate::{ClientError, Clock, Random};
 
@@ -61,7 +69,7 @@ pub fn locked_out_by_default(kind: Option<DeviceKind>) -> bool {
     )
 }
 
-/// A restore done.
+/// A restore whose rotation is published: it stands whatever `enrolled` says.
 #[derive(Debug)]
 pub struct Restored {
     pub did: String,
@@ -73,6 +81,15 @@ pub struct Restored {
     pub revoked: Vec<KeyId>,
     /// Rotations built (more than 1 when another event landed first).
     pub tries: usize,
+    /// This device enrolled after the rotation. An error (the vault did not keep master
+    /// *n*+1, the link failed) leaves the rotation as it is: [`RestoreFlow::enrol`] retries.
+    pub enrolled: Result<Enrolled, ClientError>,
+}
+
+/// This device enrolled after a restore's rotation: the vault keeps the new master, this
+/// executor's device key is in the log, the apps that kept the master key were sent it.
+#[derive(Debug)]
+pub struct Enrolled {
     /// This device's key id in the log.
     pub key_id: KeyId,
     /// The new master key put into each kept holder's inbox.
@@ -91,6 +108,8 @@ pub struct RestoreFlow<'a, R: ExecutorRpc> {
     did: String,
     devices: Vec<ListedDevice>,
     record_error: Option<ClientError>,
+    /// The index of the master this flow's rotation made current, once it is published.
+    rotated: Option<u32>,
 }
 
 /// The device keys of `chain` valid at its head, except `own` (this executor's device key),
@@ -168,6 +187,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             did: owner.did,
             devices,
             record_error,
+            rotated: None,
         })
     }
 
@@ -188,14 +208,22 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
     }
 
     /// Rotates to a fresh master on this device, revoking `lock_out` (key ids of
-    /// [`RestoreFlow::devices`]) in the same event, links this device as `this_device` when the
-    /// log does not list it, sends the new master to the apps that kept the old one, and writes
-    /// the record.
+    /// [`RestoreFlow::devices`]) in the same event, then enrols this device as `this_device`
+    /// ([`RestoreFlow::enrol`]). An error means nothing was published (or, after a publish
+    /// whose answer was lost, that it is not known; the vault keeps the staged key for
+    /// `refresh_master`); once the rotation is published it answers [`Restored`], whose
+    /// `enrolled` says whether the enrolment worked. Refused after a rotation of this flow
+    /// was published: retry the enrolment with [`RestoreFlow::enrol`].
     pub async fn finish(
-        self,
+        &mut self,
         lock_out: &[KeyId],
         this_device: DeviceEntry,
     ) -> Result<Restored, ClientError> {
+        if let Some(index) = self.rotated {
+            return Err(ClientError::Protocol(format!(
+                "this restore already made master #{index} current; enrol this device again"
+            )));
+        }
         if let Some(id) = lock_out
             .iter()
             .find(|id| !self.devices.iter().any(|d| &d.key_id == *id))
@@ -205,37 +233,80 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             )));
         }
         let scid = scid_of(&self.did)?;
-        let published = publish_rotation(self.executor, &self.did, &self.seed, lock_out).await?;
-        let index = published.signer.index();
-        keep(self.vault, &scid, &self.seed, index)?;
-        let key_id = self.link_this(&this_device).await?;
-        let secret = words::recovery_secret(&self.seed);
-        let reader = Reader::Recovery {
-            secret: &secret,
-            master: &published.signer,
-            clock: self.clock,
-        };
-        let (pushes, record) = hand_over(
+        let published = publish_rotation(
             self.executor,
             self.vault,
+            &scid,
             &self.did,
-            &published.signer,
-            &reader,
-            Some(ThisDevice {
-                key_id: key_id.clone(),
-                entry: Some(this_device),
-            }),
-            &recovery_key_of(&self.seed),
-            self.clock,
-            self.random,
+            &self.seed,
+            lock_out,
         )
-        .await;
+        .await?;
+        let index = published.signer.index();
+        self.rotated = Some(index);
+        // The rotation is public from here: what fails after it is reported, not returned.
+        let enrolled = self.enrol(this_device).await;
         Ok(Restored {
             did: self.did.clone(),
             head: published.head,
             index,
             revoked: published.revoked,
             tries: published.tries,
+            enrolled,
+        })
+    }
+
+    /// Enrols this device after this flow's published rotation (what [`RestoreFlow::finish`]
+    /// does after the publish; call it again when [`Restored::enrolled`] is an error): the
+    /// vault keeps the new master (it promotes the staged key, or stores it again from the
+    /// words this flow holds), this executor is linked as `this_device` when the log does not
+    /// list it, the new master goes to the apps that kept the old one, and the record is
+    /// written. Refused before a rotation of this flow was published, and when the log's
+    /// current master is no longer the one this flow made current.
+    pub async fn enrol(&self, this_device: DeviceEntry) -> Result<Enrolled, ClientError> {
+        let index = self.rotated.ok_or_else(|| {
+            ClientError::Protocol("this restore has published no rotation yet".into())
+        })?;
+        let scid = scid_of(&self.did)?;
+        let chain = chain_of(self.executor, &self.did).await?;
+        if current_index(&chain, &self.seed)? != index {
+            return Err(ClientError::Protocol(format!(
+                "master #{index} of this restore was replaced; restore again with the words"
+            )));
+        }
+        if self.vault.staged_index(&scid)? == Some(index) {
+            self.vault.promote_master(&scid, index)?;
+        } else if self.vault.master_index(&scid)? != Some(index) {
+            // Current in the log: stored as a key taken from the inbox would be.
+            let key = words::master_key(&self.seed, index)?;
+            self.vault
+                .store_master(&scid, index, Secret::new(key.to_bytes()))?;
+        }
+        let key_id = self.link_this(&this_device).await?;
+        let signer = master_of(&self.seed, index)?;
+        let secret = words::recovery_secret(&self.seed);
+        let reader = Reader::Recovery {
+            secret: &secret,
+            master: &signer,
+            clock: self.clock,
+        };
+        let (pushes, record) = hand_over(
+            self.executor,
+            self.vault,
+            &self.did,
+            &signer,
+            &reader,
+            Some(ThisDevice {
+                key_id: key_id.clone(),
+                entry: Some(this_device),
+                kept: true,
+            }),
+            &recovery_key_of(&self.seed),
+            self.clock,
+            self.random,
+        )
+        .await;
+        Ok(Enrolled {
             key_id,
             pushes,
             record,

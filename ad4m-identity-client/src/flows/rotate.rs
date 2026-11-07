@@ -5,13 +5,19 @@
 //! 1. The words derive master *n*+1 at `m/7133'/0'/(n+1)'`, its salt, and the commitment to
 //!    master *n*+2 the new `next` holds. *n* is the current master's index, and the words must
 //!    derive the current master ([`ClientError::NotTheseWords`] otherwise).
-//! 2. The event is published through the executor. **A `409`** (another event landed on the
+//! 2. **Custody before publish**: the vault stages master *n*+1 ([`Vault::stage_master`]); a
+//!    vault that refuses leaves nothing public. The event is published through the executor. **A `409`** (another event landed on the
 //!    head first) reads the log again and builds the rotation again on the new head, at most
 //!    [`MAX_TRIES`] times, then stops with [`ClientError::LogBusy`]. Each rebuild takes *n*
 //!    from the new head (after a rotation by another app with the same words, the words derive
 //!    the next master on), and revokes only the listed keys still valid there. A rotation that
 //!    landed while its answer was lost is found in the log by its hash and not published again.
-//! 3. This device's vault keeps master *n*+1 in place of master *n*.
+//! 3. The vault promotes the staged master *n*+1 in place of master *n*
+//!    ([`Vault::promote_master`]). A publish that failed discards the staged key; one whose
+//!    answer was lost, or a flow cut off before the promote, leaves it staged, and
+//!    [`super::master::refresh_master`] promotes it when the log's current master is *n*+1 (or
+//!    discards it when the log does not name it). A promote that fails is reported in
+//!    [`Rotated::kept`]: the rotation stands.
 //! 4. Master *n*+1 goes to every other device that kept the master key: each device the record
 //!    lists as holding it (`true` or `"offered"`), valid at the head, that the log after the
 //!    rotation lets keep it ([`ad4m_identity_core::link::may_keep_master`]; the record's device
@@ -57,6 +63,10 @@ pub struct Rotated {
     pub pushes: Vec<(KeyId, Result<String, ClientError>)>,
     /// The record write after the pushes. The rotation stands either way.
     pub record: Result<u64, ClientError>,
+    /// The vault promoted the staged master *n*+1 to its kept key ([`Vault::promote_master`]).
+    /// An error here leaves *n*+1 staged and this device listed as not holding the master key:
+    /// the rotation stands, and `master::refresh_master` promotes the staged key later.
+    pub kept: Result<(), ClientError>,
 }
 
 /// Master `index` of `seed`, as a signer.
@@ -87,15 +97,16 @@ pub(crate) fn recovery_key_of(seed: &Seed) -> Multikey {
     x25519_multikey_of(&words::recovery_secret(seed))
 }
 
-/// The vault keeps master `index` of `seed` for `scid`, in place of the one it had.
-pub(crate) fn keep(
+/// The vault stages master `index` of `seed` for `scid`, before the rotation to it is published
+/// ([`Vault::stage_master`]): the kept key stays as it is until [`Vault::promote_master`].
+pub(crate) fn stage(
     vault: &dyn Vault,
     scid: &str,
     seed: &Seed,
     index: u32,
 ) -> Result<(), ClientError> {
     let key = words::master_key(seed, index)?;
-    vault.store_master(scid, index, Secret::new(key.to_bytes()))?;
+    vault.stage_master(scid, index, Secret::new(key.to_bytes()))?;
     Ok(())
 }
 
@@ -130,11 +141,49 @@ pub(crate) struct Published {
 /// Builds the rotation of `did` to the master after its current one, revoking those of
 /// `revoke` valid at the head, and publishes it; a `409`, or an answer that never came, reads
 /// the log and builds it again, at most [`MAX_TRIES`] times.
+///
+/// **Custody before publish**: each build stages its master *n*+1 in `vault` (for `scid`)
+/// before the publish, so a vault that refuses leaves nothing public. On `Ok` the staged key is
+/// left for the caller to promote. On an error the staged key is discarded, unless the last
+/// publish went unanswered (its outcome is unknown): then it stays staged, and
+/// `master::refresh_master` promotes it if the rotation landed, or discards it if not.
 pub(crate) async fn publish_rotation<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    scid: &str,
     did: &str,
     seed: &Seed,
     revoke: &[KeyId],
+) -> Result<Published, ClientError> {
+    let mut attempt = Attempt::default();
+    let published = publish_staged(executor, vault, scid, did, seed, revoke, &mut attempt).await;
+    if published.is_err() && !attempt.unanswered {
+        if let Some(index) = attempt.staged {
+            // Best effort: a key left staged is discarded by the next refresh.
+            let _ = vault.discard_staged(scid, index);
+        }
+    }
+    published
+}
+
+/// What [`publish_staged`] left behind: the index it staged last, and whether its last publish
+/// went unanswered.
+#[derive(Default)]
+struct Attempt {
+    staged: Option<u32>,
+    unanswered: bool,
+}
+
+/// [`publish_rotation`]'s builds, staging each one's master before its publish.
+#[allow(clippy::too_many_arguments)]
+async fn publish_staged<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    scid: &str,
+    did: &str,
+    seed: &Seed,
+    revoke: &[KeyId],
+    attempt: &mut Attempt,
 ) -> Result<Published, ClientError> {
     let mut sent: Vec<(Event, Vec<KeyId>)> = Vec::new();
     let mut tries = 0;
@@ -169,6 +218,9 @@ pub(crate) async fn publish_rotation<R: ExecutorRpc>(
             .cloned()
             .collect();
         let event = rotate_event(&chain, &signer, &salt, Some(next), &revoked)?;
+        // The new master is in the vault before anything names it publicly.
+        stage(vault, scid, seed, index)?;
+        attempt.staged = Some(index);
         match executor.publish(std::slice::from_ref(&event)).await {
             Ok(head) => {
                 return Ok(Published {
@@ -178,10 +230,18 @@ pub(crate) async fn publish_rotation<R: ExecutorRpc>(
                     tries,
                 })
             }
-            Err(e) if e.code == 409 || transient(&ClientError::Rpc(e.clone())) => {
+            Err(e) if e.code == 409 => {
+                attempt.unanswered = false;
                 sent.push((event, revoked));
             }
-            Err(e) => return Err(e.into()),
+            Err(e) if transient(&ClientError::Rpc(e.clone())) => {
+                attempt.unanswered = true;
+                sent.push((event, revoked));
+            }
+            Err(e) => {
+                attempt.unanswered = false;
+                return Err(e.into());
+            }
         }
     }
 }
@@ -212,11 +272,13 @@ pub(crate) fn kept_holders(
         .collect()
 }
 
-/// This device after a rotation: the key id it has in the log, and its whole entry when the
-/// record should list it anew (a restore), else only `holdsMaster: true`.
+/// This device after a rotation: the key id it has in the log, its whole entry when the
+/// record should list it anew (a restore), else only its `holdsMaster`, and whether its vault
+/// keeps the new master (`holdsMaster: true` with its index; else `false`).
 pub(crate) struct ThisDevice {
     pub key_id: KeyId,
     pub entry: Option<DeviceEntry>,
+    pub kept: bool,
 }
 
 /// Steps 4 and 5: master `signer` (now current) to every kept holder, then the record written
@@ -273,18 +335,32 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         Some(ThisDevice {
             key_id,
             entry: Some(entry),
+            kept,
         }) => changes.push(Change::Device {
             key_id,
             entry: DeviceEntry {
-                holds_master: HoldsMaster::Yes,
-                master_index: Some(index),
+                holds_master: if kept {
+                    HoldsMaster::Yes
+                } else {
+                    HoldsMaster::No
+                },
+                master_index: kept.then_some(index),
                 ..entry
             },
         }),
         Some(ThisDevice {
             key_id,
             entry: None,
+            kept: true,
         }) => changes.push(Change::Holds { key_id, index }),
+        Some(ThisDevice {
+            key_id,
+            entry: None,
+            kept: false,
+        }) => changes.push(Change::HoldsMaster {
+            key_id,
+            holds: HoldsMaster::No,
+        }),
         None => {}
     }
     let record =
@@ -326,9 +402,12 @@ pub async fn rotate<R: ExecutorRpc>(
         ));
     }
     current_index(&chain, &seed)?;
-    let published = publish_rotation(executor, did, &seed, revoke).await?;
+    let published = publish_rotation(executor, vault, &scid, did, &seed, revoke).await?;
     let index = published.signer.index();
-    keep(vault, &scid, &seed, index)?;
+    // The rotation is public from here: what fails after it is reported, not returned.
+    let kept = vault
+        .promote_master(&scid, index)
+        .map_err(ClientError::from);
     let (pushes, record) = hand_over(
         executor,
         vault,
@@ -338,6 +417,7 @@ pub async fn rotate<R: ExecutorRpc>(
         Some(ThisDevice {
             key_id: own,
             entry: None,
+            kept: kept.is_ok(),
         }),
         &recovery_key_of(&seed),
         clock,
@@ -351,5 +431,6 @@ pub async fn rotate<R: ExecutorRpc>(
         tries: published.tries,
         pushes,
         record,
+        kept,
     })
 }

@@ -113,17 +113,49 @@ impl Unlocked {
 /// ([`Vault::store_pending_incept`]), and forgets the incept once the publish is confirmed
 /// ([`Vault::incept_published`]): a publish whose answer is lost is finished later from the
 /// vault (`flows::create::resume`), with the same master key and the same identity.
+///
+/// A rotation (`rotate`, `revoke_and_rotate`, `answer_with_words`, a restore) stages master
+/// *n*+1 here *before* it publishes the `rotate` ([`Vault::stage_master`]), and promotes it to
+/// the kept master key once the publish landed ([`Vault::promote_master`]). A staged key is
+/// never used to sign and never replaces the kept one by itself: a publish that failed
+/// discards it ([`Vault::discard_staged`]); a flow cut off between the publish and the promote
+/// leaves it staged, and `flows::master::refresh_master` promotes it when the log's current
+/// master index is the staged one, or discards it when the log does not name it.
 pub trait Vault: Send + Sync {
-    /// Stores master `index` for `scid`, replacing an older index.
+    /// Stores master `index` for `scid`, replacing the kept one. Used where the key is already
+    /// current in the log (`create`'s #0 before its incept, a key taken from the inbox).
     fn store_master(
         &self,
         scid: &str,
         index: u32,
         secret: Secret<[u8; 32]>,
     ) -> Result<(), VaultError>;
-    /// The index of the master key kept for `scid`; `None` when the vault keeps none. Reads no
-    /// secret, so it needs no unlock.
+    /// The index of the master key kept for `scid`. **Authenticated, from the item**: the index
+    /// sealed with the key itself (not a cache beside it), so it names the key that
+    /// [`Vault::unlock`] would give. `None` when the vault keeps no key for `scid`, *or* when
+    /// it cannot tell which index the kept key has (a cache it cannot vouch for): a caller
+    /// never forgets a key on `None`. Reads no secret, so it needs no unlock.
     fn master_index(&self, scid: &str) -> Result<Option<u32>, VaultError>;
+    /// Stages master `index` of `scid` before the rotation that makes it current is published.
+    /// Replaces a staged key of `scid` (any index); leaves the kept key as it is. A staged key
+    /// signs nothing and is not what [`Vault::unlock`] gives. Must be durable when it answers
+    /// `Ok`: the rotation is published only after.
+    fn stage_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: Secret<[u8; 32]>,
+    ) -> Result<(), VaultError>;
+    /// The index of the key staged for `scid`, authenticated as [`Vault::master_index`];
+    /// `None` when none is staged. Needs no unlock.
+    fn staged_index(&self, scid: &str) -> Result<Option<u32>, VaultError>;
+    /// The rotation to staged master `index` landed: the staged key becomes the kept master key
+    /// of `scid`, replacing the old one, and is no longer staged. `NotFound` when no key is
+    /// staged at `index`. Needs no unlock (no secret leaves the vault).
+    fn promote_master(&self, scid: &str, index: u32) -> Result<(), VaultError>;
+    /// The rotation to staged master `index` did not land: the staged key is forgotten. No
+    /// error when none is staged, or one at another index (left as it is).
+    fn discard_staged(&self, scid: &str, index: u32) -> Result<(), VaultError>;
     /// Forgets the master key of `scid` (no error when it keeps none): the person removed it
     /// from this device, or it was replaced by a rotation.
     fn forget_master(&self, scid: &str) -> Result<(), VaultError>;
@@ -228,6 +260,7 @@ mod memory {
     #[derive(Default)]
     pub struct MemoryVault {
         keys: Mutex<Keys>,
+        staged: Mutex<Keys>,
         pending: Mutex<Vec<Event>>,
         pushes: Mutex<Vec<PendingPush>>,
         unlocks: Mutex<Vec<MasterUse>>,
@@ -271,6 +304,47 @@ mod memory {
 
         fn forget_master(&self, scid: &str) -> Result<(), VaultError> {
             self.keys.lock().map_err(poisoned)?.remove(scid);
+            Ok(())
+        }
+
+        fn stage_master(
+            &self,
+            scid: &str,
+            index: u32,
+            secret: Secret<[u8; 32]>,
+        ) -> Result<(), VaultError> {
+            let mut staged = self.staged.lock().map_err(poisoned)?;
+            staged.insert(scid.to_string(), (index, secret));
+            Ok(())
+        }
+
+        fn staged_index(&self, scid: &str) -> Result<Option<u32>, VaultError> {
+            Ok(self
+                .staged
+                .lock()
+                .map_err(poisoned)?
+                .get(scid)
+                .map(|(index, _)| *index))
+        }
+
+        fn promote_master(&self, scid: &str, index: u32) -> Result<(), VaultError> {
+            let mut staged = self.staged.lock().map_err(poisoned)?;
+            if staged.get(scid).map(|(i, _)| *i) != Some(index) {
+                return Err(VaultError::NotFound);
+            }
+            let kept = staged.remove(scid).ok_or(VaultError::NotFound)?;
+            self.keys
+                .lock()
+                .map_err(poisoned)?
+                .insert(scid.to_string(), kept);
+            Ok(())
+        }
+
+        fn discard_staged(&self, scid: &str, index: u32) -> Result<(), VaultError> {
+            let mut staged = self.staged.lock().map_err(poisoned)?;
+            if staged.get(scid).map(|(i, _)| *i) == Some(index) {
+                staged.remove(scid);
+            }
             Ok(())
         }
 

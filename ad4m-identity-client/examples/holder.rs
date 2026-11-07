@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! {"cmd":"connect","url":"http://127.0.0.1:12000","token":""}  -> {"ok":true}
-//! {"cmd":"create"}                                              -> {"did","scid","seq"}
+//! {"cmd":"create","name":"Home","kind":"desktop-app"}           -> {"did","scid","seq","words","record"}
 //! {"cmd":"open","did":"did:scid:…","store":"http://…"}           -> {"link","offerString","offerId"}
 //! {"cmd":"scan","did":"…","store":"http://…","device":"coasys:device:1:…"} -> {"offerId"}
 //! {"cmd":"waitClaim"}                                -> {"matchCode","deviceKey","hint","canKeepMaster"}
@@ -19,11 +19,13 @@
 //! {"cmd":"postRequest","body":{"kind":"send-master"}}           -> {"id"}
 //! {"cmd":"requests"}                                            -> [DeviceRequest]
 //! {"cmd":"answer","did":"did:scid:…","id":"…"}                   -> {"answered","record"}
-//! {"cmd":"rotate","did":"did:scid:…","keyIds":[]}   -> {"index","seq","tries","revoked","pushes","record"}
-//! {"cmd":"refreshMaster","did":"did:scid:…"}         -> {"refreshed","index"?,"id"?}
+//! {"cmd":"rotate","did":"did:scid:…","keyIds":[]}   -> {"index","seq","tries","revoked","pushes","record","kept"}
+//! {"cmd":"refreshMaster","did":"did:scid:…"}         -> {"refreshed","index"?,"id"?,"record"?}
 //! {"cmd":"removeMaster","did":"did:scid:…"}          -> {"record"}
 //! {"cmd":"restore","words":"…","name":"Laptop","kind":"desktop-app","lockOut":["d1"]}
 //!        -> {"did","devices","index","seq","tries","revoked","keyId","pushes","record"}
+//!           (an enrolment that failed after the rotation: {…,"enrolled":{"error"}} instead of
+//!           keyId, pushes and record)
 //! ```
 //!
 //! `scan` is the holder scanning a device string: a bound offer whose ticket goes into the
@@ -35,7 +37,8 @@
 //! connects to the device's executor as its custody service. `record` and `master`/`record`
 //! fields answer a record write's version, or `{"error"}`.
 //!
-//! `create` answers the 12 words too, so a test can restore from them on another executor;
+//! `create` lists this device in the record as `name` (default `This computer`) of `kind`
+//! (default `desktop-app`), holding master #0. It answers the 12 words too, so a test can restore from them on another executor;
 //! `rotate` rotates with the words this holder made the identity with. `restore` is a new
 //! device's holder: without `lockOut` it locks out the devices ticked by default.
 //!
@@ -106,6 +109,14 @@ fn written(record: &Result<u64, ClientError>) -> Value {
     }
 }
 
+/// A step's outcome as JSON: `true`, or `{"error"}`.
+fn done(step: &Result<(), ClientError>) -> Value {
+    match step {
+        Ok(()) => json!(true),
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
 /// The master #0 secret of each identity this holder made, base58btc, from the words: what
 /// `sendMaster` answers so a test can compare what the device takes. The flows never see it.
 type Masters = HashMap<String, String>;
@@ -141,6 +152,7 @@ async fn create(
     vault: &MemoryVault,
     masters: &mut Masters,
     phrases: &mut Phrases,
+    this: DeviceEntry,
 ) -> Result<Value, String> {
     let (mut flow, screen) = CreateFlow::start(&RANDOM);
     let CreateScreen::ShowWords(words) = screen else {
@@ -157,7 +169,7 @@ async fn create(
     flow.confirm([&words[positions[0] - 1], &words[positions[1] - 1]])
         .map_err(|e| e.to_string())?;
     let created = flow
-        .finish(executor, vault, &OsRandom)
+        .finish(executor, vault, this, &OsRandom)
         .await
         .map_err(|e| e.to_string())?;
     masters.insert(
@@ -171,6 +183,7 @@ async fn create(
         "scid": created.scid,
         "seq": created.head.seq,
         "words": phrase,
+        "record": created.record.as_ref().map(written),
     }))
 }
 
@@ -228,7 +241,12 @@ async fn main() {
             }
         };
         let answer: Result<Value, String> = match command["cmd"].as_str() {
-            Some("create") => create(&executor, &vault, &mut masters, &mut phrases).await,
+            Some("create") => {
+                match device_entry(&command, Some("This computer"), DeviceKind::DesktopApp) {
+                    Ok(this) => create(&executor, &vault, &mut masters, &mut phrases, this).await,
+                    Err(e) => Err(e),
+                }
+            }
             Some("rotate") => {
                 async {
                     let did = field(&command, "did")?;
@@ -248,6 +266,7 @@ async fn main() {
                         "revoked": rotated.revoked,
                         "pushes": pushes(&rotated.pushes),
                         "record": written(&rotated.record),
+                        "kept": done(&rotated.kept),
                     }))
                 }
                 .await
@@ -260,6 +279,12 @@ async fn main() {
                         .map_err(|e| e.to_string())?
                     {
                         Refreshed::Current => Ok(json!({ "refreshed": "current" })),
+                        Refreshed::Promoted { index, record } => Ok(json!({
+                            "refreshed": "promoted",
+                            "index": index,
+                            "record": written(&record),
+                        })),
+                        Refreshed::Unknown => Ok(json!({ "refreshed": "unknown" })),
                         Refreshed::Taken(taken) => Ok(json!({
                             "refreshed": "taken",
                             "index": taken.index,
@@ -284,7 +309,7 @@ async fn main() {
                 async {
                     let typed = field(&command, "words")?;
                     let this = device_entry(&command, Some("restored"), DeviceKind::DesktopApp)?;
-                    let flow = RestoreFlow::start(&executor, &vault, typed, &CLOCK, &RANDOM)
+                    let mut flow = RestoreFlow::start(&executor, &vault, typed, &CLOCK, &RANDOM)
                         .await
                         .map_err(|e| e.to_string())?;
                     let did = flow.did().to_string();
@@ -314,17 +339,23 @@ async fn main() {
                         .finish(&lock_out, this)
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok(json!({
+                    let mut answer = json!({
                         "did": did,
                         "devices": devices,
                         "index": restored.index,
                         "seq": restored.head.seq,
                         "tries": restored.tries,
                         "revoked": restored.revoked,
-                        "keyId": restored.key_id,
-                        "pushes": pushes(&restored.pushes),
-                        "record": written(&restored.record),
-                    }))
+                    });
+                    match &restored.enrolled {
+                        Ok(enrolled) => {
+                            answer["keyId"] = json!(enrolled.key_id);
+                            answer["pushes"] = pushes(&enrolled.pushes);
+                            answer["record"] = written(&enrolled.record);
+                        }
+                        Err(e) => answer["enrolled"] = json!({ "error": e.to_string() }),
+                    }
+                    Ok(answer)
                 }
                 .await
             }
@@ -526,11 +557,12 @@ async fn main() {
                             "seq": revoked.head.seq,
                             "record": written(&revoked.record),
                         })),
-                        Answered::Rotated(rotated) => Ok(json!({
+                        Answered::Rotated { rotated, deleted } => Ok(json!({
                             "answered": "confirm-revoke",
                             "seq": rotated.head.seq,
                             "master": rotated.index,
                             "record": written(&rotated.record),
+                            "deleted": done(&deleted),
                         })),
                     }
                 }

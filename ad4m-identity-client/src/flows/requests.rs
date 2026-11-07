@@ -42,8 +42,14 @@ pub enum Answered {
     MasterSent(Sent),
     /// `confirm-revoke`: the keys are revoked.
     Revoked(Revoked),
-    /// `confirm-revoke` with the words: the keys are revoked in a rotation.
-    Rotated(Rotated),
+    /// `confirm-revoke` with the words: the keys are revoked in a rotation. The rotation
+    /// stands whatever `deleted` says: a request left in the box after it names keys the
+    /// rotation already revoked, and answering it again is refused.
+    Rotated {
+        rotated: Rotated,
+        /// The master-signed delete of the request after the rotation.
+        deleted: Result<(), ClientError>,
+    },
 }
 
 /// Checks that `request` of `did`'s box was posted by the device key it names: a device key
@@ -179,10 +185,14 @@ pub async fn answer_with_words<R: ExecutorRpc>(
     check_poster(request, did, &chain)?;
     check_current(request, &chain, clock.now())?;
     let rotated = rotate(executor, vault, did, words, key_ids, clock, random).await?;
-    let signer = master_of(&ad4m_identity_core::words::seed(words), rotated.index)?;
-    let chain = chain_of(executor, did).await?;
-    delete(executor, &chain, did, &signer, &request.id, clock, random).await?;
-    Ok(Answered::Rotated(rotated))
+    // The rotation is public from here: a failed delete is reported with it, not as an error.
+    let deleted = async {
+        let signer = master_of(&ad4m_identity_core::words::seed(words), rotated.index)?;
+        let chain = chain_of(executor, did).await?;
+        delete(executor, &chain, did, &signer, &request.id, clock, random).await
+    }
+    .await;
+    Ok(Answered::Rotated { rotated, deleted })
 }
 
 /// The device's side: asks a holder for the current master key (a `send-master` request,

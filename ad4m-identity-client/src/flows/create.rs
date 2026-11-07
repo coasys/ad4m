@@ -14,16 +14,20 @@
 //!    kept incept again: the executor answers a repeat of the events its store holds with the
 //!    store's head, so the identity is made once, with the master key the vault holds.
 //! 6. The private record's first version, with the words' recovery key: a restore from the
-//!    words alone opens it and shows the devices by name.
+//!    words alone opens it and shows the devices by name. It lists this device (`d1`) as
+//!    the surface names it, `holdsMaster: true` with `masterIndex` 0: the creator counts as a
+//!    copy of master #0 (`remove_master` on another holder), and a rotation elsewhere sends
+//!    it the new master.
 
 use ad4m_identity_core::build::{incept_human, Signer};
+use ad4m_identity_core::record::{DeviceEntry, HoldsMaster};
 use ad4m_identity_core::words::{self, Seed, Words};
 use ad4m_identity_core::{DeviceKey, Event, KeyLife, Op};
 use ad4m_ldk::identity::SignedHead;
 
 use crate::executor::{ExecutorRpc, IdentityStatus, ViaExecutor};
 use crate::flows::rotate::recovery_key_of;
-use crate::record::{self, Reader};
+use crate::record::{self, Change, Reader};
 use crate::secret::Secret;
 use crate::vault::Vault;
 use crate::{fold, ClientError, Random};
@@ -61,8 +65,9 @@ pub struct Created {
     /// The executor's device key's id in the log (`d1`).
     pub device_key_id: String,
     pub head: SignedHead,
-    /// The record write that sets the words' recovery key (`None` from [`resume`], which has
-    /// no words; a later rotation sets it). The identity stands either way.
+    /// The record write that sets the words' recovery key and lists this device as holding
+    /// master #0 (`None` from [`resume`], which has no words; a later rotation sets it). The
+    /// identity stands either way.
     pub record: Option<Result<u64, ClientError>>,
 }
 
@@ -142,36 +147,49 @@ impl CreateFlow {
         Ok(())
     }
 
-    /// Makes the identity on `executor` and keeps master #0 in `vault`.
+    /// Makes the identity on `executor`, keeps master #0 in `vault`, and lists this device as
+    /// `this_device` in the record (its `holdsMaster` and `masterIndex` are set here: `true`,
+    /// 0).
     pub async fn finish<R: ExecutorRpc>(
         self,
         executor: &ViaExecutor<R>,
         vault: &dyn Vault,
+        this_device: DeviceEntry,
         random: &dyn Random,
     ) -> Result<Created, ClientError> {
         let Some(Step::Confirmed(seed)) = self.step else {
             return Err(ClientError::Step("finish follows confirm"));
         };
-        create_from_seed(&seed, executor, vault, random).await
+        create_from_seed(&seed, executor, vault, this_device, random).await
     }
 }
 
-/// Steps 3 to 6 of `create` from the seed of confirmed words. When the vault keeps an incept of
-/// these words for this executor (an earlier `create` that did not see its publish answered),
-/// publishes that one again instead of making another.
+/// Steps 3 to 6 of `create` from the seed of confirmed words; the record lists this device as
+/// `this_device`, holding master #0. When the vault keeps an incept of these words for this
+/// executor (an earlier `create` that did not see its publish answered), publishes that one
+/// again instead of making another.
 pub async fn create_from_seed<R: ExecutorRpc>(
     seed: &Seed,
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
+    this_device: DeviceEntry,
     random: &dyn Random,
 ) -> Result<Created, ClientError> {
     let mut created = publish_from_seed(seed, executor, vault).await?;
+    let this = Change::Device {
+        key_id: created.device_key_id.clone(),
+        entry: DeviceEntry {
+            holds_master: HoldsMaster::Yes,
+            master_index: Some(0),
+            ..this_device
+        },
+    };
     created.record = Some(
         record::write_as(
             executor,
             &created.did,
             &Reader::Executor,
-            &[],
+            &[this],
             Some(&recovery_key_of(seed)),
             random,
         )
