@@ -168,6 +168,9 @@ pub struct IdentityService {
     /// The device inbox: what this executor read of it, the open pre-join read, the pull's
     /// wake-up.
     pub inbox: super::inbox::Inbox,
+    /// The origins a key statement's `audience` may name: `public_origins`, else this
+    /// executor's own loopback origins.
+    pub audiences: super::key_login::Audiences,
 }
 
 impl IdentityService {
@@ -714,6 +717,7 @@ mod tests {
             store_url: None,
             challenges: Default::default(),
             inbox: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         }
     }
@@ -750,6 +754,7 @@ mod tests {
             store_url: None,
             challenges: Default::default(),
             inbox: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
         assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
@@ -798,6 +803,7 @@ mod tests {
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
                 inbox: Default::default(),
+                audiences: Default::default(),
                 store_keys_source: crate::identity::StoreSource::Config,
             }
         };
@@ -854,6 +860,7 @@ mod tests {
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
                 inbox: Default::default(),
+                audiences: Default::default(),
                 store_keys_source,
             }
             .refuse_without_store_keys()
@@ -1109,6 +1116,7 @@ mod tests {
             store_url: None,
             challenges: Default::default(),
             inbox: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
         let scid = ours.scid();
@@ -1205,6 +1213,7 @@ mod tests {
             store_url: None,
             challenges: Default::default(),
             inbox: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         }
     }
@@ -1410,6 +1419,7 @@ mod tests {
             store_url: None,
             challenges: Default::default(),
             inbox: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
         let incept = incept_listing(&agent, 53);

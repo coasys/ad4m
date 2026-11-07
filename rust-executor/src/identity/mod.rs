@@ -119,6 +119,12 @@ pub struct IdentitySettings {
     /// `identity.allowPrivateSrc`: let a DID URL's `src` reach loopback and private addresses.
     /// Off by default; for tests and local development only.
     pub allow_private_src: bool,
+    /// `public_origins`: the origins clients reach this executor at, as configured. A key
+    /// statement's `audience` must be one of them (`key_login::Audiences`).
+    pub public_origins: Vec<String>,
+    /// The API port: without `public_origins`, a key statement's `audience` must be one of the
+    /// loopback origins on it.
+    pub api_port: Option<u16>,
 }
 
 impl IdentitySettings {
@@ -160,6 +166,8 @@ impl IdentitySettings {
             store_url_source,
             store_keys_source,
             allow_private_src: config.identity_allow_private_src.unwrap_or(false),
+            public_origins: config.public_origins.clone().unwrap_or_default(),
+            api_port: config.port,
         }
     }
 
@@ -167,7 +175,14 @@ impl IdentitySettings {
     /// [`check_store_url`]), the error naming where each came from. Checked at start.
     pub fn check(&self) -> Result<(), String> {
         check_store_keys(&self.store_keys, self.store_keys_source)?;
-        check_store_url(self.store_url.as_deref(), self.store_url_source)
+        check_store_url(self.store_url.as_deref(), self.store_url_source)?;
+        self.audiences().map(|_| ())
+    }
+
+    /// The origins a key statement may name here: `public_origins` normalised, else the
+    /// loopback origins of the API port. Fails on a configured value that is no origin.
+    pub fn audiences(&self) -> Result<key_login::Audiences, String> {
+        key_login::Audiences::new(&self.public_origins, self.api_port)
     }
 }
 
@@ -240,6 +255,8 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         resolver: Arc::new(resolver),
         challenges: Default::default(),
         inbox: Default::default(),
+        // `check` refused a bad origin at start; past it, none is accepted.
+        audiences: settings.audiences().unwrap_or_default(),
     };
     let service = Arc::new(service);
     if SERVICE.set(service.clone()).is_err() {
@@ -315,10 +332,26 @@ fn listed_signers(service: &IdentityService) -> Vec<String> {
 }
 
 /// The verdict of a signed expression (a link) and its person, from the executor's key map,
-/// with no I/O ([`resolver::check_signed_with`]). No space order is known here: a link signed
-/// before its key's revocation counts.
+/// with no I/O ([`resolver::check_signed_with`]). No space order is known here: a link by a
+/// key revoked after its anchor is `flagged` ([`check_signed_entered`] for the one order the
+/// executor does know).
 pub fn check_signed<T: serde::Serialize>(expr: &Expression<T>) -> CheckedLink {
-    resolver::check_signed_with(expr, &cache::global_key_map(), None, service::now())
+    check_signed_entered(expr, None)
+}
+
+/// [`check_signed`] with what the caller knows of the order: `Some(false)` for a link this
+/// executor held as `valid` before the signer's revocation reached its key map (the link store
+/// at a re-judgement), `Some(true)` for one that arrived after, `None` when nothing is known.
+pub fn check_signed_entered<T: serde::Serialize>(
+    expr: &Expression<T>,
+    entered_after_revoke: Option<bool>,
+) -> CheckedLink {
+    resolver::check_signed_with(
+        expr,
+        &cache::global_key_map(),
+        entered_after_revoke,
+        service::now(),
+    )
 }
 
 /// Fills the key map for the signers of `links` before they are checked and stored: the key

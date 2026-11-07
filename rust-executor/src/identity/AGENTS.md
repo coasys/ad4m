@@ -8,7 +8,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 |---|---|
 | `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`, else the network seed's `identityStore`; `identity.allowPrivateSrc`), `write_agent_language_settings`, the `identity-fork` publisher; re-exports `verify_expression` |
 | `resolver.rs` | The one place that decides what a log says. `key_valid_at_anchor` and `verify_expression` (both up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author with its `proof.record`, for `LanguageController::verify_expression_proof`; the record anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Links: `check_signed_with` (the verdict and person of a signed link from the key map, no I/O), `Resolver::author_of` / `lookup_signer` (key map, then the key index confirmed against the log), `Resolver::prepare` (fills the key map before links are stored). Sessions: `Resolver::session_key` / `cached_session_key` (`SessionKey`: a device key's verdict and bot mark in a named log at its trusted seq, the log read from the store when older than the caller allows; `SessionKeyError::StoreUnavailable` fails closed) |
-| `key_login.rs` | Login with a device key: `Challenges` (one use, 60 s, at most 10 000 open), `login` (challenge, audience, signature over `signing_bytes("coasys:session", statement)`, key, role: the operator record's identity gets the operator role, else the local agent that speaks for it, else `not-known`), `renew`, `session_info`, `end_all_sessions`, `sign_statement` (`agent.signSessionStatement`, `.local_only()`: a key-login operator is never "on this machine", on a loopback listener too, so it and every other local-only method refuse it; every other method admits it as the operator, `agent.generate`, `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` included), `run_key_session_watch` (ends a key's grants on its `VerdictChange`, and the 5-minute re-check) |
+| `key_login.rs` | Login with a device key: `Challenges` (one use, 60 s, at most 10 000 open), `login` (challenge, executor DID, `audience` origin against `Audiences`, signature over `signing_bytes("coasys:session", statement)`, key, role: the operator record's identity gets the operator role, else the local agent that speaks for it, else `not-known`), `renew`, `session_info`, `end_all_sessions`, `sign_statement` (`agent.signSessionStatement`, `.local_only()`: a key-login operator is never "on this machine", on a loopback listener too, so it and every other local-only method refuse it; every other method admits it as the operator, `agent.generate`, `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` included), `run_key_session_watch` (ends a key's grants on its `VerdictChange`, and the 5-minute re-check) |
 | `verdict.rs` | `LinkVerdict` (`Valid`, `Invalid(reason)`, `CantCheck`, `Flagged`) and `judge`, a pure function of the signature, the anchor, the signer's log and the space order; `KeyVerdict`, `VerdictChange`, `key_verdict` |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
@@ -37,6 +37,20 @@ the offer's state).
   over the did:scid host profile (`src_fetch.rs`), where the address policy can be enforced at
   connect time; its events are folded in memory for that one answer and never cached, its head
   is only a paging hint. Nothing else here speaks HTTP.
+- **A key statement names the origin it was signed for.** `KeyStatement.audience` is the
+  origin the client dialed (`scheme://host[:port]`), signed under `coasys:session` with the
+  rest; `agent.signSessionStatement` signs it as given, so the person's app shows and signs
+  the server it talks to. `login` and `renew` accept it only when, normalised
+  (`normalise_origin`: `ws`/`wss` read as `http`/`https`, host lowercase, default port
+  dropped), it is one of `Audiences`: the configured `public_origins` (`--public-origin`),
+  else this executor's own loopback origins (`http://127.0.0.1:<port>`,
+  `http://localhost:<port>`, `http://[::1]:<port>`). Without `public_origins` a non-loopback
+  audience is refused as `no-public-origin`, a reason that names the setting; any other
+  mismatch is `audience`. Nothing from the connection (`Host`, `Origin`, the listener) is
+  read: the caller controls those. This is what stops a relay: a server the person added
+  hands the app this executor's challenge and DID, but the app signs the server's own
+  origin, and this executor refuses that. The executor-DID check stays as well. The
+  challenge is spent before any of these checks, so a refused statement cannot be retried.
 - The cache only extends a log. A different event at a held seq that holds (below) records a
   fork, appends nothing and fires `identity-fork` once per fork, to the sessions of the
   identity's local agents.

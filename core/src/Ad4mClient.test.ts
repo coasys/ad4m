@@ -1447,7 +1447,7 @@ describe('User and Auth', () => {
         expect(lastRpcCall).toEqual({ type: 'user.sessionChallenge', params: {} });
 
         const unsigned = {
-            v: 1, purpose: 'login' as const, executor: challenge.executor, challenge: challenge.challenge,
+            v: 1, purpose: 'login' as const, executor: challenge.executor, audience: 'http://127.0.0.1:12000', challenge: challenge.challenge,
             client: { kind: 'native' as const }, issuedAt: 1000,
         };
         const proof = await ad4m.agent.signSessionStatement(unsigned);

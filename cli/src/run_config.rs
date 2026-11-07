@@ -270,6 +270,17 @@ pub struct RunArgs {
     /// run; five runs kept). Default: stdout.
     #[arg(long, env = "AD4M_LOG_DIR", value_parser = non_empty(StringValueParser::new()))]
     pub log_dir: Option<String>,
+    /// An origin clients reach this executor at (`public_origins`), e.g.
+    /// `https://ad4m.example.org`; repeat it or separate with commas. A key login or a session
+    /// renewal is accepted only when its signed statement names one of them. Default: only this
+    /// executor's own loopback origins, so key logins come only from this machine.
+    #[arg(
+        long = "public-origin",
+        env = "AD4M_PUBLIC_ORIGINS",
+        value_delimiter = ',',
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub public_origins: Option<Vec<String>>,
     /// Local DID for this SFU node in a cascade cluster. Required alongside
     /// --sfu-cascade-listen to enable cascade gossip.
     #[arg(long, env = "AD4M_SFU_LOCAL_DID", value_parser = non_empty(StringValueParser::new()))]
@@ -409,6 +420,7 @@ impl RunArgs {
         overlay(&mut file.sfu_public_addr, &self.sfu_public_addr);
         overlay(&mut file.sfu_stun_server, &self.sfu_stun_server);
         overlay(&mut file.log_dir, &self.log_dir);
+        overlay(&mut file.public_origins, &self.public_origins);
         if self.identity_store_url.is_some()
             || self.identity_store_keys.is_some()
             || self.identity_allow_private_src.is_some()
@@ -493,6 +505,7 @@ impl RunArgs {
             ),
             ("multi_user_config", self.enable_multi_user.is_some() || tls),
             ("log_dir", self.log_dir.is_some()),
+            ("public_origins", self.public_origins.is_some()),
         ]
         .into_iter()
         .filter(|(_, pinned)| *pinned)
@@ -1005,6 +1018,7 @@ pub(crate) mod tests {
                 allow_private_src: Some(false),
             }),
             log_dir: Some("/a/logs".into()),
+            public_origins: Some(vec!["https://a.example".into()]),
         };
         let file_json = serde_json::to_value(&file).unwrap();
         let config = write_config(&dir, &file_json.to_string());
@@ -1027,6 +1041,8 @@ pub(crate) mod tests {
             "/multi_user_config/tls_config/enabled",
             // A list: `identity_store_keys_take_a_comma_separated_list` covers it.
             "/identity/storeKeys",
+            // A list: `public_origins_take_a_repeated_or_comma_separated_list` covers it.
+            "/public_origins",
         ];
         for key in keys.iter().filter(|key| !flagless.contains(&key.as_str())) {
             assert!(
@@ -1096,6 +1112,45 @@ pub(crate) mod tests {
         assert_eq!(
             resolved.identity_store_url.as_deref(),
             Some("http://127.0.0.1:8080")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `--public-origin` (repeated or comma separated) / `AD4M_PUBLIC_ORIGINS` replace the
+    /// file's `public_origins`, the flag over the variable.
+    #[test]
+    fn public_origins_take_a_repeated_or_comma_separated_list() {
+        let _env = lock_env();
+        let dir = scratch_dir("public-origins");
+        let config = write_config(&dir, r#"{"public_origins": ["https://a.example"]}"#);
+        let origins = |argv: &[&str], env: &[(&'static str, &str)]| {
+            let mut full = vec!["--config", config.as_str()];
+            full.extend_from_slice(argv);
+            resolve(&full, env).unwrap().config.public_origins
+        };
+        let list = |items: &[&str]| Some(items.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(origins(&[], &[]), list(&["https://a.example"]));
+        assert_eq!(
+            origins(
+                &[],
+                &[(
+                    "AD4M_PUBLIC_ORIGINS",
+                    "https://b.example,https://c.example:8443"
+                )]
+            ),
+            list(&["https://b.example", "https://c.example:8443"])
+        );
+        assert_eq!(
+            origins(
+                &[
+                    "--public-origin",
+                    "https://d.example",
+                    "--public-origin",
+                    "https://e.example"
+                ],
+                &[("AD4M_PUBLIC_ORIGINS", "https://b.example")]
+            ),
+            list(&["https://d.example", "https://e.example"])
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1325,7 +1380,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 45, "every flag of run has a variable");
+        assert_eq!(checked, 46, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
