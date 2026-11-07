@@ -214,6 +214,27 @@ impl KeyMap {
             .unwrap_or_default()
     }
 
+    /// The listed bot keys with a scope whose `expires` falls in `(after, upto]` (unix
+    /// seconds): the keys whose links the clock, not a new head, may have turned invalid.
+    pub fn expiring(&self, after: u64, upto: u64) -> Vec<String> {
+        let Ok(inner) = self.inner.lock() else {
+            return Vec::new();
+        };
+        inner
+            .logs
+            .values()
+            .flat_map(|log| log.state.keys.values())
+            .filter(|record| {
+                record
+                    .scopes
+                    .iter()
+                    .any(|(_, scope)| after < scope.expires && scope.expires <= upto)
+            })
+            .filter(|record| inner.keys.contains_key(&record.sign))
+            .map(|record| record.sign.clone())
+            .collect()
+    }
+
     /// Keeps the log of the local identity `scid` through the bound, from now on (an agent of
     /// this executor speaks for it). The pin outlives [`KeyMap::forget`].
     pub fn pin(&self, scid: &str) {

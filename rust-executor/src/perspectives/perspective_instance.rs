@@ -8222,6 +8222,73 @@ mod tests {
         map.forget(&log.scid());
     }
 
+    /// A bot's link counts while its scope lasts. When the scope expires, the next tick
+    /// re-checks that key's links and the stored verdict turns `invalid`, though no new head
+    /// came in.
+    #[tokio::test]
+    async fn a_bot_link_turns_invalid_when_its_scope_expires() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::verdict::InvalidReason;
+        use ad4m_identity_core::build::Signer;
+        use ad4m_identity_core::BotScope;
+
+        let perspective = setup().await;
+        let log = TestLog::new(98);
+        let map = global_key_map();
+        let start = chrono::Utc::now().timestamp() as u64;
+        let mut state = log.chain().state().clone();
+        state.keys.get_mut("d1").unwrap().scopes = vec![(
+            0,
+            BotScope {
+                can: vec!["read".into()],
+                expires: start + 2,
+            },
+        )];
+        map.publish(&log.scid(), TrustedLog { state, trusted: 0 });
+        map.note_confirmed(&log.scid(), start);
+        let key = log.device.key();
+        let data = create_link().normalize();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        perspective.sparql_store.add_link(&link).unwrap();
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let now = chrono::Utc::now().timestamp() as u64;
+        let expired = crate::identity::expired_signers(&map, start, now);
+        assert_eq!(
+            expired,
+            std::collections::BTreeSet::from([link.author.clone()])
+        );
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(expired))
+                .await
+                .unwrap(),
+            1
+        );
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(
+            stored[0].verdict,
+            Some(LinkVerdict::Invalid(InvalidReason::Expired))
+        );
+        assert_eq!(stored[0].person, None);
+        map.forget(&log.scid());
+    }
+
     /// A display read leaves out an invalid link; with `include_unverified` it returns it,
     /// with its verdict, and the owner can remove it.
     #[tokio::test]

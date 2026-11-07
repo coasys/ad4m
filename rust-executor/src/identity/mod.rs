@@ -254,13 +254,15 @@ pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
 
 /// The re-check of stored links: the links of each key whose verdict the cache changed (a
 /// revocation, a key a log lists for the first time), and every [`RECHECK_EVERY`] the links
-/// that could not be checked. Each re-check judges a link again from the key map and rewrites
-/// it only when its verdict or person changed, so it is idempotent.
+/// that could not be checked and those of each bot key whose scope expired since the last
+/// tick (since start on the first). Each re-check judges a link again from the key map and
+/// rewrites it only when its verdict or person changed, so it is idempotent.
 async fn run_recheck(service: Arc<IdentityService>) {
     use tokio::sync::broadcast::error::{RecvError, TryRecvError};
     let mut changes = service.cache.subscribe();
     let mut tick = tokio::time::interval(RECHECK_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut expired_until = 0;
     loop {
         tokio::select! {
             change = changes.recv() => {
@@ -288,10 +290,27 @@ async fn run_recheck(service: Arc<IdentityService>) {
                     .await;
             }
             _ = tick.tick() => {
+                let now = service::now();
+                let expired = expired_signers(service.cache.key_map(), expired_until, now);
+                expired_until = now;
+                if !expired.is_empty() {
+                    crate::perspectives::recheck_links(
+                        &crate::perspectives::Recheck::Signers(expired),
+                    )
+                    .await;
+                }
                 crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
             }
         }
     }
+}
+
+/// The signers (`did:key`) of the bot keys whose scope expired in `(after, upto]`.
+pub(crate) fn expired_signers(map: &cache::KeyMap, after: u64, upto: u64) -> BTreeSet<String> {
+    map.expiring(after, upto)
+        .into_iter()
+        .map(|key| format!("did:key:{key}"))
+        .collect()
 }
 
 fn listed_signers(service: &IdentityService) -> Vec<String> {
@@ -556,6 +575,47 @@ mod tests {
         let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
         cosign(&mut event, "m0", &log.master).unwrap();
         log.events.push(event);
+    }
+
+    /// The tick re-checks the links of each bot key whose scope expired since the last tick:
+    /// once, and never a key without a scope or one whose scope has not expired.
+    #[test]
+    fn the_tick_rechecks_the_bot_keys_whose_scope_expired_since_the_last_one() {
+        use ad4m_identity_core::BotScope;
+        let bot = TestLog::new(64);
+        let person = TestLog::new(65);
+        let map = cache::KeyMap::new();
+        let mut state = bot.chain().state().clone();
+        state.keys.get_mut("d1").unwrap().scopes = vec![(
+            0,
+            BotScope {
+                can: vec!["read".into()],
+                expires: 1_500,
+            },
+        )];
+        map.publish(&bot.scid(), cache::TrustedLog { state, trusted: 0 });
+        map.publish(
+            &person.scid(),
+            cache::TrustedLog {
+                state: person.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let bot_signer = BTreeSet::from([agent_of(&bot)]);
+        assert!(
+            expired_signers(&map, 0, 1_000).is_empty(),
+            "not expired yet"
+        );
+        assert_eq!(expired_signers(&map, 1_000, 2_000), bot_signer);
+        assert!(
+            expired_signers(&map, 2_000, 3_000).is_empty(),
+            "already rechecked"
+        );
+        assert_eq!(
+            expired_signers(&map, 0, 3_000),
+            bot_signer,
+            "after a restart"
+        );
     }
 
     /// The anchor of a bound agent is its log's trusted seq, read from the key map with no
