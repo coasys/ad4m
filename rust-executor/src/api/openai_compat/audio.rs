@@ -112,9 +112,18 @@ pub async fn transcriptions(
     Ok(([(header::CONTENT_TYPE, reply.content_type)], reply.body).into_response())
 }
 
-/// What the client sees of a failed upstream call (plan §5.4): the upstream's refusal with
-/// its status, else a gateway error. Never the endpoint's URL or key.
+/// What the client sees of a failed upstream call (plan §5.4). A status the upstream
+/// answered, or an upstream not reached, maps as on the other `/v1` routes
+/// ([`OpenAIError::from_endpoint`]: 429 keeps its `Retry-After`, 404 is
+/// `model_not_found`). The rest (a timeout of the call, an answer this executor could not
+/// use, a transport error) is a gateway error. Never the endpoint's URL or key.
 fn upstream_error(error: &anyhow::Error) -> OpenAIError {
+    use crate::ai_service::providers::http::{UpstreamStatus, UpstreamUnreachable};
+    if error.downcast_ref::<UpstreamStatus>().is_some()
+        || error.downcast_ref::<UpstreamUnreachable>().is_some()
+    {
+        return OpenAIError::from_endpoint(error);
+    }
     let failure = TranscribeFailure::of(error);
     let (status, code) = match &failure {
         TranscribeFailure::Refused { status, .. } => {

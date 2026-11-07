@@ -1296,6 +1296,15 @@ impl AIService {
         self.reload_model(model_id).await
     }
 
+    /// Close the streams on `model_id`: each one keeps the URL and key of the endpoint it
+    /// opened with. The utterances they already took are answered.
+    async fn close_streams_of(&self, model_id: &str) {
+        self.transcription_streams
+            .lock()
+            .await
+            .retain(|_, stream| stream.model_id != model_id);
+    }
+
     /// Builds a model's client again from its stored row, after the row changed: an update
     /// of the model, or of the endpoint it runs on.
     pub(crate) async fn reload_model(&self, model_id: String) -> Result<()> {
@@ -1303,11 +1312,8 @@ impl AIService {
             .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
         // A stream on the model keeps the client it opened with: closed, so no more audio
-        // goes to the endpoint as it was. The utterances it already took are answered.
-        self.transcription_streams
-            .lock()
-            .await
-            .retain(|_, stream| stream.model_id != model_id);
+        // goes to the endpoint as it was.
+        self.close_streams_of(&model_id).await;
         self.init_model(&model).await
     }
 
@@ -1316,6 +1322,7 @@ impl AIService {
             .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
         self.drop_clients(&model_id).await;
+        self.close_streams_of(&model_id).await;
         crate::db_backend::db_backend()
             .remove_model(&model_id)
             .map_err(|e| anyhow!("Failed to remove model from database: {}", e))
