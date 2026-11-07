@@ -52,7 +52,8 @@ pub const CHALLENGE_TTL: u64 = 60;
 pub const MAX_OPEN_CHALLENGES: usize = 10_000;
 /// How far a statement's `issuedAt` may be from the executor's clock.
 pub const CLOCK_SKEW: u64 = 120;
-/// The oldest read of a key's log a login or a renewal takes; an older one goes to the store.
+/// The oldest read of a key's log a login takes; an older one goes to the store. A renewal
+/// always reads the store.
 pub const LOGIN_MAX_AGE: u64 = 5 * 60;
 /// How often the keys of live key-bound grants are read again.
 pub const KEY_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -542,11 +543,13 @@ pub async fn renew(
     if !signature_holds(&proof) {
         return Err(KeyLoginError::Signature);
     }
-    // On the cached log, the key was not checked: the grace keeps running from the last real
-    // check, so a device revoked on the store during the outage cannot renew past it.
+    // The store is read whatever the cache's age: a failed refresh also marks the log as read
+    // (backoff), and a renewal on that cached log would count as a check. On the cached log, the
+    // key was not checked: the grace keeps running from the last real check, so a device
+    // revoked on the store during the outage cannot renew past it.
     let (read, checked_at) = match service
         .resolver
-        .session_key(&binding.scid, &binding.key, LOGIN_MAX_AGE)
+        .session_key(&binding.scid, &binding.key, 0)
         .await
     {
         Err(SessionKeyError::StoreUnavailable)
@@ -1993,6 +1996,52 @@ mod tests {
             "the outage grace is measured from the last real check, not the last renewal"
         );
         assert_eq!(binding.checked_at(), checked);
+        world.store.store_down.store(false, Ordering::SeqCst);
+        no_operator();
+    }
+
+    // A failed refresh marks the log as read (backoff), so a renewal that took a recent read
+    // from the cache would renew on the stale log as if the store had answered, and move
+    // `checked_at` on through the outage. A renewal reads the store whatever the cache's age.
+    #[tokio::test]
+    async fn a_renewal_after_a_failed_refresh_is_no_check_of_the_key() {
+        let mut world = world(250).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        let binding = session.key_binding().unwrap();
+        let checked = binding.checked_at();
+        let renewal = |world: &World, at: u64| {
+            let mut statement = world.statement(&world.phone);
+            statement.purpose = KeyPurpose::Renew;
+            statement.grant = Some(result.grant_id.clone());
+            statement.challenge = world.service.challenges.issue(at).unwrap().0;
+            statement.issued_at = at;
+            signed(statement, &world.phone)
+        };
+
+        world.store.store_down.store(true, Ordering::SeqCst);
+        for minutes in [20, 40, 59] {
+            let at = checked + minutes * 60;
+            // A read that just failed (a link check, say) noted the log as refreshed.
+            world.service.cache.note_refreshed(&world.log.scid(), now());
+            renew(&world.service, &session, renewal(&world, at), at)
+                .await
+                .unwrap();
+            assert_eq!(
+                binding.checked_at(),
+                checked,
+                "a renewal while the store is down is no check, after {minutes} minutes"
+            );
+        }
+        let past = checked + STORE_OUTAGE_GRACE + 60;
+        world.service.cache.note_refreshed(&world.log.scid(), now());
+        assert_eq!(
+            renew(&world.service, &session, renewal(&world, past), past)
+                .await
+                .unwrap_err(),
+            KeyLoginError::StoreUnavailable
+        );
         world.store.store_down.store(false, Ordering::SeqCst);
         no_operator();
     }
