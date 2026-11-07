@@ -480,13 +480,15 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
 
 /**
  * The device inbox end to end, on a store of its own: a desktop executor (started with an admin
- * credential and the custody channel) shows its device string, the holder scans it and pushes
- * an offer ticket into its pre-join inbox, and the executor claims it; then the holder seals the
- * master key to the desktop's key, and only the custody service takes it.
+ * credential, the custody channel and its custody credential) shows its device string, the
+ * holder scans it and pushes an offer ticket into its pre-join inbox, and the executor claims it;
+ * then the holder seals the master key to the desktop's key, and only the custody service (the
+ * custody credential, never the admin credential) takes it.
  */
 describe("Identity: the device inbox, a ticket in the pre-join inbox and a master key for the custody service", function () {
     this.timeout(600_000);
-    const CREDENTIAL = "custody-service-credential";
+    const CREDENTIAL = "desktop-admin-credential";
+    const CUSTODY = "custody-service-credential";
 
     let store: IdentityStore;
     let holder: Holder;
@@ -552,7 +554,7 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
     it("links a desktop through its device string: its claim, then link-ticket with the match code", async () => {
         desk = await start("inbox-desktop", {
             credential: CREDENTIAL,
-            env: { AD4M_CUSTODY_CHANNEL: "true" },
+            env: { AD4M_CUSTODY_CHANNEL: "true", AD4M_CUSTODY_CREDENTIAL: CUSTODY },
             initArgs: ["--operator", did],
         });
         const tickets: any[] = [];
@@ -596,17 +598,20 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         expect(announced[0]).to.include({ id: sealed.id, kind: "master" });
         expect(JSON.stringify(announced)).to.not.contain(sealed.secret);
 
-        // A caller without the admin credential is not the custody service.
+        // A caller without a credential is not the custody service, and neither is the admin
+        // credential (an app's window may hold it).
         const stranger = new Ad4mClient(baseUrl(desk.ports[0]));
         expect(await refused(stranger.identity.takeMaster())).to.match(/Admin credential required|403/);
+        expect(await refused(desk.client.identity.takeMaster())).to.contain("no-custody-channel");
 
-        const taken = await desk.client.identity.takeMaster();
+        const custody = new Ad4mClient(baseUrl(desk.ports[0]), CUSTODY);
+        const taken = await custody.identity.takeMaster();
         expect(taken).to.deep.equal({ messageId: sealed.id, did, index: 0, secret: sealed.secret });
         // It waits until the custody service acknowledges it.
         expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
         expect(await desk.client.identity.inboxAck(sealed.id)).to.be.true;
         expect(await desk.client.identity.inbox()).to.deep.equal([]);
-        expect(await desk.client.identity.takeMaster()).to.be.null;
+        expect(await custody.identity.takeMaster()).to.be.null;
     });
 
     it("deletes a master key on an executor without the custody channel and never hands it out", async () => {

@@ -1192,6 +1192,32 @@ mod tests {
         ends(&service);
     }
 
+    /// "Show my code" on a desktop app's executor at its first run (`--custody-channel`, no
+    /// operator record, the main agent of no identity): the ticket is claimed, not refused
+    /// `no-operator`, and the claim records the ticket's identity as the operator (`first-run`).
+    #[tokio::test]
+    async fn a_desktop_with_no_operator_record_claims_its_first_ticket() {
+        let log = TestLog::new(88);
+        let (service, store) = holder_store(&log);
+        let (main_did, _) = device_key(&AgentContext::main_agent()).unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+        let _record = OperatorRecord;
+        let _channel = crate::config::CustodyChannelForTest::on();
+        let prepared = prepare_device(&service, true).await.unwrap();
+        let device = DeviceString::parse(&prepared.device).unwrap();
+        let offer_id = push_ticket(&log, &store, &device);
+
+        until("the claim", || !store.claims.lock().unwrap().is_empty()).await;
+        assert_eq!(store.claims.lock().unwrap()[0].0, offer_id);
+        let recorded = Ad4mDb::with_global_instance(|db| db.operator_record())
+            .unwrap()
+            .expect("the claim recorded the operator");
+        assert_eq!(recorded.scid, did_of(&log.scid()));
+        assert_eq!(recorded.set_by, crate::db::OperatorSetBy::FirstRun);
+        ends(&service);
+    }
+
     /// A ticket left for the next round (here: its identity's log cannot be read now) comes
     /// back at once on each read; the pre-join read still waits out its shortest round and
     /// does not spin on the store.

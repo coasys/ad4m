@@ -5,7 +5,9 @@
 //! `claim_for_main` claims with the main wallet key and first runs the first-link rule
 //! (`operator::first_link_check`): every path that claims for the main agent calls it, the
 //! `identity.claimOffer` handler and the pre-join ticket path of `identity.prepareDevice`
-//! (`inbox`), so the rule never depends on an RPC guard. Claims for a hosted tenant's agent
+//! (`inbox`), so the rule never depends on an RPC guard. On a desktop app's executor at its first
+//! run (`--custody-channel`, no operator record, the main agent of no identity) the first claim
+//! the store takes records the offer's identity as the operator (`OperatorSetBy::FirstRun`). Claims for a hosted tenant's agent
 //! are not here yet.
 
 use ad4m_identity_core::build::Signer;
@@ -13,14 +15,14 @@ use ad4m_identity_core::did_of;
 use ad4m_identity_core::link::{self, OfferString};
 
 use super::device::{device_key, enc_key_of, WalletSigner};
-use super::operator::first_link_check;
+use super::operator::{first_link_check, FirstLink, FirstLinkRefusal};
 use super::service::{
     backend_error, cache_error, db, error, first_link_error, now, store_base, IdentityService,
 };
 use super::types::{convert, ClaimOfferResult, JoinStatus};
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
-use crate::db::JoinRow;
+use crate::db::{JoinRow, OperatorSetBy};
 
 /// The claims of one executor.
 pub struct ClaimService<'a> {
@@ -55,7 +57,10 @@ impl ClaimService<'_> {
     /// (`identity.claimOffer`, a pre-join ticket). Refuses `no-operator` with no operator
     /// record and `first-link` while the main key is in no log and the offer is not of the
     /// recorded operator; `already-linked` while the main key speaks for an
-    /// identity (a revoked key needs a new main key: `identity.rekey`). `can_keep_master` goes
+    /// identity (a revoked key needs a new main key: `identity.rekey`). With no record on a
+    /// `--custody-channel` executor whose main agent speaks for no identity (a desktop app's
+    /// first run) the claim goes ahead, and once the store takes it the offer's identity is
+    /// recorded as the operator (`OperatorSetBy::FirstRun`). `can_keep_master` goes
     /// into the claim the main key co-signs.
     pub async fn claim_for_main(
         &self,
@@ -72,7 +77,13 @@ impl ClaimService<'_> {
                 "already-linked: this executor's key speaks for an identity already",
             ));
         }
-        first_link_check(record.as_ref(), &offer_did).map_err(first_link_error)?;
+        let main = AgentContext::main_agent();
+        let desktop_first_run = record.is_none() && crate::config::custody_channel_on() && {
+            let (main_did, _) = device_key(&main).map_err(WsRpcError::internal)?;
+            db(|db| db.agent_identity(&main_did))?.is_none()
+        };
+        let first_link = first_link_check(record.as_ref(), &offer_did, desktop_first_run)
+            .map_err(first_link_error)?;
         if let Some(ours) = &self.identity.store_url {
             if store_base(ours) != store_base(&offer.store) {
                 return Err(WsRpcError::bad_request(format!(
@@ -83,7 +94,6 @@ impl ClaimService<'_> {
         }
         let secret = link::decode_secret(&offer.s)
             .ok_or_else(|| WsRpcError::bad_request("invalid: the offer's secret is malformed"))?;
-        let main = AgentContext::main_agent();
         let (_, key) = device_key(&main).map_err(WsRpcError::internal)?;
         let enc = enc_key_of(&key).map_err(WsRpcError::internal)?;
         let signer = WalletSigner::new(&main).map_err(WsRpcError::internal)?;
@@ -116,6 +126,20 @@ impl ClaimService<'_> {
             .claim_offer(&offer_did, &offer.offer_id, &claim)
             .await
             .map_err(backend_error)?;
+        if first_link == FirstLink::FirstRun {
+            // Only while the record is still empty: of two first claims at once, the first
+            // recorded wins and the other is refused as any offer of another identity is.
+            let recorded = db(|db| {
+                db.set_operator_record_if_empty(&offer_did, now(), OperatorSetBy::FirstRun)
+            })?;
+            if recorded.scid != offer_did {
+                return Err(first_link_error(FirstLinkRefusal::FirstLink {
+                    operator: recorded.scid,
+                    offer: offer_did,
+                }));
+            }
+            log::info!("identity: the first claim of this desktop executor records {offer_did} as its operator");
+        }
         Ok(ClaimOfferResult {
             did: offer_did,
             match_code: link::match_code(&offer.scid, &offer.offer_id, signer.key().as_str()),

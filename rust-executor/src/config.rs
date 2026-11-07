@@ -44,6 +44,30 @@ pub fn custody_channel_on() -> bool {
         .unwrap_or(false)
 }
 
+/// Tests: the global config with `--custody-channel` on, as a desktop app's executor runs, until
+/// dropped; the config before it comes back then.
+#[cfg(test)]
+pub(crate) struct CustodyChannelForTest(Option<Ad4mConfig>);
+
+#[cfg(test)]
+impl CustodyChannelForTest {
+    pub(crate) fn on() -> Self {
+        let mut global = GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = global.clone();
+        let mut config = saved.clone().unwrap_or_default();
+        config.custody_channel = Some(true);
+        *global = Some(config);
+        CustodyChannelForTest(saved)
+    }
+}
+
+#[cfg(test)]
+impl Drop for CustodyChannelForTest {
+    fn drop(&mut self) {
+        *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = self.0.take();
+    }
+}
+
 /// Get a clone of the global Ad4mConfig.
 /// Recovers from a poisoned mutex (see `set_global_config` for rationale).
 pub fn get_global_config() -> Ad4mConfig {
@@ -144,10 +168,18 @@ pub struct Ad4mConfig {
     /// so the executor never outlives it (`--watch-stdin`).
     pub watch_stdin: Option<bool>,
     /// This executor serves the custody channel: the desktop app's custody service takes a
-    /// master key that arrived sealed to this computer from it, with the admin credential on a
-    /// loopback listener (`--custody-channel`). Never together with multi-user mode
-    /// ([`refuse_custody_channel_with_multi_user`]).
+    /// master key that arrived sealed to this computer from it, with the custody credential on
+    /// a loopback listener (`--custody-channel`). Never together with multi-user mode
+    /// ([`refuse_custody_channel_with_multi_user`]), never without a custody credential
+    /// ([`refuse_custody_channel_without_its_credential`]).
     pub custody_channel: Option<bool>,
+    /// The custody channel's own credential (`AD4M_CUSTODY_CREDENTIAL`, never a flag: a
+    /// command line shows in `ps`). The operator on this machine, like the admin credential,
+    /// and the only caller the custody channel admits: the admin credential, which an app's
+    /// window may hold, never reaches it. Must differ from the admin credential. Serialises as
+    /// `"<redacted>"`.
+    #[serde(serialize_with = "crate::secret::serialize_redacted")]
+    pub custody_credential: Option<Secret>,
     /// The folder of the executor's own rotated log files (`--log-dir`). Unset: stdout.
     pub log_dir: Option<String>,
     /// The config file the executor started with (`--config`): the file `runtime.setConfig`
@@ -261,6 +293,7 @@ impl Ad4mConfig {
         // after prepare() (the startup check, REST/WS capabilities, the MCP
         // bind host and auth) agrees on it.
         self.admin_credential = self.admin_credential.take().filter(|c| !c.is_empty());
+        self.custody_credential = self.custody_credential.take().filter(|c| !c.is_empty());
 
         // Read shared-backend config from environment variables when not set
         // programmatically. This allows Docker containers to configure the
@@ -459,6 +492,56 @@ pub fn refuse_custody_channel_with_multi_user(
     Ok(())
 }
 
+/// The custody channel opens only with its own credential, and that credential is not the
+/// admin credential: whoever holds the admin credential (an app's window among them) must not
+/// take a master key. The CLI (exit 78) and `run` call it.
+pub fn refuse_custody_channel_without_its_credential(
+    custody_channel: bool,
+    custody_credential: &Option<Secret>,
+    admin_credential: &Option<Secret>,
+) -> Result<(), String> {
+    if !custody_channel {
+        return Ok(());
+    }
+    let Some(custody) = custody_credential.as_ref().filter(|c| !c.is_empty()) else {
+        return Err(CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR.to_string());
+    };
+    if admin_credential
+        .as_ref()
+        .is_some_and(|admin| admin.expose_for_compare(custody.expose()))
+    {
+        return Err(CUSTODY_CREDENTIAL_IS_ADMIN_CREDENTIAL_ERROR.to_string());
+    }
+    Ok(())
+}
+
+/// Why an executor refuses the custody channel without a custody credential.
+pub const CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR: &str =
+    "Refusing the custody channel without its credential: --custody-channel needs \
+     AD4M_CUSTODY_CREDENTIAL (or AD4M_CUSTODY_CREDENTIAL_FILE), a secret only the custody \
+     service holds. Set it, or start without --custody-channel.";
+
+/// Why an executor refuses a custody credential equal to the admin credential.
+pub const CUSTODY_CREDENTIAL_IS_ADMIN_CREDENTIAL_ERROR: &str =
+    "Refusing the custody channel: AD4M_CUSTODY_CREDENTIAL is the admin credential. The \
+     custody channel needs a credential of its own, which only the custody service holds.";
+
+/// Whether `token` is the custody credential of an executor that serves the custody channel.
+/// `false` without a global config, without the channel or without the credential, so a check
+/// on it fails closed. Never panics.
+pub fn is_custody_credential(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|config| config.custody_channel == Some(true))
+        .and_then(|config| config.custody_credential.as_ref())
+        .is_some_and(|custody| !custody.is_empty() && custody.expose_for_compare(token))
+}
+
 /// Why an executor refuses the custody channel with multi-user mode.
 pub const CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR: &str =
     "Refusing the custody channel with multi-user mode: the channel gives a master key to the \
@@ -602,6 +685,7 @@ impl Ad4mConfig {
             pid_file: None,
             watch_stdin: None,
             custody_channel: None,
+            custody_credential: None,
             log_dir: None,
             config_file: None,
             pinned_config_keys: Vec::new(),
@@ -746,6 +830,39 @@ mod tests {
         assert!(refuse_custody_channel_with_multi_user(true, false).is_ok());
         assert!(refuse_custody_channel_with_multi_user(false, true).is_ok());
         assert!(refuse_custody_channel_with_multi_user(false, false).is_ok());
+    }
+
+    /// The custody channel needs its own credential, not the admin credential; without the
+    /// channel neither matters.
+    #[test]
+    fn the_custody_channel_needs_its_own_credential() {
+        let secret = |s: &str| Some(Secret::from(s));
+        assert_eq!(
+            refuse_custody_channel_without_its_credential(true, &None, &secret("admin"))
+                .unwrap_err(),
+            CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR
+        );
+        assert_eq!(
+            refuse_custody_channel_without_its_credential(true, &secret(""), &secret("admin"))
+                .unwrap_err(),
+            CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR
+        );
+        assert_eq!(
+            refuse_custody_channel_without_its_credential(true, &secret("admin"), &secret("admin"))
+                .unwrap_err(),
+            CUSTODY_CREDENTIAL_IS_ADMIN_CREDENTIAL_ERROR
+        );
+        assert!(refuse_custody_channel_without_its_credential(
+            true,
+            &secret("custody"),
+            &secret("admin")
+        )
+        .is_ok());
+        assert!(
+            refuse_custody_channel_without_its_credential(true, &secret("custody"), &None).is_ok()
+        );
+        assert!(refuse_custody_channel_without_its_credential(false, &None, &None).is_ok());
+        assert!(CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR.contains("AD4M_CUSTODY_CREDENTIAL"));
     }
 
     /// Both startup gates for multi-user mode, as `run()` applies them: the start flag

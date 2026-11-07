@@ -985,7 +985,7 @@ pub struct SessionInfo {
     pub grant_id: Option<String>,
     #[ts(type = "number | null")]
     pub expires_at: Option<u64>,
-    /// `credential`, `loopback` or `key`, for the operator.
+    /// `credential`, `loopback`, `key` or `custody`, for the operator.
     pub operator_source: Option<String>,
 }
 

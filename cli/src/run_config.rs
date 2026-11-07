@@ -541,6 +541,13 @@ impl RunArgs {
             config.custody_channel == Some(true),
             config.enable_multi_user == Some(true),
         )
+        .and_then(|()| {
+            rust_executor::config::refuse_custody_channel_without_its_credential(
+                config.custody_channel == Some(true),
+                &config.custody_credential,
+                &config.admin_credential,
+            )
+        })
         .map_err(anyhow::Error::msg)?;
         config.insecure_no_admin_credential = Some(self.insecure_no_admin_credential);
         config.sfu_local_did = self.sfu_local_did;
@@ -669,12 +676,19 @@ pub(crate) mod tests {
                 "--admin-credential",
                 "secret",
             ],
-            &[("AD4M_MCP_PORT", "3002")],
+            &[
+                ("AD4M_MCP_PORT", "3002"),
+                ("AD4M_CUSTODY_CREDENTIAL", "custody"),
+            ],
         )
         .unwrap()
         .config;
         assert_eq!(resolved.watch_stdin, Some(true));
         assert_eq!(resolved.custody_channel, Some(true));
+        assert!(resolved
+            .custody_credential
+            .as_ref()
+            .is_some_and(|c| c.expose_for_compare("custody")));
         assert_eq!(resolved.log_dir.as_deref(), Some("/data/adam/logs"));
         assert_eq!(resolved.config_file.as_deref(), Some(Path::new(&config)));
         let mut pinned = resolved.pinned_config_keys.clone();
@@ -716,6 +730,46 @@ pub(crate) mod tests {
         )
         .is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The custody channel needs its own credential from the environment: `run` refuses it
+    /// without `AD4M_CUSTODY_CREDENTIAL`, and with the admin credential's value.
+    #[test]
+    fn the_custody_channel_without_its_credential_is_refused() {
+        let _env = lock_env();
+        let missing = resolve(
+            &["--custody-channel"],
+            &[("AD4M_ADMIN_CREDENTIAL", "secret")],
+        )
+        .err()
+        .expect("refused");
+        assert_eq!(
+            missing.to_string(),
+            rust_executor::config::CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR
+        );
+        let same = resolve(
+            &["--custody-channel"],
+            &[
+                ("AD4M_ADMIN_CREDENTIAL", "secret"),
+                ("AD4M_CUSTODY_CREDENTIAL", "secret"),
+            ],
+        )
+        .err()
+        .expect("refused");
+        assert_eq!(
+            same.to_string(),
+            rust_executor::config::CUSTODY_CREDENTIAL_IS_ADMIN_CREDENTIAL_ERROR
+        );
+        assert!(resolve(
+            &["--custody-channel"],
+            &[
+                ("AD4M_ADMIN_CREDENTIAL", "secret"),
+                ("AD4M_CUSTODY_CREDENTIAL", "custody"),
+            ],
+        )
+        .is_ok());
+        // Without the channel the variable is not needed.
+        assert!(resolve(&[], &[("AD4M_ADMIN_CREDENTIAL", "secret")]).is_ok());
     }
 
     #[cfg(unix)]

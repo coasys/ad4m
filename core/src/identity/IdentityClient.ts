@@ -155,8 +155,9 @@ export class IdentityClient {
 
     /**
      * The custody channel: the master key a holder sealed to this computer, checked against
-     * the log, or `null`. Only the admin credential on a loopback listener of an executor
-     * started with `--custody-channel`; any other caller gets 403. Acknowledge the message
+     * the log, or `null`. Only the custody credential (`AD4M_CUSTODY_CREDENTIAL`) on a loopback
+     * listener of an executor started with `--custody-channel`; any other caller, the admin
+     * credential included, gets 403. Acknowledge the message
      * (`inboxAck`) once the key is stored.
      */
     async takeMaster(): Promise<TakenMaster | null> {
@@ -209,8 +210,9 @@ export class IdentityClient {
 
     /**
      * The custody channel: the device keys a master key for this computer is sealed to. Only
-     * the admin credential on a loopback listener of an executor started with
-     * `--custody-channel`; any other caller gets 403.
+     * the custody credential (`AD4M_CUSTODY_CREDENTIAL`) on a loopback listener of an executor
+     * started with `--custody-channel`; any other caller, the admin credential included, gets
+     * 403.
      */
     async custodyStatus(): Promise<DeviceKeys> {
         return this.#apiClient.call("identity.custodyStatus", {});

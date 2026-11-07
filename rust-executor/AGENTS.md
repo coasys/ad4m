@@ -68,7 +68,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **The run contract** (`exit.rs`), for a supervisor (the desktop app, systemd, a host). Exit
   codes: 0 stopped (`runtime.quit`, SIGTERM, SIGINT, stdin closed with `--watch-stdin true`),
   75 `runtime.restart`, 78 a refused config (the CLI's resolve, the admin-credential check,
-  `--custody-channel` with multi-user mode), 79 another executor holds
+  `--custody-channel` with multi-user mode or without `AD4M_CUSTODY_CREDENTIAL`), 79 another
+  executor holds
   `<app_data_path>/executor.lock`, 80 the API port does not bind; any other code is a crash.
   `run` returns a refused start through its handle as a `StartRefused`, and
   `exit_when_api_fails` exits with its code. Readiness: `GET /health` answers once the API
@@ -219,7 +220,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   its DID (`identity/rekey.rs`); tokens signed with the old key stop working. A perspective
   that is not open at the time keeps the retired DID as owner until a later unlock moves it.
   `identity.custodyStatus` and `identity.takeMaster` are the custody channel
-  (`identity/custody.rs`). The device inbox (`identity/inbox.rs`): the main agent's joined
+  (`identity/custody.rs`): only the custody credential (`AD4M_CUSTODY_CREDENTIAL`, a session
+  with `OperatorSource::Custody`) on a loopback listener opens it, never the admin credential,
+  which an app's window may hold. The device inbox (`identity/inbox.rs`): the main agent's joined
   inbox is read at start, unlock, binding and every 15 minutes; an executor with the custody
   channel keeps a master key message for `identity.takeMaster`, every other deletes it
   unopened. `identity.prepareDevice` (and `ad4m-executor link-code`) shows a device string and

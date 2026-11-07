@@ -1615,4 +1615,95 @@ mod tests {
             Some(incept.scid.clone())
         );
     }
+
+    /// A desktop app's executor at its first run (`--custody-channel`, no operator record, the
+    /// main agent of no identity) claims; once the store takes the claim the offer's identity is
+    /// the operator (`first-run`), and once the add spends the offer the main agent is a device
+    /// of it. A claim for another identity is then refused `first-link`. Without the custody
+    /// channel a missing record stays `no-operator`, before the store.
+    #[tokio::test]
+    async fn a_desktop_with_no_operator_record_records_its_first_claims_identity() {
+        use crate::db::OperatorSetBy;
+        use ad4m_identity_core::link::OfferString;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = AgentContext::main_agent();
+        let (main_did, _) = device_key(&main).unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+        let incept = test_service()
+            .cosign_incept(&main, &incept_listing(&main, 59))
+            .await
+            .unwrap();
+        let incept = Event::from_json(&incept).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![incept.clone()], false));
+        let service = service_on(backend.clone());
+        let offer = |scid: &str, id: u8| OfferString {
+            store: "https://store.example".into(),
+            scid: scid.into(),
+            offer_id: bs58::encode([id; 16]).into_string(),
+            s: bs58::encode([1u8; 32]).into_string(),
+        };
+        let claims = || backend.claims.load(std::sync::atomic::Ordering::SeqCst);
+        let record = || db(|db| db.operator_record()).unwrap();
+
+        // Not a desktop app's executor: no record is `no-operator`, and nothing is recorded.
+        let refused = service
+            .claims()
+            .claim_for_main(&offer(&incept.scid, 5), false, None)
+            .await
+            .expect_err("no operator");
+        assert!(
+            refused.message.starts_with("no-operator"),
+            "{}",
+            refused.message
+        );
+        assert_eq!((claims(), record()), (0, None));
+
+        let channel = crate::config::CustodyChannelForTest::on();
+        let first = offer(&incept.scid, 6);
+        service
+            .claims()
+            .claim_for_main(&first, true, None)
+            .await
+            .expect("a desktop's first claim goes ahead");
+        assert_eq!(claims(), 1);
+        let recorded = record().expect("the claim recorded the operator");
+        assert_eq!(
+            (recorded.scid.as_str(), recorded.set_by),
+            (did_of(&incept.scid).as_str(), OperatorSetBy::FirstRun)
+        );
+
+        // The record exists now: an offer of another identity is refused before the store.
+        let other = TestLog::new(60).scid();
+        let refused = service
+            .claims()
+            .claim_for_main(&offer(&other, 7), true, None)
+            .await
+            .expect_err("another identity");
+        assert!(
+            refused.message.starts_with("first-link"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.code, 403);
+        assert_eq!(claims(), 1);
+        assert_eq!(record().unwrap().scid, did_of(&incept.scid));
+
+        *backend.offer.lock().unwrap() = "spent".into();
+        let status = service
+            .claims()
+            .join_status(&main, &first.offer_id)
+            .await
+            .unwrap();
+        assert_eq!(status.key_id.as_deref(), Some("d1"));
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
+            Some(incept.scid.clone())
+        );
+
+        drop(channel);
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+    }
 }

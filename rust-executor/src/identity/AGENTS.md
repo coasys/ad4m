@@ -16,7 +16,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner`, `store_request` (a store request signed by a device key at a store-signed head) and `body_bytes` (the JCS bytes its `bodyHash` covers) |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
-| `custody.rs` | The custody channel's guard `admit` (the admin credential on a loopback listener of an executor started with `--custody-channel`; else 403 `no-custody-channel`), and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
+| `custody.rs` | The custody channel's guard `admit` (the custody credential, `AD4M_CUSTODY_CREDENTIAL` = `OperatorSource::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`; `run` refuses the flag without the variable, exit 78), and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
 | `inbox.rs` | The device inbox: `Inbox` (the joined messages opened here, by id and type, never a body; one read of the joined inbox at a time; the open pre-join read; the pull's wake-up), `pull_inbox` (`identity.inbox`), `take_master` (`identity.takeMaster`), `inbox_ack`, `inbox_put`, `prepare_device` (`identity.prepareDevice`: the device string and the pre-join read; `take_ticket` claims and, once claimed, sends `link-ticket`), `run_pull` / `run_schedule` / `wake` (at start, at unlock and binding, every 15 minutes) |
 | `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
@@ -161,7 +161,13 @@ the offer's state).
   call `invalid` (`store-url`), which reaches callers as an error, never a panic.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
   first-link rule itself: `already-linked` while the main key is valid in its identity's log at
-  the trusted seq, `no-operator` without a record, `first-link` for another identity.
+  the trusted seq, `no-operator` without a record, `first-link` for another identity. One
+  exception (`FirstLink::FirstRun`): a `--custody-channel` executor (a desktop app, which never
+  runs `init --operator`) with no record and no identity for its main agent claims the first
+  offer, and once the store accepts that claim records the offer's identity as operator
+  (`OperatorSetBy::FirstRun`, `set_operator_record_if_empty`). From then on the rule applies as
+  above: a claim for any other identity is `first-link`. Both the ticket path and
+  `identity.claimOffer` (a pasted link) go through `claim_for_main`, so both get it.
 - With an operator record the main key may speak only for the operator's identity:
   `cosignIncept` for the main agent runs `main_incept_check` and refuses (`first-link`) an
   incept of any other identity, and `publish` of an incept by the main agent runs it again
@@ -169,7 +175,7 @@ the offer's state).
   not bound by the record.
 - `cosignIncept` and `publish` bind the caller's agent for good, and every app holds
   `agent:SIGN` and `agent:UPDATE` by default, so their guard is `Guard::UserOrOperator`: for
-  the main agent only the operator (the admin credential the custody service holds), never an
+  the main agent only the operator (the admin or the custody credential), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
   managed agent.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through
