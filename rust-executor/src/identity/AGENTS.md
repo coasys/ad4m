@@ -292,20 +292,36 @@ the offer's state).
   re-reads the log (at most once per window); with the store unreachable it stays
   `cantCheck` and the 60 s re-check tries again. Exempt: this executor's own keys
   (`KeyMap::note_own`, from `anchor_for`), so local links count offline, and a link already
-  counted. A restart confirms nothing until each log is read again. A link admitted in the
-  window before a revocation reaches the cache stays counted: without the store's append
-  order the executor cannot tell it from one signed before.
+  counted. A restart confirms nothing until each log is read again. `ADMIT_FRESHNESS` is
+  the exposure after a revocation: for up to 60 s after the store holds a `revoke`, this
+  executor may still count new links by the revoked key. A link admitted in that window
+  stays counted (stored `valid`, so the re-check keeps it): without the store's append
+  order the executor cannot tell it from one signed before. A new link after the read
+  that shows the revocation is `flagged`.
 - **Unknown is not "no log".** A failed key-index call answers `Unavailable` and is never
   kept; the index is not asked again for 30 s (`BREAKER`). An unanchored link by an unknown
-  key stays `valid` with no person; an anchored one is `cantCheck`.
+  key stays `valid` with no person; an anchored one is `cantCheck`. One `prepare` asks the
+  index about at most `DISCOVERY_PER_BATCH` (64) signers the key map does not know; the
+  others stay unknown for that batch and are found by a later batch or the re-check.
 - **The person** is derived, never on the wire: the `did:scid` of the signer's log (a bot
   key: its owner), only for a `valid` link. The link store keeps it beside the verdict
   (`ad4m://ontology/person`, `ad4m://ontology/linkVerdict`) for SPARQL; `proofValid` is `true`
   exactly for `valid`. A found person stays for good; "no log" holds for 15 minutes.
 - **The re-check** (`run_recheck`, started by `init`): on each `VerdictChange` the links of
-  that key, and every 60 s the `cantCheck` links, are judged again and rewritten when the
-  verdict or person changed (`PerspectiveInstance::recheck_links`, at most 10 000 links per
-  perspective per pass).
+  that key; every 60 s the links of bot keys whose scope `expires` fell since the last tick
+  (`KeyMap::expiring`), then the `cantCheck` links. Each is judged again and rewritten when
+  the verdict or person changed (`PerspectiveInstance::recheck_links`). Reads page by
+  reifier IRI (`RECHECK_BATCH` rows): a key's links are read to the last page; the
+  `cantCheck` pass reads one page per tick from `recheck_cursor` and wraps at the end, so
+  links that stay unresolvable do not hide the ones after them. Rewritten links go through
+  `update_prolog_engines` like a remote diff: Prolog, notifications and live queries and
+  model subscriptions hear the new verdicts.
+- **Rollout.** The anchor is in the link's proof on the wire. A neighbourhood whose link
+  language predates it (the old p-diff-sync DNA) drops `proof.anchor`, so an anchored link
+  arrives with a signature over bytes the receiver cannot rebuild and is `invalid`. Moving a
+  neighbourhood whose members bind identities to this release is a migration (published
+  again on a link language from the new DNA, its links copied), not a mixed-version
+  rollout. See `bootstrap-languages/p-diff-sync/README.md`, "Link proofs".
 - **Reads.** Logic reads (model queries, flows, SHACL, SDNA facts) count only links with
   `proofValid` `true`. The display reads `perspective.queryLinks` and `perspective.snapshot`
   (`get_links_shown`) leave out `invalid` links and return `cantCheck` and `flagged` ones with

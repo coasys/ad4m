@@ -15,6 +15,11 @@ with the old DNA keeps the old language. That language drops `anchor`, so an anc
 synced through it reaches the other members without `anchor` and fails their signature check.
 Unanchored links sync there as before.
 
+So this is a migration, not a mixed-version rollout: a neighbourhood on the old DNA whose members
+bind identities must move to a link language built from this DNA (publish the neighbourhood again
+on it and copy its links over) before their anchored links can sync. Until it moves, links
+those members sign fail on receipt.
+
 ## Tests
 
 - `cd hc-dna && bash build.sh` builds the DNA and hApp into `hc-dna/workdir`.
