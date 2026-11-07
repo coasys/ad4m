@@ -497,6 +497,38 @@ pub fn refuse_custody_channel_with_multi_user(
     Ok(())
 }
 
+/// Who a managed agent of this executor is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserKind {
+    /// A person with an account (`user.create`, `user.signup`).
+    Person,
+    /// A bot that acts for a person under the person's grant (`bot.createAgent`).
+    Bot,
+}
+
+/// What [`may_add_managed_user`] answers for a person without multi-user mode.
+pub const PERSON_WITHOUT_MULTI_USER_ERROR: &str = "Multi-user mode is not enabled";
+
+/// Whether this executor may add a managed agent of `kind`. A person's account needs
+/// multi-user mode, which the custody channel refuses (a host would hold the person's master
+/// key). A bot is no account: it acts for its owner, whose master key never reaches it, under
+/// a grant its owner sets and the owner's key log bounds. So a desktop with the custody channel
+/// runs bots, and an executor without multi-user mode does too.
+pub fn may_add_managed_user(
+    kind: UserKind,
+    custody_channel: bool,
+    multi_user_on: bool,
+) -> Result<(), String> {
+    match kind {
+        UserKind::Bot => Ok(()),
+        UserKind::Person if custody_channel => {
+            Err(CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR.to_string())
+        }
+        UserKind::Person if !multi_user_on => Err(PERSON_WITHOUT_MULTI_USER_ERROR.to_string()),
+        UserKind::Person => Ok(()),
+    }
+}
+
 /// The custody channel opens only with its own credential, and that credential is not the
 /// admin credential: whoever holds the admin credential (an app's window among them) must not
 /// take a master key. The CLI (exit 78) and `run` call it.
@@ -891,6 +923,26 @@ mod tests {
         assert!(refuse_custody_channel_with_multi_user(true, false).is_ok());
         assert!(refuse_custody_channel_with_multi_user(false, true).is_ok());
         assert!(refuse_custody_channel_with_multi_user(false, false).is_ok());
+    }
+
+    /// A bot agent is added beside the custody channel and without multi-user mode; a
+    /// person's account needs multi-user mode and never runs beside the channel.
+    #[test]
+    fn a_bot_is_a_managed_agent_beside_the_custody_channel_and_a_person_is_not() {
+        for custody in [true, false] {
+            for multi_user in [true, false] {
+                assert!(may_add_managed_user(UserKind::Bot, custody, multi_user).is_ok());
+            }
+        }
+        assert_eq!(
+            may_add_managed_user(UserKind::Person, true, false).unwrap_err(),
+            CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR
+        );
+        assert_eq!(
+            may_add_managed_user(UserKind::Person, false, false).unwrap_err(),
+            PERSON_WITHOUT_MULTI_USER_ERROR
+        );
+        assert!(may_add_managed_user(UserKind::Person, false, true).is_ok());
     }
 
     /// The custody channel needs its own credential, not the admin credential; without the
