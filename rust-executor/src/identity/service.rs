@@ -15,7 +15,7 @@ use super::cache::{CacheError, KelCache};
 use super::device::{device_key, enc_key_of, WalletSigner};
 use super::operator::{main_incept_check, FirstLinkRefusal};
 use super::types::{
-    convert, BotView, DeviceView, ForkRecord, IdentityLog, IdentityStatus, OfferListing,
+    convert, BotView, DeviceView, ForkRecord, IdentityLog, IdentityStatus, KeyOwner, OfferListing,
     OfferOpened, PublishParams, SignedHead, SignedOffer, SignedRequest, StoreInfo,
 };
 use crate::agent::AgentContext;
@@ -261,6 +261,27 @@ impl IdentityService {
             head: accepted.as_ref().map(mirror_head).transpose()?,
             fork: first_fork(&self.cache.forks(&scid).await.map_err(cache_error)?),
         })
+    }
+
+    /// `identity.keyOwner`: the identity the store's key index lists `key` under (a master key
+    /// too: a restore finds its identity by master #0, which the words derive); `None` when no
+    /// log lists it.
+    pub async fn key_owner(&self, key: &str) -> Result<Option<KeyOwner>, WsRpcError> {
+        if !ad4m_identity_core::is_ed25519_multikey(key) {
+            return Err(WsRpcError::bad_request(format!(
+                "{key} is not an Ed25519 multikey"
+            )));
+        }
+        match self.backend.key_owner(key, 0).await {
+            Ok(Some(entry)) => Ok(Some(KeyOwner {
+                did: entry.did,
+                key_id: entry.key_id,
+                added: entry.added,
+                revoked: entry.revoked,
+            })),
+            Ok(None) | Err(IdentityError::NotFound) => Ok(None),
+            Err(e) => Err(backend_error(e)),
+        }
     }
 
     /// `identity.resetLog` (the operator): drops this executor's copy of `did`'s log (its
@@ -608,6 +629,33 @@ mod tests {
     use super::*;
     use crate::db::Ad4mDb;
     use crate::identity::cache::tests::TestLog;
+
+    /// `identity.keyOwner` answers the key index's entry, `None` for a key no log lists, and
+    /// refuses what is not an Ed25519 multikey before asking the store.
+    #[tokio::test]
+    async fn key_owner_answers_the_key_index() {
+        let world = crate::identity::record::tests::Bound::new(74).await;
+        let owner = world.service.key_owner(&world.key).await.unwrap().unwrap();
+        assert_eq!(owner.did, did_of(world.log.chain().id()));
+        assert_eq!((owner.key_id.as_str(), owner.revoked), ("d2", None));
+        let stranger = ad4m_identity_core::build::Signer::key(
+            &ed25519_dalek::SigningKey::from_bytes(&[75; 32]),
+        );
+        assert!(world.service.key_owner(&stranger).await.unwrap().is_none());
+        let calls = world
+            .store
+            .key_owner_calls
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let refused = world.service.key_owner("not-a-key").await.unwrap_err();
+        assert_eq!(refused.code, 400);
+        assert_eq!(
+            world
+                .store
+                .key_owner_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            calls
+        );
+    }
 
     #[test]
     fn device_views_follow_the_log() {
