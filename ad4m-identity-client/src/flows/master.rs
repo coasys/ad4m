@@ -409,7 +409,7 @@ pub async fn refresh_master<R: ExecutorRpc>(
         }
         // Behind the log (a later rotation superseded it, or its publish was refused long
         // ago), or the identity ended: it can never become current.
-        Some(staged) if !live || staged < current => vault.discard_staged(&scid, staged)?,
+        Some(staged) if !live || staged < current => vault.discard_staged(&scid, staged, None)?,
         // Ahead of the log: a rotation's publish may be on its way (in this app or another one
         // sharing the vault). Left as it is; the rotating flow discards it when its publish is
         // refused, and the next stage replaces it.

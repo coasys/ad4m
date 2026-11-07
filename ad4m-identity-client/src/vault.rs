@@ -117,13 +117,15 @@ impl Unlocked {
 /// A rotation (`rotate`, `revoke_and_rotate`, `answer_with_words`, a restore) stages master
 /// *n*+1 here *before* it publishes the `rotate` ([`Vault::stage_master`]), and promotes it to
 /// the kept master key once the publish landed ([`Vault::promote_master`]). A staged key is
-/// never used to sign and never replaces the kept one by itself: a publish that failed
-/// discards it ([`Vault::discard_staged`]); a flow cut off between the publish and the promote
-/// leaves it staged. `flows::master::refresh_master`, run by any app sharing the vault,
-/// promotes it when the log's current master index is the staged one, leaves it while the
-/// staged index is ahead of the log (a publish may be on its way), and discards it once the
-/// log is past it. A flow whose promote answers `NotFound` while the vault keeps its index
-/// was promoted by another app first: the key is kept.
+/// never used to sign and never replaces the kept one by itself: a publish refused for good
+/// discards it ([`Vault::discard_staged`], with the flow's [`StageToken`], so it never discards
+/// a key another app staged since); a flow cut off between the publish and the promote leaves
+/// it staged. `flows::master::refresh_master`, run by any app sharing the vault, promotes it
+/// when the log's current master index is the staged one, leaves it while the staged index is
+/// ahead of the log (a publish may be on its way), and discards it once the log is past it. A
+/// flow whose promote answers `NotFound` while the vault keeps its index was promoted by
+/// another app first: the key is kept. Promotion goes by index alone: the words derive one key
+/// per index, so a key staged at the log's current index by any app is the current master.
 pub trait Vault: Send + Sync {
     /// Stores master `index` for `scid`, replacing the kept one. Used where the key is already
     /// current in the log (`create`'s #0 before its incept, a key taken from the inbox).
@@ -139,15 +141,17 @@ pub trait Vault: Send + Sync {
     /// it cannot tell which index the kept key has (a cache it cannot vouch for): a caller
     /// never forgets a key on `None`. Reads no secret, so it needs no unlock.
     fn master_index(&self, scid: &str) -> Result<Option<u32>, VaultError>;
-    /// Stages master `index` of `scid` before the rotation that makes it current is published.
-    /// Replaces a staged key of `scid` (any index); leaves the kept key as it is. A staged key
-    /// signs nothing and is not what [`Vault::unlock`] gives. Must be durable when it answers
-    /// `Ok`: the rotation is published only after.
+    /// Stages master `index` of `scid` before the rotation that makes it current is published,
+    /// with `owner`, the staging flow's token, kept beside it (not secret; authenticated like the
+    /// index). Replaces a staged key of `scid` (any index, any owner); leaves the kept key as it
+    /// is. A staged key signs nothing and is not what [`Vault::unlock`] gives. Must be durable
+    /// when it answers `Ok`: the rotation is published only after.
     fn stage_master(
         &self,
         scid: &str,
         index: u32,
         secret: Secret<[u8; 32]>,
+        owner: &StageToken,
     ) -> Result<(), VaultError>;
     /// The index of the key staged for `scid`, authenticated as [`Vault::master_index`];
     /// `None` when none is staged. Needs no unlock.
@@ -156,9 +160,17 @@ pub trait Vault: Send + Sync {
     /// of `scid`, replacing the old one, and is no longer staged. `NotFound` when no key is
     /// staged at `index`. Needs no unlock (no secret leaves the vault).
     fn promote_master(&self, scid: &str, index: u32) -> Result<(), VaultError>;
-    /// The rotation to staged master `index` did not land: the staged key is forgotten. No
-    /// error when none is staged, or one at another index (left as it is).
-    fn discard_staged(&self, scid: &str, index: u32) -> Result<(), VaultError>;
+    /// The rotation to staged master `index` did not land: the staged key is forgotten when it
+    /// is staged at `index` and, with `owner` given, was staged with that token (a flow
+    /// discarding its own key); `None` discards it whoever staged it (a refresh discarding a
+    /// key the log is past). No error when none is staged, one at another index, or one with
+    /// another owner (each left as it is).
+    fn discard_staged(
+        &self,
+        scid: &str,
+        index: u32,
+        owner: Option<&StageToken>,
+    ) -> Result<(), VaultError>;
     /// Forgets the master key of `scid` (no error when it keeps none): the person removed it
     /// from this device, or it was replaced by a rotation.
     fn forget_master(&self, scid: &str) -> Result<(), VaultError>;
@@ -181,6 +193,21 @@ pub trait Vault: Send + Sync {
     /// The push is done (the store took it) or no longer wanted: the vault forgets it (no error
     /// when it holds none).
     fn push_done(&self, push: &PendingPush) -> Result<(), VaultError>;
+}
+
+/// Who staged a master key ([`Vault::stage_master`]): an opaque token a rotating flow draws at
+/// random once, so that its [`Vault::discard_staged`] forgets only a key it staged itself, never
+/// one another app sharing the vault staged after it. Not secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StageToken(pub [u8; 16]);
+
+impl StageToken {
+    /// A fresh token from `random`.
+    pub fn new(random: &dyn Random) -> Self {
+        let mut bytes = [0u8; 16];
+        random.fill(&mut bytes);
+        StageToken(bytes)
+    }
 }
 
 /// A master key to put into a device's inbox: the identity and the device's key id. The retry
@@ -258,12 +285,14 @@ mod memory {
 
     /// Each identity's master index and key.
     type Keys = HashMap<String, (u32, Secret<[u8; 32]>)>;
+    /// Each identity's staged master index, key and owner.
+    type Staged = HashMap<String, (u32, Secret<[u8; 32]>, StageToken)>;
 
     /// Master keys in memory, for tests. Records every unlock so tests can count prompts.
     #[derive(Default)]
     pub struct MemoryVault {
         keys: Mutex<Keys>,
-        staged: Mutex<Keys>,
+        staged: Mutex<Staged>,
         pending: Mutex<Vec<Event>>,
         pushes: Mutex<Vec<PendingPush>>,
         unlocks: Mutex<Vec<MasterUse>>,
@@ -315,9 +344,10 @@ mod memory {
             scid: &str,
             index: u32,
             secret: Secret<[u8; 32]>,
+            owner: &StageToken,
         ) -> Result<(), VaultError> {
             let mut staged = self.staged.lock().map_err(poisoned)?;
-            staged.insert(scid.to_string(), (index, secret));
+            staged.insert(scid.to_string(), (index, secret, *owner));
             Ok(())
         }
 
@@ -327,25 +357,33 @@ mod memory {
                 .lock()
                 .map_err(poisoned)?
                 .get(scid)
-                .map(|(index, _)| *index))
+                .map(|(index, _, _)| *index))
         }
 
         fn promote_master(&self, scid: &str, index: u32) -> Result<(), VaultError> {
             let mut staged = self.staged.lock().map_err(poisoned)?;
-            if staged.get(scid).map(|(i, _)| *i) != Some(index) {
+            if staged.get(scid).map(|(i, _, _)| *i) != Some(index) {
                 return Err(VaultError::NotFound);
             }
-            let kept = staged.remove(scid).ok_or(VaultError::NotFound)?;
+            let (index, secret, _) = staged.remove(scid).ok_or(VaultError::NotFound)?;
             self.keys
                 .lock()
                 .map_err(poisoned)?
-                .insert(scid.to_string(), kept);
+                .insert(scid.to_string(), (index, secret));
             Ok(())
         }
 
-        fn discard_staged(&self, scid: &str, index: u32) -> Result<(), VaultError> {
+        fn discard_staged(
+            &self,
+            scid: &str,
+            index: u32,
+            owner: Option<&StageToken>,
+        ) -> Result<(), VaultError> {
             let mut staged = self.staged.lock().map_err(poisoned)?;
-            if staged.get(scid).map(|(i, _)| *i) == Some(index) {
+            let theirs = staged
+                .get(scid)
+                .is_some_and(|(i, _, by)| *i == index && owner.is_none_or(|owner| owner == by));
+            if theirs {
                 staged.remove(scid);
             }
             Ok(())
@@ -423,6 +461,38 @@ mod memory {
                 Err(VaultError::Expired)
             ));
             assert_eq!(vault.unlocks(), vec![MasterUse::Revoke]);
+        }
+
+        #[test]
+        fn a_flow_discards_only_the_key_it_staged() {
+            let vault = MemoryVault::new();
+            let (a, b) = (StageToken([1; 16]), StageToken([2; 16]));
+            vault
+                .stage_master("Qm", 1, Secret::new([1; 32]), &a)
+                .unwrap();
+            // Another app stages the same index after it: A's discard leaves B's key.
+            vault
+                .stage_master("Qm", 1, Secret::new([1; 32]), &b)
+                .unwrap();
+            vault.discard_staged("Qm", 1, Some(&a)).unwrap();
+            assert_eq!(vault.staged_index("Qm").unwrap(), Some(1));
+            // Another index is left too, whoever asks.
+            vault.discard_staged("Qm", 2, None).unwrap();
+            assert_eq!(vault.staged_index("Qm").unwrap(), Some(1));
+            vault.discard_staged("Qm", 1, Some(&b)).unwrap();
+            assert_eq!(vault.staged_index("Qm").unwrap(), None);
+            // Without an owner (a refresh past the index) it goes whoever staged it.
+            vault
+                .stage_master("Qm", 1, Secret::new([1; 32]), &a)
+                .unwrap();
+            vault.discard_staged("Qm", 1, None).unwrap();
+            assert_eq!(vault.staged_index("Qm").unwrap(), None);
+            // A promote needs no token.
+            vault
+                .stage_master("Qm", 1, Secret::new([1; 32]), &b)
+                .unwrap();
+            vault.promote_master("Qm", 1).unwrap();
+            assert_eq!(vault.master_index("Qm").unwrap(), Some(1));
         }
 
         /// The index is read without an unlock, and a forgotten key is gone.

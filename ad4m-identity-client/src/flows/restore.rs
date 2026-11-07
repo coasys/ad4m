@@ -240,6 +240,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             &self.did,
             &self.seed,
             lock_out,
+            self.random,
         )
         .await?;
         let index = published.signer.index();

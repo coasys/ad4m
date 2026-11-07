@@ -784,7 +784,9 @@ a new string ends the read of the last one.
   in a restore too) stages master *n*+1 in the vault before it publishes the `rotate`: staged,
   the key is durable but signs nothing, and the vault's kept key is still master *n*. A vault
   that refuses to stage stops the rotation before anything is published. A publish the host
-  refuses for good discards the staged key and revokes nothing; after a publish whose answer
+  refuses for good discards the key that rotation staged, and revokes nothing; the vault keeps
+  an opaque owner token beside each staged key, so a rotation discards only the key it staged
+  itself, never one another app on the device staged after it; after a publish whose answer
   never came the key stays staged, since that publish may still land. Once the `rotate`
   landed, the vault promotes the staged key to its kept key; a failed promotion is reported
   with the rotation, which stands. Every app on the device shares the vault, so a refresh in

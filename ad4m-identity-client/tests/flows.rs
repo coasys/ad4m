@@ -23,7 +23,7 @@ use ad4m_identity_client::flows::rotate::{rotate, MAX_TRIES};
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::{
     ClientError, Clock, ExecutorRpc, MasterUse, MemoryVault, OsRandom, PendingPush, Random,
-    RpcError, SystemClock, Vault, ViaExecutor,
+    RpcError, StageToken, SystemClock, Vault, ViaExecutor,
 };
 use ad4m_identity_core::build::{self, cosign, Signer};
 use ad4m_identity_core::inbox::{
@@ -1005,6 +1005,7 @@ impl Vault for RefusingVault {
         _scid: &str,
         _index: u32,
         _secret: ad4m_identity_client::Secret<[u8; 32]>,
+        _owner: &StageToken,
     ) -> Result<(), ad4m_identity_client::VaultError> {
         Err(ad4m_identity_client::VaultError::Cancelled)
     }
@@ -1025,8 +1026,9 @@ impl Vault for RefusingVault {
         &self,
         scid: &str,
         index: u32,
+        owner: Option<&StageToken>,
     ) -> Result<(), ad4m_identity_client::VaultError> {
-        self.0.discard_staged(scid, index)
+        self.0.discard_staged(scid, index, owner)
     }
 
     fn unlock(
@@ -3710,7 +3712,7 @@ async fn the_creating_computer_counts_as_a_holder() {
 /// stages master *n*+1 before the publish, so the refusal leaves nothing public: both devices
 /// keep master #0, which stays current, and a rotation on a working vault goes through.
 #[tokio::test]
-async fn a_rotation_whose_vault_refuses_after_the_publish_leaves_no_holder() {
+async fn a_rotation_whose_vault_refuses_the_stage_publishes_nothing() {
     let store = TestStore::new();
     let a = ViaExecutor::new(TestExecutor::new(&store, 1));
     let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
@@ -3910,7 +3912,12 @@ async fn a_rotation_cut_off_after_its_publish_is_promoted_by_refresh() {
     // A key staged ahead of the log (#5 is in no log yet) may belong to a rotation whose
     // publish is still on its way: refresh leaves it staged.
     vault
-        .stage_master(&scid, 5, ad4m_identity_client::Secret::new([5; 32]))
+        .stage_master(
+            &scid,
+            5,
+            ad4m_identity_client::Secret::new([5; 32]),
+            &StageToken::new(&OsRandom),
+        )
         .unwrap();
     assert!(matches!(
         refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
@@ -3918,20 +3925,36 @@ async fn a_rotation_cut_off_after_its_publish_is_promoted_by_refresh() {
     ));
     assert_eq!(vault.staged_index(&scid).unwrap(), Some(5));
     assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
+
+    // One behind the log (#0: a rotation the log is past) is discarded.
+    vault
+        .stage_master(
+            &scid,
+            0,
+            ad4m_identity_client::Secret::new([0; 32]),
+            &StageToken::new(&OsRandom),
+        )
+        .unwrap();
+    assert!(matches!(
+        refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
+        Refreshed::Current
+    ));
+    assert_eq!(vault.staged_index(&scid).unwrap(), None);
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
 }
 
 /// An executor whose `identity.publish` is held until `release` is set: before it reaches the
 /// store (`before`), or after the store took it and before the answer comes back. `held` says
 /// the publish reached the hold.
 struct HeldPublish<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a dyn ExecutorRpc,
     before: bool,
     held: Cell<bool>,
     release: Cell<bool>,
 }
 
 impl<'a> HeldPublish<'a> {
-    fn new(inner: &'a TestExecutor, before: bool) -> Self {
+    fn new(inner: &'a dyn ExecutorRpc, before: bool) -> Self {
         HeldPublish {
             inner,
             before,
@@ -4085,7 +4108,12 @@ async fn a_key_staged_behind_the_log_is_discarded_by_refresh() {
     let seed = words::seed(&words);
     let one = words::master_key(&seed, 1).unwrap();
     vault
-        .stage_master(&scid, 1, ad4m_identity_client::Secret::new(one.to_bytes()))
+        .stage_master(
+            &scid,
+            1,
+            ad4m_identity_client::Secret::new(one.to_bytes()),
+            &StageToken::new(&OsRandom),
+        )
         .unwrap();
     assert!(matches!(
         refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
@@ -4122,8 +4150,9 @@ impl Vault for PromotedFirst {
         scid: &str,
         index: u32,
         secret: ad4m_identity_client::Secret<[u8; 32]>,
+        owner: &StageToken,
     ) -> Result<(), ad4m_identity_client::VaultError> {
-        self.0.stage_master(scid, index, secret)
+        self.0.stage_master(scid, index, secret, owner)
     }
     fn staged_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
         self.0.staged_index(scid)
@@ -4141,8 +4170,9 @@ impl Vault for PromotedFirst {
         &self,
         scid: &str,
         index: u32,
+        owner: Option<&StageToken>,
     ) -> Result<(), ad4m_identity_client::VaultError> {
-        self.0.discard_staged(scid, index)
+        self.0.discard_staged(scid, index, owner)
     }
     fn unlock(
         &self,
@@ -4399,8 +4429,9 @@ impl Vault for LaggingIndex {
         scid: &str,
         index: u32,
         secret: ad4m_identity_client::Secret<[u8; 32]>,
+        owner: &StageToken,
     ) -> Result<(), ad4m_identity_client::VaultError> {
-        self.inner.stage_master(scid, index, secret)
+        self.inner.stage_master(scid, index, secret, owner)
     }
     fn staged_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
         self.inner.staged_index(scid)
@@ -4421,8 +4452,9 @@ impl Vault for LaggingIndex {
         &self,
         scid: &str,
         index: u32,
+        owner: Option<&StageToken>,
     ) -> Result<(), ad4m_identity_client::VaultError> {
-        self.inner.discard_staged(scid, index)
+        self.inner.discard_staged(scid, index, owner)
     }
     fn unlock(
         &self,
@@ -4576,4 +4608,273 @@ async fn answering_with_words_reports_a_failed_delete_with_the_rotation() {
     rotated.kept.as_ref().unwrap();
     assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
     assert_eq!(host.status().await.unwrap().revoked, Some(rotated.head.seq));
+}
+
+/// One vault store seen through two handles: the custody folder is shared by every desktop app
+/// on a computer (we `host.rs`), and each app's custody service opens it on its own.
+#[derive(Clone)]
+struct SharedVault(Arc<MemoryVault>);
+
+impl Vault for SharedVault {
+    fn store_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.store_master(scid, index, secret)
+    }
+    fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.0.master_index(scid)
+    }
+    fn forget_master(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.forget_master(scid)
+    }
+    fn stage_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+        owner: &StageToken,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.stage_master(scid, index, secret, owner)
+    }
+    fn staged_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.0.staged_index(scid)
+    }
+    fn promote_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.promote_master(scid, index)
+    }
+    fn discard_staged(
+        &self,
+        scid: &str,
+        index: u32,
+        owner: Option<&StageToken>,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.discard_staged(scid, index, owner)
+    }
+    fn unlock(
+        &self,
+        scid: &str,
+        why: MasterUse,
+        now: u64,
+    ) -> Result<ad4m_identity_client::Unlocked, ad4m_identity_client::VaultError> {
+        self.0.unlock(scid, why, now)
+    }
+    fn store_pending_incept(&self, incept: &Event) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.store_pending_incept(incept)
+    }
+    fn pending_incepts(&self) -> Result<Vec<Event>, ad4m_identity_client::VaultError> {
+        self.0.pending_incepts()
+    }
+    fn incept_published(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.incept_published(scid)
+    }
+    fn keep_push(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.keep_push(push)
+    }
+    fn pending_pushes(&self) -> Result<Vec<PendingPush>, ad4m_identity_client::VaultError> {
+        self.0.pending_pushes()
+    }
+    fn push_done(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.push_done(push)
+    }
+}
+
+/// An executor whose first `identity.publish` is preceded by another desktop app's custody
+/// read on the same computer: `refresh_master` through that app's executor and its own handle
+/// on the shared vault (we's `refresh_stale` calls it whenever a key is staged). Then the
+/// publish goes through.
+struct ReadBeforePublish<'a> {
+    inner: &'a TestExecutor,
+    other: &'a ViaExecutor<TestExecutor>,
+    other_vault: SharedVault,
+    did: String,
+    /// What the other app's read answered, once it ran.
+    read: RefCell<Option<String>>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for ReadBeforePublish<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.publish" && self.read.borrow().is_none() {
+            let read = refresh_master(self.other, &self.other_vault, &self.did, &OsRandom).await;
+            *self.read.borrow_mut() = Some(format!("{read:?}"));
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// From Data's review of #1667 (gist 46bcb3766dd925a120f3e80b6bb61ee1). Between
+/// `stage_master` and the publish, the staged index is one ahead of the log: that is the normal
+/// state of a rotation in flight, not a failed one. Another desktop app on this computer
+/// (linked, not a holder) shares the custody folder; its status read in that window must leave
+/// the staged key alone, so the publish that lands has a key to promote and this computer still
+/// holds the master key afterwards.
+#[tokio::test]
+async fn a_custody_read_between_the_stage_and_the_publish_leaves_the_staged_key_alone() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let other_app = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let mine = SharedVault(shared.clone());
+    let theirs = SharedVault(shared.clone());
+    let did = create(&a, &shared, 48).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &shared,
+        &did,
+        &other_app,
+        entry("Other app", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    let words = words::from_entropy(&[48; 16]);
+
+    let reading = ViaExecutor::new(ReadBeforePublish {
+        inner: a.rpc(),
+        other: &other_app,
+        other_vault: theirs,
+        did: did.clone(),
+        read: RefCell::new(None),
+    });
+    let rotated = rotate(&reading, &mine, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(rotated.index, 1);
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().masters.len(), 2, "the rotation landed");
+    let read = reading.rpc().read.borrow().clone();
+    assert!(read.is_some(), "the other app read its status mid-publish");
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let d1 = opened.record.devices.get("d1").cloned();
+    assert!(
+        rotated.kept.is_ok(),
+        "the promote found no staged master #1: {:?}\n  the other app's read answered {read:?}\n  \
+         the shared vault keeps {:?}, staged {:?}\n  the record lists d1 as {:?}, {d2} as {:?}",
+        rotated.kept,
+        mine.master_index(&scid),
+        mine.staged_index(&scid),
+        d1.as_ref().map(|e| (e.holds_master, e.master_index)),
+        opened
+            .record
+            .devices
+            .get(&d2)
+            .map(|e| (e.holds_master, e.master_index)),
+    );
+    assert_eq!(mine.master_index(&scid).unwrap(), Some(1));
+    assert_eq!(mine.staged_index(&scid).unwrap(), None);
+    assert_eq!(
+        d1.map(|e| (e.holds_master, e.master_index)),
+        Some((HoldsMaster::Yes, Some(1)))
+    );
+    // Both apps' next reads find the current key kept.
+    assert!(matches!(
+        refresh_master(&a, &mine, &did, &OsRandom).await.unwrap(),
+        Refreshed::Current
+    ));
+    assert!(matches!(
+        refresh_master(&other_app, &theirs_again(&shared), &did, &OsRandom)
+            .await
+            .unwrap(),
+        Refreshed::Current
+    ));
+}
+
+fn theirs_again(shared: &Arc<MemoryVault>) -> SharedVault {
+    SharedVault(shared.clone())
+}
+
+/// From Data's review of #1667: two apps on one computer rotate at once through the shared
+/// vault. Both stage master #1; A's publish is refused for good and A discards what it staged,
+/// which must not be the key B staged after it: B's publish lands and B keeps #1.
+#[tokio::test]
+async fn two_apps_rotating_at_once_keep_the_key_of_the_one_that_landed() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &shared, 52).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    link_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        entry("Other app", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    let words = words::from_entropy(&[52; 16]);
+    let (vault_a, vault_b) = (SharedVault(shared.clone()), SharedVault(shared.clone()));
+
+    let refusing = RefusingPublish(a.rpc());
+    let held_a = ViaExecutor::new(HeldPublish::new(&refusing, true));
+    let held_b = ViaExecutor::new(HeldPublish::new(b.rpc(), true));
+    let a_done = Cell::new(false);
+    let (by_a, by_b, ()) = tokio::join!(
+        async {
+            let rotated = rotate(
+                &held_a,
+                &vault_a,
+                &did,
+                &words,
+                &[],
+                &SystemClock,
+                &OsRandom,
+            )
+            .await;
+            a_done.set(true);
+            rotated
+        },
+        async {
+            held_a.rpc().until_held().await;
+            rotate(
+                &held_b,
+                &vault_b,
+                &did,
+                &words,
+                &[],
+                &SystemClock,
+                &OsRandom,
+            )
+            .await
+        },
+        async {
+            held_a.rpc().until_held().await;
+            held_b.rpc().until_held().await;
+            assert_eq!(
+                shared.staged_index(&scid).unwrap(),
+                Some(1),
+                "both staged #1"
+            );
+            // A's publish is refused and A discards what it staged; then B's publish goes.
+            held_a.rpc().release.set(true);
+            while !a_done.get() {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                shared.staged_index(&scid).unwrap(),
+                Some(1),
+                "A's discard left B's staged key"
+            );
+            held_b.rpc().release.set(true);
+        }
+    );
+    assert!(
+        matches!(&by_a, Err(ClientError::Rpc(e)) if e.code == 400),
+        "{by_a:?}"
+    );
+    let by_b = by_b.unwrap();
+    assert_eq!(by_b.index, 1);
+    assert!(by_b.kept.is_ok(), "{:?}", by_b.kept);
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(1));
+    assert_eq!(shared.staged_index(&scid).unwrap(), None);
+    let unlocked = shared.unlock(&scid, MasterUse::Link, 0).unwrap();
+    assert_eq!(unlocked.signer(0).unwrap().index(), 1);
 }

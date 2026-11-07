@@ -15,7 +15,8 @@
 //! 3. The vault promotes the staged master *n*+1 in place of master *n*
 //!    ([`Vault::promote_master`]); a promote another app sharing the vault made first (its
 //!    `refresh_master` saw the publish land) counts as kept. A publish refused for good
-//!    discards the staged key; one whose answer was lost, or a flow cut off before the
+//!    discards the key this flow staged (by its [`StageToken`]: a key another app sharing the
+//!    vault staged since is left); one whose answer was lost, or a flow cut off before the
 //!    promote, leaves it staged, and [`super::master::refresh_master`] promotes it when the
 //!    log's current master index is *n*+1, leaves it while the log is behind it, and discards
 //!    it once the log is past it. A promote that fails is reported in [`Rotated::kept`]: the
@@ -42,7 +43,7 @@ use crate::flows::revoke::check_keys;
 use crate::record::{self, Change, Reader};
 use crate::request::{self, chain_of, scid_of};
 use crate::secret::Secret;
-use crate::vault::{KeySigner, MasterSigner, Vault, VaultError};
+use crate::vault::{KeySigner, MasterSigner, StageToken, Vault, VaultError};
 use crate::{fold, ClientError, Clock, Random};
 
 /// Rotations built and published before [`ClientError::LogBusy`]: the first, and a rebuild on
@@ -99,16 +100,18 @@ pub(crate) fn recovery_key_of(seed: &Seed) -> Multikey {
     x25519_multikey_of(&words::recovery_secret(seed))
 }
 
-/// The vault stages master `index` of `seed` for `scid`, before the rotation to it is published
-/// ([`Vault::stage_master`]): the kept key stays as it is until [`Vault::promote_master`].
+/// The vault stages master `index` of `seed` for `scid` with `owner`, before the rotation to it
+/// is published ([`Vault::stage_master`]): the kept key stays as it is until
+/// [`Vault::promote_master`].
 pub(crate) fn stage(
     vault: &dyn Vault,
     scid: &str,
     seed: &Seed,
     index: u32,
+    owner: &StageToken,
 ) -> Result<(), ClientError> {
     let key = words::master_key(seed, index)?;
-    vault.stage_master(scid, index, Secret::new(key.to_bytes()))?;
+    vault.stage_master(scid, index, Secret::new(key.to_bytes()), owner)?;
     Ok(())
 }
 
@@ -167,22 +170,30 @@ pub(crate) async fn publish_rotation<R: ExecutorRpc>(
     did: &str,
     seed: &Seed,
     revoke: &[KeyId],
+    random: &dyn Random,
 ) -> Result<Published, ClientError> {
-    let mut attempt = Attempt::default();
+    let mut attempt = Attempt {
+        owner: StageToken::new(random),
+        staged: None,
+        unanswered: false,
+    };
     let published = publish_staged(executor, vault, scid, did, seed, revoke, &mut attempt).await;
     if published.is_err() && !attempt.unanswered {
         if let Some(index) = attempt.staged {
-            // Best effort: a key left staged is discarded by the next refresh.
-            let _ = vault.discard_staged(scid, index);
+            // Best effort, and only the key this flow staged: another app sharing the vault
+            // may have staged its own since. A key left staged is discarded by a refresh once
+            // the log is past its index.
+            let _ = vault.discard_staged(scid, index, Some(&attempt.owner));
         }
     }
     published
 }
 
 /// What [`publish_staged`] left behind: the index it staged last, and whether any of its
-/// publishes went unanswered (that one may still land, so the staged key must stay).
-#[derive(Default)]
+/// publishes went unanswered (that one may still land, so the staged key must stay), and the
+/// token it stages with.
 struct Attempt {
+    owner: StageToken,
     staged: Option<u32>,
     unanswered: bool,
 }
@@ -232,7 +243,7 @@ async fn publish_staged<R: ExecutorRpc>(
             .collect();
         let event = rotate_event(&chain, &signer, &salt, Some(next), &revoked)?;
         // The new master is in the vault before anything names it publicly.
-        stage(vault, scid, seed, index)?;
+        stage(vault, scid, seed, index, &attempt.owner)?;
         attempt.staged = Some(index);
         match executor.publish(std::slice::from_ref(&event)).await {
             Ok(head) => {
@@ -411,7 +422,7 @@ pub async fn rotate<R: ExecutorRpc>(
         ));
     }
     current_index(&chain, &seed)?;
-    let published = publish_rotation(executor, vault, &scid, did, &seed, revoke).await?;
+    let published = publish_rotation(executor, vault, &scid, did, &seed, revoke, random).await?;
     let index = published.signer.index();
     // The rotation is public from here: what fails after it is reported, not returned.
     let kept = promote(vault, &scid, index).map_err(ClientError::from);
