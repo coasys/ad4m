@@ -972,6 +972,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile)
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    // `agent.generate`, `agent.import` and `agent.lock` are not local only: the operator calls
+    // them from anywhere, an operator from a key login included.
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
         .long()
         .guard(Guard::Executor(AGENT_CREATE_CAPABILITY.clone()));

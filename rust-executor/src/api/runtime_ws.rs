@@ -764,7 +764,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link)
         .guard(Guard::Operator);
     // Read or write any path on the host and the whole executor database. A perspective export
-    // also checks the perspective's owner in the handler.
+    // also checks the perspective's owner in the handler. Neither is local only: an operator
+    // from a key login moves the data folder from anywhere.
     map.method::<ExportRequest, bool>("runtime.exportData", export_data)
         .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     // An import writes rows as they are in the file: notifications with their `granted` flag

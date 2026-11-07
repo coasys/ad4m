@@ -172,6 +172,13 @@ macro_rules! ad4m_db_methods {
             fn revoke_grants(&self, ids: &[String]) -> Ad4mDbResult<()>;
             fn delete_grants(&self, ids: &[String]) -> Ad4mDbResult<()>;
             fn delete_grants_expired_before(&self, cutoff: u64) -> Ad4mDbResult<()>;
+            fn renew_grant(
+                &self,
+                id: &str,
+                expires_at: u64,
+                head_seq: u64,
+                checked_at: u64
+            ) -> Ad4mDbResult<()>;
 
             // AI: model status, tasks, models
             fn create_or_update_model_status(
@@ -930,6 +937,7 @@ impl DbBackend for SharedDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::GrantKeyRow;
 
     #[test]
     fn test_shared_db_get() {
@@ -1267,6 +1275,7 @@ mod tests {
             revoked: false,
             expires_at: u64::MAX / 4,
             created_at: 1,
+            ..GrantRow::default()
         };
         db.add_grant(&grant).expect("add_grant runs on SQLite");
         assert!(db.grants().unwrap().contains(&grant));
@@ -1279,6 +1288,36 @@ mod tests {
             .find(|row| row.id == grant.id)
             .expect("the grant stays, revoked");
         assert!(stored.revoked);
+
+        // A key-bound grant: a renewal moves its expiry and the verdict it was read at.
+        let key_grant = GrantRow {
+            id: format!("key-grant-{tag}"),
+            request_id: format!("key-request-{tag}"),
+            agent_did: Some(did.clone()),
+            auth_info: "{}".to_string(),
+            expires_at: 100,
+            created_at: 1,
+            key: Some(GrantKeyRow {
+                scid: format!("did:scid:coasys:1:{tag}"),
+                signing_key: format!("z6MkKey{tag}"),
+                key_id: "d2".to_string(),
+                head_seq: 1,
+                checked_at: 10,
+            }),
+            ..GrantRow::default()
+        };
+        db.add_grant(&key_grant).expect("add_grant runs on SQLite");
+        db.renew_grant(&key_grant.id, 5_000, 3, 4_000)
+            .expect("renew_grant runs on SQLite");
+        let renewed = db
+            .grants()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == key_grant.id)
+            .expect("the key grant stays");
+        assert_eq!(renewed.expires_at, 5_000);
+        let key = renewed.key.expect("the key binding stays");
+        assert_eq!((key.head_seq, key.checked_at), (3, 4_000));
 
         // Tasks, owned by the user's agent
         let task_id = db

@@ -1,6 +1,7 @@
 /**
- * Identity end to end (create, link, the person's profile, the first-link refusal, revoke, DID resolution on an
- * executor that never saw the log, fork, restart): executors
+ * Identity end to end (create, link, the person's profile, login with a device key, the first-link refusal,
+ * revoke and the end of the revoked key's sessions, DID resolution on an executor that never saw the log, fork,
+ * restart): executors
  * with no Holochain, a real identity-store this suite starts on a temp file, and the
  * centralized agent language seeded as every executor's agent language.
  *
@@ -17,6 +18,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { ChildProcess, execSync } from "child_process";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
+import WebSocket from "ws";
 import {
     baseUrl, executorBinary, executorDataPath, pollUntil, quitExecutor, spawnExecutor, startExecutor,
 } from "../utils/utils";
@@ -245,6 +247,129 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect((await b.client.agent.byDID(await keyOf(a))).did).to.equal(await keyOf(a));
     });
 
+    /** `signer` signs a login to `target` with its own device key; `target` answers the session. */
+    async function keyLogin(signer: Node, target: Node) {
+        const challenge = await target.client.agent.sessionChallenge();
+        const proof = await signer.client.agent.signSessionStatement({
+            v: 1,
+            purpose: "login",
+            executor: challenge.executor,
+            // The origin the client dials: the target's API.
+            audience: baseUrl(target.ports[0]),
+            challenge: challenge.challenge,
+            client: { kind: "native" },
+            issuedAt: Math.floor(Date.now() / 1000),
+        });
+        const app = {
+            appName: `${signer.name} shell`,
+            appDesc: "key login test",
+            appDomain: "coasys.org",
+            capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
+        };
+        const session = await target.client.agent.loginWithKey(proof, app);
+        return { proof, app, session, client: new Ad4mClient(baseUrl(target.ports[0]), session.token) };
+    }
+
+    let bOnA: Ad4mClient | null = null;
+
+    it("logs B's device key in to A as A's agent, and A's key in to B as its operator", async () => {
+        // A has no operator record, and its main agent speaks for the identity: B's device key
+        // (d2 of the same identity) gets a session on A's main agent.
+        const { proof, app, session, client } = await keyLogin(b, a);
+        expect(session.role).to.equal("app");
+        expect(session.scid).to.equal(did);
+        expect(session.did).to.equal((await a.client.agent.status()).did);
+        const info = await client.agent.currentSession();
+        expect(info.role).to.equal("app");
+        expect(info.keyId).to.equal("d2");
+        expect(info.grantId).to.equal(session.grantId);
+        // It acts as A's agent: A's identity, A's device key d1.
+        const status = await client.identity.status();
+        expect(status.did).to.equal(did);
+        expect(status.keyId).to.equal("d1");
+        bOnA = client;
+
+        // The challenge was used: the same statement again is refused.
+        const replay = await a.client.agent.loginWithKey(proof, app).then(() => null, (e) => e);
+        expect(String(replay?.message ?? replay)).to.contain("challenge");
+
+        // B was started with --operator <the identity>: A's device key gets the operator role.
+        const onB = await keyLogin(a, b);
+        expect(onB.session.role).to.equal("operator");
+        const operator = await onB.client.agent.currentSession();
+        expect(operator.operatorSource).to.equal("key");
+        // Log out ends that session only.
+        expect(await onB.client.agent.logout()).to.be.true;
+        await pollUntil(
+            () => onB.client.agent.currentSession().then(() => false, (e) => /Unauthorized/.test(String(e?.message ?? e))),
+            { timeoutMs: 10_000, label: "the logged-out key session refused" },
+        );
+        expect((await client.agent.currentSession()).grantId).to.equal(session.grantId);
+    });
+
+    // A relay: a server the person added takes a challenge from A and has the person's executor
+    // sign it. The app names the origin it dialed, the relay's, so A refuses the statement
+    // whatever Host the relay's own connection to A sends. A runs without public_origins, so
+    // only its own loopback origins are accepted.
+    it("refuses a key statement signed for another origin, whatever Host the connection sends", async () => {
+        const port = a.ports[0];
+        const call = (host: string, type: string, params: unknown) =>
+            new Promise<any>((resolve, reject) => {
+                const ws = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws`, { headers: { Host: host } });
+                ws.on("open", () => ws.send(JSON.stringify({ id: "relay", type, params })));
+                ws.on("message", (data) => {
+                    const reply = JSON.parse(String(data));
+                    if (reply.id === "relay") {
+                        ws.close();
+                        resolve(reply);
+                    }
+                });
+                ws.on("error", reject);
+            });
+        const signed = async (audience: string) => {
+            const challenge = await a.client.agent.sessionChallenge();
+            return b.client.agent.signSessionStatement({
+                v: 1,
+                purpose: "login",
+                executor: challenge.executor,
+                audience,
+                challenge: challenge.challenge,
+                client: { kind: "native" },
+                issuedAt: Math.floor(Date.now() / 1000),
+            });
+        };
+        const app = {
+            appName: "relay",
+            appDesc: "key login relay test",
+            appDomain: "coasys.org",
+            capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
+        };
+        const login = async (host: string, audience: string) =>
+            call(host, "user.loginWithKey", { proof: await signed(audience), app });
+
+        // The relay's origin, with the Host the relay forges to match it: refused, naming the setting.
+        for (const [host, audience] of [
+            ["e.example", "https://e.example"],
+            ["e.example", "http://e.example"],
+            [`127.0.0.1:${port}`, "https://e.example"],
+        ]) {
+            const refused = await login(host, audience);
+            expect(refused.result, `${host} ${audience}`).to.be.undefined;
+            expect(refused.error.code).to.equal(403);
+            expect(refused.error.message).to.contain("no-public-origin");
+            expect(refused.error.message).to.contain("public_origins");
+        }
+        // A loopback origin on another port is another executor: refused.
+        const other = await login(`127.0.0.1:${port + 1}`, `http://127.0.0.1:${port + 1}`);
+        expect(other.error.message).to.equal("audience");
+        // A's own origin logs in, whatever the Host: the Host plays no part.
+        for (const audience of [baseUrl(port), `http://localhost:${port}`, `ws://127.0.0.1:${port}`]) {
+            const own = await login("e.example", audience);
+            expect(own.error, audience).to.be.undefined;
+            expect(own.result.role).to.equal("app");
+        }
+    });
+
     it("refuses a claim on an executor started without --operator, and a stranger's first link", async () => {
         c = await startNode("c");
         const opened = await holder.send({ cmd: "open", did, store: store.url });
@@ -282,6 +407,20 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         const devices = await a.client.identity.devices();
         expect(devices.find((d) => d.keyId === "d2")!.revokedSeq).to.equal(2);
         expect((await a.client.identity.status()).revoked).to.be.null;
+    });
+
+    it("ends B's key session on A once A learns B's key is revoked", async () => {
+        expect(bOnA, "the key login test ran").to.not.be.null;
+        // A reads the log the revoke made (its accepted head moves): the key's verdict changes,
+        // and every grant bound to it ends.
+        await a.client.identity.log(did, 0, true);
+        await pollUntil(
+            () => bOnA!.agent.currentSession().then(() => false, (e) => /Unauthorized/.test(String(e?.message ?? e))),
+            { timeoutMs: 15_000, label: "B's key session on A refused" },
+        );
+        // A new login by the revoked key is refused.
+        const refused = await keyLogin(b, a).then(() => null, (e) => e);
+        expect(String(refused?.message ?? refused)).to.contain("key");
     });
 
     it("resolves the DID on an executor that never saw its log", async () => {
