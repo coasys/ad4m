@@ -3,9 +3,9 @@
 //! A native app asks `user.sessionChallenge` for a one-use challenge, signs a [`KeyStatement`]
 //! with one of its person's device keys under `coasys:session`, and sends it to
 //! `user.loginWithKey`. The executor checks, in order: the challenge (consumed whatever
-//! follows), the audience (its own DID, `issuedAt` within [`CLOCK_SKEW`] of its clock), the
-//! signature, the key (a device key of the named log, valid at the log's trusted seq, without
-//! the bot mark, read at most [`LOGIN_MAX_AGE`] ago), then the role:
+//! follows), the audience (its own DID, an `audience` origin it answers at ([`Audiences`]),
+//! `issuedAt` within [`CLOCK_SKEW`] of its clock), the signature, the key (a device key of the
+//! named log, valid at the log's trusted seq, without the bot mark, read at most [`LOGIN_MAX_AGE`] ago), then the role:
 //!
 //! - the identity is the operator record's: the operator role ([`KeyGrant::Operator`]);
 //! - a local agent speaks for the identity (`identity_agents`, its own device key valid in the
@@ -63,8 +63,12 @@ pub const STORE_OUTAGE_GRACE: u64 = 60 * 60;
 pub enum KeyLoginError {
     /// The challenge is unknown, used or expired.
     Challenge,
-    /// The statement names another executor, or its `issuedAt` is off the executor's clock.
+    /// The statement names another executor (its DID, or an `audience` origin that does not
+    /// name this executor), or its `issuedAt` is off the executor's clock.
     Audience,
+    /// The statement names an origin beyond this machine, and no `public_origins` is set: this
+    /// executor takes key logins only from this machine.
+    NoPublicOrigin,
     /// The signature does not hold under the statement's key.
     Signature,
     /// The key is not a valid device key of the named log at its trusted seq, or a bot's.
@@ -89,6 +93,7 @@ impl KeyLoginError {
         match self {
             KeyLoginError::Challenge => "challenge",
             KeyLoginError::Audience => "audience",
+            KeyLoginError::NoPublicOrigin => "no-public-origin",
             KeyLoginError::Signature => "signature",
             KeyLoginError::Key => "key",
             KeyLoginError::NotKnown => "not-known",
@@ -111,6 +116,10 @@ impl From<KeyLoginError> for WsRpcError {
             | KeyLoginError::Key
             | KeyLoginError::NotKnown
             | KeyLoginError::Grant => WsRpcError::forbidden(code),
+            KeyLoginError::NoPublicOrigin => WsRpcError::forbidden(format!(
+                "{code}: this executor takes key logins only from this machine. Set \
+                 public_origins (--public-origin) to the origin clients reach it at"
+            )),
             KeyLoginError::StoreUnavailable => WsRpcError {
                 code: 503,
                 message: code.into(),
@@ -235,11 +244,123 @@ fn check_identity(statement: &KeyStatement) -> Result<(), KeyLoginError> {
     Ok(())
 }
 
-fn check_audience(statement: &KeyStatement, executor: &str, now: u64) -> Result<(), KeyLoginError> {
+fn check_audience(
+    statement: &KeyStatement,
+    executor: &str,
+    audiences: &Audiences,
+    now: u64,
+) -> Result<(), KeyLoginError> {
     if statement.executor != executor || now.abs_diff(statement.issued_at) > CLOCK_SKEW {
         return Err(KeyLoginError::Audience);
     }
-    Ok(())
+    audiences.check(&statement.audience)
+}
+
+/// `origin` as `scheme://host[:port]`: `ws`/`wss` read as `http`/`https`, the host lowercase
+/// (IDNA), a default port left out, a trailing `/` dropped. Anything else (another scheme, a
+/// path, a query, credentials) is not an origin.
+pub fn normalise_origin(origin: &str) -> Result<String, String> {
+    let not = |why: &str| format!("{origin} is not an http(s) origin: {why}");
+    let mut url = url::Url::parse(origin.trim()).map_err(|e| not(&e.to_string()))?;
+    let scheme = match url.scheme() {
+        "http" | "ws" => "http",
+        "https" | "wss" => "https",
+        _ => return Err(not("the scheme is not http, https, ws or wss")),
+    };
+    if url.host().is_none() {
+        return Err(not("no host"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(not("it carries credentials"));
+    }
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(not("it has a path, a query or a fragment"));
+    }
+    // A default port of the old scheme is already gone; `ws` and `http` share theirs.
+    url.set_scheme(scheme)
+        .map_err(|_| not("the scheme cannot change"))?;
+    Ok(url.origin().ascii_serialization())
+}
+
+/// Whether the normalised origin `origin` names this machine: `localhost` (or a name under
+/// it), `127.0.0.0/8` or `::1`.
+fn is_loopback_origin(origin: &str) -> bool {
+    match url::Url::parse(origin)
+        .ok()
+        .and_then(|u| u.host().map(|h| h.to_owned()))
+    {
+        Some(url::Host::Domain(name)) => name == "localhost" || name.ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// The origins a key statement's `audience` may name on this executor.
+///
+/// Only configuration decides them, never the request: the `Host` a connection sends is the
+/// caller's to choose, and a server that relays a person's statement sends whichever one the
+/// statement names. The app signs the origin it dialed, so a statement it signed for another
+/// server's origin is refused here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Audiences {
+    /// `public_origins`, normalised: these and no other.
+    Public(Vec<String>),
+    /// No `public_origins`: this executor's own loopback origins on its API port
+    /// ([`Audiences::loopback`]), so key logins come only from this machine.
+    Loopback(Vec<String>),
+}
+
+impl Default for Audiences {
+    /// No origin at all: an executor whose API port is unknown accepts no key statement.
+    fn default() -> Self {
+        Audiences::Loopback(vec![])
+    }
+}
+
+impl Audiences {
+    /// The configured `public_origins` when there are any, else the loopback origins of
+    /// `api_port`. Fails on a configured value that is not an origin ([`normalise_origin`]).
+    pub fn new(public_origins: &[String], api_port: Option<u16>) -> Result<Self, String> {
+        if public_origins.is_empty() {
+            return Ok(api_port.map(Audiences::loopback).unwrap_or_default());
+        }
+        public_origins
+            .iter()
+            .map(|origin| normalise_origin(origin).map_err(|e| format!("public_origins: {e}")))
+            .collect::<Result<_, _>>()
+            .map(Audiences::Public)
+    }
+
+    /// `http://127.0.0.1:<port>`, `http://localhost:<port>` and `http://[::1]:<port>`.
+    pub fn loopback(port: u16) -> Self {
+        Audiences::Loopback(
+            ["127.0.0.1", "localhost", "[::1]"]
+                .iter()
+                .filter_map(|host| normalise_origin(&format!("http://{host}:{port}")).ok())
+                .collect(),
+        )
+    }
+
+    /// `Ok` when `audience` is one of these origins. Otherwise `Audience`; or, with no
+    /// `public_origins` and an audience beyond this machine, `NoPublicOrigin`, which names the
+    /// setting.
+    pub fn check(&self, audience: &str) -> Result<(), KeyLoginError> {
+        let Ok(audience) = normalise_origin(audience) else {
+            return Err(KeyLoginError::Audience);
+        };
+        match self {
+            Audiences::Public(origins) | Audiences::Loopback(origins)
+                if origins.contains(&audience) =>
+            {
+                Ok(())
+            }
+            Audiences::Loopback(_) if !is_loopback_origin(&audience) => {
+                Err(KeyLoginError::NoPublicOrigin)
+            }
+            _ => Err(KeyLoginError::Audience),
+        }
+    }
 }
 
 /// Whether `proof.sig` is the statement key's signature over
@@ -338,7 +459,7 @@ pub async fn login(
     )?;
     check_identity(statement)?;
     let auth = AuthInfo::try_from(app).map_err(KeyLoginError::BadRequest)?;
-    check_audience(statement, &executor_did()?, now)?;
+    check_audience(statement, &executor_did()?, &service.audiences, now)?;
     if !signature_holds(&proof) {
         return Err(KeyLoginError::Signature);
     }
@@ -411,7 +532,7 @@ pub async fn renew(
     {
         return Err(KeyLoginError::Grant);
     }
-    check_audience(statement, &executor_did()?, now)?;
+    check_audience(statement, &executor_did()?, &service.audiences, now)?;
     if !signature_holds(&proof) {
         return Err(KeyLoginError::Signature);
     }
@@ -550,6 +671,7 @@ pub fn sign_statement(unsigned: UnsignedKeyStatement) -> Result<SignedKeyStateme
         unsigned.grant.as_ref(),
         unsigned.purpose,
     )?;
+    normalise_origin(&unsigned.audience).map_err(KeyLoginError::BadRequest)?;
     let main = AgentContext::main_agent();
     let main_did = did_for_context(&main).map_err(|e| KeyLoginError::Internal(e.to_string()))?;
     let scid = db(|db| db.agent_identity(&main_did))?.ok_or_else(|| {
@@ -566,6 +688,7 @@ pub fn sign_statement(unsigned: UnsignedKeyStatement) -> Result<SignedKeyStateme
         scid: did_of(scid_from(&scid)),
         key,
         executor: unsigned.executor,
+        audience: unsigned.audience,
         challenge: unsigned.challenge,
         client: unsigned.client,
         code_challenge: None,
@@ -793,6 +916,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            audiences: Audiences::loopback(LOCAL_PORT),
             store_keys_source: crate::identity::StoreSource::Config,
         }
     }
@@ -813,6 +937,7 @@ mod tests {
                 cache: self.service.cache.clone(),
                 store_url: None,
                 challenges: Default::default(),
+                audiences: Audiences::loopback(LOCAL_PORT),
                 store_keys_source: crate::identity::StoreSource::Config,
             };
             self.store = store;
@@ -832,6 +957,7 @@ mod tests {
                 scid: self.did.clone(),
                 key: key.key(),
                 executor: challenge.executor,
+                audience: LOCAL_ORIGIN.into(),
                 challenge: challenge.challenge,
                 client: SessionClient::Native,
                 code_challenge: None,
@@ -862,6 +988,10 @@ mod tests {
             sig: ad4m_hash_chain::encode_proof_value(&sig),
         }
     }
+
+    /// The loopback origin the tests' local client dials, and how its connection arrives.
+    const LOCAL_ORIGIN: &str = "http://127.0.0.1:12000";
+    const LOCAL_PORT: u16 = 12000;
 
     fn app() -> AuthInfoInput {
         AuthInfoInput {
@@ -1352,7 +1482,7 @@ mod tests {
                 &world.service,
                 &session,
                 signed(by_d1, &world.log.device),
-                now()
+                now(),
             )
             .await
             .unwrap_err(),
@@ -1365,7 +1495,7 @@ mod tests {
                 &world.service,
                 &session,
                 signed(login_statement, &world.phone),
-                now()
+                now(),
             )
             .await
             .unwrap_err(),
@@ -1413,7 +1543,7 @@ mod tests {
                 &world.service,
                 &session,
                 signed(statement, &world.phone),
-                now()
+                now(),
             )
             .await
             .unwrap_err(),
@@ -1434,7 +1564,7 @@ mod tests {
                 &world.service,
                 &operator,
                 signed(statement, &world.phone),
-                now()
+                now(),
             )
             .await
             .unwrap_err(),
@@ -1486,6 +1616,7 @@ mod tests {
             v: 1,
             purpose: KeyPurpose::Login,
             executor: "did:key:z6MkTarget".into(),
+            audience: "WSS://Target.Example:443".into(),
             challenge: "c".into(),
             client: SessionClient::Native,
             code_challenge: None,
@@ -1502,6 +1633,18 @@ mod tests {
         assert_eq!(signed.statement.scid, world.did);
         assert_eq!(signed.statement.key, multikey_of(&main).unwrap());
         assert!(signature_holds(&signed));
+        assert_eq!(
+            signed.statement.audience, "WSS://Target.Example:443",
+            "signed as given"
+        );
+        let no_origin = UnsignedKeyStatement {
+            audience: "target.example/api".into(),
+            ..unsigned.clone()
+        };
+        assert!(matches!(
+            sign_statement(no_origin),
+            Err(KeyLoginError::BadRequest(_))
+        ));
 
         let web = UnsignedKeyStatement {
             client: SessionClient::Web {
@@ -1570,5 +1713,217 @@ mod tests {
         let operator = session_info(&Session::for_test(Principal::Operator));
         assert_eq!(operator.operator_source.as_deref(), Some("credential"));
         assert_eq!(operator.grant_id, None);
+    }
+
+    #[test]
+    fn origins_are_normalised_and_anything_else_is_refused() {
+        for (given, origin) in [
+            ("https://ad4m.example.org", "https://ad4m.example.org"),
+            ("https://AD4M.Example.org/", "https://ad4m.example.org"),
+            ("wss://ad4m.example.org:443", "https://ad4m.example.org"),
+            ("ws://127.0.0.1:12000", "http://127.0.0.1:12000"),
+            ("http://localhost:80", "http://localhost"),
+            (
+                "https://ad4m.example.org:8443",
+                "https://ad4m.example.org:8443",
+            ),
+            ("http://[::1]:12000", "http://[::1]:12000"),
+        ] {
+            assert_eq!(normalise_origin(given).as_deref(), Ok(origin), "{given}");
+        }
+        for bad in [
+            "ad4m.example.org",
+            "ftp://ad4m.example.org",
+            "https://ad4m.example.org/api/v1/ws",
+            "https://ad4m.example.org?x=1",
+            "https://user:pw@ad4m.example.org",
+            "",
+        ] {
+            assert!(normalise_origin(bad).is_err(), "{bad}");
+        }
+    }
+
+    // Only configuration decides which audience names this executor: the configured
+    // `public_origins`, and without them its own loopback origins on its API port.
+    #[test]
+    fn an_audience_is_a_configured_origin_or_else_an_own_loopback_origin() {
+        let public = Audiences::new(&["https://A.example/".into()], Some(LOCAL_PORT)).unwrap();
+        assert_eq!(public, Audiences::Public(vec!["https://a.example".into()]));
+        assert_eq!(public.check("https://a.example"), Ok(()));
+        assert_eq!(public.check("wss://a.example:443"), Ok(()));
+        for refused in [
+            "https://e.example",
+            "https://a.example:8443",
+            "http://a.example",
+            LOCAL_ORIGIN,
+            "not an origin",
+        ] {
+            assert_eq!(
+                public.check(refused),
+                Err(KeyLoginError::Audience),
+                "{refused}"
+            );
+        }
+        assert!(Audiences::new(&["a.example".into()], None)
+            .unwrap_err()
+            .starts_with("public_origins: "));
+
+        let loopback = Audiences::new(&[], Some(LOCAL_PORT)).unwrap();
+        assert_eq!(loopback, Audiences::loopback(LOCAL_PORT));
+        for own in [
+            LOCAL_ORIGIN,
+            "ws://127.0.0.1:12000",
+            "http://localhost:12000",
+            "http://[::1]:12000",
+        ] {
+            assert_eq!(loopback.check(own), Ok(()), "{own}");
+        }
+        for (refused, why) in [
+            ("https://e.example", KeyLoginError::NoPublicOrigin),
+            ("http://192.168.1.2:12000", KeyLoginError::NoPublicOrigin),
+            ("http://127.0.0.1:12001", KeyLoginError::Audience),
+            ("https://127.0.0.1:12000", KeyLoginError::Audience),
+            ("http://localhost:12001", KeyLoginError::Audience),
+        ] {
+            assert_eq!(loopback.check(refused), Err(why), "{refused}");
+        }
+        assert_eq!(
+            Audiences::default().check(LOCAL_ORIGIN),
+            Err(KeyLoginError::Audience),
+            "no API port, no origin"
+        );
+        let message = WsRpcError::from(KeyLoginError::NoPublicOrigin).message;
+        assert!(message.starts_with("no-public-origin: "), "{message}");
+        assert!(
+            message.contains("public_origins (--public-origin)"),
+            "{message}"
+        );
+    }
+
+    // The relay: a server E the person added takes a fresh challenge from the person's own
+    // executor A and hands A's challenge and A's DID to the person's app, which signs. The app
+    // names the origin it dialed, E's, so A refuses the statement and the challenge is used up.
+    // A statement for A's own origin logs in.
+    #[tokio::test]
+    async fn a_statement_for_another_origin_is_refused_so_a_relay_gets_no_session() {
+        let mut world = world(225).await;
+        world.operate();
+        world.service.audiences = Audiences::new(&["https://a.example".into()], None).unwrap();
+        let for_origin = |world: &World, audience: &str| {
+            let mut statement = world.statement(&world.phone);
+            statement.audience = audience.into();
+            statement
+        };
+
+        for audience in ["https://e.example", "wss://e.example", LOCAL_ORIGIN] {
+            let statement = for_origin(&world, audience);
+            let proof = signed(statement.clone(), &world.phone);
+            assert!(signature_holds(&proof), "the person's key signed it");
+            assert_eq!(
+                login(&world.service, params(proof), now())
+                    .await
+                    .unwrap_err(),
+                KeyLoginError::Audience,
+                "{audience}"
+            );
+            let mut retry = statement;
+            retry.audience = "https://a.example".into();
+            assert_eq!(
+                login(&world.service, params(signed(retry, &world.phone)), now())
+                    .await
+                    .unwrap_err(),
+                KeyLoginError::Challenge,
+                "the challenge is used up"
+            );
+        }
+        assert_eq!(grants_of(&world.phone), 0, "no session from a relay");
+
+        let session = login(
+            &world.service,
+            params(signed(
+                for_origin(&world, "https://a.example"),
+                &world.phone,
+            )),
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.role, SessionRole::Operator);
+
+        // Without public_origins, A takes key logins only on its own loopback origins.
+        world.service.audiences = Audiences::new(&[], Some(LOCAL_PORT)).unwrap();
+        assert_eq!(
+            login(
+                &world.service,
+                params(signed(
+                    for_origin(&world, "https://e.example"),
+                    &world.phone
+                )),
+                now(),
+            )
+            .await
+            .unwrap_err(),
+            KeyLoginError::NoPublicOrigin
+        );
+        assert!(world.login_as(&world.phone).await.is_ok());
+        no_operator();
+    }
+
+    // The same for a renewal: E relays a renew statement the app signed for E's origin.
+    #[tokio::test]
+    async fn a_renewal_for_another_origin_is_refused() {
+        let mut world = world(245).await;
+        world.operate();
+        world.service.audiences = Audiences::new(&["https://a.example".into()], None).unwrap();
+        let mut first = world.statement(&world.phone);
+        first.audience = "https://a.example".into();
+        let result = login(&world.service, params(signed(first, &world.phone)), now())
+            .await
+            .unwrap();
+        let session = open(&result.token).unwrap();
+        let renewal = |audience: &str| {
+            let mut statement = world.statement(&world.phone);
+            statement.purpose = KeyPurpose::Renew;
+            statement.grant = Some(result.grant_id.clone());
+            statement.audience = audience.into();
+            statement
+        };
+
+        let relayed = renewal("https://e.example");
+        assert_eq!(
+            renew(
+                &world.service,
+                &session,
+                signed(relayed.clone(), &world.phone),
+                now(),
+            )
+            .await
+            .unwrap_err(),
+            KeyLoginError::Audience
+        );
+        let mut retry = relayed;
+        retry.audience = "https://a.example".into();
+        assert_eq!(
+            renew(&world.service, &session, signed(retry, &world.phone), now())
+                .await
+                .unwrap_err(),
+            KeyLoginError::Challenge,
+            "the challenge is used up"
+        );
+        assert!(
+            session.check().is_ok(),
+            "a refused renewal leaves the grant"
+        );
+
+        let renewed = renew(
+            &world.service,
+            &session,
+            signed(renewal("https://a.example"), &world.phone),
+            now(),
+        )
+        .await
+        .unwrap();
+        assert!(open(&renewed.token).is_ok());
+        no_operator();
     }
 }

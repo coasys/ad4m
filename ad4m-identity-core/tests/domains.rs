@@ -216,6 +216,7 @@ fn a_key_statement_signs_under_the_session_domain_only() {
         "scid": "did:scid:coasys:1:QmS",
         "key": mk(&key),
         "executor": "did:key:z6MkExecutor",
+        "audience": "https://ad4m.example.org",
         "challenge": "c2",
         "client": {"kind": "native"},
         "issuedAt": 7,
@@ -224,7 +225,7 @@ fn a_key_statement_signs_under_the_session_domain_only() {
     assert_eq!(
         String::from_utf8(bytes).unwrap(),
         format!(
-            r#"{{"challenge":"c2","client":{{"kind":"native"}},"domain":"coasys:session","executor":"did:key:z6MkExecutor","issuedAt":7,"key":"{}","purpose":"login","scid":"did:scid:coasys:1:QmS","v":1}}"#,
+            r#"{{"audience":"https://ad4m.example.org","challenge":"c2","client":{{"kind":"native"}},"domain":"coasys:session","executor":"did:key:z6MkExecutor","issuedAt":7,"key":"{}","purpose":"login","scid":"did:scid:coasys:1:QmS","v":1}}"#,
             mk(&key)
         )
     );

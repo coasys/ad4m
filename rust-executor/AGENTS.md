@@ -125,7 +125,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   executors before grants (`apps_data.json`) is not read: no migration exists. Tests mint with
   `test_utils::granted_token(auth)`; a token signed without a grant is refused.
 - **Key sessions** (`identity/key_login.rs`, `grants::mint_key_grant`): a login signed by a
-  person's device key (`user.sessionChallenge`, `user.loginWithKey`) mints a grant bound to that
+  person's device key (`user.sessionChallenge`, `user.loginWithKey`; the statement names the
+  origin it was signed for, accepted only from `public_origins` or, without it, this executor's
+  own loopback origins: `src/identity/AGENTS.md`) mints a grant bound to that
   key (`KeyBinding`: the `did:scid`, the multikey, its key id; columns `scid`, `signing_key`,
   `key_id`, `head_seq`, `checked_at`) for one hour. Its role (`GrantRole`, column `role`) is
   `Operator` for the operator record's identity (`Session::open` opens `Principal::Operator`,

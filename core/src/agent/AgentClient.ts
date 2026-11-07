@@ -329,7 +329,11 @@ export class AgentClient {
    * Logs in with a `login` statement that a device key signed under `coasys:session`. The
    * executor gives the operator role to its operator record's identity, or a session on the
    * local agent that speaks for the identity; it refuses with one reason: `challenge`,
-   * `audience`, `signature`, `key`, `not-known` or `store-unavailable`. The token lives one hour.
+   * `audience`, `no-public-origin`, `signature`, `key`, `not-known` or `store-unavailable`.
+   * The statement's `audience` is the origin this client dialed (`https://host[:port]`): the
+   * executor accepts only its configured `public_origins`, or without them its own loopback
+   * origins, so a statement a relaying server obtained for its own origin is refused. The
+   * token lives one hour.
    */
   async loginWithKey(proof: SignedKeyStatement, app: AuthInfoWire): Promise<KeySessionResult> {
     return this.#apiClient.call('user.loginWithKey', { proof, app });

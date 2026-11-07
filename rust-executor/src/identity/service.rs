@@ -165,6 +165,9 @@ pub struct IdentityService {
     pub resolver: Arc<super::resolver::Resolver>,
     /// The open challenges of key logins (`user.sessionChallenge`).
     pub challenges: super::key_login::Challenges,
+    /// The origins a key statement's `audience` may name: `public_origins`, else this
+    /// executor's own loopback origins.
+    pub audiences: super::key_login::Audiences,
 }
 
 impl IdentityService {
@@ -708,6 +711,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         }
     }
@@ -743,6 +747,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
         assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
@@ -790,6 +795,7 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
+                audiences: Default::default(),
                 store_keys_source: crate::identity::StoreSource::Config,
             }
         };
@@ -845,6 +851,7 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
+                audiences: Default::default(),
                 store_keys_source,
             }
             .refuse_without_store_keys()
@@ -1102,6 +1109,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
         let scid = ours.scid();
@@ -1197,6 +1205,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         }
     }
@@ -1338,6 +1347,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
         let incept = incept_listing(&agent, 53);

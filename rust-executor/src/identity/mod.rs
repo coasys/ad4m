@@ -116,6 +116,12 @@ pub struct IdentitySettings {
     /// `identity.allowPrivateSrc`: let a DID URL's `src` reach loopback and private addresses.
     /// Off by default; for tests and local development only.
     pub allow_private_src: bool,
+    /// `public_origins`: the origins clients reach this executor at, as configured. A key
+    /// statement's `audience` must be one of them (`key_login::Audiences`).
+    pub public_origins: Vec<String>,
+    /// The API port: without `public_origins`, a key statement's `audience` must be one of the
+    /// loopback origins on it.
+    pub api_port: Option<u16>,
 }
 
 impl IdentitySettings {
@@ -157,6 +163,8 @@ impl IdentitySettings {
             store_url_source,
             store_keys_source,
             allow_private_src: config.identity_allow_private_src.unwrap_or(false),
+            public_origins: config.public_origins.clone().unwrap_or_default(),
+            api_port: config.port,
         }
     }
 
@@ -164,7 +172,14 @@ impl IdentitySettings {
     /// [`check_store_url`]), the error naming where each came from. Checked at start.
     pub fn check(&self) -> Result<(), String> {
         check_store_keys(&self.store_keys, self.store_keys_source)?;
-        check_store_url(self.store_url.as_deref(), self.store_url_source)
+        check_store_url(self.store_url.as_deref(), self.store_url_source)?;
+        self.audiences().map(|_| ())
+    }
+
+    /// The origins a key statement may name here: `public_origins` normalised, else the
+    /// loopback origins of the API port. Fails on a configured value that is no origin.
+    pub fn audiences(&self) -> Result<key_login::Audiences, String> {
+        key_login::Audiences::new(&self.public_origins, self.api_port)
     }
 }
 
@@ -236,6 +251,8 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         store_keys_source: settings.store_keys_source,
         resolver: Arc::new(resolver),
         challenges: Default::default(),
+        // `check` refused a bad origin at start; past it, none is accepted.
+        audiences: settings.audiences().unwrap_or_default(),
     };
     let service = Arc::new(service);
     if SERVICE.set(service.clone()).is_err() {
