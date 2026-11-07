@@ -127,8 +127,8 @@ pub fn get_link_write_rate() -> f64 {
 ///      compute; other errors are logged and swallowed (do not fail the
 ///      user's request on a bookkeeping hiccup).
 ///
-/// Consistency with the WS-RPC transcription pattern (ai_service::
-/// open_transcription_stream) is deliberate. Do not inline a
+/// Transcription bills through here too (`ai_service::transcription::
+/// bill_transcription`). Do not inline a
 /// different formula per surface — route through this helper.
 pub fn bill_ai_operation(
     agent_did: &str,

@@ -1,4 +1,3 @@
-use super::audio::{audio_decode, decode_pcm_wav};
 use super::billing_amounts::speech_amount;
 use super::errors::OpenAIError;
 use super::realtime::pcm16_to_f32;
@@ -195,120 +194,6 @@ fn speech_request_deser() {
     assert_eq!(req.model, "tts-1");
     assert_eq!(req.voice.as_deref(), Some("nova"));
     assert_eq!(req.speed, Some(1.5));
-}
-
-// ---------------------------------------------------------------------------
-// WAV decoding (audio_decode / decode_pcm_wav)
-// ---------------------------------------------------------------------------
-
-fn make_wav(sample_rate: u32, channels: u16, bits: u16, samples: &[i16]) -> Vec<u8> {
-    let data_size = (samples.len() * 2) as u32;
-    let fmt_size: u32 = 16;
-    let file_size = 4 + (8 + fmt_size) + (8 + data_size);
-    let byte_rate = sample_rate * (channels as u32) * (bits as u32 / 8);
-    let block_align = channels * (bits / 8);
-
-    let mut buf = Vec::with_capacity(file_size as usize + 8);
-    buf.extend_from_slice(b"RIFF");
-    buf.extend_from_slice(&file_size.to_le_bytes());
-    buf.extend_from_slice(b"WAVE");
-    // fmt chunk
-    buf.extend_from_slice(b"fmt ");
-    buf.extend_from_slice(&fmt_size.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    buf.extend_from_slice(&channels.to_le_bytes());
-    buf.extend_from_slice(&sample_rate.to_le_bytes());
-    buf.extend_from_slice(&byte_rate.to_le_bytes());
-    buf.extend_from_slice(&block_align.to_le_bytes());
-    buf.extend_from_slice(&bits.to_le_bytes());
-    // data chunk
-    buf.extend_from_slice(b"data");
-    buf.extend_from_slice(&data_size.to_le_bytes());
-    for &s in samples {
-        buf.extend_from_slice(&s.to_le_bytes());
-    }
-    buf
-}
-
-#[test]
-fn decode_valid_16khz_mono_wav() {
-    let samples: Vec<i16> = vec![0, 16383, -16384, i16::MAX, i16::MIN];
-    let wav = make_wav(16_000, 1, 16, &samples);
-    let result = decode_pcm_wav(&wav).unwrap();
-    assert_eq!(result.len(), 5);
-    assert!((result[0] - 0.0).abs() < 1e-5);
-    assert!((result[3] - 1.0).abs() < 1e-5);
-    assert!((result[4] - (-1.0)).abs() < 1e-3);
-}
-
-#[test]
-fn decode_wav_via_audio_decode() {
-    let wav = make_wav(16_000, 1, 16, &[0, 100, -100]);
-    let result = audio_decode(&wav, Some("audio/wav")).unwrap();
-    assert_eq!(result.len(), 3);
-}
-
-#[test]
-fn reject_stereo_wav() {
-    let wav = make_wav(16_000, 2, 16, &[0, 0, 100, 100]);
-    let err = decode_pcm_wav(&wav).unwrap_err();
-    let body = serde_json::to_value(&err).unwrap();
-    assert!(body["error"]["message"].as_str().unwrap().contains("mono"));
-}
-
-#[test]
-fn reject_wrong_sample_rate() {
-    let wav = make_wav(44_100, 1, 16, &[0, 100]);
-    let err = decode_pcm_wav(&wav).unwrap_err();
-    let body = serde_json::to_value(&err).unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("16 kHz"));
-}
-
-#[test]
-fn reject_non_pcm_wav() {
-    let mut wav = make_wav(16_000, 1, 16, &[0]);
-    // Overwrite audio_format (offset 20-21) to 3 (IEEE float)
-    wav[20] = 3;
-    wav[21] = 0;
-    let err = decode_pcm_wav(&wav).unwrap_err();
-    let body = serde_json::to_value(&err).unwrap();
-    assert!(body["error"]["message"].as_str().unwrap().contains("PCM"));
-}
-
-#[test]
-fn reject_non_wav_audio() {
-    let mp3_header = vec![0xFF, 0xFB, 0x90, 0x00]; // fake MP3 sync
-    let err = audio_decode(&mp3_header, Some("audio/mpeg")).unwrap_err();
-    let body = serde_json::to_value(&err).unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Unsupported"));
-}
-
-#[test]
-fn reject_truncated_wav() {
-    let wav = make_wav(16_000, 1, 16, &[0, 100]);
-    let truncated = &wav[..20]; // cut off mid-fmt
-    let err = decode_pcm_wav(truncated).unwrap_err();
-    let body = serde_json::to_value(&err).unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Truncated"));
-}
-
-#[test]
-fn decode_wav_inflated_chunk_size() {
-    let mut wav = make_wav(16_000, 1, 16, &[100, -100]);
-    let data_size_pos = wav.windows(4).position(|w| w == b"data").unwrap() + 4;
-    wav[data_size_pos..data_size_pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
-
-    let result = decode_pcm_wav(&wav).unwrap();
-    assert_eq!(result.len(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -687,31 +572,25 @@ fn seam_can_force_insufficient_credits() {
 // Regression guard for round-1 finding #2: /v1/audio/transcriptions
 // double-billed (once at the handler, once in the whisper worker).
 //
-// Behavioural test: send a real multipart request through the router
-// with a valid audio blob. The handler will reach
-// AIService::global_instance() and 500 (AIService is not initialised in
-// tests) — but by that point it will have made EXACTLY zero bill_compute
-// calls if the fix from commit 849681b4 is intact. Any regression that
-// re-adds handler-level billing will make call_count > 0 and fail this
-// test with a clear message.
+// Transcription is billed in one function, `ai_service::transcription::
+// bill_transcription`, once per transcript (`transcription_is_billed_in_one_place`
+// pins that). The handler calls it after the upstream answered: a request
+// that never reaches the upstream bills nothing, and the main agent (the
+// admin credential here) pays nothing.
 // ---------------------------------------------------------------------------
 
-/// Build a minimal but valid multipart body: `model=whisper-1` + a tiny
-/// WAV file. Enough to get past parse + audio_decode and reach the
-/// AIService boundary.
-fn tiny_multipart_transcription() -> (String, Vec<u8>) {
+/// A minimal multipart body: `model`, a tiny WAV file, and `fields`.
+fn tiny_multipart_transcription(model: &str, fields: &[(&str, &str)]) -> (String, Vec<u8>) {
     let boundary = "----marvin-test-boundary-12345";
     let mut body: Vec<u8> = Vec::new();
-    // model field
-    body.extend_from_slice(
-        format!(
-            "--{b}\r\n\
-             Content-Disposition: form-data; name=\"model\"\r\n\r\n\
-             whisper-1\r\n",
-            b = boundary
-        )
-        .as_bytes(),
-    );
+    for (name, value) in std::iter::once(("model", model)).chain(fields.iter().copied()) {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
     // file field with a minimal 16 kHz mono WAV (44-byte header + 32 samples of silence)
     let wav = tiny_wav_16khz_mono(32);
     body.extend_from_slice(
@@ -733,7 +612,7 @@ fn tiny_multipart_transcription() -> (String, Vec<u8>) {
 #[tokio::test]
 async fn transcriptions_handler_does_not_bill() {
     test_seam::reset();
-    let (ct, body) = tiny_multipart_transcription();
+    let (ct, body) = tiny_multipart_transcription("whisper-1", &[]);
     let req = Request::builder()
         .uri("/audio/transcriptions")
         .method("POST")
@@ -744,20 +623,154 @@ async fn transcriptions_handler_does_not_bill() {
 
     let _ = test_router().oneshot(req).await.unwrap();
 
-    // Whatever status the router returned (400/500 for missing model or
-    // AIService), the handler MUST NOT have called bill_compute. All
-    // transcription billing happens per-word inside the whisper worker
-    // in ai_service/mod.rs::open_transcription_stream.
+    // No model `whisper-1`: the request never reached an upstream, so nothing
+    // was transcribed and nothing may be billed.
     let calls = test_seam::calls();
     assert!(
         calls.is_empty(),
         "regression: /v1/audio/transcriptions handler called bill_compute {} time(s): {calls:?}\n\
-         Transcription is billed per-word inside the whisper worker \
-         (ai_service/mod.rs::open_transcription_stream). Handler-level \
-         billing double-charges the user. See round-1 review finding #2.",
+         Transcription is billed once per transcript, in \
+         ai_service::transcription::bill_transcription. See round-1 review finding #2.",
         calls.len()
     );
     test_seam::reset();
+}
+
+/// A transcription model named `name` on the OpenAI-shaped server at `url` (an endpoint
+/// is linked to it), served upstream as `remote`.
+fn transcription_model_on(url: &str, name: &str, remote: &str) {
+    crate::db::Ad4mDb::with_global_instance(|db| {
+        db.add_model(&crate::types::ModelInput {
+            name: name.to_string(),
+            api: Some(crate::types::ModelApiInput {
+                base_url: url.to_string(),
+                api_key: None,
+                model: remote.to_string(),
+                api_type: "OPEN_AI".to_string(),
+                max_num_ctx: None,
+                native_tools: None,
+            }),
+            local: None,
+            model_type: crate::types::ModelType::Transcription,
+        })
+    })
+    .expect("the model is added");
+}
+
+fn transcription_request(model: &str, fields: &[(&str, &str)]) -> Request<Body> {
+    let (ct, body) = tiny_multipart_transcription(model, fields);
+    Request::builder()
+        .uri("/audio/transcriptions")
+        .method("POST")
+        .header("content-type", ct)
+        .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn transcriptions_pass_through_to_the_models_endpoint() {
+    use mockito::Matcher;
+    let router = test_router();
+    let mut upstream = mockito::Server::new_async().await;
+    let name = format!("stt-{}", uuid::Uuid::new_v4());
+    transcription_model_on(&upstream.url(), &name, "parakeet-tdt-0.6b-v3");
+    let srt = "1\n00:00:00,000 --> 00:00:01,000\nhello there\n";
+    let mock = upstream
+        .mock("POST", "/v1/audio/transcriptions")
+        .match_body(Matcher::AllOf(vec![
+            Matcher::Regex("name=\"model\"\r\n\r\nparakeet-tdt-0.6b-v3\r\n".into()),
+            Matcher::Regex("name=\"response_format\"\r\n\r\nsrt\r\n".into()),
+            Matcher::Regex("filename=\"a.wav\"".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/x-subrip")
+        .with_body(srt)
+        .create_async()
+        .await;
+
+    let resp = router
+        .oneshot(transcription_request(&name, &[("response_format", "srt")]))
+        .await
+        .unwrap();
+
+    mock.assert_async().await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "application/x-subrip");
+    assert_eq!(body_bytes(resp).await, srt.as_bytes());
+}
+
+#[tokio::test]
+async fn a_failing_upstream_is_a_gateway_error_that_names_no_endpoint() {
+    let router = test_router();
+    let mut upstream = mockito::Server::new_async().await;
+    let name = format!("stt-{}", uuid::Uuid::new_v4());
+    transcription_model_on(&upstream.url(), &name, "m");
+    upstream
+        .mock("POST", "/v1/audio/transcriptions")
+        .with_status(500)
+        .with_body("internal")
+        .create_async()
+        .await;
+
+    let resp = router
+        .clone()
+        .oneshot(transcription_request(&name, &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"]["code"], "upstream_error");
+    assert!(!body.to_string().contains(&upstream.url()), "{body}");
+
+    upstream.reset();
+    upstream
+        .mock("POST", "/v1/audio/transcriptions")
+        .with_status(400)
+        .with_body(r#"{"error":{"message":"unsupported audio"}}"#)
+        .create_async()
+        .await;
+    let resp = router
+        .oneshot(transcription_request(&name, &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported audio"));
+}
+
+#[tokio::test]
+async fn a_local_whisper_model_is_refused_by_the_passthrough() {
+    let router = test_router();
+    let name = format!("whisper-{}", uuid::Uuid::new_v4());
+    crate::db::Ad4mDb::with_global_instance(|db| {
+        db.add_model(&crate::types::ModelInput {
+            name: name.clone(),
+            api: None,
+            local: Some(crate::types::LocalModelInput {
+                file_name: "whisper_tiny".into(),
+                tokenizer_source: None,
+                huggingface_repo: None,
+                revision: None,
+            }),
+            model_type: crate::types::ModelType::Transcription,
+        })
+    })
+    .unwrap();
+
+    let resp = router
+        .oneshot(transcription_request(&name, &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("has no endpoint"));
 }
 
 // ---------------------------------------------------------------------------

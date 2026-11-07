@@ -1,0 +1,111 @@
+//! Transcription against a real OpenAI-shaped server (speaches, a Parakeet wrapper, ...).
+//!
+//! Skipped unless `TRANSCRIPTION_E2E_BASE_URL` (e.g. `http://127.0.0.1:8000`) and
+//! `TRANSCRIPTION_E2E_MODEL` (the id the server knows) are set; `TRANSCRIPTION_E2E_API_KEY`
+//! when the server takes one. Run:
+//!
+//! ```sh
+//! TRANSCRIPTION_E2E_BASE_URL=http://127.0.0.1:8000 \
+//! TRANSCRIPTION_E2E_MODEL=Systran/faster-whisper-small \
+//! cargo test --release --lib ai_service::transcription_e2e -- --test-threads=1 --nocapture
+//! ```
+
+use std::sync::Arc;
+
+use super::providers::audio::{AudioFile, OpenAiTranscribe, RemoteTranscribe};
+use super::transcription::SAMPLE_RATE;
+use super::AIService;
+use crate::db::Ad4mDb;
+use crate::types::RequestContext;
+
+/// The configured server and model, or `None` (the test is skipped).
+fn upstream() -> Option<(OpenAiTranscribe, String)> {
+    let base_url = std::env::var("TRANSCRIPTION_E2E_BASE_URL").ok()?;
+    let model = std::env::var("TRANSCRIPTION_E2E_MODEL").ok()?;
+    let key = std::env::var("TRANSCRIPTION_E2E_API_KEY").unwrap_or_default();
+    let base_url = url::Url::parse(&base_url).expect("TRANSCRIPTION_E2E_BASE_URL is a URL");
+    Some((OpenAiTranscribe::new(&key, base_url), model))
+}
+
+// The passthrough's case: the client's own file goes up as it is. A 16 kHz mono PCM WAV,
+// the one format every server here takes (nemo-speech: WAV, FLAC, MP3; dev's own route took
+// only this).
+#[tokio::test]
+async fn a_recording_is_transcribed_as_uploaded() {
+    let Some((client, model)) = upstream() else {
+        eprintln!("skipped: TRANSCRIPTION_E2E_BASE_URL / TRANSCRIPTION_E2E_MODEL not set");
+        return;
+    };
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/transcription_test.wav"
+    );
+    let audio = AudioFile {
+        bytes: std::fs::read(path).expect("the test recording is in the repo"),
+        file_name: "transcription_test.wav".into(),
+        mime: "audio/wav".into(),
+    };
+
+    let reply = client.transcribe(&model, audio, vec![]).await.unwrap();
+
+    eprintln!("transcript: {}", reply.text);
+    // The recording says "If you can read this, transcription is working".
+    assert!(
+        reply
+            .text
+            .to_lowercase()
+            .contains("transcription is working"),
+        "{:?}",
+        reply.text
+    );
+}
+
+// A stream's case: the speech gate passes the recording, the upstream takes the executor's
+// own WAV encoding, and the text (in pieces, when the server streams) is the recording's.
+#[tokio::test]
+async fn a_streamed_utterance_is_accepted_and_answered() {
+    let Some((client, model)) = upstream() else {
+        eprintln!("skipped: TRANSCRIPTION_E2E_BASE_URL / TRANSCRIPTION_E2E_MODEL not set");
+        return;
+    };
+    let _ = Ad4mDb::init_global_instance(":memory:");
+    let service = AIService::empty();
+    let operator = RequestContext::operator_for_test();
+    let id = service
+        .open_remote_stream(
+            "e2e".into(),
+            model,
+            Arc::new(client),
+            None,
+            "did:key:e2e".into(),
+        )
+        .await;
+    let mut text = service
+        .subscribe_transcription_text(&id, &operator)
+        .await
+        .unwrap();
+
+    // One second of a quiet tone: no speech, so the gate keeps it from the server.
+    let tone: Vec<f32> = (0..SAMPLE_RATE)
+        .map(|i| 0.05 * (i as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin())
+        .collect();
+    service
+        .feed_transcription_stream(&id, tone, &operator)
+        .await
+        .unwrap();
+    assert!(text.try_recv().is_err(), "a tone was transcribed");
+
+    service
+        .feed_transcription_stream(&id, super::transcription::speech_fixture(), &operator)
+        .await
+        .expect("the upstream takes the executor's WAV");
+    let pieces: Vec<String> = std::iter::from_fn(|| text.try_recv().ok()).collect();
+    eprintln!("pieces: {pieces:?}");
+    assert!(
+        pieces
+            .concat()
+            .to_lowercase()
+            .contains("transcription is working"),
+        "{pieces:?}"
+    );
+}

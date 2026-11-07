@@ -15,7 +15,6 @@ use crate::ai_service::AIService;
 use crate::types::{
     AIModelLoadingStatus, AITask, AITaskInput, DetectedEndpoint, EndpointInput, EndpointKind,
     EndpointView, Model, ModelInput, ModelType, ModelView, RequestContext,
-    VoiceActivityParamsInput,
 };
 use base64::Engine;
 
@@ -504,7 +503,7 @@ async fn open_transcription_stream(
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let stream_id = service
-        .open_transcription_stream(body.model_id, body.params.map(|p| p.into()), &ctx)
+        .open_transcription_stream(body.model_id, &ctx)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -706,16 +705,20 @@ pub async fn feed_transcription_stream(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let mut errors: Vec<String> = Vec::new();
-    for stream_id in &stream_ids {
-        if let Err(e) = service
-            .feed_transcription_stream(stream_id, audio_f32.clone(), &context)
-            .await
-        {
+    // Concurrently: a stream on an endpoint answers once its utterance is transcribed.
+    let outcomes = futures::future::join_all(stream_ids.iter().map(|stream_id| {
+        service.feed_transcription_stream(stream_id, audio_f32.clone(), &context)
+    }))
+    .await;
+    let errors: Vec<String> = stream_ids
+        .iter()
+        .zip(outcomes)
+        .filter_map(|(stream_id, outcome)| {
+            let e = outcome.err()?;
             log::warn!("Error feeding stream {}: {}", stream_id, e);
-            errors.push(format!("{}: {}", stream_id, e));
-        }
-    }
+            Some(format!("{}: {}", stream_id, e))
+        })
+        .collect();
 
     feed_outcome(&errors, stream_ids.len())?;
     Ok(Json("true".to_string()))
@@ -853,8 +856,6 @@ pub struct AiUpdateTaskParams {
 #[ts(export)]
 pub struct AiTranscriptionOpenParams {
     pub model_id: String,
-    #[ts(optional)]
-    pub params: Option<VoiceActivityParamsInput>,
 }
 
 #[derive(Deserialize, TS)]
@@ -1082,6 +1083,49 @@ mod compute_credit_tests {
         assert_eq!(results.0.unwrap_err().code, 403, "a user without credits");
         assert!(results.1.is_ok(), "a user with credits");
         assert!(results.2.is_ok(), "a caller without a user pays nothing");
+    }
+
+    // The HTTP feed refuses a user at 0 credits before any stream is fed.
+    #[tokio::test]
+    async fn the_http_feed_refuses_a_user_without_credits() {
+        use crate::agent::session::{Principal, Session};
+        use crate::agent::AgentContext;
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        let id = uuid::Uuid::new_v4();
+        let broke_did = format!("did:key:broke-feeder-{id}");
+        let was_free = Ad4mDb::with_global_instance(|db| {
+            db.add_user(&format!("broke-feeder-{id}@example.org"), &broke_did, "pw")?;
+            let was_free = db.get_free_hosting_enabled()?;
+            db.set_free_hosting_enabled(false)?;
+            Ok::<_, anyhow::Error>(was_free)
+        })
+        .unwrap();
+        let context = RequestContext::for_session(
+            Session::for_test(Principal::Agent(AgentContext::managed(broke_did)))
+                .with_caps(vec![AI_TRANSCRIBE_CAPABILITY.clone()]),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-stream-ids", "a-stream".parse().unwrap());
+
+        let fed = feed_transcription_stream(
+            State(AppState {
+                admin_credential: None,
+            }),
+            context,
+            headers,
+            axum::body::Bytes::from(vec![0u8; 8]),
+        )
+        .await;
+        crate::db_backend::db_backend()
+            .set_free_hosting_enabled(was_free)
+            .unwrap();
+
+        match fed {
+            Err(ApiError::Forbidden(message)) => assert!(message.contains("credits"), "{message}"),
+            other => panic!("a user without credits fed a stream: {other:?}"),
+        }
     }
 
     // On dev a closed database panicked the check, so the request failed. The read error

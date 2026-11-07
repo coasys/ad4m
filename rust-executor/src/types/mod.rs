@@ -22,5 +22,5 @@ pub use domain::{
     QuerySubscription, QuerySubscriptionUpdate, QuerySubscriptionUpdateEvent, QueryUpdatesLagged,
     ReadinessStatus, RequestContext, Resource, ResourceInput, RuntimeInfo, SentMessage,
     TokenizerSourceInput, TranscriptionTextFilter, UserCreationResult, UserStatistics,
-    VerificationRequestResult, VoiceActivityParamsInput,
+    VerificationRequestResult,
 };
