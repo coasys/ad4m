@@ -11,8 +11,10 @@
 //! | each language's agent context (`agent.did()`, signing) | reads `AgentService` on each call |
 //! | open sessions of the main agent (event audiences) | `Session::acts_as_did` reads the DID again after a re-key |
 //! | apps on the main agent | their grants are revoked: their tokens were signed with the old key |
-//! | perspective owners | each retired main DID is replaced by the new one (`update_perspective_with`) |
-//! | notification owners | from each retired main DID (`DbBackend::move_notification_owner`) |
+//! | apps of managed agents | with the local wallet (signing key `main`), revoked too: the old key signed their tokens |
+//! | perspective owners | each retired main DID is replaced by the new one (`update_perspective_with`); again at start-up |
+//! | notification owners | from each retired main DID (`DbBackend::move_notification_owner`); again at start-up |
+//! | flow bookkeeping (`flow_replica_state`, `flow_fired_mark`) | from each retired main DID (`DbBackend::move_flow_rows`); again at start-up |
 //! | the claims the old key made (`identity.joinStatus`) | forgotten (`DbBackend::clear_joins`) |
 //! | the published agent profile | published again under the new DID |
 //!
@@ -22,6 +24,13 @@
 //! One re-key runs at a time (`REKEY`), in its own task: a caller that goes away does not stop
 //! it half way. Owners move from every retired main key, not only the last one, so the next
 //! re-key repairs a place an earlier one failed to move.
+//!
+//! A process that stops after the key change but before the moves leaves those places on the
+//! retired key. So the three moves marked "again at start-up" ([`move_from_retired`]) run once
+//! more when the main agent is unlocked (`agent.unlock`, or the passphrase file at start-up),
+//! after the perspectives are open: [`finish_moves_at_start`]. It revokes no grants (the old
+//! key's tokens no longer verify) and keeps the claims. It does nothing without a retired key,
+//! changes nothing when every place has moved, and logs what it cannot move.
 
 use crate::agent::grants::Grants;
 use crate::agent::rekey::retired_key_name;
@@ -30,7 +39,7 @@ use crate::api::ws_handler::WsRpcError;
 use crate::db_backend::db_backend;
 use crate::events::Event;
 use crate::pubsub::get_global_pubsub_sync;
-use crate::wallet::wallet_backend;
+use crate::wallet::{wallet_backend, KEY_NAME_MAIN};
 
 use super::types::DeviceKeys;
 
@@ -69,10 +78,53 @@ async fn rekey_and_move() -> Result<DeviceKeys, WsRpcError> {
     let retired = retired_main_dids();
     let mut failed: Vec<String> = Vec::new();
 
-    if let Err(e) = Grants::global().revoke_agent(&AgentContext::main_agent()) {
-        failed.push(format!("the apps on the main agent: {e:?}"));
+    // Tokens are signed with the signing key: when that is `main` (the local wallet), the
+    // old key signed the managed agents' tokens too.
+    let revoked = if crate::agent::capabilities::signing_key_name() == KEY_NAME_MAIN {
+        Grants::global().revoke_all()
+    } else {
+        Grants::global().revoke_agent(&AgentContext::main_agent())
+    };
+    if let Err(e) = revoked {
+        failed.push(format!("the apps signed with the old key: {e:?}"));
     }
 
+    failed.extend(move_from_retired(&retired, new).await);
+
+    let db = db_backend();
+    if let Err(e) = db.clear_joins() {
+        failed.push(format!("the claims of the old key: {e}"));
+    }
+
+    let (status, agent) = AgentService::with_global_instance(|svc| (svc.dump(), svc.agent.clone()));
+    let pubsub = get_global_pubsub_sync();
+    pubsub.publish_event(Event::agent_status(&status));
+    if let Some(agent) = agent {
+        pubsub.publish_event(Event::agent_updated(&agent));
+    }
+    tokio::spawn(async {
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!("identity.rekey: could not publish the profile under the new key: {e}");
+        }
+    });
+
+    if !failed.is_empty() {
+        log::error!(
+            "identity.rekey: the key changed, but these did not move to it: {}",
+            failed.join("; ")
+        );
+        return Err(WsRpcError::internal(format!(
+            "the main key is now {new}, but these did not move to it: {}",
+            failed.join("; ")
+        )));
+    }
+    super::custody::main_device_keys()
+}
+
+/// Moves the perspective owners, the notification owners and the flow bookkeeping of every DID
+/// in `retired` to `new`. Returns the places that did not move; the others still move.
+async fn move_from_retired(retired: &[String], new: &str) -> Vec<String> {
+    let mut failed: Vec<String> = Vec::new();
     for instance in crate::perspectives::all_perspectives() {
         let handle = instance.persisted.lock().await.clone();
         if !retired.iter().any(|did| handle.is_owned_by(did)) {
@@ -101,38 +153,47 @@ async fn rekey_and_move() -> Result<DeviceKeys, WsRpcError> {
     }
 
     let db = db_backend();
-    for did in &retired {
+    for did in retired {
         if let Err(e) = db.move_notification_owner(did, new) {
             failed.push(format!("the notifications of {did}: {e}"));
         }
+        if let Err(e) = db.move_flow_rows(did, new) {
+            failed.push(format!("the flow bookkeeping of {did}: {e}"));
+        }
     }
-    if let Err(e) = db.clear_joins() {
-        failed.push(format!("the claims of the old key: {e}"));
-    }
+    failed
+}
 
-    let (status, agent) = AgentService::with_global_instance(|svc| (svc.dump(), svc.agent.clone()));
-    let pubsub = get_global_pubsub_sync();
-    pubsub.publish_event(Event::agent_status(&status));
-    if let Some(agent) = agent {
-        pubsub.publish_event(Event::agent_updated(&agent));
+/// Finishes the moves of a re-key the process did not live through: the key changed, then
+/// the process stopped before the owners moved. Moves what [`move_from_retired`] moves from
+/// every retired main DID to the current one; grants and claims stay (the old key's tokens no
+/// longer verify). Needs the unlocked wallet, which lists the retired keys; without one it
+/// returns at once. Returns the places that did not move.
+pub async fn finish_moves() -> Vec<String> {
+    if retired_main_dids().is_empty() {
+        return Vec::new();
+    }
+    let _one_at_a_time = REKEY.lock().await;
+    let new = crate::agent::did();
+    move_from_retired(&retired_main_dids(), &new).await
+}
+
+/// [`finish_moves`] at start-up, once the agent is unlocked: waits for the perspectives to
+/// open, then logs what did not move. A wallet without retired keys returns at once.
+pub fn finish_moves_at_start() {
+    if retired_main_dids().is_empty() {
+        return;
     }
     tokio::spawn(async {
-        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-            log::warn!("identity.rekey: could not publish the profile under the new key: {e}");
+        crate::perspectives::opened().await;
+        let failed = finish_moves().await;
+        if !failed.is_empty() {
+            log::error!(
+                "start-up: these did not move to the main agent's key after a re-key: {}",
+                failed.join("; ")
+            );
         }
     });
-
-    if !failed.is_empty() {
-        log::error!(
-            "identity.rekey: the key changed, but these did not move to it: {}",
-            failed.join("; ")
-        );
-        return Err(WsRpcError::internal(format!(
-            "the main key is now {new}, but these did not move to it: {}",
-            failed.join("; ")
-        )));
-    }
-    super::custody::main_device_keys()
 }
 
 #[cfg(test)]
@@ -170,6 +231,14 @@ mod tests {
         });
         let app = Session::open(&app_token, &Some("admin".into()), ListenerReach::Network)
             .expect("the app's token opens a session before the re-key");
+        // A managed user's app: the old main key signed its token too.
+        let user_token = crate::test_utils::granted_token(AuthInfo {
+            app_name: "an app of a managed user".to_string(),
+            user_email: Some("rekey-user@example.test".to_string()),
+            ..AuthInfo::default()
+        });
+        let user = Session::open(&user_token, &Some("admin".into()), ListenerReach::Network)
+            .expect("the user's token opens a session before the re-key");
 
         // A perspective the main agent owns, beside a user's.
         let owned = PerspectiveHandle::new_with_owner("mine".into(), old.clone());
@@ -200,7 +269,10 @@ mod tests {
                 offer_id: "rekey-offer".into(),
                 scid: "rekey-scid".into(),
                 claimed_at: 1,
-            })
+            })?;
+            // Its flow bookkeeping on the perspective.
+            db.record_flow_replica_pass(&owned.uuid, &old, "flow", Some("open"), &[], "t")
+                .map(|_| ())
         })
         .unwrap();
 
@@ -215,6 +287,7 @@ mod tests {
         // The app's grant is revoked: its token was signed with the old key.
         assert!(app.check().is_err(), "the app's grant ends at the re-key");
         assert!(Session::open(&app_token, &Some("admin".into()), ListenerReach::Network).is_err());
+        assert!(user.check().is_err(), "a managed user's grant ends too");
         // Perspective owners: the main agent's perspective moved, the user's did not.
         let mine = crate::perspectives::get_perspective(&owned.uuid).unwrap();
         let mine = mine.persisted.lock().await.clone();
@@ -223,15 +296,22 @@ mod tests {
         let theirs = theirs.persisted.lock().await.clone();
         assert_eq!(theirs.owners, Some(vec!["did:key:rekey-user".to_string()]));
         // Notifications and claims.
-        let (owners, join) = Ad4mDb::with_global_instance(|db| {
+        let (owners, join, flow) = Ad4mDb::with_global_instance(|db| {
             let owners: Vec<String> = db
                 .get_notifications()
                 .unwrap()
                 .into_iter()
                 .map(|n| n.owner_did)
                 .collect();
-            (owners, db.join("rekey-offer").unwrap())
+            let flow = db
+                .get_flow_replica_state(&owned.uuid, &new, "flow")
+                .unwrap();
+            (owners, db.join("rekey-offer").unwrap(), flow)
         });
+        assert_eq!(
+            flow.and_then(|row| row.current_state).as_deref(),
+            Some("open")
+        );
         assert!(owners.contains(&new), "{owners:?}");
         assert!(!owners.contains(&old), "{owners:?}");
         assert_eq!(join, None);
@@ -402,5 +482,76 @@ mod tests {
 
         assert_eq!(owners, Some(vec![keys.sign.clone()]));
         assert_eq!(owner, Some(keys.sign));
+    }
+
+    /// A re-key whose process stopped after the key change: the start-up pass moves the
+    /// perspective owners, the notification owners and the flow bookkeeping, and a second
+    /// pass changes nothing.
+    #[tokio::test]
+    async fn the_start_up_pass_finishes_the_moves_of_an_interrupted_rekey() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = main_agent_in(&dir);
+        let owned = PerspectiveHandle::new_with_owner("interrupted".into(), old.clone());
+        crate::perspectives::add_perspective(owned.clone(), None)
+            .await
+            .unwrap();
+        let notification = Ad4mDb::with_global_instance(|db| {
+            let id = db.add_notification(
+                NotificationInput {
+                    description: "interrupted".into(),
+                    app_name: "app".into(),
+                    app_url: "https://app.test".into(),
+                    app_icon_path: String::new(),
+                    trigger: "SELECT 1".into(),
+                    perspective_ids: vec![],
+                    webhook_url: "https://webhook.test".into(),
+                    webhook_auth: "auth".into(),
+                },
+                &old,
+                true,
+            )?;
+            db.record_flow_replica_pass(&owned.uuid, &old, "flow", Some("open"), &[], "t")?;
+            Ok::<_, anyhow::Error>(id)
+        })
+        .unwrap();
+        // The key changes; the process stops before any move.
+        AgentService::with_mutable_global_instance(|svc| svc.rekey_main_key()).unwrap();
+        let new = crate::agent::did();
+        assert_eq!(owners_of(&owned.uuid).await, Some(vec![old.clone()]));
+
+        let state = || async {
+            let owner = Ad4mDb::with_global_instance(|db| db.get_notifications())
+                .unwrap()
+                .into_iter()
+                .find(|n| n.id == notification)
+                .map(|n| n.owner_did);
+            let flow = |did: &str| {
+                Ad4mDb::with_global_instance(|db| {
+                    db.get_flow_replica_state(&owned.uuid, did, "flow")
+                })
+                .unwrap()
+                .and_then(|row| row.current_state)
+            };
+            (owners_of(&owned.uuid).await, owner, flow(&new), flow(&old))
+        };
+        let first = finish_moves().await;
+        let after_first = state().await;
+        let second = finish_moves().await;
+        let after_second = state().await;
+        crate::perspectives::remove_perspective(&owned.uuid).await;
+        crate::test_utils::setup_agent();
+
+        assert!(first.is_empty(), "{first:?}");
+        assert_eq!(
+            after_first,
+            (
+                Some(vec![new.clone()]),
+                Some(new.clone()),
+                Some("open".to_string()),
+                None
+            )
+        );
+        assert!(second.is_empty(), "{second:?}");
+        assert_eq!(after_second, after_first, "a second pass changes nothing");
     }
 }

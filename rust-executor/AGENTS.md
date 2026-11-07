@@ -78,9 +78,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   and `PR_SET_DUMPABLE = 0`.
 - **Local only.** A method registered `.local_only()` answers only the operator on this
   machine (`Session::is_operator_on_this_machine`: the admin credential, or no token on an
-  executor without one, on a loopback listener). Every other caller, the admin credential on
-  a network listener included, gets 403 `local-only`. It is on `agent.unlock`,
-  `identity.rekey`, `identity.custodyStatus` and `runtime.quit`, and `runtime.setConfig`
+  executor without one, on a loopback listener). The method's guard answers first (403 "Admin
+  credential required" for a caller without the credential); the admin credential on a
+  network listener gets 403 `local-only`. It is on `agent.unlock`,
+  `identity.rekey`, `identity.custodyStatus`, `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
   refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
   An executor on `--localhost false` without TLS has no loopback listener, so these calls
   answer on no listener there.
@@ -196,8 +197,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   device `did:key`. `identity.resolve` (`identity/resolver.rs`) answers a DID Core resolution
   result for a `did:scid:coasys:1` DID URL or a device `did:key`; a URL's `src` must name a
   public HTTPS host unless `identity.allowPrivateSrc` is set. `identity.rekey` (local only, or
-  `ad4m-executor rekey`) gives the main agent a new wallet key and moves every place that holds
-  its DID (`identity/rekey.rs`); tokens signed with the old key stop working.
+  `ad4m-executor rekey`) gives the main agent a new wallet key and moves the places that hold
+  its DID (`identity/rekey.rs`); tokens signed with the old key stop working. A perspective
+  that is not open at the time keeps the retired DID as owner until a later unlock moves it.
   `identity.custodyStatus` is the custody channel (`identity/custody.rs`).
 
 ## Do / don't

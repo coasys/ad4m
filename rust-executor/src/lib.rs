@@ -305,7 +305,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         });
     }
 
-    // Spawn the shutdown handler that waits for the signal and cleans up
+    // Spawn the shutdown handler that waits for the signal and cleans up. It reads the PID
+    // file from here: a stop may come before the global config is set.
+    let pid_file = config.pid_file.clone();
     tokio::spawn(async move {
         if let Ok(reason) = shutdown_rx.await {
             info!("Shutdown signal received ({reason:?}), cleaning up...");
@@ -321,8 +323,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
 
             // 2. Remove PID file if it was configured
-            let shutdown_config = crate::config::get_global_config();
-            if let Some(ref pid_file) = shutdown_config.pid_file {
+            if let Some(ref pid_file) = pid_file {
                 let _ = std::fs::remove_file(pid_file);
                 info!("Removed PID file: {}", pid_file);
             }
@@ -350,6 +351,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 std::path::Path::new(dir),
                 config.log_config.as_ref(),
             ) {
+                // No file logger: the reason goes to stdout.
+                crate::logging::init_cli_logging(config.log_config.as_ref());
                 return failed_start(format!("Cannot write the executor log in {dir}: {e}"));
             }
         }
@@ -373,14 +376,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         warn!("Could not turn off core dumps for the executor: {e}");
     }
 
-    // A supervisor's pipe: when it closes, the supervisor is gone and the executor stops.
-    if config.watch_stdin == Some(true) {
-        exit::stop_when_closed(std::io::stdin(), || {
-            info!("stdin closed (--watch-stdin): stopping");
-            exit::request_shutdown(exit::ExitReason::Stopped);
-        });
-    }
-
     // Write PID file if requested via config.
     // Test harnesses can set pid_file to get a reliable PID for targeted cleanup.
     if let Some(ref pid_file) = config.pid_file {
@@ -390,6 +385,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         } else {
             info!("Wrote PID {} to {}", pid, pid_file);
         }
+    }
+
+    // A supervisor's pipe: when it closes, the supervisor is gone and the executor stops.
+    // After the PID file, so the stop that removes it never comes before it is written.
+    if config.watch_stdin == Some(true) {
+        exit::stop_when_closed(std::io::stdin(), || {
+            info!("stdin closed (--watch-stdin): stopping");
+            exit::request_shutdown(exit::ExitReason::Stopped);
+        });
     }
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it
@@ -720,7 +724,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
-    perspectives::initialize_from_db();
+    perspectives::open_at_start();
 
     // Start periodic perspective snapshots in shared mode.
     if config.wallet_backend.as_deref() == Some("shared") {
