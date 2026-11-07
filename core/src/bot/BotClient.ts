@@ -10,8 +10,8 @@ export interface BotGrantInput {
     /** Neighbourhood URLs and perspective UUIDs the bot may act in. */
     spaces: string[];
     can: BotAction[];
-    /** Unix seconds; absent for no end but the key's in the owner's log. */
-    expires?: number;
+    /** Unix seconds; absent (or null) for no end but the key's in the owner's log. */
+    expires?: number | null;
     state: GrantState;
     /** The version read (`BotAgent.grant.version`); a grant changed since answers 409. */
     version: number;
@@ -43,9 +43,20 @@ export class BotClient {
         return this.#apiClient.call("bot.createAgent", { offer, name });
     }
 
-    /** Replaces the grant of the bot `bot` (its agent DID). `revoked` is for good. */
+    /**
+     * Replaces the grant of the bot `bot` (its agent DID). `revoked` is for good. Only the
+     * input's fields are sent, so a `BotGrant` read back (with its `updatedAt`) may be passed.
+     */
     async setGrant(bot: string, grant: BotGrantInput): Promise<BotAgent> {
-        return this.#apiClient.call("bot.setGrant", { bot, ...grant });
+        const { spaces, can, expires, state, version } = grant;
+        return this.#apiClient.call("bot.setGrant", {
+            bot,
+            spaces,
+            can,
+            expires: expires ?? undefined,
+            state,
+            version,
+        });
     }
 
     /** Pauses the bot: every call in its spaces answers `bot-paused` until `resume`. */
@@ -64,13 +75,7 @@ export class BotClient {
 
     async #withState(bot: string, state: GrantState): Promise<BotAgent> {
         const { grant } = await this.grant(bot);
-        return this.setGrant(bot, {
-            spaces: grant.spaces,
-            can: grant.can,
-            expires: grant.expires ?? undefined,
-            state,
-            version: grant.version,
-        });
+        return this.setGrant(bot, { ...grant, state });
     }
 
     /** The bot, its grant, and what the owner's log says about its key. */

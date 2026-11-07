@@ -1313,6 +1313,15 @@ describe('BotClient', () => {
         expect(paused.grant.version).toBe(4);
     });
 
+    test('setGrant() sends only the grant input, so a grant read back can be passed', async () => {
+        const { grant } = await ad4m.bot.grant('did:key:z6MkBot');
+        expect(grant.updatedAt).toBeDefined();
+        await ad4m.bot.setGrant('did:key:z6MkBot', { ...grant, can: ['read'] });
+        expect(lastRpcCall!.type).toBe('bot.setGrant');
+        expect(Object.keys(lastRpcCall!.params).sort()).toEqual(['bot', 'can', 'spaces', 'state', 'version']);
+        expect(lastRpcCall!.params.can).toEqual(['read']);
+    });
+
     test('log() sends the bot and the page', async () => {
         const entries = await ad4m.bot.log('did:key:z6MkBot', { before: 9, limit: 5 });
         expect(lastRpcCall!.params).toEqual({ bot: 'did:key:z6MkBot', before: 9, limit: 5 });
