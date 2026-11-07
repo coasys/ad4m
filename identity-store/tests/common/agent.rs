@@ -480,6 +480,7 @@ impl Person {
                 address: None,
                 runs_executor: true,
                 holds_master: HoldsMaster::Yes,
+                master_index: None,
                 operator: None,
             },
         );

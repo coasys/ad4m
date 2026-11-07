@@ -282,6 +282,32 @@ fn holds_master_is_false_offered_or_true() {
     assert!(serde_json::from_value::<HoldsMaster>(json!(1)).is_err());
 }
 
+/// A holder's entry names the master index it holds (`masterIndex`); an entry without one (an
+/// older record) still reads, as an unknown index, and is written back without the field.
+#[test]
+fn a_device_entry_names_the_master_index_it_holds() {
+    let mut record = record_fixture();
+    let entry = record.devices.get_mut("d1").unwrap();
+    assert_eq!(entry.master_index, None);
+    let value = serde_json::to_value(&*entry).unwrap();
+    assert!(value.get("masterIndex").is_none(), "{value}");
+    entry.master_index = Some(3);
+    let value = serde_json::to_value(&record).unwrap();
+    assert_eq!(value["devices"]["d1"]["masterIndex"], json!(3));
+    assert_eq!(
+        serde_json::from_value::<PrivateRecord>(value.clone()).unwrap(),
+        record
+    );
+    let mut older = value;
+    older["devices"]["d1"]
+        .as_object_mut()
+        .unwrap()
+        .remove("masterIndex");
+    let read: PrivateRecord = serde_json::from_value(older).unwrap();
+    assert_eq!(read.devices["d1"].master_index, None);
+    assert_eq!(read.devices["d1"].holds_master, HoldsMaster::Yes);
+}
+
 #[test]
 fn device_kinds_and_places_use_kebab_case() {
     assert_eq!(

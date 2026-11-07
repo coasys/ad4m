@@ -17,7 +17,8 @@
 //!
 //! The device's side ([`take_master`]): its custody service takes the key its executor opened
 //! (`identity.takeMaster`), checks it against its own fold of the log, keeps it in the vault,
-//! acknowledges the message, and marks itself `holdsMaster: true` in the record.
+//! acknowledges the message, and marks itself `holdsMaster: true` with the key's
+//! `masterIndex` in the record.
 //!
 //! **After a rotation** ([`refresh_master`]): a device whose vault keeps a master key the log
 //! has replaced takes the new one when the rotating app sent it; when none waits (the push
@@ -25,16 +26,18 @@
 //! new one with a `send-master` request, which a holder answers ([`super::requests::answer`]).
 //!
 //! **Removing the master key from a device** ([`remove_master`]): refused when no other
-//! device valid at the head holds it: one the record lists as `holdsMaster: true` and the log
-//! lets keep it ([`may_keep_master`], never the record's kind; a key only offered, or the 12
-//! words, do not count). Otherwise the record marks this device
-//! `holdsMaster: false` first, then the vault forgets the key and its retry list for the
-//! identity.
+//! device valid at the head holds the current master key: one the record lists as
+//! `holdsMaster: true` with the log's current `masterIndex` and the log lets keep it
+//! ([`may_keep_master`], never the record's kind; a key only offered, an entry without an
+//! index or with a replaced one, or the 12 words, do not count). Otherwise the record marks
+//! this device `holdsMaster: false` first, then the vault forgets the key and its retry list
+//! for the identity. The check runs on the version the record write builds on, again after
+//! each stale version, so two holders removing it at once leave one copy.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{InboxAddress, InboxError};
 use ad4m_identity_core::link::may_keep_master;
-use ad4m_identity_core::record::HoldsMaster;
+use ad4m_identity_core::record::{HoldsMaster, PrivateRecord};
 use ad4m_identity_core::{Event, KelChain, KeyId};
 use ad4m_ldk::identity::InboxWrite;
 
@@ -307,9 +310,9 @@ pub async fn take_master<R: ExecutorRpc>(
     let record = record::write(
         executor,
         &taken.did,
-        &[Change::HoldsMaster {
+        &[Change::Holds {
             key_id,
-            holds: HoldsMaster::Yes,
+            index: taken.index,
         }],
         random,
     )
@@ -367,9 +370,12 @@ pub async fn refresh_master<R: ExecutorRpc>(
 }
 
 /// Removes the master key of `did`, its executor's identity, from this device. Refused with
-/// [`ClientError::OnlyCopy`] unless another device valid at the head holds it: the record lists
-/// it as `holdsMaster: true` and the log lets it keep the master key ([`may_keep_master`]; the
-/// record's device kind grants nothing, any linked device can write the record). Writes the record (this device
+/// [`ClientError::OnlyCopy`] unless another device valid at the head holds the current master
+/// key ([`another_copy`]): the record lists it as `holdsMaster: true` with the log's current
+/// master index, and the log lets it keep the master key ([`may_keep_master`]; the record's
+/// device kind grants nothing, any linked device can write the record). The check runs on the
+/// record version the write builds on, again after each stale version ([`record::write_if`]),
+/// so of two holders removing it at once at most one does. Writes the record (this device
 /// `holdsMaster: false`) before the vault forgets the key, so a failed write leaves the key
 /// where it was. Answers the record version written.
 pub async fn remove_master<R: ExecutorRpc>(
@@ -383,29 +389,23 @@ pub async fn remove_master<R: ExecutorRpc>(
         executor.status().await?.key_id.ok_or_else(|| {
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
-    let (events, chain) = log_of(executor, did).await?;
-    let state = chain.state();
-    let head = chain.head().seq;
-    let record = record::read(executor, did).await?;
-    let elsewhere = record.is_some_and(|opened| {
-        opened.record.devices.iter().any(|(id, entry)| {
-            *id != own
-                && entry.holds_master == HoldsMaster::Yes
-                && state.keys.contains_key(id)
-                && state.key_valid_at(id, head)
-                && may_keep_master(&events, id)
-        })
-    });
-    if !elsewhere {
-        return Err(ClientError::OnlyCopy);
-    }
-    let version = record::write(
+    let (events, _) = log_of(executor, did).await?;
+    let check = |record: Option<&PrivateRecord>, chain: &KelChain| {
+        // The events may lag the chain the write read; a key `add`ed since is no copy yet.
+        if record.is_some_and(|r| another_copy(r, &events, chain, &own)) {
+            Ok(())
+        } else {
+            Err(ClientError::OnlyCopy)
+        }
+    };
+    let version = record::write_if(
         executor,
         did,
         &[Change::HoldsMaster {
-            key_id: own,
+            key_id: own.clone(),
             holds: HoldsMaster::No,
         }],
+        &check,
         random,
     )
     .await?;
@@ -416,4 +416,32 @@ pub async fn remove_master<R: ExecutorRpc>(
         }
     }
     Ok(version)
+}
+
+/// Whether `record` lists a device other than `own` that holds the current master key of
+/// `chain`: valid at the head, `holdsMaster: true` with `masterIndex` the index of the log's
+/// current master (an entry without an index, or with an older one, proves no current copy),
+/// and let keep it by the log `events` ([`may_keep_master`]).
+pub(crate) fn another_copy(
+    record: &PrivateRecord,
+    events: &[Event],
+    chain: &KelChain,
+    own: &str,
+) -> bool {
+    let state = chain.state();
+    let head = chain.head().seq;
+    let Some(current) = state
+        .current_master()
+        .and_then(|_| u32::try_from(state.masters.len() - 1).ok())
+    else {
+        return false;
+    };
+    record.devices.iter().any(|(id, entry)| {
+        id != own
+            && entry.holds_master == HoldsMaster::Yes
+            && entry.master_index == Some(current)
+            && state.keys.contains_key(id)
+            && state.key_valid_at(id, head)
+            && may_keep_master(events, id)
+    })
 }

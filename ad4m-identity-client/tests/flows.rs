@@ -1785,6 +1785,7 @@ fn entry(name: &str, kind: DeviceKind) -> DeviceEntry {
         address: None,
         runs_executor: true,
         holds_master: HoldsMaster::No,
+        master_index: None,
         operator: None,
     }
 }
@@ -2834,6 +2835,245 @@ async fn removing_the_master_key_is_refused_on_its_only_holder() {
         Err(ClientError::OnlyCopy)
     ));
     assert_eq!(desk_vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// An executor whose first `identity.recordPut` waits until every executor sharing `arrived`
+/// reached its own: the writers have all read the same record version before any writes.
+struct Gated<'a> {
+    inner: &'a TestExecutor,
+    arrived: &'a Cell<usize>,
+    writers: usize,
+    waited: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for Gated<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.recordPut" && !self.waited.replace(true) {
+            self.arrived.set(self.arrived.get() + 1);
+            while self.arrived.get() < self.writers {
+                tokio::task::yield_now().await;
+            }
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Two holders removing the master key at once: each saw the other in the record, but the
+/// check runs again on the version each write builds on, so one removes it and the other is
+/// refused with `OnlyCopy`; one copy remains.
+#[tokio::test]
+async fn two_holders_removing_the_master_key_at_once_leave_one_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let phone = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let phone_vault = MemoryVault::new();
+    let did = create(&a, &vault, 30).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    holding_app(
+        &a,
+        &vault,
+        &did,
+        &phone,
+        &phone_vault,
+        entry("Phone", DeviceKind::PhoneApp),
+    )
+    .await;
+
+    let arrived = Cell::new(0);
+    let gated = |inner| {
+        ViaExecutor::new(Gated {
+            inner,
+            arrived: &arrived,
+            writers: 2,
+            waited: Cell::new(false),
+        })
+    };
+    let (desk_gated, phone_gated) = (gated(desk.rpc()), gated(phone.rpc()));
+    let (by_desk, by_phone) = tokio::join!(
+        remove_master(&desk_gated, &desk_vault, &did, &OsRandom),
+        remove_master(&phone_gated, &phone_vault, &did, &OsRandom),
+    );
+    assert_eq!(arrived.get(), 2, "both read the record before either wrote");
+    let refused = [&by_desk, &by_phone]
+        .iter()
+        .filter(|r| matches!(r, Err(ClientError::OnlyCopy)))
+        .count();
+    let removed = [&by_desk, &by_phone].iter().filter(|r| r.is_ok()).count();
+    assert_eq!((removed, refused), (1, 1), "{by_desk:?} {by_phone:?}");
+    let kept = [&desk_vault, &phone_vault]
+        .iter()
+        .filter(|v| v.master_index(&scid).unwrap() == Some(0))
+        .count();
+    assert_eq!(kept, 1);
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let holders = opened
+        .record
+        .devices
+        .values()
+        .filter(|e| e.holds_master == HoldsMaster::Yes)
+        .count();
+    assert_eq!(holders, 1);
+}
+
+/// An executor that yields to the scheduler before each call, so two flows that run at once
+/// interleave at every RPC boundary (as two devices on a network do).
+struct Yielding<'a>(&'a TestExecutor);
+
+#[async_trait(?Send)]
+impl ExecutorRpc for Yielding<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        tokio::task::yield_now().await;
+        self.0.call(method, params).await
+    }
+}
+
+/// From the review of #1667: two holders that remove the master key while their flows
+/// interleave at every call. The creator removes its copy first, so the desk and the phone are
+/// the two holders; exactly one of them removes its copy and one copy is left.
+#[tokio::test]
+async fn two_holders_removing_at_once_leave_at_least_one_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let phone = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let phone_vault = MemoryVault::new();
+    let did = create(&a, &vault, 41).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let d3 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &phone,
+        &phone_vault,
+        entry("Phone", DeviceKind::PhoneApp),
+    )
+    .await;
+    remove_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    let opened = record::read(&desk, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::Yes);
+    assert_eq!(opened.record.devices[&d3].holds_master, HoldsMaster::Yes);
+    assert!(opened
+        .record
+        .devices
+        .get("d1")
+        .is_none_or(|e| e.holds_master == HoldsMaster::No));
+
+    let yd = ViaExecutor::new(Yielding(desk.rpc()));
+    let yp = ViaExecutor::new(Yielding(phone.rpc()));
+    let (first, second) = tokio::join!(
+        remove_master(&yd, &desk_vault, &did, &OsRandom),
+        remove_master(&yp, &phone_vault, &did, &OsRandom)
+    );
+    let removed = [&first, &second].iter().filter(|r| r.is_ok()).count();
+    let refused = [&first, &second]
+        .iter()
+        .filter(|r| matches!(r, Err(ClientError::OnlyCopy)))
+        .count();
+    assert_eq!((removed, refused), (1, 1), "{first:?} {second:?}");
+    let left = [
+        desk_vault.master_index(&scid).unwrap(),
+        phone_vault.master_index(&scid).unwrap(),
+    ];
+    assert_eq!(
+        left.iter().filter(|k| **k == Some(0)).count(),
+        1,
+        "{left:?}"
+    );
+    let opened = record::read(&desk, &did).await.unwrap().unwrap();
+    let holders = [&d2, &d3]
+        .iter()
+        .filter(|d| opened.record.devices[**d].holds_master == HoldsMaster::Yes)
+        .count();
+    assert_eq!(holders, 1);
+}
+
+/// `holdsMaster: true` counts as another copy only for the current master: a device whose
+/// entry names an older master index (its vault kept the key a rotation replaced) is not one.
+#[tokio::test]
+async fn a_holder_of_a_replaced_master_is_not_another_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 31).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].master_index, Some(0));
+
+    let words = words::from_entropy(&[31; 16]);
+    rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    // The desk, still on master #0, says it holds the master key.
+    record::write(
+        &desk,
+        &did,
+        &[Change::Holds {
+            key_id: d2.clone(),
+            index: 0,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        remove_master(&a, &vault, &did, &OsRandom).await,
+        Err(ClientError::OnlyCopy)
+    ));
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
+
+    // Once it takes master #1 it is one.
+    let Refreshed::Taken(taken) = refresh_master(&desk, &desk_vault, &did, &OsRandom)
+        .await
+        .unwrap()
+    else {
+        panic!("expected master #1 taken from the inbox");
+    };
+    taken.record.unwrap();
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            opened.record.devices[&d2].holds_master,
+            opened.record.devices[&d2].master_index
+        ),
+        (HoldsMaster::Yes, Some(1))
+    );
+    remove_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert_eq!(vault.master_index(&scid).unwrap(), None);
 }
 
 /// The record's device kind grants nothing: a desktop app whose claim said it does not keep the

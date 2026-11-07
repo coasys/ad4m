@@ -84,6 +84,11 @@ pub struct DeviceEntry {
     pub address: Option<String>,
     pub runs_executor: bool,
     pub holds_master: HoldsMaster,
+    /// With `holdsMaster: true`: the index *n* of the master key the device holds, written by
+    /// the device when its vault keeps that key. Absent (an older entry, or a `true` written
+    /// without it) is unknown: no proof that the device holds the current master key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_index: Option<u32>,
     /// For an executor: who operates it, as a bare did:scid, when known.
     #[serde(default)]
     pub operator: Option<String>,

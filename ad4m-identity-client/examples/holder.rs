@@ -93,6 +93,7 @@ fn device_entry(
         address: None,
         runs_executor: true,
         holds_master: HoldsMaster::No,
+        master_index: None,
         operator: None,
     })
 }

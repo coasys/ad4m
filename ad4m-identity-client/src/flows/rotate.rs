@@ -268,6 +268,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         });
         pushes.push((key_id, sent));
     }
+    let index = signer.index();
     match this {
         Some(ThisDevice {
             key_id,
@@ -276,16 +277,14 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
             key_id,
             entry: DeviceEntry {
                 holds_master: HoldsMaster::Yes,
+                master_index: Some(index),
                 ..entry
             },
         }),
         Some(ThisDevice {
             key_id,
             entry: None,
-        }) => changes.push(Change::HoldsMaster {
-            key_id,
-            holds: HoldsMaster::Yes,
-        }),
+        }) => changes.push(Change::Holds { key_id, index }),
         None => {}
     }
     let record =

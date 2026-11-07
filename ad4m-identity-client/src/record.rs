@@ -54,8 +54,12 @@ pub enum Change {
     Device { key_id: KeyId, entry: DeviceEntry },
     /// A new name for a listed device.
     Rename { key_id: KeyId, name: String },
-    /// Whether a listed device holds the master key.
+    /// Whether a listed device holds the master key. Clears the entry's `masterIndex`: a
+    /// device that keeps a master key says which with [`Change::Holds`].
     HoldsMaster { key_id: KeyId, holds: HoldsMaster },
+    /// A listed device's vault keeps master `index`: `holdsMaster: true`, `masterIndex: index`.
+    /// Only the device itself (or the flow that put the key in its vault) writes it.
+    Holds { key_id: KeyId, index: u32 },
     /// A revocation no reachable master key could sign yet; one per key.
     PendingRevocation(PendingRevocation),
 }
@@ -87,6 +91,13 @@ fn merge(record: &mut PrivateRecord, chain: &KelChain, changes: &[Change]) {
             Change::HoldsMaster { key_id, holds } => {
                 if let Some(entry) = record.devices.get_mut(key_id) {
                     entry.holds_master = *holds;
+                    entry.master_index = None;
+                }
+            }
+            Change::Holds { key_id, index } => {
+                if let Some(entry) = record.devices.get_mut(key_id) {
+                    entry.holds_master = HoldsMaster::Yes;
+                    entry.master_index = Some(*index);
                 }
             }
             Change::PendingRevocation(pending) => {
@@ -258,13 +269,64 @@ pub async fn write_as<R: ExecutorRpc>(
     recovery_key: Option<&Multikey>,
     random: &dyn Random,
 ) -> Result<u64, ClientError> {
+    write_checked(
+        executor,
+        did,
+        reader,
+        changes,
+        recovery_key,
+        &|_, _| Ok(()),
+        random,
+    )
+    .await
+}
+
+/// A condition a write holds to: it sees the version the write builds on (`None` before the
+/// first write) and the log at the head, and refuses with the error the write answers.
+pub type Precondition<'a> =
+    &'a dyn Fn(Option<&PrivateRecord>, &KelChain) -> Result<(), ClientError>;
+
+/// [`write`] only while `check` holds on the version it builds on. The check runs again on
+/// each read after a stale version, and the store takes only the stored version plus one, so a
+/// version written was built on a version that passed: of two writers whose checks exclude
+/// each other, at most one writes.
+pub async fn write_if<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    changes: &[Change],
+    check: Precondition<'_>,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    write_checked(
+        executor,
+        did,
+        &Reader::Executor,
+        changes,
+        None,
+        check,
+        random,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_checked<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    reader: &Reader<'_>,
+    changes: &[Change],
+    recovery_key: Option<&Multikey>,
+    check: Precondition<'_>,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
     for _ in 0..MAX_WRITES {
         let chain = chain_of(executor, did).await?;
-        let (version, mut record, kept) =
-            match read_as(executor, did, &chain, reader, random).await? {
-                Some(opened) => (opened.version + 1, opened.record, opened.recovery_key),
-                None => (1, PrivateRecord::default(), None),
-            };
+        let opened = read_as(executor, did, &chain, reader, random).await?;
+        check(opened.as_ref().map(|o| &o.record), &chain)?;
+        let (version, mut record, kept) = match opened {
+            Some(opened) => (opened.version + 1, opened.record, opened.recovery_key),
+            None => (1, PrivateRecord::default(), None),
+        };
         let recovery_key = kept.or_else(|| recovery_key.cloned());
         merge(&mut record, &chain, changes);
         let sealed = seal_record(

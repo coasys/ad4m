@@ -698,7 +698,9 @@ device key valid at the head without the bot mark (`wrapped[keyId]`), and to `re
 set (`wrapped["recovery"]`). A writer reads the `enc` keys from the log, so a removed or revoked
 device cannot read a later version. `version` rises by one with each write (a host refuses any
 other than the stored version plus one); a reader refuses a version lower than one it has read. A device entry's `holdsMaster` is `false`, `"offered"` or
-`true`; a pending revocation's `reason` is `left-host` or `account-deleted`.
+`true`; with `true` it carries `masterIndex`, the index *n* of the master key the device's
+vault keeps, written by the device (or the flow that put the key there). An entry without
+`masterIndex` (written before it existed) is read as an unknown index. A pending revocation's `reason` is `left-host` or `account-deleted`.
 
 **The request box.** A device key without the bot mark posts `{body, expires}` with `body`
 `{kind: "send-master"}` or `{kind: "confirm-revoke", keyIds, rotate}`; `expires` lies at most 7
@@ -765,7 +767,14 @@ a new string ends the read of the last one.
   app keeps the push on a retry list of its own; it forgets it once the host takes it, or when
   the host refuses it for good, or when the device key has left the log, and retries what is
   left at each start and unlock. The holder marks the device `holdsMaster: "offered"`; the
-  device marks itself `true` once its vault keeps the key.
+  device marks itself `true` with the key's `masterIndex` once its vault keeps the key.
+- *Removes the master key from a device* only while another copy of the current master key
+  remains: another device valid at the head that the log lets keep it, listed `holdsMaster:
+  true` with `masterIndex` equal to the index of the log's current master. An entry offered,
+  without an index or with a replaced index, and the 12 words, are no copy. The app checks this
+  on the record version its write (this device `holdsMaster: false`) builds on, again on each
+  re-read after a stale version, and the vault forgets the key only after the write; of two
+  devices removing it at once, the second write builds on the first's version and is refused.
 - *Writes the record* by reading the newest version, applying its own changes (a device's
   entry, a name, `holdsMaster`, a pending revocation) and dropping the entries of keys no
   longer valid at the head, sealing the result as the next version to every reader of the
