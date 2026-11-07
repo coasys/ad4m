@@ -26,7 +26,7 @@ use super::{ChatReply, ChatRequest, ChatRole, ChatTurn, ChatUsage, RemoteChat, T
 use crate::types::{DiscoveredModel, EndpointKind};
 
 /// A completion can run for minutes on a long prompt or a slow local model.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct OpenAiChat {
     http: reqwest::Client,
@@ -63,20 +63,14 @@ impl OpenAiChat {
             request = request.bearer_auth(&self.api_key);
         }
         let response = request.send().await.map_err(|e| {
-            anyhow!(
-                "Error connecting to remote LLM API: {}",
-                super::http::scrub(&e.to_string(), &self.api_key)
-            )
+            super::http::UpstreamUnreachable::new(&self.endpoint, &e, &self.api_key)
         })?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = super::http::read_error_text(response).await;
-            return Err(super::http::UpstreamStatus {
-                url: self.endpoint.clone(),
-                status,
-                body: super::http::scrub(&body, &self.api_key),
-            }
-            .into());
+        if !response.status().is_success() {
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, &self.api_key)
+                    .await
+                    .into(),
+            );
         }
         Ok(response)
     }
@@ -621,7 +615,15 @@ mod wire_tests {
             .chat(ChatRequest::new("m", vec![]))
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("Error connecting"), "{error}");
+        // Typed, so `/v1` answers a 503 for it (`OpenAIError::from_upstream`).
+        assert!(
+            error
+                .downcast_ref::<super::super::http::UpstreamUnreachable>()
+                .is_some(),
+            "{error}"
+        );
+        assert!(error.to_string().contains("Could not reach"), "{error}");
+        assert!(!error.to_string().contains("sk-test"), "{error}");
 
         let error = OpenAiChat::new("sk-test", url(&server.url()))
             .chat(ChatRequest::new("m", vec![]))

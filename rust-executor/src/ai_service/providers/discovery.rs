@@ -168,6 +168,7 @@ mod tests {
                 url: "http://h/v1/models".into(),
                 status: reqwest::StatusCode::from_u16(code).unwrap(),
                 body: "no".into(),
+                retry_after: None,
             })
         };
         assert_eq!(
@@ -194,6 +195,7 @@ mod tests {
                 url: "http://h/v1/models".into(),
                 status: reqwest::StatusCode::NOT_FOUND,
                 body: "File Not Found".into(),
+                retry_after: None,
             }))
         };
         let registered = || vec!["whisper-1".to_string()];

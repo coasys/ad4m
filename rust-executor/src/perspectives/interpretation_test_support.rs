@@ -325,24 +325,49 @@ pub(crate) async fn setup_interpretation_e2e(
     (perspective, shapes, ctx)
 }
 
-/// Register (and load) an `AIService` embedding model named `interpretation-embed`
-/// — a local candle Bert (CPU) — so the `DedupStrategy::Semantic` path can embed
-/// identity strings through `AIService::embed` rather than any external endpoint.
-/// The channel is keyed by the model *name*, which is what `semantic_from_env`
-/// (default `interpretation-embed`) passes to `embed`. Idempotent-ish: only the
-/// one semantic-dedup e2e needs it, so it isn't part of the default setup (Bert
-/// load is not free).
+/// Register (and load) the `AIService` embedding model the `DedupStrategy::Semantic` path
+/// embeds identity strings with. Its name is the one `semantic_from_env` passes to `embed`
+/// (`INTERPRETATION_EMBED_MODEL`, default `interpretation-embed`).
+///
+/// With `INTERPRETATION_EMBED_BASE_URL` set, the model is that remote model (the same
+/// variable, default `nomic-embed-text`) on an OpenAI-shaped endpoint at that URL, which
+/// the model registers (`INTERPRETATION_EMBED_API_KEY`, default `ollama`, as the LLM's).
+/// Without it, a local Bert (CPU). Only the one semantic-dedup e2e needs it, so it isn't
+/// part of the default setup.
 pub(crate) async fn register_interpretation_embedding_model() {
-    use crate::types::{ModelInput, ModelType};
+    use crate::types::{ModelApiInput, ModelApiType, ModelInput, ModelType};
     let service = crate::ai_service::AIService::global_instance()
         .await
         .expect("AIService global instance");
+    let model = std::env::var("INTERPRETATION_EMBED_MODEL").ok();
+    let api = std::env::var("INTERPRETATION_EMBED_BASE_URL")
+        .ok()
+        .map(|base_url| ModelApiInput {
+            base_url,
+            api_key: Some(
+                std::env::var("INTERPRETATION_EMBED_API_KEY")
+                    .unwrap_or_else(|_| "ollama".into())
+                    .into(),
+            ),
+            model: model.clone().unwrap_or_else(|| "nomic-embed-text".into()),
+            api_type: ModelApiType::OpenAi.to_string(),
+            max_num_ctx: None,
+            native_tools: None,
+        });
+    eprintln!(
+        "[e2e] semantic dedup embeds with {}",
+        api.as_ref()
+            .map_or("a local Bert".to_string(), |api| format!(
+                "'{}' at {}",
+                api.model, api.base_url
+            ))
+    );
     service
         .add_model(ModelInput {
-            name: "interpretation-embed".into(),
+            name: model.unwrap_or_else(|| "interpretation-embed".into()),
             model_type: ModelType::Embedding,
             local: None,
-            api: None,
+            api,
         })
         .await
         .expect("add_model(Embedding)");

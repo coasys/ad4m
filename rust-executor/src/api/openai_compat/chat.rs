@@ -18,6 +18,11 @@
 //!
 //! A model whose provider carries tools as data skips all of that and goes
 //! through [`super::native_tools`] instead.
+//!
+//! A model on an OpenAI-shaped endpoint is not answered here at all: the request goes
+//! to the endpoint as it is ([`super::passthrough`]), unless it carries tools the model
+//! does not take as definitions. Ollama is answered here, through its native
+//! `/api/chat`, which honours `num_ctx`.
 
 use std::convert::Infallible;
 use std::time::SystemTime;
@@ -30,9 +35,10 @@ use futures::Stream;
 use kalosm::language::ArcParser;
 use uuid::Uuid;
 
-use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
-use super::model_selector::resolve_model;
+use super::errors::{OpenAIError, OpenAIJson};
+use super::model_selector::{resolve, Resolved};
 use super::native_tools;
+use super::passthrough::{self, Route, Upstream};
 use super::tool_grammar::{self, ExtractedToolCall, ToolChoice};
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
@@ -43,20 +49,31 @@ use super::types::{
 use crate::agent::capabilities::AI_PROMPT_CAPABILITY;
 use crate::agent::session::Session;
 use crate::ai_service::AIService;
-use crate::billing::check_compute_credits;
 use crate::types::{ModelType, RequestContext};
 
 /// `POST /v1/chat/completions` — handles both streaming (`stream: true`)
 /// and non-streaming responses.
 pub async fn chat_completions(
     auth: RequestContext,
-    OpenAIJson(req): OpenAIJson<ChatCompletionRequest>,
+    OpenAIJson(body): OpenAIJson<serde_json::Value>,
 ) -> Result<axum::response::Response, OpenAIError> {
     auth.require(&AI_PROMPT_CAPABILITY)
         .map_err(OpenAIError::forbidden)?;
 
-    // Resolve the OpenAI `model` string to an AD4M model_id.
-    let model_id = resolve_model(&req.model, ModelType::Llm).await?;
+    let resolved = resolve(requested_model(&body), ModelType::Llm).await?;
+    if let Some(upstream) = Upstream::for_chat(&resolved, &body) {
+        return passthrough::forward_completion(&auth, upstream, Route::ChatCompletions, body)
+            .await;
+    }
+    // Answered here: a caller who pays must cover the prompt, as a forwarded request must.
+    passthrough::afford_prompt(
+        &auth,
+        &resolved.model.id,
+        passthrough::prompt_estimate(&body),
+    )?;
+    let req: ChatCompletionRequest =
+        serde_json::from_value(body).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
+    let model_id = resolved.model.id.clone();
 
     let tools: Vec<ToolDef> = req.tools.clone().unwrap_or_default();
     let has_tools = !tools.is_empty();
@@ -72,7 +89,7 @@ pub async fn chat_completions(
         return native_tools::chat_with_native_tools(
             auth,
             req.model.clone(),
-            model_id,
+            &resolved,
             &req.messages,
             &tools,
             req.stream,
@@ -105,7 +122,7 @@ pub async fn chat_completions(
         chat_stream(
             auth,
             req.model.clone(),
-            model_id,
+            &resolved,
             messages,
             constraint,
             tools_active,
@@ -115,7 +132,7 @@ pub async fn chat_completions(
         chat_oneshot(
             auth,
             req.model.clone(),
-            model_id,
+            &resolved,
             messages,
             constraint,
             tools_active,
@@ -129,22 +146,28 @@ pub async fn chat_completions(
 /// the legacy endpoint.
 pub async fn completions(
     auth: RequestContext,
-    OpenAIJson(req): OpenAIJson<CompletionRequest>,
-) -> OpenAIResult<Json<CompletionResponse>> {
+    OpenAIJson(body): OpenAIJson<serde_json::Value>,
+) -> Result<axum::response::Response, OpenAIError> {
     auth.require(&AI_PROMPT_CAPABILITY)
         .map_err(OpenAIError::forbidden)?;
 
-    let model_id = resolve_model(&req.model, ModelType::Llm).await?;
+    let resolved = resolve(requested_model(&body), ModelType::Llm).await?;
+    if let Some(upstream) = Upstream::of(&resolved) {
+        return passthrough::forward_completion(&auth, upstream, Route::Completions, body).await;
+    }
+    passthrough::afford_prompt(
+        &auth,
+        &resolved.model.id,
+        passthrough::prompt_estimate(&body),
+    )?;
+    let req: CompletionRequest =
+        serde_json::from_value(body).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
+    let model_id = resolved.model.id.clone();
     let prompt = req
         .prompt
         .into_single()
         .map_err(OpenAIError::invalid_request)?;
     let messages = vec![("user".to_string(), prompt)];
-
-    if let Some(agent_did) = auth.user_did() {
-        check_compute_credits(agent_did)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-    }
 
     let service = AIService::global_instance()
         .await
@@ -157,7 +180,7 @@ pub async fn completions(
             None,
         )
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(|e| resolved.failure(e))?;
 
     // Billing is now inside AIService::prompt_messages via bill_ai_operation
     // (host_rates-based, shared with WS-RPC path). No handler-level bill_compute here.
@@ -177,13 +200,21 @@ pub async fn completions(
             completion_tokens: result.completion_tokens as u64,
             total_tokens: (result.prompt_tokens + result.completion_tokens) as u64,
         },
-    }))
+    })
+    .into_response())
+}
+
+/// The request's `model`; empty when it names none, which resolving refuses.
+fn requested_model(body: &serde_json::Value) -> &str {
+    body.get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
 }
 
 async fn chat_oneshot(
     auth: RequestContext,
     requested_model: String,
-    model_id: String,
+    resolved: &Resolved,
     messages: Vec<(String, String)>,
     constraint: Option<ArcParser<()>>,
     tools_active: bool,
@@ -191,23 +222,19 @@ async fn chat_oneshot(
     // NOTE: WS-RPC `ai.prompt` on dev does not bill today (only pre-checks).
     // /v1 billing is correct for the public API surface; the WS-RPC gap
     // should be aligned in a separate PR against dev.
-    if let Some(agent_did) = auth.user_did() {
-        check_compute_credits(agent_did)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-    }
-
+    // The credits were checked against the prompt in `chat_completions`.
     let service = AIService::global_instance()
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
         .prompt_messages(
-            model_id,
+            resolved.model.id.clone(),
             messages,
             auth.user_did().map(str::to_string),
             constraint,
         )
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(|e| resolved.failure(e))?;
 
     // Billing is now inside AIService::prompt_messages via bill_ai_operation.
 
@@ -259,28 +286,24 @@ async fn chat_oneshot(
 async fn chat_stream(
     auth: RequestContext,
     requested_model: String,
-    model_id: String,
+    resolved: &Resolved,
     messages: Vec<(String, String)>,
     constraint: Option<ArcParser<()>>,
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(agent_did) = auth.user_did() {
-        check_compute_credits(agent_did)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-    }
-
+    // The credits were checked against the prompt in `chat_completions`.
     let service = AIService::global_instance()
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let (token_rx, done_rx) = service
         .prompt_messages_stream(
-            model_id,
+            resolved.model.id.clone(),
             messages,
             auth.user_did().map(str::to_string),
             constraint,
         )
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(|e| resolved.failure(e))?;
 
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = epoch_seconds();

@@ -11,7 +11,7 @@ Split plan: spec item 9 (`mod.rs`), item 7 (`harness/` → `agentic/`).
 | ~330–510 | construction, model load/add/status, background tasks, global instance |
 | ~510–1120 | LLM: candle device selection, `build_local_llama`, `build_remote_client` (a `providers::RemoteChat` per protocol), `spawn_llm_model` (per-model worker thread + channel) |
 | ~1120–1670 | AI tasks CRUD, `prompt` / `prompt_messages` / `prompt_messages_stream`, billing hooks (`bill_prompt_if_authed`) |
-| ~1670–1775 | embeddings |
+| ~1670–1775 | embeddings: one `Embedder` per model id (the endpoint's `providers::embed` client, or a Bert thread for a model without an endpoint); `embed_batch` resolves an id or a name and sends one request per batch. `default_embedding.rs`: the Bert (`bert` / `bert-id`, not a row) of an executor without models, loaded by the first embed that resolves to it |
 | ~1775–2440 | whisper transcription sessions + VAD |
 | rest | tests |
 
@@ -31,7 +31,26 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
   capabilities of the models listed, removes none, and stores nothing when the URL moved
   meanwhile; an `OPEN_AI_AUDIO` server whose listing is a 404 serves its registered
   models), Ollama `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s, a
-  failure's detail names no URL). A URL with a user name or password is refused.
+  failure's detail names no URL), and the per-request limits: `request_timeout` (the
+  endpoint's, else the route's default) and `request_slot` (a semaphore only when the
+  operator set `max_concurrent`; none by default). Which calls hold them:
+  - `/v1` forwards (`passthrough::send`): the slot, and the timeout from the slot wait on
+    (default 300 s for chat, 120 s for speech); a forwarded stream instead gets at most 30 s
+    to its response headers (less when less of the timeout is left after the slot wait),
+    then the timeout between two chunks, the first body chunk included.
+  - Embeddings: the slot, and the timeout from the slot wait on (default `EMBED_TIMEOUT`,
+    60 s).
+  - The remote chat calls of a model worker (`within_endpoint_limits` in
+    `ai_service/mod.rs`): a call that is not a stream gets the slot and the timeout from
+    the slot wait on (default `CHAT_TIMEOUT`, 600 s, the provider clients' own
+    `CHAT_REQUEST_TIMEOUT`). A streaming call gets the slot only: neither its wait for the
+    slot nor the stream has `request_timeout`; the provider client's 600 s bounds the call
+    once it holds the slot.
+  - Not covered: Ollama `pull_model` (its own idle timeout, `PULL_IDLE_TIMEOUT`) and
+    `delete_upstream_model` (30 s), health checks and discovery (`PROBE_TIMEOUT`). None
+    takes a slot.
+
+  A URL with a user name or password is refused.
 - `detect.rs`: `ai.detectEndpoints`, loopback ports, classified by answer shape. Saves nothing.
 - `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
   before the service loads; idempotent by name (a new name takes over the endpoint the
@@ -60,5 +79,6 @@ edges; item 7 moves harness + interpretation + flows + auto_processor into `agen
 - Never call a model without a billing decision: use the existing `bill_*_if_authed` /
   `CreditGate` path.
 - Model name strings (whisper table, default model ids) are data; don't scatter new ones.
-- Streaming responses go through `prompt_messages_stream`; the OpenAI shim (`api/openai_compat`)
-  and WS `ai.*` handlers both sit on it.
+- Streaming responses of models the executor runs go through `prompt_messages_stream`; WS
+  `ai.*` handlers and `/v1` for those models sit on it. `/v1` forwards a model on an
+  OpenAI-shaped endpoint itself (`api/openai_compat/passthrough.rs`).

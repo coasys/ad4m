@@ -12,6 +12,12 @@ use std::time::Duration;
 /// model listing is one small JSON document, so half a minute is generous.
 pub(crate) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a chat client waits for one answer. A completion can run for minutes on a long
+/// prompt or a slow local model; without a bound a hung upstream would park a model's
+/// worker thread forever, since the thread handles one request at a time. The model
+/// worker's own bound on a chat call (`within_endpoint_limits`) defaults to the same.
+pub(crate) const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// An HTTP client for a request that carries a credential. It follows no
 /// redirects, and it gives up after `timeout`.
 ///
@@ -70,6 +76,27 @@ pub struct UpstreamStatus {
     pub url: String,
     pub status: reqwest::StatusCode,
     pub body: String,
+    /// The upstream's `Retry-After`, passed on to a client it throttled.
+    pub retry_after: Option<String>,
+}
+
+impl UpstreamStatus {
+    /// The error answer `response` of `url`, its body with `api_key` scrubbed out.
+    pub(crate) async fn read(response: reqwest::Response, url: &str, api_key: &str) -> Self {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = read_error_text(response).await;
+        UpstreamStatus {
+            url: url.to_string(),
+            status,
+            body: scrub(&body, api_key),
+            retry_after,
+        }
+    }
 }
 
 impl std::fmt::Display for UpstreamStatus {
@@ -79,6 +106,33 @@ impl std::fmt::Display for UpstreamStatus {
 }
 
 impl std::error::Error for UpstreamStatus {}
+
+/// An upstream that could not be asked: no connection, or no answer in time. `detail` has
+/// the key scrubbed out.
+#[derive(Debug)]
+pub struct UpstreamUnreachable {
+    pub url: String,
+    pub timed_out: bool,
+    pub detail: String,
+}
+
+impl UpstreamUnreachable {
+    pub(crate) fn new(url: &str, error: &reqwest::Error, api_key: &str) -> Self {
+        UpstreamUnreachable {
+            url: url.to_string(),
+            timed_out: error.is_timeout(),
+            detail: scrub(&error.to_string(), api_key),
+        }
+    }
+}
+
+impl std::fmt::Display for UpstreamUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Could not reach {}: {}", self.url, self.detail)
+    }
+}
+
+impl std::error::Error for UpstreamUnreachable {}
 
 /// `text` with every occurrence of `api_key` replaced by `<redacted>`.
 pub(crate) fn scrub(text: &str, api_key: &str) -> String {
@@ -141,22 +195,22 @@ pub(crate) async fn fetch_json(
     url: &str,
     api_key: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let response = request.send().await.map_err(|e| {
-        anyhow::anyhow!("Could not reach {url}: {}", scrub(&e.to_string(), api_key))
-    })?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = read_error_text(response).await;
-        return Err(UpstreamStatus {
-            url: url.to_string(),
-            status,
-            body: scrub(&body, api_key),
-        }
-        .into());
+    let response = request
+        .send()
+        .await
+        .map_err(|e| UpstreamUnreachable::new(url, &e, api_key))?;
+    if !response.status().is_success() {
+        return Err(UpstreamStatus::read(response, url, api_key).await.into());
     }
     read_json(response)
         .await
-        .map_err(|e| anyhow::anyhow!("Could not read the answer of {url}: {e}"))
+        .map_err(|e| match e.downcast_ref::<reqwest::Error>() {
+            Some(e) if e.is_timeout() => UpstreamUnreachable::new(url, e, api_key).into(),
+            _ => anyhow::anyhow!(
+                "Could not read the answer of {url}: {}",
+                scrub(&e.to_string(), api_key)
+            ),
+        })
 }
 
 /// What an operator is told when [`is_transport_safe`] refuses their key.

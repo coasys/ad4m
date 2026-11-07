@@ -27,7 +27,8 @@ export class LocalModel {
     revision?: string;
 }
 
-export type ModelType = "LLM" | "EMBEDDING" | "TRANSCRIPTION";
+/** `SPEECH`: text to speech (`/v1/audio/speech`) on an endpoint with the speech capability. */
+export type ModelType = "LLM" | "EMBEDDING" | "TRANSCRIPTION" | "SPEECH";
 
 export class Model {
     id: string;

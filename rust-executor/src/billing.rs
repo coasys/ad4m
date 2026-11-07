@@ -141,18 +141,11 @@ pub fn bill_ai_operation(
         return Ok(());
     }
 
-    let rate_key = crate::db_backend::db_backend()
-        .get_model(model_id.to_string())
-        .ok()
-        .flatten()
-        .map(|m| m.name)
-        .unwrap_or_else(|| model_id.to_string());
-
-    let rate = crate::db_backend::db_backend()
-        .get_host_rate(&rate_key)
-        .ok()
-        .flatten()
-        .unwrap_or(0.0);
+    let AiRate {
+        rate_key,
+        endpoint_id,
+        rate,
+    } = AiRate::of(model_id)?;
 
     let cost = unit_count as f64 * rate;
     if cost <= 0.0 {
@@ -169,12 +162,12 @@ pub fn bill_ai_operation(
         return Ok(());
     }
 
-    let summary = format!(
-        "{unit_count} {unit_label} (model: {rate_key})",
-        unit_count = unit_count,
-        unit_label = unit_label,
-        rate_key = rate_key
-    );
+    let summary = match endpoint_id {
+        Some(endpoint_id) => {
+            format!("{unit_count} {unit_label} (model: {rate_key}, endpoint: {endpoint_id})")
+        }
+        None => format!("{unit_count} {unit_label} (model: {rate_key})"),
+    };
 
     match bill_compute(agent_did, cost, operation, Some(&summary)) {
         Ok(()) => Ok(()),
@@ -193,11 +186,63 @@ pub fn bill_ai_operation(
     }
 }
 
+/// What a unit of an AI model costs: `host_rates` keyed by the model's name (by `model_id`
+/// when the model has no row), 0 when the operator has not priced it.
+struct AiRate {
+    rate_key: String,
+    endpoint_id: Option<String>,
+    rate: f64,
+}
+
+impl AiRate {
+    /// A read error is an error, not a zero rate: a zero rate makes the operation free.
+    fn of(model_id: &str) -> Result<AiRate, anyhow::Error> {
+        let db = crate::db_backend::db_backend();
+        let model = db.get_model(model_id.to_string())?;
+        let endpoint_id = model.as_ref().and_then(|m| m.endpoint_id.clone());
+        let rate_key = model
+            .map(|m| m.name)
+            .unwrap_or_else(|| model_id.to_string());
+        let rate = db.get_host_rate(&rate_key)?.unwrap_or(0.0);
+        Ok(AiRate {
+            rate_key,
+            endpoint_id,
+            rate,
+        })
+    }
+}
+
+/// How many units of `model_id` the agent `agent_did` can pay for at the rate
+/// [`bill_ai_operation`] bills: its credits divided by the model's rate. `None` when it
+/// pays nothing: free hosting, free access, or a model without a price.
+pub fn affordable_ai_units(
+    agent_did: &str,
+    model_id: &str,
+) -> Result<Option<usize>, anyhow::Error> {
+    let db = crate::db_backend::db_backend();
+    if db.get_free_hosting_enabled()? || db.get_agent_free_access(agent_did)? {
+        return Ok(None);
+    }
+    let rate = AiRate::of(model_id)?.rate;
+    if rate <= 0.0 {
+        return Ok(None);
+    }
+    let credits = db.get_agent_credits(agent_did)?.max(0.0);
+    // `as` saturates: a balance beyond usize::MAX units is usize::MAX.
+    Ok(Some((credits / rate).floor() as usize))
+}
+
 /// Read-only credit check for the account that owns the agent `agent_did`. Returns Ok(()) if
 /// it can afford compute. Used as a pre-check before link operations; the actual deduction
 /// happens after the operation via bill_compute with the exact cost.
 /// No-ops (allows) if free hosting is enabled or user has free access.
 pub fn check_compute_credits(agent_did: &str) -> Result<(), anyhow::Error> {
+    check_credits_cover(agent_did, 0.0)
+}
+
+/// [`check_compute_credits`] for an operation whose least cost is known: the balance must be
+/// above 0 and at least `amount`, the credits [`bill_compute`] will deduct.
+pub fn check_credits_cover(agent_did: &str, amount: f64) -> Result<(), anyhow::Error> {
     let global_free = crate::db_backend::db_backend().get_free_hosting_enabled()?;
     if global_free {
         return Ok(());
@@ -207,7 +252,7 @@ pub fn check_compute_credits(agent_did: &str) -> Result<(), anyhow::Error> {
         return Ok(());
     }
     let credits = crate::db_backend::db_backend().get_agent_credits(agent_did)?;
-    if credits <= 0.0 {
+    if credits <= 0.0 || credits < amount {
         return Err(anyhow::anyhow!("Insufficient compute credits"));
     }
     Ok(())
@@ -274,5 +319,14 @@ mod closed_db_tests {
     fn a_closed_database_is_not_free_hosting() {
         let _closed = crate::test_utils::DbClosed::now();
         assert!(super::check_compute_credits("did:key:z6MkClosedDbCompute").is_err());
+    }
+
+    // A read error of the model or its rate made the rate 0, so the operation was not billed.
+    #[test]
+    fn a_rate_that_cannot_be_read_is_not_a_zero_rate() {
+        let _closed = crate::test_utils::DbClosed::now();
+        let billed =
+            super::bill_ai_operation("did:key:z6MkClosedDbRate", "model", "chat", 10, "tokens");
+        assert!(billed.is_err());
     }
 }

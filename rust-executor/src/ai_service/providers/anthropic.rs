@@ -53,10 +53,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// provider. Threading that through is worth doing and is not done here.
 const DEFAULT_MAX_TOKENS: u32 = 16_384;
 
-/// A completion can legitimately run for minutes on a long prompt. Without a
-/// timeout a hung upstream would park this model's worker thread forever,
-/// since the thread handles one request at a time.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// A completion can legitimately run for minutes on a long prompt.
+const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct AnthropicChat {
     http: reqwest::Client,
@@ -362,16 +360,21 @@ impl AnthropicChat {
             .json(body)
             .send()
             .await
-            .map_err(|e| anyhow!("Error connecting to remote LLM API: {:?}", e))?;
+            .map_err(|e| {
+                super::http::UpstreamUnreachable::new(&self.endpoint, &e, &self.api_key)
+            })?;
 
-        let status = response.status();
-        if !status.is_success() {
+        if !response.status().is_success() {
             // Anthropic puts the useful part in the body (`error.message`);
             // the status alone does not distinguish a bad key from a bad
-            // model name, and both are things an operator has to fix.
-            let body =
-                super::http::scrub(&super::http::read_error_text(response).await, &self.api_key);
-            return Err(anyhow!("Anthropic API error {}: {}", status, body));
+            // model name, and both are things an operator has to fix. Typed, so
+            // `/v1` answers with the upstream's status (`OpenAIError::from_upstream`).
+            // `UpstreamStatus::read` keeps at most `MAX_ERROR_BODY_BYTES`, key scrubbed.
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, &self.api_key)
+                    .await
+                    .into(),
+            );
         }
 
         Ok(response)

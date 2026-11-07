@@ -2,7 +2,7 @@
 //! enables it, and the first `embed` call that names it loads it. A fresh node therefore
 //! downloads it only when something embeds, not when it starts.
 
-use super::{publish_model_status, AIService, EmbeddingRequest, Result};
+use super::{publish_model_status, AIService, Embedder, EmbeddingRequest, Result};
 use crate::types::{LocalModel, Model, ModelType};
 use anyhow::anyhow;
 use std::future::Future;
@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, OnceCell};
 
-/// Name and id of the embedding model an executor without configured models serves.
+/// Name and id of the embedding model an executor without configured models serves. It
+/// is not a database row: `embed` resolves the name to the id only while no embedding
+/// model of that name is registered.
 pub(super) const DEFAULT_EMBEDDING_MODEL: &str = "bert";
 pub(super) const DEFAULT_EMBEDDING_MODEL_ID: &str = "bert-id";
 
@@ -63,25 +65,26 @@ impl AIService {
     pub(super) async fn load_embedding_worker(
         model_config: Model,
     ) -> Result<mpsc::UnboundedSender<EmbeddingRequest>> {
-        let (bert_tx, ready) = AIService::start_embedding_worker(model_config);
+        let (bert_tx, ready) = AIService::spawn_bert(model_config.id);
         ready
             .await
             .map_err(|_| anyhow!("embedding worker ended before its model loaded"))??;
         Ok(bert_tx)
     }
 
-    /// Loads the default embedding model if `model_id` names it, it is enabled, and it has
-    /// not loaded yet. See [`DefaultEmbedding`].
+    /// Loads the default embedding model if `model_id` (an embedder key, as
+    /// `embedding_model_id` resolves it) is its id, it is enabled, and it has not loaded
+    /// yet. See [`DefaultEmbedding`].
     pub(super) async fn ensure_default_embedding(&self, model_id: &str) -> Result<()> {
         let default = &self.default_embedding;
-        if model_id != DEFAULT_EMBEDDING_MODEL || !default.enabled.load(Ordering::SeqCst) {
+        if model_id != DEFAULT_EMBEDDING_MODEL_ID || !default.enabled.load(Ordering::SeqCst) {
             return Ok(());
         }
         default
             .ready
             .get_or_try_init(|| async {
                 if self.embedding_channel.lock().await.contains_key(model_id) {
-                    // A model added under this name since start serves it.
+                    // An embedder registered under this id since start serves it.
                     return Ok(());
                 }
                 let model = Model {
@@ -98,12 +101,12 @@ impl AIService {
                     endpoint_id: None,
                 };
                 let sender = (default.loader)(model).await?;
-                // A model added under this name while we loaded keeps serving it.
+                // An embedder registered under this id while we loaded keeps serving it.
                 self.embedding_channel
                     .lock()
                     .await
                     .entry(model_id.to_string())
-                    .or_insert(sender);
+                    .or_insert(Embedder::Bert(sender));
                 Ok::<(), anyhow::Error>(())
             })
             .await?;
@@ -115,6 +118,7 @@ impl AIService {
 mod tests {
     use super::*;
     use crate::db::Ad4mDb;
+    use crate::types::ModelInput;
     use tokio::time::{sleep, Duration};
 
     /// A loader that counts its calls, fails the first `fail_first` of them, and otherwise
@@ -136,7 +140,8 @@ mod tests {
                 let (tx, mut rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
                 tokio::spawn(async move {
                     while let Some(request) = rx.recv().await {
-                        let _ = request.result_sender.send(Ok(vec![1.0, 2.0]));
+                        let vectors = request.texts.iter().map(|_| vec![1.0, 2.0]).collect();
+                        let _ = request.result_sender.send(Ok(vectors));
                     }
                 });
                 Ok(tx)
@@ -222,21 +227,31 @@ mod tests {
             .expect("initialization to work");
         service.load().await.expect("load to work");
 
-        // A configured model named "bert" arrives while the default loads.
+        // An embedding model named "bert" is registered while the default loads.
         let (configured_tx, mut configured_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
         tokio::spawn(async move {
             while let Some(request) = configured_rx.recv().await {
-                let _ = request.result_sender.send(Ok(vec![9.0]));
+                let vectors = request.texts.iter().map(|_| vec![9.0]).collect();
+                let _ = request.result_sender.send(Ok(vectors));
             }
         });
         let (_, first) = tokio::join!(
             async {
                 sleep(Duration::from_millis(50)).await;
+                let id = Ad4mDb::with_global_instance(|db| {
+                    db.add_model(&ModelInput {
+                        name: DEFAULT_EMBEDDING_MODEL.to_string(),
+                        api: None,
+                        local: None,
+                        model_type: ModelType::Embedding,
+                    })
+                })
+                .expect("model row");
                 service
                     .embedding_channel
                     .lock()
                     .await
-                    .insert(DEFAULT_EMBEDDING_MODEL.to_string(), configured_tx);
+                    .insert(id, Embedder::Bert(configured_tx));
             },
             service.embed("bert".into(), "one".into(), None),
         );

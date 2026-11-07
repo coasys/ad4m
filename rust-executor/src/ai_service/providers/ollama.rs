@@ -51,7 +51,7 @@ const FALLBACK_NUM_CTX: u32 = 2_048;
 
 /// Same reasoning as the Anthropic timeout — a long prompt on a local model
 /// can take minutes.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct OllamaChat {
     http: reqwest::Client,
@@ -197,7 +197,7 @@ impl OllamaChat {
 }
 
 /// The Ollama root: the base URL without a trailing slash or an OpenAI-compat `/v1`.
-fn ollama_root(base_url: &Url) -> String {
+pub(super) fn ollama_root(base_url: &Url) -> String {
     let trimmed = base_url.as_str().trim_end_matches('/');
     trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
 }
@@ -339,10 +339,10 @@ pub async fn pull_model(
         .await
         .map_err(|_| anyhow!("{url} did not answer the pull of {model} in {PULL_IDLE_TIMEOUT:?}"))?
         .map_err(|e| anyhow!("Could not reach {url}: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = super::http::read_error_text(response).await;
-        return Err(super::http::UpstreamStatus { url, status, body }.into());
+    if !response.status().is_success() {
+        return Err(super::http::UpstreamStatus::read(response, &url, "")
+            .await
+            .into());
     }
 
     let mut stream = response.bytes_stream();
@@ -392,10 +392,10 @@ pub async fn delete_model(base_url: &Url, model: &str) -> Result<()> {
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach {url}: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = super::http::read_error_text(response).await;
-        return Err(super::http::UpstreamStatus { url, status, body }.into());
+    if !response.status().is_success() {
+        return Err(super::http::UpstreamStatus::read(response, &url, "")
+            .await
+            .into());
     }
     Ok(())
 }
@@ -601,12 +601,14 @@ impl RemoteChat for OllamaChat {
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow!("Could not reach Ollama at {}: {e}", self.endpoint))?;
+            .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let err_body = super::http::read_error_text(response).await;
-            return Err(anyhow!("Ollama API error {status}: {err_body}"));
+        if !response.status().is_success() {
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, "")
+                    .await
+                    .into(),
+            );
         }
 
         let parsed: ChatResponse = super::http::read_json(response)
@@ -658,12 +660,14 @@ impl RemoteChat for OllamaChat {
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow!("Could not reach Ollama at {}: {e}", self.endpoint))?;
+            .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let err_body = super::http::read_error_text(response).await;
-            return Err(anyhow!("Ollama API error {status}: {err_body}"));
+        if !response.status().is_success() {
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, "")
+                    .await
+                    .into(),
+            );
         }
 
         let mut stream = response.bytes_stream();

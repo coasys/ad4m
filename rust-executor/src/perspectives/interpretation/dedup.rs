@@ -41,8 +41,8 @@ pub enum DedupStrategy {
     /// the default: existing callers observe no behaviour change.
     NormalizedString,
     /// Embed each identity string through the executor's own
-    /// [`AIService`](crate::ai_service::AIService) embedding model (a local
-    /// candle Bert, CPU-capable — no external endpoint and no CUDA CI switch).
+    /// [`AIService`](crate::ai_service::AIService) embedding model (the endpoint
+    /// that serves it, or a local candle Bert for a model without one).
     /// Proposals whose maximum cosine similarity to any existing identity in
     /// the same class meets or exceeds `threshold` are treated as duplicates
     /// and dropped.
@@ -98,11 +98,16 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// The most identity strings semantic dedup sends in one embedding request. Endpoints cap
+/// a request's inputs (OpenAI at 2048) and its tokens; identity strings are short, so the
+/// count is what binds.
+pub(crate) const EMBED_BATCH: usize = 64;
+
 /// Embed `texts` through the executor's own [`AIService`] embedding model
-/// (`model_id` must be a registered `ModelType::Embedding` model — a local
-/// candle Bert, so this runs on CPU with no external endpoint). One call per
-/// text against the shared embedding channel; order is preserved so callers can
-/// zip results back onto their inputs.
+/// (`model_id` names a registered `ModelType::Embedding` model, by id or name: the
+/// endpoint that serves it, or a local Bert for a model without one). One request per
+/// [`EMBED_BATCH`] texts, so a large class stays within what an endpoint takes in one
+/// request; order is preserved so callers can zip results back onto their inputs.
 pub(crate) async fn embed_via_ai_service(
     model_id: &str,
     texts: &[String],
@@ -113,25 +118,24 @@ pub(crate) async fn embed_via_ai_service(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("semantic dedup: AIService not ready: {e:#}"))?;
-    let mut out = Vec::with_capacity(texts.len());
     let batch_started = std::time::Instant::now();
-    for text in texts {
+    let mut vectors = Vec::with_capacity(texts.len());
+    for batch in texts.chunks(EMBED_BATCH) {
         let embedded = service
             // Internal caller (SHACL dedup) — no user auth context; billing skipped.
-            .embed(model_id.to_string(), text.clone(), None)
+            .embed_batch(model_id, batch.to_vec(), None)
             .await
             .map_err(|e| anyhow::anyhow!("semantic dedup: embed('{model_id}') failed: {e:#}"))?;
-        out.push(embedded.embeddings);
+        vectors.extend(embedded.vectors);
     }
-    // Batch-level info replaces the per-call info in AIService::embed (now
-    // debug). One line per dedup pass; see rust-executor/LOGGING.md.
+    // One line per dedup pass; see rust-executor/LOGGING.md.
     log::info!(
         "🤖 embed batch model={} n={} latency_total={}ms (semantic-dedup)",
         model_id,
         texts.len(),
         batch_started.elapsed().as_millis()
     );
-    Ok(out)
+    Ok(vectors)
 }
 
 /// PURE (no I/O) semantic-dedup filter over pre-computed vectors — the
