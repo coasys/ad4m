@@ -64,6 +64,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `fd_limit::raise_fd_limit_at_startup` (#1462); do not add another.
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.
   Subject classes, flows and model queries run on SHACL + SPARQL (`perspectives/model_query`).
+- **Classes are registered with `perspective.registerShapes`** (`perspective_instance/shapes.rs`):
+  one call for all of an app's shapes, matched by target class IRI, idempotent (an unchanged
+  shape writes nothing), answered once the shape cache holds the new shapes. `perspective.shapes`
+  reads them back with a hash of each shape's canonical JSON. Details in `perspectives/AGENTS.md`.
 - **Tokio vs std locks** are both used; check the import before assuming `.lock()` is async.
 - **JS ↔ Rust bridge**: `#[op2]` extensions in `js_core/*_extension.rs`, `holochain_service/`,
   `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every Language

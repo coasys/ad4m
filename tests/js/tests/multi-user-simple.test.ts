@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, Model, Perspective, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, Model, Perspective, PerspectiveProxy, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -600,7 +600,7 @@ describe("Multi-User Simple integration tests", () => {
             const p1 = await client1.perspective.add("User 1 Subject Test Perspective");
             
             // User 1 ensures SDNA subject class
-            await p1.ensureSDNASubjectClass(TestSubject);
+            await TestSubject.register(p1);
 
 
             // User 1 creates a subject instance
@@ -622,7 +622,7 @@ describe("Multi-User Simple integration tests", () => {
             const p2 = await client2.perspective.add("User 2 Subject Test Perspective");
             
             // User 2 ensures the same SDNA subject class
-            await p2.ensureSDNASubjectClass(TestSubject);
+            await TestSubject.register(p2);
 
             // User 2 creates a subject instance
             await p2.createSubject(new TestSubject(), "test://subject2", {name: "Test Subject 2"});
@@ -1377,15 +1377,11 @@ describe("Multi-User Simple integration tests", () => {
             }
 
 
-            console.log("Ensuring User 1 model...");
-            await perspective1.ensureSDNASubjectClass(User1Model);
-            console.log("User 1 model ensured");
+            const classNames = async (p: PerspectiveProxy) => (await p.shapes()).map((s) => s.name);
 
-            // Poll until SDNA subject class is available
-            await pollUntil(async () => {
-                const classes = await perspective1.subjectClasses();
-                return classes.some((c: any) => c === "User1Model" || c.name === "User1Model");
-            }, { timeoutMs: 10000, label: "User1Model SDNA class available" });
+            // Registration answers once the class is usable: no polling.
+            await User1Model.register(perspective1);
+            expect(await classNames(perspective1)).to.deep.equal(["User1Model"]);
 
             let user1Model = new User1Model(perspective1);
             user1Model.user1Property = "User1 created this";
@@ -1423,16 +1419,8 @@ describe("Multi-User Simple integration tests", () => {
                 user2Property: string = "";
             }
 
-            console.log("Ensuring User 2 model...");
-            await user2SharedPerspective!.ensureSDNASubjectClass(User2Model);
-            console.log("User 2 model ensured");
-
-
-            // Poll until User2Model SDNA class is available
-            await pollUntil(async () => {
-                const classes = await user2SharedPerspective!.subjectClasses();
-                return classes.some((c: any) => c === "User2Model" || c.name === "User2Model");
-            }, { timeoutMs: 10000, label: "User2Model SDNA class available" });
+            await User2Model.register(user2SharedPerspective!);
+            expect(await classNames(user2SharedPerspective!)).to.include("User2Model");
 
             let user2Model = new User2Model(user2SharedPerspective!);
             user2Model.user2Property = "User2 created this";
@@ -1443,18 +1431,11 @@ describe("Multi-User Simple integration tests", () => {
             console.log("Testing prolog pool isolation...");
 
             // Poll until both users see both SDNA classes (shared neighbourhood sync)
-            await pollUntil(async () => {
-                const c1 = await perspective1.subjectClasses();
-                return c1.length >= 2;
-            }, { timeoutMs: 15000, label: "User 1 sees both SDNA classes" });
+            await pollUntil(async () => (await classNames(perspective1)).length >= 2,
+                { timeoutMs: 15000, label: "User 1 sees both SDNA classes" });
 
-            let classesSeenByUser1 = await perspective1.subjectClasses()
-            console.log("User 1 sees classes:", classesSeenByUser1);
-            expect(classesSeenByUser1.length).to.equal(2);
-
-            let classesSeenByUser2 = await user2SharedPerspective!.subjectClasses()
-            console.log("User 2 sees classes:", classesSeenByUser2);
-            expect(classesSeenByUser2.length).to.equal(2);
+            expect(await classNames(perspective1)).to.deep.equal(["User1Model", "User2Model"]);
+            expect(await classNames(user2SharedPerspective!)).to.deep.equal(["User1Model", "User2Model"]);
 
             console.log("✅ Prolog pool working correctly - both users see shared SDNA classes");
         });

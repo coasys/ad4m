@@ -549,11 +549,6 @@ export async function wipePerspective(
   if (links.length > 0) {
     await perspective.removeLinks(links);
   }
-  // Clear the per-instance SHACL registration cache so that
-  // subsequent register() calls re-add SHACL definitions.
-  if (typeof perspective.clearEnsuredSubjectClasses === 'function') {
-    perspective.clearEnsuredSubjectClasses();
-  }
 }
 
 /**

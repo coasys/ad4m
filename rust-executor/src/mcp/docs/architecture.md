@@ -113,7 +113,7 @@ Subject classes impose structure on the link graph using SHACL (Shapes Constrain
 
 ### How It Works
 
-Classes are registered via the `add_model` MCP tool (or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
+Classes are registered via the `add_model` MCP tool (the `perspective.registerShapes` RPC; `register_shapes()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective. A class is its target class IRI. Registering the same shape again writes nothing.
 
 Each instance's identity is its base expression — a freshly generated, content-independent `ad4m://obj/<id>` IRI (see [Links Alone Don't Give You Uniqueness](#links-alone-dont-give-you-uniqueness) above). This is what makes subject classes the canonical way to model anything where two instances might end up with identical property values.
 
@@ -323,13 +323,13 @@ The static tools write the same links: `instance_update` for the scalar case, `i
 SHACL definitions are decomposed into RDF links in the perspective. Key link patterns:
 
 ```
-(ad4m://self) --ad4m://has_shacl--> (literal:string:shacl://Message)
-(literal:string:shacl://Message) --ad4m://shacl_shape_uri--> (message://MessageShape)
 (message://Message) --rdf://type--> (ad4m://SubjectClass)
+(message://Message) --ad4m://shape--> (message://MessageShape)
+(message://MessageShape) --sh://targetClass--> (message://Message)
 (message://MessageShape) --sh://property--> (message://Message.body)
 ```
 
-Query available models with `describe_perspective` (the fully-resolved schema of every class in one call — see Key Operations above), or retrieve the raw links with predicate `ad4m://has_shacl`.
+The first two links are the name index: the class name is the IRI's local name (`Message`). Query available models with `describe_perspective` (the fully-resolved schema of every class in one call — see Key Operations above), or retrieve the raw links with `rdf://type` `ad4m://SubjectClass`.
 
 ## Built-in Services
 

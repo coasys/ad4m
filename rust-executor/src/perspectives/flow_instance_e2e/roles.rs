@@ -463,7 +463,7 @@ async fn a_role_gate_with_an_unknown_key_refuses_the_edge() {
 
 /// #1144, the write side. A flow definition whose `consensusRule` the reader
 /// would refuse (an unknown key, or a key written twice) is refused by the
-/// write paths `addFlow` (`link_mutations`) and `addSdna` (`add_links`) use,
+/// write paths `addFlow` (`link_mutations`) and `addLinks` (`add_links`) use,
 /// with an error naming the state and the key, and nothing of it is stored.
 /// The same definition with the rule spelt right adds through the same path.
 ///
@@ -541,13 +541,13 @@ async fn a_flow_definition_with_an_unreadable_role_gate_is_refused_before_it_is_
             .link_mutations(as_mutations(&links), LinkStatus::Local, &ctx)
             .await
             .map(|_| ());
-        let via_add_sdna = perspective
+        let via_add_links = perspective
             .add_links(links.clone(), LinkStatus::Local, None, &ctx)
             .await
             .map(|_| ());
         for (path, result) in [
             ("link_mutations", via_add_flow),
-            ("add_links", via_add_sdna),
+            ("add_links", via_add_links),
         ] {
             let err = result
                 .err()

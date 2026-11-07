@@ -10,6 +10,7 @@ import { formatQueryValue, compileWhereClause } from "./query-utils";
 import { requireSingleParent, requireTotalCount, resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
+import type { RegisterResult } from "../generated/api/RegisterResult";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
 import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
@@ -549,8 +550,6 @@ export class Ad4mModel {
     return (this as any).createdAt;
   }
 
-  private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
-
   /**
    * Generates the SDNA (Subject DNA) Prolog rules for this model class.
    * Injected at class-definition time by the `@Model` decorator.
@@ -570,29 +569,11 @@ export class Ad4mModel {
     return { shape: null, name: '' };
   }
 
-  static async getClassName(perspective: PerspectiveProxy) {
-      // Check if this is the Ad4mModel class itself or a subclass
-      const isBaseClass = this === Ad4mModel;
-  
-      // For the base Ad4mModel class, we can't use the cache
-      if (isBaseClass) {
-        return await perspective.stringOrTemplateObjectToSubjectClassName(this);
-      }
-
-    // Get or create the cache for this class
-    let classCache = this.classNamesByClass.get(this);
-    if (!classCache) {
-      classCache = {};
-      this.classNamesByClass.set(this, classCache);
-    }
-
-    // Get or create the cached name for this perspective
-    const perspectiveID = perspective.uuid;
-    if (!classCache[perspectiveID]) {
-      classCache[perspectiveID] = await perspective.stringOrTemplateObjectToSubjectClassName(this);
-    }
-
-    return classCache[perspectiveID];
+  /** The `@Model` name of this class. */
+  static getClassName(): string {
+    const className = (this as any).className;
+    if (!className) throw new Error(`Class ${this.name} has no class name: declare it with @Model.`);
+    return className;
   }
 
   /**
@@ -1882,10 +1863,8 @@ export class Ad4mModel {
       }
     }
 
-    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
     await this.perspective.createSubject(
-      className,
+      this,
       this._baseExpression,
       initialValues,
       batchId
@@ -2121,8 +2100,8 @@ export class Ad4mModel {
 
     const instanceIds = instances.map(inst => inst.id || (inst as any)._baseExpression);
 
-    // The executor reads getter SPARQL from the perspective's SHACL triples
-    // (written by `addSdna`), so no shape JSON is shipped with the call.
+    // The executor reads getter SPARQL from the registered shape, so no
+    // shape JSON is shipped with the call.
     const result = await perspective.evaluateGetters(
       metadata.className,
       instanceIds,
@@ -2441,14 +2420,15 @@ export class Ad4mModel {
   static async register(
     this: typeof Ad4mModel,
     perspective: PerspectiveProxy,
-  ): Promise<void> {
-    await perspective.ensureSDNASubjectClass(this);
+  ): Promise<RegisterResult> {
+    return Ad4mModel.registerAll(perspective, [this]);
   }
 
   /**
-   * Batch-registers multiple model classes on a perspective in a single RPC call.
-   * This is significantly faster than calling `register()` on each model individually
-   * because it eliminates N-1 round-trips and mutex acquisitions.
+   * Registers model classes on a perspective in one call. A class whose
+   * stored shape already is its shape is `unchanged` and nothing is written,
+   * so registering on every start is cheap; built-in classes (`TextContent`)
+   * live in the executor and are skipped.
    *
    * @param perspective - The perspective to register the models on
    * @param models - Array of Ad4mModel subclasses to register
@@ -2461,8 +2441,15 @@ export class Ad4mModel {
   static async registerAll(
     perspective: PerspectiveProxy,
     models: (typeof Ad4mModel)[],
-  ): Promise<void> {
-    await perspective.ensureSubjectClasses(models);
+  ): Promise<RegisterResult> {
+    const shapes = models
+      .filter(model => !Object.prototype.hasOwnProperty.call(model, 'builtinUri'))
+      .map(model => {
+        const { shape } = model.generateSHACL();
+        if (!shape) throw new Error(`Class ${model.name} has no shape: declare it with @Model.`);
+        return shape as SHACLShape;
+      });
+    return perspective.registerShapes(shapes);
   }
 
   /**
@@ -2610,7 +2597,7 @@ export class Ad4mModel {
    * This method recovers those values so that old perspectives are queried
    * with the correct type-discriminator triple.
    *
-   * @param shape - SHACL node shape (as returned by `PerspectiveProxy.getAllShacl()`)
+   * @param shape - SHACL node shape (as returned by `PerspectiveProxy.shapes()`)
    * @param name  - Class name to assign (e.g. "Channel")
    * @returns Generated Ad4mModel subclass, ready for querying
    */

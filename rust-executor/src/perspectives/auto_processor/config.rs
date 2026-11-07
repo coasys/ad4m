@@ -33,7 +33,7 @@ use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClas
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 
 use super::scalar_string;
-use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
+use crate::perspectives::hardwired_class::{ensure_subject_classes, subject_class_registered};
 
 /// Instances already reported as unloadable, so each is complained about once.
 ///
@@ -242,20 +242,11 @@ pub fn processor_node(processor_id: &str) -> String {
 }
 
 /// Idempotently register the hard-wired [`AUTO_PROCESSOR_CLASS`] subject class.
-/// Refreshes the SHACL if an older registration predates the `flows` selection.
 pub async fn ensure_auto_processor_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    ensure_subject_class(
-        perspective,
-        AUTO_PROCESSOR_CLASS,
-        AUTO_PROCESSOR_TARGET_CLASS,
-        AUTO_PROCESSOR_SDNA,
-        Some("ad4m://flow"),
-        context,
-    )
-    .await
+    ensure_subject_classes(perspective, &[AUTO_PROCESSOR_SDNA], context).await
 }
 
 /// Register the class if needed, then mint the processor as a subject instance.

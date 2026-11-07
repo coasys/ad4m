@@ -20,6 +20,7 @@ import type { AgentReply } from "../generated/api/AgentReply";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
+import type { RegisterResult, ShapeJson, ShapeSummary } from "../generated/api";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
@@ -501,18 +502,19 @@ export class PerspectiveClient {
         ))
     }
 
-    async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
-        const result = await this.#wrote(uuid, this.#apiClient.call(
-            'perspective.addSdna', { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
-        ))
-        return typeof result === 'boolean' ? result : result.every(Boolean)
+    /**
+     * Register model classes, each as the class of its target class IRI. A
+     * class whose stored shape already is the given one is left alone; the
+     * others are rewritten in one diff. Answers once the executor reads the
+     * new shapes.
+     */
+    async registerShapes(uuid: string, shapes: ShapeJson[]): Promise<RegisterResult> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.registerShapes', { uuid, shapes }))
     }
 
-    async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
-        const result = await this.#wrote(uuid, this.#apiClient.call(
-            'perspective.addSdna', { uuid, entries: entries.map(e => ({ ...e, sdnaCode: e.sdnaCode || "" })) }
-        ))
-        return typeof result === 'boolean' ? [result] : result
+    /** The registered classes (only those in `names` when given), sorted by name. */
+    async shapes(uuid: string, names?: string[]): Promise<ShapeSummary[]> {
+        return this.#apiClient.call('perspective.shapes', { uuid, names })
     }
 
     async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
@@ -544,54 +546,6 @@ export class PerspectiveClient {
         return this.#apiClient.call(
             'perspective.getSubjectData', { uuid, subjectClass, expressionAddress }
         )
-    }
-
-    // ── SHACL resolution (server-side) ─────────────────────────────────────────
-    // These methods delegate shape resolution to the executor, which reads links
-    // from its local store in-process.  Each call replaces the multi-round-trip
-    // `queryLinks` sequences the old PerspectiveProxy methods performed.
-
-    /** List the names of every SHACL shape stored in a perspective (one RPC call). */
-    async getShaclNames(uuid: string): Promise<string[]> {
-        return this.#apiClient.call('perspective.getShaclNames', { uuid })
-    }
-
-    /**
-     * Resolve a shape's `sh:targetClass` by name (one RPC call).
-     *
-     * Returns `undefined` when the shape (or its `sh://targetClass` edge) is
-     * absent — unified with `PerspectiveProxy.getShaclTargetClass` so callers
-     * see a single "not found" representation across both layers. The
-     * executor wire format is still `null` (see `perspective.getShaclTargetClass`
-     * in `perspectives_ws.rs`); this method maps that at the boundary rather
-     * than pushing the null one layer further up. PR #935 review r3897752023.
-     */
-    async getShaclTargetClass(uuid: string, name: string): Promise<string | undefined> {
-        const result = await this.#apiClient.call(
-            'perspective.getShaclTargetClass',
-            { uuid, name },
-        )
-        return result ?? undefined
-    }
-
-    /**
-     * Retrieve a single SHACL shape's link triples by name (one RPC call).
-     * Returns `{shapeUri, links}` for reconstruction via `SHACLShape.fromLinks()`,
-     * or `null` if no shape with that name exists.
-     */
-    async getShacl(uuid: string, name: string): Promise<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null> {
-        return this.#apiClient.call(
-            'perspective.getShacl', { uuid, name }
-        )
-    }
-
-    /**
-     * Retrieve SHACL shapes in one call: every shape, or only those in
-     * `names` (unknown names are left out). Returns `{name, shapeUri, links}`
-     * per shape.
-     */
-    async getAllShacl(uuid: string, names?: string[]): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
-        return this.#apiClient.call('perspective.getAllShacl', { uuid, names })
     }
 
     // ExpressionClient functions, needed for Subjects:

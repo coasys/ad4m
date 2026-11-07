@@ -382,11 +382,7 @@ pub(crate) async fn resolve_class(
             return Ok((canonical, shape));
         }
     }
-    let mut registered = perspective
-        .get_subject_classes_from_shacl()
-        .await
-        .unwrap_or_default();
-    registered.sort();
+    let registered = perspective.class_names().unwrap_or_default();
     Err(error_json(format!(
         "Unknown subject class '{}'. Registered classes: {}. Call describe_perspective to see \
          their schemas.",

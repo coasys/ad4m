@@ -641,7 +641,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
   } as any;
 
   beforeEach(() => {
@@ -797,7 +796,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
   } as any;
 
   beforeEach(() => {
@@ -1972,7 +1970,6 @@ describe("deepQuery — getter evaluation", () => {
     }),
     get: jest.fn().mockResolvedValue([]),
     getExpression: jest.fn().mockResolvedValue(null),
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("DeepQueryTestMessage"),
   };
 
   beforeEach(() => {
@@ -2274,7 +2271,6 @@ describe("IncludeProjection type guard and key splitting", () => {
     modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: "test-perspective-uuid",
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("Post"),
   } as any;
 
   beforeEach(() => {
@@ -2704,9 +2700,6 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       createSubject: jest.fn().mockResolvedValue(undefined),
       createBatch: jest.fn().mockResolvedValue("batch-generated"),
       commitBatch: jest.fn().mockResolvedValue(undefined),
-      stringOrTemplateObjectToSubjectClassName: jest
-        .fn()
-        .mockResolvedValue("TestRelationship"),
       uuid: "test-perspective-uuid",
     }) as any;
 

@@ -3,7 +3,7 @@ import { HasMany, Model, Property } from "./decorators";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 
 // Every RPC that save() and delete() send, counted on a client double that
-// keeps the registered classes' SHACL links like the executor does.
+// keeps the registered classes' shapes like the executor does.
 
 @Model({ name: "RoundTripNote" })
 class RoundTripNote extends Ad4mModel {
@@ -52,13 +52,14 @@ const link = (source: string, predicate: string, target: string) => ({
   data: { source, predicate, target },
 });
 
-/** The SHACL links the executor stores for `classes`, with the class marker
- *  it adds (`shacl_parser.rs`). */
+/** The links the executor stores for `classes`: the class index link and
+ *  the shape (`shacl_parser::shape_links`). */
 function shaclLinks(classes: any[]) {
   return classes.flatMap((cls) => {
     const { shape } = cls.generateSHACL();
     return [
       link(shape.targetClass, "rdf://type", "ad4m://SubjectClass"),
+      link(shape.targetClass, "ad4m://shape", shape.nodeShapeUri),
       ...shape.toLinks().map((l: any) => link(l.source, l.predicate, l.target)),
     ];
   });
@@ -66,6 +67,11 @@ function shaclLinks(classes: any[]) {
 
 function countingProxy(registered: any[], rttMs = 0) {
   const store = shaclLinks(registered);
+  const summaries = registered.map((cls) => ({
+    name: cls.getClassName(),
+    shape: cls.generateSHACL().shape.toJSON(),
+    hash: cls.getClassName(),
+  }));
   const calls: string[] = [];
   const sent: any[][] = [];
   const answers: Record<string, (...args: any[]) => any> = {
@@ -76,6 +82,8 @@ function countingProxy(registered: any[], rttMs = 0) {
           (!q.predicate || l.data.predicate === q.predicate) &&
           (!q.target || l.data.target === q.target),
       ),
+    shapes: (_uuid: string, names?: string[]) =>
+      summaries.filter((s) => !names || names.includes(s.name)),
     createBatch: () => "batch-1",
     commitBatch: () => ({ additions: [], removals: [] }),
     createSubject: () => true,
@@ -231,8 +239,8 @@ describe("RPCs per write", () => {
     const { proxy, calls } = countingProxy([RoundTripNote]);
     const note = new RoundTripNote(proxy, "rt://note/1");
     await note.delete();
-    // abstract markers, destructor, the destructor's commands, incoming links
-    expect(calls).toEqual(["queryLinks", "queryLinks", "executeCommands", "queryLinks"]);
+    // the executor runs the destructor, then incoming links
+    expect(calls).toEqual(["removeSubject", "queryLinks"]);
   });
 });
 
@@ -246,8 +254,9 @@ describe("class name a write resolves", () => {
   const createdAs = (sent: any[][]) => JSON.parse(sent.find((c) => c[0] === "createSubject")![2]).className;
 
   async function resolve(registered: any[], subject: any) {
-    const { proxy } = countingProxy(registered);
-    return proxy.stringOrTemplateObjectToSubjectClassName(subject);
+    const { proxy, sent } = countingProxy(registered);
+    await proxy.createSubject(subject, "rt://note/1");
+    return createdAs(sent);
   }
 
   it("is the decorated name of an instance and of its class", async () => {
@@ -264,9 +273,9 @@ describe("class name a write resolves", () => {
   it("is the decorated name even when the class is not registered and another class has its properties", async () => {
     const { proxy, calls } = countingProxy([]);
     const byProperties = jest.spyOn(proxy as any, "findClassByProperties").mockResolvedValue("RoundTripTwin" as never);
-    expect(await proxy.stringOrTemplateObjectToSubjectClassName(new RoundTripNote(undefined as any))).toBe("RoundTripNote");
+    await proxy.createSubject(new RoundTripNote(undefined as any), "rt://note/1");
     expect(byProperties).not.toHaveBeenCalled();
-    expect(calls).toEqual([]);
+    expect(calls).toEqual(["createSubject"]);
   });
 
   it("is a template's own className", async () => {
@@ -281,12 +290,12 @@ describe("class name a write resolves", () => {
     expect(await resolve([], "Anything")).toBe("Anything");
   });
 
-  it("matches an undecorated object by its properties", async () => {
-    const { proxy, calls } = countingProxy([RoundTripNote]);
-    const byProperties = jest.spyOn(proxy as any, "findClassByProperties").mockResolvedValue("RoundTripNote" as never);
-    expect(await proxy.stringOrTemplateObjectToSubjectClassName({ title: "" })).toBe("RoundTripNote");
-    expect(byProperties).toHaveBeenCalled();
-    expect(calls).toEqual([]);
+  it("matches an undecorated object by its properties in one shapes read", async () => {
+    const { proxy, calls, sent } = countingProxy([RoundTripCall, RoundTripNote]);
+    await proxy.createSubject({ title: "" }, "rt://note/1");
+    // Both classes have `title`; the first in the registry's order wins.
+    expect(createdAs(sent)).toBe("RoundTripCall");
+    expect(calls).toEqual(["shapes", "createSubject"]);
   });
 
   it("creates the record under the model's name", async () => {
@@ -301,8 +310,8 @@ describe("class name a write resolves", () => {
     expect(sent.find((c) => c[0] === "removeSubject")).toEqual(
       ["removeSubject", "rt-uuid", "RoundTripReadable", "rt://note/1", undefined],
     );
-    // abstract markers, removeSubject, incoming links
-    expect(calls).toEqual(["queryLinks", "removeSubject", "queryLinks"]);
+    // removeSubject, incoming links
+    expect(calls).toEqual(["removeSubject", "queryLinks"]);
   });
 
   it("createSubject with a decorated instance sends its name in one RPC", async () => {

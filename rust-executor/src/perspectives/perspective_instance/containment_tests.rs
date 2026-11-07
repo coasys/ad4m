@@ -444,15 +444,7 @@ async fn a_containment_subscription_follows_new_edges_and_removals() {
     let (mut sub, initial) = Sub::open(&p, "Message", json!({"parent": {"id": parent}})).await;
     assert!(initial.contains("\"instances\":[]"), "{initial}");
 
-    p.add_sdna(
-        "Block".into(),
-        String::new(),
-        SdnaType::SubjectClass,
-        Some(BLOCK_SDNA.into()),
-        &ctx,
-    )
-    .await
-    .unwrap();
+    p.register_shape_json(BLOCK_SDNA, &ctx).await.unwrap();
     sub.pass(
         &p,
         &[("ns://BlockShape", "sh://property", "ns://Block.blocks")],

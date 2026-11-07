@@ -422,20 +422,13 @@ const ROLE_SDNA: &str = r#"{
 #[tokio::test(flavor = "multi_thread")]
 async fn an_output_committed_as_a_task_is_not_produced_by_the_flow_as_a_role() {
     use crate::perspectives::flow_instance::produced::mint_flow_receipt;
-    use crate::perspectives::perspective_instance::SdnaType;
 
     let mut f = seed_satisfied_fixture(None).await;
     let ctx = f.ctx.clone();
     f.perspective
-        .add_sdna(
-            "ns://Role".to_string(),
-            String::new(),
-            SdnaType::SubjectClass,
-            Some(ROLE_SDNA.to_string()),
-            &ctx,
-        )
+        .register_shape_json(ROLE_SDNA, &ctx)
         .await
-        .expect("add_sdna(Role)");
+        .expect("register Role");
 
     // Precondition: the Task node IS a Role instance by conformance.
     let (ids, _) = ids_of_class(&f, "ns://Role", serde_json::json!({})).await;

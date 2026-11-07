@@ -68,17 +68,15 @@ describe("TextContent", () => {
     }).not.toThrow();
   });
 
-  it("register() writes nothing", async () => {
+  it("register() sends no shape: the executor holds it", async () => {
     const { PerspectiveProxy } = await import("./PerspectiveProxy");
-    const calls: string[] = [];
+    const sent: unknown[][] = [];
     const proxy = Object.create(PerspectiveProxy.prototype);
-    // The skip comes before anything else: a write would be recorded, and
-    // reaching the private registration set throws on this bare object.
-    Object.defineProperty(proxy, "addSdna", { value: () => { calls.push("addSdna"); } });
-    Object.defineProperty(proxy, "addSdnaAll", { value: () => { calls.push("addSdnaAll"); } });
-    await expect(proxy.ensureSubjectClasses([TextContent])).resolves.toBeUndefined();
-    await expect(proxy.ensureSubjectClass(TextContent)).resolves.toBeUndefined();
-    expect(calls).toEqual([]);
+    Object.defineProperty(proxy, "registerShapes", {
+      value: async (shapes: unknown[]) => { sent.push(shapes); return { unchanged: [], written: [], generation: 0 }; },
+    });
+    await TextContent.register(proxy);
+    expect(sent).toEqual([[]]);
   });
 
   it("save() and delete() of a row read through it go to the executor by its URI", async () => {

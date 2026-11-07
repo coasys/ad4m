@@ -6,7 +6,7 @@
 //! query to generate correct conformance patterns and hydrate results.
 //!
 //! Production resolution is always [`load_shape`] — reads SHACL triples
-//! that were written by `addSdna()` into the perspective's link store.
+//! that `registerShapes` wrote into the perspective's link store.
 //! The result is memoized by `PerspectiveInstance::shape_cache` so each
 //! class is parsed at most once per process lifetime.
 //!
@@ -33,7 +33,7 @@ impl std::fmt::Display for MissingShape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "No SHACL shape stored for class '{}'. Call ensureSubjectClasses / addSdna first.",
+            "No SHACL shape stored for class '{}'. Register it with perspective.registerShapes first.",
             self.class_name
         )
     }

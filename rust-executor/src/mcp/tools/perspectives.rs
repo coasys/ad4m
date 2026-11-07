@@ -2,10 +2,11 @@
 //!
 //! Tools for managing perspectives (knowledge graphs) and raw links. Each tool calls the RPC
 //! method that does its job (`perspective.all`, `.create`, `.addLink`, `.queryLinks`,
-//! `.addSdna`) through the handler map, so the method's guard decides who may call it.
+//! `.registerShapes`) through the handler map, so the method's guard decides who may call it.
 
 use super::instances::{normalize_legacy_literal, other_literal_spelling};
 use super::{labelled, method_error, Ad4mMcpHandler};
+use crate::perspectives::perspective_instance::RegisterResult;
 use crate::types::{DecoratedLinkExpression, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -53,7 +54,7 @@ pub struct QueryLinksParams {
     pub target: Option<String>,
 }
 
-/// Parameters for adding SDNA (subject class definition) to a perspective
+/// Parameters for registering a model (subject class) in a perspective
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AddModelParams {
     /// Perspective UUID
@@ -81,20 +82,21 @@ fn local_class_name(target_class: &str) -> &str {
 /// looks fine in `describe_perspective` but whose property setters are never
 /// found, so every write fails with "read-only". Rejecting the mismatch up
 /// front turns a silent broken registration into an actionable error.
-fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String> {
+fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<serde_json::Value, String> {
     let shape: serde_json::Value = serde_json::from_str(shacl_json)
         .map_err(|e| format!("Error: shacl_json is not valid JSON: {}", e))?;
 
     let target_class = shape
         .get("target_class")
         .and_then(|v| v.as_str())
+        .map(str::to_string)
         .ok_or_else(|| {
             "Error: shacl_json has no `target_class` field. Every SHACL shape must declare \
              the class URI it describes, e.g. \"target_class\": \"board://Task\"."
                 .to_string()
         })?;
 
-    let expected = local_class_name(target_class);
+    let expected = local_class_name(&target_class);
     if class_name != expected {
         return Err(format!(
             "Error: class_name '{}' does not match the SHACL target_class '{}'. \
@@ -105,7 +107,7 @@ fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String>
         ));
     }
 
-    Ok(())
+    Ok(shape)
 }
 
 /// The link filters `query_links` should try, in order.
@@ -330,25 +332,28 @@ impl Ad4mMcpHandler {
     pub async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;
 
-        if let Err(message) = validate_class_name(&p.class_name, &p.shacl_json) {
-            return message;
-        }
-
+        let shape = match validate_class_name(&p.class_name, &p.shacl_json) {
+            Ok(shape) => shape,
+            Err(message) => return message,
+        };
         let params = json!({
             "uuid": p.perspective_id,
-            "name": p.class_name,
-            "sdnaType": "subject_class",
-            "shaclJson": p.shacl_json,
+            "shapes": [shape],
         });
-        let added = self
-            .call::<serde_json::Value>("perspective.addSdna", params, labelled("Error adding SDNA"))
+        let registered = self
+            .call::<RegisterResult>(
+                "perspective.registerShapes",
+                params,
+                labelled("Error registering model"),
+            )
             .await;
-        match added {
-            Ok(_) => {
+        match registered {
+            Ok(registered) => {
                 let result = json!({
                     "success": true,
                     "perspective_id": p.perspective_id,
                     "class_name": p.class_name,
+                    "changed": !registered.written.is_empty(),
                 });
                 serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }

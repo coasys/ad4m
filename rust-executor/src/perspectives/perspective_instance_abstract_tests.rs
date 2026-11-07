@@ -95,15 +95,9 @@ fn rows(json: &str) -> Vec<(String, String, String)> {
 const ALL: &str = r#"{"includeUnverified":true}"#;
 
 async fn install(p: &mut PerspectiveInstance, ctx: &AgentContext, class: &str, sdna: &str) {
-    p.add_sdna(
-        class.into(),
-        String::new(),
-        SdnaType::SubjectClass,
-        Some(sdna.into()),
-        ctx,
-    )
-    .await
-    .unwrap_or_else(|e| panic!("add_sdna({class}): {e}"));
+    p.register_shape_json(sdna, ctx)
+        .await
+        .unwrap_or_else(|e| panic!("register {class}: {e}"));
 }
 
 fn class(name: &str) -> SubjectClassOption {
