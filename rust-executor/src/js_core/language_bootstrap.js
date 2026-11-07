@@ -387,6 +387,9 @@ async function initLanguage(contextJson) {
         "identityPowParams", "identityAttachNote", "identityPutAgent",
         "identityOpenOffer", "identityListOffers", "identityCancelOffer",
         "identityClaimOffer", "identityOfferState",
+        "identityInboxPut", "identityInboxList", "identityInboxAck",
+        "identityGetRecord", "identityPutRecord",
+        "identityPostRequest", "identityListRequests", "identityDeleteRequest",
         "tokenAssets", "tokenBalance", "tokenSend", "tokenReceived",
     ];
     for (const key of flatExportNames) {

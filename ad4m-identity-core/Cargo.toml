@@ -18,10 +18,7 @@ words = [
     "dep:bip39",
     "dep:hmac",
     "dep:hkdf",
-    "dep:zeroize",
-    "dep:x25519-dalek",
-    "dep:rand_core",
-    "dep:getrandom",
+    "rand_core/getrandom",
 ]
 # `fold_stored`: the replay of a host's own stored, already-verified log, without the signature
 # checks. Only the identity store enables it; never a client, an executor or a wallet.
@@ -40,15 +37,25 @@ thiserror = "2.0.12"
 bip39 = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"], optional = true }
 hmac = { version = "0.12.1", optional = true }
 hkdf = { version = "0.12.4", optional = true }
-zeroize = { version = "1.8", optional = true }
-x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"], optional = true }
-rand_core = { version = "0.6.4", features = ["getrandom"], optional = true }
+# Secrets held in memory (the words, the seed, a record key, a master key from the inbox).
+zeroize = "1.8"
+# The device inbox and the private record: HPKE (RFC 9180) base mode with DHKEM(X25519,
+# HKDF-SHA256), HKDF-SHA256 and ChaCha20-Poly1305; the record itself under XChaCha20-Poly1305.
+# hpke 0.12 is the line on rand_core 0.6, like the rest of the workspace. The caller passes the
+# RNG (the core draws no randomness of its own outside `words::generate`).
+hpke = { version = "0.12.0", default-features = false, features = ["alloc", "x25519"] }
+chacha20poly1305 = "0.10.1"
+base64 = "0.22.1"
+x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"] }
+rand_core = "0.6.4"
 wasm-bindgen = { version = "0.2.127", optional = true }
 js-sys = { version = "0.3.104", optional = true }
 
-# `words::generate` draws its entropy from the browser's or Node's crypto on wasm32.
+# getrandom's backend on wasm32: the browser's or Node's crypto. `words::generate` draws from it;
+# and hpke's AEAD crates turn on `aead/getrandom`, so getrandom is in every wasm32 build and needs
+# a backend even where nothing calls it.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2.17", features = ["js"], optional = true }
+getrandom = { version = "0.2.17", features = ["js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest = "1.11.0"

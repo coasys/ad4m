@@ -7,17 +7,20 @@
 //! canonical JSON of the argument, so a signer hashes `JCS(body)` for `bodyHash`. HTTP
 //! statuses map one to one onto `IdentityErrorCode`; a network failure or the host's
 //! 10-second timeout is `unavailable`, a reply body past [`MAX_REPLY_BYTES`] (the host stops
-//! reading it there) is `invalid` (`too-large`). The store URL is read on every call, and every call goes
-//! to that store: a did:scid `src` hint is the executor's to fetch, never the language's.
+//! reading it there) is `invalid` (`too-large`). The store URL is read on every call, and every
+//! call goes to that store: a did:scid `src` hint is the executor's to fetch, never the
+//! language's.
 
 use std::future::Future;
 
 use ad4m_hash_chain::canonical_json;
 use ad4m_identity_core::{Event, FoldError, FormatError};
 use ad4m_ldk::identity::{
-    AgentRecord, AppendRequest, Claim, ClaimReceipt, ForbiddenReason, IdentityErrorCode,
-    KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, PowParams, RateLimitScope,
-    SignedHead, SignedOffer, SignedRequest, VouchNote, LOG_PAGE_EVENTS, MAX_LOG_PAGE_BYTES,
+    AgentRecord, AppendRequest, Claim, ClaimReceipt, DeviceRequest, ForbiddenReason,
+    IdentityErrorCode, InboxAddress, InboxAuth, InboxMessage, InboxStored, InboxWrite,
+    KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, PostedRequest, PowParams,
+    PreInboxAuth, RateLimitScope, RecordStored, RequestPosted, SealedRecord, SignedHead,
+    SignedOffer, SignedRequest, VouchNote, LOG_PAGE_EVENTS, MAX_LOG_PAGE_BYTES,
 };
 use ad4m_ldk::prelude::LanguageResult;
 use serde::de::DeserializeOwned;
@@ -26,6 +29,8 @@ use serde_json::value::RawValue;
 use serde_json::Value;
 
 pub const REQUEST_HEADER: &str = "X-Coasys-Request";
+/// The header of a pre-join inbox read: base64url(JCS(PreInboxAuth)).
+pub const PRE_INBOX_HEADER: &str = "X-Coasys-Inbox";
 /// The largest reply body the language takes from the store, on every route and status: a log
 /// page ([`MAX_LOG_PAGE_BYTES`]) is the largest answer a store gives. The language passes it to
 /// the host's `httpFetch` as `maxBytes`, so the host stops reading a body past it; the language
@@ -216,11 +221,22 @@ pub fn base64url(bytes: &[u8]) -> String {
     out
 }
 
-/// The header value of a signed request: base64url(JCS(SignedRequest)).
-pub fn encode_request(req: &SignedRequest) -> LanguageResult<String> {
-    let value = serde_json::to_value(req).map_err(|_| invalid("request"))?;
+/// A header value: base64url(JCS(value)), for a `SignedRequest` (`X-Coasys-Request`) and a
+/// `PreInboxAuth` (`X-Coasys-Inbox`).
+pub fn encode_header<T: Serialize>(value: &T) -> LanguageResult<String> {
+    let value = serde_json::to_value(value).map_err(|_| invalid("request"))?;
     let text = canonical_json(&value).map_err(|_| invalid("request"))?;
     Ok(base64url(text.as_bytes()))
+}
+
+/// The store path of an inbox: `/v1/inbox/pre/{pre}` or `/v1/inbox/{scid}/{keyId}`.
+pub fn inbox_path(address: &InboxAddress) -> String {
+    match address {
+        InboxAddress::Pre { pre } => format!("/v1/inbox/pre/{}", segment(pre)),
+        InboxAddress::Joined { scid, key_id } => {
+            format!("/v1/inbox/{}/{}", segment(scid), segment(key_id))
+        }
+    }
 }
 
 /// A path segment: unreserved characters and `:` stay, so the path a signer signs (DIDs,
@@ -264,7 +280,25 @@ pub struct Store<H: Http> {
 pub struct Send<'a> {
     pub body: Option<Value>,
     pub req: Option<&'a SignedRequest>,
+    /// A pre-join inbox read, in `X-Coasys-Inbox`.
+    pub pre: Option<&'a PreInboxAuth>,
     pub query: Vec<(&'static str, String)>,
+}
+
+impl<'a> Send<'a> {
+    /// The headers an inbox read carries for `auth`.
+    fn authed(auth: &'a InboxAuth) -> Send<'a> {
+        match auth {
+            InboxAuth::Request(req) => Send {
+                req: Some(req),
+                ..Send::default()
+            },
+            InboxAuth::Pre(pre) => Send {
+                pre: Some(pre),
+                ..Send::default()
+            },
+        }
+    }
 }
 
 impl<H: Http> Store<H> {
@@ -315,7 +349,10 @@ impl<H: Http> Store<H> {
             None => String::new(),
         };
         if let Some(req) = options.req {
-            headers.insert(REQUEST_HEADER.into(), encode_request(req)?.into());
+            headers.insert(REQUEST_HEADER.into(), encode_header(req)?.into());
+        }
+        if let Some(pre) = options.pre {
+            headers.insert(PRE_INBOX_HEADER.into(), encode_header(pre)?.into());
         }
         let headers = Value::Object(headers).to_string();
         let reply = self
@@ -355,18 +392,9 @@ impl<H: Http> Store<H> {
     pub async fn read<T: DeserializeOwned>(
         &self,
         path: &str,
-        query: Vec<(&'static str, String)>,
+        options: Send<'_>,
     ) -> LanguageResult<Option<T>> {
-        let reply = self
-            .send(
-                "GET",
-                path,
-                Send {
-                    query,
-                    ..Send::default()
-                },
-            )
-            .await?;
+        let reply = self.send("GET", path, options).await?;
         if reply.status == 404 {
             return Ok(None);
         }
@@ -432,8 +460,11 @@ impl<H: Http> Store<H> {
     }
 
     pub async fn head(&self, did: &str) -> LanguageResult<Option<SignedHead>> {
-        self.read(&format!("/v1/heads/{}", segment(scid_of(did)?)), Vec::new())
-            .await
+        self.read(
+            &format!("/v1/heads/{}", segment(scid_of(did)?)),
+            Send::default(),
+        )
+        .await
     }
 
     pub async fn append(&self, did: &str, req: &AppendRequest) -> LanguageResult<SignedHead> {
@@ -451,7 +482,11 @@ impl<H: Http> Store<H> {
         multikey: &str,
         wait_s: u8,
     ) -> LanguageResult<Option<KeyIndexEntry>> {
-        self.read(&format!("/v1/keys/{}", segment(multikey)), wait(wait_s))
+        let options = Send {
+            query: wait(wait_s),
+            ..Send::default()
+        };
+        self.read(&format!("/v1/keys/{}", segment(multikey)), options)
             .await
     }
 
@@ -558,6 +593,115 @@ impl<H: Http> Store<H> {
             ..Send::default()
         };
         self.call("GET", &path, options).await
+    }
+
+    /// `PUT` of an inbox: a pre-join write carries `bind`; both are signed by the current
+    /// master key.
+    pub async fn inbox_put(
+        &self,
+        address: &InboxAddress,
+        write: &InboxWrite,
+        req: &SignedRequest,
+    ) -> LanguageResult<InboxStored> {
+        let mut options = body_of(write)?;
+        options.req = Some(req);
+        self.call("PUT", &inbox_path(address), options).await
+    }
+
+    /// `GET` of an inbox, oldest first; `wait_s` holds it until a message is there.
+    pub async fn inbox_list(
+        &self,
+        address: &InboxAddress,
+        auth: &InboxAuth,
+        wait_s: u8,
+    ) -> LanguageResult<Vec<InboxMessage>> {
+        let mut options = Send::authed(auth);
+        options.query = wait(wait_s);
+        self.call("GET", &inbox_path(address), options).await
+    }
+
+    /// `DELETE` of message `id` of an inbox.
+    pub async fn inbox_ack(
+        &self,
+        address: &InboxAddress,
+        id: &str,
+        auth: &InboxAuth,
+    ) -> LanguageResult<()> {
+        let path = format!("{}/{}", inbox_path(address), segment(id));
+        let _: Value = self.call("DELETE", &path, Send::authed(auth)).await?;
+        Ok(())
+    }
+
+    /// `GET /v1/private/{scid}`: `None` when the identity has no record yet.
+    pub async fn get_record(
+        &self,
+        did: &str,
+        req: &SignedRequest,
+    ) -> LanguageResult<Option<SealedRecord>> {
+        let path = format!("/v1/private/{}", segment(scid_of(did)?));
+        let options = Send {
+            req: Some(req),
+            ..Send::default()
+        };
+        self.read(&path, options).await
+    }
+
+    /// `PUT /v1/private/{scid}`.
+    pub async fn put_record(
+        &self,
+        did: &str,
+        record: &SealedRecord,
+        req: &SignedRequest,
+    ) -> LanguageResult<RecordStored> {
+        let path = format!("/v1/private/{}", segment(scid_of(did)?));
+        let mut options = body_of(record)?;
+        options.req = Some(req);
+        self.call("PUT", &path, options).await
+    }
+
+    /// `POST /v1/requests/{scid}` with `post` as the body.
+    pub async fn post_request(
+        &self,
+        did: &str,
+        post: &PostedRequest,
+        req: &SignedRequest,
+    ) -> LanguageResult<RequestPosted> {
+        let path = format!("/v1/requests/{}", segment(scid_of(did)?));
+        let mut options = body_of(post)?;
+        options.req = Some(req);
+        self.call("POST", &path, options).await
+    }
+
+    /// `GET /v1/requests/{scid}?since=`.
+    pub async fn list_requests(
+        &self,
+        did: &str,
+        since: u64,
+        req: &SignedRequest,
+    ) -> LanguageResult<Vec<DeviceRequest>> {
+        let path = format!("/v1/requests/{}", segment(scid_of(did)?));
+        let options = Send {
+            req: Some(req),
+            query: vec![("since", since.to_string())],
+            ..Send::default()
+        };
+        self.call("GET", &path, options).await
+    }
+
+    /// `DELETE /v1/requests/{scid}/{id}`.
+    pub async fn delete_request(
+        &self,
+        did: &str,
+        id: &str,
+        req: &SignedRequest,
+    ) -> LanguageResult<()> {
+        let path = format!("/v1/requests/{}/{}", segment(scid_of(did)?), segment(id));
+        let options = Send {
+            req: Some(req),
+            ..Send::default()
+        };
+        let _: Value = self.call("DELETE", &path, options).await?;
+        Ok(())
     }
 }
 
@@ -685,6 +829,27 @@ mod tests {
         ] {
             assert!(!transport_allowed(url), "{url}");
         }
+    }
+
+    #[test]
+    fn a_pre_join_read_header_carries_its_store() {
+        let auth = PreInboxAuth {
+            address: "zPre".into(),
+            sign: "z6MkDev".into(),
+            r: "zR".into(),
+            store: "did:key:z6MkStore".into(),
+            method: "GET".into(),
+            path: "/v1/inbox/pre/zPre".into(),
+            nonce: "zNonce".into(),
+            expires: 60,
+            sig: "zSig".into(),
+        };
+        assert_eq!(
+            encode_header(&auth).unwrap(),
+            base64url(
+                br#"{"address":"zPre","expires":60,"method":"GET","nonce":"zNonce","path":"/v1/inbox/pre/zPre","r":"zR","sig":"zSig","sign":"z6MkDev","store":"did:key:z6MkStore"}"#
+            )
+        );
     }
 
     #[test]

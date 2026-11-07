@@ -7,20 +7,25 @@
 //! whose `state()` is the [`KeyState`]. The core does no I/O and reads no clock (callers pass
 //! `now`); it draws randomness only in `words::generate`. Features: `build` (event builders),
 //! `words` (the 12 words and master-key derivation), `wasm` (wasm-bindgen exports). [`link`]
-//! holds offers, claims and the match code of device linking. [`did_document`] derives the
-//! DID Core document of a log at a seq.
+//! holds offers, claims and the match code of device linking; [`inbox`] the device inbox (HPKE
+//! seals, payloads and their checks), [`record`] the private details record and [`requests`]
+//! the request box. [`did_document`] derives the DID Core document of a log at a seq.
 
 use serde_json::{json, Value};
 
 mod event;
 mod keys;
 mod policy;
+mod seal;
 mod state;
 
 pub mod document;
 pub mod domain;
+pub mod inbox;
 pub mod link;
 pub mod pow;
+pub mod record;
+pub mod requests;
 
 #[cfg(feature = "build")]
 pub mod build;
@@ -42,6 +47,7 @@ pub use domain::{
 pub use event::{BotScope, DeviceKey, Event, KeyLife, Kind, Op, BOT_ACTIONS};
 pub use keys::{
     decode_x25519_multikey, encode_x25519_multikey, is_ed25519_multikey, is_x25519_multikey,
+    x25519_multikey_of, x25519_secret_of_ed25519, X25519Secret,
 };
 pub use policy::{FoldError, FormatError, KelPolicy};
 pub use state::{KeyRecord, KeyState};

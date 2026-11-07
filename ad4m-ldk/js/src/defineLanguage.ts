@@ -31,6 +31,16 @@ import type {
     Claim,
     ClaimReceipt,
     OfferProgress,
+    InboxAddress,
+    InboxWrite,
+    InboxStored,
+    InboxMessage,
+    PreInboxAuth,
+    SealedRecord,
+    RecordStored,
+    PostedRequest,
+    RequestPosted,
+    DeviceRequest,
     Amount,
     TokenBalance,
     TokenTransfer,
@@ -174,6 +184,14 @@ export interface FlatLanguageExports {
     identityCancelOffer?(did: string, offerId: string, req: SignedRequest): Promise<void>;
     identityClaimOffer?(did: string, offerId: string, claim: Claim): Promise<ClaimReceipt>;
     identityOfferState?(did: string, offerId: string, key: string, waitSec?: number): Promise<OfferProgress>;
+    identityInboxPut?(address: InboxAddress, write: InboxWrite, req: SignedRequest): Promise<InboxStored>;
+    identityInboxList?(address: InboxAddress, auth: SignedRequest | PreInboxAuth, waitSec?: number): Promise<InboxMessage[]>;
+    identityInboxAck?(address: InboxAddress, id: string, auth: SignedRequest | PreInboxAuth): Promise<void>;
+    identityGetRecord?(did: string, req: SignedRequest): Promise<SealedRecord | null>;
+    identityPutRecord?(did: string, record: SealedRecord, req: SignedRequest): Promise<RecordStored>;
+    identityPostRequest?(did: string, post: PostedRequest, req: SignedRequest): Promise<RequestPosted>;
+    identityListRequests?(did: string, since: number, req: SignedRequest): Promise<DeviceRequest[]>;
+    identityDeleteRequest?(did: string, id: string, req: SignedRequest): Promise<void>;
 
     // Token (agent language only)
     tokenAssets?(): Promise<string[]>;
@@ -291,6 +309,14 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
         out.identityCancelOffer = i.cancelOffer.bind(i);
         out.identityClaimOffer = i.claimOffer.bind(i);
         out.identityOfferState = i.offerState.bind(i);
+        out.identityInboxPut = i.inboxPut.bind(i);
+        out.identityInboxList = i.inboxList.bind(i);
+        out.identityInboxAck = i.inboxAck.bind(i);
+        out.identityGetRecord = i.getRecord.bind(i);
+        out.identityPutRecord = i.putRecord.bind(i);
+        out.identityPostRequest = i.postRequest.bind(i);
+        out.identityListRequests = i.listRequests.bind(i);
+        out.identityDeleteRequest = i.deleteRequest.bind(i);
     }
 
     // Token

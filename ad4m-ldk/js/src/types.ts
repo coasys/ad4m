@@ -343,6 +343,101 @@ export interface OfferProgress {
     seq?: number;
 }
 
+/** An inbox's address: before the device joins, the pre-join address of its device string; after, its key id. */
+export type InboxAddress = { pre: string } | { scid: string; keyId: string };
+
+/** The bound offer a pre-join write is for. */
+export interface InboxBind {
+    scid: string;
+    offerId: string;
+    /** The device string's signing key, the offer's bound key. */
+    sign: string;
+    /** The device string's `r`. */
+    r: string;
+}
+
+/** The body of an inbox write; only a pre-join write carries `bind`. */
+export interface InboxWrite {
+    /** base64url HPKE ciphertext, at most 8 KiB. */
+    sealed: string;
+    bind?: InboxBind;
+}
+
+export interface InboxStored {
+    id: string;
+    expires: number;
+}
+
+/** Who wrote an inbox message, as the store checked it. */
+export type InboxWriter =
+    | { kind: "offer"; scid: string; offerId: string }
+    | { kind: "master"; scid: string; keyId: string };
+
+export interface InboxMessage {
+    id: string;
+    sealed: string;
+    writer: InboxWriter;
+    storedAt: number;
+    expires: number;
+}
+
+/**
+ * A pre-join read or acknowledgement (header `X-Coasys-Inbox`), signed by the device
+ * string's key under `coasys:inbox` over every field but `sig`.
+ */
+export interface PreInboxAuth {
+    address: string;
+    sign: string;
+    r: string;
+    /** did:key of the store the read is for, as a `SignedRequest`'s `store`: a store refuses a read for another (`403 store`). */
+    store: string;
+    method: string;
+    path: string;
+    nonce: string;
+    expires: number;
+    sig: string;
+}
+
+/** The private details record, encrypted; the store never reads it. */
+export interface SealedRecord {
+    version: number;
+    /** Key id or "recovery" → the record key sealed to that reader. */
+    wrapped: Record<string, string>;
+    recoveryKey?: string;
+    nonce: string;
+    ciphertext: string;
+}
+
+export interface RecordStored {
+    version: number;
+}
+
+export type DeviceRequestBody =
+    | { kind: "send-master" }
+    | { kind: "confirm-revoke"; keyIds: string[]; rotate: boolean };
+
+/** `POST /v1/requests/{scid}`. */
+export interface PostedRequest {
+    body: DeviceRequestBody;
+    /** At most 7 days ahead. */
+    expires: number;
+}
+
+export interface RequestPosted {
+    id: string;
+}
+
+/** One request of the box, with the signed request the device posted it with. */
+export interface DeviceRequest {
+    id: string;
+    body: DeviceRequestBody;
+    /** The posting device key's id. */
+    by: string;
+    created: number;
+    expires: number;
+    signed: SignedRequest;
+}
+
 /**
  * The agent language's identity interface (section 5.8 of
  * `docs-src/language-interface-spec.md`).
@@ -379,6 +474,22 @@ export interface IdentitySpec {
     claimOffer(did: string, offerId: string, claim: Claim): Promise<ClaimReceipt>;
     /** GET /v1/offers/{scid}/{offerId}/state?key=&wait= */
     offerState(did: string, offerId: string, key: string, waitSec?: number): Promise<OfferProgress>;
+    /** PUT /v1/inbox/pre/{pre} (with bind) or /v1/inbox/{scid}/{keyId}, signed by the current master key */
+    inboxPut(address: InboxAddress, write: InboxWrite, req: SignedRequest): Promise<InboxStored>;
+    /** GET of an inbox ?wait= (0–8 seconds): a pre-join read for {pre}, the device key's request for {scid, keyId} */
+    inboxList(address: InboxAddress, auth: SignedRequest | PreInboxAuth, waitSec?: number): Promise<InboxMessage[]>;
+    /** DELETE of message `id` of an inbox */
+    inboxAck(address: InboxAddress, id: string, auth: SignedRequest | PreInboxAuth): Promise<void>;
+    /** GET /v1/private/{scid}: null before the first write */
+    getRecord(did: string, req: SignedRequest): Promise<SealedRecord | null>;
+    /** PUT /v1/private/{scid} */
+    putRecord(did: string, record: SealedRecord, req: SignedRequest): Promise<RecordStored>;
+    /** POST /v1/requests/{scid} */
+    postRequest(did: string, post: PostedRequest, req: SignedRequest): Promise<RequestPosted>;
+    /** GET /v1/requests/{scid}?since= */
+    listRequests(did: string, since: number, req: SignedRequest): Promise<DeviceRequest[]>;
+    /** DELETE /v1/requests/{scid}/{id} */
+    deleteRequest(did: string, id: string, req: SignedRequest): Promise<void>;
 }
 
 export type IdentityForbiddenReason =
@@ -390,7 +501,7 @@ export type IdentityForbiddenReason =
     | "bound"
     | "cosig"
     | "writer"
-    /** A signed request for another store. */
+    /** A signed request or a pre-join inbox read for another store. */
     | "store";
 
 /** How the identity interface refuses a call; HTTP statuses map one to one. */

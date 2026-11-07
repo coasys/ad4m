@@ -5,6 +5,9 @@
 
 use ad4m_hash_chain::{decode_ed25519_multikey, Multikey};
 
+/// An X25519 secret: a device's encryption key, or the private record's recovery key.
+pub use x25519_dalek::StaticSecret as X25519Secret;
+
 /// The multicodec prefix of an X25519 public key (varint of 0xec).
 pub const X25519_PUB: [u8; 2] = [0xec, 0x01];
 
@@ -44,6 +47,18 @@ pub fn decode_x25519_multikey(multikey: &str) -> Option<[u8; 32]> {
 /// True when `key` is an X25519 encryption multikey.
 pub fn is_x25519_multikey(key: &str) -> bool {
     decode_x25519_multikey(key).is_some()
+}
+
+/// The X25519 multikey of `secret`'s public key.
+pub fn x25519_multikey_of(secret: &X25519Secret) -> Multikey {
+    encode_x25519_multikey(x25519_dalek::PublicKey::from(secret).as_bytes())
+}
+
+/// The X25519 secret of an Ed25519 key (RFC 7748 form of its scalar): the encryption key of a
+/// device key held in an executor's wallet, whose `enc` is the Montgomery form of the signing
+/// key. `x25519_multikey_of` of it equals the `enc` that `did:key` gives that key.
+pub fn x25519_secret_of_ed25519(key: &ed25519_dalek::SigningKey) -> X25519Secret {
+    X25519Secret::from(key.to_scalar_bytes())
 }
 
 #[cfg(test)]
@@ -88,5 +103,12 @@ mod tests {
         assert_eq!(decode_x25519_multikey(&huge), None);
         assert!(!is_x25519_multikey(&huge));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_x25519_secret_of_an_ed25519_key_matches_its_montgomery_form() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let enc = encode_x25519_multikey(&key.verifying_key().to_montgomery().to_bytes());
+        assert_eq!(x25519_multikey_of(&x25519_secret_of_ed25519(&key)), enc);
     }
 }

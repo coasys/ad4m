@@ -8,8 +8,9 @@ document at a seq. The spec with every rule is `docs-src/identity/did-scid-coasy
 vectors are `vectors/*.json`. The spec has three parts: Part A, the format (sections 1–12:
 events, replay, key validity, resolution, the DID document), binds every verifier and
 resolver; Part B, the host profile (13–14: the HTTPS log route, and admission such as the
-proof of work as host policy), binds hosts; Part C, the wallet profile (15–16: the 12 words,
-the signing domains other than `coasys:kel`), is informative.
+proof of work as host policy), binds hosts; Part C, the wallet profile (15–17: the 12 words,
+the signing domains other than `coasys:kel`, the device inbox, the private record and the
+request box), is informative.
 
 | File | What |
 |---|---|
@@ -17,7 +18,11 @@ the signing domains other than `coasys:kel`), is informative.
 | `src/event.rs` | `Event`, `Op`, `DeviceKey`, `KeyLife`, `BotScope`, `Kind`; the strict JSON parser `Event::from_json`, and `Event::from_json_text` for text (also behind `Deserialize`; refuses a duplicate member name) |
 | `src/policy.rs` | `KelPolicy` (`genesis`, `apply`), `FoldError`, `FormatError` |
 | `src/state.rs` | `KeyState`, `KeyRecord`: `key_valid_at`, `key_valid_at_time`, `bot_scope_at`, `current_master`, `key_id_of`, `device_key_id_of` (content signers: device keys only), `next_device_id`, `encryption_keys_at` |
-| `src/keys.rs` | X25519 multikeys; key-type checks |
+| `src/keys.rs` | X25519 multikeys; key-type checks; `X25519Secret`, `x25519_multikey_of`, `x25519_secret_of_ed25519` (an executor key's `enc` secret) |
+| `src/seal.rs` | the one HPKE construction (RFC 9180 base mode, X25519/HKDF-SHA256/ChaCha20-Poly1305, `base64url(enc ‖ ct)`), crate-private; used by `inbox` and `record` |
+| `src/inbox.rs` | the device inbox (spec section 17): `InboxAddress`, `pre_address`, `InboxPayload`, `InboxBody` (`OfferTicket`, `Master`), `sign_payload`, `seal`/`open`, `check_payload` → `Accept` (`ClaimOffer`, `KeepMaster`, `Stale`), `PreInboxAuth` (`sign_pre_auth`, `verify_pre_auth`), `check_sealed` (the store's shape check), the limits |
+| `src/record.rs` | the private details record: `SealedRecord`, `PrivateRecord`, `DeviceEntry`, `DeviceKind`, `Place`, `HoldsMaster`, `PendingRevocation`, `RevocationReason`; `readers` (who a record is wrapped to), `seal_record`, `open_record`, `check_sealed` (the store's check), `record_aad`, `wrap_info` |
+| `src/requests.rs` | the request box: `DeviceRequestBody` (`SendMaster`, `ConfirmRevoke`), `PostedRequest`, `check_post`, `REQUEST_TTL_S`, `MAX_OPEN_REQUESTS` |
 | `src/document.rs` | `did_document(chain, version, also_known_as)`: `DidDocument`, `VerificationMethod`, `DocumentMetadata`, `DocumentError` (spec section 9); the contexts `DID_CONTEXT`, `MULTIKEY_CONTEXT`, `COASYS_CONTEXT` |
 | `src/domain.rs` | the signing-domain registry and labels (spec sections 7 and 16); `signing_bytes`, `verify_signed`, `check_domain`; `LINK_DOMAIN`, `AGENT_RECORD_DOMAIN`, `HEAD_DOMAIN`, `REQUEST_DOMAIN`, `SESSION_DOMAIN` (key statements: a device key's login on an executor); `HeadStatement` (what the store signs for a head; the store signs it, executors verify it) |
 | `src/pow.rs` | `Pow`, `solve`, `solve_range`, `check` (the brake's proof of work, bound to the SCID; host policy, spec section 14) |
@@ -30,8 +35,20 @@ the signing domains other than `coasys:kel`), is informative.
 ## Rules
 
 - **No I/O and no clock.** Callers pass `now` to `key_valid_at_time`. Randomness only in
-  `words::generate` (OS source) and `words::generate_with` (caller's RNG). Every feature builds
-  for `wasm32-unknown-unknown`.
+  `words::generate` (OS source) and in the caller's RNG (`words::generate_with`, `inbox::seal`,
+  `record::seal_record`). Every feature builds for `wasm32-unknown-unknown`.
+- **One seal.** Everything sealed to an X25519 key goes through `seal.rs`; its `info` is a
+  label, `0x00` and the place (`coasys:inbox` + address, `coasys:record` + scid), so a seal for
+  one place never opens at another. `hpke` stays on 0.12 (rand_core 0.6, like the rest of the
+  workspace); 0.13 moved to rand_core 0.9.
+- **Secrets are wiped and never printed.** The words, the seed, a record key, an opened seal's
+  plaintext and a master key decoded from the inbox sit in `zeroize::Zeroizing`; `Debug` of
+  `Words`, `Seed` and `InboxBody::Master` leaves the secret out.
+- **A record is wrapped to `record::readers`**: every device key valid at the head without the
+  bot mark, plus `"recovery"` exactly when `recoveryKey` is set; a fresh record key and nonce
+  every version. The store checks the set with `record::check_sealed`.
+- An internally tagged unit variant ignores extra fields under `deny_unknown_fields`; a kind
+  with no fields is an empty struct variant (`DeviceRequestBody::SendMaster {}`).
 - The executor and the store enable `build`, never `words`: no node can make the words. Only
   the store enables `stored-fold`.
 - Only a bot scope expires. A device key's validity over time comes from the log's events, so
@@ -89,6 +106,12 @@ generator builds; after an intended change regenerate and review the diff:
 `check_add`; `vectors/link.json` pins the offer commit, the claim and offer signing bytes,
 the match code, the offer and device strings, and the `add` events (device and bot) that
 spend a claim.
+`tests/inbox.rs` covers seals (round trip, wrong key, wrong address, tampering), every refusal
+of `check_payload`, offer tickets and pre-join reads; `tests/record.rs` the wrapping (device
+keys and the recovery key, never a bot key), a revoked device and the next version, the AAD,
+the store's check and the record JSON; `tests/requests.rs` expiry and `confirm-revoke` keys.
+`vectors/devices.json` pins them with fixed X25519 secrets and the RNG stream of
+`tests/common::TestRng`.
 `tests/document.rs` covers the DID document mapping (live, revoked, bot, rotated,
 ended, past the head, member order); `vectors/document.json` pins the document and metadata
 of the log of `log.json` at the head and after every seq.

@@ -5,17 +5,28 @@
 use ad4m_hash_chain::{encode_ed25519_multikey, sha256, verify_proof};
 use ad4m_identity_core::build::{self, Signer};
 use ad4m_identity_core::domain::{LABELS, SIGNING_DOMAINS};
+use ad4m_identity_core::inbox::{
+    check_payload, open, payload_signing_bytes, pre_address, pre_auth_signing_bytes, seal,
+    seal_info, sign_payload, sign_pre_auth, verify_pre_auth, Accept, InboxAddress, InboxBody,
+    InboxPayload, PreInboxAuth, INBOX_DOMAIN,
+};
 use ad4m_identity_core::link::{
     check_add, check_secret, claim_body, claim_view, decode_secret, make_claim, match_code,
     match_input, offer_commit, offer_signing_bytes, sign_offer, verify_claim, verify_offer, Claim,
     ClaimView, DeviceString, Offer, OfferKind, OfferString, SignedBy, SignedOffer, CLAIM_DOMAIN,
     OFFER_TTL_S,
 };
+use ad4m_identity_core::record::{
+    check_sealed, open_record, record_aad, seal_record, wrap_info, DeviceEntry, DeviceKind,
+    HoldsMaster, PendingRevocation, PrivateRecord, RevocationReason, SealedRecord,
+};
+use ad4m_identity_core::requests::{check_post, DeviceRequestBody, PostedRequest, REQUEST_TTL_S};
 use ad4m_identity_core::{
     commitment, derive_scid, did_document, encode_x25519_multikey, error_code, event_hash, fold,
     fold_json, pow, signing_bytes, verify_signed, BotScope, DeviceKey, Event, FoldError, KelChain,
     KelPolicy, KeyLife, Multikey, Op, KEL_DOMAIN,
 };
+use ad4m_identity_core::{x25519_multikey_of, X25519Secret};
 use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
 
@@ -132,6 +143,14 @@ impl Log {
         let id = self.chain.state().current_master().unwrap().id.clone();
         sign(&mut event, &id, &master(self.n));
         event
+    }
+
+    /// Appends the `add` of `key`, signed by the current master.
+    pub fn add_key(&mut self, key: DeviceKey) {
+        let mut event = build::add_unsigned(&self.chain, key, "offer-1", "z3coSig").unwrap();
+        let id = self.chain.state().current_master().unwrap().id.clone();
+        sign(&mut event, &id, &master(self.n));
+        self.push(event);
     }
 
     pub fn add(&mut self, life: KeyLife) -> String {
@@ -766,6 +785,7 @@ pub const VECTOR_NAMES: &[&str] = &[
     "domains",
     "link",
     "document",
+    "devices",
 ];
 
 /// The fixed entropy of the words vector.
@@ -785,6 +805,7 @@ pub fn build_vectors() -> Vec<(&'static str, Value)> {
         ("domains", build_domains()),
         ("link", build_link()),
         ("document", build_document()),
+        ("devices", build_devices()),
     ]
 }
 
@@ -978,6 +999,7 @@ pub fn check_vector_file(name: &str, file: &Value) {
         "domains" => check_domains(file),
         "link" => check_link(file),
         "document" => check_document(file),
+        "devices" => check_devices(file),
         other => panic!("unknown vector file {other}"),
     }
 }
@@ -1391,6 +1413,328 @@ fn check_document(file: &Value) {
         let err = did_document(&chain, case["version"].as_u64(), &aka).unwrap_err();
         assert_eq!(err.name(), case["error"]);
     }
+}
+
+// ----- The device inbox, the private record and the request box -----
+
+/// A repeatable RNG: block i of the stream is `sha256(seed ‖ i as u64 big-endian)`.
+pub struct TestRng {
+    seed: Vec<u8>,
+    block: u64,
+    buf: Vec<u8>,
+}
+
+impl TestRng {
+    pub fn new(seed: &str) -> TestRng {
+        TestRng {
+            seed: seed.as_bytes().to_vec(),
+            block: 0,
+            buf: Vec::new(),
+        }
+    }
+}
+
+impl rand_core::RngCore for TestRng {
+    fn next_u32(&mut self) -> u32 {
+        rand_core::impls::next_u32_via_fill(self)
+    }
+    fn next_u64(&mut self) -> u64 {
+        rand_core::impls::next_u64_via_fill(self)
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for b in dest {
+            if self.buf.is_empty() {
+                let mut input = self.seed.clone();
+                input.extend_from_slice(&self.block.to_be_bytes());
+                self.buf = sha256(&input).to_vec();
+                self.block += 1;
+            }
+            *b = self.buf.remove(0);
+        }
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl rand_core::CryptoRng for TestRng {}
+
+/// The X25519 secret of a sealable device key `d<n>`: `sha256("enc secret d<n>")`.
+pub fn enc_secret(n: u32) -> X25519Secret {
+    X25519Secret::from(sha256(format!("enc secret d{n}").as_bytes()))
+}
+
+/// Device key `d<n>` whose `enc` has a known secret ([`enc_secret`]).
+pub fn sealable_device(n: u32, life: KeyLife) -> DeviceKey {
+    DeviceKey {
+        id: format!("d{n}"),
+        sign: mk(&dev(n)),
+        enc: x25519_multikey_of(&enc_secret(n)),
+        life,
+    }
+}
+
+/// The log of the device vectors: `d1` and `d2` standing at #0, the bot key `d3` at seq 1, all
+/// sealable.
+pub fn devices_log() -> Log {
+    let mut log = Log::incept(vec![
+        sealable_device(1, KeyLife::Standing),
+        sealable_device(2, KeyLife::Standing),
+    ]);
+    log.add_key(sealable_device(3, bot(&["read"], 1_900_000_000)));
+    log
+}
+
+/// The secret of the recovery key in the record vectors: `sha256("recovery secret")`.
+pub fn recovery_secret_fixture() -> X25519Secret {
+    X25519Secret::from(sha256(b"recovery secret"))
+}
+
+/// A device string's `r`: 16 bytes, base58btc.
+pub fn device_r() -> String {
+    bs58::encode(&sha256(b"device r")[..16]).into_string()
+}
+
+/// The `did:key` of the store the pre-join read vector is signed for: the key `sk("store")`.
+pub fn store_did() -> String {
+    format!("did:key:{}", mk(&sk("store")))
+}
+
+/// A `Master` payload of master `index` for `d<to>`, signed by the current master at the head.
+pub fn master_payload(log: &Log, to: u32, index: u32) -> InboxPayload {
+    let body = InboxBody::Master {
+        did: log.chain.state().did.clone(),
+        index,
+        secret: bs58::encode(master(index).to_bytes()).into_string(),
+    };
+    sign_payload(mk(&dev(to)), body, LINK_NOW, signed_by(log), &master(log.n)).unwrap()
+}
+
+/// The joined inbox of `d<n>` on `log`.
+pub fn joined(log: &Log, n: u32) -> InboxAddress {
+    InboxAddress::Joined {
+        scid: log.chain.state().scid.clone(),
+        key_id: format!("d{n}"),
+    }
+}
+
+/// A record that names every device of the device vectors' log.
+pub fn record_fixture() -> PrivateRecord {
+    let entry = |name: &str, kind, holds| DeviceEntry {
+        name: name.into(),
+        kind,
+        place: None,
+        address: None,
+        runs_executor: kind == DeviceKind::DesktopApp,
+        holds_master: holds,
+        operator: None,
+    };
+    PrivateRecord {
+        devices: [
+            (
+                "d1".to_string(),
+                entry("MacBook Pro", DeviceKind::DesktopApp, HoldsMaster::Yes),
+            ),
+            (
+                "d2".to_string(),
+                entry("Pixel 8", DeviceKind::PhoneApp, HoldsMaster::Offered),
+            ),
+            (
+                "d3".to_string(),
+                entry("Helper", DeviceKind::Bot, HoldsMaster::No),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        words_checked_at: Some(LINK_NOW),
+        pending_revocations: vec![PendingRevocation {
+            key_id: "d2".into(),
+            reason: RevocationReason::AccountDeleted,
+            at: LINK_NOW,
+        }],
+        safeguards: Default::default(),
+    }
+}
+
+fn build_devices() -> Value {
+    let log = devices_log();
+    let state = log.chain.state();
+    let r = device_r();
+    let pre = pre_address(&mk(&dev(4)), &r).unwrap();
+    let payload = master_payload(&log, 1, 0);
+    let address = joined(&log, 1);
+    let sealed = seal(
+        &x25519_multikey_of(&enc_secret(1)),
+        &address,
+        &payload,
+        &mut TestRng::new("inbox seal"),
+    )
+    .unwrap();
+    let auth = sign_pre_auth(
+        &r,
+        &store_did(),
+        "GET",
+        &format!("/v1/inbox/pre/{pre}"),
+        &bs58::encode(&sha256(b"nonce")[..16]).into_string(),
+        LINK_NOW + 60,
+        &dev(4),
+    )
+    .unwrap();
+    let recovery = x25519_multikey_of(&recovery_secret_fixture());
+    let record = record_fixture();
+    let sealed_record = seal_record(
+        &log.chain,
+        1,
+        &record,
+        Some(recovery.clone()),
+        &mut TestRng::new("record seal"),
+    )
+    .unwrap();
+    let post = PostedRequest {
+        body: DeviceRequestBody::ConfirmRevoke {
+            key_ids: vec!["d2".into()],
+            rotate: true,
+        },
+        expires: LINK_NOW + REQUEST_TTL_S,
+    };
+    json!({
+        "description": "The device inbox, the private record and the request box. HPKE base mode (RFC 9180): DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, empty AAD; sealed = base64url(enc || ciphertext). An inbox seal's info is \"coasys:inbox\" || 0x00 || address (\"pre:<a>\" or \"<scid>/<keyId>\"); a record key's is \"coasys:record\" || 0x00 || scid. The ephemeral keys and the record key come from the RNG stream sha256(seed || u64be(i)), 32 bytes per block, with the named seed. The X25519 secrets are sha256(\"enc secret d<n>\") and sha256(\"recovery secret\").",
+        "log": log.json(),
+        "now": LINK_NOW,
+        "preAddress": {
+            "sign": mk(&dev(4)),
+            "r": r,
+            "hashInput": String::from_utf8(signing_bytes(INBOX_DOMAIN, &json!({"sign": mk(&dev(4)), "r": r})).unwrap()).unwrap(),
+            "address": pre,
+        },
+        "payload": {
+            "value": payload,
+            "signingBytes": String::from_utf8(payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by).unwrap()).unwrap(),
+        },
+        "seal": {
+            "recipientSecret": hex(&enc_secret(1).to_bytes()),
+            "to": x25519_multikey_of(&enc_secret(1)),
+            "address": address.text(),
+            "info": hex(&seal_info(&address)),
+            "rngSeed": "inbox seal",
+            "sealed": sealed,
+        },
+        "preAuth": {
+            "value": auth,
+            "signingBytes": String::from_utf8(pre_auth_signing_bytes(&auth).unwrap()).unwrap(),
+        },
+        "record": {
+            "value": record,
+            "plaintext": ad4m_hash_chain::canonical_json(&serde_json::to_value(&record).unwrap()).unwrap(),
+            "aad": String::from_utf8(record_aad(&state.scid, 1).unwrap()).unwrap(),
+            "wrapInfo": hex(&wrap_info(&state.scid)),
+            "recoverySecret": hex(&recovery_secret_fixture().to_bytes()),
+            "rngSeed": "record seal",
+            "sealed": sealed_record,
+        },
+        "request": {
+            "value": post,
+            "body": ad4m_hash_chain::canonical_json(&serde_json::to_value(&post).unwrap()).unwrap(),
+        },
+    })
+}
+
+fn check_devices(file: &Value) {
+    let events: Vec<Value> = serde_json::from_value(file["log"].clone()).unwrap();
+    let chain = fold_json(&events).unwrap();
+    let now = file["now"].as_u64().unwrap();
+
+    let pre = &file["preAddress"];
+    let (sign, r) = (pre["sign"].as_str().unwrap(), pre["r"].as_str().unwrap());
+    assert_eq!(
+        signing_bytes(INBOX_DOMAIN, &json!({"sign": sign, "r": r})).unwrap(),
+        pre["hashInput"].as_str().unwrap().as_bytes()
+    );
+    assert_eq!(pre_address(sign, r).unwrap(), pre["address"]);
+
+    let payload: InboxPayload = serde_json::from_value(file["payload"]["value"].clone()).unwrap();
+    assert_eq!(
+        payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by).unwrap(),
+        file["payload"]["signingBytes"].as_str().unwrap().as_bytes()
+    );
+    assert_eq!(
+        check_payload(&payload, &payload.to, &chain, now).unwrap(),
+        Accept::KeepMaster { index: 0 }
+    );
+
+    let s = &file["seal"];
+    let secret: [u8; 32] = unhex(s["recipientSecret"].as_str().unwrap())
+        .try_into()
+        .unwrap();
+    let secret = X25519Secret::from(secret);
+    assert_eq!(x25519_multikey_of(&secret), s["to"]);
+    let address = InboxAddress::Joined {
+        scid: chain.state().scid.clone(),
+        key_id: "d1".into(),
+    };
+    assert_eq!(address.text(), s["address"]);
+    assert_eq!(hex(&seal_info(&address)), s["info"]);
+    let sealed = s["sealed"].as_str().unwrap();
+    assert_eq!(open(&secret, &address, sealed).unwrap(), payload);
+    let mut rng = TestRng::new(s["rngSeed"].as_str().unwrap());
+    assert_eq!(
+        seal(s["to"].as_str().unwrap(), &address, &payload, &mut rng).unwrap(),
+        sealed
+    );
+
+    let auth: PreInboxAuth = serde_json::from_value(file["preAuth"]["value"].clone()).unwrap();
+    assert_eq!(
+        pre_auth_signing_bytes(&auth).unwrap(),
+        file["preAuth"]["signingBytes"].as_str().unwrap().as_bytes()
+    );
+    verify_pre_auth(&auth).unwrap();
+    assert_eq!(auth.store, store_did());
+    let mut elsewhere = auth.clone();
+    elsewhere.store = format!("did:key:{}", mk(&sk("another store")));
+    assert!(verify_pre_auth(&elsewhere).is_err());
+
+    let rec = &file["record"];
+    let record: PrivateRecord = serde_json::from_value(rec["value"].clone()).unwrap();
+    let scid = &chain.state().scid;
+    assert_eq!(
+        record_aad(scid, 1).unwrap(),
+        rec["aad"].as_str().unwrap().as_bytes()
+    );
+    assert_eq!(hex(&wrap_info(scid)), rec["wrapInfo"]);
+    let sealed: SealedRecord = serde_json::from_value(rec["sealed"].clone()).unwrap();
+    check_sealed(&sealed, &chain).unwrap();
+    let recovery: [u8; 32] = unhex(rec["recoverySecret"].as_str().unwrap())
+        .try_into()
+        .unwrap();
+    let recovery = X25519Secret::from(recovery);
+    assert_eq!(
+        open_record(&sealed, scid, "d1", &enc_secret(1)).unwrap(),
+        record
+    );
+    assert_eq!(
+        open_record(&sealed, scid, "recovery", &recovery).unwrap(),
+        record
+    );
+    let mut rng = TestRng::new(rec["rngSeed"].as_str().unwrap());
+    assert_eq!(
+        seal_record(
+            &chain,
+            sealed.version,
+            &record,
+            sealed.recovery_key.clone(),
+            &mut rng
+        )
+        .unwrap(),
+        sealed
+    );
+
+    let post: PostedRequest = serde_json::from_value(file["request"]["value"].clone()).unwrap();
+    assert_eq!(
+        ad4m_hash_chain::canonical_json(&serde_json::to_value(&post).unwrap()).unwrap(),
+        file["request"]["body"]
+    );
+    check_post(&post, chain.state(), chain.head().seq, now).unwrap();
 }
 
 // ----- Time -----

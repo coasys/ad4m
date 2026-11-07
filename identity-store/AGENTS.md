@@ -1,6 +1,7 @@
 # identity-store — agent guide
 
-The shared store of `did:scid:coasys:1` key logs with the offers and claims of device linking.
+The shared store of `did:scid:coasys:1` key logs with the offers and claims of device linking,
+the device inbox, the private details record and the request box.
 One Rust binary, one SQLite file. Executors reach it only through the agent language
 (`bootstrap-languages/centralized-agent-language`), so an executor never speaks HTTP to a
 store and a deployment can swap the store behind the language; the auth domain calls it
@@ -17,19 +18,23 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 |---|---|
 | `src/main.rs` | `identity-store [serve]`, `identity-store keygen`; configuration from the environment |
 | `src/lib.rs` | `Store` (database, head key, clock, settings, the change signal for waits), `Settings`, `Clock`, `Fault` |
-| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`), log replay, the key index (key rows with each master marked, the next-key commitment in `logs.next`) and its lookups |
+| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`, `requests`, `buckets`), log replay, the key index (key rows with each master marked, the next-key commitment in `logs.next`) and its lookups |
 | `src/held.rs` | `HeldLogs`: the folds of recently used logs at their stored heads, bounded, least recently used out; `Store::held_chain`; `fold_bytes_of` (a fold's whole heap and its live part, for the bound and the per-log budget); `state_before` (a log's state before a seq, rebuilt from a later state) |
 | `src/log.rs` | `POST …/events` with the admission checks (below), log pages, heads, the key index; `admit_new_log` (the brake's place) |
 | `src/offers.rs` | the offer routes, the claim route, the device's state poll, the store's side of the claim check (`check_spend`, `spend`, `supersede`) |
-| `src/request.rs` | signed requests (`X-Coasys-Request`): checks, nonce replay guard, `percent_decode` |
+| `src/request.rs` | signed requests (`X-Coasys-Request`): checks, nonce replay guard (`take_nonce`, shared with pre-join reads), `percent_decode` |
+| `src/inbox.rs` | the device inbox: pre-join and joined writes, reads (`X-Coasys-Inbox` for a pre-join read) and acknowledgements; `purge_ended` and `drop_closed_offer_messages`, which the append and the offer state changes call in their transactions |
+| `src/private.rs` | the private details record: one per identity, versioned, wrapped to exactly the log's readers |
+| `src/request_box.rs` | the request box: post, list, delete |
+| `src/limits.rs` | the identity bucket (`take_identity_write`) |
 | `src/agents.rs` | agent records under a `did:key` or a `did:scid`; the store checks the record signature and never reads `profile` (the agent language writes a `did:key` agent's signed AD4M expression there) |
 | `src/head.rs` | `StoreKey` (key file, `keygen`), `sign_head` (the core's `HeadStatement`; executors verify it with the same type) |
 | `src/routes.rs` | the axum router, body limit, CORS, waits, the feed (token compared in constant time) |
 | `src/error.rs` | `ApiError`: every refusal as a status and a JSON body with an `error` name |
 | `tests/common/agent.rs` | a test person: fixed keys, a log built with the core's builders, offers, claims, signed requests, records |
 | `tests/common/mod.rs` | `TestStore`: a real store on a temp file with an injected clock, called through the router |
-| `tests/logs.rs`, `tests/offers.rs` | the store's acceptance tests: logs, heads, the key index, signed requests, limits and agent records; offers, claims, the state poll and the claim check |
-| `tests/held.rs` | the held folds: no replay per request, a forged request reads no log, an append's head in force at once, the bound, rival events (one that does not replay refused on the held fold with no replay), `state_before` against a fold at every seq |
+| `tests/logs.rs`, `tests/offers.rs`, `tests/devices.rs` | the store's acceptance tests: logs, heads, the key index, signed requests, limits and agent records; offers, claims, the state poll and the claim check; the inbox, the record, the request box, the purges, the sweeper and the identity bucket |
+| `tests/held.rs` | the held folds: no replay per request (the inbox, record and request-box writes included), a forged request reads no log, an append's head in force at once (a revoke refuses the key's next write), the bound, rival events (one that does not replay refused on the held fold with no replay), `state_before` against a fold at every seq |
 | `tests/append_copies.rs` | an append copies the held fold once, taken or refused at its last event (a counting allocator) |
 | `tests/authenticate.rs` | authenticated before any replay: junk and wrongly signed appends, offers and requests on an unheld log replay nothing; a valid append and a `rotate` replay once; the length cap |
 | `tests/held_memory.rs` | the heap a held fold takes per event (a counting allocator; the bound stated under "Held folds") |
@@ -51,11 +56,22 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `POST /notes/{scid}` `{token}` + signed request | `403 signer`/`store` · `503 vouch-unavailable` (no vouching service exists yet) |
 | `GET /agents/{did}` | `200 AgentRecord` · `404` |
 | `PUT /agents/{did}` | `200` · `400 malformed`/`anchor`/`version` · `403 signer`/`writer`/`store` · `409 {version}` · `409 forked` |
-| `POST /offers/{scid}` `SignedOffer` | `201 {offerId}` · `400` · `403 signer` · `404` · `409 {head}` · `409 offer-exists` · `429 identity` |
+| `POST /offers/{scid}` `SignedOffer` | `201 {offerId}` · `400` · `403 signer` · `404` · `409 {head}` · `409 offer-exists` · `429 identity` (5 open offers, or the identity bucket) |
 | `GET /offers/{scid}?wait=` master-signed | `200 [{offer, state}]` (open and claimed) · `403 signer`/`store` |
 | `DELETE /offers/{scid}/{offerId}` master-signed | `204` · `403 signer`/`store` · `404` |
 | `POST /offers/{scid}/{offerId}/claim` `Claim` | `201`/`200` repeat `{state, kind, expires}` · `403 secret`/`bound`/`cosig` · `404` · `409 key-taken` · `410 {state}` |
 | `GET /offers/{scid}/{offerId}/state?key=&wait=` | `200 {state, seq?}` for the claiming key only · `404` |
+| `PUT /inbox/pre/{a}` `{sealed, bind:{scid, offerId, sign, r}}` + master-signed request | `201 {id, expires}` (expires = the offer's) · `400` · `403 writer` · `413` · `429 identity` (2 messages, or the bucket) |
+| `GET /inbox/pre/{a}?wait=` `X-Coasys-Inbox` | `200 [InboxMessage]` oldest first · `403 signer`/`store` |
+| `DELETE /inbox/pre/{a}/{id}` `X-Coasys-Inbox` | `204` · `403 signer`/`store` · `404` |
+| `PUT /inbox/{scid}/{keyId}` `{sealed}` + master-signed request | `201 {id, expires}` (30 days) · `400` · `403 writer` · `404` no such key valid at the head without the bot mark · `413` · `429 identity` (16 messages, or the bucket) |
+| `GET /inbox/{scid}/{keyId}?wait=` signed by `keyId` | `200 [InboxMessage]` · `403 signer` |
+| `DELETE /inbox/{scid}/{keyId}/{id}` signed by `keyId` | `204` · `403 signer` · `404` |
+| `GET /private/{scid}` signed (device key or master) | `200 SealedRecord` · `403` · `404` none yet |
+| `PUT /private/{scid}` `SealedRecord` + signed request | `200 {version}` · `400 malformed`/`wrapped`/`recovery-key` · `403` · `409 {version}` · `413` · `429 identity` |
+| `POST /requests/{scid}` `{body, expires}` signed by a device key | `201 {id}` · `400 malformed`/`expires` · `403 signer` · `429 identity` (16 open, or the bucket) |
+| `GET /requests/{scid}?since=` signed (device key or master) | `200 [DeviceRequest]` oldest first |
+| `DELETE /requests/{scid}/{id}` by the poster or the master | `204` · `403 signer` · `404` |
 | `GET /feed?after=` `Authorization: Bearer <FEED_TOKEN>` | `200 {items, next}` · `401` |
 | `GET /health` | `200` |
 
@@ -100,7 +116,10 @@ tests name them by these names.
 5. **The bot-scope check.** A bot key writes its own agent record only while its scope is in
    force (`agents.rs`).
 6. **The one-transaction rule.** Events (`SqliteChainStore::append_in`), `logs`, `keys`, `feed`,
-   spent claims, superseded offers and the signed head commit together or not at all.
+   spent claims, superseded offers, the purges (`inbox::purge_ended`: the joined inbox and the
+   requests of every key the append ended, and every joined message written by a master that
+   is no longer current; the pre-join messages of offers that left `open`) and the signed head
+   commit together or not at all.
    `Fault::AfterEvents` (tests only, `Store::inject_fault`) fails an append right after the
    event insert; the tests check that nothing of it stays.
 7. **The claim check.** An `add` spends a claim. Its conditions:
@@ -183,9 +202,10 @@ tests name them by these names.
 - The store reads the clock only through `Store::now` (tests inject it). A `wait` read
   watches one `Topic`: the identity's offers (`GET /offers/{scid}`, master-signed), the
   identity's offers for the device's unauthenticated state poll (`OfferState`, its own
-  places, so pollers never take the owner's) or one key (`GET /keys/{k}`); a committed write
-  wakes only the topics it concerns (`Store::changed`: an offer write its identity's offers
-  and their state polls, an append those and every key it lists). At most
+  places, so pollers never take the owner's), one key (`GET /keys/{k}`) or one inbox address
+  (`GET /inbox/…`); a committed write wakes only the topics it concerns (`Store::changed`: an
+  offer write its identity's offers and their state polls, an append those and every key it
+  lists, an inbox write its address). At most
   `MAX_WAITERS_PER_TOPIC` (16) reads wait on one topic: a read that finds its topic full takes
   the oldest read's place, and that one answers at once, as with `wait=0`, so squatters who
   know an offer and its claiming key cannot shut the claimant's poll out, they only shorten
@@ -195,9 +215,12 @@ tests name them by these names.
 - **Held folds** (`held.rs`): the store keeps each recently used log folded in memory, keyed
   by the stored head it ends at. `Store::held_chain` reads the head from `chain_heads` (one
   primary-key lookup) and uses the held fold only when it ends exactly there; otherwise the
-  log folds once from `chain_entries` and is held. An append puts its new fold in after its
-  transaction commits, under the database lock, so the next request sees the new head's keys
-  (a revoked key is refused at once) with no replay. The folds are bounded by the heap they
+  log folds once from `chain_entries` and is held. An append purges the inboxes and requests
+  of the keys it ends inside its transaction, then puts its new fold in after that transaction
+  commits, under the database lock, so the next request sees the new head's keys (a revoked
+  key is refused at once) with no replay. The writes that check a signed request inside their
+  own transaction (agent records, inbox, record and request-box writes) read the held fold
+  there, so a revoke committed before the write refuses it. The folds are bounded by the heap they
   take together (`HELD_LOG_BYTES`, default 256 MiB), least recently used out first; the bound
   is at least the per-log whole-fold bound, twice `LOG_FOLD_BYTES` (`Settings::check`, at
   start), so every log within its budget can be held (a log past it by rotations alone, below, needs some room above it). `Store::held.folds()` counts replays (the tests count them instead of timing
@@ -301,7 +324,10 @@ tests name them by these names.
   length cap bounds how many there are, so a log is past its budget by its rotations alone
   (at most 16 384 × 400 B, about 6.5 MB); such a log is held while the bound has room for it.
   Any other append is measured, a `rotate` in it included, so the owner sends the recovery
-  `rotate` on its own.
+  `rotate` on its own. The inbox, the private details record and the request box add nothing
+  to a log: they are rows of their own tables, never events, so they neither grow a fold nor
+  count toward the budget; their own caps bound them (2 pre-join and 16 joined messages per
+  address, one record per identity, 16 open requests, the 64 kB body).
 - **A fresh database**: the store has never been deployed, and a store file from before the
   agent-record version ceiling, the `fork_signers` table and the key index's `keys.master` and
   `logs.next` columns is not upgraded: start such a store on an empty database. Records
@@ -334,6 +360,43 @@ tests name them by these names.
   is taken, retires the rival's signer and so ends the freeze. The log and head stay readable
   as held throughout.
 - Never store or answer an offer's secret `s`: `tests/offers.rs` scans every table and response.
+- **The device inbox, the record and the request box keep ciphertext and signed envelopes
+  only.** The store reads the outer fields (who wrote, for whom, until when) and never a
+  payload; `tests/devices.rs` scans every table for a master secret and a record's device name.
+- **Inbox rules.** A pre-join write needs an `open` offer bound to `bind.sign`,
+  `pre_address(sign, r)` equal to the route's address, and a request by the current master that
+  signed the offer (`403 writer` otherwise); its message expires with the offer. A joined write
+  needs the current master (`403 writer`) and a receiving device key valid at the head without
+  the bot mark (`404`). The signed request (`Store::verify_request_in`) and each check run
+  inside the write's transaction, on the log's fold at the head that transaction reads
+  (`Store::held_chain`, no replay) and the offers as it reads them, so a revoke or an offer
+  change that lands first is seen. A joined inbox is
+  read and acknowledged only by its own key; a pre-join one only with an `X-Coasys-Inbox` by the
+  device string's key for this store (`403 store` otherwise, the signed requests' check), that
+  method and path, with a fresh nonce. Listing never deletes.
+  Pre-join messages go whenever their offer leaves `open` (`offers::end`, the claim,
+  `supersede`, `refresh`).
+- **Record rules.** Readers and writers are the identity's device keys without the bot mark and
+  the current master (`Signer::AnyKey`). The record must be wrapped to exactly the log's readers
+  at the head (`record::check_sealed`, `400 wrapped`), its version must be the stored one plus
+  one (`409 {version}`), and a recovery key once set is kept (`400 recovery-key`). The signed
+  request is checked inside the write's transaction (`Store::verify_request_in`), against the
+  held fold at the head it reads; the request box's post and delete do the same.
+- **Request box rules.** Only a device key without the bot mark posts (a master gets
+  `403 signer`); a new `send-master` replaces the poster's older one; a request lives at most 7
+  days; the poster or the current master deletes. The stored `signed` is the post's own signed
+  request, so a reader checks the poster without trusting the store.
+- **The identity bucket** (`limits.rs`, `IDENTITY_BURST` and `IDENTITY_REFILL_S`): offer opens,
+  inbox writes, record writes and request posts take one token, last, inside their
+  transaction, so a refused write costs nothing. Reads and waits never count. The default
+  burst of 10 lets a person link two devices that keep the master key back to back (one such
+  link takes 5 writes: offer, ticket, master push, record, and the device's record update).
+  Tests of another
+  limit use `TestStore::with_identity_burst(n)`; the agent language suite starts its store with
+  `IDENTITY_BURST=1000`.
+- **Expiry.** Reads never answer an expired inbox message or request; `Store::sweep` deletes
+  them (and old nonces), and `serve` runs it every `SWEEP_EVERY_S` (60 s). Per-address limits
+  (long polls, writes per hour, failed claims) belong with the brake and do not exist yet.
 
 ## Configuration
 
@@ -345,6 +408,8 @@ tests name them by these names.
 | `POW_BITS` | `22` | what `GET /v1/pow` publishes and a sent proof must meet |
 | `CORS_ORIGINS` | none | comma-separated browser origins (all routes but the public host profile's, which allow any origin) |
 | `FEED_TOKEN` | none | the mirror token; without one the feed answers `401` |
+| `IDENTITY_BURST` | `10` | writes per identity at once (the identity bucket) |
+| `IDENTITY_REFILL_S` | `60` | seconds per write the identity bucket refills |
 | `HELD_LOG_BYTES` | `268435456` (256 MiB) | the most heap the logs held folded in memory take together (`held::held_bytes_of`); at least twice `LOG_FOLD_BYTES`, else `serve` refuses to start |
 | `LOG_FOLD_BYTES` | `16777216` (16 MiB) | the per-log budget: the most heap one log's fold may take without the records of revoked keys, and half the most its whole fold may take; an append past either is `400 log-too-large`, unless all its events are `rotate`s |
 

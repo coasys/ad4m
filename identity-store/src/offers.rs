@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::db::{self, from_sql, to_sql};
 use crate::error::ApiError;
-use crate::{Store, Topic};
+use crate::{inbox, limits, Store, Topic};
 
 /// How long a terminal offer stays readable.
 pub const TOMBSTONE_S: u64 = 86_400;
@@ -63,7 +63,21 @@ fn refresh(conn: &Connection, scid: &str, now: u64) -> Result<bool, ApiError> {
         "DELETE FROM offers WHERE scid = ?1 AND ended_at IS NOT NULL AND ended_at <= ?2",
         params![scid, gone],
     )?;
+    inbox::drop_closed_offer_messages(conn, scid)?;
     Ok(expired > 0)
+}
+
+/// The signed offer `offer_id` of `scid` while it is `open` (its time states applied first).
+pub(crate) fn open_offer_at(
+    conn: &Connection,
+    scid: &str,
+    offer_id: &str,
+    now: u64,
+) -> Result<Option<SignedOffer>, ApiError> {
+    refresh(conn, scid, now)?;
+    Ok(read_offer(conn, scid, offer_id)?
+        .filter(|row| row.state == "open")
+        .map(|row| row.signed))
 }
 
 fn read_offer(conn: &Connection, scid: &str, offer_id: &str) -> Result<Option<OfferRow>, ApiError> {
@@ -110,7 +124,7 @@ fn end(
         "UPDATE offers SET state = ?3, ended_at = ?4 WHERE scid = ?1 AND offer_id = ?2",
         params![scid, offer_id, state, to_sql(now)?],
     )?;
-    Ok(())
+    inbox::drop_closed_offer_messages(conn, scid)
 }
 
 fn offer_state(conn: &Connection, scid: &str, row: &OfferRow) -> Result<OfferState, ApiError> {
@@ -181,7 +195,7 @@ pub(crate) fn supersede(conn: &Connection, scid: &str, now: u64) -> Result<(), A
         "UPDATE offers SET state = 'superseded', ended_at = ?2 WHERE scid = ?1 AND state IN ('open', 'claimed')",
         params![scid, to_sql(now)?],
     )?;
-    Ok(())
+    inbox::drop_closed_offer_messages(conn, scid)
 }
 
 fn receipt(offer: &SignedOffer) -> Value {
@@ -260,6 +274,7 @@ impl Store {
                 .unwrap_or(60);
             return Err(ApiError::rate_limited("identity", retry));
         }
+        limits::take_identity_write(&tx, &self.settings, scid, now)?;
         let offer = &signed.offer;
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO offers (scid, offer_id, signed, kind, commit_hash, bound_key, expires, state, created_at)
@@ -427,6 +442,7 @@ impl Store {
             "UPDATE offers SET state = 'claimed' WHERE scid = ?1 AND offer_id = ?2",
             params![scid, offer_id],
         )?;
+        inbox::drop_closed_offer_messages(&tx, scid)?;
         tx.commit()?;
         drop(conn);
         self.changed(&[Topic::offers(scid)]);

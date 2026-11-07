@@ -7,13 +7,15 @@
 
 mod common;
 
+use ad4m_hash_chain::canonical_json;
+use ad4m_identity_core::link::OfferKind;
 use ad4m_identity_core::{build, BotScope, DeviceKey, KeyLife};
 use axum::http::StatusCode;
 use identity_store::held::{held_bytes_of, state_before};
 use identity_store::Settings;
 use serde_json::{json, Value};
 
-use common::agent::{key, Person};
+use common::agent::{key, Device, Person};
 use common::TestStore;
 
 /// Grows `person`'s log by `n` events (rotations onto each next master), sent 32 to an append.
@@ -57,6 +59,20 @@ async fn note_by_d1(t: &TestStore, person: &Person) -> common::Reply {
     t.send("POST", &path, Some(body), Some(header)).await
 }
 
+/// A signed write of `value` (sent as its JCS) on `path`, by `signer_id`/`signer`.
+async fn signed_write(
+    t: &TestStore,
+    person: &Person,
+    method: &str,
+    path: &str,
+    value: &Value,
+    signer: (&str, &ed25519_dalek::SigningKey),
+) -> common::Reply {
+    let bytes = canonical_json(value).unwrap().into_bytes();
+    let header = person.request(signer.0, signer.1, method, path, &bytes, t.now() + 60);
+    t.send(method, path, Some(bytes), Some(header)).await
+}
+
 fn store_with_bound(held_log_bytes: usize) -> TestStore {
     TestStore::with_settings(Settings {
         pow_bits: 8,
@@ -91,6 +107,75 @@ async fn signed_requests_on_a_long_log_never_replay_it() {
     // Ten requests and the appends that grew the log: the log was never replayed.
     assert_eq!(t.store.held.folds(), folds);
     assert!(t.store.held.holds(&alice.scid()));
+}
+
+#[tokio::test]
+async fn inbox_record_and_request_box_writes_check_the_held_fold_and_a_revoke_refuses_them() {
+    // The inbox, record and request-box writes check their signed request inside their write
+    // transaction, against the held fold: no replay of the log. A revoke committed before a
+    // write is in that fold at once, so the revoked key's write is refused, again with no replay.
+    let t = TestStore::with_identity_burst(100);
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let phone = Device::new("alice phone");
+    assert_eq!(
+        t.link(&mut alice, &phone, OfferKind::Device, None).await,
+        "d2"
+    );
+    let master = alice.current_master();
+    let master_id = alice.master_id();
+    let as_master = (master_id.as_str(), &master);
+    let d1 = ("d1", &alice.device_key(1));
+    let d2 = ("d2", &phone.key);
+    let inbox = format!("/v1/inbox/{}/d2", alice.scid());
+    let record = format!("/v1/private/{}", alice.scid());
+    let requests = format!("/v1/requests/{}", alice.scid());
+    let message = json!({ "sealed": alice.seal_master("d2") });
+    let post = json!({"body": {"kind": "send-master"}, "expires": t.now() + 3600});
+    let folds = t.store.held.folds();
+
+    for version in 1..=3 {
+        let reply = signed_write(&t, &alice, "PUT", &inbox, &message, as_master).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        let sealed = serde_json::to_value(alice.sealed_record(version, None)).unwrap();
+        let writer = if version == 2 { d2 } else { d1 };
+        let reply = signed_write(&t, &alice, "PUT", &record, &sealed, writer).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let reply = signed_write(&t, &alice, "POST", &requests, &post, d2).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    }
+    // Nine writes after the appends that built the log: the log was never replayed.
+    assert_eq!(t.store.held.folds(), folds);
+    assert!(t.store.held.holds(&alice.scid()));
+
+    // The revoke of d2 commits; its next writes are refused at once.
+    let revoke = alice.revoke(&["d2"]);
+    let reply = t.append_push(&mut alice, revoke).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let reply = signed_write(&t, &alice, "PUT", &inbox, &message, as_master).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+    let sealed = serde_json::to_value(alice.sealed_record(4, None)).unwrap();
+    let reply = signed_write(&t, &alice, "PUT", &record, &sealed, d2).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert!(
+        detail(&reply.body).contains("not valid at the head"),
+        "{}",
+        reply.body
+    );
+    let reply = signed_write(&t, &alice, "POST", &requests, &post, d2).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert!(
+        detail(&reply.body).contains("not valid at the head"),
+        "{}",
+        reply.body
+    );
+    // Nothing of d2's was let in, and the revoke purged its inbox and requests.
+    assert_eq!(t.count("inbox"), 0);
+    assert_eq!(t.count("requests"), 0);
+    // The record d1 writes for the readers left still passes.
+    let reply = signed_write(&t, &alice, "PUT", &record, &sealed, d1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(t.store.held.folds(), folds);
 }
 
 #[tokio::test]
