@@ -685,21 +685,21 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         expect(await refused(stranger.identity.takeMaster())).to.match(/Admin credential required|403/);
         expect(await refused(desk.client.identity.takeMaster())).to.contain("no-custody-channel");
 
-        const custody = new Ad4mClient(baseUrl(desk.ports[0]), CUSTODY);
-        const taken = await custody.identity.takeMaster();
+        const service = new Ad4mClient(baseUrl(desk.ports[0]), CUSTODY);
+        const taken = await service.identity.takeMaster();
         expect(taken).to.deep.equal({ messageId: sealed.id, did, index: 0, secret: sealed.secret });
         // It waits until the custody service acknowledges it.
         expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
         expect(await desk.client.identity.inboxAck(sealed.id)).to.be.true;
         expect(await desk.client.identity.inbox()).to.deep.equal([]);
-        expect(await custody.identity.takeMaster()).to.be.null;
+        expect(await service.identity.takeMaster()).to.be.null;
     });
 
     it("the desktop's custody service takes the master key and the record shows it holds it", async () => {
-        // The custody service: the client library on the desktop's executor, with the admin
-        // credential over the loopback listener.
+        // The custody service: the client library on the desktop's executor, with the custody
+        // credential over the loopback listener (the admin credential never opens the channel).
         custody = new Holder();
-        expect(await custody.send({ cmd: "connect", url: baseUrl(desk.ports[0]), token: CREDENTIAL }))
+        expect(await custody.send({ cmd: "connect", url: baseUrl(desk.ports[0]), token: CUSTODY }))
             .to.deep.equal({ ok: true });
         expect(await custody.send({ cmd: "takeMaster" })).to.be.null;
 
