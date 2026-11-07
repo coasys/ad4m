@@ -285,6 +285,7 @@ pub(crate) mod tests {
                 store_url: Some("http://store.test".into()),
                 challenges: Default::default(),
                 inbox: Default::default(),
+                store_keys_source: crate::identity::StoreSource::Config,
             });
             db(|db| db.set_agent_identity(&agent_did, &log.scid(), now())).unwrap();
             Bound {

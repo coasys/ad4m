@@ -797,6 +797,7 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
+                inbox: Default::default(),
                 store_keys_source: crate::identity::StoreSource::Config,
             }
         };
@@ -852,6 +853,7 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
+                inbox: Default::default(),
                 store_keys_source,
             }
             .refuse_without_store_keys()
