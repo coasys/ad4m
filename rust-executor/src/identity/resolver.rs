@@ -48,6 +48,9 @@ const PAGE_EVENTS: usize = 256;
 /// How long (seconds) a log refreshed from the configured store may admit a key before the
 /// next admission refreshes it again ([`verify_expression`]).
 pub const ADMIT_FRESHNESS: u64 = 60;
+/// The most signers the key map does not know that one [`Resolver::prepare`] asks the key
+/// index about; the rest wait for a later batch or the re-check.
+pub const DISCOVERY_PER_BATCH: usize = 64;
 /// Bounds of the in-memory maps (failed fetches, confirmed keys).
 const MAP_BOUND: usize = 4096;
 /// How long the resolver stops asking the key index after it failed to answer, so an outage
@@ -917,7 +920,8 @@ impl Resolver {
     /// head is `CantCheck` ([`KeyMap::admits`] in [`check_signed_with`]) until a read
     /// succeeds. The failed attempt still counts as the window's read, so an unreachable
     /// store is tried once per window per log, not on every batch; the periodic re-check
-    /// of `cantCheck` links retries it.
+    /// of `cantCheck` links retries it. At most [`DISCOVERY_PER_BATCH`] signers the key map
+    /// does not know are looked up per call; the others stay unknown until a later one.
     pub async fn prepare(&self, signers: &[(String, Option<u64>)]) {
         self.prepare_at(signers, super::service::now()).await
     }
@@ -925,6 +929,8 @@ impl Resolver {
     /// [`Resolver::prepare`] at the unix time `now` (tests move the clock).
     pub(crate) async fn prepare_at(&self, signers: &[(String, Option<u64>)], now: u64) {
         let mut seen = std::collections::HashSet::new();
+        // Signers the key map does not know: each may cost the key index a call.
+        let mut discovered = std::collections::HashSet::new();
         for (did, anchor) in signers {
             if !seen.insert((did.as_str(), *anchor)) {
                 continue;
@@ -932,6 +938,14 @@ impl Resolver {
             let Some(key) = multikey_of(did) else {
                 continue;
             };
+            if matches!(self.cache.key_map().lookup(key), KeyLookup::Unknown)
+                && !discovered.contains(key)
+            {
+                if discovered.len() >= DISCOVERY_PER_BATCH {
+                    continue;
+                }
+                discovered.insert(key);
+            }
             let KeyLookup::Listed { scid, .. } = self.lookup_signer(key).await else {
                 continue;
             };
@@ -3547,6 +3561,39 @@ mod link_check_tests {
         assert_eq!(
             check_signed_with(&expr, resolver.cache.key_map(), None, NOW),
             valid_for(Some(did_of(&log.scid())))
+        );
+    }
+
+    /// One batch asks the key index about at most `DISCOVERY_PER_BATCH` signers the key map
+    /// does not know; the rest stay unknown (their links `CantCheck`) for the next batch or the
+    /// re-check. Signers the map already knows do not count.
+    #[tokio::test]
+    async fn a_batch_asks_the_key_index_about_a_bounded_number_of_new_signers() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        let resolver = resolver_on(store.clone());
+        let signers: Vec<(String, Option<u64>)> = (0..DISCOVERY_PER_BATCH + 36)
+            .map(|_| (TestSigner::generate().did, Some(0)))
+            .collect();
+        resolver.prepare(&signers).await;
+        assert_eq!(
+            store.key_owner_calls.load(Ordering::SeqCst),
+            DISCOVERY_PER_BATCH
+        );
+        let unknown = signers
+            .iter()
+            .filter(|(did, _)| {
+                matches!(
+                    resolver.cache.key_map().lookup(multikey_of(did).unwrap()),
+                    KeyLookup::Unknown
+                )
+            })
+            .count();
+        assert_eq!(unknown, 36);
+
+        resolver.prepare(&signers).await;
+        assert_eq!(
+            store.key_owner_calls.load(Ordering::SeqCst),
+            DISCOVERY_PER_BATCH + 36
         );
     }
 
