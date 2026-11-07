@@ -763,3 +763,28 @@ fn the_words_open_the_record_through_the_recovery_key() {
         Ok(record_fixture())
     );
 }
+
+/// Review coasys/ad4m#1632 (Data's red test): at bc18061d2 the record's AAD was `{scid,
+/// version}` and the envelope carried no writer signature, so a store could replace
+/// `recoveryKey` with a key of its own while leaving the wraps and the ciphertext intact, and
+/// the next honest writer copied the swapped key. The envelope signature covers `recoveryKey`
+/// and its attestation, and the AAD binds `recoveryKey`.
+#[test]
+fn a_record_whose_recovery_key_the_store_swapped_is_refused_by_readers_and_the_store() {
+    let log = devices_log();
+    let mut s = sealed(&log, 1, true);
+    // The store's own X25519 key, in the recovery key's place.
+    s.recovery_key = Some(x25519_multikey_of(&enc_secret(3)));
+    assert_eq!(
+        open_record(&s, &log.chain, "d1", &enc_secret(1)),
+        Err(RecordError::Signature),
+        "a device opened a record whose recovery key was swapped"
+    );
+    assert_eq!(
+        check_sealed(&s, &log.chain),
+        Err(RecordError::Signature),
+        "the store check passed a record whose recovery key was swapped"
+    );
+    // Nor does a copying writer carry it on: it no longer counts.
+    assert_eq!(recovery_of(&s, &log.chain), None);
+}

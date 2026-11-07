@@ -1270,3 +1270,70 @@ async fn a_refused_write_takes_no_token() {
         assert_eq!(reply.status, StatusCode::OK);
     }
 }
+
+/// Review coasys/ad4m#1632 (Data's red test): at bc18061d2 the next-version rule ran only when a
+/// row existed, so a first write could carry any version. At 2^53 − 1 the next version is past
+/// the safe integers and every later write is refused with no way back. The first write must be
+/// version 1.
+#[tokio::test]
+async fn a_first_record_write_must_be_version_one() {
+    let t = TestStore::with_identity_burst(100);
+    let (alice, _phone) = alice_with_phone(&t).await;
+    let path = format!("/v1/private/{}", alice.scid());
+    let d1 = ("d1", &alice.device_key(1));
+    let recovery = X25519Secret::from([5u8; 32]);
+    for version in [0u64, 2, (1u64 << 53) - 1] {
+        let first =
+            serde_json::to_value(alice.sealed_record(version, Some(x25519_multikey_of(&recovery))))
+                .unwrap();
+        let reply = signed_body(&t, &alice, "PUT", &path, &first, d1).await;
+        assert_ne!(
+            reply.status,
+            StatusCode::OK,
+            "a first write at version {version} was kept"
+        );
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{version}");
+        assert_eq!(reply.body["version"], 0, "{version}");
+    }
+}
+
+/// Review coasys/ad4m#1632 (Data's red test): at bc18061d2, with no recovery key stored, any
+/// non-bot device key installed one, and from then on no writer, the master included, could
+/// change it. Installing or replacing the recovery key needs the current master.
+#[tokio::test]
+async fn a_device_key_alone_does_not_install_the_recovery_key() {
+    let t = TestStore::with_identity_burst(100);
+    let (alice, _phone) = alice_with_phone(&t).await;
+    let path = format!("/v1/private/{}", alice.scid());
+    let d1 = ("d1", &alice.device_key(1));
+    let recovery = X25519Secret::from([7u8; 32]);
+    let v1 =
+        serde_json::to_value(alice.sealed_record(1, Some(x25519_multikey_of(&recovery)))).unwrap();
+    let reply = signed_body(&t, &alice, "PUT", &path, &v1, d1).await;
+    assert_ne!(
+        reply.status,
+        StatusCode::OK,
+        "a device key installed a recovery key on its own: {}",
+        reply.body
+    );
+    // The helper attaches the current master's attestation; a device-signed write still may
+    // not install the key, only copy it.
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.body["error"], "recovery-key");
+    // The master installs it.
+    let by_master = alice.sealed_record_by(
+        1,
+        Some(alice.attest_recovery(x25519_multikey_of(&recovery))),
+        &alice.current_master(),
+    );
+    let reply = signed_body(
+        &t,
+        &alice,
+        "PUT",
+        &path,
+        &serde_json::to_value(by_master).unwrap(),
+        d1,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
