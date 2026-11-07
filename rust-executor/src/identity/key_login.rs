@@ -36,7 +36,9 @@ use super::types::{
     UnsignedKeyStatement,
 };
 use super::verdict::{KeyVerdict, VerdictChange};
-use crate::agent::capabilities::{get_user_default_capabilities, grant_caps_for, AuthInfo};
+use crate::agent::capabilities::{
+    get_user_default_capabilities, grant_caps_for, AuthInfo, AGENT_UPDATE_CAPABILITY,
+};
 use crate::agent::grants::{self, Grants, KeyBinding, KeyGrant, LiveGrant};
 use crate::agent::session::{Principal, Session};
 use crate::agent::{did_for_context, AgentContext};
@@ -81,6 +83,8 @@ pub enum KeyLoginError {
     Grant,
     /// Too many challenges are open.
     TooManyChallenges,
+    /// The session may not do this: the message says what it lacks.
+    Forbidden(String),
     /// The call does not fit the session (no key-bound grant, no identity to sign for) or the
     /// statement's shape: the message says which.
     BadRequest(String),
@@ -100,6 +104,7 @@ impl KeyLoginError {
             KeyLoginError::StoreUnavailable => "store-unavailable",
             KeyLoginError::Grant => "grant",
             KeyLoginError::TooManyChallenges => "too-many-challenges",
+            KeyLoginError::Forbidden(_) => "forbidden",
             KeyLoginError::BadRequest(_) => "bad-request",
             KeyLoginError::Internal(_) => "internal",
         }
@@ -125,6 +130,7 @@ impl From<KeyLoginError> for WsRpcError {
                 message: code.into(),
             },
             KeyLoginError::TooManyChallenges => WsRpcError::too_many_requests(code),
+            KeyLoginError::Forbidden(m) => WsRpcError::forbidden(m),
             KeyLoginError::BadRequest(m) => WsRpcError::bad_request(m),
             KeyLoginError::Internal(m) => WsRpcError::internal(m),
         }
@@ -536,7 +542,9 @@ pub async fn renew(
     if !signature_holds(&proof) {
         return Err(KeyLoginError::Signature);
     }
-    let read = match service
+    // On the cached log, the key was not checked: the grace keeps running from the last real
+    // check, so a device revoked on the store during the outage cannot renew past it.
+    let (read, checked_at) = match service
         .resolver
         .session_key(&binding.scid, &binding.key, LOGIN_MAX_AGE)
         .await
@@ -544,12 +552,15 @@ pub async fn renew(
         Err(SessionKeyError::StoreUnavailable)
             if now.saturating_sub(binding.checked_at()) < STORE_OUTAGE_GRACE =>
         {
-            service
-                .resolver
-                .cached_session_key(&binding.scid, &binding.key)
-                .await
+            (
+                service
+                    .resolver
+                    .cached_session_key(&binding.scid, &binding.key)
+                    .await,
+                binding.checked_at(),
+            )
         }
-        other => other,
+        other => (other, now),
     };
     let key = match read {
         Ok(key) if key.admits() => key,
@@ -561,7 +572,7 @@ pub async fn renew(
     };
     let until = now + KEY_SESSION_TTL;
     let grant = Grants::global()
-        .renew(&grant.id, until, key.head_seq, now)
+        .renew(&grant.id, until, key.head_seq, checked_at)
         .map_err(|e| match e {
             grants::GrantError::NotFound => KeyLoginError::Grant,
             grants::GrantError::Store(e) => KeyLoginError::Internal(e),
@@ -638,6 +649,15 @@ pub fn end_all_sessions(
         return Err(KeyLoginError::BadRequest(
             "user.endAllSessions needs a session that a key login opened, or a session on a managed agent"
                 .into(),
+        ));
+    }
+    // Ending the agent's other grants (its logins, its approved apps) takes AGENT_UPDATE, as
+    // `user.revokeAllSessions` does: an app the user approved with read capabilities only must
+    // not log the user out everywhere. A key-bound session ends its identity's grants whatever
+    // its capabilities: the device key is the proof.
+    if managed.is_some() && !session.may(&AGENT_UPDATE_CAPABILITY) {
+        return Err(KeyLoginError::Forbidden(
+            "user.endAllSessions on a managed agent needs the AGENT UPDATE capability".into(),
         ));
     }
     let keep = keep_current.then(|| session.grant_id()).flatten();
@@ -1925,5 +1945,116 @@ mod tests {
         .unwrap();
         assert!(open(&renewed.token).is_ok());
         no_operator();
+    }
+
+    // While the store is down, a renewal proceeds on the cached log only for STORE_OUTAGE_GRACE
+    // after the last REAL check. The fallback renewal is no check: it must not move
+    // `checked_at`, or a device revoked on the store during the outage renews for ever.
+    #[tokio::test]
+    async fn an_outage_renewal_does_not_extend_the_outage_grace() {
+        let mut world = world(230).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        let binding = session.key_binding().unwrap();
+        let checked = binding.checked_at();
+        let renewal = |world: &World, at: u64| {
+            let mut statement = world.statement(&world.phone);
+            statement.purpose = KeyPurpose::Renew;
+            statement.grant = Some(result.grant_id.clone());
+            statement.challenge = world.service.challenges.issue(at).unwrap().0;
+            statement.issued_at = at;
+            signed(statement, &world.phone)
+        };
+
+        // The store goes down right after the login; the cached log is what there is.
+        world.store.store_down.store(true, Ordering::SeqCst);
+
+        // Fifty minutes on: renewed on the cached log, within the grace of the login's check.
+        let first = checked + 50 * 60;
+        world.service.cache.note_refreshed(&world.log.scid(), 0);
+        renew(&world.service, &session, renewal(&world, first), first)
+            .await
+            .unwrap();
+        assert_eq!(
+            binding.checked_at(),
+            checked,
+            "a renewal on the cached log is no check of the key"
+        );
+
+        // A hundred minutes on: the last real check is past the grace, so a renewal fails closed.
+        let second = checked + 100 * 60;
+        world.service.cache.note_refreshed(&world.log.scid(), 0);
+        assert_eq!(
+            renew(&world.service, &session, renewal(&world, second), second)
+                .await
+                .unwrap_err(),
+            KeyLoginError::StoreUnavailable,
+            "the outage grace is measured from the last real check, not the last renewal"
+        );
+        assert_eq!(binding.checked_at(), checked);
+        world.store.store_down.store(false, Ordering::SeqCst);
+        no_operator();
+    }
+
+    // A session on a managed agent ends the agent's other grants only with AGENT_UPDATE, as
+    // `user.revokeAllSessions` requires: an app the user approved with read capabilities only
+    // must not log the user out everywhere.
+    #[tokio::test]
+    async fn a_read_only_app_cannot_end_its_owners_sessions() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_test_db();
+        let user = AgentContext::managed("did:key:z6MkReadOnlyOwner".into());
+        let auth = |name: &str, caps: Vec<crate::agent::capabilities::Capability>| AuthInfo {
+            app_name: name.into(),
+            capabilities: Some(caps),
+            ..AuthInfo::default()
+        };
+        // The sessions as `Session::open` builds them from a managed agent's grant: its agent,
+        // its grant and its capabilities (the wallet holds no key for this test agent).
+        let session_on = |grant: Arc<LiveGrant>| {
+            Session::for_test(Principal::Agent(user.clone()))
+                .with_caps(grant.caps.clone())
+                .with_grant(grant)
+        };
+        let (_, login_grant) = grants::mint(
+            user.clone(),
+            auth("login", get_user_default_capabilities()),
+            None,
+            3600,
+        )
+        .unwrap();
+        let (_, app_grant) = grants::mint(
+            user.clone(),
+            auth(
+                "reader",
+                vec![crate::agent::capabilities::AGENT_READ_CAPABILITY.clone()],
+            ),
+            None,
+            3600,
+        )
+        .unwrap();
+        let login_session = session_on(login_grant);
+        let app = session_on(app_grant);
+        assert!(!app.may(&crate::agent::capabilities::AGENT_UPDATE_CAPABILITY));
+
+        // The read-only app: refused, and the owner's login stands.
+        assert!(
+            matches!(
+                end_all_sessions(&app, true, None),
+                Err(KeyLoginError::Forbidden(_))
+            ),
+            "a read-only app must not end the owner's sessions"
+        );
+        assert!(login_session.check().is_ok(), "the owner's login stands");
+
+        // The owner's login (AGENT_UPDATE) ends the app's grant.
+        assert_eq!(
+            end_all_sessions(&login_session, true, None).unwrap().ended,
+            1
+        );
+        assert_eq!(app.check(), Err(AuthError::Revoked));
+        assert!(login_session.check().is_ok());
     }
 }
