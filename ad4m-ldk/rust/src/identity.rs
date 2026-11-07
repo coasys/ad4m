@@ -450,8 +450,24 @@ pub struct SealedRecord {
     pub wrapped: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_key: Option<String>,
+    /// The current master's attestation of `recovery_key`; present exactly when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_attestation: Option<RecoveryAttestation>,
     pub nonce: String,
     pub ciphertext: String,
+    /// The writer's key id: a device key without the bot mark, or the current master.
+    pub signer: String,
+    /// That key over the envelope (`coasys:private-record`).
+    pub sig: String,
+}
+
+/// A master key over `{scid, recoveryKey, keyId}` (`coasys:recovery-key`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryAttestation {
+    /// The master key's id (`"m0"`).
+    pub key_id: String,
+    pub sig: String,
 }
 
 /// The answer of a record write.
