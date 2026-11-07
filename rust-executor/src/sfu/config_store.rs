@@ -204,8 +204,11 @@ mod tests {
                 signature: String::new(),
                 valid: Some(valid),
                 invalid: Some(!valid),
+                anchor: None,
             },
             status: None,
+            verdict: None,
+            person: None,
         }
     }
 

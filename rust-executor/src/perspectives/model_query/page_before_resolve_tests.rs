@@ -116,6 +116,7 @@ pub(super) fn link(source: &str, predicate: &str, target: &str, ts: &str) -> Lin
         proof: ExpressionProof {
             key: "key".to_string(),
             signature: "sig".to_string(),
+            anchor: None,
         },
         status: Some(LinkStatus::Shared),
     }

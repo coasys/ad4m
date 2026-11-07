@@ -538,14 +538,16 @@ export async function assertStaysFalse(
 }
 
 /**
- * Clears all links in a perspective in a single removeLinks() batch call.
+ * Clears all links in a perspective, invalid ones included, in a single removeLinks() batch call.
  * Import from here or from helpers/assertions to get a clean slate before each test.
  */
 export async function wipePerspective(
   perspective: import("@coasys/ad4m").PerspectiveProxy,
 ): Promise<void> {
   const { LinkQuery } = await import("@coasys/ad4m");
-  const links = await perspective.get(new LinkQuery({}));
+  // `includeUnverified`: a plain read leaves out invalid (e.g. forged) links,
+  // which would then survive the wipe.
+  const links = await perspective.get(new LinkQuery({ includeUnverified: true }));
   if (links.length > 0) {
     await perspective.removeLinks(links);
   }

@@ -433,6 +433,7 @@ pub async fn load_shacl_flows(
         from_date: None,
         until_date: None,
         limit: None,
+        include_unverified: None,
     };
     let type_links = perspective
         .get_links(&type_query)
@@ -456,6 +457,7 @@ pub async fn load_shacl_flows(
             from_date: None,
             until_date: None,
             limit: None,
+            include_unverified: None,
         };
         let flow_links = match perspective.get_links(&flow_query).await {
             Ok(l) => l,
@@ -486,6 +488,7 @@ pub async fn load_shacl_flows(
                 from_date: None,
                 until_date: None,
                 limit: None,
+                include_unverified: None,
             };
             match perspective.get_links(&child_query).await {
                 Ok(child_links) => bag.extend(child_links.into_iter().map(|d| d.data)),

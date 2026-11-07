@@ -2,5 +2,17 @@
 import type { DecoratedExpressionProof } from "./DecoratedExpressionProof";
 import type { Link } from "./Link";
 import type { LinkStatus } from "./LinkStatus";
+import type { LinkVerdict } from "./LinkVerdict";
 
-export type DecoratedLinkExpression = { author: string, timestamp: string, data: Link, proof: DecoratedExpressionProof, status: LinkStatus | null, };
+export type DecoratedLinkExpression = { author: string, timestamp: string, data: Link, proof: DecoratedExpressionProof, status: LinkStatus | null, 
+/**
+ * The link's verdict, as this executor judged it. Logic reads count only `valid`;
+ * display reads show `cantCheck` and `flagged` with it and never return `invalid`.
+ */
+verdict?: LinkVerdict, 
+/**
+ * The `did:scid` the signer's key speaks for (a bot key: its owner), derived from the
+ * signer and the anchor; only on a `valid` link whose signer a log lists. The link itself
+ * never carries it.
+ */
+person?: string, };

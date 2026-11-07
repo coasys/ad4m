@@ -1,12 +1,17 @@
 use chrono::{DateTime, Utc};
 use hdi::prelude::*;
 
+/// A link's proof. `anchor` is the key-log position an anchored link was signed at; an entry
+/// written before anchors existed reads with `None`, and `None` is not written, so such an
+/// entry re-encodes to the same bytes.
 #[derive(
     Serialize, Deserialize, Clone, SerializedBytes, Debug, PartialEq, Eq, Hash, Ord, PartialOrd,
 )]
 pub struct ExpressionProof {
     pub signature: String,
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<u64>,
 }
 
 #[derive(
@@ -279,6 +284,87 @@ impl OnlineAgent {
     pub fn get_sb(self) -> ExternResult<SerializedBytes> {
         self.try_into()
             .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use holochain_serialized_bytes::{decode, encode};
+
+    /// A link as the executor sends it, with the proof's `anchor`.
+    #[derive(Serialize, Deserialize, Debug)]
+    struct WireLink {
+        author: String,
+        data: Triple,
+        timestamp: String,
+        proof: WireProof,
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct WireProof {
+        signature: String,
+        key: String,
+        #[serde(default)]
+        anchor: Option<u64>,
+    }
+
+    /// The proof as the DNA before anchors wrote it.
+    #[derive(Serialize, Deserialize, Debug)]
+    struct OldLink {
+        author: String,
+        data: Triple,
+        timestamp: String,
+        proof: OldProof,
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct OldProof {
+        signature: String,
+        key: String,
+    }
+
+    fn triple() -> Triple {
+        Triple {
+            source: Some("ad4m://self".into()),
+            predicate: Some("ad4m://has".into()),
+            target: Some("literal://string:x".into()),
+        }
+    }
+
+    #[test]
+    fn an_anchored_link_keeps_its_anchor_through_an_entry() {
+        let sent = encode(&WireLink {
+            author: "did:test:alice".into(),
+            data: triple(),
+            timestamp: "2026-10-30T00:00:00.000Z".into(),
+            proof: WireProof { signature: "sig".into(), key: "key".into(), anchor: Some(7) },
+        })
+        .unwrap();
+        let link: LinkExpression = decode(&sent).unwrap();
+        let entry = encode(&PerspectiveDiffEntryReference::new(
+            PerspectiveDiff { additions: vec![link], removals: vec![] },
+            None,
+        ))
+        .unwrap();
+        let stored: PerspectiveDiffEntryReference = decode(&entry).unwrap();
+        let back: WireLink = decode(&encode(&stored.diff.additions[0]).unwrap()).unwrap();
+        assert_eq!(back.proof.anchor, Some(7));
+    }
+
+    #[test]
+    fn a_link_from_the_old_dna_reads_without_an_anchor_and_writes_the_same_bytes() {
+        let old = encode(&OldLink {
+            author: "did:test:alice".into(),
+            data: triple(),
+            timestamp: "2026-10-30T00:00:00.000Z".into(),
+            proof: OldProof { signature: "sig".into(), key: "key".into() },
+        })
+        .unwrap();
+        let link: LinkExpression = decode(&old).unwrap();
+        let back: WireLink = decode(&encode(&link).unwrap()).unwrap();
+        assert_eq!(back.proof.anchor, None);
+        assert_eq!(encode(&link).unwrap(), old);
     }
 }
 

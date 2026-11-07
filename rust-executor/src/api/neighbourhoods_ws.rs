@@ -364,6 +364,48 @@ mod tests {
             Some(true),
             "link signature"
         );
+        assert_eq!(
+            received.data.links[0].verdict,
+            Some(crate::identity::verdict::LinkVerdict::Valid),
+            "link verdict"
+        );
         assert_eq!(received.proof.valid, Some(true), "perspective signature");
+    }
+
+    // `sendSignal` / `setOnlineStatus` with a link the caller built: the executor
+    // passes it on as given, and the receiver marks a bad signature invalid. The
+    // SDK's telepresence payloads carry that verdict.
+    #[test]
+    fn a_forged_link_in_a_payload_comes_back_invalid() {
+        use crate::identity::verdict::{InvalidReason, LinkVerdict};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let signal: PerspectiveExpression = serde_json::from_value(json!({
+            "author": "did:test",
+            "timestamp": "2026-10-30T00:00:00.000Z",
+            "data": { "links": [{
+                "author": "did:test",
+                "timestamp": "2026-10-30T00:00:00.000Z",
+                "data": { "source": "alice", "target": "bob", "predicate": "signal" },
+                "proof": { "key": "key", "signature": "sig" },
+            }]},
+            "proof": { "key": "key", "signature": "sig" },
+        }))
+        .unwrap();
+
+        let mut received = through_link_language(&signal);
+        received.verify_signatures();
+
+        let link = &received.data.links[0];
+        assert_eq!(link.proof.valid, Some(false));
+        assert_eq!(link.proof.invalid, Some(true));
+        assert_eq!(
+            link.verdict,
+            Some(LinkVerdict::Invalid(InvalidReason::BadSignature))
+        );
+        assert_eq!(
+            serde_json::to_value(&link.verdict).unwrap(),
+            json!({ "kind": "invalid", "reason": "badSignature" })
+        );
     }
 }

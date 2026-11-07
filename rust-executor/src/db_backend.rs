@@ -379,6 +379,7 @@ macro_rules! ad4m_db_methods {
             fn agent_identity(&self, agent_did: &str) -> Ad4mDbResult<Option<String>>;
             fn set_agent_identity(&self, agent_did: &str, scid: &str, set_at: u64) -> Ad4mDbResult<()>;
             fn agents_of_identity(&self, scid: &str) -> Ad4mDbResult<Vec<String>>;
+            fn local_identities(&self) -> Ad4mDbResult<Vec<String>>;
             fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
 

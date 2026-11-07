@@ -121,6 +121,7 @@ fn as_input(link: &LinkExpression) -> LinkExpressionInput {
             signature: Some(link.proof.signature.clone()),
             valid: None,
             invalid: None,
+            anchor: link.proof.anchor,
         },
         timestamp: link.timestamp.clone(),
         status: link.status.clone(),
@@ -492,6 +493,7 @@ async fn t3_a_retraction_by_anyone_else_or_unsigned_removes_nothing() {
     forged.proof = ExpressionProof {
         key: forged.proof.key.clone(),
         signature: "00".repeat(64),
+        anchor: forged.proof.anchor,
     };
     sync_in(&p, vec![by_bob, forged], vec![]).await;
 

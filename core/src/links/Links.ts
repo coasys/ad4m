@@ -4,6 +4,7 @@ import type { LinkExpression as WireLinkExpression } from "../generated/api/Link
 import type { LinkExpressionInput as WireLinkExpressionInput } from "../generated/api/LinkExpressionInput";
 import type { LinkMutations as WireLinkMutations } from "../generated/api/LinkMutations";
 import type { LinkStatus as WireLinkStatus } from "../generated/api/LinkStatus";
+import type { LinkVerdict } from "../generated/api/LinkVerdict";
 import type { PerspectiveLinkDiff } from "../generated/api/PerspectiveLinkDiff";
 export class Link {
     source: string;
@@ -54,11 +55,21 @@ export class LinkExpression extends ExpressionGeneric(Link) {
         return hash;
     }
     status?: WireLinkStatus;
+    /** The executor's verdict on the link. Logic reads count only `valid` links;
+     *  `perspective.get` returns `cantCheck` and `flagged` links with it and never
+     *  an `invalid` one. */
+    verdict?: LinkVerdict;
+    /** The `did:scid` of the person whose device key signed the link (a bot key:
+     *  its owner), derived by the executor; only on a `valid` link. `author` stays
+     *  the signing device key. */
+    person?: string;
 
     /** Build a LinkExpression (with `hash()`) from the executor's wire shape. */
     static fromWire(wire: WireLinkExpression | DecoratedLinkExpression): LinkExpression {
         const link = new LinkExpression(wire.author, wire.timestamp, wire.data, wire.proof)
         if (wire.status) link.status = wire.status
+        if ("verdict" in wire && wire.verdict) link.verdict = wire.verdict
+        if ("person" in wire && wire.person) link.person = wire.person
         return link
     }
 };
@@ -72,7 +83,11 @@ export function linkExpressionToWire(link: LinkExpression): WireLinkExpression {
         author: link.author,
         timestamp: link.timestamp,
         data: { source: link.data.source, target: link.data.target, predicate: link.data.predicate ?? null },
-        proof: { key: link.proof.key, signature: link.proof.signature },
+        proof: {
+            key: link.proof.key,
+            signature: link.proof.signature,
+            ...(link.proof.anchor !== undefined ? { anchor: link.proof.anchor } : {}),
+        },
         status: link.status ?? null,
     }
 }
@@ -82,7 +97,13 @@ export function linkExpressionInputToWire(link: LinkExpressionInput): WireLinkEx
         author: link.author,
         timestamp: link.timestamp,
         data: { source: link.data.source, target: link.data.target, predicate: link.data.predicate },
-        proof: { key: link.proof.key, signature: link.proof.signature, valid: link.proof.valid, invalid: link.proof.invalid },
+        proof: {
+            key: link.proof.key,
+            signature: link.proof.signature,
+            valid: link.proof.valid,
+            invalid: link.proof.invalid,
+            ...(link.proof.anchor !== undefined ? { anchor: link.proof.anchor } : {}),
+        },
         status: link.status,
     }
 }
