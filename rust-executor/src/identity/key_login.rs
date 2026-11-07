@@ -793,6 +793,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            store_keys_source: crate::identity::StoreSource::Config,
         }
     }
 
@@ -812,6 +813,7 @@ mod tests {
                 cache: self.service.cache.clone(),
                 store_url: None,
                 challenges: Default::default(),
+                store_keys_source: crate::identity::StoreSource::Config,
             };
             self.store = store;
             self

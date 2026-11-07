@@ -29,7 +29,9 @@ export class IdentityClient {
     /**
      * This agent's identity, device key, `enc` key and the cached head. `storeBehind` is set
      * (`{ since, seq }`) while the configured store answers the log behind the executor's cache,
-     * and `null` once it catches up.
+     * and `null` once it catches up. `store` is the identity store this executor uses
+     * (`{ url, trusted }`: its config's, else its network's) and whether it trusts a key for it;
+     * `null` when its network has no store, so identities cannot be created or linked there.
      */
     async status(): Promise<IdentityStatus> {
         return this.#apiClient.call("identity.status", {});
@@ -111,7 +113,8 @@ export class IdentityClient {
     /**
      * A new main wallet key for this executor, so a revoked executor can link again. The old
      * key stays for history. Only the operator on the executor's machine (the admin credential
-     * on a loopback listener); any other caller gets 403 `local-only`.
+     * on a loopback listener). A caller without the admin credential gets 403 "Admin credential
+     * required"; the admin credential on a network listener gets 403 `local-only`.
      */
     async rekey(): Promise<DeviceKeys> {
         return this.#apiClient.call("identity.rekey", {});

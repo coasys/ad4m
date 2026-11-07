@@ -6,7 +6,7 @@
   "type": "module",
   "types": "",
   "scripts": {
-    "build": "pnpm build-deno-snapshot && pnpm build-lib",
+    "build": "pnpm build-deno-snapshot",
     "build-lib": "cargo build --release",
     "build-deno-snapshot": "cargo run --release --features generate_snapshot --bin generate_snapshot",
     "test": "cargo test --release -- --test-threads=1"

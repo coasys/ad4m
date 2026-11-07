@@ -78,9 +78,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   and `PR_SET_DUMPABLE = 0`.
 - **Local only.** A method registered `.local_only()` answers only the operator on this
   machine (`Session::is_operator_on_this_machine`: the admin credential, or no token on an
-  executor without one, on a loopback listener). Every other caller, the admin credential on
-  a network listener included, gets 403 `local-only`. It is on `agent.unlock`,
-  `identity.rekey`, `identity.custodyStatus` and `runtime.quit`, and `runtime.setConfig`
+  executor without one, on a loopback listener). The method's guard answers first (403 "Admin
+  credential required" for a caller without the credential); the admin credential on a
+  network listener gets 403 `local-only`. It is on `agent.unlock`,
+  `identity.rekey`, `identity.custodyStatus`, `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
   refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
   An operator from a key login is never on this machine, so these refuse it too; it calls
   every other method as the operator, `agent.generate`, `agent.import`, `agent.lock`,
@@ -196,9 +197,12 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   resolution metadata (`coasys:skipped`), never recorded as a fork. A head counts only under a key of the
   config's `identity.storeKeys`, authorship reads a log only up to that head, and
   `identity.storeUrl` and `identity.storeKeys` become the agent language's `storeUrl` and
-  `storeKeys` settings at every start (unset removes them; with neither set, the keys are the
-  default store's, `identity::DEFAULT_STORE_KEY`; a `storeUrl` without `storeKeys` has none
-  and warns at start: no `did:scid` record verifies). A different event at a held seq that holds on the prefix
+  `storeKeys` settings at every start (unset removes them; with neither set, the store and
+  keys are the network seed's `identityStore` (the compiled-in `mainnet_seed.json` names
+  `https://store.ad4m.dev`, today's staging network; a seed file without one, as an older
+  `init` wrote, gets the compiled-in seed's), and without one there is no store; a
+  `storeUrl` without `storeKeys` has no key; without a key the executor warns at start: no
+  `did:scid` record verifies). A different event at a held seq that holds on the prefix
   records a fork, keeps the history and fires `identity-fork`; a store answering a shorter log
   is behind (or an unverified conflict), records nothing, and the cache answers.
   `ad4m-executor init --operator <did:scid>` records the operator (`operator_record`, never
@@ -208,8 +212,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   device `did:key`. `identity.resolve` (`identity/resolver.rs`) answers a DID Core resolution
   result for a `did:scid:coasys:1` DID URL or a device `did:key`; a URL's `src` must name a
   public HTTPS host unless `identity.allowPrivateSrc` is set. `identity.rekey` (local only, or
-  `ad4m-executor rekey`) gives the main agent a new wallet key and moves every place that holds
-  its DID (`identity/rekey.rs`); tokens signed with the old key stop working.
+  `ad4m-executor rekey`) gives the main agent a new wallet key and moves the places that hold
+  its DID (`identity/rekey.rs`); tokens signed with the old key stop working. A perspective
+  that is not open at the time keeps the retired DID as owner until a later unlock moves it.
   `identity.custodyStatus` is the custody channel (`identity/custody.rs`).
 
 ## Do / don't
