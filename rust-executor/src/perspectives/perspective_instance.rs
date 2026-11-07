@@ -8971,7 +8971,7 @@ mod tests {
             .register_shape_json(changed, &AgentContext::main_agent())
             .await
             .expect("re-register");
-        assert_eq!(result.written, vec!["Recipe".to_string()]);
+        assert_eq!(result.written, vec!["ns://Recipe".to_string()]);
 
         let second = perspective.get_shape("Recipe").expect("second lookup");
         assert!(!Arc::ptr_eq(&first, &second));

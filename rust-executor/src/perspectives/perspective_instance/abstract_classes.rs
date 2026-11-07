@@ -4,9 +4,10 @@
 //! wires it, as a child of `perspective_instance` to reach its private state.
 //!
 //! A write through an abstract class dispatches to the record's own classes
-//! among those the abstract class reads (`subject_classes_of` ∩ the
-//! resolution). An update runs each class's setter for the property that
-//! answers to the abstract name; a delete runs each class's destructor.
+//! among those the abstract class reads (`subject_class_iris_of` ∩ the
+//! resolution), by target class IRI on both sides: of two classes of one
+//! name, a record's write runs its own class's actions. An update runs each
+//! class's setter for the property that answers to the abstract name; a delete runs each class's destructor.
 //! Commands two classes share run once. Values are not converted: what one
 //! class stores as HTML another gets as is. Creating one is refused.
 
@@ -26,6 +27,7 @@ use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
 use crate::perspectives::perspective_instance::SubjectClassOption;
 use crate::perspectives::shacl_parser::class_name_of;
+use crate::perspectives::subject_classes_of::subject_class_iris_of;
 use serde_json::Value;
 
 /// What the installed shapes say about abstract classes, and how many times
@@ -255,14 +257,23 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// The classes `base` is an instance of, by target class IRI: two
+    /// classes of one name are told apart, as the resolution tells them.
+    fn own_classes(&self, base: &str) -> Result<Vec<String>, AnyError> {
+        let resolver = self.shape_resolver();
+        Ok(
+            subject_class_iris_of(&self.sparql_store, &resolver, &[base.to_string()])?
+                .remove(base)
+                .unwrap_or_default(),
+        )
+    }
+
     /// The classes of `base` a write through `abstract_class` reaches: those
-    /// it is, among those the abstract class reads. Never empty.
+    /// it is, among those the abstract class reads, by target class IRI.
+    /// Never empty.
     fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
-        let own = self
-            .subject_classes_of(&[base.to_string()])?
-            .remove(base)
-            .unwrap_or_default();
+        let own = self.own_classes(base)?;
         let targets: Vec<String> = resolution
             .classes
             .iter()
@@ -639,10 +650,7 @@ impl PerspectiveInstance {
             return Ok(None);
         }
         let resolution = self.resolve_abstract(CONTAINER_URI)?;
-        let own = self
-            .subject_classes_of(&[base.to_string()])?
-            .remove(base)
-            .unwrap_or_default();
+        let own = self.own_classes(base)?;
         let index = self.abstract_index()?;
         let alias_key = builtin(CONTAINER_URI)
             .map(|b| b.name)

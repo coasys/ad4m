@@ -451,16 +451,16 @@ async fn the_resolution_is_cached_and_dropped_when_shapes_change() {
         setup_perspective_no_llm(&[("TextContent", TEXT_CONTENT_SDNA), ("Chat", CHAT_SDNA)]).await;
     let resolve = |p: &PerspectiveInstance| p.resolve_abstract("TextContent").unwrap();
     let first = resolve(&p);
-    assert_eq!(first.classes, vec!["Chat"]);
+    assert_eq!(first.classes, vec!["ns://Chat"]);
     assert!(Arc::ptr_eq(&first, &resolve(&p)), "served from the cache");
 
     install(&mut p, &ctx, "Message", MESSAGE_SDNA).await;
-    assert_eq!(resolve(&p).classes, vec!["Chat", "Message"]);
+    assert_eq!(resolve(&p).classes, vec!["ns://Chat", "ns://Message"]);
 
     let abstract_chat = CHAT_SDNA.replacen("{\n", "{\"abstract\":true,\n", 1);
     install(&mut p, &ctx, "Chat", &abstract_chat).await;
     assert!(p.abstract_index().unwrap().is_abstract("Chat"));
-    assert_eq!(resolve(&p).classes, vec!["Message"]);
+    assert_eq!(resolve(&p).classes, vec!["ns://Message"]);
     // And back: the refresh purges the marker.
     install(&mut p, &ctx, "Chat", CHAT_SDNA).await;
     assert!(!p.abstract_index().unwrap().is_abstract("Chat"));
@@ -567,7 +567,7 @@ async fn a_subscription_follows_the_installed_shapes() {
         (late, "ns://body", "literal://string:@data hi"),
     ];
     let update = sub.pass(&p, &writes).await.expect("the new class's record");
-    assert!(update.contains(late) && update.contains("\"__subjectClass\":\"Message\""));
+    assert!(update.contains(late) && update.contains("\"__subjectClass\":\"ns://Message\""));
 
     // The alias moves to `content`, which only the new view reads.
     install(&mut p, &ctx, "Message", MESSAGE_MOVED_SDNA).await;
@@ -676,10 +676,14 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
     assert_eq!(
         rows(&builtin),
         vec![
-            ("ad4m://chat/b".into(), "Chat".into(), "chat text".into()),
+            (
+                "ad4m://chat/b".into(),
+                "ns://Chat".into(),
+                "chat text".into()
+            ),
             (
                 "ad4m://message/b".into(),
-                "Message".into(),
+                "ns://Message".into(),
                 "message body".into()
             ),
         ]
@@ -752,4 +756,188 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("abstract class"), "{err}");
+}
+
+/// Anything with a `title` and `children`. Its own predicates are `ns://`,
+/// which no concrete class reads.
+const NOTE_SDNA: &str = r#"{
+  "target_class":"ns://Note",
+  "abstract":true,
+  "properties":[
+    {"path":"ns://title","name":"title","max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://children","name":"children","relation_kind":"hasMany",
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://children","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://children","target":"value"}]}
+  ]
+}"#;
+
+/// Two apps' `Task`, each a `Note` at its own predicates: `a://Task.title`,
+/// and `b://Task.heading` aliased `title`.
+fn task_sdna(ns: &str, title: &str) -> String {
+    let alias = match title {
+        "title" => String::new(),
+        _ => r#","alias":{"Note":"title"}"#.to_string(),
+    };
+    format!(
+        r#"{{
+  "target_class":"{ns}://Task",
+  "constructor_actions":[{{"action":"addLink","source":"this","predicate":"{ns}://kind","target":"{ns}://task"}}],
+  "properties":[
+    {{"path":"{ns}://kind","name":"kind","has_value":"{ns}://task","min_count":1,"max_count":1}},
+    {{"path":"{ns}://{title}","name":"{title}","max_count":1{alias},"setter":[{{"action":"setSingleTarget","source":"this","predicate":"{ns}://{title}","target":"value"}}]}},
+    {{"path":"{ns}://child","name":"children","relation_kind":"hasMany",
+     "adder":[{{"action":"addLink","source":"this","predicate":"{ns}://child","target":"value"}}],
+     "remover":[{{"action":"removeLink","source":"this","predicate":"{ns}://child","target":"value"}}]}}
+  ]
+}}"#
+    )
+}
+
+/// `Note`, `a://Task` with `ta` and `b://Task` with `tb`.
+async fn same_name_setup() -> (PerspectiveInstance, AgentContext) {
+    let a_task = task_sdna("a", "title");
+    let b_task = task_sdna("b", "heading");
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("Note", NOTE_SDNA),
+        ("Task", a_task.as_str()),
+        ("Task", b_task.as_str()),
+    ])
+    .await;
+    create(&mut p, &ctx, "a://Task", "ad4m://ta", json!({"title": "A"}))
+        .await
+        .unwrap();
+    create(
+        &mut p,
+        &ctx,
+        "b://Task",
+        "ad4m://tb",
+        json!({"heading": "B"}),
+    )
+    .await
+    .unwrap();
+    (p, ctx)
+}
+
+/// `a://Task` and `b://Task` share a name. Read through `Note`, each record
+/// comes back as its own class, named by its target class IRI, with its own
+/// value.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abstract_class_reads_two_classes_of_one_name_apart() {
+    let (p, _ctx) = same_name_setup().await;
+    let json = p.model_query_classes(&one("Note"), ALL).await.unwrap();
+    let v: Value = serde_json::from_str(&json).unwrap();
+    let mut read: Vec<(String, String, String)> = v["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
+            (s("id"), s("__subjectClass"), s("title"))
+        })
+        .collect();
+    read.sort();
+    let row = |id: &str, class: &str, title: &str| (id.into(), class.into(), title.into());
+    assert_eq!(
+        read,
+        vec![
+            row("ad4m://ta", "a://Task", "A"),
+            row("ad4m://tb", "b://Task", "B")
+        ],
+        "{json}"
+    );
+}
+
+/// A write through `Note` (a setter, an adder) and an add through the
+/// built-in `Container` on a record of one of two classes of one name run
+/// that class's actions, never the other's.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abstract_class_writes_two_classes_of_one_name_apart() {
+    let (mut p, ctx) = same_name_setup().await;
+    for (base, own, title, other) in [
+        ("ad4m://tb", "b", "b://heading", "a"),
+        ("ad4m://ta", "a", "a://title", "b"),
+    ] {
+        update(&mut p, &ctx, "Note", base, json!({"title": "new"}))
+            .await
+            .unwrap();
+        let added = json!({"children": {"action": "adder", "value": ["ad4m://c1"]}});
+        update(&mut p, &ctx, "Note", base, added).await.unwrap();
+        p.add_to_container(base, "ad4m://c2", None, &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(read_title(&p, own, base).await, "new", "{base}");
+        assert_eq!(links_on(&p, base, title), 1, "{base}");
+        assert_eq!(
+            targets_on(&p, base, &format!("{own}://child")),
+            ["ad4m://c1", "ad4m://c2"],
+            "{base}"
+        );
+        for predicate in [
+            format!("{other}://title"),
+            format!("{other}://heading"),
+            format!("{other}://child"),
+            "ns://title".to_string(),
+            "ns://children".to_string(),
+            "ad4m://has_child".to_string(),
+        ] {
+            assert_eq!(links_on(&p, base, &predicate), 0, "{base} {predicate}");
+        }
+    }
+}
+
+/// The builtin `TextContent` over `a://Task` (its own `text`, and a `body`)
+/// and `b://Task` (`body`, aliased `text`): each record reads with its own
+/// value and its own IRI as `__subjectClass`. Aliases are kept per class:
+/// `b://Task`'s alias does not make `a://Task`'s `body` its text.
+#[tokio::test(flavor = "multi_thread")]
+async fn text_content_reads_two_classes_of_one_name_apart() {
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
+    let property = |ns: &str, name: &str, alias: &str| {
+        format!(
+            r#"{{"path":"{ns}://{name}","name":"{name}","max_count":1,"resolve_language":"literal"{alias},"setter":[{{"action":"setSingleTarget","source":"this","predicate":"{ns}://{name}","target":"value"}}]}}"#
+        )
+    };
+    let task = |ns: &str, properties: &[String]| {
+        format!(
+            r#"{{"target_class":"{ns}://Task",
+  "constructor_actions":[{{"action":"addLink","source":"this","predicate":"{ns}://kind","target":"{ns}://task"}}],
+  "properties":[{{"path":"{ns}://kind","name":"kind","has_value":"{ns}://task","min_count":1,"max_count":1}},{}]}}"#,
+            properties.join(",")
+        )
+    };
+    let a = task("a", &[property("a", "text", ""), property("a", "body", "")]);
+    let b = task(
+        "b",
+        &[property("b", "body", r#","alias":{"TextContent":"text"}"#)],
+    );
+    let (mut p, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Task", a.as_str()), ("Task", b.as_str())]).await;
+    let at = json!({"text": "a text", "body": "a body"});
+    create(&mut p, &ctx, "a://Task", "ad4m://at", at)
+        .await
+        .unwrap();
+    let bt = json!({"body": "b text"});
+    create(&mut p, &ctx, "b://Task", "ad4m://bt", bt)
+        .await
+        .unwrap();
+
+    let read = p
+        .model_query_classes(&one(TEXT_CONTENT_URI), ALL)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&read),
+        vec![
+            ("ad4m://at".into(), "a://Task".into(), "a text".into()),
+            ("ad4m://bt".into(), "b://Task".into(), "b text".into()),
+        ],
+        "{read}"
+    );
+}
+
+/// The title of `base` read as `{ns}://Task`.
+async fn read_title(p: &PerspectiveInstance, ns: &str, base: &str) -> Value {
+    let prop = if ns == "a" { "title" } else { "heading" };
+    read(p, &format!("{ns}://Task"), base, prop).await
 }

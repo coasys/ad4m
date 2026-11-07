@@ -1133,7 +1133,8 @@ export class PerspectiveProxy {
      * A class whose stored shape already is the given one is left alone
      * (`unchanged`): registering on every start writes nothing. The others
      * are rewritten in one diff (`written`), which keeps links other apps
-     * put on the class. Answers once the executor reads the new shapes.
+     * put on the class. Both lists name classes by target class IRI.
+     * Answers once the executor reads the new shapes.
      *
      * Rejects, writing nothing, when two shapes name one class or share a
      * shape URI, or when another class holds a shape URI given here.

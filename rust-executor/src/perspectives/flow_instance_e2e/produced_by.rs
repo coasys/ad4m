@@ -297,12 +297,10 @@ async fn an_output_edited_after_completion_stops_being_a_valid_output() {
     assert!(verdict.is_verified(), "the ratchet holds — got: {verdict}");
 }
 
-/// An output committed under its class's bare name (`Task`, as a client may
-/// name it in `proposeTransition`) answers a query that names the class by
-/// its IRI (`ns://Task`, as the SDK does), and one by the name: the name is
-/// the class it reads here.
-///
-/// Red if the filter compares the committed name with the query's key alone.
+/// An output proposed under its class's bare name (`Task`, as a client may
+/// name it in `proposeTransition`) is committed under the IRI the name reads
+/// (`ns://Task`), and answers a query by the IRI (as the SDK names it) and
+/// one by the name.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_output_committed_by_name_answers_a_query_by_iri() {
     use crate::perspectives::flow_instance::produced::mint_flow_receipt;
@@ -323,9 +321,19 @@ async fn an_output_committed_by_name_answers_a_query_by_iri() {
     )
     .await
     .expect("propose settles on {n: 1}");
-    mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
         .await
         .expect("mint");
+    // Committed as the class the name reads now: its IRI, so a class of the
+    // same name registered later does not change what the quorum signed.
+    assert_eq!(
+        receipt
+            .outputs
+            .iter()
+            .map(OutputRef::of)
+            .collect::<Vec<_>>(),
+        vec![task_ref(TASK)]
+    );
 
     let filter = serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } });
     for class in ["ns://Task", "Task"] {

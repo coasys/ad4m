@@ -28,7 +28,7 @@
 use super::types::{ModelShape, ShapeResolver};
 use crate::perspectives::shacl_parser::{class_name_of, ABSTRACT_PREDICATE, ALIAS_PREDICATE};
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::perspectives::subject_classes_of::{concrete_subject_class_names, local_name};
+use crate::perspectives::subject_classes_of::{concrete_subject_classes, local_name};
 use deno_core::anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -40,7 +40,8 @@ use std::sync::Arc;
 pub struct AbstractIndex {
     /// By target class IRI.
     abstract_classes: BTreeSet<String>,
-    /// class name → property name → { abstract class name → alias }.
+    /// class (target class IRI) → property name → { abstract class name →
+    /// alias }. By IRI: two classes of one name have their own aliases.
     aliases: HashMap<String, HashMap<String, BTreeMap<String, String>>>,
 }
 
@@ -93,7 +94,7 @@ impl AbstractIndex {
             match serde_json::from_str::<BTreeMap<String, String>>(&json) {
                 Ok(map) => {
                     aliases
-                        .entry(local_name(class_uri))
+                        .entry(class_uri.to_string())
                         .or_default()
                         .entry(prop.to_string())
                         .or_default()
@@ -115,8 +116,8 @@ impl AbstractIndex {
             .any(|c| c == class || class_name_of(c) == class)
     }
 
-    /// The name `property` of `class` answers to read through
-    /// `abstract_class`: its alias for it, or its own name.
+    /// The name `property` of `class` (a target class IRI) answers to read
+    /// through `abstract_class`: its alias for it, or its own name.
     fn name_through<'a>(&'a self, class: &str, property: &'a str, abstract_class: &str) -> &'a str {
         self.aliases
             .get(class)
@@ -144,8 +145,10 @@ impl AbstractIndex {
     }
 }
 
-/// The concrete classes an abstract class reads, each with its view (see the
-/// module docs). Sorted by class name.
+/// The concrete classes an abstract class reads, by target class IRI, each
+/// with its view (see the module docs). Sorted by IRI. Two classes of one
+/// name (`a://Task`, `b://Task`) are each their own member, read and written
+/// through their own shape.
 #[derive(Debug, Default, Clone)]
 pub struct Resolution {
     pub classes: Vec<String>,
@@ -232,7 +235,7 @@ pub fn resolve(
 ) -> Result<Resolution, Error> {
     let mut resolution = Resolution::default();
     // The classifier's list: an abstract class never conforms to another.
-    for class in concrete_subject_class_names(store)? {
+    for class in concrete_subject_classes(store)? {
         let shape = match resolver.get_shape(&class) {
             Ok(shape) => shape,
             Err(e) => {

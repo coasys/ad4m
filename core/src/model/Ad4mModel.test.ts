@@ -2230,6 +2230,19 @@ describe("Ad4mModel.fromSHACL()", () => {
     expect(typeof (Cls as any).generateSHACL).toBe("function");
   });
 
+  it("keeps the shape's target class: the namespace is everything before the local name", () => {
+    for (const [targetClass, name] of [
+      ["urn:isbn:Book", "Book"],
+      ["a://Note", "Note"],
+      ["http://x.org/ns#Thing", "Thing"],
+      ["a://b/c/Thing", "Thing"],
+    ]) {
+      const Cls = Ad4mModel.fromSHACL(makeShape(targetClass, []), name);
+      expect(Cls.getTargetClass()).toBe(targetClass);
+      expect(Cls.getClassName()).toBe(name);
+    }
+  });
+
   it("handles shapes with no properties", () => {
     const shape = makeShape("flux://Empty", []);
     const Cls = Ad4mModel.fromSHACL(shape, "Empty");
@@ -2931,8 +2944,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
-            { id: "we://i/1", __subjectClass: "PolyImageBlock", src: "cat.png" },
+            { id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" },
+            { id: "we://i/1", __subjectClass: "we://PolyImageBlock", src: "cat.png" },
           ],
         },
       ],
@@ -2950,16 +2963,17 @@ describe("Polymorphic relations", () => {
     expect(collection.children[1].src).toBe("cat.png");
   });
 
-  it("maps a child to its class by the name the class itself declares", () => {
-    // The mapping is derived from `@Model({ name })`, not restated beside the
-    // class list — the two cannot drift apart because there is only one of them.
-    expect((PolyTextBlock as any).className).toBe("PolyTextBlock");
+  it("maps a child to its class by the target class IRI the class itself declares", () => {
+    // The mapping is derived from the class's own target class, not restated
+    // beside the class list — the two cannot drift apart because there is only
+    // one of them. By IRI, so two classes of one name stay apart.
+    expect((PolyTextBlock as any).getTargetClass()).toBe("we://PolyTextBlock");
 
     const raw = {
       instances: [
         {
           id: "we://c/1",
-          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
         },
       ],
     };
@@ -2983,8 +2997,8 @@ describe("Polymorphic relations", () => {
           children: [
             {
               id: "we://b/1",
-              __subjectClass: "PolyTextBlock",
-              __subjectClasses: ["PolyTextBlock", "PolyBookmark"],
+              __subjectClass: "we://PolyTextBlock",
+              __subjectClasses: ["we://PolyTextBlock", "we://PolyBookmark"],
               text: "hello",
             },
           ],
@@ -2998,7 +3012,7 @@ describe("Polymorphic relations", () => {
 
     const child = collection.children[0];
     expect(child).toBeInstanceOf(PolyTextBlock);
-    expect(child.__subjectClasses).toEqual(["PolyTextBlock", "PolyBookmark"]);
+    expect(child.__subjectClasses).toEqual(["we://PolyTextBlock", "we://PolyBookmark"]);
   });
 
   it("leaves children as data when no instantiateAs is given", () => {
@@ -3012,7 +3026,7 @@ describe("Polymorphic relations", () => {
       instances: [
         {
           id: "we://c/1",
-          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
         },
       ],
     };
@@ -3024,7 +3038,7 @@ describe("Polymorphic relations", () => {
     // Still correct data, just untyped — the concrete class name is present for
     // a caller that wants to do its own dispatch.
     expect(collection.children[0].text).toBe("hello");
-    expect(collection.children[0].__subjectClass).toBe("PolyTextBlock");
+    expect(collection.children[0].__subjectClass).toBe("we://PolyTextBlock");
   });
 
   it("keeps a child whose class is not listed, rather than dropping it", () => {
@@ -3038,8 +3052,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
-            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" },
+            { id: "we://k/1", __subjectClass: "we://PolyTaskBlock", done: true },
           ],
         },
       ],
@@ -3052,7 +3066,7 @@ describe("Polymorphic relations", () => {
     expect(collection.children).toHaveLength(2);
     expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
     expect(collection.children[1].done).toBe(true);
-    expect(collection.children[1].__subjectClass).toBe("PolyTaskBlock");
+    expect(collection.children[1].__subjectClass).toBe("we://PolyTaskBlock");
   });
 
   it("does not construct an unlisted child as the relation's declared target", () => {
@@ -3082,8 +3096,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
-            { id: "we://b/1", __subjectClass: "PolyBaseBlock", base: "declared" },
+            { id: "we://k/1", __subjectClass: "we://PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "we://PolyBaseBlock", base: "declared" },
           ],
         },
       ],
@@ -3097,7 +3111,7 @@ describe("Polymorphic relations", () => {
     expect(unlisted).toBeDefined();
     expect(unlisted).not.toBeInstanceOf(PolyBaseBlock);
     expect(unlisted.done).toBe(true);
-    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(unlisted.__subjectClass).toBe("we://PolyTaskBlock");
     // The declared target is still right when it is the class the executor named.
     expect(declared).toBeInstanceOf(PolyBaseBlock);
     expect(declared.base).toBe("declared");
@@ -3124,8 +3138,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
-            { id: "we://b/1", __subjectClass: "PolyBaseOnlyBlock", base: "declared" },
+            { id: "we://k/1", __subjectClass: "we://PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "we://PolyBaseOnlyBlock", base: "declared" },
           ],
         },
       ],
@@ -3138,7 +3152,7 @@ describe("Polymorphic relations", () => {
     const [unlisted, declared] = collection.children;
     expect(unlisted).not.toBeInstanceOf(PolyBaseOnlyBlock);
     expect(unlisted.done).toBe(true);
-    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(unlisted.__subjectClass).toBe("we://PolyTaskBlock");
     expect(declared).toBeInstanceOf(PolyBaseOnlyBlock);
     expect(declared.base).toBe("declared");
   });
@@ -3165,7 +3179,7 @@ describe("Polymorphic relations", () => {
       instances: [
         {
           id: "we://c/1",
-          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
         },
       ],
     };
@@ -3187,7 +3201,7 @@ describe("Polymorphic relations", () => {
 
     expect(JSON.parse(queryJson).include.children).toEqual({
       polymorphic: true,
-      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+      preferClasses: ["we://PolyTextBlock", "we://PolyImageBlock"],
     });
   });
 
@@ -3202,17 +3216,17 @@ describe("Polymorphic relations", () => {
     // Declaration order is the preference order — a target conforming to two of
     // them is read as whichever was named first.
     expect(JSON.parse(queryJson).include.children.preferClasses).toEqual([
-      "PolyTextBlock",
-      "PolyImageBlock",
+      "we://PolyTextBlock",
+      "we://PolyImageBlock",
     ]);
   });
 
   it("lets an explicit preference at the call site win over the declaration", () => {
     const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
-      include: { children: { preferClasses: ["PolyBookmark"] } },
+      include: { children: { preferClasses: ["we://PolyBookmark"] } },
     });
 
-    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["PolyBookmark"]);
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["we://PolyBookmark"]);
   });
 
   it("sends no preference for a polymorphic relation that names no classes", () => {
@@ -3257,7 +3271,7 @@ describe("Polymorphic relations", () => {
     const include = JSON.parse(queryJson).include;
     expect(include.sections.include.children).toEqual({
       polymorphic: true,
-      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+      preferClasses: ["we://PolyTextBlock", "we://PolyImageBlock"],
     });
   });
 
@@ -3621,9 +3635,9 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
 
   const rows = {
     instances: [
-      { id: "u://t1", status: "open", __subjectClass: "u://UnionTaskU", __subjectClasses: ["UnionTaskU"] },
-      { id: "u://n1", body: "hi", __subjectClass: "u://UnionNoteU", __subjectClasses: ["UnionNoteU"] },
-      { id: "u://x", __subjectClass: "Other", __subjectClasses: ["Other"] },
+      { id: "u://t1", status: "open", __subjectClass: "u://UnionTaskU", __subjectClasses: ["u://UnionTaskU"] },
+      { id: "u://n1", body: "hi", __subjectClass: "u://UnionNoteU", __subjectClasses: ["u://UnionNoteU"] },
+      { id: "u://x", __subjectClass: "o://Other", __subjectClasses: ["o://Other"] },
     ],
     totalCount: 7,
   };

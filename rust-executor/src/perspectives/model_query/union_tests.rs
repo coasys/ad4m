@@ -242,7 +242,7 @@ async fn union_returns_a_record_of_two_classes_once_with_both_classes() {
         .map(|v| v.as_str().unwrap())
         .collect();
     all.sort();
-    assert_eq!(all, vec!["Note", "Task"]);
+    assert_eq!(all, vec!["app://models/Note", "app://models/Task"]);
 
     let q = query(serde_json::json!({"preferClasses": ["Task"]}));
     let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)

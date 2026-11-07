@@ -211,7 +211,8 @@ fn reject_pagination_on_polymorphic(
 }
 
 /// The JSON key carrying each polymorphically-hydrated instance's concrete
-/// class, so the TypeScript layer can construct the right model class for it.
+/// class, by target class IRI (two classes may share a name), so the
+/// TypeScript layer can construct the right model class for it.
 ///
 /// Half of a wire contract: the reader is `SUBJECT_CLASS_KEY` in
 /// `core/src/model/Ad4mModel.ts`, and the two are separate literals in separate
@@ -222,10 +223,10 @@ fn reject_pagination_on_polymorphic(
 pub(crate) const SUBJECT_CLASS_KEY: &str = "__subjectClass";
 
 /// The JSON key carrying every class a polymorphically-hydrated instance
-/// conforms to, most specific first — the whole set [`SUBJECT_CLASS_KEY`] names
-/// only the head of.
+/// conforms to, by target class IRI, most specific first — the whole set
+/// [`SUBJECT_CLASS_KEY`] names only the head of.
 ///
-/// Always present, even where it holds a single name. A key that appeared only
+/// Always present, even where it holds a single class. A key that appeared only
 /// when a target was ambiguous would be one every consumer had to guard, to
 /// learn something a one-element array says just as well.
 ///
@@ -245,7 +246,7 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 /// per group against that group's own shape. The cost is one query per *distinct
 /// class present*, not per instance.
 ///
-/// Each instance carries its class name back under [`SUBJECT_CLASS_KEY`], which
+/// Each instance carries its target class IRI back under [`SUBJECT_CLASS_KEY`], which
 /// is what lets the caller construct the matching model class rather than the
 /// one the relation declared.
 ///
@@ -361,7 +362,6 @@ async fn hydrate_polymorphic(
                 continue;
             }
         };
-        let class_name = class_name_of(&class);
 
         let mut group_query = sub_query.clone();
         let mut wc = group_query.where_clause.take().unwrap_or_default();
@@ -384,27 +384,15 @@ async fn hydrate_polymorphic(
         for mut inst in result.instances {
             if let Some(id) = inst["id"].as_str().map(|s| s.to_string()) {
                 if let Some(obj) = inst.as_object_mut() {
-                    obj.insert(
-                        SUBJECT_CLASS_KEY.to_string(),
-                        Value::String(class_name.clone()),
-                    );
+                    obj.insert(SUBJECT_CLASS_KEY.to_string(), Value::String(class.clone()));
                     // The readings this one was chosen over. Costs nothing to
                     // return — the classification that picked the head had to
                     // produce the whole set to rank it.
-                    let mut all: Vec<String> = Vec::new();
-                    for name in classes
+                    let all = classes
                         .get(&id)
-                        .into_iter()
-                        .flatten()
-                        .map(|c| class_name_of(c))
-                    {
-                        if !all.contains(&name) {
-                            all.push(name);
-                        }
-                    }
-                    if all.is_empty() {
-                        all.push(class_name.clone());
-                    }
+                        .filter(|all| !all.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| vec![class.clone()]);
                     obj.insert(
                         SUBJECT_CLASSES_KEY.to_string(),
                         Value::Array(all.into_iter().map(Value::String).collect()),

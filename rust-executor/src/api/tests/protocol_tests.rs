@@ -273,7 +273,7 @@ async fn register_shapes_then_shapes_round_trips() {
     )
     .await
     .unwrap();
-    assert_eq!(first["written"], json!(["Todo"]));
+    assert_eq!(first["written"], json!(["test://Todo"]));
     assert_eq!(first["unchanged"], json!([]));
 
     let shapes = call("perspective.shapes", json!({ "uuid": p.0 }), admin_ctx())
@@ -299,7 +299,7 @@ async fn register_shapes_then_shapes_round_trips() {
     .await
     .unwrap();
     assert_eq!(again["written"], json!([]));
-    assert_eq!(again["unchanged"], json!(["Todo"]));
+    assert_eq!(again["unchanged"], json!(["test://Todo"]));
     assert_eq!(again["generation"], first["generation"]);
 }
 

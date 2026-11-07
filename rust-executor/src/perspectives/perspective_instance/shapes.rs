@@ -30,7 +30,8 @@ use crate::perspectives::shacl_parser::{
 use crate::perspectives::sparql_store::canonical_target;
 use crate::types::{DecoratedLinkExpression, Link, LinkMutations, LinkStatus};
 
-/// What `register_shapes` did, by class name.
+/// What `register_shapes` did, by target class IRI (two classes may share a
+/// name), each sorted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -191,6 +192,24 @@ impl PerspectiveInstance {
         Ok(names)
     }
 
+    /// Every registered class, sorted by name then IRI, each by the key that
+    /// reads it: its name, or its target class IRI when another class shares
+    /// the name (the bare name reads only the least IRI).
+    pub fn class_keys(&self) -> Result<Vec<String>, AnyError> {
+        let registry = self.shape_registry()?;
+        let shared = |name: &str| registry.iter().filter(|s| s.name == name).count() > 1;
+        Ok(registry
+            .iter()
+            .map(|s| {
+                if shared(&s.name) {
+                    s.shape.target_class.clone()
+                } else {
+                    s.name.clone()
+                }
+            })
+            .collect())
+    }
+
     /// Register `shapes`, each as the class of its target class IRI.
     ///
     /// A class whose stored own links already are the ones its shape gives
@@ -211,15 +230,11 @@ impl PerspectiveInstance {
         shapes: Vec<SHACLShape>,
         context: &AgentContext,
     ) -> Result<RegisterResult, AnyError> {
-        let mut expected: BTreeMap<String, (String, Vec<Link>)> = BTreeMap::new();
+        let mut expected: BTreeMap<String, Vec<Link>> = BTreeMap::new();
         for shape in shapes {
             let target_class = shape.target_class.clone();
-            let name = class_name_of(&target_class);
-            let links = shape_links(shape, &name)?;
-            if expected
-                .insert(target_class.clone(), (name, links))
-                .is_some()
-            {
+            let links = shape_links(shape, &class_name_of(&target_class))?;
+            if expected.insert(target_class.clone(), links).is_some() {
                 return Err(anyhow!(
                     "Two shapes for class '{target_class}' in one call: give each class once."
                 ));
@@ -227,7 +242,7 @@ impl PerspectiveInstance {
         }
         let shape_uris: BTreeMap<&str, &str> = expected
             .iter()
-            .flat_map(|(target_class, (_, links))| {
+            .flat_map(|(target_class, links)| {
                 links
                     .iter()
                     .filter(|l| {
@@ -266,12 +281,12 @@ impl PerspectiveInstance {
         let mut unchanged = Vec::new();
         let mut written = Vec::new();
         let mut mutations = LinkMutations::default();
-        for (target_class, (name, links)) in expected {
+        for (target_class, links) in expected {
             let wanted: BTreeSet<Triple> = links.iter().map(triple).collect();
             let stored = self.own_shape_links(&target_class)?;
             let held: BTreeSet<Triple> = stored.iter().map(|l| triple(&l.data)).collect();
             if wanted == held {
-                unchanged.push(name);
+                unchanged.push(target_class);
                 continue;
             }
             let mut added = BTreeSet::new();
@@ -290,7 +305,7 @@ impl PerspectiveInstance {
                     .filter(|l| !wanted.contains(&triple(&l.data)))
                     .map(Into::into),
             );
-            written.push((name, target_class));
+            written.push(target_class);
         }
 
         if !written.is_empty() {
@@ -302,14 +317,12 @@ impl PerspectiveInstance {
             self.clear_shape_cache();
         }
         self.shape_registry()?;
-        for (_, target_class) in &written {
+        for target_class in &written {
             if let Err(e) = self.get_shape(target_class) {
                 log::warn!("register_shapes: '{target_class}' is stored but does not load: {e:#}");
             }
         }
-        let mut written: Vec<String> = written.into_iter().map(|(name, _)| name).collect();
-        unchanged.sort();
-        written.sort();
+        // In `expected`'s order: sorted by target class IRI.
         Ok(RegisterResult {
             unchanged,
             written,

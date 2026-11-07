@@ -335,7 +335,7 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
                 'perspective.removeLinks': [added],
                 'perspective.linkMutations': { additions: [added], removals: [] },
                 'perspective.commitBatch': { additions: [added], removals: [] },
-                'perspective.registerShapes': { unchanged: [], written: ['C'], generation: 1 },
+                'perspective.registerShapes': { unchanged: [], written: ['test://C'], generation: 1 },
                 'perspective.rejectFlowProposal': { retractedLinks: 1 },
             }
             return Promise.resolve(method in replies ? replies[method] : added)

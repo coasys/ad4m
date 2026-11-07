@@ -382,7 +382,7 @@ pub(crate) async fn resolve_class(
             return Ok((canonical, shape));
         }
     }
-    let registered = perspective.class_names().unwrap_or_default();
+    let registered = perspective.class_keys().unwrap_or_default();
     Err(error_json(format!(
         "Unknown subject class '{}'. Registered classes: {}. Call describe_perspective to see \
          their schemas.",

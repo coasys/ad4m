@@ -106,7 +106,7 @@ impl PerspectiveProxy {
 
     /// Register class shapes (each the SHACL shape JSON `perspective.shapes`
     /// answers) with `perspective.registerShapes`. Answers which classes were
-    /// written and which were already stored as given.
+    /// written and which were already stored as given, by target class IRI.
     pub async fn register_shapes(&self, shapes: Vec<Value>) -> Result<Value> {
         self.ws
             .call(
@@ -180,18 +180,10 @@ impl PerspectiveProxy {
         Ok(())
     }
 
-    /// The names of the registered classes (`perspective.shapes`), sorted,
-    /// each once.
+    /// Every registered class (`perspective.shapes`), sorted by name then
+    /// IRI: [`class_keys`] of the shapes.
     pub async fn subject_classes(&self) -> Result<Vec<String>> {
-        let mut classes: Vec<String> = self
-            .shapes(None)
-            .await?
-            .iter()
-            .filter_map(|class| class["name"].as_str().map(str::to_string))
-            .collect();
-        classes.sort();
-        classes.dedup();
-        Ok(classes)
+        Ok(class_keys(&self.shapes(None).await?))
     }
 
     pub async fn subject_class_properties(&self, class: &String) -> Result<Vec<String>> {
@@ -410,4 +402,36 @@ fn parse_action(action: &str) -> Result<Vec<Command>> {
     }
 
     Ok(commands)
+}
+
+/// Each class of `shapes` (`perspective.shapes` entries, sorted by name then
+/// IRI) by the key that reads it: its name, or its target class IRI when
+/// another class shares the name (the bare name reads only the least IRI).
+pub fn class_keys(shapes: &[Value]) -> Vec<String> {
+    let name = |class: &Value| class["name"].as_str().unwrap_or_default().to_string();
+    let shared = |n: &str| shapes.iter().filter(|c| name(c) == n).count() > 1;
+    shapes
+        .iter()
+        .map(|class| match class["shape"]["target_class"].as_str() {
+            Some(iri) if shared(&name(class)) => iri.to_string(),
+            _ => name(class),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::class_keys;
+    use serde_json::json;
+
+    #[test]
+    fn class_keys_name_a_shared_name_by_iri() {
+        let class = |name: &str, iri: &str| json!({"name": name, "shape": {"target_class": iri}});
+        let shapes = [
+            class("Note", "a://Note"),
+            class("Task", "a://Task"),
+            class("Task", "b://Task"),
+        ];
+        assert_eq!(class_keys(&shapes), vec!["Note", "a://Task", "b://Task"]);
+    }
 }

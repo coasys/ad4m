@@ -372,7 +372,13 @@ pub async fn write_processor(
            state, and a local-only class list would make one peer's view of what to extract differ
            from everyone else's.
         */
+        // Each class is stored by its target class IRI: a bare name reads the
+        // least IRI of that name, which a class registered later can change.
+        // A class not registered yet is stored as given.
         for class in cfg.interpretation_classes.iter() {
+            let class = perspective
+                .get_shape(class)
+                .map_or_else(|_| class.clone(), |s| s.target_class.clone());
             perspective
                 .add_link(
                     Link {
@@ -1160,6 +1166,38 @@ mod tests {
         assert_eq!(
             loaded[0].interpretation_classes,
             vec!["ns://Question".to_string(), "ns://Task".to_string()]
+        );
+    }
+
+    /// A class is stored by its target class IRI. A bare name reads only the
+    /// least IRI of its name, and which that is changes as classes of the
+    /// name register: the processor keeps the class it was configured with.
+    /// A class not registered yet is stored as given.
+    #[tokio::test]
+    async fn interpretation_classes_are_stored_by_iri() {
+        let task = |ns: &str| {
+            format!(
+                r#"{{"target_class":"{ns}://Task","constructor_actions":[{{"action":"addLink","source":"this","predicate":"rdf://type","target":"{ns}://Task"}}],"properties":[]}}"#
+            )
+        };
+        let (b, c) = (task("b"), task("c"));
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Task", &b), ("Task", &c)]).await;
+        let mut cfg = sample_config("by-iri");
+        cfg.interpretation_classes = vec!["Task".into(), "c://Task".into(), "ns://Later".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        p.register_shape_json(&task("a"), &ctx)
+            .await
+            .expect("a://Task");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(
+            loaded[0].interpretation_classes,
+            vec![
+                "b://Task".to_string(),
+                "c://Task".to_string(),
+                "ns://Later".to_string()
+            ]
         );
     }
 

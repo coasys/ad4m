@@ -592,7 +592,12 @@ describe("flow task handover — WE-facing API with roles", function () {
     // is a valid output of a completed ReviewerRoleGrant run in `Granted`.
     const granted = await aliceP.flowValidOutputs(GRANT_FLOW_URI, "Granted");
     expect(granted).to.have.lengthOf(1);
-    expect(granted[0].output).to.deep.equal({ className: "HandoverReviewerRole", id: role.id });
+    // Named by the class's target class IRI: the proposal resolved the name
+    // before signing it.
+    expect(granted[0].output).to.deep.equal({
+      className: ReviewerRole.getTargetClass(),
+      id: role.id,
+    });
     expect(granted[0].receiptUri).to.equal(minted.receiptUri);
     const verdict = await bobP.verifyFlowReceipt(minted.receipt);
     expect(verdict.outcome, verdict.detail).to.equal("verified");

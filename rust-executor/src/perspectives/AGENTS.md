@@ -58,6 +58,17 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   in one call, a shape URI another class holds, and a shape URI not ending in `{Name}Shape`.
   A relation resolves through `ShapeRelation::target_class` (the class owning its
   `sh:class` shape), the name only when that shape is not stored.
+- Every answer names a class by IRI: `RegisterResult`, `__subjectClass`/`__subjectClasses`
+  (polymorphic hydration, unions, abstract reads; a union asked by name echoes the name as
+  `__subjectClass`), `abstract_classes::Resolution` (classes, views) and its aliases, the
+  containment edges, stored auto-processor `interpretation_classes` and signed flow
+  `OutputRef`s (resolved by `get_shape` before storing/signing; a class not registered yet is
+  kept as given). Abstract reads walk `concrete_subject_classes` and writes intersect
+  `subject_class_iris_of` with the resolution, so two classes of one name read and write
+  apart. MCP `describe_perspective` and the CLI list `class_keys` (the name, the IRI when
+  shared); the per-class MCP tools are named by `class_names`, so a shared name gets tools
+  for its least IRI only. `subject_classes_of` (the `subjectClassesOf` RPC, and flow spawn
+  matching a flow's `inputTypes`) still answers names; `subject_class_iris_of` the IRIs.
 - The executor's own paths address the six hard-wired classes by IRI (`ad4m://FlowInstance`,
   `flow_classes::FLOW_INSTANCE_CLASS` and the like), so an app's `app://FlowInstance` is
   stored beside them and never read in their place.

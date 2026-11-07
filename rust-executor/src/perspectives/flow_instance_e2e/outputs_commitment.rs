@@ -267,9 +267,7 @@ async fn propose_commits_to_the_named_outputs_and_refuses_a_missing_one() {
     for bad in [
         task_ref("ad4m://deliverable/never-written"),
         OutputRef {
-            class_name: crate::perspectives::shacl_parser::class_name_of(
-                crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS,
-            ),
+            class_name: crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS.to_string(),
             id: TASK.to_string(),
         },
     ] {

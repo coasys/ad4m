@@ -164,10 +164,9 @@ describe("Ad4mModel — one query over several classes", function () {
     });
     expect(rows.length).to.equal(1);
     expect(rows[0]).to.be.instanceOf(UnionTask);
-    expect([...(rows[0] as any).__subjectClasses].sort()).to.deep.equal([
-      "UnionNote",
-      "UnionTask",
-    ]);
+    expect([...(rows[0] as any).__subjectClasses].sort()).to.deep.equal(
+      [UnionNote.getTargetClass(), UnionTask.getTargetClass()].sort(),
+    );
 
     const asNote = await Ad4mModel.findAllOf(perspective, [UnionTask, UnionNote], {
       preferClasses: ["UnionNote"],

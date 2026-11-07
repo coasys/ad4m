@@ -153,6 +153,9 @@ A class is addressed by its target class IRI (`flux://Note`). Its name, the last
 - A bare name passed to the executor (`perspective.createSubject("Note", ...)`, an MCP tool) reads the class of that name with the least IRI: `a://Note` over `b://Note`. Pass the IRI to reach any other.
 - `perspective.shapes(["Note"])` lists every class of that name, least IRI first; `perspective.shapes(["b://Note"])` only that one.
 - A relation to another class resolves through the target class of the shape it names, so `sh:class b://NoteShape` reaches `b://Note` even when `a://Note` exists.
+- Answers name a class by its IRI: `registerShapes`' `written` and `unchanged`, `__subjectClass` and `__subjectClasses` on the rows of polymorphic relations, union queries and abstract classes, and the classes an auto-processor config or a flow output lists. A raw `modelQuery` given a name gets that name back as `__subjectClass`.
+- MCP `describe_perspective` and `ad4m perspective subject-classes` list each class by its name, or by its IRI when another class shares the name.
+- `Ad4mModel.fromSHACL(shape, name)` keeps the shape's target class: `urn:isbn:Book` stays `urn:isbn:Book`.
 - The executor's own classes (`ad4m://FlowInstance`, `ad4m://AutoProcessor`, ...) are addressed by IRI too, so an app may register `app://FlowInstance` beside them.
 - `Ad4mModel.fromSHACL(shape, name)` keeps the shape's target class, so the hydrated model addresses the class it was built from.
 
@@ -1031,11 +1034,11 @@ const builder = Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
 await builder.subscribe((items) => render(items));
 ```
 
-Each result is an instance of the class it was read as, and carries `__subjectClass` (that class's name) and `__subjectClasses` (every class the record conforms to), as members of a [polymorphic relation](#relations) do. The query itself is the same `Query` a single class takes. The rules where the classes differ:
+Each result is an instance of the class it was read as, and carries `__subjectClass` (that class's target class IRI) and `__subjectClasses` (the IRI of every class the record conforms to), as members of a [polymorphic relation](#relations) do. The query itself is the same `Query` a single class takes. The rules where the classes differ:
 
 | Situation | Result |
 |---|---|
-| A record conforms to several of the classes | Returned once, when any of its readings passes the query (`where`, `linkStatus`, `includeUnverified`), the same answer a query per class gives. It is read as a class whose reading passes: the first such `preferClasses` entry, otherwise the most specific of them. A reading the query cannot see, such as a Local flag under `linkStatus: "shared"`, is never chosen. |
+| A record conforms to several of the classes | Returned once, when any of its readings passes the query (`where`, `linkStatus`, `includeUnverified`), the same answer a query per class gives. It is read as a class whose reading passes: the first such `preferClasses` entry (a target class IRI or a name; by default the classes given, in order), otherwise the most specific of them. A reading the query cannot see, such as a Local flag under `linkStatus: "shared"`, is never chosen. |
 | `where` on a property a class does not declare | That class's rows are excluded. `{ status: "open" }` returns only records that have an open status. |
 | `order` on a property a class does not declare, or a record with no value | Those rows sort last in both directions. Ties are broken by id. |
 | `limit` / `offset` | Applied once, over the union, after `where` and `order`. `count()` and `totalCount` count the union after `where`. Without `order`, paging uses `createdAt` ascending, then id. |
@@ -1074,7 +1077,7 @@ A query over an abstract class is a [union query](#querying-several-classes-at-o
 |---|---|
 | Matching | By name only. A class matches when, for every property of the abstract class, it has a property with that name or an alias for it, and the same for relations. Predicates (`through`), datatypes and directions are not compared, so the abstract class's own `through` values are never used. |
 | Aliases | `alias: { Readable: "text" }` on a property or relation. Read through `Readable`, the row carries `text`, read through this property's predicate, and `where` / `order` use `text`. Read as `Message`, it stays `body`. A class that already has a property named `text` cannot also alias another property to `text`: registering it fails. |
-| Rows | Each row is the record's real class: `__subjectClass` names it. |
+| Rows | Each row is the record's real class: `__subjectClass` is its target class IRI. Two classes of one name (`a://Task`, `b://Task`) are read apart, each through its own shape and its own aliases. |
 | Creating | Refused: `Readable.create(…)` and `createSubject("Readable", …)` throw. |
 | Writing | Dispatched to the record's own classes, like a virtual call. See [Writing Through an Abstract Class](#writing-through-an-abstract-class). |
 | No names | An abstract class with no property and no relation is refused at registration. One that arrives that way anyhow (a sync, raw links) reads no class. |
@@ -1131,7 +1134,7 @@ await folder.setChildren(["ad4m://c3"]);              // Box.items: c3
 
 The rules:
 
-- **Which classes get the write.** Every class the record belongs to among those `Readable` reads. A record that is both a `Message` and a `Poll`, each with a property answering to `text`, gets both written. A class the record also belongs to but that `Readable` does not read is untouched, by writes and by `delete()`.
+- **Which classes get the write.** Every class the record belongs to among those `Readable` reads. A record that is both a `Message` and a `Poll`, each with a property answering to `text`, gets both written. A class the record also belongs to but that `Readable` does not read is untouched, by writes and by `delete()`. Classes are told apart by IRI: of `a://Task` and `b://Task`, a record of `b://Task` gets only `b://Task`'s setters.
 - **Properties.** `save()` and `Readable.update(perspective, id, { text })` run, for each class, its setter for the property answering to the name. Two classes that store the name at the same predicate write it once, so a collection does not get the member twice.
 - **Relations.** A class with no setter for the relation gets `setX`'s members set on its adder's predicate.
 - **Names.** Only the abstract class's own names can be written through it. Through `Readable` that is `text`; the record's other properties are written through its own class.

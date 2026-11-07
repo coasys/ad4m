@@ -133,7 +133,7 @@ describe("abstract classes", () => {
       get: (_t, key) => async (...args: any[]) => {
         calls.push([key, ...args]);
         if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://m/1", __subjectClass: "Message", text: "hi" }], totalCount: 1 };
+          return { instances: [{ id: "ad4m://m/1", __subjectClass: "test://Message", text: "hi" }], totalCount: 1 };
         }
         return [];
       },
@@ -156,7 +156,7 @@ describe("abstract classes", () => {
       get: (_t, key) => async (...args: any[]) => {
         calls.push([key, ...args]);
         if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "Folder", children: [] }], totalCount: 1 };
+          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "test://Folder", children: [] }], totalCount: 1 };
         }
         return [];
       },
@@ -180,7 +180,7 @@ describe("abstract classes", () => {
       get: (_t, key) => async (...args: any[]) => {
         calls.push([key, ...args]);
         if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "Folder", children: [] }], totalCount: 1 };
+          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "test://Folder", children: [] }], totalCount: 1 };
         }
         return [];
       },
@@ -200,7 +200,7 @@ describe("abstract classes", () => {
       get: (_t, key) => async (...args: any[]) => {
         calls.push([key, ...args]);
         if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "Folder", children: ["ad4m://child/1"] }], totalCount: 1 };
+          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "test://Folder", children: ["ad4m://child/1"] }], totalCount: 1 };
         }
         return [];
       },

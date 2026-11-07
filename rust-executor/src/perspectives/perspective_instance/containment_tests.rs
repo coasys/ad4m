@@ -146,7 +146,7 @@ async fn the_edge_set_is_has_child_plus_each_aliased_predicate() {
         described,
         vec![
             (HAS_CHILD.to_string(), None),
-            ("we://child".to_string(), Some("Block".to_string())),
+            ("we://child".to_string(), Some("ns://Block".to_string())),
         ]
     );
     // Cached until the installed shapes change.

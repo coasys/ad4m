@@ -74,19 +74,9 @@ pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error
 
 /// Every registered class that is not abstract (#1435): the classes a record
 /// can be classified as. An abstract class names what a record has, not what
-/// it is, so it is never one of a record's classes. By name, each once.
-pub fn concrete_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
-    let mut names: Vec<String> = concrete_subject_classes(store)?
-        .iter()
-        .map(|class| class_name_of(class))
-        .collect();
-    names.sort();
-    names.dedup();
-    Ok(names)
-}
-
-/// [`concrete_subject_class_names`] by target class IRI, sorted. Two classes
-/// may share a name (`a://Task`, `b://Task`); each is its own class here.
+/// it is, so it is never one of a record's classes. By target class IRI,
+/// sorted. Two classes may share a name (`a://Task`, `b://Task`); each is its
+/// own class here.
 pub fn concrete_subject_classes(store: &SparqlStore) -> Result<Vec<String>, Error> {
     let query = format!(
         r#"

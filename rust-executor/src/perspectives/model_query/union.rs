@@ -35,8 +35,9 @@
 //!   the rule the store's `ORDER BY` applies to a single class.
 //! - `limit` / `offset` apply once over the union; `totalCount` is the union
 //!   after `where`.
-//! - Every row carries `__subjectClass` (the class it was hydrated as) and
-//!   `__subjectClasses` (every class it conforms to), as polymorphic members do.
+//! - Every row carries `__subjectClass` (the class it was hydrated as: the key
+//!   it was asked for by) and `__subjectClasses` (every class it conforms to,
+//!   by target class IRI), as polymorphic members do.
 
 use super::filtering::{compare_values, extract_sort_value};
 use super::projection::resolve_projections;
@@ -302,15 +303,6 @@ pub async fn execute_union_query_with_views(
     // name.
     let classified =
         crate::perspectives::subject_classes_of::subject_class_iris_of(store, resolver, &all_ids)?;
-    let names_of = |classes: &[String]| -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
-        for name in classes.iter().map(|c| class_name_of(c)) {
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-        names
-    };
     let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
     let mut union: Vec<Value> = Vec::new();
     let mut chosen_by_id: HashMap<String, String> = HashMap::new();
@@ -347,8 +339,8 @@ pub async fn execute_union_query_with_views(
         };
         let all = classified
             .get(id)
-            .map(|classes| names_of(classes))
-            .unwrap_or_else(|| vec![class_name_of(&chosen)]);
+            .cloned()
+            .unwrap_or_else(|| vec![chosen.clone()]);
         if let Some(obj) = row.as_object_mut() {
             obj.insert(SUBJECT_CLASS_KEY.to_string(), Value::String(chosen.clone()));
             obj.insert(

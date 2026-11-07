@@ -113,7 +113,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.removeLink': true,
     'perspective.queryProlog': JSON.stringify([{ X: 'test' }]),
     'perspective.querySparql': JSON.stringify([{ id: '1' }]),
-    'perspective.registerShapes': { unchanged: [], written: ['TestClass'], generation: 1 },
+    'perspective.registerShapes': { unchanged: [], written: ['test://TestClass'], generation: 1 },
     'perspective.executeCommands': true,
     'perspective.createSubject': true,
     'perspective.getSubjectData': '{"name":"test"}',
@@ -670,7 +670,7 @@ describe('PerspectiveClient', () => {
 
     test('registerShapes() registers shapes', async () => {
         const result = await ad4m.perspective.registerShapes('uuid-1', [{ target_class: 'test://TestClass', properties: [] }]);
-        expect(result).toEqual({ unchanged: [], written: ['TestClass'], generation: 1 });
+        expect(result).toEqual({ unchanged: [], written: ['test://TestClass'], generation: 1 });
     });
 
     test('queryProlog() runs prolog query', async () => {

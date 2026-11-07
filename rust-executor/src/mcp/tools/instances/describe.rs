@@ -150,12 +150,18 @@ pub(crate) async fn describe_perspective_value(
     perspective: &PerspectiveInstance,
     handle: &PerspectiveHandle,
 ) -> Value {
-    let class_names = perspective.class_names().unwrap_or_default();
+    // A class whose name another class shares is listed by its IRI.
+    let class_keys = perspective.class_keys().unwrap_or_default();
 
-    let registered: BTreeSet<&str> = class_names.iter().map(String::as_str).collect();
+    let names = perspective.class_names().unwrap_or_default();
+    let registered: BTreeSet<&str> = class_keys
+        .iter()
+        .chain(&names)
+        .map(String::as_str)
+        .collect();
 
-    let mut classes = Vec::with_capacity(class_names.len());
-    for name in &class_names {
+    let mut classes = Vec::with_capacity(class_keys.len());
+    for name in &class_keys {
         match perspective.get_shape(name) {
             Ok(shape) => classes.push(describe_class(name, &shape, &registered)),
             // Never drop a class silently — an agent that can't see a class

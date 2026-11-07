@@ -50,11 +50,39 @@ import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./typ
  * `tests/js/tests/model/model-polymorphic.test.ts` drives both ends against one
  * executor, so the drift fails a test rather than a user's query.
  *
- * The executor also returns `__subjectClasses`, the whole set this one names the
- * head of. Nothing here reads it — it rides onto the instance with every other
- * JSON key, for a caller that wants to know a choice was made.
+ * The value is the class's target class IRI (two classes may share a name):
+ * {@link classKey} of the class it was read as. The executor also returns
+ * `__subjectClasses`, the whole set this one names the head of, by target
+ * class IRI. Nothing here reads it — it rides onto the instance with every
+ * other JSON key, for a caller that wants to know a choice was made.
  */
 const SUBJECT_CLASS_KEY = '__subjectClass';
+
+/**
+ * The IRI the executor names `cls` by (`queriedAs`: its target class), or
+ * `undefined` for something that is not a declared model class.
+ */
+function classKey(cls: unknown): string | undefined {
+  try {
+    const key = (cls as any)?.queriedAs?.();
+    return typeof key === 'string' ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The namespace of a target class IRI: everything up to and including its
+ * last `#`, `:` or `/`, the split the executor's `class_name_of` makes
+ * (`urn:isbn:Book` → `urn:isbn:`, `a://b/c/Thing` → `a://b/c/`). `undefined`
+ * when there is no local name after it.
+ */
+function namespaceOf(targetClass: string | undefined): string | undefined {
+  if (!targetClass) return undefined;
+  const split = Math.max(targetClass.lastIndexOf('#'), targetClass.lastIndexOf(':'), targetClass.lastIndexOf('/'));
+  if (split < 0 || split === targetClass.length - 1) return undefined;
+  return targetClass.slice(0, split + 1);
+}
 
 /**
  * Turn on `polymorphic` for every relation that declares it, at every depth of
@@ -109,10 +137,10 @@ function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): 
         subQuery.preferClasses === undefined &&
         meta.instantiateAs
       ) {
-        const names = (meta.instantiateAs() ?? [])
-          .map((cls) => (cls as any)?.className)
-          .filter((name): name is string => typeof name === 'string');
-        if (names.length) subQuery.preferClasses = names;
+        const classes = (meta.instantiateAs() ?? [])
+          .map(classKey)
+          .filter((key): key is string => typeof key === 'string');
+        if (classes.length) subQuery.preferClasses = classes;
       }
     }
 
@@ -300,20 +328,20 @@ function jsonToModelInstance<T extends Ad4mModel>(
       // class back on the instance, because it had to know it in order to
       // hydrate against the right shape at all. What it cannot send is the
       // constructor, so `instantiateAs` names the classes this side can build
-      // and the name → class map is derived from them: `@Model` records each
-      // class's name on the class itself, so listing the classes and listing
-      // their names would be the same list written twice, free to disagree.
+      // and the target class → class map is derived from them: each class
+      // knows its own target class IRI, which the executor names it by (two
+      // classes may share a name).
       //
       // Built on first use rather than at decoration time, because the thunk
       // exists to be called late: a class defined further round a circular
       // import graph is not there yet when the decorator runs.
-      let byClassName: Record<string, any> | undefined;
+      let byTargetClass: Map<string, any> | undefined;
       // May resolve to nothing: a polymorphic relation is allowed to declare no
       // target at all, and the list may not name the class that arrived — it
       // says what this call site can construct, not what the relation may hold.
-      // The item then stays plain JSON — correct data, carrying its class name
-      // for a caller that wants to dispatch on it — rather than being forced
-      // through a constructor that does not exist.
+      // The item then stays plain JSON — correct data, carrying its target
+      // class for a caller that wants to dispatch on it — rather than being
+      // forced through a constructor that does not exist.
       const resolveChildClass = (item: any): any => {
         if (!meta.polymorphic) return TargetClass;
         const concrete = item?.[SUBJECT_CLASS_KEY];
@@ -322,14 +350,15 @@ function jsonToModelInstance<T extends Ad4mModel>(
         // own declared target is the right shape.
         if (typeof concrete !== 'string') return TargetClass;
         if (meta.instantiateAs) {
-          if (!byClassName) {
-            byClassName = {};
+          if (!byTargetClass) {
+            byTargetClass = new Map();
             for (const cls of meta.instantiateAs() ?? []) {
-              const name = (cls as any)?.className;
-              if (typeof name === 'string') byClassName[name] = cls;
+              const key = classKey(cls);
+              if (key) byTargetClass.set(key, cls);
             }
           }
-          if (byClassName[concrete]) return byClassName[concrete];
+          const cls = byTargetClass.get(concrete);
+          if (cls) return cls;
         }
         // The declared target is not a fallback, and having named no classes to
         // build does not make it one. Where a relation both declares a target
@@ -339,7 +368,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
         // not, carrying fields that class never declared — the exact
         // mislabelling polymorphic reads exist to prevent. It fits only when it
         // is the class the executor named.
-        return (TargetClass as any)?.className === concrete ? TargetClass : undefined;
+        return TargetClass && classKey(TargetClass) === concrete ? TargetClass : undefined;
       };
       const nestedInclude =
         typeof includeVal === 'object' && includeVal !== null
@@ -2700,9 +2729,8 @@ export class Ad4mModel {
     }
 
     // The class keeps the shape's target class, which the executor
-    // addresses it by: `name` is its local name, so the namespace is the rest.
-    const targetClass = shape.targetClass;
-    const namespace = targetClass?.endsWith(name) ? targetClass.slice(0, -name.length) : undefined;
+    // addresses it by: its namespace is everything before the local name.
+    const namespace = namespaceOf(shape.targetClass);
     const ModelDecorator = Model({ name, ...(namespace && { namespace }) });
     ModelDecorator(DynamicModelClass);
 

@@ -85,7 +85,7 @@ describe("TextContent", () => {
       get: (_t, key) => async (...args: any[]) => {
         calls.push([key, ...args]);
         if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://m/1", __subjectClass: "Message", text: "hi" }], totalCount: 1 };
+          return { instances: [{ id: "ad4m://m/1", __subjectClass: "flux://Message", text: "hi" }], totalCount: 1 };
         }
         return true;
       },

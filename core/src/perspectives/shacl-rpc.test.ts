@@ -24,7 +24,7 @@ function noteShape(): SHACLShape {
 
 describe('PerspectiveProxy shape registration', () => {
   it('registerShapes sends each shape as its JSON and answers what the executor did', async () => {
-    const result = { unchanged: [], written: ['Note'], generation: 3 };
+    const result = { unchanged: [], written: ['test://Note'], generation: 3 };
     const client = { registerShapes: jest.fn().mockResolvedValue(result) };
     const shape = noteShape();
 

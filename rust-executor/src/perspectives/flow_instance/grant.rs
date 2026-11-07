@@ -130,7 +130,7 @@
 //! revocable needs an authority in the role query that is going to be there
 //! later.
 
-use super::produced::first_produced_at;
+use super::produced::{first_produced_at, output_matches_class};
 use crate::perspectives::flow_evaluator::RequiresQueryable;
 use crate::perspectives::shacl_parser::ProducedByFlow;
 use std::collections::BTreeMap;
@@ -146,7 +146,10 @@ use std::collections::BTreeMap;
 ///
 /// `role_class` must be the role query's `className` from this replica's own
 /// flow definition: an output committed as another class is not a produced
-/// member of this one.
+/// member of this one. The classes match as the `producedByFlow` query filter
+/// matches them ([`output_matches_class`]): as written, or through the class
+/// each reads here, so a role named `Reviewer` is the output a proposal
+/// signed as `coasys://Reviewer`.
 ///
 /// Errors, never an empty map, when the answer cannot be decided: F is not in
 /// this replica's catalogue, or F's index could not be read (module header).
@@ -169,6 +172,8 @@ pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
             spec.flow
         ))
     })?;
+    let role_iri = perspective.class_iri(role_class);
+    let role_iri = role_iri.as_deref().unwrap_or(role_class);
     Ok(first_produced_at(
         &catalogue,
         &spec.flow,
@@ -177,7 +182,10 @@ pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
         perspective.receipt_verdict_memo(),
     )
     .into_iter()
-    .filter(|(output, _)| output.class_name == role_class)
+    .filter(|(output, _)| {
+        let resolved = perspective.class_iri(&output.class_name);
+        output_matches_class(output, resolved.as_deref(), role_class, role_iri)
+    })
     .map(|(output, at)| (output.id, at))
     .collect())
 }
@@ -483,6 +491,15 @@ mod tests {
         async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
             Ok(self.catalogue.clone())
         }
+
+        /// [`ROLE`] and [`TASK_CLASS`] are registered: each reads by its IRI
+        /// and by its name.
+        fn class_iri(&self, class: &str) -> Option<String> {
+            [ROLE, TASK_CLASS]
+                .into_iter()
+                .find(|iri| *iri == class || iri.rsplit('/').next() == Some(class))
+                .map(str::to_string)
+        }
     }
 
     fn store(flows: &[&SHACLFlow], receipts: Vec<FlowReceipt>) -> GateStore {
@@ -744,6 +761,41 @@ mod tests {
             1,
             "so the refusal above is the class, not a receipt that never verified"
         );
+    }
+
+    /// **A gate names its role class by name, the receipt by IRI.** A
+    /// proposal signs each output under its class's target class IRI, and a
+    /// flow definition's `fromRole.className` is often the bare name. The
+    /// gate matches them through the class the name reads here, the same
+    /// rule as the `producedByFlow` query filter (`output_matches_class`), so
+    /// a role named `Reviewer` is granted by an output committed as
+    /// `coasys://Reviewer` and by nothing committed as `coasys://Task`.
+    ///
+    /// Red if the gate compares the two class strings as written.
+    #[tokio::test]
+    async fn a_role_named_by_name_is_granted_by_an_output_committed_by_iri() {
+        let granting = granting_flow("Onboarding");
+        let gate_spec = spec(&granting.flow_uri(), "done");
+        let receipt = receipt_for(
+            &granting,
+            "done",
+            T1,
+            &[role_item(ROLE_INSTANCE), item(TASK_CLASS, SOMEBODY_ELSE)],
+        );
+        let db = store(&[&granting], vec![receipt]);
+
+        let by_name = produced_at_by_instance(&db, "Reviewer", &gate_spec)
+            .await
+            .expect("the gate can be decided");
+        assert_eq!(
+            by_name.keys().collect::<Vec<_>>(),
+            vec![ROLE_INSTANCE],
+            "the Reviewer output grants a gate naming `Reviewer`; the Task output does not"
+        );
+        let by_iri = produced_at_by_instance(&db, ROLE, &gate_spec)
+            .await
+            .expect("the gate can be decided");
+        assert_eq!(by_iri, by_name, "the name and the IRI are one class");
     }
 
     /// The binding is **per instance**: two matched instances of the same

@@ -102,7 +102,7 @@ async fn register_twice_writes_no_link() {
         .register_shapes(vec![note()], &ctx)
         .await
         .unwrap();
-    assert_eq!(first.written, vec!["Note".to_string()]);
+    assert_eq!(first.written, vec!["ns://Note".to_string()]);
     assert!(first.unchanged.is_empty());
     let before = all_links(&perspective);
 
@@ -111,7 +111,7 @@ async fn register_twice_writes_no_link() {
         .await
         .unwrap();
 
-    assert_eq!(second.unchanged, vec!["Note".to_string()]);
+    assert_eq!(second.unchanged, vec!["ns://Note".to_string()]);
     assert!(second.written.is_empty());
     assert_eq!(second.generation, first.generation);
     assert_eq!(all_links(&perspective), before, "links and timestamps stay");
@@ -154,7 +154,7 @@ async fn refresh_keeps_foreign_annotations() {
         .await
         .unwrap();
 
-    assert_eq!(result.written, vec!["Note".to_string()]);
+    assert_eq!(result.written, vec!["ns://Note".to_string()]);
     for source in ["ns://Note", "ns://NoteShape", title.as_str()] {
         for (predicate, target) in annotations {
             assert_eq!(
@@ -207,7 +207,7 @@ async fn refresh_keeps_foreign_type_links() {
         .await
         .unwrap();
 
-    assert_eq!(result.written, vec!["Note".to_string()]);
+    assert_eq!(result.written, vec!["ns://Note".to_string()]);
     for source in ["ns://Note", "ns://NoteShape", title.as_str()] {
         assert_eq!(
             count(&perspective, source, "rdf://type", "app://Tagged"),
@@ -257,7 +257,7 @@ async fn shapes_equals_the_stored_shape() {
         .register_shapes(vec![summary.shape.clone()], &ctx)
         .await
         .unwrap();
-    assert_eq!(again.unchanged, vec!["Note".to_string()]);
+    assert_eq!(again.unchanged, vec!["ns://Note".to_string()]);
     assert_eq!(again.generation, generation);
     assert!(perspective
         .shapes(Some(vec!["Other".into()]))
@@ -407,7 +407,7 @@ async fn concurrent_duplicate_triple_counts_as_unchanged() {
         .await
         .unwrap();
 
-    assert_eq!(result.unchanged, vec!["Note".to_string()]);
+    assert_eq!(result.unchanged, vec!["ns://Note".to_string()]);
     for link in &copies {
         assert_eq!(
             count(
@@ -451,7 +451,7 @@ async fn shape_moved_to_a_new_uri_moves_its_mapping() {
         .await
         .unwrap();
 
-    assert_eq!(result.written, vec!["Note".to_string()]);
+    assert_eq!(result.written, vec!["ns://Note".to_string()]);
     let shapes: Vec<String> = perspective
         .sparql_store
         .query_links(
@@ -642,9 +642,7 @@ async fn two_classes_of_one_name_coexist_by_iri() {
         .register_shapes(vec![task("b://"), task("a://"), project], &ctx)
         .await
         .unwrap();
-    let mut written = result.written.clone();
-    written.sort();
-    assert_eq!(written, ["Project", "Task", "Task"]);
+    assert_eq!(result.written, ["a://Task", "b://Task", "p://Project"]);
     let classes: Vec<_> = perspective
         .shapes(Some(vec!["Task".into()]))
         .unwrap()
@@ -1010,7 +1008,7 @@ async fn classes_the_previous_writer_stored_are_read_and_rewritten_once() {
         .register_shapes(vec![old_task.clone()], &ctx)
         .await
         .unwrap();
-    assert_eq!(result.written, vec!["Task".to_string()]);
+    assert_eq!(result.written, vec!["old://Task".to_string()]);
     let after = all_links(&perspective);
     let changed = |a: &BTreeSet<_>, b: &BTreeSet<_>| -> BTreeSet<(String, String)> {
         a.difference(b)
@@ -1040,7 +1038,7 @@ async fn classes_the_previous_writer_stored_are_read_and_rewritten_once() {
         .register_shapes(vec![old_task], &ctx)
         .await
         .unwrap();
-    assert_eq!(again.unchanged, vec!["Task".to_string()]);
+    assert_eq!(again.unchanged, vec!["old://Task".to_string()]);
 }
 
 #[tokio::test]
@@ -1059,10 +1057,10 @@ async fn two_concurrent_registrations_of_one_shape_write_once() {
         (b.written.clone(), b.unchanged.clone()),
     ];
     outcomes.sort();
-    let note_name = vec!["Note".to_string()];
+    let note_iri = vec!["ns://Note".to_string()];
     assert_eq!(
         outcomes,
-        [(vec![], note_name.clone()), (note_name, vec![])],
+        [(vec![], note_iri.clone()), (note_iri, vec![])],
         "{a:?} {b:?}"
     );
     assert_eq!(a.generation, b.generation);
@@ -1140,7 +1138,7 @@ async fn a_class_name_two_peers_registered_answers_for_the_class_readers_find() 
             .register_shapes(vec![task("a://"), task("b://")], ctx)
             .await
             .unwrap();
-        assert_eq!(again.unchanged, ["Task", "Task"]);
+        assert_eq!(again.unchanged, ["a://Task", "b://Task"]);
         assert!(again.written.is_empty());
         assert_eq!(all_links(side), before, "nothing is written");
     }

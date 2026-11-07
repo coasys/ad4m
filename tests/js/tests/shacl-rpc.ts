@@ -89,7 +89,7 @@ export default function shaclRpcTests(testContext: TestContext) {
             describe("after registering Message + Todo", () => {
                 before(async () => {
                     const result = await Ad4mModel.registerAll(await perspective(), [ShaclMessage, ShaclTodo]);
-                    expect(result.written).to.deep.equal(["Message", "Todo"]);
+                    expect(result.written).to.deep.equal(["ad4m://Message", "todo://Todo"]);
                     expect(result.unchanged).to.deep.equal([]);
                 });
 
@@ -135,7 +135,7 @@ export default function shaclRpcTests(testContext: TestContext) {
                     const p = await perspective();
                     const before = await snapshot(p);
                     const result = await Ad4mModel.registerAll(p, [ShaclMessage, ShaclTodo]);
-                    expect(result.unchanged).to.deep.equal(["Message", "Todo"]);
+                    expect(result.unchanged).to.deep.equal(["ad4m://Message", "todo://Todo"]);
                     expect(result.written).to.deep.equal([]);
                     expect(await snapshot(p)).to.deep.equal(before);
                 });
@@ -149,12 +149,12 @@ export default function shaclRpcTests(testContext: TestContext) {
                         return shape;
                     };
                     const first = await p.registerShapes([note("xsd://string")]);
-                    expect(first.written).to.deep.equal(["Note"]);
+                    expect(first.written).to.deep.equal(["note://Note"]);
                     // An annotation another app keeps on the property node.
                     await p.add(new Link({ source: "note://Note.text", predicate: "other://label", target: "literal://string:Text" }));
 
                     const second = await p.registerShapes([note("xsd://integer")]);
-                    expect(second.written).to.deep.equal(["Note"]);
+                    expect(second.written).to.deep.equal(["note://Note"]);
                     expect(second.generation).to.be.greaterThan(first.generation);
 
                     const [stored] = await p.shapes(["Note"]);
@@ -200,8 +200,8 @@ export default function shaclRpcTests(testContext: TestContext) {
                         });
                         return shape;
                     };
-                    expect((await p.registerShapes([note("b://", "body")])).written).to.deep.equal(["Note"]);
-                    expect((await p.registerShapes([note("a://", "text")])).written).to.deep.equal(["Note"]);
+                    expect((await p.registerShapes([note("b://", "body")])).written).to.deep.equal(["b://Note"]);
+                    expect((await p.registerShapes([note("a://", "text")])).written).to.deep.equal(["a://Note"]);
 
                     // A name lists every class of that name, the least IRI first; an IRI only its own.
                     const notes = await p.shapes(["Note"]);
