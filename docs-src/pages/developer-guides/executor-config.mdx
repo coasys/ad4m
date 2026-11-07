@@ -211,7 +211,7 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
 |---|---|---|
 | 0 | stopped: `runtime.quit`, SIGTERM, SIGINT, or stdin closed with `--watch-stdin true` | nothing |
 | 75 | `runtime.restart` | start the executor again with the same arguments |
-| 78 | the config or a flag is refused (also `--custody-channel` with multi-user mode, or without `AD4M_CUSTODY_CREDENTIAL`) | do not retry: it fails the same way |
+| 78 | the config or a flag is refused (also `--custody-channel` with multi-user mode, without a custody credential on the first line of stdin, or with `AD4M_CUSTODY_CREDENTIAL` set) | do not retry: it fails the same way |
 | 79 | another executor holds this data folder (`<app_data_path>/executor.lock`) | report it |
 | 80 | the API port does not bind | pick another port and start again |
 | other, or a signal | a crash | restart with a delay |
@@ -231,14 +231,24 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
 - **`--custody-channel`**: this executor serves the custody channel
   (`identity.custodyStatus`, `identity.takeMaster`) to the custody credential
   on a loopback listener only. The custody credential is a second secret,
-  given only to the custody service: pass it in the environment
-  (`AD4M_CUSTODY_CREDENTIAL`, or `AD4M_CUSTODY_CREDENTIAL_FILE`), never on
-  the command line, and give a new one at each start. It must differ from
-  the admin credential; the admin credential (which an app's window may
-  hold) gets 403 `no-custody-channel`. Without the variable, or with the
-  admin credential's value, `run` exits 78. Multi-user mode refuses the
-  channel too: `run` exits 78, and `user.setMultiUserEnabled(true)` answers
-  403.
+  given only to the custody service. The supervisor writes it as the
+  **first line of the executor's stdin** (the value, then `\n`; a trailing
+  `\r` is dropped), right after it starts the executor; the executor reads
+  that line before anything else, keeps the value in memory only, and wipes
+  it when it is dropped. Then the supervisor keeps the pipe open and writes
+  nothing more (with `--watch-stdin true` the executor stops when it
+  closes; without it, closing does nothing). Generate a new credential at
+  each start.
+
+  Not the environment and not a flag: a process's environment is a file
+  others can read (`/proc/<pid>/environ` on Linux; same-user processes on
+  macOS too), so is its command line, and the admin credential, which an
+  app's window may hold, reads host files. `AD4M_CUSTODY_CREDENTIAL` or
+  `AD4M_CUSTODY_CREDENTIAL_FILE` set stops `run` with 78, as does stdin
+  ending before the line, an empty line, or the admin credential's value.
+  The admin credential gets 403 `no-custody-channel`. Multi-user mode
+  refuses the channel too: `run` exits 78, and
+  `user.setMultiUserEnabled(true)` answers 403.
 - **Local only**: `runtime.quit`, `runtime.restart`, `agent.unlock`,
   `agent.signSessionStatement`, `identity.rekey` and `identity.custodyStatus`
   answer only the operator on a loopback listener.
@@ -275,12 +285,15 @@ Secrets come from files or environment variables:
 | Secret | From a file | From a value | In the config file |
 |---|---|---|---|
 | Admin credential | `AD4M_ADMIN_CREDENTIAL_FILE` | `AD4M_ADMIN_CREDENTIAL` | — |
-| Custody credential (`--custody-channel`) | `AD4M_CUSTODY_CREDENTIAL_FILE` | `AD4M_CUSTODY_CREDENTIAL` | — |
 | SMTP password | `AD4M_SMTP_PASSWORD_FILE` | `AD4M_SMTP_PASSWORD` | `smtp_config.password_file` |
 | Agent passphrase | `AD4M_UNLOCK_PASSPHRASE_FILE` | — | — |
 
 - Setting both variables of one secret stops `run`. The variables win over
   `smtp_config.password_file`.
+- The custody credential (`--custody-channel`) comes from none of these: only
+  from the first line of stdin (see [Running under a supervisor](#running-under-a-supervisor)).
+  A `custody_credential` key in the config file stops `run`, and so does
+  `AD4M_CUSTODY_CREDENTIAL` or `AD4M_CUSTODY_CREDENTIAL_FILE`.
 - A secret file must not be readable by group or others: mode `0600` or
   `0400`, otherwise `run` stops and names the file and its mode.
 - One trailing newline is removed, so `echo "$SECRET" > file` works.

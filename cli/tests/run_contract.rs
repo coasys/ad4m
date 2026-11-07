@@ -147,6 +147,31 @@ fn spawn(
     }
 }
 
+/// Starts the executor as a custody service's supervisor does: stdin is a pipe, `first` (when
+/// given) is written to it, and the pipe stays open while the [`Executor`] holds it. `None`
+/// writes nothing.
+fn spawn_with_stdin(
+    folder: &DataFolder,
+    port: u16,
+    args: Vec<String>,
+    first: Option<&[u8]>,
+    log: &str,
+    env: &[(&str, &str)],
+) -> Executor {
+    let mut executor = spawn(folder, port, args, Stdio::piped(), log, env);
+    if let Some(bytes) = first {
+        let stdin = executor.child.stdin.as_mut().expect("a piped stdin");
+        stdin.write_all(bytes).expect("write the first line");
+        stdin.flush().expect("flush the first line");
+    }
+    executor
+}
+
+/// The custody credential as a supervisor writes it: one line on stdin.
+fn custody_line() -> Vec<u8> {
+    format!("{CUSTODY}\n").into_bytes()
+}
+
 impl Executor {
     fn output(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
@@ -378,7 +403,7 @@ fn a_log_folder_that_cannot_be_made_fails_the_start_and_says_why() {
 }
 
 /// A start the executor refuses exits 78, whether the CLI refuses it (the custody channel with
-/// multi-user mode on the command line, the custody channel without `AD4M_CUSTODY_CREDENTIAL`, a
+/// multi-user mode on the command line, the custody channel with stdin closed before its line, a
 /// config file with an unknown key, an empty `AD4M_*` variable) or `run` does (the custody channel with multi-user mode left on in the database
 /// by an earlier run).
 #[tokio::test(flavor = "multi_thread")]
@@ -425,7 +450,7 @@ async fn a_refused_start_exits_78() {
     assert!(
         no_custody_credential
             .output()
-            .contains("AD4M_CUSTODY_CREDENTIAL"),
+            .contains("first line of stdin"),
         "{}",
         no_custody_credential.output()
     );
@@ -500,16 +525,13 @@ async fn a_refused_start_exits_78() {
 
     let port = free_port();
     let args = run_args(&folder, port, &["--custody-channel"]);
-    let mut custody = spawn(
+    let mut custody = spawn_with_stdin(
         &folder,
         port,
         args,
-        Stdio::null(),
+        Some(&custody_line()),
         "custody.log",
-        &[
-            ("AD4M_ADMIN_CREDENTIAL", ADMIN),
-            ("AD4M_CUSTODY_CREDENTIAL", CUSTODY),
-        ],
+        &credential,
     );
     assert_eq!(
         code(custody.exit_within(READY)),
@@ -534,14 +556,17 @@ async fn the_custody_channel_answers_only_the_custody_credential_on_loopback_wit
     let _serial = SERIAL.lock().await;
     let folder = DataFolder::new();
     let credential = [("AD4M_ADMIN_CREDENTIAL", ADMIN)];
-    let with_custody = [
-        ("AD4M_ADMIN_CREDENTIAL", ADMIN),
-        ("AD4M_CUSTODY_CREDENTIAL", CUSTODY),
-    ];
 
     let port = free_port();
     let args = run_args(&folder, port, &["--custody-channel"]);
-    let mut on = spawn(&folder, port, args, Stdio::null(), "on.log", &with_custody);
+    let mut on = spawn_with_stdin(
+        &folder,
+        port,
+        args,
+        Some(&custody_line()),
+        "on.log",
+        &credential,
+    );
     on.ready();
     let admin = WsRpcClient::connect(&on.url(), ADMIN).await.unwrap();
     let _: Value = admin
@@ -588,13 +613,13 @@ async fn the_custody_channel_answers_only_the_custody_credential_on_loopback_wit
         port,
         &["--custody-channel", "--insecure-no-admin-credential"],
     );
-    let mut tokenless = spawn(
+    let mut tokenless = spawn_with_stdin(
         &folder,
         port,
         args,
-        Stdio::null(),
+        Some(&custody_line()),
         "tokenless.log",
-        &[("AD4M_CUSTODY_CREDENTIAL", CUSTODY)],
+        &[],
     );
     tokenless.ready();
     let operator = WsRpcClient::connect(&tokenless.url(), "").await.unwrap();
@@ -624,6 +649,221 @@ async fn the_custody_channel_answers_only_the_custody_credential_on_loopback_wit
     assert!(
         refused.starts_with("RPC error 403: no-custody-channel"),
         "{refused}"
+    );
+}
+
+/// The custody credential reaches the executor only as the first line of its stdin: it opens
+/// the custody channel, and it is in no file the admin credential can read. Not in the process
+/// environment (`/proc/<pid>/environ`) nor on the command line (`/proc/<pid>/cmdline`), and
+/// not in the log, `runtime.config` or `runtime.info`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_custody_credential_comes_as_the_first_line_of_stdin_and_nowhere_else() {
+    let _serial = SERIAL.lock().await;
+    let folder = DataFolder::new();
+    let config = folder.file("config.json");
+    std::fs::write(&config, "{}").unwrap();
+    let port = free_port();
+    let args = run_args(
+        &folder,
+        port,
+        &["--custody-channel", "--config", config.to_str().unwrap()],
+    );
+    let mut executor = spawn_with_stdin(
+        &folder,
+        port,
+        args,
+        Some(&custody_line()),
+        "stdin-credential.log",
+        &[("AD4M_ADMIN_CREDENTIAL", ADMIN)],
+    );
+    executor.ready();
+
+    let admin = WsRpcClient::connect(&executor.url(), ADMIN).await.unwrap();
+    let _: Value = admin
+        .call("agent.generate", json!({ "passphrase": "run-contract" }))
+        .await
+        .unwrap();
+    let custody = WsRpcClient::connect(&executor.url(), CUSTODY)
+        .await
+        .unwrap();
+    let keys: Value = custody
+        .call("identity.custodyStatus", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        keys["sign"].as_str().unwrap().starts_with("did:key:z6Mk"),
+        "{keys}"
+    );
+
+    for method in ["runtime.config", "runtime.info"] {
+        let answer: Value = admin.call(method, json!({})).await.unwrap();
+        assert!(!answer.to_string().contains(CUSTODY), "{method}: {answer}");
+    }
+    assert!(
+        !executor.output().contains(CUSTODY),
+        "{}",
+        executor.output()
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        let pid = executor.child.id();
+        for file in ["environ", "cmdline"] {
+            let bytes = match std::fs::read(format!("/proc/{pid}/{file}")) {
+                Ok(bytes) => bytes,
+                // The executor made itself not dumpable (no core dumps): the kernel then closes
+                // its environ to every other process of the user too. Nobody reads it.
+                Err(e) if file == "environ" && e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    continue
+                }
+                Err(e) => panic!("/proc/{pid}/{file}: {e}"),
+            };
+            assert!(!bytes.is_empty() || file == "environ", "empty {file}");
+            assert!(
+                !bytes
+                    .windows(CUSTODY.len())
+                    .any(|window| window == CUSTODY.as_bytes()),
+                "the custody credential is in /proc/{pid}/{file}"
+            );
+        }
+    }
+}
+
+/// The custody credential in the environment is refused with 78, even with the line on stdin:
+/// any process of the same user reads another's environment (`/proc/<pid>/environ`), and the
+/// admin credential reads host files. `AD4M_CUSTODY_CREDENTIAL_FILE` likewise.
+#[test]
+fn the_custody_credential_in_the_environment_is_refused_with_78() {
+    let _serial = serial();
+    let folder = DataFolder::new();
+    for (name, log) in [
+        ("AD4M_CUSTODY_CREDENTIAL", "env-credential.log"),
+        ("AD4M_CUSTODY_CREDENTIAL_FILE", "env-credential-file.log"),
+    ] {
+        let port = free_port();
+        let args = run_args(&folder, port, &["--custody-channel"]);
+        let mut executor = spawn_with_stdin(
+            &folder,
+            port,
+            args,
+            Some(&custody_line()),
+            log,
+            &[("AD4M_ADMIN_CREDENTIAL", ADMIN), (name, CUSTODY)],
+        );
+        assert_eq!(
+            code(executor.exit_within(EXIT)),
+            Some(78),
+            "{name}: {}",
+            executor.output()
+        );
+        assert!(
+            executor.output().contains(name) && executor.output().contains("stdin"),
+            "{name}: {}",
+            executor.output()
+        );
+    }
+}
+
+/// Every first line that is not a custody credential of its own is refused with 78: stdin closed
+/// at start, stdin closed before a line, an empty line, a whitespace line, the admin credential.
+#[test]
+fn a_custody_channel_without_a_good_first_line_is_refused_with_78() {
+    let _serial = serial();
+    let folder = DataFolder::new();
+    let admin_line = format!("{ADMIN}\n");
+    let cases: [(&str, Option<&[u8]>, &str); 5] = [
+        ("closed.log", None, "first line of stdin"),
+        ("no-newline-eof.log", Some(b""), "first line of stdin"),
+        ("empty-line.log", Some(b"\n"), "first line of stdin"),
+        ("blank-line.log", Some(b"  \r\n"), "first line of stdin"),
+        (
+            "admin-line.log",
+            Some(admin_line.as_bytes()),
+            "is the admin credential",
+        ),
+    ];
+    for (log, first, message) in cases {
+        let port = free_port();
+        let args = run_args(&folder, port, &["--custody-channel"]);
+        let mut executor = spawn_with_stdin(
+            &folder,
+            port,
+            args,
+            first,
+            log,
+            &[("AD4M_ADMIN_CREDENTIAL", ADMIN)],
+        );
+        // The supervisor closes its end: the executor never waits for a line that won't come.
+        drop(executor.child.stdin.take());
+        assert_eq!(
+            code(executor.exit_within(EXIT)),
+            Some(78),
+            "{log}: {}",
+            executor.output()
+        );
+        assert!(
+            executor.output().contains(message),
+            "{log}: {}",
+            executor.output()
+        );
+        assert!(
+            !executor.output().contains(ADMIN),
+            "{log}: {}",
+            executor.output()
+        );
+    }
+}
+
+/// `--custody-channel` with `--watch-stdin`: the first line is the credential, then the watcher
+/// reads on, and the executor stops with 0 when the supervisor's end closes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_custody_line_and_watch_stdin_share_stdin() {
+    let _serial = SERIAL.lock().await;
+    let folder = DataFolder::new();
+    let port = free_port();
+    let args = run_args(
+        &folder,
+        port,
+        &["--custody-channel", "--watch-stdin", "true"],
+    );
+    let mut executor = spawn_with_stdin(
+        &folder,
+        port,
+        args,
+        Some(&custody_line()),
+        "custody-watch.log",
+        &[("AD4M_ADMIN_CREDENTIAL", ADMIN)],
+    );
+    executor.ready();
+    let custody = WsRpcClient::connect(&executor.url(), CUSTODY)
+        .await
+        .unwrap();
+    // No agent yet: the channel is open to the credential, so the refusal is not about it.
+    let answer = custody
+        .call::<Value>("identity.custodyStatus", json!({}))
+        .await;
+    if let Err(e) = &answer {
+        assert!(!e.to_string().contains("no-custody-channel"), "{e}");
+        assert!(!e.to_string().contains("Admin credential required"), "{e}");
+    }
+    drop(custody);
+    // Data after the line is no stop.
+    executor
+        .child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"more\n")
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(executor.running(), "{}", executor.output());
+    drop(executor.child.stdin.take());
+    let status = executor.exit_within(EXIT);
+    assert_eq!(code(status), Some(0), "{}", executor.output());
+    assert!(
+        executor.output().contains("stdin closed"),
+        "{}",
+        executor.output()
     );
 }
 

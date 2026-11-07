@@ -1,8 +1,11 @@
 //! The custody channel: the path by which the desktop app's custody service takes a master key
 //! that arrived sealed to this computer's device key. It is no listener of its own: it is the
-//! custody credential (`AD4M_CUSTODY_CREDENTIAL`) on a loopback listener of an executor started
-//! with `--custody-channel`. The admin credential never opens it: an app's window may hold that
-//! one, and must not take a master key. [`admit`] is its one guard, for `identity.custodyStatus`,
+//! custody credential on a loopback listener of an executor started with `--custody-channel`.
+//! The credential arrives as the first line of stdin
+//! ([`read_custody_credential`](crate::config::read_custody_credential)), never in the
+//! environment or on the command line, which the admin credential could read back as host files.
+//! The admin credential never opens the channel: an app's window may hold that one, and must not
+//! take a master key. [`admit`] is its one guard, for `identity.custodyStatus`,
 //! `identity.takeMaster` and a claim that keeps the master key (`identity.claimOffer` with
 //! `canKeepMaster`).
 

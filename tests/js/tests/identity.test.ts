@@ -564,7 +564,13 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
 
     async function start(
         name: string,
-        opts: { credential?: string; env?: Record<string, string>; initArgs?: string[] } = {},
+        opts: {
+            credential?: string;
+            env?: Record<string, string>;
+            initArgs?: string[];
+            /** `--custody-channel`'s credential, written as the first line of stdin. */
+            custodyCredential?: string;
+        } = {},
     ): Promise<Node> {
         const ports = await getFreePorts(3);
         registerPorts(ports);
@@ -577,6 +583,7 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
             true,           // sharedStores
             { ...store.executorEnv(), ...(opts.env ?? {}) },
             opts.initArgs ?? [],
+            opts.custodyCredential,
         );
         const client = new Ad4mClient(baseUrl(ports[0]), opts.credential);
         await client.agent.generate("passphrase");
@@ -620,7 +627,8 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
     it("links a desktop through its device string: its claim, then link-ticket with the match code", async () => {
         desk = await start("inbox-desktop", {
             credential: CREDENTIAL,
-            env: { AD4M_CUSTODY_CHANNEL: "true", AD4M_CUSTODY_CREDENTIAL: CUSTODY },
+            env: { AD4M_CUSTODY_CHANNEL: "true" },
+            custodyCredential: CUSTODY,
             initArgs: ["--operator", did],
         });
         const tickets: any[] = [];

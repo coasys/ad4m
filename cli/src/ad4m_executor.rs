@@ -305,7 +305,7 @@ async fn main() -> Result<()> {
             exit(rust_executor::exit::ExitReason::ConfigRefused.code());
         };
         let ResolvedRun {
-            config,
+            mut config,
             unlock_passphrase,
         } = run_args
             .resolve(process_env)
@@ -315,6 +315,18 @@ async fn main() -> Result<()> {
         if let Err(message) = checked.check_admin_credential() {
             refused(message);
         }
+        // The custody credential is the first line of stdin, read here before anything else
+        // reads stdin: never the environment or a flag, which other processes (and the admin
+        // credential's host file reads) can see. Only that line leaves the process's buffered
+        // stdin; `--watch-stdin`'s watcher reads on from the same buffer.
+        if config.custody_channel == Some(true) {
+            let read = rust_executor::config::read_custody_credential(
+                &mut std::io::stdin().lock(),
+                &checked.admin_credential,
+            );
+            config.custody_credential = Some(read.unwrap_or_else(|message| refused(message)));
+        }
+        drop(checked);
         let startup = tokio::spawn(async move { rust_executor::run(config).await }).await;
         // Exit 1 when the REST API fails (e.g. the port is taken), instead of
         // running on with no API.
