@@ -177,11 +177,14 @@ the offer's state).
   first-link rule itself: `already-linked` while the main key is valid in its identity's log at
   the trusted seq, `no-operator` without a record, `first-link` for another identity. One
   exception (`FirstLink::FirstRun`): a `--custody-channel` executor (a desktop app, which never
-  runs `init --operator`) with no record and no identity for its main agent claims the first
-  offer, and once the store accepts that claim records the offer's identity as operator
-  (`OperatorSetBy::FirstRun`, `set_operator_record_if_empty`). From then on the rule applies as
-  above: a claim for any other identity is `first-link`. Both the ticket path and
-  `identity.claimOffer` (a pasted link) go through `claim_for_main`, so both get it.
+  runs `init --operator`) with no record and no identity for its main agent may claim any
+  offer. The claim records nothing: only when the main agent joins (`join_status` on `spent`
+  binds it, then `record_first_run_operator`) is that identity recorded as operator
+  (`OperatorSetBy::FirstRun`, `set_operator_record_if_empty`). So a claim that never completes
+  (the wrong code scanned, the holder said No) leaves the desktop free to claim again, for the
+  same or another identity. From then on the rule applies as above: a claim for any other
+  identity is `first-link`. Both the ticket path and `identity.claimOffer` (a pasted link) go
+  through `claim_for_main` and end in `joinStatus`, so both get it.
 - With an operator record the main key may speak only for the operator's identity:
   `cosignIncept` for the main agent runs `main_incept_check` and refuses (`first-link`) an
   incept of any other identity, and `publish` of an incept by the main agent runs it again
