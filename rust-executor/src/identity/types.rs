@@ -69,6 +69,21 @@ pub struct IdentityStatus {
     /// Set while the configured store answers the log behind the cache (a store restored from
     /// a backup, or not caught up): the cached log answers meanwhile. `null` once it catches up.
     pub store_behind: Option<StoreBehind>,
+    /// The identity store this executor uses (the config's, else its network seed's), and
+    /// whether it trusts a key for it; `null` when it has none (a network without a store).
+    pub store: Option<StoreInfo>,
+}
+
+/// The identity store an executor uses (`identity.status`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreInfo {
+    /// The store's base URL, as the agent language reaches it.
+    pub url: String,
+    /// Whether the executor trusts a key for the store (`identity.storeKeys`, or the seed's
+    /// keys). Without one it accepts no head from it, so no `did:scid` record verifies, and
+    /// `identity.publish` and `identity.claimOffer` refuse `no-store-keys`.
+    pub trusted: bool,
 }
 
 /// The configured store answering a log behind this executor's cache (`identity.status`).

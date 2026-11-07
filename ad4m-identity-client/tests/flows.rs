@@ -381,6 +381,7 @@ impl ExecutorRpc for TestExecutor {
                     "head": null,
                     "fork": null,
                     "storeBehind": null,
+                    "store": { "url": STORE_URL, "trusted": true },
                 }))
             }
             "identity.cosignIncept" => {
@@ -849,6 +850,14 @@ async fn create_makes_an_identity_that_lists_the_executor_as_d1() {
     let status = a.status().await.unwrap();
     assert_eq!(status.did.as_deref(), Some(created.did.as_str()));
     assert_eq!(status.key_id.as_deref(), Some("d1"));
+    // The typed status carries the executor's store, as `identity.status` answers it.
+    assert_eq!(
+        status.store,
+        Some(ad4m_identity_client::executor::StoreInfo {
+            url: STORE_URL.into(),
+            trusted: true,
+        })
+    );
     let events = a.events(&created.did).await.unwrap();
     assert_eq!(events.len(), 1);
     let kept = vault.unlock(&created.scid, MasterUse::Link, 0).unwrap();

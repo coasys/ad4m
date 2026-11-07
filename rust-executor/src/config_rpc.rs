@@ -70,7 +70,7 @@ pub struct ConfigKeyInfo {
 #[ts(export)]
 pub struct RuntimeConfig {
     /// The file's keys and values: what the next start reads. The file holds no secret (a
-    /// secret is named by a `*_file` path), so neither does this.
+    /// secret is named by a `*_file` path), and a secret pasted into it is left out.
     #[ts(type = "Record<string, unknown>")]
     pub values: Map<String, Value>,
     /// Every key `runtime.setConfig` knows, with its class.
@@ -143,7 +143,7 @@ pub type ConfigValidator =
     Arc<dyn Fn(Value) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
 /// A key `runtime.setConfig` knows. `key` names a top-level key of the config file, or a
-/// nested one with dots (`link_server.url`).
+/// nested one with dots (`multi_user_config.enabled`).
 #[derive(Clone)]
 pub struct ConfigKeySpec {
     pub key: &'static str,
@@ -254,20 +254,29 @@ pub fn read_values(file: &Path) -> Result<Map<String, Value>, String> {
     }
 }
 
-/// `runtime.config` for an executor that started with `file` and `pinned` keys.
+/// `runtime.config` for an executor that started with `file` and `pinned` keys. A secret pasted
+/// into the file after the start ([`INLINE_SECRETS`](crate::config_file::INLINE_SECRETS), which
+/// the next start refuses) is left out.
 pub fn runtime_config(file: Option<&Path>, pinned: &[String]) -> Result<RuntimeConfig, String> {
+    let mut values = match file {
+        Some(file) => read_values(file)?,
+        None => Map::new(),
+    };
+    for (pointer, _) in crate::config_file::INLINE_SECRETS {
+        remove_at(
+            &mut values,
+            &pointer.trim_start_matches('/').replace('/', "."),
+        );
+    }
     Ok(RuntimeConfig {
-        values: match file {
-            Some(file) => read_values(file)?,
-            None => Map::new(),
-        },
+        values,
         keys: key_infos(pinned),
         restart_pending: restart_pending(),
         file: file.map(|f| f.display().to_string()),
     })
 }
 
-/// The path segments of a key: `link_server.url` is `["link_server", "url"]`.
+/// The path segments of a key: `multi_user_config.enabled` is `["multi_user_config", "enabled"]`.
 fn segments(key: &str) -> Vec<&str> {
     key.split('.').collect()
 }
@@ -305,7 +314,7 @@ fn remove_at(values: &mut Map<String, Value>, key: &str) {
 /// after `start`: the file parses; with the flags and variables of `start` laid over it and
 /// the secrets read from the environment, it converts to the executor's config, which refuses
 /// values the shape accepts (a default TLS port past 65535); and that config passes the checks
-/// the CLI applies before `run`.
+/// the CLI applies before `run`, and has SFU addresses `run` can use.
 fn next_start_accepts(values: &Map<String, Value>, start: &Ad4mConfig) -> Result<(), String> {
     let text = serde_json::to_string(values).map_err(|e| e.to_string())?;
     ExecutorConfigFile::parse(&text).map_err(|e| e.to_string())?;
@@ -316,6 +325,13 @@ fn next_start_accepts(values: &Map<String, Value>, start: &Ad4mConfig) -> Result
     let secrets = ExecutorSecrets::from_env(|name| std::env::var(name).ok(), &file)
         .map_err(|e| e.to_string())?;
     let mut next = file.to_ad4m_config(&secrets).map_err(|e| e.to_string())?;
+    // `run` stops on SFU addresses it cannot use.
+    crate::sfu::server::sfu_media_addrs(
+        next.sfu_bind_addr.as_deref(),
+        next.localhost.unwrap_or(true),
+        next.sfu_udp_port,
+        next.sfu_public_addr.as_deref(),
+    )?;
     crate::config::refuse_custody_channel_with_multi_user(
         start.custody_channel == Some(true),
         next.enable_multi_user == Some(true),
@@ -342,7 +358,8 @@ fn write_atomically(file: &Path, values: &Map<String, Value>) -> Result<(), Stri
     let text = serde_json::to_string_pretty(values).map_err(|e| e.to_string())? + "\n";
     let write = || -> std::io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        // New only: a file or a link at the name is not opened, nor followed.
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -707,6 +724,64 @@ mod tests {
         .unwrap();
         assert!(result.refused.is_empty(), "{result:?}");
         assert_eq!(read_values(&path).unwrap().get("port"), Some(&json!(12100)));
+    }
+
+    /// An SFU bind address that `run` would stop on is refused: with a fixed UDP port it must
+    /// be an IP of this machine.
+    #[tokio::test]
+    async fn an_sfu_address_the_next_start_stops_on_is_invalid() {
+        let (_dir, path) = config_file(r#"{"sfu_udp_port": 40000}"#);
+        let result = set_config(
+            &started(Some(&path), &[]),
+            true,
+            set(json!({ "sfu_bind_addr": "not-an-ip" })),
+            VALIDATOR_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reasons(&result),
+            vec![("sfu_bind_addr".to_string(), RefusalReason::Invalid)]
+        );
+        assert!(!read_values(&path).unwrap().contains_key("sfu_bind_addr"));
+    }
+
+    /// A secret pasted into the file after the start never leaves through `runtime.config`.
+    #[test]
+    fn runtime_config_leaves_out_a_secret_pasted_into_the_file() {
+        let (_dir, path) = config_file(
+            r#"{"port": 12000, "admin_credential": "pasted",
+                "multi_user_config": {"smtp_config": {"password": "pasted", "port": 465}}}"#,
+        );
+        let config = runtime_config(Some(&path), &[]).unwrap();
+        let text = serde_json::to_string(&config.values).unwrap();
+        assert!(!text.contains("pasted"), "{text}");
+        assert_eq!(config.values.get("port"), Some(&json!(12000)));
+        assert_eq!(
+            Value::Object(config.values).pointer("/multi_user_config/smtp_config/port"),
+            Some(&json!(465))
+        );
+    }
+
+    /// The temporary file is made new: a link planted at its name is not followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_never_follows_a_link_at_the_temporary_name() {
+        let (dir, path) = config_file(r#"{"port": 12000}"#);
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        let temporary = dir
+            .path()
+            .join(format!(".config.json.{}.tmp", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &temporary).unwrap();
+
+        let mut values = read_values(&path).unwrap();
+        values.insert("port".into(), json!(12100));
+        let written = write_atomically(&path, &values);
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert!(written.is_err(), "{written:?}");
+        assert_eq!(read_values(&path).unwrap().get("port"), Some(&json!(12000)));
     }
 
     /// The check reads the file as the next start does, with this start's flags laid over it:
