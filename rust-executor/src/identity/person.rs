@@ -256,6 +256,7 @@ mod tests {
                 cache,
                 store_url: None,
                 challenges: Default::default(),
+                audiences: Default::default(),
                 store_keys_source: crate::identity::StoreSource::Config,
             };
             World {

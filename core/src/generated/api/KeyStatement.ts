@@ -21,9 +21,19 @@ scid: string,
  */
 key: string, 
 /**
- * The audience: the executor's DID, from `user.sessionChallenge`.
+ * The executor's DID, from `user.sessionChallenge`.
  */
 executor: string, 
+/**
+ * The origin the client dialed, `scheme://host[:port]` (e.g. `https://ad4m.example.org`):
+ * chosen by the client, never taken from the server's answers. The executor accepts the
+ * statement only when this is one of its configured `public_origins`, or, with none
+ * configured, one of its own loopback origins (`http://127.0.0.1:<port>`,
+ * `http://localhost:<port>`, `http://[::1]:<port>`); so a server that relays the
+ * statement to another executor gets a refusal. Compared after normalising: `ws`/`wss`
+ * read as `http`/`https`, the host lowercase, a default port left out.
+ */
+audience: string, 
 /**
  * The challenge from `user.sessionChallenge`.
  */

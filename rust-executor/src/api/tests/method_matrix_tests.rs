@@ -661,7 +661,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("user.endAllSessions", || json!({ "keepCurrent": true })),
     (
         "agent.signSessionStatement",
-        || json!({ "statement": { "v": 1, "purpose": "login", "executor": "did:key:z6Mk", "challenge": "c", "client": { "kind": "native" }, "issuedAt": 1 } }),
+        || json!({ "statement": { "v": 1, "purpose": "login", "executor": "did:key:z6Mk", "audience": "http://127.0.0.1:12000", "challenge": "c", "client": { "kind": "native" }, "issuedAt": 1 } }),
     ),
 ];
 
@@ -669,7 +669,8 @@ fn signed_key_statement(purpose: &str) -> Value {
     json!({
         "statement": {
             "v": 1, "purpose": purpose, "scid": "did:scid:coasys:1:Qm", "key": "z6Mk",
-            "executor": "did:key:z6Mk", "challenge": "c", "client": { "kind": "native" },
+            "executor": "did:key:z6Mk", "audience": "http://127.0.0.1:12000", "challenge": "c",
+            "client": { "kind": "native" },
             "issuedAt": 1,
         },
         "sig": "z",

@@ -42,6 +42,7 @@ ignored, and the error names the key by its path, e.g.
 |---|---|---|---|
 | `app_data_path` | string | `~/.ad4m` | `--app-data-path` / `AD4M_APP_DATA_PATH` |
 | `port` | number | `12000` | `--port` / `AD4M_PORT` |
+| `public_origins` | list of origins | none: key login from this machine only | `--public-origin` (repeat it, or separate with `,`) / `AD4M_PUBLIC_ORIGINS` |
 | `hc_admin_port` | number | first free from 2000 | `--hc-admin-port` / `AD4M_HC_ADMIN_PORT` |
 | `hc_app_port` | number | first free from 1337 | `--hc-app-port` / `AD4M_HC_APP_PORT` |
 | `localhost` | bool | `true` | `--localhost` / `AD4M_LOCALHOST` |
@@ -141,6 +142,22 @@ the seed's `identityStore`.
   "storeKeys": ["z6Mk…"] } }
 ```
 
+**`public_origins`** lists the origins (`scheme://host[:port]`) clients reach
+this executor at, such as `["https://ad4m.example.org"]`. A key login
+(`user.loginWithKey`, `user.renewSession`) signs the origin the client dialed
+into its statement, and the executor accepts the statement only when that
+origin, normalised (`wss` reads as `https`, `ws` as `http`, the host in lower
+case, a default port left out), is one of these. So a server that passes this
+executor's challenge on to a person's app gets a statement for its own origin,
+which this executor refuses. Without `public_origins` the executor accepts only
+its own loopback origins (`http://127.0.0.1:<port>`, `http://localhost:<port>`,
+`http://[::1]:<port>`), and refuses a statement for any other origin with 403
+`no-public-origin`. Once the key is set, only the listed origins count: list a
+loopback origin too if local apps log in with a key. The executor never reads
+the origin from the connection's `Host` or `Origin` header, which a caller
+chooses. A value that is not an origin (a path, a query, no host) stops the
+start with an error that names `public_origins`.
+
 **`log_config`** sets a level (`error`, `warn`, `info`, `debug`, `trace`)
 per crate over the defaults `rust_executor: info`, `holochain: warn`,
 `wasmer_compiler_cranelift: warn`, `warp::server: info`.
@@ -183,7 +200,7 @@ write, with a reason:
 
 `restart` keys: `mcp_enabled`, `mcp_port`, `log_config`,
 `auto_permit_cap_requests`. Every other key is a `machine` key: paths,
-listeners, ports, `multi_user_config`, `identity`, `log_dir`. A write
+listeners, ports, `public_origins`, `multi_user_config`, `identity`, `log_dir`. A write
 publishes `config-changed` to the operator.
 
 ## Running under a supervisor
