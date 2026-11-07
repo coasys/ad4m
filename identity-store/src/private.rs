@@ -3,8 +3,9 @@
 //! master key (the restoring app). The store cannot open it; it checks that the record is
 //! wrapped to exactly the log's readers (`record::check_sealed`: every valid device key
 //! without the bot mark, plus `"recovery"` exactly when `recoveryKey` is set), that its
-//! version is the stored one plus one (`409 {version}` otherwise; a jump would let one write
-//! take the version to 2^53 − 1 and end every later write), and that a recovery key, once
+//! version is the stored one plus one, an absent record counting as version 0 so the first
+//! write is version 1 (`409 {version}` otherwise; a jump would let one write take the version
+//! to 2^53 − 1 and end every later write), and that a recovery key, once
 //! set, stays.
 
 use ad4m_identity_core::record::{check_sealed, SealedRecord};
@@ -63,14 +64,16 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if let Some((version, text)) = stored {
-            let version = from_sql(version);
-            if record.version != version.saturating_add(1) {
-                return Err(ApiError::conflict_with(
-                    "version",
-                    json!({ "version": version }),
-                ));
-            }
+        // An absent record is version 0, so the first write is version 1: a first write at
+        // 2^53 − 1 would leave no version for any later write.
+        let version = stored.as_ref().map_or(0, |(v, _)| from_sql(*v));
+        if record.version != version.saturating_add(1) {
+            return Err(ApiError::conflict_with(
+                "version",
+                json!({ "version": version }),
+            ));
+        }
+        if let Some((_, text)) = stored {
             let before: SealedRecord = serde_json::from_str(&text)
                 .map_err(|e| ApiError::internal(format!("stored record: {e}")))?;
             if before.recovery_key.is_some() && before.recovery_key != record.recovery_key {

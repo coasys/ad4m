@@ -719,6 +719,36 @@ async fn a_record_is_kept_with_rising_versions_and_read_by_the_identitys_keys() 
 }
 
 #[tokio::test]
+async fn the_first_record_is_version_one() {
+    let t = TestStore::with_identity_burst(100);
+    let alice = Person::new("alice");
+    t.publish(&alice).await;
+    let path = format!("/v1/private/{}", alice.scid());
+    let d1 = ("d1", &alice.device_key(1));
+    // An absent record is version 0: a first write at 0, at 2 or at 2^53 − 1 (which would
+    // leave no version for a later write) is refused with the stored version 0.
+    for version in [0, 2, ad4m_hash_chain::MAX_SAFE_INTEGER] {
+        let write = serde_json::to_value(alice.sealed_record(version, None)).unwrap();
+        let reply = signed_body(&t, &alice, "PUT", &path, &write, d1).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::CONFLICT,
+            "{version}: {}",
+            reply.body
+        );
+        assert_eq!(reply.body["version"], 0, "{version}");
+    }
+    assert_eq!(
+        signed(&t, &alice, "GET", &path, d1).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let v1 = serde_json::to_value(alice.sealed_record(1, None)).unwrap();
+    let reply = signed_body(&t, &alice, "PUT", &path, &v1, d1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body, json!({"version": 1}));
+}
+
+#[tokio::test]
 async fn a_record_not_wrapped_to_exactly_the_logs_readers_or_by_a_bot_is_refused() {
     let t = TestStore::with_identity_burst(100);
     let mut alice = Person::new("alice");

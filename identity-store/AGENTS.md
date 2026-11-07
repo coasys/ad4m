@@ -379,7 +379,7 @@ tests name them by these names.
 - **Record rules.** Readers and writers are the identity's device keys without the bot mark and
   the current master (`Signer::AnyKey`). The record must be wrapped to exactly the log's readers
   at the head (`record::check_sealed`, `400 wrapped`), its version must be the stored one plus
-  one (`409 {version}`), and a recovery key once set is kept (`400 recovery-key`). The signed
+  one, an absent record counting as version 0 so the first write is version 1 (`409 {version}`), and a recovery key once set is kept (`400 recovery-key`). The signed
   request is checked inside the write's transaction (`Store::verify_request_in`), against the
   held fold at the head it reads; the request box's post and delete do the same.
 - **Request box rules.** Only a device key without the bot mark posts (a master gets

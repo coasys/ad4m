@@ -697,7 +697,8 @@ key is sealed (above) with `info = "coasys:record" ‖ 0x00 ‖ scid` to the `en
 device key valid at the head without the bot mark (`wrapped[keyId]`), and to `recoveryKey` when
 set (`wrapped["recovery"]`). A writer reads the `enc` keys from the log, so a removed or revoked
 device cannot read a later version. `version` rises by one with each write (a host refuses any
-other than the stored version plus one); a reader refuses a version lower than one it has read. A device entry's `holdsMaster` is `false`, `"offered"` or
+other than the stored version plus one; with no record stored the version is 0, so the first write
+is version 1); a reader refuses a version lower than one it has read. A device entry's `holdsMaster` is `false`, `"offered"` or
 `true`; a pending revocation's `reason` is `left-host` or `account-deleted`.
 
 **The request box.** A device key without the bot mark posts `{body, expires}` with `body`
