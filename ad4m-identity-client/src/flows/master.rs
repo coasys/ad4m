@@ -426,6 +426,17 @@ pub async fn refresh_master<R: ExecutorRpc>(
     }
     match kept {
         Some(index) if index < current || !live => {
+            // `kept` was read before the take. Another app sharing the vault may have installed
+            // the current key since (its take, or its promote): the forget is for the key read,
+            // never for one installed after it.
+            let now = vault.master_index(&scid)?;
+            if now != kept {
+                return Ok(if live && now == Some(current) {
+                    Refreshed::Current
+                } else {
+                    Refreshed::Unknown
+                });
+            }
             vault.forget_master(&scid)?;
             let id = executor
                 .post_request(&ad4m_ldk::identity::DeviceRequestBody::SendMaster {}, None)

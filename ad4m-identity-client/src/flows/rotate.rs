@@ -427,15 +427,22 @@ pub async fn rotate<R: ExecutorRpc>(
     // The rotation is public from here: what fails after it is reported, not returned.
     // Promoted here or by another app's refresh first ([`promote`]). Nothing staged at `index`
     // and not kept (another app's rotation re-staged the slot): the words make the same key, so
-    // it is stored as the restore stores it. `store_master` leaves a staged key in place.
+    // it is stored as the restore stores it. `store_master` leaves a staged key in place. A
+    // vault that already keeps this master, or a later one (this answer came back after
+    // another app's rotation past it landed and was kept), is left as it is: the kept key never
+    // goes back a generation.
     let kept = match promote(vault, &scid, index) {
-        Err(VaultError::NotFound) => words::master_key(&seed, index)
-            .map_err(ClientError::from)
-            .and_then(|key| {
-                vault
-                    .store_master(&scid, index, Secret::new(key.to_bytes()))
-                    .map_err(ClientError::from)
-            }),
+        Err(VaultError::NotFound) => match vault.master_index(&scid) {
+            Ok(Some(kept)) if kept >= index => Ok(()),
+            Ok(_) => words::master_key(&seed, index)
+                .map_err(ClientError::from)
+                .and_then(|key| {
+                    vault
+                        .store_master(&scid, index, Secret::new(key.to_bytes()))
+                        .map_err(ClientError::from)
+                }),
+            Err(e) => Err(e.into()),
+        },
         promoted => promoted.map_err(ClientError::from),
     };
     let (pushes, record) = hand_over(

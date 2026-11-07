@@ -778,10 +778,16 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
     });
 
     it("restores the identity from the 12 words on a new device, locking out the lost one", async () => {
-        const laptop = await start("inbox-restored", { initArgs: ["--operator", did] });
+        // A restored computer keeps the master key, so it claims through the custody channel.
+        const laptop = await start("inbox-restored", {
+            credential: CREDENTIAL,
+            env: { AD4M_CUSTODY_CHANNEL: "true" },
+            custodyCredential: CUSTODY,
+            initArgs: ["--operator", did],
+        });
         const restorer = new Holder();
         try {
-            await restorer.send({ cmd: "connect", url: baseUrl(laptop.ports[0]), token: "" });
+            await restorer.send({ cmd: "connect", url: baseUrl(laptop.ports[0]), token: CUSTODY });
             // A wrong word is named by its position.
             const typo = words.split(" ").map((w: string, i: number) => (i === 4 ? "zebrra" : w)).join(" ");
             expect(await refused(restorer.send({ cmd: "restore", words: typo }))).to.contain("word 5 (\"zebrra\")");
