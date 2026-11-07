@@ -283,7 +283,7 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
     let (id, _, initial) = perspective
         .model_subscribe_and_query(
             classes,
-            r#"{"includeUnverified":true}"#.into(),
+            r#"{"includeUnverified":true,"count":true}"#.into(),
             "c".into(),
             None,
         )
