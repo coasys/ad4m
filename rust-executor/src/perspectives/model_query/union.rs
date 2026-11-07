@@ -35,8 +35,9 @@
 //!   the rule the store's `ORDER BY` applies to a single class.
 //! - `limit` / `offset` apply once over the union; `totalCount` is the union
 //!   after `where`.
-//! - Every row carries `__subjectClass` (the class it was hydrated as) and
-//!   `__subjectClasses` (every class it conforms to), as polymorphic members do.
+//! - Every row carries `__subjectClass` (the class it was hydrated as: the key
+//!   it was asked for by) and `__subjectClasses` (every class it conforms to,
+//!   by target class IRI), as polymorphic members do.
 
 use super::filtering::{compare_values, extract_sort_value};
 use super::projection::resolve_projections;
@@ -46,6 +47,7 @@ use super::types::{
     ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope, ShapeResolver,
     WhereCondition,
 };
+use crate::perspectives::shacl_parser::class_name_of;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
@@ -186,7 +188,8 @@ pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
 
 /// Execute one model query over several classes.
 ///
-/// `classes` are bare class names, each resolved through `resolver`; a missing
+/// `classes` are class IRIs or names, each resolved through `resolver`; a
+/// row's `__subjectClass` is the key it was asked for by. A missing
 /// shape surfaces as the resolver's error, so the caller's shape-wait loop
 /// treats it exactly as it treats a single class.
 pub async fn execute_union_query(
@@ -295,24 +298,26 @@ pub async fn execute_union_query_with_views(
     //    is kept whenever one of its readings passes — the answer a per-class
     //    query gives — and a reading the read cannot see (a Local or
     //    unverified flag under a shared read) can never be the one chosen.
+    // Classified by class IRI; a requested key (an IRI or a name) is a
+    // reading of the record when one of its classes is that IRI or has that
+    // name.
     let classified =
-        crate::perspectives::subject_classes_of::subject_classes_of(store, resolver, &all_ids)?;
+        crate::perspectives::subject_classes_of::subject_class_iris_of(store, resolver, &all_ids)?;
     let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
     let mut union: Vec<Value> = Vec::new();
     let mut chosen_by_id: HashMap<String, String> = HashMap::new();
     for id in &all_ids {
-        let conforms: Vec<String> = classified
-            .get(id)
-            .map(|all| {
-                all.iter()
-                    .filter(|c| {
-                        requested.contains(c)
-                            && rows_by_class.get(*c).is_some_and(|r| r.contains_key(id))
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut conforms: Vec<String> = Vec::new();
+        for class in classified.get(id).into_iter().flatten() {
+            for key in &requested {
+                if (key == class || *key == class_name_of(class))
+                    && rows_by_class.get(key).is_some_and(|r| r.contains_key(id))
+                    && !conforms.contains(key)
+                {
+                    conforms.push(key.clone());
+                }
+            }
+        }
         // Classification is structural and skips a class with no required
         // triples; the store's conformance query still answers for it. Such a
         // record falls back to the first requested class that returned it.

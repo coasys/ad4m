@@ -23,6 +23,7 @@ import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+import type { RegisterResult } from "../generated/api/RegisterResult";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
@@ -30,6 +31,15 @@ import { Ad4mModel } from "../model/Ad4mModel";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
+
+/** A class registered in a perspective, as {@link PerspectiveProxy.shapes} reads it. */
+export interface RegisteredShape {
+    /** The class name: the local name of its target class. */
+    name: string;
+    shape: SHACLShape;
+    /** SHA-256 (hex) of the shape's canonical JSON. */
+    hash: string;
+}
 
 /** Extract namespace prefix from a URI (everything up to and including the last / or #) */
 function extractNamespaceFromUri(uri: string): string {
@@ -185,7 +195,7 @@ interface Parameter {
  * });
  * 
  * // Use Social DNA
- * await perspective.addSdna(todoClass, "subject_class");
+ * await Todo.register(perspective);
  * const todo = await perspective.createSubject("Todo", "expression://123");
  * 
  * // Subscribe to changes
@@ -222,7 +232,6 @@ export class PerspectiveProxy {
 
     /** Releases of the handlers `on()` registered and has not released yet. */
     #releases = new Set<() => void>()
-    #ensuredSubjectClasses = new Set<string>()
     /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
     #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
 
@@ -257,19 +266,6 @@ export class PerspectiveProxy {
         this.sharedUrl = handle.sharedUrl;
         this.neighbourhood = handle.neighbourhood;
         this.state = handle.state;
-    }
-
-    /**
-     * Escapes special regex characters in a string to prevent ReDoS attacks
-     * and regex injection when building dynamic regular expressions.
-     * 
-     * @param str - The string to escape
-     * @returns The escaped string safe for use in RegExp constructor
-     * 
-     * @private
-     */
-    private escapeRegExp(str: string): string {
-        return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
     /**
@@ -710,7 +706,7 @@ export class PerspectiveProxy {
      * Execute a model query — the executor-side replacement for SPARQL query building + JS hydration.
      *
      * The executor resolves the model's shape from the perspective's SHACL
-     * triples (written by `addSdna`).  Callers no longer ship shape
+     * triples (written by `registerShapes`).  Callers no longer ship shape
      * metadata with the query; the perspective is the source of truth.
      *
      * @param className - The model class name (e.g. "Recipe"), or several: one
@@ -1126,223 +1122,35 @@ export class PerspectiveProxy {
         return available;
     }
 
-    /** Returns the perspective's Social DNA code
-     * This will return all SDNA code elements in an array.
-     */
-    async getSdna(): Promise<string[]> {
-        // First, find all the name literals that are linked from ad4m://self with SDNA predicates
-        const sdnaPredicates = [
-            "ad4m://has_subject_class",
-            "ad4m://has_flow",
-            "ad4m://has_custom_sdna"
-        ];
-        
-        const allSdnaCode: string[] = [];
-        
-        for (const predicate of sdnaPredicates) {
-            // Find name literals linked from ad4m://self with this predicate
-            const nameLinks = await this.get(new LinkQuery({
-                source: "ad4m://self",
-                predicate: predicate
-            }));
-            
-            // For each name literal found, get the actual SDNA code
-            for (const nameLink of nameLinks) {
-                const nameLiteral = nameLink.data.target;
-                
-                // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
-                const sdnaLinks = await this.get(new LinkQuery({
-                    source: nameLiteral,
-                    predicate: "ad4m://sdna"
-                }));
-                
-                // Extract the SDNA code from each link
-                for (const sdnaLink of sdnaLinks) {
-                    const code = Literal.fromUrl(sdnaLink.data.target).get();
-                    if (typeof code === 'string') {
-                        allSdnaCode.push(code);
-                    }
-                }
-            }
-        }
-        
-        return allSdnaCode;
-    }
-
-    /** Returns the Social DNA code for a specific class
-     * This will return the SDNA code for the specified class, or null if not found.
-     */
-    async getSdnaForClass(className: string): Promise<string | null> {
-        // First, find the name literal for this class that is linked from ad4m://self
-        const nameLiteral = Literal.from(className);
-        
-        const links = await this.get(new LinkQuery({
-            source: "ad4m://self",
-            target: nameLiteral.toUrl(),
-            predicate: "ad4m://has_subject_class"
-        }));
-        
-        if (links.length === 0) {
-            return null;
-        }
-        
-        // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
-        const sdnaLinks = await this.get(new LinkQuery({
-            source: nameLiteral.toUrl(),
-            predicate: "ad4m://sdna"
-        }));
-        
-        if (sdnaLinks.length === 0) {
-            return null;
-        }
-        
-        // Extract the SDNA code from the first link
-        const code = Literal.fromUrl(sdnaLinks[0].data.target).get();
-        return typeof code === 'string' ? code : null;
-    }
-
-    /** 
-     * Adds Social DNA code to the perspective.
-     * 
-     * **Recommended:** Use {@link addShacl} instead, which accepts the `SHACLShape` type directly.
-     * This method is primarily for the RPC API layer and legacy Prolog code.
-     * 
-     * @param name - Unique name for this SDNA definition
-     * @param sdnaCode - Prolog SDNA code (legacy, can be empty string if shaclJson provided)
-     * @param sdnaType - Type of SDNA: "subject_class", "flow", or "custom"
-     * @param shaclJson - SHACL JSON string (use addShacl() for type-safe alternative)
-     * 
-     * @example
-     * // Recommended: Use addShacl() with SHACLShape type
-     * const shape = new SHACLShape('recipe://Recipe');
-     * shape.addProperty({ name: 'title', path: 'recipe://title', datatype: 'xsd:string' });
-     * await perspective.addShacl('Recipe', shape);
-     * 
-     * // Legacy: Prolog code is auto-converted to SHACL
-     * await perspective.addSdna('Recipe', prologCode, 'subject_class');
-     */
-    async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string) {
-        return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType, shaclJson)
-    }
-
     /**
-     * Batch variant of addSdna — registers multiple SDNA entries in a single RPC call.
-     * Acquires the Rust-side mutex once for the entire batch.
-     */
-    async addSdnaAll(entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
-        return this.#client.addSdnaBatch(this.#handle.uuid, entries)
-    }
-
-    /**
-     * Batch-registers multiple model classes as SHACL subject classes in a single RPC call.
-     * Skips classes already registered on this perspective instance.
-     */
-    async ensureSubjectClasses(jsClasses: any[]): Promise<void> {
-        const entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[] = [];
-        for (const jsClass of jsClasses) {
-            // Built-in classes (`TextContent`) live in the executor, not here.
-            if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) continue;
-            const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
-            if (this.#ensuredSubjectClasses.has(className)) continue;
-
-            if (!jsClass.generateSHACL) {
-                throw new Error(`Class ${jsClass.name} must have generateSHACL(). Use @Model decorator.`);
-            }
-
-            const { shape } = jsClass.generateSHACL();
-            entries.push({
-                name: className,
-                sdnaType: 'subject_class',
-                shaclJson: JSON.stringify(shape.toJSON()),
-            });
-        }
-        if (entries.length === 0) return;
-
-        await this.addSdnaAll(entries);
-        for (const entry of entries) {
-            this.#ensuredSubjectClasses.add(entry.name);
-        }
-    }
-
-    /**
-     * **Recommended way to add SDNA schemas.**
-     * 
-     * Store a SHACL shape in this Perspective. The executor writes it as links, as it
-     * does for `@Model` classes. The shape needs a `targetClass` and keeps its
-     * `nodeShapeUri`, which must end with `{name}Shape`.
-     * 
-     * @param name - Unique name for this schema (e.g., 'Recipe', 'Task')
-     * @param shape - SHACLShape instance defining the schema
-     * 
-     * @example
-     * import { SHACLShape } from '@coasys/ad4m';
-     * 
-     * const shape = new SHACLShape('recipe://Recipe');
-     * shape.addProperty({ 
-     *   name: 'title', 
-     *   path: 'recipe://title', 
-     *   datatype: 'xsd:string',
-     *   minCount: 1 
-     * });
-     * shape.addProperty({
-     *   name: 'ingredients',
-     *   path: 'recipe://has_ingredient',
-     *   // No maxCount = relation
-     * });
-     * 
-     * await perspective.addShacl('Recipe', shape);
-     */
-    async addShacl(name: string, shape: SHACLShape): Promise<void> {
-        await this.addSdna(name, '', 'subject_class', JSON.stringify(shape.toJSON()));
-    }
-    
-    /**
-     * Retrieve a SHACL shape by name from this Perspective (one RPC call).
-     * The executor resolves the full shape (including property sub-shapes)
-     * in-process and returns link triples for client-side reconstruction.
-     */
-    async getShacl(name: string): Promise<SHACLShape | null> {
-        const result = await this.#client.getShacl(this.#handle.uuid, name);
-        if (!result) return null;
-        return SHACLShape.fromLinks(result.links as any, result.shapeUri);
-    }
-    
-    /**
-     * List the names of every SHACL shape stored in this Perspective (one RPC call).
-     */
-    async getShaclNames(): Promise<string[]> {
-        return this.#client.getShaclNames(this.#handle.uuid);
-    }
-
-    /**
-     * Resolve a shape's `sh:targetClass` by name (one RPC call).
+     * Register model classes in this perspective, each as the class of its
+     * target class IRI, in one call:
      *
-     * `PerspectiveClient.getShaclTargetClass` now returns `undefined` on
-     * "not found" already (see review r3897752023 — the null→undefined
-     * coercion used to happen here and be duplicated one layer down),
-     * so this method is a pure passthrough.
+     * ```typescript
+     * await perspective.registerShapes([Recipe.generateSHACL().shape]);
+     * ```
+     *
+     * A class whose stored shape already is the given one is left alone
+     * (`unchanged`): registering on every start writes nothing. The others
+     * are rewritten in one diff (`written`), which keeps links other apps
+     * put on the class. Both lists name classes by target class IRI.
+     * Answers once the executor reads the new shapes.
+     *
+     * Rejects, writing nothing, when two shapes name one class or share a
+     * shape URI, or when another class holds a shape URI given here.
      */
-    async getShaclTargetClass(name: string): Promise<string | undefined> {
-        return this.#client.getShaclTargetClass(this.#handle.uuid, name);
+    async registerShapes(shapes: SHACLShape[]): Promise<RegisterResult> {
+        return this.#client.registerShapes(this.#handle.uuid, shapes.map(shape => shape.toJSON()));
     }
 
     /**
-     * Get the SHACL shapes stored in this Perspective in one RPC call: all of
-     * them, or only those named in `names` (unknown names are left out).
-     * A shape that fails to decode is skipped with a `console.warn`, so it
-     * does not hide the others.
+     * The classes registered in this perspective, sorted by name (only those
+     * named in `names` when given): each with its shape and the SHA-256 of
+     * the shape's canonical JSON, which changes exactly when the shape does.
      */
-    async getAllShacl(options?: { names?: string[] }): Promise<Array<{name: string, shape: SHACLShape}>> {
-        const entries = await this.#client.getAllShacl(this.#handle.uuid, options?.names);
-        const shapes: Array<{name: string, shape: SHACLShape}> = [];
-        for (const { name, shapeUri, links } of entries) {
-            try {
-                shapes.push({ name, shape: SHACLShape.fromLinks(links as any, shapeUri) });
-            } catch (e) {
-                console.warn(`getAllShacl: skipping SHACL shape "${name}" that cannot be decoded:`, e);
-            }
-        }
-        return shapes;
+    async shapes(names?: string[]): Promise<RegisteredShape[]> {
+        const summaries = await this.#client.shapes(this.#handle.uuid, names);
+        return summaries.map(({ name, shape, hash }) => ({ name, shape: SHACLShape.fromJSON(shape), hash }));
     }
 
     /**
@@ -1478,69 +1286,26 @@ export class PerspectiveProxy {
         return SHACLFlow.fromLinks(flowLinks, flowUri);
     }
 
-    /** Returns all the Subject classes defined in this perspectives SDNA 
-     * 
-     * Uses SHACL-based lookup (Prolog-free implementation).
-     */
-    async subjectClasses(): Promise<string[]> {
-        // A failed lookup rejects. Answering `[]` would read as "no classes are
-        // registered", which a caller deciding whether to register its own
-        // classes acts on.
-        // Query SHACL class links directly — no need for a separate RPC endpoint
-        const classLinks = await this.get(new LinkQuery({
-            predicate: "rdf://type",
-            target: "ad4m://SubjectClass"
-        }));
-        const classNames = classLinks
-            .map(l => {
-                const source = l.data.source;
-                // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
-                const parts = source.split("://");
-                const lastPart = parts[parts.length - 1];
-                return lastPart.split('/').pop() || '';
-            })
-            .filter(name => name.length > 0);
-        // Deduplicate
-        return [...new Set(classNames)];
-    }
-
-    /**
-     * Return the full target-class URIs of every registered SubjectClass.
-     *
-     * Unlike {@link subjectClasses}, which strips the namespace and returns bare
-     * names (`"Space"`, `"Channel"`), this method returns the complete URIs
-     * (`"we://Space"`, `"flux://Channel"`).  The full URI is the key that
-     * `load_shape` resolves against, so it is the only collision-safe identifier
-     * — two apps can both declare a class called `"Template"` under different
-     * namespaces, and the bare name cannot distinguish them.
-     *
-     * Callers that need to check whether a *set* of models are already
-     * registered should call this once and test membership against the returned
-     * set, rather than issuing one `queryLinks` per model.
-     *
-     * One `queryLinks` round trip, no executor-side changes. A failed lookup
-     * rejects rather than answering `[]`, which would read as "nothing is
-     * registered" and lead such a caller to register everything again.
-     */
-    async subjectClassTargetClasses(): Promise<string[]> {
-        const classLinks = await this.get(new LinkQuery({
-            predicate: "rdf://type",
-            target: "ad4m://SubjectClass"
-        }));
-        const uris = classLinks
-            .map(l => l.data.source)
-            .filter(source => source.length > 0);
-        return [...new Set(uris)];
-    }
-
-    async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
-        if(typeof subjectClass === "string")
-            return subjectClass
-        // The @Model decorator names the class, as in createSubject: no lookup.
-        // Only an undecorated object is matched by its properties.
+    /** The key the executor addresses `subjectClass` by: the string itself
+     *  (a name or a target class IRI), the target class IRI of a decorated
+     *  class or instance (`Ad4mModel.queriedAs`), else the name of the first
+     *  registered class that has the template object's properties; `null`
+     *  when none does. */
+    async #classNameOf(subjectClass: unknown): Promise<string | null> {
+        if (typeof subjectClass === "string") return subjectClass;
         const obj = subjectClass as any;
+        const model = typeof obj === "function" ? obj : obj.constructor;
+        if (model?.className && typeof model.queriedAs === "function") return model.queriedAs();
         return obj.className || obj.constructor?.className || obj.constructor?.prototype?.className
-            || (await this.subjectClassesByTemplate(obj))[0]
+            || await this.findClassByProperties(obj);
+    }
+
+    async #className(subjectClass: unknown): Promise<string> {
+        const className = await this.#classNameOf(subjectClass);
+        if (!className) {
+            throw new Error("Could not resolve subject class name from object. Use a decorated class or pass a className string.");
+        }
+        return className;
     }
 
     /**
@@ -1563,38 +1328,16 @@ export class PerspectiveProxy {
         initialValues?: Record<string, any>,
         batchId?: B
     ): Promise<B extends undefined ? T : string> {
-        let className: string;
-
-        if(typeof subjectClass === "string") {
-            className = subjectClass;
-            await this.#client.createSubject(
-                this.#handle.uuid, 
-                JSON.stringify({
-                    className,
-                    initialValues
-                }), 
-                exprAddr,
-                initialValues ? JSON.stringify(initialValues) : undefined,
-                batchId
-            );
-        } else {
-            const obj = subjectClass as any;
-            const resolvedClassName = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className
-                || await this.findClassByProperties(obj);
-            if (!resolvedClassName) {
-                throw new Error("Could not resolve subject class name from object. Use a decorated class or pass a className string.");
-            }
-            await this.#client.createSubject(
-                this.#handle.uuid, 
-                JSON.stringify({
-                    className: resolvedClassName,
-                    initialValues
-                }), 
-                exprAddr,
-                initialValues ? JSON.stringify(initialValues) : undefined,
-                batchId
-            );
-        }
+        await this.#client.createSubject(
+            this.#handle.uuid,
+            JSON.stringify({
+                className: await this.#className(subjectClass),
+                initialValues
+            }),
+            exprAddr,
+            initialValues ? JSON.stringify(initialValues) : undefined,
+            batchId
+        );
 
         // Skip subject proxy creation when in batch mode since the subject won't exist until batch is committed
         if (batchId) {
@@ -1614,49 +1357,8 @@ export class PerspectiveProxy {
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
-        if (typeof subjectClass === "string") {
-            return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: subjectClass}), exprAddr))
-        }
-        const obj = subjectClass as any;
-        const resolvedClassName = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className
-            || await this.findClassByProperties(obj);
-        if (!resolvedClassName) {
-            throw new Error("Could not resolve subject class name from object. Use a decorated class or pass a className string.");
-        }
-        return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: resolvedClassName}), exprAddr))
-    }
-
-    /**
-     * Gets actions from SHACL links for a given predicate (e.g., ad4m://constructor, ad4m://destructor).
-     * Returns the parsed action array if found, or null if not found.
-     */
-    private async getActionsFromSHACL(className: string, predicate: string): Promise<any[] | null> {
-        // Use regex to match exact class name followed by "Shape" at end of URI
-        // This prevents "RecipeShape" from matching "MyRecipeShape"
-        const escaped = this.escapeRegExp(className);
-        const shapePattern = new RegExp(`[/:#]${escaped}Shape$`);
-        const links = await this.get(new LinkQuery({ predicate }));
-
-        for (const link of links) {
-            if (shapePattern.test(link.data.source)) {
-                // Parse actions from literal:string:{json}
-                const prefix = "literal:string:";
-                if (link.data.target.startsWith(prefix)) {
-                    const jsonStr = link.data.target.slice(prefix.length);
-                    // Decode URL-encoded JSON if needed, with fallback for raw % characters
-                    let decoded = jsonStr;
-                    try { decoded = decodeURIComponent(jsonStr); } catch {}
-                    try {
-                        return JSON.parse(decoded);
-                    } catch (e) {
-                        console.warn(`Failed to parse SHACL actions JSON for ${className}:`, e);
-                        return null;
-                    }
-                }
-            }
-        }
-
-        return null;
+        const className = await this.#className(subjectClass);
+        return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className}), exprAddr))
     }
 
     /** Removes a subject instance by running its (SDNA defined) destructor,
@@ -1670,32 +1372,11 @@ export class PerspectiveProxy {
      * and won't be executed until the batch is committed.
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
-        // A built-in abstract class (`TextContent`, #1446) is never stored,
-        // so it has no marker: the executor dispatches it by its URI.
-        const ctor = (subjectClass as any)?.constructor;
-        if (typeof subjectClass === "object" && ctor && Object.prototype.hasOwnProperty.call(ctor, 'builtinUri')) {
-            await this.#client.removeSubject(this.#handle.uuid, ctor.builtinUri, exprAddr, batchId);
-            return;
-        }
-        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
-
-        // An abstract class (#1435) is never a record's class: the executor
-        // runs the destructors of the record's classes it reads.
-        const shapePattern = new RegExp(`[/:#]${this.escapeRegExp(className)}Shape$`);
-        const markers = await this.get(new LinkQuery({ predicate: "ad4m://abstract" }));
-        if (markers.some((link) => shapePattern.test(link.data.source))) {
-            await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
-            return;
-        }
-
-        // Get destructor actions from SHACL links (Prolog-free)
-        let actions = await this.getActionsFromSHACL(className, "ad4m://destructor");
-
-        if (!actions) {
-            throw `No destructor found for subject class: ${className}. Make sure the class was registered with SHACL.`;
-        }
-
-        await this.executeAction(actions, exprAddr, undefined, batchId)
+        // The executor runs the class's destructor: for an abstract class
+        // (#1435), the destructors of the record's classes it reads. A
+        // built-in one (`TextContent`, #1446) goes by its URI.
+        const className = await this.#className(subjectClass);
+        await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
     }
 
     /** Checks if the given expression is a subject instance of the given subject class
@@ -1705,23 +1386,21 @@ export class PerspectiveProxy {
      * that matches the given properties will be used.
     */
     async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
-        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
-
-        // Get metadata from SHACL links
-        const metadata = await this.getSubjectClassMetadata(className);
-        if (!metadata) {
-            console.warn(`isSubjectInstance: No SHACL metadata found for class ${className}`);
+        const className = await this.#classNameOf(subjectClass);
+        const requiredTriples = className ? await this.#requiredTriples(className) : null;
+        if (!requiredTriples) {
+            console.warn(`isSubjectInstance: no registered class ${className}`);
             return false;
         }
 
         // If no required triples, any expression with links is an instance
-        if (metadata.requiredTriples.length === 0) {
+        if (requiredTriples.length === 0) {
             const links = await this.get(new LinkQuery({ source: expression }));
             return links.length > 0;
         }
 
         // Build a single SPARQL ASK query with all required triple patterns
-        const patterns = metadata.requiredTriples.map((t, i) => {
+        const patterns = requiredTriples.map((t, i) => {
             const target = t.target ? `<${t.target}>` : `?t${i}`;
             return `<${expression}> <${t.predicate}> ${target} .`;
         }).join('\n    ');
@@ -1732,92 +1411,32 @@ export class PerspectiveProxy {
 
 
     /**
-     * Gets subject class metadata from SHACL links using SHACLShape.fromLinks().
-     * Retrieves the SHACL shape and extracts metadata for instance queries.
+     * The triples every instance of `className` has: those its constructor
+     * adds, with the target only where it is fixed (not a value, not a
+     * writable property). `null` when no such class is registered.
      */
-    async getSubjectClassMetadata(className: string): Promise<{
-        requiredPredicates: string[],
-        requiredTriples: Array<{predicate: string, target?: string}>,
-        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
-    } | null> {
-        try {
-            // Use getShacl() to retrieve the shape via SHACLShape.fromLinks()
-            const shape = await this.getShacl(className);
-            if (!shape) {
-                console.warn(`No SHACL metadata found for ${className}`);
-                return null;
-            }
-
-            const requiredPredicates: string[] = [];
-            const requiredTriples: Array<{predicate: string, target?: string}> = [];
-            const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
-            const relations = new Map<string, { predicate: string, instanceFilter?: string }>();
-
-            // Build property/relation maps and track writable predicates from shape properties
-            const writablePredicates = new Set<string>();
-            for (const prop of shape.properties) {
-                if (!prop.path || !prop.name) continue;
-
-                if (prop.writable) {
-                    writablePredicates.add(prop.path);
-                }
-
-                const isRelation = prop.adder && prop.adder.length > 0;
-                if (isRelation) {
-                    relations.set(prop.name, { predicate: prop.path });
-                } else {
-                    properties.set(prop.name, {
-                        predicate: prop.path,
-                        resolveLanguage: prop.resolveLanguage
-                    });
-                }
-            }
-
-            // Extract required predicates/triples from constructor actions
-            if (shape.constructor_actions) {
-                for (const action of shape.constructor_actions) {
-                    if (action.predicate) {
-                        requiredPredicates.push(action.predicate);
-                        const isWritableProperty = writablePredicates.has(action.predicate);
-                        if (action.target && action.target !== 'value' && !isWritableProperty) {
-                            requiredTriples.push({ predicate: action.predicate, target: action.target });
-                        } else {
-                            requiredTriples.push({ predicate: action.predicate });
-                        }
-                    }
-                }
-            }
-
-            return { requiredPredicates, requiredTriples, properties, relations };
-        } catch (e) {
-            console.error(`Error getting SHACL metadata for ${className}:`, e);
-            return null;
-        }
+    async #requiredTriples(className: string): Promise<Array<{predicate: string, target?: string}> | null> {
+        const [registered] = await this.shapes([className]);
+        if (!registered) return null;
+        const { shape } = registered;
+        const writablePredicates = new Set(shape.properties.filter(p => p.writable).map(p => p.path));
+        return (shape.constructor_actions ?? [])
+            .filter(action => action.predicate)
+            .map(action => action.target && action.target !== 'value' && !writablePredicates.has(action.predicate!)
+                ? { predicate: action.predicate!, target: action.target }
+                : { predicate: action.predicate! });
     }
 
-    /**
-     * Generates a SPARQL query to find instances based on class metadata.
-     */
-    /**
-     * Finds all instances matching subject class metadata by querying links.
-     * Returns base URIs of matching instances.
-     */
-    private async findInstancesByMetadata(metadata: {
-        requiredPredicates: string[],
-        requiredTriples: Array<{predicate: string, target?: string}>,
-        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
-    }): Promise<Array<{base: string}>> {
-        if (metadata.requiredTriples.length === 0) {
-            // No required triples - return all unique sources that have any link
+    /** The bases that have every one of `requiredTriples`; with none, every
+     *  source of a link. */
+    async #findInstances(requiredTriples: Array<{predicate: string, target?: string}>): Promise<string[]> {
+        if (requiredTriples.length === 0) {
             const allLinks = await this.get(new LinkQuery({}));
-            const sources = new Set(allLinks.map(l => l.data.source));
-            return Array.from(sources).map(s => ({ base: s }));
+            return [...new Set(allLinks.map(l => l.data.source))];
         }
 
         // Build a single SPARQL SELECT with all required triple patterns joined
-        const patterns = metadata.requiredTriples.map((t, i) => {
+        const patterns = requiredTriples.map((t, i) => {
             const target = t.target ? `<${t.target}>` : `?t${i}`;
             return `?base <${t.predicate}> ${target} .`;
         }).join('\n    ');
@@ -1826,71 +1445,40 @@ export class PerspectiveProxy {
             `SELECT DISTINCT ?base WHERE {\n    ${patterns}\n}`
         );
         if (!Array.isArray(results)) return [];
-        return results.map((row: any) => ({ base: row.base }));
+        return results.map((row: any) => row.base);
     }
 
-    /** Returns all subject instances of the given subject class as proxy objects.
-     *  @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class. In the latter case, all subject classes
-     * that match the given properties will be used.
+    /** Returns all subject instances of the given subject class.
+     *  @param subjectClass The name of the subject class, a `@Model` class (its
+     * instances come back loaded), or an object with the properties of the
+     * subject class (the first registered class that has them is used).
      */
     async getAllSubjectInstances<T>(subjectClass: T): Promise<T[]> {
-        let classes = []
-        let isClassConstructor = typeof subjectClass === "function"
-        if(typeof subjectClass === "string") {
-            classes = [subjectClass]
-        } else if (isClassConstructor) {
-            // It's an Ad4mModel class constructor
-            //@ts-ignore
-            classes = [subjectClass.name]
-        } else {
-            classes = await this.subjectClassesByTemplate(subjectClass as object)
-        }
+        const className = await this.#classNameOf(subjectClass)
+        const requiredTriples = className ? await this.#requiredTriples(className) : null
+        if (!requiredTriples) return []
 
-        let instances = []
-        for(let className of classes) {
-            //console.log(`getAllSubjectInstances: Processing class ${className}`);
-            // Query SDNA for metadata, then query SPARQL for instances
-            const metadata = await this.getSubjectClassMetadata(className);
-            //console.log(`getAllSubjectInstances: Got metadata for ${className}:`, metadata);
-            if (metadata) {
-                const results = await this.findInstancesByMetadata(metadata);
-                
-               // console.log(`getAllSubjectInstances: SPARQL returned ${results?.length || 0} results`);
-
-                for (const result of results || []) {
-                    //console.log(`getAllSubjectInstances: Creating subject for base ${result.base}`);
-                    try {
-                        let instance;
-                        if (isClassConstructor) {
-                            // Create an instance of the actual Ad4mModel class
-                            //@ts-ignore
-                            instance = new subjectClass(this, result.base);
-                            // Load the instance data from links
-                            await instance.get();
-                        } else {
-                            // Return plain data for string-based lookups
-                            const data = await this.getSubjectData(className, result.base);
-                            instance = { id: result.base, ...data };
-                        }
-                        instances.push(instance as unknown as T);
-                        //console.log(`getAllSubjectInstances: Successfully created subject for ${result.base}`);
-                    } catch (e) {
-                        //console.warn(`Failed to create subject for ${result.base}:`, e);
-                    }
+        const instances: T[] = []
+        for (const base of await this.#findInstances(requiredTriples)) {
+            try {
+                if (typeof subjectClass === "function") {
+                    const instance = new (subjectClass as any)(this, base);
+                    await instance.get();
+                    instances.push(instance);
+                } else {
+                    const data = JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({ className }), base));
+                    instances.push({ id: base, ...data } as unknown as T);
                 }
-            } else {
-                //console.warn(`getAllSubjectInstances: No metadata found for ${className}`);
+            } catch (e) {
+                // A base the class's triples match but that does not load is skipped.
             }
         }
-        //console.log(`getAllSubjectInstances: Returning ${instances.length} instances`);
         return instances
     }
 
 
     /**
-     * Find a subject class by matching an object's properties/relations against SHACL shapes.
-     * Queries SHACL links client-side to find a class whose properties contain all required ones.
+     * Find a subject class by matching an object's properties/relations against the registered shapes.
      * @returns The matching class name, or null if no match found.
      */
     private async findClassByProperties(obj: object): Promise<string | null> {
@@ -1922,354 +1510,18 @@ export class PerspectiveProxy {
             return null;
         }
 
-        // Single SPARQL query to get all class shapes with their properties and collections
-        const results = await this.querySparql(`
-            SELECT ?shape ?predicate ?target WHERE {
-                { ?shape <rdf://type> <ad4m://SubjectClass> . BIND(<rdf://type> AS ?predicate) BIND(<ad4m://SubjectClass> AS ?target) }
-                UNION
-                { ?shape <sh://property> ?target . BIND(<sh://property> AS ?predicate) }
-                UNION
-                { ?shape <sh://collection> ?target . BIND(<sh://collection> AS ?predicate) }
-            }
-        `);
-        if (!Array.isArray(results) || results.length === 0) return null;
-
-        // Build a map of className -> { properties, relations }
-        const classShapes: Map<string, { shapeUri: string, properties: string[], relations: string[] }> = new Map();
-
-        // First pass: find all subject classes
-        for (const r of results) {
-            if (r.predicate === 'rdf://type' && r.target === 'ad4m://SubjectClass') {
-                const source = r.shape;
-                const sepIdx = source.indexOf('://');
-                if (sepIdx < 0) continue;
-                const className = source.substring(sepIdx + 3).split('/').pop();
-                if (!className) continue;
-                classShapes.set(className, { shapeUri: source, properties: [], relations: [] });
+        // A class matches when it has every property name, and every relation
+        // name as a collection: names as the shapes declare them.
+        for (const { name, shape } of await this.shapes()) {
+            const names = new Set(shape.properties.map(p => p.name));
+            const collections = new Set(shape.properties
+                .filter(p => p.collection ?? (p.relationKind === 'hasMany' || p.relationKind === 'belongsToMany'))
+                .map(p => p.name));
+            if (properties.every(p => names.has(p)) && relations.every(r => collections.has(r))) {
+                return name;
             }
         }
-
-        // Second pass: collect properties and relations for each class
-        for (const r of results) {
-            if (r.predicate === 'sh://property' || r.predicate === 'sh://collection') {
-                // Match shape source to class (e.g., "recipe://RecipeShape" -> "Recipe")
-                for (const [className, shape] of classShapes) {
-                    if (r.shape.endsWith(`${className}Shape`)) {
-                        const dotIdx = r.target.lastIndexOf('.');
-                        if (dotIdx < 0) continue;
-                        const name = r.target.substring(dotIdx + 1);
-                        if (r.predicate === 'sh://property') {
-                            shape.properties.push(name);
-                        } else {
-                            shape.relations.push(name);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Find a class that has all required properties and relations
-        for (const [className, shape] of classShapes) {
-            const hasAllProps = properties.every(p => shape.properties.includes(p));
-            const hasAllRels = relations.every(c => shape.relations.includes(c));
-            if (hasAllProps && hasAllRels) {
-                return className;
-            }
-        }
-
         return null;
-    }
-
-    /** Returns all subject classes that match the given template object.
-     * This function looks at the properties of the template object and
-     * its setters and relations to create a Prolog query that finds
-     * all subject classes that would be converted to a proxy object
-     * with exactly the same properties and relations.
-     *
-     * Since there could be multiple subject classes that match the given
-     * criteria, this function returns a list of class names.
-     *
-     * @param obj The template object
-     */
-    async subjectClassesByTemplate(obj: object): Promise<string[]> {
-        // className lookup first: the @Model decorator sets a precise className on the prototype,
-        // so this is always more specific than property-set matching.
-        // Property matching alone has a superset-ambiguity problem: if DerivedModel adds
-        // properties to BaseModel, then DerivedModel's shape is a superset of BaseModel's
-        // property list, so findClassByProperties could wrongly return DerivedModel for a
-        // BaseModel instance (causing the derived SDNA constructor to fire and inject extra
-        // links into what should be a plain base instance).
-        try {
-            // @ts-ignore - className is added dynamically by decorators
-            const className = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className;
-            if (className) {
-                const existingClasses = await this.subjectClasses();
-                if (existingClasses.includes(className)) {
-                    return [className];
-                }
-            }
-        } catch (e) {
-            console.warn('subjectClassesByTemplate: className lookup failed:', e);
-        }
-
-        // Fall back to SHACL-based property matching for undecorated / dynamic objects
-        try {
-            const match = await this.findClassByProperties(obj);
-            if (match) {
-                return [match];
-            }
-        } catch (e) {
-            console.warn('subjectClassesByTemplate: property matching failed:', e);
-        }
-
-        return [];
-    }
-
-    /** Takes a JS class (its constructor) and assumes that it was decorated by
-     * the @subjectClass etc. decorators. It then tests if there is a subject class
-     * already present in the perspective's SDNA that matches the given class.
-     * If there is no such class, it gets the JS class's SDNA by calling its
-     * static generateSDNA() function and adds it to the perspective's SDNA.
-     */
-    async ensureSDNASubjectClass(jsClass: any): Promise<void> {
-        return this.ensureSubjectClass(jsClass);
-    }
-
-    /** Takes a JS class (its constructor) and ensures the SHACL subject class exists. */
-    async ensureSubjectClass(jsClass: any): Promise<void> {
-        // Built-in classes (`TextContent`) live in the executor, not here.
-        if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) return;
-
-        // Get the class name from the JS class
-        const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
-        
-        // Skip if already registered for this perspective instance
-        if (this.#ensuredSubjectClasses.has(className)) return;
-
-        // Note: Duplicate checking is handled on the Rust side in add_sdna
-        
-        // Generate SHACL SDNA (Prolog-free)
-        if (!jsClass.generateSHACL) {
-            throw new Error(`Class ${jsClass.name} must have generateSHACL(). Use @Model decorator.`);
-        }
-
-        // Get SHACL shape (W3C standard + AD4M action definitions)
-        const { shape } = jsClass.generateSHACL();
-
-        // Serialize SHACL shape to JSON for Rust backend using SHACLShape.toJSON()
-        const shaclJson = JSON.stringify(shape.toJSON());
-
-        // Pass SHACL JSON to backend (Prolog-free)
-        // Backend stores SHACL links directly
-        await this.addSdna(className, '', 'subject_class', shaclJson);
-        
-        // Mark as registered for this perspective instance
-        this.#ensuredSubjectClasses.add(className);
-    }
-
-    /** Clear the per-instance ensured subject class cache.
-     * Call this after wiping a perspective's links so that
-     * subsequent register() calls re-add SHACL definitions. */
-    clearEnsuredSubjectClasses(): void {
-        this.#ensuredSubjectClasses.clear();
-    }
-
-    /**
-     * Returns a list of all class names that have been registered as SHACL
-     * subject classes in this perspective (via `ensureSDNASubjectClass` or `addSdna`).
-     *
-     * @returns Array of class name strings (e.g. `["Channel", "Message", "Task"]`)
-     */
-    async listRegisteredClasses(): Promise<string[]> {
-        const results = await this.querySparql(
-            `SELECT DISTINCT ?class WHERE { ?class <rdf://type> <ad4m://SubjectClass> . }`
-        );
-        if (!Array.isArray(results)) return [];
-        return results.map((row: any) => {
-            const uri: string = row.class || '';
-            // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
-            const hashIdx = uri.lastIndexOf('#');
-            if (hashIdx >= 0) return uri.substring(hashIdx + 1);
-            const slashIdx = uri.lastIndexOf('/');
-            if (slashIdx >= 0) return uri.substring(slashIdx + 1);
-            return uri;
-        }).filter(Boolean);
-    }
-
-    /**
-     * Returns the SHACL shape metadata for a registered class, including
-     * property names, predicates, datatypes, and cardinality constraints.
-     *
-     * @param className - The name of the registered class
-     * @returns Shape metadata or `null` if the class is not registered
-     */
-    async getClassShape(className: string): Promise<{
-        className: string;
-        shapeUri: string;
-        properties: Array<{
-            name: string;
-            predicate: string;
-            datatype?: string;
-            required: boolean;
-            collection: boolean;
-            writable: boolean;
-            options?: Array<{ value: string; label?: string }>;
-        }>;
-    } | null> {
-        // Find the shape URI for this class
-        const safeName = className.replace(/['"\\]/g, '');
-        const shapeResults = await this.querySparql(
-            `SELECT ?shapeUri ?targetClass WHERE {
-                ?targetClass <rdf://type> <ad4m://SubjectClass> .
-                ?targetClass <ad4m://shape> ?shapeUri .
-                FILTER(STRENDS(STR(?targetClass), "/${safeName}") || STRENDS(STR(?targetClass), "#${safeName}"))
-            } LIMIT 1`
-        );
-        if (!Array.isArray(shapeResults) || shapeResults.length === 0) return null;
-
-        const shapeUri = shapeResults[0].shapeUri;
-        const classUri = shapeResults[0].targetClass;
-
-        // Query all properties for this shape, including sh:in
-        const propResults = await this.querySparql(
-            `SELECT ?propShape ?path ?datatype ?minCount ?maxCount ?writable ?propType ?shIn WHERE {
-                <${shapeUri}> <sh://property> ?propShape .
-                ?propShape <sh://path> ?path .
-                ?propShape <rdf://type> ?propType .
-                OPTIONAL { ?propShape <sh://datatype> ?datatype }
-                OPTIONAL { ?propShape <sh://minCount> ?minCount }
-                OPTIONAL { ?propShape <sh://maxCount> ?maxCount }
-                OPTIONAL { ?propShape <ad4m://writable> ?writable }
-                OPTIONAL { ?propShape <sh://in> ?shIn }
-            }`
-        );
-
-        const properties = (Array.isArray(propResults) ? propResults : []).map((row: any) => {
-            // Extract property name from shape URI like "recipe://Recipe.name"
-            const propUri: string = row.propShape || '';
-            const dotIdx = propUri.lastIndexOf('.');
-            const name = dotIdx >= 0 ? propUri.substring(dotIdx + 1) : propUri;
-
-            const minCount = parseInt(row.minCount || '0', 10);
-            const isCollection = row.propType === 'ad4m://CollectionShape';
-            const writable = row.writable === 'true' || row.writable === 'literal:true';
-
-            // Parse sh:in values if present
-            let options: Array<{ value: string; label?: string }> | undefined;
-            if (row.shIn) {
-                try {
-                    let raw = row.shIn;
-                    // Strip literal: prefix if present, and URI-decode for robustness
-                    if (raw.startsWith('literal:string:')) {
-                        raw = decodeURIComponent(raw.substring('literal:string:'.length));
-                    }
-                    options = JSON.parse(raw);
-                } catch { /* ignore parse errors */ }
-            }
-
-            return {
-                name,
-                predicate: row.path || '',
-                datatype: row.datatype || undefined,
-                required: minCount > 0,
-                collection: isCollection,
-                writable,
-                ...(options && options.length > 0 ? { options } : {}),
-            };
-        });
-
-        return { className: safeName, shapeUri, properties };
-    }
-
-    /**
-     * Detects which registered subject classes a given instance conforms to,
-     * based on its stored triples matching the class shapes' required properties.
-     *
-     * @param baseExpression - The instance's base expression / subject URI
-     * @returns Array of class names the instance matches
-     */
-    async getInstanceClasses(baseExpression: string): Promise<string[]> {
-        const safeId = baseExpression.replace(/['"\\]/g, '');
-        // Get all registered classes and their required conformance properties
-        const results = await this.querySparql(
-            `SELECT DISTINCT ?class WHERE {
-                ?class <rdf://type> <ad4m://SubjectClass> .
-                ?class <ad4m://shape> ?shape .
-                ?shape <sh://property> ?propShape .
-                ?propShape <sh://minCount> ?mc .
-                FILTER(?mc >= 1)
-                ?propShape <sh://path> ?path .
-                <${safeId}> ?path ?_val .
-            }`
-        );
-        if (!Array.isArray(results)) return [];
-        return results.map((row: any) => {
-            const uri: string = row.class || '';
-            const hashIdx = uri.lastIndexOf('#');
-            if (hashIdx >= 0) return uri.substring(hashIdx + 1);
-            const slashIdx = uri.lastIndexOf('/');
-            if (slashIdx >= 0) return uri.substring(slashIdx + 1);
-            return uri;
-        }).filter(Boolean);
-    }
-
-    /**
-     * Returns all named options (sh:in values) for a registered class, grouped by property.
-     *
-     * @param className - The name of the registered class
-     * @returns Record mapping property name → array of { value, label } options
-     */
-    async getNamedOptions(className: string): Promise<Record<string, Array<{ value: string; label?: string }>>> {
-        const shape = await this.getClassShape(className);
-        if (!shape) return {};
-        const result: Record<string, Array<{ value: string; label?: string }>> = {};
-        for (const prop of shape.properties) {
-            if (prop.options && prop.options.length > 0) {
-                result[prop.name] = prop.options;
-            }
-        }
-        return result;
-    }
-
-    /**
-     * Adds a named option (sh:in value) to a property of a registered class.
-     * This appends to the existing sh:in list stored on the property shape.
-     *
-     * @param className - The registered class name
-     * @param propertyName - The property to add the option to
-     * @param value - The RDF value for the option
-     * @param label - Optional human-readable label
-     */
-    async addNamedOption(className: string, propertyName: string, value: string, label?: string): Promise<void> {
-        const shape = await this.getClassShape(className);
-        if (!shape) throw new Error(`Class "${className}" not found`);
-
-        const prop = shape.properties.find(p => p.name === propertyName);
-        if (!prop) throw new Error(`Property "${propertyName}" not found on class "${className}"`);
-
-        // Build the property shape URI
-        const ns = extractNamespaceFromUri(shape.shapeUri);
-        const propShapeId = `${ns}${className}.${propertyName}`;
-
-        // Get existing options
-        const existing = prop.options || [];
-        // Don't add duplicates
-        if (existing.some(o => o.value === value)) return;
-
-        const updated = [...existing, { value, ...(label ? { label } : {}) }];
-
-        // Remove old sh:in link if exists by querying for it
-        const oldLinks = await this.get(new LinkQuery({ source: propShapeId, predicate: "sh://in" }));
-        for (const oldLink of oldLinks) {
-            await this.remove(oldLink);
-        }
-
-        // Add new sh:in link
-        await this.add(new Link({
-            source: propShapeId,
-            predicate: "sh://in",
-            target: `literal:string:${JSON.stringify(updated)}`
-        }));
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {

@@ -338,15 +338,25 @@ fn earlier_of(a: String, b: String) -> String {
 /// read through another class is other content, and not what the quorum
 /// signed. So the `producedByFlow` filter admits an output only into queries
 /// for that class — matched against either spelling a flow's DNA may have
-/// used, the query-side class name or the shape's target class.
+/// used, the query-side class name or the shape's target class — or when the
+/// committed class resolves here (`resolved`: the target class the output's
+/// class name reads, a bare name the least IRI of that name) to the queried
+/// shape's target class, as an SDK query names its class by IRI.
 ///
 /// This is defense in depth on top of shape conformance (a node that is not
 /// an instance of the queried class never matches its SPARQL patterns), and
 /// it is the half conformance cannot do: one node can conform to two classes
 /// with different content, and a quorum that committed to it as one has said
 /// nothing about it as the other.
-pub fn output_matches_class(output: &OutputRef, queried_name: &str, target_class: &str) -> bool {
-    output.class_name == queried_name || output.class_name == target_class
+pub fn output_matches_class(
+    output: &OutputRef,
+    resolved: Option<&str>,
+    queried_name: &str,
+    target_class: &str,
+) -> bool {
+    output.class_name == queried_name
+        || output.class_name == target_class
+        || resolved == Some(target_class)
 }
 
 /// `flow --> receipt`: the per-flow index [`mint_flow_receipt`] writes, so a
@@ -1017,13 +1027,14 @@ mod tests {
     // ---- the class dimension ----------------------------------------------
 
     /// The `producedByFlow` model-query filter admits an output only into
-    /// queries for the class it was committed as — by either spelling — and
-    /// a quorum that committed to a node as one class has said nothing about
-    /// it as another. Conformance cannot carry this alone: one node can
-    /// conform to two classes with different content.
+    /// queries for the class it was committed as — by either spelling, or by
+    /// the class its name resolves to — and a quorum that committed to a node
+    /// as one class has said nothing about it as another. Conformance cannot
+    /// carry this alone: one node can conform to two classes with different
+    /// content.
     ///
     /// Red if `output_matches_class` returns true for a foreign class, or
-    /// matches only one of the two spellings.
+    /// matches only one of the spellings.
     #[test]
     fn an_output_counts_only_for_the_class_it_was_committed_as() {
         let committed = OutputRef {
@@ -1032,20 +1043,45 @@ mod tests {
         };
         assert!(output_matches_class(
             &committed,
+            None,
             "coasys://Deliverable",
             "coasys://Deliverable"
         ));
         assert!(
-            output_matches_class(&committed, "Deliverable", "coasys://Deliverable"),
+            output_matches_class(&committed, None, "Deliverable", "coasys://Deliverable"),
             "the DNA may name the target class where the query names the shape"
         );
         assert!(
-            output_matches_class(&committed, "coasys://Deliverable", "we://deliverable"),
+            output_matches_class(&committed, None, "coasys://Deliverable", "we://deliverable"),
             "or the query-side name where the shape's target differs"
         );
         assert!(
-            !output_matches_class(&committed, "coasys://Task", "we://task"),
+            !output_matches_class(&committed, None, "coasys://Task", "we://task"),
             "a query for another class must not inherit the commitment"
+        );
+
+        // Committed by name, queried by IRI: the name's class decides.
+        let by_name = OutputRef {
+            class_name: "Deliverable".into(),
+            id: OUTPUT.into(),
+        };
+        assert!(
+            output_matches_class(
+                &by_name,
+                Some("a://Deliverable"),
+                "a://Deliverable",
+                "a://Deliverable"
+            ),
+            "a name committed is the class it reads"
+        );
+        assert!(
+            !output_matches_class(
+                &by_name,
+                Some("a://Deliverable"),
+                "b://Deliverable",
+                "b://Deliverable"
+            ),
+            "and not another class of that name"
         );
     }
 

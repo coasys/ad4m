@@ -3,6 +3,7 @@ import { Link, LinkExpression } from '../links/Links';
 import { LinkQuery } from './LinkQuery';
 import { Literal } from '../Literal';
 import { SHACLFlow } from '../shacl/SHACLFlow';
+import { TextContent } from './TextContent';
 
 function createProxy(client: any): PerspectiveProxy {
   return new PerspectiveProxy(
@@ -89,76 +90,44 @@ describe('QuerySubscriptionProxy', () => {
   });
 });
 
-describe('PerspectiveProxy.subjectClassTargetClasses', () => {
-  function mockLink(source: string) {
-    return { data: { source, predicate: 'rdf://type', target: 'ad4m://SubjectClass' } };
+describe('PerspectiveProxy resolves a template object to a registered class', () => {
+  function shapeJson(targetClass: string, properties: any[]) {
+    return { target_class: targetClass, properties };
   }
 
-  function proxyWithLinks(links: any[]): PerspectiveProxy {
-    const mockClient: any = {
-      queryLinks: jest.fn().mockResolvedValue(links),
+  function proxyWithShapes(shapes: any[]) {
+    const client: any = {
+      shapes: jest.fn().mockResolvedValue(shapes),
+      createSubject: jest.fn().mockResolvedValue(undefined),
     };
-    return createProxy(mockClient);
+    return { client, proxy: createProxy(client) };
   }
 
-  it('returns full URIs, not stripped names', async () => {
-    const proxy = proxyWithLinks([
-      mockLink('we://Space'),
-      mockLink('flux://Channel'),
-      mockLink('recipe://Recipe'),
+  it('matches property names and collection names as the shapes declare them', async () => {
+    const { client, proxy } = proxyWithShapes([
+      // Same property, but `tags` is no collection: not a match.
+      { name: 'Card', hash: 'h1', shape: shapeJson('app://Card', [
+        { path: 'app://title', name: 'title' },
+        { path: 'app://tag', name: 'tags' },
+      ]) },
+      { name: 'Post', hash: 'h2', shape: shapeJson('app://Post', [
+        // A name the path's local part does not give.
+        { path: 'app://title', name: 'geo.title' },
+        { path: 'app://tag', name: 'tags', collection: true },
+      ]) },
     ]);
 
-    const result = await proxy.subjectClassTargetClasses();
+    await proxy.createSubject({ 'geo.title': '', tags: [] }, 'expr://1', undefined, 'batch-1');
 
-    expect(result).toContain('we://Space');
-    expect(result).toContain('flux://Channel');
-    expect(result).toContain('recipe://Recipe');
-    expect(result).toHaveLength(3);
+    expect(client.createSubject).toHaveBeenCalledWith(
+      'test-uuid', JSON.stringify({ className: 'Post' }), 'expr://1', undefined, 'batch-1');
   });
 
-  it('deduplicates URIs', async () => {
-    const proxy = proxyWithLinks([
-      mockLink('we://Space'),
-      mockLink('we://Space'),
-    ]);
+  it('refuses a template object no registered class fits', async () => {
+    const { client, proxy } = proxyWithShapes([]);
 
-    expect(await proxy.subjectClassTargetClasses()).toEqual(['we://Space']);
-  });
-
-  it('filters out empty sources', async () => {
-    const proxy = proxyWithLinks([
-      mockLink('we://Space'),
-      mockLink(''),
-    ]);
-
-    expect(await proxy.subjectClassTargetClasses()).toEqual(['we://Space']);
-  });
-
-  it('returns an empty array when no classes are registered', async () => {
-    const proxy = proxyWithLinks([]);
-    expect(await proxy.subjectClassTargetClasses()).toEqual([]);
-  });
-
-  it('rejects when the lookup fails, rather than answering that nothing is registered', async () => {
-    const mockClient: any = {
-      queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
-    };
-    const proxy = createProxy(mockClient);
-
-    await expect(proxy.subjectClassTargetClasses()).rejects.toThrow('network error');
-    await expect(proxy.subjectClasses()).rejects.toThrow('network error');
-  });
-
-  it('still lets subjectClassesByTemplate fall back to property matching when the lookup fails', async () => {
-    const mockClient: any = {
-      queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
-    };
-    const proxy = createProxy(mockClient);
-    const byProperties = jest.spyOn(proxy as any, 'findClassByProperties').mockResolvedValue('Recipe' as never);
-
-    // A className sends it to the subjectClasses() lookup first, which now rejects.
-    await expect(proxy.subjectClassesByTemplate({ className: 'Recipe' })).resolves.toEqual(['Recipe']);
-    expect(byProperties).toHaveBeenCalled();
+    await expect(proxy.createSubject({ title: '' }, 'expr://1')).rejects.toThrow('Could not resolve subject class name');
+    expect(client.createSubject).not.toHaveBeenCalled();
   });
 });
 
@@ -510,8 +479,7 @@ describe('PerspectiveProxy reads after write RPCs are fresh', () => {
     const c = client();
     const proxy = createProxy(c);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    const row = { constructor: { builtinUri: 'ad4m://TextContent' } };
-    await proxy.removeSubject(row, 'ad4m://m/1');
+    await proxy.removeSubject(new TextContent(proxy, 'ad4m://m/1'), 'ad4m://m/1');
     expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'ad4m://TextContent', 'ad4m://m/1', undefined);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
   });

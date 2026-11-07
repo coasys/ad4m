@@ -45,7 +45,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::model_query::utils::looks_like_absolute_iri;
-use super::shacl_parser::ABSTRACT_PREDICATE;
+use super::shacl_parser::{class_name_of, ABSTRACT_PREDICATE};
 use super::sparql_store::SparqlStore;
 
 /// Every subject class registered in this perspective.
@@ -74,8 +74,10 @@ pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error
 
 /// Every registered class that is not abstract (#1435): the classes a record
 /// can be classified as. An abstract class names what a record has, not what
-/// it is, so it is never one of a record's classes.
-pub fn concrete_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
+/// it is, so it is never one of a record's classes. By target class IRI,
+/// sorted. Two classes may share a name (`a://Task`, `b://Task`); each is its
+/// own class here.
+pub fn concrete_subject_classes(store: &SparqlStore) -> Result<Vec<String>, Error> {
     let query = format!(
         r#"
         SELECT ?targetClass WHERE {{
@@ -88,15 +90,15 @@ pub fn concrete_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, 
     "#
     );
     let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
-    let mut names: Vec<String> = rows
+    let mut classes: Vec<String> = rows
         .iter()
         .filter_map(|r| r["targetClass"].as_str())
-        .map(local_name)
-        .filter(|n| !n.is_empty())
+        .filter(|c| !class_name_of(c).is_empty())
+        .map(str::to_string)
         .collect();
-    names.sort();
-    names.dedup();
-    Ok(names)
+    classes.sort();
+    classes.dedup();
+    Ok(classes)
 }
 
 pub(crate) fn local_name(uri: &str) -> String {
@@ -156,8 +158,8 @@ fn required_triples(shape: &ModelShape) -> Option<Vec<(String, Option<String>)>>
 /// module needing to know anything about the inheritance graph (which SHACL does
 /// not record).
 ///
-/// Ties break alphabetically. Two genuinely different classes with identical
-/// required sets are indistinguishable *by definition of how membership works
+/// Ties break alphabetically by name, then by target class IRI. Two genuinely
+/// different classes with identical required sets are indistinguishable *by definition of how membership works
 /// here*, so any tie-break is arbitrary; the point of sorting is that every peer
 /// makes the same arbitrary choice rather than returning whatever the hash map
 /// iterated first.
@@ -165,8 +167,12 @@ fn required_triples(shape: &ModelShape) -> Option<Vec<(String, Option<String>)>>
 /// This is only an ordering. It ranks the members of a set without removing any
 /// of them — the caller decides whether the tail matters.
 fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
-    matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    matches.iter().map(|(name, _)| name.clone()).collect()
+    matches.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| class_name_of(&a.0).cmp(&class_name_of(&b.0)))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    matches.iter().map(|(class, _)| class.clone()).collect()
 }
 
 /// Resolve each URI to every subject class it is an instance of, most specific
@@ -211,6 +217,39 @@ pub fn subject_classes_of_with_pending(
     uris: &[String],
     pending: &[(String, String, String)],
 ) -> Result<HashMap<String, Vec<String>>, Error> {
+    Ok(
+        subject_class_iris_of_with_pending(store, resolver, uris, pending)?
+            .into_iter()
+            .map(|(uri, classes)| {
+                let mut names: Vec<String> = Vec::new();
+                for name in classes.iter().map(|c| class_name_of(c)) {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                (uri, names)
+            })
+            .collect(),
+    )
+}
+
+/// [`subject_classes_of`] by target class IRI: each URI's classes, most
+/// specific first. Two classes of one name are told apart here, so a reader
+/// hydrates an instance through the class it conforms to.
+pub fn subject_class_iris_of(
+    store: &SparqlStore,
+    resolver: &dyn ShapeResolver,
+    uris: &[String],
+) -> Result<HashMap<String, Vec<String>>, Error> {
+    subject_class_iris_of_with_pending(store, resolver, uris, &[])
+}
+
+fn subject_class_iris_of_with_pending(
+    store: &SparqlStore,
+    resolver: &dyn ShapeResolver,
+    uris: &[String],
+    pending: &[(String, String, String)],
+) -> Result<HashMap<String, Vec<String>>, Error> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     if uris.is_empty() {
         return Ok(out);
@@ -231,25 +270,25 @@ pub fn subject_classes_of_with_pending(
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Load every class's shape once. Shapes are cached per perspective, so this
-    // is a map lookup after the first call.
-    let class_names = concrete_subject_class_names(store)?;
+    // Load every class's shape once, by its IRI. Shapes are cached per
+    // perspective, so this is a map lookup after the first call.
+    let classes = concrete_subject_classes(store)?;
     let mut shapes: Vec<(String, Vec<(String, Option<String>)>)> = Vec::new();
-    for name in class_names {
-        match resolver.get_shape(&name) {
+    for class in classes {
+        match resolver.get_shape(&class) {
             // A class with no required triples at all matches literally every
             // URI, which is not an answer — it is the absence of one.
             Ok(shape) => match required_triples(shape.as_ref()) {
-                Some(triples) if !triples.is_empty() => shapes.push((name, triples)),
+                Some(triples) if !triples.is_empty() => shapes.push((class, triples)),
                 Some(_) => {}
                 None => log::warn!(
-                    "subjectClassesOf: skipping class '{name}': a required predicate or flag \
+                    "subjectClassesOf: skipping class '{class}': a required predicate or flag \
                      value is not an absolute IRI"
                 ),
             },
             // A class whose SHACL will not parse cannot classify anything; skip
             // it rather than failing the whole batch for the others.
-            Err(e) => log::warn!("subjectClassesOf: skipping class '{name}': {e}"),
+            Err(e) => log::warn!("subjectClassesOf: skipping class '{class}': {e}"),
         }
     }
     if shapes.is_empty() {
@@ -326,7 +365,7 @@ pub fn subject_classes_of_with_pending(
         let uri_present = present.get(uri);
 
         let mut matches: Vec<(String, usize)> = Vec::new();
-        for (name, triples) in &shapes {
+        for (class, triples) in &shapes {
             let conforms = triples.iter().all(|(pred, value)| match value {
                 Some(v) => uri_pairs
                     .map(|p| p.contains(&(pred.clone(), v.clone())))
@@ -334,7 +373,7 @@ pub fn subject_classes_of_with_pending(
                 None => uri_present.map(|p| p.contains(pred)).unwrap_or(false),
             });
             if conforms {
-                matches.push((name.clone(), triples.len()));
+                matches.push((class.clone(), triples.len()));
             }
         }
 

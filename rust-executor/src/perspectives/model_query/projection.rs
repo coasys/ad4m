@@ -420,7 +420,7 @@ fn with_where_target<'a>(
         .find(|r| r.name == proj.from && !r.target_class_name.is_empty())
     {
         Some(rel) => std::borrow::Cow::Owned(ProjectionInput {
-            target_class_name: Some(rel.target_class_name.clone()),
+            target_class_name: Some(rel.target().to_string()),
             ..proj.clone()
         }),
         None => std::borrow::Cow::Borrowed(proj),

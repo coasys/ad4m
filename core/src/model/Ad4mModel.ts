@@ -10,6 +10,7 @@ import { formatQueryValue, compileWhereClause } from "./query-utils";
 import { requireSingleParent, requireTotalCount, resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
+import type { RegisterResult } from "../generated/api/RegisterResult";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
 import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
@@ -49,11 +50,39 @@ import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./typ
  * `tests/js/tests/model/model-polymorphic.test.ts` drives both ends against one
  * executor, so the drift fails a test rather than a user's query.
  *
- * The executor also returns `__subjectClasses`, the whole set this one names the
- * head of. Nothing here reads it — it rides onto the instance with every other
- * JSON key, for a caller that wants to know a choice was made.
+ * The value is the class's target class IRI (two classes may share a name):
+ * {@link classKey} of the class it was read as. The executor also returns
+ * `__subjectClasses`, the whole set this one names the head of, by target
+ * class IRI. Nothing here reads it — it rides onto the instance with every
+ * other JSON key, for a caller that wants to know a choice was made.
  */
 const SUBJECT_CLASS_KEY = '__subjectClass';
+
+/**
+ * The IRI the executor names `cls` by (`queriedAs`: its target class), or
+ * `undefined` for something that is not a declared model class.
+ */
+function classKey(cls: unknown): string | undefined {
+  try {
+    const key = (cls as any)?.queriedAs?.();
+    return typeof key === 'string' ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The namespace of a target class IRI: everything up to and including its
+ * last `#`, `:` or `/`, the split the executor's `class_name_of` makes
+ * (`urn:isbn:Book` → `urn:isbn:`, `a://b/c/Thing` → `a://b/c/`). `undefined`
+ * when there is no local name after it.
+ */
+function namespaceOf(targetClass: string | undefined): string | undefined {
+  if (!targetClass) return undefined;
+  const split = Math.max(targetClass.lastIndexOf('#'), targetClass.lastIndexOf(':'), targetClass.lastIndexOf('/'));
+  if (split < 0 || split === targetClass.length - 1) return undefined;
+  return targetClass.slice(0, split + 1);
+}
 
 /**
  * Turn on `polymorphic` for every relation that declares it, at every depth of
@@ -108,10 +137,10 @@ function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): 
         subQuery.preferClasses === undefined &&
         meta.instantiateAs
       ) {
-        const names = (meta.instantiateAs() ?? [])
-          .map((cls) => (cls as any)?.className)
-          .filter((name): name is string => typeof name === 'string');
-        if (names.length) subQuery.preferClasses = names;
+        const classes = (meta.instantiateAs() ?? [])
+          .map(classKey)
+          .filter((key): key is string => typeof key === 'string');
+        if (classes.length) subQuery.preferClasses = classes;
       }
     }
 
@@ -164,7 +193,7 @@ function splitIncludeProjections(include: IncludeMap): {
 }
 
 /**
- * Tag each projection with its target class name, so the executor can resolve
+ * Tag each projection with its target class IRI, so the executor can resolve
  * the target shape through its in-memory cache when applying a projection's
  * where-clause. `ctor` is the class the projections are read against; without
  * one (the members of a polymorphic relation) nothing is tagged, and the
@@ -177,10 +206,9 @@ function tagProjectionTargets(projections: Record<string, IncludeProjection>, ct
     const relMeta = allRelMeta[proj.from];
     if (!proj.targetClassName && relMeta?.target) {
       try {
-        const TargetClass = relMeta.target();
-        const targetMeta = (TargetClass as any).getModelMetadata?.();
-        if (targetMeta?.className) {
-          proj.targetClassName = targetMeta.className;
+        const TargetClass = relMeta.target() as any;
+        if (typeof TargetClass?.queriedAs === 'function') {
+          proj.targetClassName = TargetClass.queriedAs();
         }
       } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
     }
@@ -300,20 +328,20 @@ function jsonToModelInstance<T extends Ad4mModel>(
       // class back on the instance, because it had to know it in order to
       // hydrate against the right shape at all. What it cannot send is the
       // constructor, so `instantiateAs` names the classes this side can build
-      // and the name → class map is derived from them: `@Model` records each
-      // class's name on the class itself, so listing the classes and listing
-      // their names would be the same list written twice, free to disagree.
+      // and the target class → class map is derived from them: each class
+      // knows its own target class IRI, which the executor names it by (two
+      // classes may share a name).
       //
       // Built on first use rather than at decoration time, because the thunk
       // exists to be called late: a class defined further round a circular
       // import graph is not there yet when the decorator runs.
-      let byClassName: Record<string, any> | undefined;
+      let byTargetClass: Map<string, any> | undefined;
       // May resolve to nothing: a polymorphic relation is allowed to declare no
       // target at all, and the list may not name the class that arrived — it
       // says what this call site can construct, not what the relation may hold.
-      // The item then stays plain JSON — correct data, carrying its class name
-      // for a caller that wants to dispatch on it — rather than being forced
-      // through a constructor that does not exist.
+      // The item then stays plain JSON — correct data, carrying its target
+      // class for a caller that wants to dispatch on it — rather than being
+      // forced through a constructor that does not exist.
       const resolveChildClass = (item: any): any => {
         if (!meta.polymorphic) return TargetClass;
         const concrete = item?.[SUBJECT_CLASS_KEY];
@@ -322,14 +350,15 @@ function jsonToModelInstance<T extends Ad4mModel>(
         // own declared target is the right shape.
         if (typeof concrete !== 'string') return TargetClass;
         if (meta.instantiateAs) {
-          if (!byClassName) {
-            byClassName = {};
+          if (!byTargetClass) {
+            byTargetClass = new Map();
             for (const cls of meta.instantiateAs() ?? []) {
-              const name = (cls as any)?.className;
-              if (typeof name === 'string') byClassName[name] = cls;
+              const key = classKey(cls);
+              if (key) byTargetClass.set(key, cls);
             }
           }
-          if (byClassName[concrete]) return byClassName[concrete];
+          const cls = byTargetClass.get(concrete);
+          if (cls) return cls;
         }
         // The declared target is not a fallback, and having named no classes to
         // build does not make it one. Where a relation both declares a target
@@ -339,7 +368,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
         // not, carrying fields that class never declared — the exact
         // mislabelling polymorphic reads exist to prevent. It fits only when it
         // is the class the executor named.
-        return (TargetClass as any)?.className === concrete ? TargetClass : undefined;
+        return TargetClass && classKey(TargetClass) === concrete ? TargetClass : undefined;
       };
       const nestedInclude =
         typeof includeVal === 'object' && includeVal !== null
@@ -549,8 +578,6 @@ export class Ad4mModel {
     return (this as any).createdAt;
   }
 
-  private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
-
   /**
    * Generates the SDNA (Subject DNA) Prolog rules for this model class.
    * Injected at class-definition time by the `@Model` decorator.
@@ -570,29 +597,20 @@ export class Ad4mModel {
     return { shape: null, name: '' };
   }
 
-  static async getClassName(perspective: PerspectiveProxy) {
-      // Check if this is the Ad4mModel class itself or a subclass
-      const isBaseClass = this === Ad4mModel;
-  
-      // For the base Ad4mModel class, we can't use the cache
-      if (isBaseClass) {
-        return await perspective.stringOrTemplateObjectToSubjectClassName(this);
-      }
+  /** The `@Model` name of this class: its human-facing name. Two classes
+   *  may share one; the executor addresses each by {@link getTargetClass}. */
+  static getClassName(): string {
+    const className = (this as any).className;
+    if (!className) throw new Error(`Class ${this.name} has no class name: declare it with @Model.`);
+    return className;
+  }
 
-    // Get or create the cache for this class
-    let classCache = this.classNamesByClass.get(this);
-    if (!classCache) {
-      classCache = {};
-      this.classNamesByClass.set(this, classCache);
-    }
-
-    // Get or create the cached name for this perspective
-    const perspectiveID = perspective.uuid;
-    if (!classCache[perspectiveID]) {
-      classCache[perspectiveID] = await perspective.stringOrTemplateObjectToSubjectClassName(this);
-    }
-
-    return classCache[perspectiveID];
+  /** The target class IRI of this class (`sh:targetClass` of its shape),
+   *  which the executor addresses it by. */
+  static getTargetClass(): string {
+    const targetClass = this.generateSHACL().shape?.targetClass;
+    if (!targetClass) throw new Error(`Class ${this.name} has no target class: declare it with @Model.`);
+    return targetClass;
   }
 
   /**
@@ -1119,14 +1137,14 @@ export class Ad4mModel {
    * @internal
    */
   /**
-   * The name the executor knows this class by: its class name, or a
+   * The IRI the executor addresses this class by: its target class, or a
    * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
    * the class's own static only: a subclass is a class of its own.
    * @internal
    */
   static queriedAs(): string {
     const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
-    return builtinUri || this.getModelMetadata().className;
+    return builtinUri || this.getTargetClass();
   }
 
   static prepareModelQueryParams(
@@ -1349,7 +1367,8 @@ export class Ad4mModel {
 
   /**
    * Build each row of a union result as the class the executor hydrated it as
-   * (`__subjectClass`). A row of a class not in `classes` stays plain JSON.
+   * (`__subjectClass`, the key it was asked for: {@link queriedAs}). A row of
+   * a class not in `classes` stays plain JSON.
    * @internal
    */
   static parseUnionResult(
@@ -1362,9 +1381,9 @@ export class Ad4mModel {
     const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
-    const byName = new Map(classes.map((c) => [c.getModelMetadata().className, c]));
+    const byKey = new Map(classes.map((c) => [c.queriedAs(), c]));
     return arr.map((json: any) => {
-      const cls = byName.get(json?.[SUBJECT_CLASS_KEY]);
+      const cls = byKey.get(json?.[SUBJECT_CLASS_KEY]);
       return cls ? jsonToModelInstance(cls as any, perspective, json, include, properties) : json;
     });
   }
@@ -1840,11 +1859,11 @@ export class Ad4mModel {
 
     // New instance → create path. The executor refuses an abstract class
     // too; refusing here keeps the error ahead of the batch.
-    const abstractName = this.abstractName();
-    if (abstractName) {
+    if (this.abstractName()) {
+      const name = (this.constructor as typeof Ad4mModel).getClassName();
       throw new Error(
-        `'${abstractName}' is an abstract class and cannot be created. Create an instance of ` +
-        `a class that has its properties; querying '${abstractName}' reads it.`
+        `'${name}' is an abstract class and cannot be created. Create an instance of ` +
+        `a class that has its properties; querying '${name}' reads it.`
       );
     }
     let batchCreatedHere = false;
@@ -1882,10 +1901,8 @@ export class Ad4mModel {
       }
     }
 
-    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
     await this.perspective.createSubject(
-      className,
+      this,
       this._baseExpression,
       initialValues,
       batchId
@@ -2121,10 +2138,10 @@ export class Ad4mModel {
 
     const instanceIds = instances.map(inst => inst.id || (inst as any)._baseExpression);
 
-    // The executor reads getter SPARQL from the perspective's SHACL triples
-    // (written by `addSdna`), so no shape JSON is shipped with the call.
+    // The executor reads getter SPARQL from the registered shape, so no
+    // shape JSON is shipped with the call.
     const result = await perspective.evaluateGetters(
-      metadata.className,
+      this.queriedAs(),
       instanceIds,
       propertyNames,
     );
@@ -2441,14 +2458,15 @@ export class Ad4mModel {
   static async register(
     this: typeof Ad4mModel,
     perspective: PerspectiveProxy,
-  ): Promise<void> {
-    await perspective.ensureSDNASubjectClass(this);
+  ): Promise<RegisterResult> {
+    return Ad4mModel.registerAll(perspective, [this]);
   }
 
   /**
-   * Batch-registers multiple model classes on a perspective in a single RPC call.
-   * This is significantly faster than calling `register()` on each model individually
-   * because it eliminates N-1 round-trips and mutex acquisitions.
+   * Registers model classes on a perspective in one call. A class whose
+   * stored shape already is its shape is `unchanged` and nothing is written,
+   * so registering on every start is cheap; built-in classes (`TextContent`)
+   * live in the executor and are skipped.
    *
    * @param perspective - The perspective to register the models on
    * @param models - Array of Ad4mModel subclasses to register
@@ -2461,8 +2479,15 @@ export class Ad4mModel {
   static async registerAll(
     perspective: PerspectiveProxy,
     models: (typeof Ad4mModel)[],
-  ): Promise<void> {
-    await perspective.ensureSubjectClasses(models);
+  ): Promise<RegisterResult> {
+    const shapes = models
+      .filter(model => !Object.prototype.hasOwnProperty.call(model, 'builtinUri'))
+      .map(model => {
+        const { shape } = model.generateSHACL();
+        if (!shape) throw new Error(`Class ${model.name} has no shape: declare it with @Model.`);
+        return shape as SHACLShape;
+      });
+    return perspective.registerShapes(shapes);
   }
 
   /**
@@ -2610,7 +2635,7 @@ export class Ad4mModel {
    * This method recovers those values so that old perspectives are queried
    * with the correct type-discriminator triple.
    *
-   * @param shape - SHACL node shape (as returned by `PerspectiveProxy.getAllShacl()`)
+   * @param shape - SHACL node shape (as returned by `PerspectiveProxy.shapes()`)
    * @param name  - Class name to assign (e.g. "Channel")
    * @returns Generated Ad4mModel subclass, ready for querying
    */
@@ -2703,7 +2728,10 @@ export class Ad4mModel {
       }
     }
 
-    const ModelDecorator = Model({ name });
+    // The class keeps the shape's target class, which the executor
+    // addresses it by: its namespace is everything before the local name.
+    const namespace = namespaceOf(shape.targetClass);
+    const ModelDecorator = Model({ name, ...(namespace && { namespace }) });
     ModelDecorator(DynamicModelClass);
 
     return DynamicModelClass as typeof Ad4mModel;

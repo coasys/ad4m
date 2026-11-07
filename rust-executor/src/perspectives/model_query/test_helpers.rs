@@ -1,3 +1,4 @@
+use super::super::shacl_parser::class_name_of;
 use super::shape::parse_shape_from_json;
 use super::types::{InstanceLinks, ModelShape, ShapeProperty, ShapeResolver};
 use deno_core::anyhow::{anyhow, Error};
@@ -148,11 +149,14 @@ impl StaticShapeResolver {
 }
 
 impl ShapeResolver for StaticShapeResolver {
+    /// The shape registered under `class_name`, else (for a target class IRI,
+    /// as classification asks) the one registered under its name: the
+    /// fixtures hold one class per name.
     fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, Error> {
-        self.shapes
-            .read()
-            .unwrap()
+        let shapes = self.shapes.read().unwrap();
+        shapes
             .get(class_name)
+            .or_else(|| shapes.get(&class_name_of(class_name)))
             .cloned()
             .ok_or_else(|| {
                 anyhow!(

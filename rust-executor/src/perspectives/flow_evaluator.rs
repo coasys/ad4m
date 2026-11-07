@@ -956,6 +956,14 @@ pub trait RequiresQueryable: Send + Sync {
     ) -> Option<&crate::perspectives::flow_instance::verify::memo::VerdictMemo> {
         None
     }
+
+    /// The target class IRI `class` reads here (a bare name: the least IRI
+    /// of that name), or `None` when no registered class reads it. A
+    /// `producedByFlow` gate matches a committed output's class through it.
+    /// The default knows no class, so a gate compares classes as written.
+    fn class_iri(&self, _class: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Does a link target name this DID? Accepts the raw DID (the flow's own
@@ -992,6 +1000,10 @@ impl RequiresQueryable for PerspectiveInstance {
 
     async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
         load_shacl_flows(self).await
+    }
+
+    fn class_iri(&self, class: &str) -> Option<String> {
+        self.get_shape(class).ok().map(|s| s.target_class.clone())
     }
 }
 

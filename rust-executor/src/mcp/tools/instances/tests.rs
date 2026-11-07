@@ -522,6 +522,101 @@ async fn describe_perspective_marks_unregistered_relation_targets() {
     );
 }
 
+/// A `Task` shape in namespace `ns`.
+fn task_sdna(ns: &str) -> String {
+    format!(
+        r#"{{
+  "target_class": "{ns}://Task",
+  "constructor_actions": [
+    {{"action":"addLink","source":"this","predicate":"rdf://type","target":"{ns}://Task"}}
+  ],
+  "properties": [
+    {{"path":"{ns}://title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{{"action":"setSingleTarget","source":"this","predicate":"{ns}://title","target":"value"}}]}}
+  ]
+}}"#
+    )
+}
+
+/// Two classes of one name (`a://Task`, `b://Task`) are both described,
+/// each named by its target class IRI, and the instance tools take that IRI
+/// (and the IRI of a class whose name is its own) as `class_name`.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_perspective_lists_two_classes_of_one_name() {
+    let (a, b) = (task_sdna("a"), task_sdna("b"));
+    let (handler, uuid, _guard) = setup_with(
+        &[("Task", &a), ("Task", &b), ("Channel", CHANNEL_SDNA)],
+        false,
+    )
+    .await;
+    let desc = parse(
+        &handler
+            .describe_perspective(Parameters(DescribePerspectiveParams {
+                perspective_id: uuid.clone(),
+            }))
+            .await,
+    );
+    let classes = desc["classes"].as_array().expect("classes array");
+    let listed: Vec<(&str, &str)> = classes
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap(),
+                c["class_uri"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("Channel", "flux://Channel"),
+            ("a://Task", "a://Task"),
+            ("b://Task", "b://Task"),
+        ],
+        "{desc}"
+    );
+
+    for class_name in ["b://Task", "a://Task"] {
+        let created = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: class_name.into(),
+                    properties: Some(props(&[("title", json!(class_name))])),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        );
+        assert_eq!(created["created"], true, "{created}");
+        let base_uri = created["base_uri"].as_str().unwrap().to_string();
+        let (ns, _) = class_name.split_once("://").unwrap();
+        let p = crate::perspectives::get_perspective(&uuid).unwrap();
+        let titles = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some(base_uri.clone()),
+                predicate: Some(format!("{ns}://title")),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(titles.len(), 1, "{class_name} writes its own predicate");
+    }
+
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "flux://Channel".into(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(channel["created"], true, "{channel}");
+}
+
 /// Relation-typed properties through the generic tools: schema exposure,
 /// URI-gated writes on a forward hasOne, rejection of non-URI values, and
 /// read-only enforcement on a belongsTo (reverse) relation.

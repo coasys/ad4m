@@ -297,6 +297,52 @@ async fn an_output_edited_after_completion_stops_being_a_valid_output() {
     assert!(verdict.is_verified(), "the ratchet holds — got: {verdict}");
 }
 
+/// An output proposed under its class's bare name (`Task`, as a client may
+/// name it in `proposeTransition`) is committed under the IRI the name reads
+/// (`ns://Task`), and answers a query by the IRI (as the SDK names it) and
+/// one by the name.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_output_committed_by_name_answers_a_query_by_iri() {
+    use crate::perspectives::flow_instance::produced::mint_flow_receipt;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    let by_name = OutputRef {
+        class_name: "Task".to_string(),
+        id: TASK.to_string(),
+    };
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[by_name],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+    // Committed as the class the name reads now: its IRI, so a class of the
+    // same name registered later does not change what the quorum signed.
+    assert_eq!(
+        receipt
+            .outputs
+            .iter()
+            .map(OutputRef::of)
+            .collect::<Vec<_>>(),
+        vec![task_ref(TASK)]
+    );
+
+    let filter = serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } });
+    for class in ["ns://Task", "Task"] {
+        let (ids, total) = ids_of_class(&f, class, filter.clone()).await;
+        assert_eq!(ids, vec![TASK.to_string()], "queried as {class}");
+        assert_eq!(total, 1, "queried as {class}");
+    }
+}
+
 /// The filter runs BEFORE the page is cut (the #1093 `limitPerAnchor`
 /// guarantee, restated for verification): with forged receipts planted for
 /// two other tasks, `limit: 2` still returns the two VALID outputs — never
@@ -422,20 +468,13 @@ const ROLE_SDNA: &str = r#"{
 #[tokio::test(flavor = "multi_thread")]
 async fn an_output_committed_as_a_task_is_not_produced_by_the_flow_as_a_role() {
     use crate::perspectives::flow_instance::produced::mint_flow_receipt;
-    use crate::perspectives::perspective_instance::SdnaType;
 
     let mut f = seed_satisfied_fixture(None).await;
     let ctx = f.ctx.clone();
     f.perspective
-        .add_sdna(
-            "ns://Role".to_string(),
-            String::new(),
-            SdnaType::SubjectClass,
-            Some(ROLE_SDNA.to_string()),
-            &ctx,
-        )
+        .register_shape_json(ROLE_SDNA, &ctx)
         .await
-        .expect("add_sdna(Role)");
+        .expect("register Role");
 
     // Precondition: the Task node IS a Role instance by conformance.
     let (ids, _) = ids_of_class(&f, "ns://Role", serde_json::json!({})).await;

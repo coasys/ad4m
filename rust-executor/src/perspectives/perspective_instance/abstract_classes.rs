@@ -4,9 +4,10 @@
 //! wires it, as a child of `perspective_instance` to reach its private state.
 //!
 //! A write through an abstract class dispatches to the record's own classes
-//! among those the abstract class reads (`subject_classes_of` ∩ the
-//! resolution). An update runs each class's setter for the property that
-//! answers to the abstract name; a delete runs each class's destructor.
+//! among those the abstract class reads (`subject_class_iris_of` ∩ the
+//! resolution), by target class IRI on both sides: of two classes of one
+//! name, a record's write runs its own class's actions. An update runs each
+//! class's setter for the property that answers to the abstract name; a delete runs each class's destructor.
 //! Commands two classes share run once. Values are not converted: what one
 //! class stores as HTML another gets as is. Creating one is refused.
 
@@ -25,6 +26,8 @@ use crate::perspectives::model_query::containment::{self, ContainmentEdges};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
 use crate::perspectives::perspective_instance::SubjectClassOption;
+use crate::perspectives::shacl_parser::class_name_of;
+use crate::perspectives::subject_classes_of::subject_class_iris_of;
 use serde_json::Value;
 
 /// What the installed shapes say about abstract classes, and how many times
@@ -37,6 +40,8 @@ pub(super) struct AbstractCache {
     resolved: HashMap<String, Arc<Resolution>>,
     /// The containment edge set (see `super::containment`).
     pub(super) containment: Option<crate::perspectives::model_query::containment::ContainmentEdges>,
+    /// The registered classes and their shapes (see `super::shapes`).
+    pub(super) registry: Option<Arc<Vec<super::shapes::ShapeSummary>>>,
 }
 
 /// The classes a model query or subscription reads: those it names, or an
@@ -71,11 +76,12 @@ impl PerspectiveInstance {
         cache.index = None;
         cache.resolved.clear();
         cache.containment = None;
+        cache.registry = None;
     }
 
     /// How many times the installed shapes have changed. Read it *before*
     /// resolving, so a change landing mid-resolution is seen.
-    pub(super) fn shapes_generation(&self) -> u64 {
+    pub(crate) fn shapes_generation(&self) -> u64 {
         self.abstract_cache.read().unwrap().generation
     }
 
@@ -103,14 +109,15 @@ impl PerspectiveInstance {
 
     /// The name aliases key `abstract_class` by, and its shape. A built-in
     /// by its URI, from `builtin_classes`, never from the store: an app class
-    /// of the same name does not change what it reads or writes.
-    fn abstract_shape<'a>(
-        &self,
-        abstract_class: &'a str,
-    ) -> Result<(&'a str, Arc<ModelShape>), AnyError> {
+    /// of the same name does not change what it reads or writes. A stored
+    /// class by its IRI or its name; aliases name it by its name.
+    fn abstract_shape(&self, abstract_class: &str) -> Result<(String, Arc<ModelShape>), AnyError> {
         Ok(match builtin(abstract_class) {
-            Some(b) => (b.name, b.shape.clone()),
-            None => (abstract_class, self.get_shape(abstract_class)?),
+            Some(b) => (b.name.to_string(), b.shape.clone()),
+            None => (
+                class_name_of(abstract_class),
+                self.get_shape(abstract_class)?,
+            ),
         })
     }
 
@@ -134,7 +141,7 @@ impl PerspectiveInstance {
             &self.sparql_store,
             &self.shape_resolver(),
             &index,
-            alias_key,
+            &alias_key,
             &shape,
         )?;
         // A built-in that reads its own rows (`Container`'s class-less
@@ -250,14 +257,23 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// The classes `base` is an instance of, by target class IRI: two
+    /// classes of one name are told apart, as the resolution tells them.
+    fn own_classes(&self, base: &str) -> Result<Vec<String>, AnyError> {
+        let resolver = self.shape_resolver();
+        Ok(
+            subject_class_iris_of(&self.sparql_store, &resolver, &[base.to_string()])?
+                .remove(base)
+                .unwrap_or_default(),
+        )
+    }
+
     /// The classes of `base` a write through `abstract_class` reaches: those
-    /// it is, among those the abstract class reads. Never empty.
+    /// it is, among those the abstract class reads, by target class IRI.
+    /// Never empty.
     fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
-        let own = self
-            .subject_classes_of(&[base.to_string()])?
-            .remove(base)
-            .unwrap_or_default();
+        let own = self.own_classes(base)?;
         let targets: Vec<String> = resolution
             .classes
             .iter()
@@ -346,7 +362,7 @@ impl PerspectiveInstance {
             let mut has_action = false;
             for class in &targets {
                 let own_shape = self.get_shape(class)?;
-                let Some(own) = index.own_name(class, &own_shape, name, alias_key) else {
+                let Some(own) = index.own_name(class, &own_shape, name, &alias_key) else {
                     continue;
                 };
                 let Some(actions) = self.actions_for(class, own, op, membership).await? else {
@@ -634,10 +650,7 @@ impl PerspectiveInstance {
             return Ok(None);
         }
         let resolution = self.resolve_abstract(CONTAINER_URI)?;
-        let own = self
-            .subject_classes_of(&[base.to_string()])?
-            .remove(base)
-            .unwrap_or_default();
+        let own = self.own_classes(base)?;
         let index = self.abstract_index()?;
         let alias_key = builtin(CONTAINER_URI)
             .map(|b| b.name)

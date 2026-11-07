@@ -104,8 +104,10 @@ describe("producedByFlow — receipts, valid outputs, and the query filter", fun
     // proves it.
     const outputs = await p.flowValidOutputs(FLOW_URI, "Done");
     expect(outputs).to.have.lengthOf(1);
+    // Named by the class's target class IRI: the proposal resolved the name
+    // before signing it.
     expect(outputs[0].output).to.deep.equal({
-      className: "ProducedDeliverable",
+      className: Deliverable.getTargetClass(),
       id: deliverable.id,
     });
     expect(outputs[0].terminalState).to.equal("Done");
@@ -116,7 +118,7 @@ describe("producedByFlow — receipts, valid outputs, and the query filter", fun
     expect(verdict.outcome, verdict.detail).to.equal("verified");
     expect(verdict.terminalState).to.equal("Done");
     expect(verdict.outputs).to.deep.equal([
-      { className: "ProducedDeliverable", id: deliverable.id },
+      { className: Deliverable.getTargetClass(), id: deliverable.id },
     ]);
 
     // A tampered copy — same signed material, outputs swapped to a node the

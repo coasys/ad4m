@@ -24,6 +24,7 @@ use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter};
+use crate::perspectives::shacl_parser::class_name_of;
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::LinkStatus;
 
@@ -210,7 +211,8 @@ fn reject_pagination_on_polymorphic(
 }
 
 /// The JSON key carrying each polymorphically-hydrated instance's concrete
-/// class, so the TypeScript layer can construct the right model class for it.
+/// class, by target class IRI (two classes may share a name), so the
+/// TypeScript layer can construct the right model class for it.
 ///
 /// Half of a wire contract: the reader is `SUBJECT_CLASS_KEY` in
 /// `core/src/model/Ad4mModel.ts`, and the two are separate literals in separate
@@ -221,10 +223,10 @@ fn reject_pagination_on_polymorphic(
 pub(crate) const SUBJECT_CLASS_KEY: &str = "__subjectClass";
 
 /// The JSON key carrying every class a polymorphically-hydrated instance
-/// conforms to, most specific first — the whole set [`SUBJECT_CLASS_KEY`] names
-/// only the head of.
+/// conforms to, by target class IRI, most specific first — the whole set
+/// [`SUBJECT_CLASS_KEY`] names only the head of.
 ///
-/// Always present, even where it holds a single name. A key that appeared only
+/// Always present, even where it holds a single class. A key that appeared only
 /// when a target was ambiguous would be one every consumer had to guard, to
 /// learn something a one-element array says just as well.
 ///
@@ -244,7 +246,7 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 /// per group against that group's own shape. The cost is one query per *distinct
 /// class present*, not per instance.
 ///
-/// Each instance carries its class name back under [`SUBJECT_CLASS_KEY`], which
+/// Each instance carries its target class IRI back under [`SUBJECT_CLASS_KEY`], which
 /// is what lets the caller construct the matching model class rather than the
 /// one the relation declared.
 ///
@@ -298,7 +300,11 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 pub(super) fn choose<'a>(matched: &'a [String], preferred: &[String]) -> Option<&'a String> {
     preferred
         .iter()
-        .find_map(|want| matched.iter().find(|have| *have == want))
+        .find_map(|want| {
+            matched
+                .iter()
+                .find(|have| *have == want || class_name_of(have) == *want)
+        })
         .or_else(|| matched.first())
 }
 
@@ -314,8 +320,11 @@ async fn hydrate_polymorphic(
 ) -> Result<(), Error> {
     // `limit`/`offset` were refused before either resolver ran — see
     // `reject_pagination_on_polymorphic`. Nothing to check here.
-    let classes =
-        crate::perspectives::subject_classes_of::subject_classes_of(store, resolver, target_ids)?;
+    // By class IRI: two classes may share a name, and each target hydrates
+    // through the class it conforms to.
+    let classes = crate::perspectives::subject_classes_of::subject_class_iris_of(
+        store, resolver, target_ids,
+    )?;
 
     // Group by class, keeping the ids of each group in the order they arrived so
     // a group's own results stay stable.
@@ -345,11 +354,11 @@ async fn hydrate_polymorphic(
         }
     }
 
-    for (class_name, ids) in by_class {
-        let target_shape = match resolver.get_shape(&class_name) {
+    for (class, ids) in by_class {
+        let target_shape = match resolver.get_shape(&class) {
             Ok(s) => s,
             Err(e) => {
-                log::warn!("polymorphic include: no shape for '{class_name}': {e}");
+                log::warn!("polymorphic include: no shape for '{class}': {e}");
                 continue;
             }
         };
@@ -375,17 +384,15 @@ async fn hydrate_polymorphic(
         for mut inst in result.instances {
             if let Some(id) = inst["id"].as_str().map(|s| s.to_string()) {
                 if let Some(obj) = inst.as_object_mut() {
-                    obj.insert(
-                        SUBJECT_CLASS_KEY.to_string(),
-                        Value::String(class_name.clone()),
-                    );
+                    obj.insert(SUBJECT_CLASS_KEY.to_string(), Value::String(class.clone()));
                     // The readings this one was chosen over. Costs nothing to
                     // return — the classification that picked the head had to
                     // produce the whole set to rank it.
                     let all = classes
                         .get(&id)
+                        .filter(|all| !all.is_empty())
                         .cloned()
-                        .unwrap_or_else(|| vec![class_name.clone()]);
+                        .unwrap_or_else(|| vec![class.clone()]);
                     obj.insert(
                         SUBJECT_CLASSES_KEY.to_string(),
                         Value::Array(all.into_iter().map(Value::String).collect()),
@@ -483,7 +490,7 @@ async fn resolve_forward_include(
                 rel.name
             ));
         }
-        let target_shape = resolver.get_shape(&rel.target_class_name)?;
+        let target_shape = resolver.get_shape(rel.target())?;
         let result = Box::pin(execute_model_query_inner(
             store,
             target_shape.as_ref(),
@@ -671,7 +678,7 @@ async fn resolve_reverse_include(
                     rel.name
                 ));
             }
-            let target_shape = resolver.get_shape(&rel.target_class_name)?;
+            let target_shape = resolver.get_shape(rel.target())?;
             let result = Box::pin(execute_model_query_inner(
                 store,
                 target_shape.as_ref(),

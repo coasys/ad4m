@@ -197,17 +197,13 @@ fn params(method: &str, fx: &Fixture) -> Value {
         | "neighbourhood.onlineAgents"
         | "neighbourhood.otherAgents"
         | "perspective.get"
-        | "perspective.getAllShacl"
-        | "perspective.getShaclNames"
+        | "perspective.shapes"
         | "perspective.interpretationOverlays"
         | "perspective.queryLinks"
         | "perspective.snapshot"
         | "perspective.flowStates"
         | "perspective.subjectClassesOf" => json!({ "uuid": uuid }),
         "perspective.flowFired" => json!({ "uuid": uuid, "instances": ["test://leak"] }),
-        "perspective.getShacl" | "perspective.getShaclTargetClass" => {
-            json!({ "uuid": uuid, "name": "Leak" })
-        }
         "perspective.getSubjectData" => {
             json!({ "uuid": uuid, "subjectClass": "Leak", "expressionAddress": "test://leak" })
         }

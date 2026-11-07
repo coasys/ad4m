@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::{
-    literal::{Literal, LiteralValue},
     subject_proxy::SubjectProxy,
     types::{LinkExpression, LinkExpressionInput, LinkInput},
     ws_rpc::WsRpcClient,
@@ -105,277 +104,29 @@ impl PerspectiveProxy {
             .await
     }
 
-    pub async fn add_dna(&self, name: String, dna: String, dna_type: String) -> Result<()> {
-        let mut predicate = "ad4m://has_custom_sdna";
-
-        if dna_type == "subject_class" {
-            predicate = "ad4m://has_subject_class"
-        } else if dna_type == "flow" {
-            predicate = "ad4m://has_flow"
-        }
-
-        let literal_name = Literal::from_string(name);
-
-        let links = self
-            .get(
-                Some("ad4m://self".into()),
-                Some(literal_name.to_url().unwrap()),
-                Some(predicate.into()),
-                None,
-                None,
-                None,
+    /// Register class shapes (each the SHACL shape JSON `perspective.shapes`
+    /// answers) with `perspective.registerShapes`. Answers which classes were
+    /// written and which were already stored as given, by target class IRI.
+    pub async fn register_shapes(&self, shapes: Vec<Value>) -> Result<Value> {
+        self.ws
+            .call(
+                "perspective.registerShapes",
+                serde_json::json!({
+                    "uuid": self.perspective_uuid,
+                    "shapes": shapes,
+                }),
             )
-            .await?;
-
-        if links.is_empty() {
-            self.set_single_target(
-                "ad4m://self".into(),
-                predicate.into(),
-                literal_name.to_url().unwrap(),
-            )
-            .await?;
-        }
-
-        let literal = Literal::from_string(dna);
-
-        self.add_link(
-            literal_name.to_url().unwrap(),
-            literal.to_url().unwrap(),
-            Some("ad4m://sdna".into()),
-            Some("shared".to_string()),
-        )
-        .await?;
-        Ok(())
+            .await
     }
 
-    pub async fn is_sdna_loaded(&self, sdna_code: &str) -> Result<bool> {
-        let subject_class_regex =
-            Regex::new(r#"^\s*subject_class\("([^"]+)",\s*("([^"]+)"|([^,\s)]+))\)\s*\.\s*$"#)
-                .unwrap();
-
-        let mut subject_class_facts = Vec::new();
-
-        for line in sdna_code.lines() {
-            let line = line.trim();
-            if let Some(captures) = subject_class_regex.captures(line) {
-                if let Some(class_name) = captures.get(1) {
-                    let ref_value = if let Some(quoted_ref) = captures.get(3) {
-                        quoted_ref.as_str()
-                    } else if let Some(unquoted_ref) = captures.get(4) {
-                        unquoted_ref.as_str()
-                    } else {
-                        continue;
-                    };
-
-                    subject_class_facts
-                        .push((class_name.as_str().to_string(), ref_value.to_string()));
-                }
-            }
+    /// The registered classes (`perspective.shapes`): each `{ name, shape,
+    /// hash }`, sorted by name. `names` keeps only the classes named.
+    pub async fn shapes(&self, names: Option<Vec<String>>) -> Result<Vec<Value>> {
+        let mut params = serde_json::json!({ "uuid": self.perspective_uuid });
+        if let Some(names) = names {
+            params["names"] = serde_json::json!(names);
         }
-
-        if subject_class_facts.is_empty() {
-            return Ok(false);
-        }
-
-        for (class_name, ref_value) in subject_class_facts {
-            let query = "subject_class(Name, Ref).".to_string();
-
-            match self.infer(query).await {
-                Ok(results) => {
-                    if let Some(array) = results.as_array() {
-                        let mut found_match = false;
-                        for result in array {
-                            if let Some(result_obj) = result.as_object() {
-                                let name_binding = result_obj.get("Name");
-                                let ref_binding = result_obj.get("Ref");
-
-                                if let (Some(name), Some(ref_val)) = (name_binding, ref_binding) {
-                                    if let (Some(bound_name), Some(bound_ref)) =
-                                        (name.as_str(), ref_val.as_str())
-                                    {
-                                        if bound_name == class_name && bound_ref == ref_value {
-                                            found_match = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if found_match {
-                            continue;
-                        } else {
-                            return Ok(false);
-                        }
-                    } else {
-                        return Ok(false);
-                    }
-                }
-                Err(_) => {
-                    return Ok(false);
-                }
-            }
-        }
-
-        Ok(true)
-    }
-
-    pub async fn get_dna(
-        &self,
-    ) -> Result<Vec<(String, Vec<(String, String)>, Vec<String>, Vec<String>)>> {
-        let sdna_predicates = vec![
-            "ad4m://has_subject_class",
-            "ad4m://has_flow",
-            "ad4m://has_custom_sdna",
-        ];
-
-        use std::collections::HashMap;
-        let mut class_groups: HashMap<String, (Vec<String>, Vec<String>, Vec<(String, String)>)> =
-            HashMap::new();
-
-        for predicate in sdna_predicates {
-            let links = self
-                .get(
-                    Some("ad4m://self".into()),
-                    None,
-                    Some(predicate.into()),
-                    None,
-                    None,
-                    None,
-                )
-                .await?;
-
-            for link in links {
-                let name_literal = link.data.target.clone();
-                let name_author = link.author.clone();
-
-                let class_name = match Literal::from_url(name_literal.clone()) {
-                    Ok(literal) => match literal.get() {
-                        Ok(LiteralValue::String(name)) => name,
-                        _ => continue,
-                    },
-                    Err(_) => continue,
-                };
-
-                let sdna_links = self
-                    .get(
-                        Some(name_literal.clone()),
-                        None,
-                        Some("ad4m://sdna".into()),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await?;
-
-                let (name_authors, code_authors, sdna_codes_with_authors) = class_groups
-                    .entry(class_name.clone())
-                    .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new()));
-
-                if !name_authors.contains(&name_author) {
-                    name_authors.push(name_author);
-                }
-
-                for sdna_link in sdna_links {
-                    if !code_authors.contains(&sdna_link.author) {
-                        code_authors.push(sdna_link.author.clone());
-                    }
-
-                    if let Ok(literal) = Literal::from_url(sdna_link.data.target.clone()) {
-                        if let Ok(LiteralValue::String(sdna_code)) = literal.get() {
-                            let code_exists = sdna_codes_with_authors
-                                .iter()
-                                .any(|(existing_code, _)| existing_code == &sdna_code);
-
-                            if !code_exists {
-                                sdna_codes_with_authors.push((sdna_code, sdna_link.author.clone()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut result = Vec::new();
-        for (class_name, (name_authors, code_authors, sdna_codes_with_authors)) in class_groups {
-            result.push((
-                class_name,
-                sdna_codes_with_authors,
-                name_authors,
-                code_authors,
-            ));
-        }
-
-        Ok(result)
-    }
-
-    pub async fn get_dna_for_class(
-        &self,
-        class_name: &str,
-    ) -> Result<Option<(String, Vec<String>, Vec<String>)>> {
-        let name_literal = Literal::from_string(class_name.to_string());
-
-        let links = self
-            .get(
-                Some("ad4m://self".into()),
-                Some(name_literal.to_url().unwrap()),
-                Some("ad4m://has_subject_class".into()),
-                None,
-                None,
-                None,
-            )
-            .await?;
-
-        if links.is_empty() {
-            return Ok(None);
-        }
-
-        let mut name_authors = Vec::new();
-        for link in &links {
-            if !name_authors.contains(&link.author) {
-                name_authors.push(link.author.clone());
-            }
-        }
-
-        let sdna_links = self
-            .get(
-                Some(name_literal.to_url().unwrap()),
-                None,
-                Some("ad4m://sdna".into()),
-                None,
-                None,
-                None,
-            )
-            .await?;
-
-        if sdna_links.is_empty() {
-            return Ok(None);
-        }
-
-        let mut code_authors = Vec::new();
-        let mut first_sdna_code = None;
-
-        for sdna_link in sdna_links {
-            if !code_authors.contains(&sdna_link.author) {
-                code_authors.push(sdna_link.author.clone());
-            }
-
-            if first_sdna_code.is_none() {
-                let literal = Literal::from_url(sdna_link.data.target.clone())?;
-                match literal.get() {
-                    Ok(LiteralValue::String(string)) => {
-                        first_sdna_code = Some(string);
-                    }
-                    _ => continue,
-                }
-            }
-        }
-
-        if let Some(sdna_code) = first_sdna_code {
-            Ok(Some((sdna_code, name_authors, code_authors)))
-        } else {
-            Ok(None)
-        }
+        self.ws.call("perspective.shapes", params).await
     }
 
     pub async fn get_single_target(&self, source: String, predicate: String) -> Result<String> {
@@ -429,16 +180,10 @@ impl PerspectiveProxy {
         Ok(())
     }
 
+    /// Every registered class (`perspective.shapes`), sorted by name then
+    /// IRI: [`class_keys`] of the shapes.
     pub async fn subject_classes(&self) -> Result<Vec<String>> {
-        let mut classes = Vec::new();
-        if let Value::Array(classes_results) = self.infer("subject_class(X, _)".into()).await? {
-            for class in classes_results {
-                if let Some(Value::String(class_name)) = class.get("X") {
-                    classes.push(class_name.clone());
-                }
-            }
-        }
-        Ok(classes)
+        Ok(class_keys(&self.shapes(None).await?))
     }
 
     pub async fn subject_class_properties(&self, class: &String) -> Result<Vec<String>> {
@@ -657,4 +402,36 @@ fn parse_action(action: &str) -> Result<Vec<Command>> {
     }
 
     Ok(commands)
+}
+
+/// Each class of `shapes` (`perspective.shapes` entries, sorted by name then
+/// IRI) by the key that reads it: its name, or its target class IRI when
+/// another class shares the name (the bare name reads only the least IRI).
+pub fn class_keys(shapes: &[Value]) -> Vec<String> {
+    let name = |class: &Value| class["name"].as_str().unwrap_or_default().to_string();
+    let shared = |n: &str| shapes.iter().filter(|c| name(c) == n).count() > 1;
+    shapes
+        .iter()
+        .map(|class| match class["shape"]["target_class"].as_str() {
+            Some(iri) if shared(&name(class)) => iri.to_string(),
+            _ => name(class),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::class_keys;
+    use serde_json::json;
+
+    #[test]
+    fn class_keys_name_a_shared_name_by_iri() {
+        let class = |name: &str, iri: &str| json!({"name": name, "shape": {"target_class": iri}});
+        let shapes = [
+            class("Note", "a://Note"),
+            class("Task", "a://Task"),
+            class("Task", "b://Task"),
+        ];
+        assert_eq!(class_keys(&shapes), vec!["Note", "a://Task", "b://Task"]);
+    }
 }

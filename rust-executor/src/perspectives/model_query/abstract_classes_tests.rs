@@ -154,13 +154,15 @@ fn the_index_reads_abstract_markers_and_aliases() {
     ] {
         assert!(!index.is_abstract(name), "{name} is concrete");
     }
-    assert_eq!(index.name_through("Message", "body", "TextContent"), "text");
-    assert_eq!(index.name_through("Message", "body", "Readable"), "body");
-    assert_eq!(index.name_through("Note", "body", "Readable"), "text");
-    assert_eq!(index.name_through("Post", "text", "TextContent"), "text");
+    let through =
+        |class, property, abstract_class| index.name_through(class, property, abstract_class);
+    assert_eq!(through("flux://Message", "body", "TextContent"), "text");
+    assert_eq!(through("flux://Message", "body", "Readable"), "body");
+    assert_eq!(through("app://Note", "body", "Readable"), "text");
+    assert_eq!(through("app://Post", "text", "TextContent"), "text");
     // And back, for a write through the abstract class.
     let message = load_shape_from_store(&store, "Message").unwrap();
-    let own = |name| index.own_name("Message", &message, name, "TextContent");
+    let own = |name| index.own_name("flux://Message", &message, name, "TextContent");
     assert_eq!((own("text"), own("body")), (Some("body"), None));
 }
 
@@ -172,9 +174,12 @@ fn an_abstract_class_reads_every_concrete_class_with_its_names() {
     let store = all_classes();
     assert_eq!(
         resolved(&store, "TextContent").classes,
-        vec!["Message", "Post"]
+        vec!["app://Post", "flux://Message"]
     );
-    assert_eq!(resolved(&store, "Readable").classes, vec!["Note", "Post"]);
+    assert_eq!(
+        resolved(&store, "Readable").classes,
+        vec!["app://Note", "app://Post"]
+    );
 }
 
 /// An abstract shape with no names reads nothing, not everything. The
@@ -208,7 +213,7 @@ fn an_abstract_shape_without_names_reads_no_class() {
     assert!(shape.properties.is_empty(), "{shape:?}");
     assert_eq!(resolved(&store, "Bare").classes, Vec::<String>::new());
     let post = StoreResolver(&store).get_shape("Post").unwrap();
-    assert!(view_through(&index, "Bare", &shape, "Post", &post).is_none());
+    assert!(view_through(&index, "Bare", &shape, "app://Post", &post).is_none());
 }
 
 /// Relations match relations by name, whatever their predicate or direction;
@@ -216,7 +221,7 @@ fn an_abstract_shape_without_names_reads_no_class() {
 #[test]
 fn relations_match_by_name_only() {
     let store = all_classes();
-    assert_eq!(resolved(&store, "Container").classes, vec!["Folder"]);
+    assert_eq!(resolved(&store, "Container").classes, vec!["app://Folder"]);
 }
 
 /// The view renames the aliased property and nothing else: same predicate,
@@ -225,7 +230,7 @@ fn relations_match_by_name_only() {
 fn the_view_carries_the_abstract_names_through_the_concrete_predicates() {
     let store = all_classes();
     let resolution = resolved(&store, "TextContent");
-    let view = &resolution.views["Message"];
+    let view = &resolution.views["flux://Message"];
     let text = view
         .properties
         .iter()
@@ -258,7 +263,10 @@ fn a_class_with_two_properties_answering_to_one_name_is_left_out() {
             ("app://Post.body", ALIAS_PREDICATE, &alias),
         ],
     );
-    assert_eq!(resolved(&store, "TextContent").classes, vec!["Message"]);
+    assert_eq!(
+        resolved(&store, "TextContent").classes,
+        vec!["flux://Message"]
+    );
 }
 
 /// The classifier lists concrete classes only. TextContent requires `text`,
@@ -335,8 +343,12 @@ async fn a_query_through_the_abstract_class_reads_aliases_as_its_names() {
     assert_eq!(
         ids_and_texts(&all),
         vec![
-            ("app://p1".into(), "Post".into(), "post one".into()),
-            ("flux://m1".into(), "Message".into(), "hello data".into()),
+            ("app://p1".into(), "app://Post".into(), "post one".into()),
+            (
+                "flux://m1".into(),
+                "flux://Message".into(),
+                "hello data".into()
+            ),
         ]
     );
     assert!(all.instances.iter().all(|r| r.get("body").is_none()));
@@ -349,7 +361,11 @@ async fn a_query_through_the_abstract_class_reads_aliases_as_its_names() {
     .await;
     assert_eq!(
         ids_and_texts(&filtered),
-        vec![("flux://m1".into(), "Message".into(), "hello data".into())]
+        vec![(
+            "flux://m1".into(),
+            "flux://Message".into(),
+            "hello data".into()
+        )]
     );
 }
 

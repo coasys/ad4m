@@ -34,7 +34,7 @@ describe("TextContent", () => {
       @Property({ through: "app://extra" })
       extra: string = "";
     }
-    expect((OwnText as any).prepareModelQueryParams({}).className).toBe("OwnText");
+    expect((OwnText as any).prepareModelQueryParams({}).className).toBe("ad4m://OwnText");
   });
 
   it("is sent by its URI in a union too, so the executor refuses it as abstract", async () => {
@@ -45,7 +45,7 @@ describe("TextContent", () => {
     }
     expect(Ad4mModel.prepareUnionQueryParams([TextContent, UnionPeer] as any, {}).classNames).toEqual([
       "ad4m://TextContent",
-      "UnionPeer",
+      "app://UnionPeer",
     ]);
     const sent: any[] = [];
     const perspective: any = {
@@ -55,7 +55,7 @@ describe("TextContent", () => {
       },
     };
     await expect(Ad4mModel.findAllOf(perspective, [TextContent, UnionPeer] as any)).rejects.toThrow("abstract class");
-    expect(sent).toEqual([["ad4m://TextContent", "UnionPeer"]]);
+    expect(sent).toEqual([["ad4m://TextContent", "app://UnionPeer"]]);
   });
 
   it("is implemented through an alias", () => {
@@ -68,17 +68,15 @@ describe("TextContent", () => {
     }).not.toThrow();
   });
 
-  it("register() writes nothing", async () => {
+  it("register() sends no shape: the executor holds it", async () => {
     const { PerspectiveProxy } = await import("./PerspectiveProxy");
-    const calls: string[] = [];
+    const sent: unknown[][] = [];
     const proxy = Object.create(PerspectiveProxy.prototype);
-    // The skip comes before anything else: a write would be recorded, and
-    // reaching the private registration set throws on this bare object.
-    Object.defineProperty(proxy, "addSdna", { value: () => { calls.push("addSdna"); } });
-    Object.defineProperty(proxy, "addSdnaAll", { value: () => { calls.push("addSdnaAll"); } });
-    await expect(proxy.ensureSubjectClasses([TextContent])).resolves.toBeUndefined();
-    await expect(proxy.ensureSubjectClass(TextContent)).resolves.toBeUndefined();
-    expect(calls).toEqual([]);
+    Object.defineProperty(proxy, "registerShapes", {
+      value: async (shapes: unknown[]) => { sent.push(shapes); return { unchanged: [], written: [], generation: 0 }; },
+    });
+    await TextContent.register(proxy);
+    expect(sent).toEqual([[]]);
   });
 
   it("save() and delete() of a row read through it go to the executor by its URI", async () => {
@@ -87,7 +85,7 @@ describe("TextContent", () => {
       get: (_t, key) => async (...args: any[]) => {
         calls.push([key, ...args]);
         if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://m/1", __subjectClass: "Message", text: "hi" }], totalCount: 1 };
+          return { instances: [{ id: "ad4m://m/1", __subjectClass: "flux://Message", text: "hi" }], totalCount: 1 };
         }
         return true;
       },

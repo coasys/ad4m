@@ -227,11 +227,8 @@ subject(<base>)
 # List all subject classes
 classes
 
-# Show DNA/schema of a class
-sdna <class>
-
-# Show SDNA authorship information (debugging)
-sdna-authors
+# Show the registered shape of a class (all classes without <class>)
+shapes <class>
 ```
 
 #### System Commands

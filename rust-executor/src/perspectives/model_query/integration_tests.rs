@@ -6848,8 +6848,14 @@ async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
         .find(|c| c["id"] == "we://i/1")
         .expect("the image block");
 
-    assert_eq!(text["__subjectClass"].as_str(), Some("TextBlock"));
-    assert_eq!(image["__subjectClass"].as_str(), Some("ImageBlock"));
+    assert_eq!(
+        text["__subjectClass"].as_str(),
+        Some("we://models/TextBlock")
+    );
+    assert_eq!(
+        image["__subjectClass"].as_str(),
+        Some("we://models/ImageBlock")
+    );
     // The property that only exists on the concrete class — the thing a
     // base-class hydration silently drops.
     assert_eq!(text["text"].as_str(), Some("hello"));
@@ -6965,7 +6971,10 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
     assert_eq!(children.len(), 1, "one link, one child");
 
     let child = &children[0];
-    assert_eq!(child["__subjectClass"].as_str(), Some("TextBlock"));
+    assert_eq!(
+        child["__subjectClass"].as_str(),
+        Some("we://models/TextBlock")
+    );
     // `text` exists only on the subclass, so its presence is the proof that the
     // subclass's shape did the hydrating and not the parent's.
     assert_eq!(child["text"].as_str(), Some("hello"));
@@ -6973,7 +6982,7 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
     // simply true, and it is reported.
     assert_eq!(
         child["__subjectClasses"],
-        serde_json::json!(["TextBlock", "Block"]),
+        serde_json::json!(["we://models/TextBlock", "we://models/Block"]),
         "the whole set, most specific first"
     );
 }
@@ -7097,7 +7106,7 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
     assert_eq!(child["id"].as_str(), Some("we://b/1"));
     assert_eq!(
         child["__subjectClass"].as_str(),
-        Some("Bookmark"),
+        Some("we://models/Bookmark"),
         "the ranking ties, so the tie-break decides — and decides the same way everywhere"
     );
     assert_eq!(child["url"].as_str(), Some("https://ad4m.dev"));
@@ -7105,7 +7114,7 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
     // `TextBlock` for it directly.
     assert_eq!(
         child["__subjectClasses"],
-        serde_json::json!(["Bookmark", "TextBlock"])
+        serde_json::json!(["we://models/Bookmark", "we://models/TextBlock"])
     );
 }
 
@@ -7286,7 +7295,7 @@ async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
 
     assert_eq!(
         entry["__subjectClass"].as_str(),
-        Some("Post"),
+        Some("we://models/Post"),
         "the caller named Post, and the target is one"
     );
     assert_eq!(entry["title"].as_str(), Some("Chocolate Cake"));
@@ -7295,7 +7304,7 @@ async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
     // preference was applied precisely because the head is not the chosen class.
     assert_eq!(
         entry["__subjectClasses"],
-        serde_json::json!(["ImagePost", "Post"]),
+        serde_json::json!(["we://models/ImagePost", "we://models/Post"]),
         "the whole set, still most specific first"
     );
 }
@@ -7409,7 +7418,10 @@ async fn test_preferring_classes_does_not_drop_the_ones_not_named() {
         .iter()
         .find(|e| e["id"] == "we://r/1")
         .expect("the unnamed class is still a member");
-    assert_eq!(recipe["__subjectClass"].as_str(), Some("Recipe"));
+    assert_eq!(
+        recipe["__subjectClass"].as_str(),
+        Some("we://models/Recipe")
+    );
     assert_eq!(recipe["ingredients"].as_str(), Some("flour, sugar"));
 }
 
@@ -7638,8 +7650,11 @@ async fn test_polymorphic_reverse_include_hydrates_each_source_as_its_own_class(
         .find(|c| c["id"] == "we://b/1")
         .expect("the board");
 
-    assert_eq!(collection["__subjectClass"].as_str(), Some("Collection"));
-    assert_eq!(board["__subjectClass"].as_str(), Some("Board"));
+    assert_eq!(
+        collection["__subjectClass"].as_str(),
+        Some("we://models/Collection")
+    );
+    assert_eq!(board["__subjectClass"].as_str(), Some("we://models/Board"));
     // The property that exists only on the concrete class — before this, both
     // took the same path through the declared target class and arrived empty.
     assert_eq!(collection["title"].as_str(), Some("Reading list"));
@@ -9874,9 +9889,9 @@ async fn test_polymorphic_has_one_hydrates_as_one_record_of_its_own_class() {
         task.is_object(),
         "a to-one hydrates as one object, got {task}"
     );
-    assert_eq!(task["__subjectClass"], "TaskBlock");
+    assert_eq!(task["__subjectClass"], "we://models/TaskBlock");
     assert_eq!(task["title"], "ship");
-    assert_eq!(note["__subjectClass"], "NoteBlock");
+    assert_eq!(note["__subjectClass"], "we://models/NoteBlock");
     assert_eq!(note["text"], "hello");
 }
 

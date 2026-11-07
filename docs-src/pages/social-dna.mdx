@@ -218,19 +218,22 @@ Here's how a Todo class maps to SHACL:
     ```
     # SHACL shapes are stored as links in the perspective:
 
-    (ad4m://self) --ad4m://has_sdna--> (ad4m://sdna_Todo)
-    (ad4m://sdna_Todo) --ad4m://sdna_type--> (literal:string:subject_class)
+    # The class index: the class IRI is a subject class and has a shape
+    (todo://Todo) --rdf://type--> (ad4m://SubjectClass)
+    (todo://Todo) --ad4m://shape--> (todo://TodoShape)
 
-    # The shape URI and its properties:
-    (ad4m://sdna_Todo) --sh:targetClass--> (todo://Todo)
-    (ad4m://sdna_Todo) --sh:property--> (ad4m://sdna_Todo_prop_0)
+    # The shape and its properties:
+    (todo://TodoShape) --rdf://type--> (sh://NodeShape)
+    (todo://TodoShape) --sh://targetClass--> (todo://Todo)
+    (todo://TodoShape) --sh://property--> (todo://Todo.state)
 
-    # Property shape for "state":
-    (ad4m://sdna_Todo_prop_0) --sh:path--> (todo://state)
-    (ad4m://sdna_Todo_prop_0) --sh:datatype--> (xsd:string)
-    (ad4m://sdna_Todo_prop_0) --sh:maxCount--> (literal:number:1)
-    (ad4m://sdna_Todo_prop_0) --sh:minCount--> (literal:number:1)
-    (ad4m://sdna_Todo_prop_0) --ad4m://initial--> (todo://ready)
+    # Property shape for "state": the node is {namespace}{Class}.{name},
+    # so the property name comes from the node
+    (todo://Todo.state) --rdf://type--> (sh://PropertyShape)
+    (todo://Todo.state) --sh://path--> (todo://state)
+    (todo://Todo.state) --sh://datatype--> (xsd://string)
+    (todo://Todo.state) --sh://maxCount--> (literal:1^^xsd:integer)
+    (todo://Todo.state) --sh://minCount--> (literal:1^^xsd:integer)
 
     # ... and so on for each property
     ```
@@ -316,14 +319,15 @@ shape.addProperty({
   // No maxCount = collection
 });
 
-// Store in perspective
-await perspective.addShacl('Recipe', shape);
+// Store in perspective. Registering the same shape again writes nothing:
+// the result names it under `unchanged`.
+const { written, unchanged } = await perspective.registerShapes([shape]);
 
-// Retrieve
-const retrieved = await perspective.getShacl('Recipe');
+// Retrieve, with a hash of each stored shape
+const [recipe] = await perspective.shapes(['Recipe']);
 
 // List all shapes
-const allShapes = await perspective.getAllShacl();
+const allShapes = await perspective.shapes();
 ```
 
 #### Understanding the Lower Level
@@ -335,10 +339,10 @@ For a complete understanding, here are the basic PerspectiveProxy methods that p
 await Todo.register(perspective);
 
 // Or add SHACL directly
-await perspective.addShacl("Todo", shape);
+await perspective.registerShapes([shape]);
 
 // List all available subject classes
-const classes = await perspective.subjectClasses();
+const classes = (await perspective.shapes()).map(s => s.name);
 // Returns: ["Todo"]
 
 // Create a new subject instance
@@ -540,10 +544,10 @@ await Todo.register(perspective);
 // Or add SHACL shapes directly
 const shape = new SHACLShape('todo://Todo');
 shape.addProperty({ path: 'todo://state', datatype: 'xsd:string', maxCount: 1, minCount: 1 });
-await perspective.addShacl('Todo', shape);
+await perspective.registerShapes([shape]);
 
-// Add a flow definition
-await perspective.addSdna("Todo", flowDefinition, "flow");
+// Add a flow definition (a SHACLFlow)
+await perspective.addFlow("Todo", todoFlow);
 ```
 
 Then query your data:

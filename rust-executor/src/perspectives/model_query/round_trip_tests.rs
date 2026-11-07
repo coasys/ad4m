@@ -28,25 +28,10 @@ fn make_link_for_round_trip(signer: &TestSigner, link: Link) -> LinkExpression {
 fn round_trip(class_name: &str, shacl_json: &str) -> ModelShape {
     let store = SparqlStore::new(None).unwrap();
     let signer = TestSigner::generate();
+    // The links include the class index (`rdf://type`, `ad4m://shape`)
+    // `load_shape` starts from.
     let links = parse_shacl_to_links(shacl_json, class_name).expect("parse SHACL");
-    // The shape <ad4m://shape> URI link is normally emitted by add_sdna_inner;
-    // synthesize the SubjectClass-pointing-at-shape pair load_shape relies on.
-    let target_class_uri = format!("ns://{class_name}");
-    let shape_uri = format!("ns://{class_name}Shape");
-    let mut all_links = vec![
-        Link {
-            source: target_class_uri.clone(),
-            predicate: Some("rdf://type".to_string()),
-            target: "ad4m://SubjectClass".to_string(),
-        },
-        Link {
-            source: target_class_uri.clone(),
-            predicate: Some("ad4m://shape".to_string()),
-            target: shape_uri.clone(),
-        },
-    ];
-    all_links.extend(links);
-    for link in all_links {
+    for link in links {
         store
             .add_link(&make_link_for_round_trip(&signer, link))
             .unwrap();

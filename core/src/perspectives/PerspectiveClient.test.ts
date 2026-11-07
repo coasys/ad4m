@@ -335,7 +335,7 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
                 'perspective.removeLinks': [added],
                 'perspective.linkMutations': { additions: [added], removals: [] },
                 'perspective.commitBatch': { additions: [added], removals: [] },
-                'perspective.addSdna': true,
+                'perspective.registerShapes': { unchanged: [], written: ['test://C'], generation: 1 },
                 'perspective.rejectFlowProposal': { retractedLinks: 1 },
             }
             return Promise.resolve(method in replies ? replies[method] : added)
@@ -395,11 +395,10 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
             () => client.updateSubject('u', 'C', 'expr', '{}'),
             () => client.removeSubject('u', 'C', 'expr'),
             () => client.commitBatch('u', 'b'),
-            // Executor methods whose handlers write links themselves (SHACL
-            // and SDNA links, overlays, flow proposals, votes, fired marks,
-            // receipts, processor configs).
-            () => client.addSdna('u', 'C', undefined, 'subject_class', '{}'),
-            () => client.addSdnaBatch('u', [{ name: 'C', sdnaType: 'subject_class', shaclJson: '{}' }]),
+            // Executor methods whose handlers write links themselves (shape
+            // links, overlays, flow proposals, votes, fired marks, receipts,
+            // processor configs).
+            () => client.registerShapes('u', [{ target_class: 'app://C', properties: [] }]),
             () => client.runInterpretation('u', [], 'base://'),
             () => client.runInterpretationWithHarness('u', [], 'base://', 5),
             () => client.runAgent('u', [], { writeTools: ['add_link'] }),
@@ -477,11 +476,11 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
     })
 })
 
-describe('PerspectiveProxy.getAllShacl reads shapes in one RPC', () => {
-    const shape = (name: string) => ({
+describe('PerspectiveProxy.shapes reads shapes in one RPC', () => {
+    const summary = (name: string) => ({
         name,
-        shapeUri: `app://${name}Shape`,
-        links: [{ source: `app://${name}Shape`, predicate: 'sh://targetClass', target: `app://${name}` }],
+        hash: `hash-${name}`,
+        shape: { node_shape_uri: `app://${name}Shape`, target_class: `app://${name}`, properties: [] },
     })
 
     beforeEach(() => {
@@ -493,17 +492,17 @@ describe('PerspectiveProxy.getAllShacl reads shapes in one RPC', () => {
         return new PerspectiveProxy(makeHandle('uuid-shacl', 'S'), new PerspectiveClient('http://localhost:12000', 'token'))
     }
 
-    it('getAllShacl() makes one perspective.getAllShacl RPC with no name filter', async () => {
-        mockCall.mockResolvedValue([shape('A'), shape('B')])
-        const shapes = await proxy().getAllShacl()
-        expect(mockCall.mock.calls).toEqual([['perspective.getAllShacl', { uuid: 'uuid-shacl' }]])
-        expect(shapes.map(s => [s.name, s.shape.targetClass])).toEqual([['A', 'app://A'], ['B', 'app://B']])
+    it('shapes() makes one perspective.shapes RPC with no name filter', async () => {
+        mockCall.mockResolvedValue([summary('A'), summary('B')])
+        const shapes = await proxy().shapes()
+        expect(mockCall.mock.calls).toEqual([['perspective.shapes', { uuid: 'uuid-shacl', names: undefined }]])
+        expect(shapes.map(s => [s.name, s.shape.targetClass, s.hash])).toEqual([['A', 'app://A', 'hash-A'], ['B', 'app://B', 'hash-B']])
     })
 
-    it('getAllShacl({ names }) sends the names in the same single RPC', async () => {
-        mockCall.mockResolvedValue([shape('B')])
-        const shapes = await proxy().getAllShacl({ names: ['B', 'Missing'] })
-        expect(mockCall.mock.calls).toEqual([['perspective.getAllShacl', { uuid: 'uuid-shacl', names: ['B', 'Missing'] }]])
+    it('shapes(names) sends the names in the same single RPC', async () => {
+        mockCall.mockResolvedValue([summary('B')])
+        const shapes = await proxy().shapes(['B', 'Missing'])
+        expect(mockCall.mock.calls).toEqual([['perspective.shapes', { uuid: 'uuid-shacl', names: ['B', 'Missing'] }]])
         expect(shapes.map(s => s.name)).toEqual(['B'])
     })
 })
@@ -523,70 +522,6 @@ describe('PerspectiveProxy.flowFired reads many instances in one RPC (P9)', () =
         expect(await proxy.flowFired(runs)).toEqual(entries)
         expect(mockCall.mock.calls).toEqual([['perspective.flowFired', { uuid: 'uuid-flow', instances: runs }]])
     })
-})
-
-/**
- * Unit tests for PerspectiveProxy utility functions.
- */
-
-describe('PerspectiveProxy getClassShape sh:in URI-decoding', () => {
-    // This tests the sh:in parsing logic in getClassShape() which was fixed
-    // to URI-decode values from the Rust executor's SPARQL results
-
-    function parseShInValue(raw: string): Array<{ value: string; label?: string }> | undefined {
-        // Reproduce the exact parsing logic from PerspectiveProxy.getClassShape()
-        try {
-            if (raw.startsWith('literal:string:')) {
-                raw = decodeURIComponent(raw.substring('literal:string:'.length));
-            }
-            return JSON.parse(raw);
-        } catch { return undefined; }
-    }
-
-    it('parses plain JSON sh:in values', () => {
-        const result = parseShInValue('[{"value":"a"},{"value":"b","label":"B"}]');
-        expect(result).toEqual([
-            { value: 'a' },
-            { value: 'b', label: 'B' },
-        ]);
-    });
-
-    it('strips literal:string: prefix and parses', () => {
-        const result = parseShInValue('literal:string:[{"value":"x"},{"value":"y"}]');
-        expect(result).toEqual([
-            { value: 'x' },
-            { value: 'y' },
-        ]);
-    });
-
-    it('URI-decodes encoded sh:in values from Rust executor', () => {
-        // Rust executor may URI-encode the JSON when returning SPARQL results
-        const encoded = 'literal:string:' + encodeURIComponent('[{"value":"hello world"},{"value":"a&b"}]');
-        const result = parseShInValue(encoded);
-        expect(result).toEqual([
-            { value: 'hello world' },
-            { value: 'a&b' },
-        ]);
-    });
-
-    it('handles double-encoded brackets and quotes', () => {
-        const encoded = 'literal:string:%5B%7B%22value%22%3A%22active%22%7D%2C%7B%22value%22%3A%22inactive%22%7D%5D';
-        const result = parseShInValue(encoded);
-        expect(result).toEqual([
-            { value: 'active' },
-            { value: 'inactive' },
-        ]);
-    });
-
-    it('returns undefined for malformed JSON', () => {
-        const result = parseShInValue('literal:string:not-json');
-        expect(result).toBeUndefined();
-    });
-
-    it('handles already-decoded values without prefix', () => {
-        const result = parseShInValue('[{"value":"test"}]');
-        expect(result).toEqual([{ value: 'test' }]);
-    });
 })
 
 describe('PerspectiveClient builds SDK classes from wire data', () => {
@@ -657,18 +592,6 @@ describe('PerspectiveClient builds SDK classes from wire data', () => {
 
         expect(mockCall.mock.calls[0][1].link).not.toHaveProperty('status')
         expect(link.status).toBe('SHARED')
-    })
-
-    it('addSdna narrows the single/batch result union', async () => {
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-        mockCall.mockResolvedValueOnce(true)
-        expect(await client.addSdna('u', 'n', 'code', 'subject_class')).toBe(true)
-        mockCall.mockResolvedValueOnce([true, false])
-        expect(await client.addSdna('u', 'n', 'code', 'subject_class')).toBe(false)
-        mockCall.mockResolvedValueOnce(true)
-        expect(await client.addSdnaBatch('u', [{ name: 'n', sdnaType: 'flow' }])).toEqual([true])
-        mockCall.mockResolvedValueOnce([true, false])
-        expect(await client.addSdnaBatch('u', [{ name: 'n', sdnaType: 'flow' }])).toEqual([true, false])
     })
 
     it('interpretationOverlays narrows kind to create | update', async () => {

@@ -9,7 +9,6 @@
 export type { AddLinkExpressionRequest } from "./AddLinkExpressionRequest";
 export type { AddLinkRequest } from "./AddLinkRequest";
 export type { AddLinksBulkRequest } from "./AddLinksBulkRequest";
-export type { AddSdnaRequest } from "./AddSdnaRequest";
 export type { AgentMessage } from "./AgentMessage";
 export type { AgentReply } from "./AgentReply";
 export type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
@@ -99,6 +98,13 @@ export type { SignedRequest } from "./SignedRequest";
 export type { SkippedSource } from "./SkippedSource";
 export type { StoreBehind } from "./StoreBehind";
 export type { StoreInfo } from "./StoreInfo";
+// Class registration (perspective.registerShapes, perspective.shapes).
+export type { PropertyShapeJson } from "./PropertyShapeJson";
+export type { RegisterResult } from "./RegisterResult";
+export type { ShapeAction } from "./ShapeAction";
+export type { ShapeConformanceCondition } from "./ShapeConformanceCondition";
+export type { ShapeJson } from "./ShapeJson";
+export type { ShapeSummary } from "./ShapeSummary";
 export { READ_METHODS, LONG_METHODS } from "./RpcMethods";
 export type { RpcMethods, RpcMethod } from "./RpcMethods";
 export { SCOPED_EVENTS } from "./Events";

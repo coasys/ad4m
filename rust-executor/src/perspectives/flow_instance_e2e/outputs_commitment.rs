@@ -164,7 +164,9 @@ async fn a_co_signer_refuses_a_named_output_that_is_not_an_instance_of_its_class
     let seal = seal_for(&f, "scoped").await;
     let missing = task_ref("ad4m://task/never-written");
     let wrong_class = OutputRef {
-        class_name: crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS.to_string(),
+        class_name: crate::perspectives::shacl_parser::class_name_of(
+            crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS,
+        ),
         id: TASK.to_string(),
     };
     // Whatever these hash to, the instance check must answer first.

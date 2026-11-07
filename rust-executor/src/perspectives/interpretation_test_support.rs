@@ -20,7 +20,7 @@ use super::interpretation::{
 };
 use super::model_query::shape::load_shape;
 use super::model_query::types::{ModelShape, Scope};
-use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
+use super::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use super::shacl_parser::parse_shacl_to_links;
 use super::sparql_store::SparqlStore;
 use crate::agent::signatures::TestSigner;
@@ -202,7 +202,7 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
 /// that exercise perspective writes (upsert, `apply_interpretation_ops`) but
 /// never call a model.
 ///
-/// The `add_sdna` registration is what makes `create_subject` / `update_subject`
+/// The `register_shapes` registration is what makes `create_subject` / `update_subject`
 /// work: they read each class's `ad4m://constructor` + per-property
 /// `ad4m://setter` actions from the perspective's store, not from the in-memory
 /// `ModelShape`. Without it they error with "No SHACL constructor found".
@@ -236,17 +236,11 @@ pub(crate) async fn setup_perspective_no_llm(
         .await
         .expect("prolog engine pool");
 
-    for (class, sdna) in class_sdnas {
+    for (_, sdna) in class_sdnas {
         perspective
-            .add_sdna(
-                (*class).to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some((*sdna).to_string()),
-                &ctx,
-            )
+            .register_shape_json(sdna, &ctx)
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
     }
 
     let shapes: Vec<ModelShape> = class_sdnas

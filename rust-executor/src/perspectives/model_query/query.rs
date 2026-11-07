@@ -576,7 +576,7 @@ pub(super) async fn execute_model_query_inner(
                             .include_relations
                             .iter()
                             .find(|r| r.name == rel_name && !r.predicate.is_empty())
-                            .and_then(|rel| resolver.get_shape(&rel.target_class_name).ok())
+                            .and_then(|rel| resolver.get_shape(rel.target()).ok())
                             .map(|target_shape| {
                                 target_shape.properties.iter().any(|p| {
                                     p.name == prop_name
@@ -698,22 +698,19 @@ pub(super) async fn execute_model_query_inner(
                         .iter()
                         .find(|r| r.name == rel_name && !r.predicate.is_empty())
                         .and_then(|rel| {
-                            resolver
-                                .get_shape(&rel.target_class_name)
-                                .ok()
-                                .and_then(|ts| {
-                                    ts.properties
-                                        .iter()
-                                        .find(|p| {
-                                            p.name == prop_name
-                                                && !p.is_collection
-                                                && !p.predicate.is_empty()
-                                        })
-                                        .map(|p| SortKey::RelationProperty {
-                                            rel_pred: rel.predicate.clone(),
-                                            prop_pred: p.predicate.clone(),
-                                        })
-                                })
+                            resolver.get_shape(rel.target()).ok().and_then(|ts| {
+                                ts.properties
+                                    .iter()
+                                    .find(|p| {
+                                        p.name == prop_name
+                                            && !p.is_collection
+                                            && !p.predicate.is_empty()
+                                    })
+                                    .map(|p| SortKey::RelationProperty {
+                                        rel_pred: rel.predicate.clone(),
+                                        prop_pred: p.predicate.clone(),
+                                    })
+                            })
                         })
                         .unwrap_or(SortKey::Timestamp)
                 } else {

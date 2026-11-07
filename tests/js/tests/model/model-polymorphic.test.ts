@@ -300,7 +300,7 @@ describe("Ad4mModel — polymorphic relations", function () {
     expect(gotTask).to.not.be.instanceOf(PolyTaskBlock);
     expect(gotTask.label).to.equal("unknown", "correct data, just untyped");
     expect(gotTask.__subjectClass).to.equal(
-      "PolyTaskBlock",
+      PolyTaskBlock.getTargetClass(),
       "and it names its class, so a caller can dispatch on it",
     );
   });
@@ -340,13 +340,16 @@ describe("Ad4mModel — polymorphic relations", function () {
     // collection declares it builds text blocks before bookmarks, so that is
     // how a node answering to both is read. A convention losing to a statement
     // of what the read is for.
-    expect(child.__subjectClass).to.equal("PolyTextBlock");
+    expect(child.__subjectClass).to.equal(PolyTextBlock.getTargetClass());
     expect(child).to.be.instanceOf(PolyTextBlock);
     expect(child.text).to.equal("hello");
     // The reading that lost, reported rather than dropped, and still ranked by
     // specificity — so the set stays a fact about the node while the choice
     // follows the request. A caller wanting the other has the id.
-    expect(child.__subjectClasses).to.deep.equal(["PolyBookmark", "PolyTextBlock"]);
+    expect(child.__subjectClasses).to.deep.equal([
+      PolyBookmark.getTargetClass(),
+      PolyTextBlock.getTargetClass(),
+    ]);
   });
 
   it("lets the call site name a different reading of the same child", async () => {
@@ -370,7 +373,7 @@ describe("Ad4mModel — polymorphic relations", function () {
     });
 
     const child = (found!.children as any[])[0];
-    expect(child.__subjectClass).to.equal("PolyBookmark");
+    expect(child.__subjectClass).to.equal(PolyBookmark.getTargetClass());
     expect(child).to.be.instanceOf(PolyBookmark);
     // Read through the bookmark's shape, so the bookmark's property is what
     // came back — the choice decides which predicates are fetched, not just
@@ -464,11 +467,14 @@ describe("Ad4mModel — polymorphic relations", function () {
     const entry = entries[0];
     expect(entry).to.be.instanceOf(PolyPost, "constructed as the class the feed declared");
     expect(entry.headline).to.equal("Chocolate cake");
-    expect(entry.__subjectClass).to.equal("PolyPost");
+    expect(entry.__subjectClass).to.equal(PolyPost.getTargetClass());
     // The set stays ranked by specificity whatever was preferred, so it remains
     // a fact about the node — and the caller can see the more specific reading
     // exists, and fetch it by id if it ever wants it.
-    expect(entry.__subjectClasses).to.deep.equal(["PolyImagePost", "PolyPost"]);
+    expect(entry.__subjectClasses).to.deep.equal([
+      PolyImagePost.getTargetClass(),
+      PolyPost.getTargetClass(),
+    ]);
   });
 
   // ── 6. The failure that used to be unreadable ───────────────────────────────

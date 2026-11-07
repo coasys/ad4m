@@ -146,7 +146,7 @@ async fn the_edge_set_is_has_child_plus_each_aliased_predicate() {
         described,
         vec![
             (HAS_CHILD.to_string(), None),
-            ("we://child".to_string(), Some("Block".to_string())),
+            ("we://child".to_string(), Some("ns://Block".to_string())),
         ]
     );
     // Cached until the installed shapes change.
@@ -444,15 +444,7 @@ async fn a_containment_subscription_follows_new_edges_and_removals() {
     let (mut sub, initial) = Sub::open(&p, "Message", json!({"parent": {"id": parent}})).await;
     assert!(initial.contains("\"instances\":[]"), "{initial}");
 
-    p.add_sdna(
-        "Block".into(),
-        String::new(),
-        SdnaType::SubjectClass,
-        Some(BLOCK_SDNA.into()),
-        &ctx,
-    )
-    .await
-    .unwrap();
+    p.register_shape_json(BLOCK_SDNA, &ctx).await.unwrap();
     sub.pass(
         &p,
         &[("ns://BlockShape", "sh://property", "ns://Block.blocks")],
