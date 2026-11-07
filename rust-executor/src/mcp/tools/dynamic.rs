@@ -597,11 +597,7 @@ impl Ad4mMcpHandler {
         // Strategy 1: Find instances via SHACL constructor "type marker" link pattern.
         // The constructor's first addLink action typically defines the type marker
         // (e.g., flux://entry_type → flux://has_message for Message class).
-        let shape_links = Self::get_shacl_shape_links(&perspective, class_name).await;
-
-        if let Some(shape_link) = shape_links.first() {
-            let shape_uri = &shape_link.data.target;
-
+        if let Some(shape_uri) = Self::class_shape_uri(&perspective, class_name) {
             // Get constructor actions
             let constructor_links = perspective
                 .get_links(&LinkQuery {
@@ -731,13 +727,10 @@ impl Ad4mMcpHandler {
 
         // Filter to only those children that are instances of the given class
         // We need to find the type marker for the class
-        let shape_links = Self::get_shacl_shape_links(&perspective, class_name).await;
-
         // Track which child addresses matched the SHACL type
         let mut matched_addrs: Vec<String> = Vec::new();
 
-        if let Some(shape_link) = shape_links.first() {
-            let shape_uri = &shape_link.data.target;
+        if let Some(shape_uri) = Self::class_shape_uri(&perspective, class_name) {
             let constructor_links = perspective
                 .get_links(&LinkQuery {
                     source: Some(shape_uri.clone()),
@@ -834,14 +827,9 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        // Reuse get_subject_data logic — try both encoded and raw SHACL name
-        let shape_links = Self::get_shacl_shape_links(&perspective, class_name).await;
-
-        if shape_links.is_empty() {
+        let Some(shape_uri) = Self::class_shape_uri(&perspective, class_name) else {
             return format!("No SHACL shape found for class '{}'", class_name);
-        }
-
-        let shape_uri = &shape_links[0].data.target;
+        };
         let prop_links = match perspective
             .get_links(&LinkQuery {
                 source: Some(shape_uri.clone()),

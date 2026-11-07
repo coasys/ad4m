@@ -305,6 +305,34 @@ impl From<DecoratedLinkExpression> for LinkExpression {
     }
 }
 
+/// A stored link, as a removal for `link_mutations`.
+impl From<DecoratedLinkExpression> for LinkExpressionInput {
+    fn from(link: DecoratedLinkExpression) -> Self {
+        LinkExpressionInput {
+            author: link.author,
+            timestamp: link.timestamp,
+            data: link.data.into(),
+            proof: super::domain::ExpressionProofInput {
+                key: Some(link.proof.key),
+                signature: Some(link.proof.signature),
+                valid: link.proof.valid,
+                invalid: link.proof.invalid,
+            },
+            status: link.status,
+        }
+    }
+}
+
+impl From<Link> for LinkInput {
+    fn from(link: Link) -> Self {
+        LinkInput {
+            predicate: link.predicate,
+            source: link.source,
+            target: link.target,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, TS)]
 #[ts(export)]
 pub struct Perspective {

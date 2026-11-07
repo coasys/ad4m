@@ -382,7 +382,7 @@ describe("Decorators → SHACL writer round-trip", () => {
 
     const { shape } = JsonOrderedHolder.generateSHACL();
 
-    // `toJSON` — not `toLinks` — is what `ensureSubjectClass` ships to the
+    // `toJSON` — not `toLinks` — is what `registerShapes` ships to the
     // backend, which turns it into the `ad4m://ordering` link the executor
     // reads the strategy back from. A declaration dropped here is inert
     // end to end however faithfully `toLinks` spells it: the setter writes

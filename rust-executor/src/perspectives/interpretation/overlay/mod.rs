@@ -48,6 +48,7 @@ pub(crate) use accept::{accept_interpretation, list_overlays, reject_interpretat
 pub use classes::InterpretationRunCursor;
 pub(crate) use classes::{
     ensure_interpretation_overlay_classes, mint_interpretation_run, InterpretationRunMeta,
+    INTERPRETATION_OVERLAY, INTERPRETATION_RUN,
 };
 use gate::{gate_update, inferred_snapshot};
 use write::write_overlay;

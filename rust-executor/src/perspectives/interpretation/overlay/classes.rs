@@ -2,7 +2,7 @@
 //! their idempotent registration, and run-node minting.
 
 use crate::agent::AgentContext;
-use crate::perspectives::hardwired_class::ensure_subject_class;
+use crate::perspectives::hardwired_class::{ensure_subject_classes, HardwiredClass};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::AITask;
 use sha2::{Digest, Sha256};
@@ -11,12 +11,6 @@ use sha2::{Digest, Sha256};
 pub(crate) const INTERP_RUN_CLASS: &str = "InterpretationRun";
 /// Local subject-class name of the per-base overlay node.
 pub(crate) const INTERP_OVERLAY_CLASS: &str = "InterpretationOverlay";
-
-/// Target-class URI of [`INTERP_OVERLAY_CLASS`] — used to detect prior
-/// registration.
-const INTERP_OVERLAY_TARGET_CLASS: &str = "ad4m://InterpretationOverlay";
-/// Target-class URI of [`INTERP_RUN_CLASS`] — used to detect prior registration.
-const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
 
 /// Hard-wired SDNA for the [`INTERP_RUN_CLASS`] subject class. No dedicated
 /// `ad4m://type` flag — Nico 2026-08-19: "type flags are an anti-pattern
@@ -101,38 +95,32 @@ impl InterpretationRunMeta {
 }
 
 /// Idempotently register the hard-wired [`INTERP_RUN_CLASS`] +
-/// [`INTERP_OVERLAY_CLASS`] subject classes into the perspective, mirroring the
-/// `add_sdna` path the SoA classes use. A no-op once the overlay class is
-/// present *and* the run class has the cursor properties (`processor` /
-/// `sources`); otherwise the run class is refreshed so a perspective that
-/// registered an older SDNA picks up the new setters.
+/// [`INTERP_OVERLAY_CLASS`] subject classes into the perspective. A
+/// perspective that registered an older revision of the run class (before
+/// `debug_response`, its newest property) gets this one, so `write_processor`
+/// finds every setter it writes through.
 pub(crate) async fn ensure_interpretation_overlay_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    ensure_subject_class(
+    ensure_subject_classes(
         perspective,
-        INTERP_OVERLAY_CLASS,
-        INTERP_OVERLAY_TARGET_CLASS,
-        INTERP_OVERLAY_SDNA,
-        None,
-        context,
-    )
-    .await?;
-    // `debug_response` is the newest property on the run class, so a
-    // perspective that registered the pre-debug SDNA is refreshed rather
-    // than left with a shape whose `debug_prompt`/`debug_response` setters
-    // do not exist — `write_processor` would silently drop those values.
-    ensure_subject_class(
-        perspective,
-        INTERP_RUN_CLASS,
-        INTERP_RUN_TARGET_CLASS,
-        INTERP_RUN_SDNA,
-        Some("ad4m://interp/debug_response"),
+        &[INTERPRETATION_OVERLAY, INTERPRETATION_RUN],
         context,
     )
     .await
 }
+
+/// The hard-wired `InterpretationOverlay` class.
+pub(crate) const INTERPRETATION_OVERLAY: HardwiredClass = HardwiredClass::new(INTERP_OVERLAY_SDNA);
+
+/// The hard-wired `InterpretationRun` class; `debugResponse` is its newest
+/// property.
+pub(crate) const INTERPRETATION_RUN: HardwiredClass = HardwiredClass {
+    sdna: INTERP_RUN_SDNA,
+    newest_path: Some("ad4m://interp/debug_response"),
+    removed_path: None,
+};
 
 /// Mint the per-pass [`INTERP_RUN_CLASS`] node in the `ad4m://interp/run/`
 /// coordination namespace and return its URI (to thread onto the pass's overlays

@@ -98,6 +98,9 @@ fn by_mode(answer: &str) -> bool {
 }
 
 const SHAPE: &str = r#"{"target_class":"matrix://C","properties":[]}"#;
+
+const FLOW: &str = r#"{"name":"F","namespace":"matrix://"}"#;
+
 const COMMANDS: &str =
     r#"[{"action":"addLink","source":"this","predicate":"matrix://p","target":"matrix://t"}]"#;
 
@@ -206,8 +209,8 @@ fn tools() -> Vec<Tool> {
             "add_model",
             AsCaller,
             vec![m(
-                "perspective.addSdna",
-                |uuid| json!({ "uuid": uuid, "name": "C", "sdnaType": "subject_class", "shaclJson": SHAPE }),
+                "perspective.registerShapes",
+                |uuid| json!({ "uuid": uuid, "shapes": [serde_json::from_str::<Value>(SHAPE).unwrap()] }),
             )],
             |h, uuid| {
                 Box::pin(async move {
@@ -224,15 +227,15 @@ fn tools() -> Vec<Tool> {
             "add_flow",
             AsCaller,
             vec![m(
-                "perspective.addSdna",
-                |uuid| json!({ "uuid": uuid, "name": "F", "sdnaType": "flow", "shaclJson": "{}" }),
+                "perspective.addLinks",
+                |uuid| json!({ "uuid": uuid, "links": [], "status": "shared" }),
             )],
             |h, uuid| {
                 Box::pin(async move {
                     h.add_flow(Parameters(flows::AddFlowParams {
                         perspective_id: uuid,
                         flow_name: "F".into(),
-                        shacl_json: "{}".into(),
+                        shacl_json: FLOW.into(),
                     }))
                     .await
                 })

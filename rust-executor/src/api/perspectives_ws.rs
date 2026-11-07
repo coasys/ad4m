@@ -14,8 +14,10 @@ use crate::perspectives::perspective_instance::{
 };
 use crate::perspectives::{
     add_perspective, get_perspective,
-    perspective_instance::{PerspectiveInstance, SdnaType},
-    remove_perspective, update_perspective_with,
+    perspective_instance::{PerspectiveInstance, RegisterResult, ShapeSummary},
+    remove_perspective,
+    shacl_parser::SHACLShape,
+    update_perspective_with,
     utils::prolog_resolution_to_string,
 };
 use crate::pubsub::mark_credits_dirty;
@@ -688,56 +690,25 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     }
 }
 
-async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn register_shapes(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: PerspectiveRegisterShapesParams = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let mut perspective = guarded_perspective(&params).await?;
-    let agent_context = ctx.acts_as();
+    let result = perspective
+        .register_shapes(body.shapes, &ctx.acts_as())
+        .await
+        .map_err(|e| WsRpcError::bad_request(format!("{e:#}")))?;
+    Ok(serde_json::to_value(result)?)
+}
 
-    // Batch mode: entries array present
-    if let Some(entries_val) = params.get("entries") {
-        let entries: Vec<AddSdnaRequest> = serde_json::from_value(entries_val.clone())
-            .map_err(|e| WsRpcError::bad_request(format!("Invalid entries: {}", e)))?;
-
-        let batch: Vec<(String, String, SdnaType, Option<String>)> = entries
-            .into_iter()
-            .map(|entry| {
-                let sdna_type = SdnaType::from_string(&entry.sdna_type)
-                    .map_err(|e| WsRpcError::bad_request(format!("Invalid SDNA type: {}", e)))?;
-                Ok((
-                    entry.name,
-                    entry.sdna_code.unwrap_or_default(),
-                    sdna_type,
-                    entry.shacl_json,
-                ))
-            })
-            .collect::<Result<Vec<_>, WsRpcError>>()?;
-
-        let results = perspective
-            .add_sdna_batch(batch, &agent_context)
-            .await
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-        Ok(serde_json::to_value(results)?)
-    } else {
-        // Single-entry mode (backward compatible)
-        let body: AddSdnaRequest = serde_json::from_value(params.clone())
-            .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-        let sdna_type = SdnaType::from_string(&body.sdna_type)
-            .map_err(|e| WsRpcError::bad_request(format!("Invalid SDNA type: {}", e)))?;
-
-        let result = perspective
-            .add_sdna(
-                body.name,
-                body.sdna_code.unwrap_or_default(),
-                sdna_type,
-                body.shacl_json,
-                &agent_context,
-            )
-            .await
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-        Ok(Value::Bool(result))
-    }
+async fn shapes(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: PerspectiveShapesParams = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let perspective = guarded_perspective(&params).await?;
+    let shapes = perspective
+        .shapes(body.names)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(shapes)?)
 }
 
 async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -1190,8 +1161,7 @@ async fn run_interpretation_handler(
     let class_names = match &body.classes {
         Some(sel) if !sel.is_empty() => sel.clone(),
         _ => perspective
-            .get_subject_classes_from_shacl()
-            .await
+            .class_names()
             .map_err(|e| WsRpcError::internal(e.to_string()))?,
     };
     let mut shapes = Vec::with_capacity(class_names.len());
@@ -1455,8 +1425,7 @@ async fn run_interpretation_with_harness_handler(
     let class_names = match &body.classes {
         Some(sel) if !sel.is_empty() => sel.clone(),
         _ => perspective
-            .get_subject_classes_from_shacl()
-            .await
+            .class_names()
             .map_err(|e| WsRpcError::internal(e.to_string()))?,
     };
     let mut shapes = Vec::with_capacity(class_names.len());
@@ -2084,340 +2053,6 @@ async fn mint_flow_receipt_handler(
     }))
 }
 
-// ── SHACL resolution endpoints ──
-//
-// These handlers move SHACL shape resolution from the TypeScript SDK (which paid
-// N×M queryLinks round trips per shape) into the executor, where link reads hit
-// the local SQLite store directly.  A perspective with 26 shapes that previously
-// generated ~261 WS-RPC round trips now resolves in a single call to
-// `perspective.getAllShacl`.
-
-/// Hard cap on the number of shapes `perspective.getAllShacl` will serialise
-/// in a single response. The endpoint returns the entire shape corpus in one
-/// WS message with no pagination — fine for the 26-shape WE dataset that
-/// motivates this PR, but a perspective with a few hundred shapes at ~10
-/// properties each is a multi-MB response inside one WS frame that either
-/// fails at the transport limit or (worse) silently truncates on some
-/// clients. Fail loudly at this ceiling until a paginated variant lands.
-/// See PR #935 review comment r3897752009.
-pub(crate) const MAX_SHACL_SHAPES_PER_RESPONSE: usize = 500;
-
-/// Helper: build a LinkQuery with only `source` and optionally `predicate` set.
-pub(crate) fn shacl_link_query(source: &str, predicate: Option<&str>) -> LinkQuery {
-    LinkQuery {
-        source: Some(source.to_string()),
-        predicate: predicate.map(|p| p.to_string()),
-        ..Default::default()
-    }
-}
-
-/// Simplified link triple returned by SHACL resolution endpoints.
-/// Matches the `{source, predicate, target}` shape that
-/// `SHACLShape.fromLinks()` in the TypeScript SDK expects.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS)]
-#[ts(export)]
-pub struct ShaclLinkTriple {
-    pub source: String,
-    pub predicate: String,
-    pub target: String,
-}
-
-/// Extract a SHACL shape name from a `has_shacl` link target.
-///
-/// The `has_shacl` target is a `literal:string:` URL. The TypeScript SDK
-/// writes it as `literal:string:shacl://<Name>` verbatim (via
-/// `Literal.fromUrl(...).toUrl()`), but the SPARQL store canonicalises
-/// every `literal:string:` target through the typed-literal round-trip
-/// — the payload lands as a URL-decoded `xsd:string` and is re-encoded
-/// on read (`storage_term_to_target_string`). That flips the wire form
-/// to `literal:string:shacl%3A%2F%2F<Name>`, so a plain
-/// `strip_prefix("literal:string:shacl://")` misses every entry.
-///
-/// Accept both shapes so this helper survives store canonicalisation and
-/// any future SDK write path that uses the un-encoded form directly.
-pub(crate) fn shape_name_from_has_shacl_target(target: &str) -> Option<String> {
-    let body = target.strip_prefix("literal:string:")?;
-    // Fast path: raw form, no encoding.
-    if let Some(name) = body.strip_prefix("shacl://") {
-        return Some(name.to_string());
-    }
-    // Canonicalised form: percent-decode then re-check the scheme prefix.
-    let decoded = percent_encoding::percent_decode_str(body)
-        .decode_utf8()
-        .ok()?;
-    decoded
-        .strip_prefix("shacl://")
-        .map(|name| name.to_string())
-}
-
-/// Enumerate every SHACL shape name registered on `ad4m://self` via
-/// `ad4m://has_shacl` links. Extracted so both the WS handler and the
-/// in-crate integration tests exercise the exact same walk.
-pub(crate) async fn resolve_shacl_names(
-    perspective: &PerspectiveInstance,
-) -> Result<Vec<String>, WsRpcError> {
-    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
-    let links = perspective
-        .get_links(&query)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let mut seen = std::collections::HashSet::new();
-    let names: Vec<String> = links
-        .iter()
-        .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
-        .filter(|name| seen.insert(name.clone()))
-        .collect();
-    Ok(names)
-}
-
-/// Resolve a shape name to its `sh://targetClass` URI (or `None` when the
-/// name is unknown, or the shape has no target class). Returned as
-/// `Option` so callers can pin the wire representation (JSON `null` vs
-/// absent) at their own boundary.
-pub(crate) async fn resolve_shacl_target_class(
-    perspective: &PerspectiveInstance,
-    name: &str,
-) -> Result<Option<String>, WsRpcError> {
-    let literal_url = format!("literal:string:shacl://{}", name);
-    let uri_links = perspective
-        .get_links(&shacl_link_query(
-            &literal_url,
-            Some("ad4m://shacl_shape_uri"),
-        ))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let shape_uri = match uri_links.first() {
-        Some(link) => link.data.target.clone(),
-        None => return Ok(None),
-    };
-
-    let shape_links = perspective
-        .get_links(&shacl_link_query(&shape_uri, None))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let target_class = shape_links
-        .iter()
-        .find(|l| l.data.predicate.as_deref() == Some("sh://targetClass"))
-        .map(|l| l.data.target.clone());
-
-    Ok(target_class)
-}
-
-/// List the names of every SHACL shape stored in a perspective.
-/// Equivalent to the SDK's `PerspectiveProxy.getShaclNames()` but resolved
-/// in-process — one handler call replaces one `queryLinks` round trip, plus
-/// deduplication happens server-side.
-async fn get_shacl_names(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let perspective = guarded_perspective(&params).await?;
-    let names = resolve_shacl_names(&perspective).await?;
-    Ok(serde_json::to_value(names)?)
-}
-
-/// Resolve a shape's `sh:targetClass` by name without fetching its properties.
-/// Equivalent to the SDK's `PerspectiveProxy.getShaclTargetClass(name)` — two
-/// in-process link reads instead of two WS-RPC round trips.
-async fn get_shacl_target_class(
-    params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    let name = params.require_str("name")?;
-    let perspective = guarded_perspective(&params).await?;
-    let target_class = resolve_shacl_target_class(&perspective, &name).await?;
-    // `null` when the shape (or its `sh://targetClass`) is absent — pins
-    // the wire contract the TS client already relies on
-    // (`PerspectiveProxy.getShaclTargetClass` maps this null to
-    // `undefined` at the proxy boundary).
-    Ok(serde_json::to_value(target_class)?)
-}
-
-/// Collect all link triples that define a shape and its property sub-shapes.
-/// Used by both `get_shacl` and `get_all_shacl` to avoid duplicating the
-/// multi-step resolution logic.
-pub(crate) async fn resolve_shacl_links(
-    perspective: &PerspectiveInstance,
-    name: &str,
-) -> Result<Option<(String, Vec<ShaclLinkTriple>)>, WsRpcError> {
-    // Step 1: name → shapeUri
-    let literal_url = format!("literal:string:shacl://{}", name);
-    let uri_links = perspective
-        .get_links(&shacl_link_query(
-            &literal_url,
-            Some("ad4m://shacl_shape_uri"),
-        ))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let shape_uri = match uri_links.first() {
-        Some(link) => link.data.target.clone(),
-        None => {
-            // Diagnostic for the race Nico flagged in review r3897752007:
-            // the caller enumerated this name from `has_shacl` but the
-            // `shacl_shape_uri` edge is gone by the time we resolve it
-            // (concurrent unlink between the two reads). Debug-level:
-            // expected-in-race behaviour, not a bug — the caller's
-            // returned list simply omits the vanished shape.
-            log::debug!(
-                "🔎 🔗 shacl: name={name} resolved to no shape uri, skipping (concurrent unlink?)"
-            );
-            return Ok(None);
-        }
-    };
-
-    // Step 2: get all links from the shape node (targetClass, properties, etc.)
-    let shape_links = perspective
-        .get_links(&shacl_link_query(&shape_uri, None))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    // Step 3: find property shape URIs
-    let prop_uris: Vec<String> = shape_links
-        .iter()
-        .filter(|l| l.data.predicate.as_deref() == Some("sh://property"))
-        .map(|l| l.data.target.clone())
-        .collect();
-
-    // Step 4: fetch links from each property sub-shape. These reads are
-    // independent, so we drive them concurrently with `try_join_all` (the
-    // old TypeScript client used `Promise.all` for the same reason; the
-    // first cut of this handler regressed to sequential `.await`s and
-    // paid one round trip per property in serial). See PR #935 review
-    // (r3897752002).
-    //
-    // The queries are materialised into an owned Vec first so each future
-    // borrows a value that outlives the join; borrowing a temporary
-    // built inside `.map(|_| ...)` would fail E0515.
-    let prop_queries: Vec<LinkQuery> = prop_uris
-        .iter()
-        .map(|prop_uri| shacl_link_query(prop_uri, None))
-        .collect();
-    let all_prop_links: Vec<DecoratedLinkExpression> =
-        futures::future::try_join_all(prop_queries.iter().map(|q| perspective.get_links(q)))
-            .await
-            .map_err(|e| WsRpcError::internal(e.to_string()))?
-            .into_iter()
-            .flatten()
-            .collect();
-
-    // Step 5: merge shape links + property links, deduplicate
-    let mut seen = std::collections::HashSet::new();
-    let mut triples = Vec::new();
-    for link in shape_links.iter().chain(all_prop_links.iter()) {
-        let source = link.data.source.clone();
-        let predicate = link.data.predicate.clone().unwrap_or_default();
-        let target = link.data.target.clone();
-        let key = format!("{} {} {}", source, predicate, target);
-        if seen.insert(key) {
-            triples.push(ShaclLinkTriple {
-                source,
-                predicate,
-                target,
-            });
-        }
-    }
-
-    Ok(Some((shape_uri, triples)))
-}
-
-/// Retrieve a single SHACL shape by name.  Returns the shape URI and all link
-/// triples needed to reconstruct the shape via `SHACLShape.fromLinks()`.
-/// Equivalent to the SDK's `PerspectiveProxy.getShacl(name)` — one handler
-/// call replaces 3+N `queryLinks` round trips.
-async fn get_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let name = params.require_str("name")?;
-    let perspective = guarded_perspective(&params).await?;
-
-    match resolve_shacl_links(&perspective, &name).await? {
-        Some((shape_uri, links)) => {
-            Ok(serde_json::to_value(PerspectiveShacl { shape_uri, links })?)
-        }
-        None => Ok(Value::Null),
-    }
-}
-
-/// Retrieve all SHACL shapes in one call.  Returns an array of
-/// `{name, shapeUri, links}` objects — the client reconstructs each shape
-/// with `SHACLShape.fromLinks(entry.links, entry.shapeUri)`.  Equivalent to
-/// the SDK's `PerspectiveProxy.getAllShacl()` — one handler call replaces
-/// 1 + N×(3+M) `queryLinks` round trips (N shapes, M properties each).
-///
-/// Optional `names: string[]` restricts the reply to those shapes, in the
-/// perspective's order; unknown names are left out.
-async fn get_all_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let wanted = params.opt_str_set("names")?;
-
-    let perspective = guarded_perspective(&params).await?;
-
-    // Step 1: get all shape names
-    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
-    let name_links = perspective
-        .get_links(&query)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let mut seen_names = std::collections::HashSet::new();
-    let names: Vec<String> = name_links
-        .iter()
-        .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
-        .filter(|name| seen_names.insert(name.clone()))
-        .filter(|name| wanted.as_ref().is_none_or(|w| w.contains(name)))
-        .collect();
-
-    // Step 2: resolve each shape's full link set. Concurrent per-shape
-    // walk — each `resolve_shacl_links` call is independent, so we let
-    // them race and preserve original name order after joining. Recovers
-    // the concurrency the old TS client had via `Promise.all` (review
-    // r3897752002).
-    // Cheap fail-loud gate before the fan-out: if the name enumeration
-    // already exceeds the response cap there's no point resolving every
-    // shape only to reject the serialisation. Post-walk check below
-    // catches the race where extra names arrive between enumeration and
-    // response (e.g. via subscription).
-    if names.len() > MAX_SHACL_SHAPES_PER_RESPONSE {
-        return Err(WsRpcError::bad_request(format!(
-            "getAllShacl exceeds MAX_SHACL_SHAPES_PER_RESPONSE ({} > {}), use paginated variant (TODO: not yet implemented)",
-            names.len(),
-            MAX_SHACL_SHAPES_PER_RESPONSE,
-        )));
-    }
-
-    let resolved = futures::future::try_join_all(
-        names
-            .iter()
-            .map(|name| resolve_shacl_links(&perspective, name)),
-    )
-    .await?;
-
-    let mut results: Vec<PerspectiveNamedShacl> = Vec::with_capacity(names.len());
-    for (name, maybe) in names.iter().zip(resolved.into_iter()) {
-        match maybe {
-            Some((shape_uri, links)) => results.push(PerspectiveNamedShacl {
-                name: name.clone(),
-                shape_uri,
-                links,
-            }),
-            None => {
-                // `resolve_shacl_links` already logged the specific
-                // per-name drop at debug level; nothing to add here —
-                // this arm is just the filter that keeps the bulk
-                // response array clean.
-            }
-        }
-    }
-
-    if results.len() > MAX_SHACL_SHAPES_PER_RESPONSE {
-        return Err(WsRpcError::bad_request(format!(
-            "getAllShacl exceeds MAX_SHACL_SHAPES_PER_RESPONSE ({} > {}), use paginated variant (TODO: not yet implemented)",
-            results.len(),
-            MAX_SHACL_SHAPES_PER_RESPONSE,
-        )));
-    }
-
-    Ok(serde_json::to_value(results)?)
-}
-
 // ── Registration ──
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -2511,11 +2146,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<PerspectiveSparqlParams, String>("perspective.querySparql", query_sparql)
         .read()
         .guard(query());
-    map.method::<PerspectiveAddSdnaParams, PerspectiveAddSdnaResult>(
-        "perspective.addSdna",
-        add_sdna,
+    map.method::<PerspectiveRegisterShapesParams, RegisterResult>(
+        "perspective.registerShapes",
+        register_shapes,
     )
     .guard(update());
+    map.method::<PerspectiveShapesParams, Vec<ShapeSummary>>("perspective.shapes", shapes)
+        .read()
+        .guard(query());
     map.method::<PerspectiveExecuteCommandsParams, ()>(
         "perspective.executeCommands",
         execute_commands,
@@ -2667,27 +2305,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
-    map.method::<PerspectiveUuidParams, Vec<String>>("perspective.getShaclNames", get_shacl_names)
-        .read()
-        .guard(query());
-    map.method::<PerspectiveShaclNameParams, Option<String>>(
-        "perspective.getShaclTargetClass",
-        get_shacl_target_class,
-    )
-    .read()
-    .guard(query());
-    map.method::<PerspectiveShaclNameParams, Option<PerspectiveShacl>>(
-        "perspective.getShacl",
-        get_shacl,
-    )
-    .read()
-    .guard(query());
-    map.method::<PerspectiveGetAllShaclParams, Vec<PerspectiveNamedShacl>>(
-        "perspective.getAllShacl",
-        get_all_shacl,
-    )
-    .read()
-    .guard(query());
 }
 
 // ── Contracts ──
@@ -2809,29 +2426,12 @@ pub struct PerspectiveSparqlParams {
     pub engine: Option<String>,
 }
 
-/// One SDNA entry (`entries` absent) or a batch of them.
+/// The shapes to register, each as the class of its target class.
 #[derive(Deserialize, TS)]
-#[serde(untagged)]
 #[ts(export)]
-pub enum PerspectiveAddSdnaParams {
-    Batch {
-        uuid: String,
-        entries: Vec<AddSdnaRequest>,
-    },
-    Single {
-        uuid: String,
-        #[serde(flatten)]
-        entry: AddSdnaRequest,
-    },
-}
-
-/// One flag per entry for a batch; one flag for a single entry.
-#[derive(Deserialize, TS)]
-#[serde(untagged)]
-#[ts(export)]
-pub enum PerspectiveAddSdnaResult {
-    Batch(Vec<bool>),
-    Single(bool),
+pub struct PerspectiveRegisterShapesParams {
+    pub uuid: String,
+    pub shapes: Vec<SHACLShape>,
 }
 
 #[derive(Deserialize, TS)]
@@ -2890,10 +2490,10 @@ pub struct PerspectiveDiscardBatchParams {
     pub body: DiscardBatchRequest,
 }
 
-/// `names` restricts the reply to those shapes; unknown names are left out.
+/// `names` restricts the reply to those classes; unknown names are left out.
 #[derive(Deserialize, TS)]
 #[ts(export)]
-pub struct PerspectiveGetAllShaclParams {
+pub struct PerspectiveShapesParams {
     pub uuid: String,
     #[serde(default)]
     #[ts(optional)]
@@ -3171,30 +2771,6 @@ pub struct PerspectiveMintFlowReceiptResult {
     /// The serialized `FlowReceipt`. The receipt tree carries no TS types,
     /// so the wire keeps it opaque; pass it back to `verifyFlowReceipt`.
     pub receipt: Value,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveShaclNameParams {
-    pub uuid: String,
-    pub name: String,
-}
-
-#[derive(Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct PerspectiveShacl {
-    pub shape_uri: String,
-    pub links: Vec<ShaclLinkTriple>,
-}
-
-#[derive(Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct PerspectiveNamedShacl {
-    pub name: String,
-    pub shape_uri: String,
-    pub links: Vec<ShaclLinkTriple>,
 }
 
 #[cfg(test)]

@@ -12,7 +12,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `perspective_instance.rs` (7.6k) | **The** instance: link CRUD + batches, neighbourhood sync/commit loops, SDNA/SHACL registration, subject create/update/read, `execute_commands`, query subscriptions, notifications, telepresence signals, Prolog facade, auto-processor tick. One `impl`; being split into `perspective_instance/` |
 | `sparql_store.rs` | Per-perspective oxigraph store. Links stored as reified triples. `add_link/remove_link`, `query_links`, `query_arbitrary` (read-only SPARQL from clients), custom SPARQL fns (`parse_literal`, `strip_html`), named-graph → reifier migration |
 | `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram |
-| `shacl_parser.rs` | Writer side: SHACL class JSON → links (`parse_shacl_to_links`), flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
+| `shacl_parser.rs` | Writer side: a class's links (`shape_links`; `parse_shacl_to_links` from JSON), which links on a class node are its own (`is_own_link`), links → shape (`shape_from_links`), `canonical_json`; flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
+| `perspective_instance/shapes.rs` | Class registration: `register_shapes` (diff, under `sdna_change_mutex`) and `shapes` / `class_names` over the cached registry |
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
 | `sdna.rs`, `shacl_to_prolog.rs` | Prolog fact generation from links/SHACL. Only used when Prolog mode ≠ Disabled |
 | `flow_classes.rs`, `flow_evaluator.rs`, `flow_spawn.rs`, `flow_semantic_check.rs`, `flow_context/` | SHACLFlow state machines: hard-wired classes, deterministic transition evaluation, spawn candidates, LLM flow context. Moving to `agentic/` (spec item 7) |
@@ -35,8 +36,39 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   typed event (`Topic::LinkAdded/LinkRemoved/LinkUpdated`, one event to all owners via
   `publish_to_owners`, the main agent if unowned) → commit to
   link language if `LinkStatus::Shared`. Use the same sequence; a helper `apply_diff` is planned.
-- SHACL triples are the source of truth for shapes. `shape_cache` on the instance is
-  invalidated by `add_sdna_inner`. `get_shape(class)` → `Arc<ModelShape>`.
+- SHACL triples are the source of truth for shapes. A class is its target class IRI; the name
+  index is two links on it: `rdf://type ad4m://SubjectClass` and `ad4m://shape <shape URI>`.
+  Links from older versions (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://has_shacl`,
+  `ad4m://shacl_shape_uri`) are not read and not written. `shape_cache` and the registry are
+  invalidated by `register_shapes` and by inbound diffs that touch shape links.
+  `get_shape(class)` → `Arc<ModelShape>`.
+- `register_shapes` compares the own links a shape gives with the own links stored, as
+  triples. Equal sets write nothing (`unchanged`); otherwise one Shared diff adds what is
+  missing and removes every copy of each stale own link. Copies of an expected triple stay
+  (two peers that registered the same shape agree); links other apps put on the class, shape
+  or property nodes stay. It answers once the registry and the shape cache hold the new shape.
+- A class name (`class_name_of`, the IRI's local name) is unique in a perspective. Readers
+  find a class by name with `model_query::shape::find_class`, which reads the least target
+  class IRI of that name; a class with two `ad4m://shape` links reads the least shape URI
+  (`shacl_parser::current_shape_uri`), in the registry and in `load_shape` alike.
+  `register_shapes` refuses, writing nothing, two classes of one name in one call, and a
+  class when `find_class` reads another class for its name. The check is local, so two
+  peers can still store two classes of one name before they sync; the one `find_class`
+  reads can always register again, so an app's `registerAll` keeps working on every peer,
+  and a new class never takes a name over, even one whose IRI sorts first.
+- The six hard-wired class names (`FlowInstance`, `FlowTransitionProposal`, `AutoProcessor`,
+  `ProcessingClaim`, `InterpretationRun`, `InterpretationOverlay`) are reserved:
+  `register_shapes` refuses a class of one of them under any IRI but the executor's
+  (`hardwired_class::reserved_target_class`), so the executor's flow and interpretation
+  paths always find their own class.
+- Hard-wired classes (`hardwired_class::ensure_subject_classes`) are upgrade-only: written when
+  missing or when the stored shape lacks the newest path / declares a removed one
+  (`HardwiredClass`), never over a newer stored shape. Only the executor registers them:
+  `create_subject` registers one not stored yet before its first instance
+  (`hardwired_class::ensure_before_write`), and a model query of one not stored yet reads as
+  empty without waiting or writing. A stored revision of it (an app's `@Model` copy, a
+  newer executor's) is used as it is. The SDK's `@Model` copies (`FlowModels.ts`,
+  `InterpretationModels.ts`) read them and are never registered by the SDK.
 - `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only
   `author`/`timestamp` with no other properties. Migrating it to `model_query` is planned (spec
   item 1). Prefer `model_query` for reads.
@@ -83,8 +115,10 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Don't decode `literal://` payloads by hand: several copies exist (spec item 8 unifies them);
   reuse `model_query::utils::parse_literal_value` until then.
 - Tests that need a real instance: `interpretation_test_support.rs` (`pub(crate)`, `cfg(test)`).
-- `parse_shacl_to_links` is the only SHACL shape writer: the SDK's `addShacl` and `@Model`
-  registration both send `SHACLShape.toJSON()` through `add_sdna`. A new shape field needs the
+- `shape_links` is the only SHACL shape writer: the SDK's `registerShapes` and `@Model`
+  registration both send `SHACLShape.toJSON()` to `perspective.registerShapes`. Every JSON
+  literal is canonical (sorted keys) on both sides, so the same shape gives the same links
+  and the same hash. A property node is `{ns}{Class}.{name}`. A new shape field needs the
   Rust field, a link here, and `SHACLShape.fromLinks` in core; `fixtures/shacl_writer_golden.json`
   pins the links and the SDK test decodes the same file, so update it in the same change.
 - Flow transition URIs are `{ns}{flow}.transition/{from}/{to}/{action}`, each part

@@ -72,10 +72,6 @@ describe("Prolog + Literals", () => {
             //console.log("UUID: " + perspective.uuid)
         })
 
-        // REMOVED: Legacy Prolog SDNA test - Prolog SDNA is superseded by SHACL
-        // The addSdna API now accepts optional sdnaCode with shaclJson being the primary input.
-        // See "SDNA creation decorators" tests below for the modern SHACL-based API.
-
         // NOTE: Legacy Subject proxy tests removed in SHACL migration PR.
         // The Subject proxy API (Subject.init(), getSubjectProxy()) requires Prolog queries
         // and has been superseded by the Ad4mModel API which is Prolog-free and SHACL-native.
@@ -160,14 +156,13 @@ describe("Prolog + Literals", () => {
 
             before(async () => {
                 // Register SHACL SDNA once for all tests in this block
-                await perspective!.ensureSDNASubjectClass(Todo)
+                await Todo.register(perspective!)
             })
 
             it("should find the TODO subject class from the test SDNA", async () => {
-                let classes = await perspective!.subjectClasses();
+                const classes = await perspective!.shapes();
 
-                expect(classes.length).to.equal(1)
-                expect(classes[0]).to.equal("Todo")
+                expect(classes.map((c) => c.name)).to.deep.equal(["Todo"])
             })
 
             it.skip("should generate correct SDNA from a JS class", async () => {
@@ -304,23 +299,22 @@ describe("Prolog + Literals", () => {
                 expect(envelope.data).to.equal("new title")
             })
 
-            it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
-                expect(await perspective!.getSdna()).to.have.lengthOf(1)
+            it("can easily be initialized with Model.register()", async () => {
+                expect(await perspective!.shapes()).to.have.lengthOf(1)
 
                 @Model({
                     name: "Test"
                 })
-                class Test {
+                class Test extends Ad4mModel {
                     @Property({
                         through: "test://test_numer"
                     })
                     number: number = 0
                 }
 
-                await perspective!.ensureSDNASubjectClass(Test)
+                await Test.register(perspective!)
 
-                expect(await perspective!.getSdna()).to.have.lengthOf(2)
-                //console.log((await perspective!.getSdna())[1])
+                expect((await perspective!.shapes()).map((c) => c.name)).to.deep.equal(["Test", "Todo"])
             })
 
             // REMOVED: Custom getter prolog code test - required Prolog-based property getters
@@ -329,7 +323,7 @@ describe("Prolog + Literals", () => {
 
             describe("with Message subject class registered", () => {
                 before(async () => {
-                    await perspective!.ensureSDNASubjectClass(Message)
+                    await Message.register(perspective!)
                 })
 
                 afterEach(async () => {
@@ -459,7 +453,7 @@ describe("Prolog + Literals", () => {
                         await ad4m!.perspective.remove(perspective.uuid)
                     }
                     perspective = await ad4m!.perspective.add("active-record-implementation-test")
-                    await perspective!.ensureSDNASubjectClass(Recipe)
+                    await Recipe.register(perspective!)
                 })
 
                 it("save() & get()", async () => {
@@ -605,7 +599,7 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the class
-                    await perspective!.ensureSDNASubjectClass(RecipeWithSparqlFilter);
+                    await RecipeWithSparqlFilter.register(perspective!);
                     
                     // SHACL metadata indexing happens asynchronously — no fixed
                     // wait needed; downstream pollUntil on query results handles it
@@ -723,7 +717,7 @@ describe("Prolog + Literals", () => {
                         @Property({ through: "flux://content", resolveLanguage: "literal" })
                         content: any = null;
                     }
-                    await perspective!.ensureSDNASubjectClass(FluxMessageAtom);
+                    await FluxMessageAtom.register(perspective!);
 
                     const payload = { body: "hello flux", mentions: ["did:key:zABC"] };
 
@@ -1201,7 +1195,7 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the Task class
-                    await perspective!.ensureSDNASubjectClass(TaskDue);
+                    await TaskDue.register(perspective!);
 
                     // Create timestamps & tasks
                     const start = new Date().getTime();
@@ -1787,7 +1781,7 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the Notification class
-                    await perspective!.ensureSDNASubjectClass(Notification);
+                    await Notification.register(perspective!);
 
                     // Clear any previous notifications
                     let notifications = await Notification.findAll(perspective!);
@@ -1903,8 +1897,8 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the Note class
-                    await perspective!.ensureSDNASubjectClass(Note1);
-                    await perspective!.ensureSDNASubjectClass(Note2);
+                    await Note1.register(perspective!);
+                    await Note2.register(perspective!);
 
                     // Create instances of both classes with the same name
                     const note1 = new Note1(perspective!);
@@ -1956,7 +1950,7 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the Task class
-                    await perspective!.ensureSDNASubjectClass(Task);
+                    await Task.register(perspective!);
 
                     // Clear any previous tasks
                     let tasks = await Task.findAll(perspective!);
@@ -2079,7 +2073,7 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the ImagePost class
-                    await transformTestPerspective!.ensureSDNASubjectClass(ImagePost);
+                    await ImagePost.register(transformTestPerspective!);
 
                     // Create a new image post
                     const post = new ImagePost(transformTestPerspective!);
@@ -2128,8 +2122,8 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the classes
-                    await perspective!.ensureSDNASubjectClass(BatchRecipe);
-                    await perspective!.ensureSDNASubjectClass(BatchNote);
+                    await BatchRecipe.register(perspective!);
+                    await BatchNote.register(perspective!);
 
                     // Create batch
                     const batchId = await perspective!.createBatch();
@@ -2244,7 +2238,7 @@ describe("Prolog + Literals", () => {
 
                     beforeEach(async () => {
                         perspective = await ad4m!.perspective.add("subscription-parity-test");
-                        await perspective!.ensureSDNASubjectClass(TestModel);
+                        await TestModel.register(perspective!);
                     });
 
                     afterEach(async () => {
@@ -2348,7 +2342,7 @@ describe("Prolog + Literals", () => {
 
                     beforeEach(async () => {
                         perspective = await ad4m!.perspective.add("query-builder-test");
-                        await perspective!.ensureSDNASubjectClass(TestModel);
+                        await TestModel.register(perspective!);
                     });
 
                     afterEach(async () => {
@@ -2624,8 +2618,8 @@ describe("Prolog + Literals", () => {
                     //     // Add a small delay to ensure Prolog engine is stable
                     //     await sleep(2000);
                         
-                    //     // Register the EmojiMessage class using ensureSDNASubjectClass
-                    //     await perspective!.ensureSDNASubjectClass(EmojiMessage);
+                    //     // Register the EmojiMessage class
+                    //     await EmojiMessage.register(perspective!);
                         
                     //     // Clear any existing EmojiMessage instances to start fresh
                     //     const existingMessages = await EmojiMessage.findAll(perspective!);
@@ -2635,8 +2629,8 @@ describe("Prolog + Literals", () => {
                     // });
 
                     beforeEach(async () => {
-                        // Register the EmojiMessage class using ensureSDNASubjectClass
-                        await perspective!.ensureSDNASubjectClass(EmojiMessage);
+                        // Register the EmojiMessage class
+                        await EmojiMessage.register(perspective!);
                         // Clean up any messages from previous tests
                         const existingMessages = await EmojiMessage.findAll(perspective!);
                         for (const msg of existingMessages) {
@@ -2813,7 +2807,7 @@ describe("Prolog + Literals", () => {
                         await ad4m!.perspective.remove(perspective.uuid)
                     }
                     perspective = await ad4m!.perspective.add("getter-test")
-                    await perspective!.ensureSDNASubjectClass(BlogPost)
+                    await BlogPost.register(perspective!)
                 });
 
                 it("should evaluate getter for property", async () => {
@@ -2941,10 +2935,10 @@ describe("Prolog + Literals", () => {
                     }
                     perspective = await ad4m!.perspective.add("type-filter-test")
                     
-                    // Register both Comment and Article classes using ensureSDNASubjectClass
-                    await perspective!.ensureSDNASubjectClass(Comment);
-                    await perspective!.ensureSDNASubjectClass(Article);
-                    await perspective!.ensureSDNASubjectClass(ArticleWithString);
+                    // Register both Comment and Article classes
+                    await Comment.register(perspective!);
+                    await Article.register(perspective!);
+                    await ArticleWithString.register(perspective!);
 
                     // SDNA class indexing handled by downstream pollUntil checks
                 });
@@ -3342,7 +3336,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 person.email = "alice.johnson@example.com"
 
-                await perspective!.ensureSDNASubjectClass(PersonClass)
+                await PersonClass.register(perspective!)
                 await person.save()
 
                 // Create a second person to test multiple instances
@@ -3418,7 +3412,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 contact.email = "bob.wilson@company.com"
 
-                await perspective!.ensureSDNASubjectClass(ContactClass)
+                await ContactClass.register(perspective!)
                 await contact.save()
 
                 // Create second contact to test multiple instances
@@ -3504,7 +3498,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 product.description = "A high-performance gaming laptop with RTX graphics"
 
-                await perspective!.ensureSDNASubjectClass(ProductClass)
+                await ProductClass.register(perspective!)
                 await product.save()
 
                 // Create a second product with different pricing
@@ -3579,7 +3573,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 book.isbn = "978-0-7432-7356-5"
 
-                await perspective!.ensureSDNASubjectClass(BookClass)
+                await BookClass.register(perspective!)
                 await book.save()
 
                 // Add a second book
@@ -3742,7 +3736,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - className is added dynamically
                 expect(BlogPostClass.className).to.equal("BlogPost")
 
-                await perspective!.ensureSDNASubjectClass(BlogPostClass)
+                await BlogPostClass.register(perspective!)
 
                 // Create a blog post with complex data
                 const post1 = new BlogPostClass(perspective!)
@@ -3853,7 +3847,7 @@ describe("Prolog + Literals", () => {
                 })
 
 
-                await perspective!.ensureSDNASubjectClass(PersonHolonClass)
+                await PersonHolonClass.register(perspective!)
 
                 // Test with realistic data
                 const person = new PersonHolonClass(perspective!)

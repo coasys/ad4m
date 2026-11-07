@@ -169,11 +169,11 @@ fn a_second_valid_encoding_keeps_the_first_wire_target() {
     assert_eq!(not_verified_after_read_back(&a), Vec::<String>::new());
 }
 
-/// The SHACL links `add_sdna` writes through `parse_shacl_to_links` (setter,
+/// The SHACL links `register_shapes` writes through `shape_links` (setter,
 /// adder, constructor, interpretation-hint JSON under `literal:string:`)
 /// verify after a read-back.
 #[tokio::test]
-async fn shacl_add_sdna_links_verify_after_a_read_back() {
+async fn registered_shape_links_verify_after_a_read_back() {
     let (perspective, _, _) =
         setup_perspective_no_llm(&[("Belief", BELIEF_SDNA), ("Task", TASK_WITH_RELATION_SDNA)])
             .await;
@@ -184,7 +184,7 @@ async fn shacl_add_sdna_links_verify_after_a_read_back() {
             .unwrap()
             .iter()
             .any(|l| l.data.predicate.as_deref() == Some("ad4m://setter")),
-        "setup: add_sdna wrote setter links"
+        "setup: registration wrote setter links"
     );
     assert_eq!(not_verified_after_read_back(store), Vec::<String>::new());
 }

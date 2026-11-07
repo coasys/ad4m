@@ -66,16 +66,14 @@
     ]
   },
   "links": [
-    {"source": "ad4m://self", "predicate": "ad4m://has_shacl", "target": "literal:string:shacl://Dog"},
-    {"source": "literal:string:shacl://Dog", "predicate": "ad4m://shacl_shape_uri", "target": "zoo://DogShape"},
     {"source": "zoo://Dog", "predicate": "rdf://type", "target": "ad4m://SubjectClass"},
     {"source": "zoo://Dog", "predicate": "ad4m://shape", "target": "zoo://DogShape"},
     {"source": "zoo://DogShape", "predicate": "rdf://type", "target": "sh://NodeShape"},
     {"source": "zoo://DogShape", "predicate": "sh://targetClass", "target": "zoo://Dog"},
     {"source": "zoo://DogShape", "predicate": "sh://node", "target": "zoo://AnimalShape"},
     {"source": "zoo://DogShape", "predicate": "ad4m://interpretation_hint", "target": "literal:string:A dog"},
-    {"source": "zoo://DogShape", "predicate": "ad4m://constructor", "target": "literal:string:[{\"action\":\"addLink\",\"source\":\"this\",\"predicate\":\"zoo://kind\",\"target\":\"zoo://dog\"}]"},
-    {"source": "zoo://DogShape", "predicate": "ad4m://destructor", "target": "literal:string:[{\"action\":\"removeLink\",\"source\":\"this\",\"predicate\":\"zoo://kind\",\"target\":\"zoo://dog\"}]"},
+    {"source": "zoo://DogShape", "predicate": "ad4m://constructor", "target": "literal:string:[{\"action\":\"addLink\",\"predicate\":\"zoo://kind\",\"source\":\"this\",\"target\":\"zoo://dog\"}]"},
+    {"source": "zoo://DogShape", "predicate": "ad4m://destructor", "target": "literal:string:[{\"action\":\"removeLink\",\"predicate\":\"zoo://kind\",\"source\":\"this\",\"target\":\"zoo://dog\"}]"},
     {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.name"},
     {"source": "zoo://Dog.name", "predicate": "rdf://type", "target": "sh://PropertyShape"},
     {"source": "zoo://Dog.name", "predicate": "sh://path", "target": "zoo://name"},
@@ -89,9 +87,9 @@
     {"source": "zoo://Dog.name", "predicate": "ad4m://resolveLanguage", "target": "literal:string:literal"},
     {"source": "zoo://Dog.name", "predicate": "sh://nodeKind", "target": "sh://Literal"},
     {"source": "zoo://Dog.name", "predicate": "ad4m://local", "target": "literal:true"},
-    {"source": "zoo://Dog.name", "predicate": "ad4m://setter", "target": "literal:string:[{\"action\":\"setSingleTarget\",\"source\":\"this\",\"predicate\":\"zoo://name\",\"target\":\"value\",\"local\":true}]"},
-    {"source": "zoo://Dog.name", "predicate": "ad4m://transform", "target": "literal:string:{\"type\":\"path\",\"predicate\":\"zoo://nickname\"}"},
-    {"source": "zoo://Dog.name", "predicate": "sh://in", "target": "literal:string:[{\"value\":\"rex\",\"label\":\"Rex\"},{\"value\":\"fido\"}]"},
+    {"source": "zoo://Dog.name", "predicate": "ad4m://setter", "target": "literal:string:[{\"action\":\"setSingleTarget\",\"local\":true,\"predicate\":\"zoo://name\",\"source\":\"this\",\"target\":\"value\"}]"},
+    {"source": "zoo://Dog.name", "predicate": "ad4m://transform", "target": "literal:string:{\"predicate\":\"zoo://nickname\",\"type\":\"path\"}"},
+    {"source": "zoo://Dog.name", "predicate": "sh://in", "target": "literal:string:[{\"label\":\"Rex\",\"value\":\"rex\"},{\"value\":\"fido\"}]"},
     {"source": "zoo://Dog.name", "predicate": "sh://pattern", "target": "literal:^[a-z]+$"},
     {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.age"},
     {"source": "zoo://Dog.age", "predicate": "rdf://type", "target": "sh://PropertyShape"},
@@ -114,11 +112,11 @@
     {"source": "zoo://Dog.toys", "predicate": "rdf://type", "target": "ad4m://CollectionShape"},
     {"source": "zoo://Dog.toys", "predicate": "sh://path", "target": "zoo://toy"},
     {"source": "zoo://Dog.toys", "predicate": "ad4m://ordering", "target": "literal:string:linkedList"},
-    {"source": "zoo://Dog.toys", "predicate": "ad4m://adder", "target": "literal:string:[{\"action\":\"addLink\",\"source\":\"this\",\"predicate\":\"zoo://toy\",\"target\":\"value\"}]"},
-    {"source": "zoo://Dog.toys", "predicate": "ad4m://remover", "target": "literal:string:[{\"action\":\"removeLink\",\"source\":\"this\",\"predicate\":\"zoo://toy\",\"target\":\"value\"}]"},
+    {"source": "zoo://Dog.toys", "predicate": "ad4m://adder", "target": "literal:string:[{\"action\":\"addLink\",\"predicate\":\"zoo://toy\",\"source\":\"this\",\"target\":\"value\"}]"},
+    {"source": "zoo://Dog.toys", "predicate": "ad4m://remover", "target": "literal:string:[{\"action\":\"removeLink\",\"predicate\":\"zoo://toy\",\"source\":\"this\",\"target\":\"value\"}]"},
     {"source": "zoo://Dog.toys", "predicate": "sh://class", "target": "zoo://ToyShape"},
     {"source": "zoo://Dog.toys", "predicate": "ad4m://getter", "target": "literal:string:toys-getter"},
-    {"source": "zoo://Dog.toys", "predicate": "ad4m://conformanceConditions", "target": "literal:string:[{\"type\":\"flag\",\"predicate\":\"zoo://kind\",\"value\":\"zoo://toy\"}]"},
+    {"source": "zoo://Dog.toys", "predicate": "ad4m://conformanceConditions", "target": "literal:string:[{\"predicate\":\"zoo://kind\",\"type\":\"flag\",\"value\":\"zoo://toy\"}]"},
     {"source": "zoo://Dog.toys", "predicate": "ad4m://relationKind", "target": "literal:string:hasMany"},
     {"source": "zoo://Dog.toys", "predicate": "ad4m://targetClassName", "target": "literal:string:Toy"},
     {"source": "zoo://Dog.toys", "predicate": "ad4m://whereFilter", "target": "literal:string:{\"colour\":\"red\"}"},
@@ -143,8 +141,6 @@
     ]
   },
   "links": [
-    {"source": "ad4m://self", "predicate": "ad4m://has_shacl", "target": "literal:string:shacl://Note"},
-    {"source": "literal:string:shacl://Note", "predicate": "ad4m://shacl_shape_uri", "target": "memo://NoteShape"},
     {"source": "memo://Note", "predicate": "rdf://type", "target": "ad4m://SubjectClass"},
     {"source": "memo://Note", "predicate": "ad4m://shape", "target": "memo://NoteShape"},
     {"source": "memo://NoteShape", "predicate": "rdf://type", "target": "sh://NodeShape"},
@@ -155,7 +151,7 @@
     {"source": "memo://Note.body", "predicate": "rdf://type", "target": "sh://PropertyShape"},
     {"source": "memo://Note.body", "predicate": "sh://path", "target": "memo://body"},
     {"source": "memo://Note.body", "predicate": "sh://maxCount", "target": "literal:1^^xsd:integer"},
-    {"source": "memo://Note.body", "predicate": "ad4m://setter", "target": "literal:string:[{\"action\":\"setSingleTarget\",\"source\":\"this\",\"predicate\":\"memo://body\",\"target\":\"value\"}]"}
+    {"source": "memo://Note.body", "predicate": "ad4m://setter", "target": "literal:string:[{\"action\":\"setSingleTarget\",\"predicate\":\"memo://body\",\"source\":\"this\",\"target\":\"value\"}]"}
   ]
 },
 {
@@ -175,8 +171,6 @@
     ]
   },
   "links": [
-    {"source": "ad4m://self", "predicate": "ad4m://has_shacl", "target": "literal:string:shacl://Readable"},
-    {"source": "literal:string:shacl://Readable", "predicate": "ad4m://shacl_shape_uri", "target": "memo://ReadableShape"},
     {"source": "memo://Readable", "predicate": "rdf://type", "target": "ad4m://SubjectClass"},
     {"source": "memo://Readable", "predicate": "ad4m://shape", "target": "memo://ReadableShape"},
     {"source": "memo://ReadableShape", "predicate": "rdf://type", "target": "sh://NodeShape"},

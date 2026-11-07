@@ -1535,19 +1535,6 @@ impl SparqlStore {
         self.query_links(None, Some(predicate), None, None, None, None)
     }
 
-    /// Get all links with the given predicate where source ends with the given suffix.
-    pub fn get_links_by_predicate_and_source_suffix(
-        &self,
-        predicate: &str,
-        source_suffix: &str,
-    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        let links = self.get_links_by_predicate(predicate)?;
-        Ok(links
-            .into_iter()
-            .filter(|l| l.data.source.ends_with(source_suffix))
-            .collect())
-    }
-
     fn sparql_evaluator(&self) -> SparqlEvaluator {
         SparqlEvaluator::new()
             .with_custom_function(

@@ -37,6 +37,8 @@ pub(super) struct AbstractCache {
     resolved: HashMap<String, Arc<Resolution>>,
     /// The containment edge set (see `super::containment`).
     pub(super) containment: Option<crate::perspectives::model_query::containment::ContainmentEdges>,
+    /// The registered classes and their shapes (see `super::shapes`).
+    pub(super) registry: Option<Arc<Vec<super::shapes::ShapeSummary>>>,
 }
 
 /// The classes a model query or subscription reads: those it names, or an
@@ -71,11 +73,12 @@ impl PerspectiveInstance {
         cache.index = None;
         cache.resolved.clear();
         cache.containment = None;
+        cache.registry = None;
     }
 
     /// How many times the installed shapes have changed. Read it *before*
     /// resolving, so a change landing mid-resolution is seen.
-    pub(super) fn shapes_generation(&self) -> u64 {
+    pub(crate) fn shapes_generation(&self) -> u64 {
         self.abstract_cache.read().unwrap().generation
     }
 

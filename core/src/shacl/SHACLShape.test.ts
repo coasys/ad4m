@@ -14,6 +14,27 @@ const golden = goldenCases[0];
 
 describe('SHACLShape', () => {
   describe('toLinks()', () => {
+    // The executor's `canonical_json_matches_the_sdk_byte_for_byte`
+    // (rust-executor/src/perspectives/shacl_parser.rs) pins the same object
+    // to the same string. Integer-like keys sort as text, not first; the
+    // non-BMP key sorts by its UTF-16 surrogate, before U+FF61.
+    it('writes JSON literals byte for byte as the executor does', () => {
+      const whereFilter = {
+        '\uFF61': null,
+        '\u{1F600}': 'e"\n',
+        a: { z: [{ y: 1, x: 2 }], '10': true },
+        B: 3,
+        '2': 2,
+        '10': 1,
+      };
+      const shape = new SHACLShape('recipe://Recipe');
+      shape.addProperty({ name: 'items', path: 'recipe://items', whereFilter });
+      const link = shape.toLinks().find(l => l.predicate === 'ad4m://whereFilter');
+      expect(link!.target).toBe(
+        'literal:string:{"10":1,"2":2,"B":3,"a":{"10":true,"z":[{"x":2,"y":1}]},"\u{1F600}":"e\\"\\n","\uFF61":null}'
+      );
+    });
+
     it('creates basic shape links', () => {
       const shape = new SHACLShape('recipe://Recipe');
       const links = shape.toLinks();

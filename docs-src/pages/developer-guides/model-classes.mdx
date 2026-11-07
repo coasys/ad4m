@@ -45,14 +45,13 @@ const cake = await Recipe.create(perspective, {
 
 ### Option 2: From a SHACL Shape (Dynamic)
 
-When a perspective already carries a SHACL shape — for example, a shape installed by another app or recovered via `perspective.getClassShape()` / `perspective.getAllShacl()` — you can hydrate a working model class straight from it. No predicate inference is needed: every property's URI is read directly from the shape.
+When a perspective already carries a SHACL shape — for example, a shape installed by another app or read back with `perspective.shapes()` — you can hydrate a working model class straight from it. No predicate inference is needed: every property's URI is read directly from the shape.
 
 ```typescript
 import { Ad4mModel } from '@coasys/ad4m';
 
 // Fetch the SHACL shape from a perspective that already has it registered
-const { shape } = (await perspective.getAllShacl())
-  .find(s => s.name === "Recipe")!;
+const [{ shape }] = await perspective.shapes(["Recipe"]);
 
 // Synthesise a fully functional model class from the shape
 const Recipe = Ad4mModel.fromSHACL(shape, "Recipe");
@@ -67,7 +66,7 @@ This is how AD4M tooling (the MCP server, the CLI, the management UI) discovers 
 
 A `SHACLShape` is not just an in-process JavaScript object. It also has two serialized forms that make a shape portable beyond the app that defined it:
 
-- **JSON** — the format used over the wire between the client and the AD4M executor. Every `addSdna` RPC carries a `shaclJson` string; `addShacl` and model registration send `shape.toJSON()`. This is the format you want to ship a shape between apps, store it in a config file, paste it into a Neighbourhood definition, or generate from another tool.
+- **JSON** — the format used over the wire between the client and the AD4M executor. `perspective.registerShapes` sends `shape.toJSON()` and `perspective.shapes` answers it, together with the SHA-256 of the shape's canonical JSON (sorted keys). This is the format you want to ship a shape between apps, store it in a config file, paste it into a Neighbourhood definition, or generate from another tool.
 - **Turtle** — the standard W3C SHACL serialization (RDF Turtle). Export-only in the client today (no `fromTurtle` round-trip yet), but useful for sharing shapes with non-AD4M tooling and for human-readable review.
 
 Both are produced by the same `SHACLShape`:
@@ -75,7 +74,7 @@ Both are produced by the same `SHACLShape`:
 ```typescript
 import { SHACLShape } from '@coasys/ad4m';
 
-const { shape } = (await perspective.getAllShacl()).find(s => s.name === "Recipe")!;
+const [{ shape }] = await perspective.shapes(["Recipe"]);
 
 const json    = shape.toJSON();     // structured object, JSON.stringify-able
 const turtle  = shape.toTurtle();   // W3C SHACL Turtle string
@@ -85,7 +84,7 @@ A minimal shape's JSON form looks like this:
 
 ```json
 {
-  "node_shape_uri": "shacl://Recipe",
+  "node_shape_uri": "recipe://RecipeShape",
   "target_class": "recipe://Recipe",
   "properties": [
     {
@@ -113,7 +112,7 @@ The same shape in Turtle:
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
 @prefix ad4m: <ad4m://> .
 
-<shacl://Recipe>
+<recipe://RecipeShape>
   a sh:NodeShape ;
   sh:targetClass <recipe://Recipe> ;
   sh:property [
@@ -136,14 +135,23 @@ Because the JSON form is exactly what the executor consumes over RPC, an app —
 const shape = SHACLShape.fromJSON(JSON.parse(await readFile("recipe.shacl.json", "utf8")));
 
 // Install it directly on a perspective
-await perspective.addShacl("Recipe", shape);
+await perspective.registerShapes([shape]);
 
 // Optionally, hydrate a model class from it for ergonomic access
 const Recipe = Ad4mModel.fromSHACL(shape, "Recipe");
 const recipes = await Recipe.findAll(perspective);
 ```
 
-This is the canonical path for sharing schemas across apps: the publisher serializes a shape to JSON (or Turtle for documentation), the consumer installs it with `addShacl`, and from then on both apps read and write the same Subject Class against the same Perspective.
+This is the canonical path for sharing schemas across apps: the publisher serializes a shape to JSON (or Turtle for documentation), the consumer installs it with `registerShapes`, and from then on both apps read and write the same Subject Class against the same Perspective.
+
+#### Class Names
+
+Queries and creates find a class by its name, the last segment of its target class IRI (`Note` for `flux://Note`). A name belongs to one class per Perspective:
+
+- `registerShapes` refuses a class whose name another stored class holds, and the whole call it comes in, writing nothing. Once `b://Note` is registered, `a://Note` is refused too, though its IRI sorts first: a new class never takes a name over.
+- It refuses two classes of one name in one call.
+- When two peers register `a://Note` and `b://Note` before they sync, both end up in the Perspective. Readers then use the class with the least IRI (`a://Note`). That class can always be registered again; `b://Note` is refused from then on.
+- The names of the executor's own classes are reserved: `FlowInstance`, `FlowTransitionProposal`, `AutoProcessor`, `ProcessingClaim`, `InterpretationRun` and `InterpretationOverlay`. `registerShapes` refuses a class of one of these names under any IRI but the executor's (`ad4m://FlowInstance` and so on), so `app://FlowInstance` is refused.
 
 ### Option 3: From JSON Schema (Dynamic)
 
@@ -1222,15 +1230,14 @@ You can introspect registered model classes at runtime:
 
 ```typescript
 // List all registered model classes in this perspective
-const classes = await perspective.listRegisteredClasses();
-// ["Recipe", "Comment", "Chef"]
+const classes = (await perspective.shapes()).map(s => s.name);
+// ["Chef", "Comment", "Recipe"]
 
-// Get the SHACL shape for a class
-const shape = await perspective.getClassShape("Recipe");
-// Returns the full SHACL shape definition
+// Get the SHACL shape for a class, with the hash of its canonical JSON
+const [{ shape, hash }] = await perspective.shapes(["Recipe"]);
 
 // Get enum options for a property (sh:in constraints)
-const options = await perspective.getClassOptions("Recipe", "difficulty");
+const options = shape.properties.find(p => p.name === "difficulty")?.in;
 // [{ value: "easy", label: "Easy" }, { value: "medium", label: "Medium" }, ...]
 ```
 

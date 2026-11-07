@@ -4,10 +4,10 @@
  * graph for interpretation history and pending overlay proposals without
  * knowing the raw link predicates.
  *
- * Registration:
- *   await InterpretationOverlay.register(perspective);
- *   await InterpretationRun.register(perspective);
- *   await AutoProcessorConfig.register(perspective);
+ * Do not register them: the classes are hard-wired in the executor, which
+ * registers each before writing its first instance and reads one not
+ * registered yet as empty. An app registering its copy would compete with
+ * the executor's revision.
  *
  * Querying:
  *   const pending = await InterpretationOverlay.findAll(perspective);

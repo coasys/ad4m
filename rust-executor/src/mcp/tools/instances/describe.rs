@@ -150,12 +150,7 @@ pub(crate) async fn describe_perspective_value(
     perspective: &PerspectiveInstance,
     handle: &PerspectiveHandle,
 ) -> Value {
-    let mut class_names = perspective
-        .get_subject_classes_from_shacl()
-        .await
-        .unwrap_or_default();
-    class_names.sort();
-    class_names.dedup();
+    let class_names = perspective.class_names().unwrap_or_default();
 
     let registered: BTreeSet<&str> = class_names.iter().map(String::as_str).collect();
 

@@ -22,7 +22,7 @@ pub struct ShaclClass {
     pub name_lower: String,
     /// Properties defined on this class
     pub properties: Vec<ShaclProperty>,
-    /// The SHACL shape URI (the target of ad4m://shacl_shape_uri link)
+    /// The SHACL shape URI (the target of the class's `ad4m://shape` link)
     pub shape_uri: Option<String>,
     /// All predicate URIs used by this class's properties (derived from sh://path).
     /// Useful for constructing targeted subscription queries.
@@ -128,7 +128,7 @@ impl ShaclProperty {
 /// memoized, so repeated MCP tool generation runs are O(class count) rather
 /// than O(class count × predicate count) against the store.
 pub async fn load_classes(perspective: &PerspectiveInstance) -> Vec<ShaclClass> {
-    let class_names = match perspective.get_subject_classes_from_shacl().await {
+    let class_names = match perspective.class_names() {
         Ok(names) => names,
         Err(_) => return vec![],
     };
@@ -153,14 +153,15 @@ pub async fn load_class(perspective: &PerspectiveInstance, class_name: &str) -> 
     Some(shape_to_shacl_class(class_name, &shape))
 }
 
-/// Extract property information from a SHACL shape (convenience wrapper)
+/// The properties of `class_name`'s shape (none for an unknown class).
 pub async fn load_class_properties(
     perspective: &PerspectiveInstance,
     class_name: &str,
 ) -> Vec<ShaclProperty> {
-    load_class_properties_with_uri(perspective, class_name)
+    load_class(perspective, class_name)
         .await
-        .0
+        .map(|class| class.properties)
+        .unwrap_or_default()
 }
 
 /// Translate a `ModelShape` (the canonical in-memory representation derived
@@ -231,278 +232,12 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
     }
 }
 
-/// Extract property information from a SHACL shape, also returning the shape URI
-pub async fn load_class_properties_with_uri(
-    perspective: &PerspectiveInstance,
-    class_name: &str,
-) -> (Vec<ShaclProperty>, Option<String>) {
-    // Try both URL-encoded and raw formats (Flux uses raw, Rust Literal encodes)
-    let encoded = ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
-        .to_url()
-        .unwrap_or_else(|_| format!("literal:string:shacl://{}", class_name));
-    let raw = format!("literal:string:shacl://{}", class_name);
-    let mut shape_links = match perspective
-        .get_links(&LinkQuery {
-            source: Some(encoded),
-            predicate: Some("ad4m://shacl_shape_uri".to_string()),
-            ..Default::default()
-        })
-        .await
-    {
-        Ok(links) => links,
-        Err(_) => return (vec![], None),
-    };
-    if shape_links.is_empty() {
-        shape_links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(raw),
-                predicate: Some("ad4m://shacl_shape_uri".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(_) => return (vec![], None),
-        };
-    }
-
-    if shape_links.is_empty() {
-        return (vec![], None);
-    }
-
-    let shape_uri = &shape_links[0].data.target;
-    let prop_links = match perspective
-        .get_links(&LinkQuery {
-            source: Some(shape_uri.clone()),
-            predicate: Some("sh://property".to_string()),
-            ..Default::default()
-        })
-        .await
-    {
-        Ok(links) => links,
-        Err(_) => return (vec![], None),
-    };
-
-    let mut properties = Vec::new();
-    for prop_link in &prop_links {
-        let prop_uri = &prop_link.data.target;
-        let prop_name = prop_uri
-            .rsplit_once('.')
-            .map(|(_, name)| name.to_string())
-            .unwrap_or_else(|| prop_uri.clone());
-
-        let is_collection = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://CollectionShape".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => !links.is_empty(),
-            Err(_) => false,
-        };
-
-        // Get the predicate URI (sh://path link)
-        let predicate = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://path".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
-            _ => None,
-        };
-
-        // Get datatype constraint (sh://datatype)
-        let datatype = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://datatype".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
-            _ => None,
-        };
-
-        // Get min/max count (sh://minCount, sh://maxCount)
-        let min_count = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://minCount".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => {
-                ad4m_client::literal::Literal::from_url(links[0].data.target.clone())
-                    .ok()
-                    .and_then(|l| l.get().ok())
-                    .and_then(|v| v.to_string().parse::<u32>().ok())
-            }
-            _ => None,
-        };
-
-        let max_count = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://maxCount".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => {
-                ad4m_client::literal::Literal::from_url(links[0].data.target.clone())
-                    .ok()
-                    .and_then(|l| l.get().ok())
-                    .and_then(|v| v.to_string().parse::<u32>().ok())
-            }
-            _ => None,
-        };
-
-        // Get node kind (sh://nodeKind)
-        let node_kind = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://nodeKind".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
-            _ => None,
-        };
-
-        // Get getter expression (ad4m://getter)
-        let getter = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://getter".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => {
-                let raw = links[0].data.target.clone();
-                Some(
-                    raw.strip_prefix("literal://string:")
-                        .or_else(|| raw.strip_prefix("literal:string:"))
-                        .unwrap_or(&raw)
-                        .to_string(),
-                )
-            }
-            _ => None,
-        };
-
-        // Get target shape class (sh://class)
-        let class_uri = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://class".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
-            _ => None,
-        };
-
-        // Get resolveLanguage (ad4m://resolveLanguage) — the general language selector.
-        let resolve_language = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://resolveLanguage".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => {
-                let target = &links[0].data.target;
-                let val = target
-                    .strip_prefix("literal://string:")
-                    .or_else(|| target.strip_prefix("literal:string:"))
-                    .unwrap_or(target);
-                let decoded = urlencoding::decode(val).unwrap_or_default();
-                Some(decoded.to_string())
-            }
-            _ => None,
-        };
-
-        // Interpretation hint (ad4m://interpretation_hint) — natural-language
-        // meaning for this property/relation, used by the harness's tool
-        // schema generation to explain what a predicate is for.
-        let interpretation_hint = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://interpretation_hint".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => {
-                let target = &links[0].data.target;
-                let raw = target
-                    .strip_prefix("literal://string:")
-                    .or_else(|| target.strip_prefix("literal:string:"))
-                    .unwrap_or(target);
-                Some(urlencoding::decode(raw).unwrap_or_default().to_string())
-            }
-            _ => None,
-        };
-
-        // `ad4m://local` — executor-private storage for this property's
-        // links. Read here as well as in `load_shape`, because this
-        // link-walking path is what the dynamic per-class tools resolve
-        // against; missing it would leave them writing Shared links for a
-        // property the shape declares local.
-        let local = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://local".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => links[0]
-                .data
-                .target
-                .rsplit(':')
-                .next()
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            _ => false,
-        };
-
-        properties.push(ShaclProperty {
-            name: prop_name,
-            is_collection,
-            predicate,
-            datatype,
-            min_count,
-            max_count,
-            node_kind,
-            getter,
-            class: class_uri,
-            resolve_language,
-            interpretation_hint,
-            local,
-        });
-    }
-
-    (properties, Some(shape_uri.clone()))
-}
-
 /// Find the original-cased class name from a lowercase name
 pub async fn find_class_name(
     perspective: &PerspectiveInstance,
     class_name_lower: &str,
 ) -> Option<String> {
-    let class_names = match perspective.get_subject_classes_from_shacl().await {
+    let class_names = match perspective.class_names() {
         Ok(names) => names,
         Err(_) => return None,
     };

@@ -20,11 +20,12 @@
 //! surfaces at build time.
 
 use crate::agent::AgentContext;
-use crate::perspectives::hardwired_class::ensure_subject_class;
+use crate::perspectives::hardwired_class::{ensure_subject_classes, HardwiredClass};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::{Link, LinkStatus};
 
 pub(crate) const FLOW_INSTANCE_CLASS: &str = "FlowInstance";
+#[cfg(test)]
 pub(crate) const FLOW_INSTANCE_TARGET_CLASS: &str = "ad4m://FlowInstance";
 pub(crate) const FLOW_INSTANCE_SDNA: &str = include_str!("hardwired_sdna/flow_instance.json");
 /// `FlowInstance → flowUri` — the row's identity: which `SHACLFlow` it runs.
@@ -35,12 +36,12 @@ pub(crate) const FLOW_BASE_PREDICATE: &str = "ad4m://flow/base";
 /// was written before #1424, as a `Local` link. Nothing writes or reads it any
 /// more — the state lives in
 /// [`replica_state`](crate::perspectives::flow_instance::replica_state) — and
-/// old links under it are dead data. Kept only so a perspective whose
-/// registered `FlowInstance` shape still declares it can be told to
-/// re-register ([`ensure_flow_model_classes`]).
+/// old links under it are dead data. A stored `FlowInstance` shape that still
+/// declares it is older than this one ([`ensure_flow_model_classes`]).
 pub(crate) const LEGACY_FLOW_CURRENT_STATE_PREDICATE: &str = "ad4m://flow/current_state";
 
 pub(crate) const FLOW_TRANSITION_PROPOSAL_CLASS: &str = "FlowTransitionProposal";
+#[cfg(test)]
 pub(crate) const FLOW_TRANSITION_PROPOSAL_TARGET_CLASS: &str = "ad4m://FlowTransitionProposal";
 pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
     include_str!("hardwired_sdna/flow_transition_proposal.json");
@@ -48,72 +49,35 @@ pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
 /// Idempotently register both hard-wired flow-runtime subject classes into the
 /// perspective. Mirrors [`super::interpretation::overlay::classes::ensure_interpretation_overlay_classes`].
 ///
-/// A registered shape is replaced when it is out of date in either direction:
-/// it lacks the newest path, or it still declares a path #1424 removed.
-/// `acceptedBy` (read through a getter) is the newest `FlowTransitionProposal`
-/// path; `nonce` was #1108's and `outputs_hash` #1104's — a shape from before
-/// them reads proposals without their votes, and before `nonce` would silently
-/// drop the nonce every proposal now writes. The removed paths are the old
-/// `Local` bookkeeping (`currentState`, `resolvedAs`): a shape still declaring
-/// them would hydrate those dead links as if they were current.
+/// A registered shape from an older revision is upgraded: one that lacks
+/// `acceptedBy` (#1108's `nonce`, #1104's `outputs_hash`) reads proposals
+/// without their votes, and one that still declares the old `Local`
+/// bookkeeping (`currentState`, `resolvedAs`, removed by #1424) would hydrate
+/// those dead links as if they were current. A newer one stays
+/// (`hardwired_class`).
 pub(crate) async fn ensure_flow_model_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    use crate::perspectives::flow_instance::atom::{
-        ACCEPTED_BY_PREDICATE, LEGACY_RESOLVED_AS_PREDICATE,
-    };
-    for (class_name, target_class, sdna, required, removed) in [
-        (
-            FLOW_INSTANCE_CLASS,
-            FLOW_INSTANCE_TARGET_CLASS,
-            FLOW_INSTANCE_SDNA,
-            None,
-            LEGACY_FLOW_CURRENT_STATE_PREDICATE,
-        ),
-        (
-            FLOW_TRANSITION_PROPOSAL_CLASS,
-            FLOW_TRANSITION_PROPOSAL_TARGET_CLASS,
-            FLOW_TRANSITION_PROPOSAL_SDNA,
-            Some(ACCEPTED_BY_PREDICATE),
-            LEGACY_RESOLVED_AS_PREDICATE,
-        ),
-    ] {
-        if crate::perspectives::hardwired_class::subject_class_registered(perspective, target_class)
-            .await?
-            && crate::perspectives::hardwired_class::shacl_path_present(
-                perspective,
-                target_class,
-                removed,
-            )
-            .await?
-        {
-            perspective
-                .add_sdna(
-                    class_name.to_string(),
-                    String::new(),
-                    crate::perspectives::perspective_instance::SdnaType::SubjectClass,
-                    Some(sdna.to_string()),
-                    context,
-                )
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("re-registering {class_name} without `{removed}`: {e:#}")
-                })?;
-            continue;
-        }
-        ensure_subject_class(
-            perspective,
-            class_name,
-            target_class,
-            sdna,
-            required,
-            context,
-        )
-        .await?;
-    }
-    Ok(())
+    ensure_subject_classes(
+        perspective,
+        &[FLOW_INSTANCE, FLOW_TRANSITION_PROPOSAL],
+        context,
+    )
+    .await
 }
+
+pub(crate) const FLOW_INSTANCE: HardwiredClass = HardwiredClass {
+    sdna: FLOW_INSTANCE_SDNA,
+    newest_path: None,
+    removed_path: Some(LEGACY_FLOW_CURRENT_STATE_PREDICATE),
+};
+
+pub(crate) const FLOW_TRANSITION_PROPOSAL: HardwiredClass = HardwiredClass {
+    sdna: FLOW_TRANSITION_PROPOSAL_SDNA,
+    newest_path: Some(crate::perspectives::flow_instance::atom::ACCEPTED_BY_PREDICATE),
+    removed_path: Some(crate::perspectives::flow_instance::atom::LEGACY_RESOLVED_AS_PREDICATE),
+};
 
 /// URI scheme for a freshly-minted `FlowInstance` node: `ad4m://flow/instance/{id}`.
 /// Kept separate from the class' target-class URI (`ad4m://FlowInstance`) so a
@@ -403,7 +367,6 @@ pub(crate) const PROPOSAL_EVIDENCE_PREDICATE: &str = "ad4m://flow/evidence";
 mod tests {
     use super::*;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
-    use crate::perspectives::perspective_instance::SdnaType;
     use serde_json::Value;
 
     fn parse(sdna: &str) -> Value {
@@ -515,8 +478,7 @@ mod tests {
 
     /// The engine's bookkeeping left the graph in #1424: neither hardwired
     /// shape may declare the old `Local` paths, or hydration would surface
-    /// dead links as the current state and as fired marks — and
-    /// `ensure_flow_model_classes` would re-register on every call.
+    /// dead links as the current state and as fired marks.
     #[test]
     fn no_shape_declares_the_removed_bookkeeping_paths() {
         use crate::perspectives::flow_instance::atom::LEGACY_RESOLVED_AS_PREDICATE;
@@ -732,7 +694,7 @@ mod tests {
         );
     }
 
-    /// Regression guard for issue #1007: after `add_sdna` with `SdnaType::Flow`
+    /// Regression guard for issue #1007: after `ensure_flow_model_classes`
     /// the two hard-wired runtime classes are registered, so
     /// `model_query("FlowTransitionProposal", "{}")` must return an empty list
     /// rather than the "No SHACL shape stored" RPC 500 the engine was producing
@@ -741,28 +703,26 @@ mod tests {
     async fn add_flow_registers_runtime_classes() {
         let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
 
-        // Before add_sdna, both classes are absent — model_query must error.
-        let before = perspective
-            .model_query("FlowTransitionProposal", "{}")
-            .await;
-        assert!(
-            before.is_err(),
-            "FlowTransitionProposal must not be queryable before any flow is added (got Ok)"
-        );
+        // Before registration the class is absent: the read is empty and
+        // registers nothing (a read never writes).
+        let before: Value = serde_json::from_str(
+            &perspective
+                .model_query("FlowTransitionProposal", "{}")
+                .await
+                .expect("a hard-wired class not stored yet reads as empty"),
+        )
+        .unwrap();
+        assert_eq!(before["instances"], serde_json::json!([]));
+        assert!(perspective
+            .shapes(Some(vec!["FlowTransitionProposal".into()]))
+            .unwrap()
+            .is_empty());
 
-        // Register a flow (no SHACL body needed — the sdna_type hook fires regardless).
-        perspective
-            .add_sdna(
-                "TestFlow".to_string(),
-                String::new(),
-                SdnaType::Flow,
-                None,
-                &ctx,
-            )
+        ensure_flow_model_classes(&mut perspective, &ctx)
             .await
-            .expect("add_sdna(Flow) must succeed");
+            .expect("ensure_flow_model_classes");
 
-        // After add_sdna the runtime classes are present: findAll returns [] not 500.
+        // Registered: findAll returns [] not 500.
         let result_json = perspective
             .model_query("FlowTransitionProposal", "{}")
             .await
