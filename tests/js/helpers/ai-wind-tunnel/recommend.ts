@@ -182,7 +182,9 @@ function throughAdapter(c: CellResult): boolean {
  */
 function unverified(c: CellResult): boolean {
   if (c.service === "llm" && c.metrics.tokenCountSource === "chunks") return true;
-  return !!c.backend && c.backend !== "cpu" && c.metrics.peakRssBytes === null;
+  // An attached server often has no backend label (vLLM, speaches, whisper-server, Ollama
+  // without its log): only a cell labelled `cpu` needs no memory sample.
+  return c.backend !== "cpu" && c.metrics.peakRssBytes === null;
 }
 
 export function deriveRecommendations(all: LoadedEvidence[], generatedAt: string, rules = SERVICE_RULES): Recommendations {
