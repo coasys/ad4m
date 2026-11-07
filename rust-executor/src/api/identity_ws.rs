@@ -323,8 +323,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // runs inside `claim_for_main`, so it never depends on this guard.
     map.method::<ClaimOfferParams, ClaimOfferResult>("identity.claimOffer", claim_offer)
         .guard(Guard::Operator);
+    // A write, though it answers a state: on `spent` it binds the main agent to the identity
+    // and may record the operator, so a client does not replay it as a read.
     map.method::<JoinStatusParams, JoinStatus>("identity.joinStatus", join_status)
-        .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<NoParams, Vec<DeviceView>>("identity.devices", devices)
         .read()
@@ -498,6 +499,34 @@ mod tests {
             .map(|(name, guard)| (name.to_string(), guard.clone()))
             .collect();
         assert_eq!(got, want);
+    }
+
+    /// The idempotent reads a client resends after a reconnect. `identity.joinStatus` is none:
+    /// on `spent` it binds the main agent and may record the operator.
+    #[test]
+    fn the_identity_reads_are_the_calls_that_change_nothing() {
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let reads: Vec<&str> = map
+            .specs()
+            .into_iter()
+            .filter(|s| s.read)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            reads,
+            [
+                "identity.custodyStatus",
+                "identity.devices",
+                "identity.inbox",
+                "identity.log",
+                "identity.offers",
+                "identity.record",
+                "identity.requests",
+                "identity.resolve",
+                "identity.status",
+            ]
+        );
     }
 
     /// `identity.rekey`, the custody channel and the device inbox stay on this machine: the

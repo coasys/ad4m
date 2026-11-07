@@ -495,7 +495,6 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "identity.custodyStatus",
   "identity.devices",
   "identity.inbox",
-  "identity.joinStatus",
   "identity.log",
   "identity.offers",
   "identity.record",

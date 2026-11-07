@@ -178,9 +178,12 @@ the offer's state).
   the trusted seq, `no-operator` without a record, `first-link` for another identity. One
   exception (`FirstLink::FirstRun`): a `--custody-channel` executor (a desktop app, which never
   runs `init --operator`) with no record and no identity for its main agent may claim any
-  offer. The claim records nothing: only when the main agent joins (`join_status` on `spent`
-  binds it, then `record_first_run_operator`) is that identity recorded as operator
-  (`OperatorSetBy::FirstRun`, `set_operator_record_if_empty`). So a claim that never completes
+  offer. The claim records nothing: only when the main agent joins (`join_status` on `spent`,
+  `bind_agent_if_listed` with `first_run_operator`) is that identity recorded as operator
+  (`OperatorSetBy::FirstRun`). The binding and the record are one transaction
+  (`set_agent_identity_and_first_run_operator`): a process that stops between them leaves
+  neither, and the next `joinStatus` writes both. That is why `identity.joinStatus` is a
+  write, not a `.read()`. So a claim that never completes
   (the wrong code scanned, the holder said No) leaves the desktop free to claim again, for the
   same or another identity. From then on the rule applies as above: a claim for any other
   identity is `first-link`. Both the ticket path and `identity.claimOffer` (a pasted link) go
