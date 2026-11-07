@@ -11,9 +11,8 @@ use serde_json::Value;
 // Common
 // ---------------------------------------------------------------------------
 
-/// Standard OpenAI usage object.  All token counts are best-effort: the
-/// local Kalosm backend reports `chars/4` estimates today; remote upstreams
-/// return exact counts which we forward when available.
+/// Standard OpenAI usage object. On the paths the executor answers itself the counts are
+/// `chars/4` estimates; a forwarded answer carries the upstream's own `usage`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: u64,
@@ -37,7 +36,7 @@ pub struct ModelInfo {
     pub id: String,
     pub object: &'static str, // "model"
     pub created: i64,         // unix epoch seconds
-    /// The name of the endpoint that serves it; `ad4m` for a model the executor runs.
+    /// The name of the endpoint that serves it.
     pub owned_by: String,
     /// AD4M-specific extension fields.  Tools that don't know about them
     /// ignore them.
@@ -49,14 +48,11 @@ pub struct ModelInfo {
 #[serde(rename_all = "camelCase")]
 pub struct ModelExtensions {
     pub model_type: crate::types::ModelType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint_id: Option<String>,
+    pub endpoint_id: String,
     /// The id the endpoint knows the model by.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_model: Option<String>,
-    /// From the endpoint's last health check; absent before the first.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<crate::types::ModelStatus>,
+    pub remote_model: String,
+    /// From the endpoint's last health check (`UNKNOWN` before the first).
+    pub status: crate::types::ModelStatus,
 }
 
 // ---------------------------------------------------------------------------

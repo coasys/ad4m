@@ -15,7 +15,9 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use super::providers::discovery::{
     discover_for, endpoint_capabilities, health_of, listing_or_registered, PROBE_TIMEOUT,
 };
-use super::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
+use super::providers::http::{
+    is_transport_safe, UpstreamStatus, UpstreamUnreachable, CLEARTEXT_KEY_REFUSAL,
+};
 use super::providers::ollama;
 use super::{AIService, Result};
 use crate::agent::AgentService;
@@ -140,7 +142,7 @@ pub(crate) fn has_credentials(url: &url::Url) -> bool {
 }
 
 /// Refuses a credential in the URL, and a key that would cross the network in the clear
-/// (the rule of `ai.addModel`).
+/// (the rule of `ai.discoverModels`).
 fn refuse_unsafe_key(endpoint: &Endpoint) -> Result<()> {
     if has_credentials(&endpoint.base_url) {
         return Err(InvalidEndpoint(URL_CREDENTIALS_REFUSAL.to_string()).into());
@@ -199,6 +201,36 @@ pub(crate) async fn publish_model_status(
             status,
         },
     ));
+}
+
+/// Publish `model-status` for each upstream model on `before` whose status `health` changes.
+/// Managed users do not get `ai-endpoint-status` (it names the URL): this is how they learn
+/// that a model's endpoint went down or came back.
+async fn publish_model_changes(before: &Endpoint, health: &EndpointHealth) {
+    let models = match crate::db_backend::db_backend().get_models() {
+        Ok(models) => models,
+        Err(e) => {
+            log::warn!("AI endpoint health: could not read the models: {e}");
+            return;
+        }
+    };
+    let after = Endpoint {
+        health: health.clone(),
+        ..before.clone()
+    };
+    let mut remote_models: Vec<String> = models
+        .into_iter()
+        .filter(|model| model.endpoint_id == before.id)
+        .map(|model| model.remote_model)
+        .collect();
+    remote_models.sort();
+    remote_models.dedup();
+    for remote_model in remote_models {
+        let status = after.model_status(&remote_model);
+        if status.state != before.model_status(&remote_model).state {
+            publish_model_status(&before.id, &remote_model, status).await;
+        }
+    }
 }
 
 /// A check this soon after the last probe of the same endpoint answers the stored health
@@ -282,8 +314,73 @@ async fn probe_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
         || capabilities != endpoint.capabilities;
     if stored && changed {
         publish_health(&endpoint.id, &health, &capabilities).await;
+        publish_model_changes(endpoint, &health).await;
     }
     Ok(health)
+}
+
+/// What a failed request says about its endpoint.
+#[derive(Debug, PartialEq)]
+enum FailureSays {
+    /// No connection, or the key refused: the endpoint's health may have changed.
+    CheckEndpoint,
+    /// The endpoint answered 404: it does not serve the model.
+    ModelMissing,
+}
+
+impl FailureSays {
+    fn of(error: &anyhow::Error) -> Option<Self> {
+        if let Some(unreachable) = error.downcast_ref::<UpstreamUnreachable>() {
+            return (!unreachable.timed_out).then_some(Self::CheckEndpoint);
+        }
+        if let Some(answered) = error.downcast_ref::<UpstreamStatus>() {
+            return match answered.status.as_u16() {
+                401 | 403 => Some(Self::CheckEndpoint),
+                404 => Some(Self::ModelMissing),
+                _ => None,
+            };
+        }
+        // A client that keeps reqwest's error (transcription) rather than wrapping it.
+        let refused = error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+            .any(reqwest::Error::is_connect);
+        refused.then_some(Self::CheckEndpoint)
+    }
+}
+
+/// Act, in the background, on what a failed request for `remote_model` on endpoint
+/// `endpoint_id` says: down or refusing the key re-checks the endpoint's health (which
+/// publishes the change), a missing model is published `MISSING`. The one rule for `/v1`,
+/// prompts, embeddings and transcription streams, so a status does not wait for the health
+/// loop.
+pub fn after_failed_request(endpoint_id: &str, remote_model: &str, error: &anyhow::Error) {
+    let Some(says) = FailureSays::of(error) else {
+        return;
+    };
+    let (endpoint_id, remote_model) = (endpoint_id.to_string(), remote_model.to_string());
+    tokio::spawn(async move {
+        match says {
+            FailureSays::CheckEndpoint => {
+                // The stored endpoint: a client's copy holds the health of when it was built.
+                let checked = match stored_endpoint(&endpoint_id) {
+                    Ok(endpoint) => check_health(&endpoint).await.map(drop),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = checked {
+                    log::warn!("AI endpoint health after a failed request: {e}");
+                }
+            }
+            FailureSays::ModelMissing => {
+                let status = ModelStatus {
+                    state: ModelState::Missing,
+                    progress: None,
+                    detail: Some("The endpoint does not serve this model".into()),
+                };
+                publish_model_status(&endpoint_id, &remote_model, status).await;
+            }
+        }
+    });
 }
 
 /// Check every endpoint now and then every [`HEALTH_INTERVAL`], for as long as the
@@ -545,16 +642,10 @@ mod tests {
         crate::db_backend::db_backend()
             .add_model(&crate::types::ModelInput {
                 name: "whisper".into(),
-                api: Some(crate::types::ModelApiInput {
-                    base_url: server.url(),
-                    api_key: None,
-                    model: "whisper-1".into(),
-                    api_type: "OPEN_AI".into(),
-                    max_num_ctx: None,
-                    native_tools: None,
-                }),
-                local: None,
                 model_type: crate::types::ModelType::Transcription,
+                endpoint_id: view.id.clone(),
+                remote_model: "whisper-1".into(),
+                native_tools: None,
             })
             .unwrap();
         let endpoint = stored_endpoint(&view.id).unwrap();
@@ -627,6 +718,99 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.downcast_ref::<EndpointNotFound>().is_some());
+    }
+
+    /// The next `model-status` event about `endpoint_id`, or `None` within a second.
+    async fn next_model_status(
+        events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>,
+        endpoint_id: &str,
+    ) -> Option<Arc<Event>> {
+        let next = async {
+            loop {
+                let event = events.recv().await.ok()?;
+                if event.topic == Topic::AiModelStatus && event.payload["endpointId"] == endpoint_id
+                {
+                    return Some(event);
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), next)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    // Managed users do not get `ai-endpoint-status` (it names the URL): the `model-status`
+    // of each model on the endpoint is how they learn it went down or came back.
+    #[tokio::test]
+    async fn a_change_of_health_publishes_the_status_of_each_model_on_the_endpoint() {
+        let service = service().await;
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_body(r#"{"data":[{"id":"qwen3"}]}"#)
+            .create_async()
+            .await;
+        let view = service
+            .add_endpoint(input("vllm", &server.url(), None))
+            .await
+            .unwrap();
+        // Two models on one upstream model: one event names them both.
+        for name in ["a", "b"] {
+            service
+                .add_model(crate::types::ModelInput {
+                    name: name.into(),
+                    model_type: crate::types::ModelType::Llm,
+                    endpoint_id: view.id.clone(),
+                    remote_model: "qwen3".into(),
+                    native_tools: None,
+                })
+                .await
+                .unwrap();
+        }
+        let mut events = get_global_pubsub().await.subscribe_events();
+
+        // A check stores and publishes only what it found at the stored URL, and probes an
+        // endpoint once per `HEALTH_DEBOUNCE`: each step moves the stored endpoint and
+        // forgets the last probe.
+        let moved_to = |url: &str| {
+            let mut endpoint = stored_endpoint(&view.id).unwrap();
+            endpoint.base_url = url::Url::parse(url).unwrap();
+            crate::db_backend::db_backend()
+                .update_endpoint(&endpoint)
+                .unwrap();
+            last_probes().lock().unwrap().remove(&view.id);
+            endpoint
+        };
+
+        let down = moved_to("http://127.0.0.1:1");
+        check_health(&down).await.unwrap();
+        let event = next_model_status(&mut events, &view.id)
+            .await
+            .expect("no model-status when the endpoint went down");
+        assert_eq!(event.audience, Audience::Everyone);
+        assert_eq!(event.payload["remoteModel"], "qwen3");
+        assert_eq!(event.payload["status"]["state"], "ENDPOINT_DOWN");
+        assert!(
+            !event.payload.to_string().contains("127.0.0.1"),
+            "{}",
+            event.payload
+        );
+        assert!(
+            next_model_status(&mut events, &view.id).await.is_none(),
+            "one event per upstream model"
+        );
+
+        check_health(&moved_to(&server.url())).await.unwrap();
+        let event = next_model_status(&mut events, &view.id)
+            .await
+            .expect("no model-status when the endpoint came back");
+        assert_eq!(event.payload["status"]["state"], "READY");
+
+        // Unchanged: nothing.
+        check_health(&moved_to(&server.url())).await.unwrap();
+        assert!(next_model_status(&mut events, &view.id).await.is_none());
     }
 
     #[tokio::test]
@@ -821,19 +1005,18 @@ mod tests {
             .with_body(r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#)
             .create_async()
             .await;
+        let endpoint_id = service
+            .add_endpoint(input("vllm", &server.url(), None))
+            .await
+            .unwrap()
+            .id;
         let id = service
             .add_model(crate::types::ModelInput {
                 name: "m".into(),
-                api: Some(crate::types::ModelApiInput {
-                    base_url: server.url(),
-                    api_key: None,
-                    model: "qwen3".into(),
-                    api_type: "OPEN_AI".into(),
-                    max_num_ctx: None,
-                    native_tools: None,
-                }),
-                local: None,
                 model_type: crate::types::ModelType::Llm,
+                endpoint_id: endpoint_id.clone(),
+                remote_model: "qwen3".into(),
+                native_tools: None,
             })
             .await
             .unwrap();
@@ -854,12 +1037,6 @@ mod tests {
             )
             .await
             .unwrap();
-        let endpoint_id = crate::db_backend::db_backend()
-            .get_model(id)
-            .unwrap()
-            .unwrap()
-            .endpoint_id
-            .unwrap();
 
         service
             .update_endpoint(&endpoint_id, input("renamed", &server.url(), None))
@@ -873,32 +1050,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_model_that_stops_being_an_llm_stops_its_llm_worker() {
+    async fn a_model_that_stops_being_an_llm_stops_its_llm_client() {
         let service = service().await;
-        let llm = |model_type| crate::types::ModelInput {
+        let endpoint_id = service
+            .add_endpoint(input("down", "http://127.0.0.1:1", None))
+            .await
+            .unwrap()
+            .id;
+        let model = |model_type| crate::types::ModelInput {
             name: "m".into(),
-            api: Some(crate::types::ModelApiInput {
-                base_url: "http://127.0.0.1:1".into(),
-                api_key: None,
-                model: "qwen3".into(),
-                api_type: "OPEN_AI".into(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
             model_type,
+            endpoint_id: endpoint_id.clone(),
+            remote_model: "qwen3".into(),
+            native_tools: None,
         };
         let id = service
-            .add_model(llm(crate::types::ModelType::Llm))
+            .add_model(model(crate::types::ModelType::Llm))
             .await
             .unwrap();
-        assert!(service.llm_channel.lock().await.contains_key(&id));
+        assert!(service.llms.lock().await.contains_key(&id));
 
         service
-            .update_model(id.clone(), llm(crate::types::ModelType::Embedding))
+            .update_model(id.clone(), model(crate::types::ModelType::Embedding))
             .await
             .unwrap();
 
-        assert!(!service.llm_channel.lock().await.contains_key(&id));
+        assert!(!service.llms.lock().await.contains_key(&id));
+        assert!(service.embedders.lock().await.contains_key(&id));
     }
 }

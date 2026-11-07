@@ -7,7 +7,7 @@
 //! what they get here.
 //!
 //! The batch is one call to [`AIService::embed_batch`], as `ai.embed` and semantic dedup
-//! make it: one request to the model's endpoint, or the local Bert of a model without one.
+//! make it: one request to the model's endpoint.
 
 use axum::Json;
 
@@ -37,13 +37,11 @@ pub async fn embeddings(
     }
 
     let resolved = resolve(&req.model, ModelType::Embedding).await?;
-    if let Some(endpoint) = &resolved.endpoint {
-        if endpoint.kind == EndpointKind::Anthropic {
-            return Err(OpenAIError::model_not_supported(format!(
-                "Model '{}' is on an Anthropic endpoint, which serves no embeddings",
-                req.model
-            )));
-        }
+    if resolved.endpoint.kind == EndpointKind::Anthropic {
+        return Err(OpenAIError::model_not_supported(format!(
+            "Model '{}' is on an Anthropic endpoint, which serves no embeddings",
+            req.model
+        )));
     }
     let inputs = req.input.into_vec();
 
@@ -65,6 +63,7 @@ pub async fn embeddings(
             auth.user_did().map(str::to_string),
         )
         .await
+        // `embed_batch` already acted on what the failure says about the endpoint.
         .map_err(|e| resolved.failure(e))?;
     // One info line per batch; see rust-executor/LOGGING.md.
     log::info!(

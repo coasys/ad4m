@@ -181,7 +181,7 @@ the guard checked:
 | `ai.embed` | `Cap(artificial intelligence:PROMPT)` |
 | `ai.endpoints` | `Executor(artificial intelligence:READ)` |
 | `ai.getDefaultModel` | `Cap(artificial intelligence:READ)` |
-| `ai.modelLoadingStatus` | `Cap(artificial intelligence:READ)` |
+| `ai.modelStatus` | `Cap(artificial intelligence:READ)` |
 | `ai.models` | `Cap(artificial intelligence:READ)` |
 | `ai.prompt` | `Owns(Task taskId, artificial intelligence:PROMPT)` |
 | `ai.pullModel` | `Executor(artificial intelligence:CREATE)` |
@@ -446,7 +446,7 @@ them against those two guards.
   may hold the perspective's handle lock while it emits. `hosting-user-info-changed` goes out twice
   (`Event::hosting_user_info`): to the user's DID (looked up by email in the local users table
   at publish, never imported) with RUNTIME_HOSTING_READ, and to the main agent's with
-  RUNTIME_USER_MANAGEMENT_READ (the operator and apps that may list users see every user's). `model-loading-status` goes to everyone; `transcription-text` to the stream
+  RUNTIME_USER_MANAGEMENT_READ (the operator and apps that may list users see every user's). `model-status` goes to everyone; `ai-endpoint-status` to the main agent's DID; `transcription-text` to the stream
   owner's DID. `agent-status-changed` and `agent-updated` go to the DID the payload names
   (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
   `apps-changed` (`Event::apps_changed`) and the approval exceptions (`CapabilityRequested`,
@@ -563,13 +563,17 @@ Wire translation over `AIService`, and an aggregator over the AI endpoints:
 and speech to a model's endpoint as the client wrote them (only `model` rewritten, SSE
 passed event by event, billed from upstream `usage`), unless the endpoint is Anthropic
 or Ollama (its `/v1` ignores `num_ctx`; the executor uses native `/api/chat`) or the
-request has active tools the model does not take as definitions: those, and models
-without an endpoint, the executor answers. For a caller who pays, `cap_cost` lowers the
-completion limits so prompt plus `n` answers fit the caller's credits, and drops
-`service_tier`. A stream is billed when it is dropped (`StreamBill`), however it ends,
-and times out on silence, not on its length. Upstream failures map per plan §5.4
-(`OpenAIError::from_endpoint`); messages name no URL, and `/v1/models` shows no health
-`detail`. Embeddings go through
+request has active tools the model does not take as definitions, or it forces a call
+(`tool_choice: "required"` or a named function) on a server that does not enforce that
+(all but OpenAI and vLLM, `passthrough::enforces_tool_choice`): those, and models without
+an endpoint, the executor answers, a forced call under a JSON schema the server decodes
+against, checked and retried once (`chat::constrained_tool_calls`,
+`tool_grammar::ToolCallConstraint`). `tool_choice: "none"` reaches llama-server without
+the tools. For a caller who pays, `cap_cost` lowers the completion limits so prompt plus
+`n` answers fit the caller's credits, and drops `service_tier`. A stream is billed when
+it is dropped (`StreamBill`), however it ends, and times out on silence, not on its
+length. Upstream failures map per plan §5.4 (`OpenAIError::from_endpoint`); messages
+name no URL, and `/v1/models` shows no health `detail`. Embeddings go through
 `AIService::embed_batch`. `GET /v1/models` lists model rows by name, not upstream lists.
 Exception: `harness_bridge.rs` +
 `tool_grammar.rs` are the interpretation harness's `CompletionSource` and tool

@@ -5,8 +5,7 @@
 //! A passthrough to the model's endpoint: the OpenAI multipart upload (`file`, `model`,
 //! `language`, `prompt`, `response_format`, `temperature`, ...) goes on as it came, with
 //! `model` replaced by the id the upstream knows, and the upstream's answer comes back as
-//! it was sent. Any container the upstream decodes is accepted. A model without an endpoint
-//! (local Whisper) is refused: it transcribes only through streams.
+//! it was sent. Any container the upstream decodes is accepted.
 //!
 //! ## TTS
 //!
@@ -83,17 +82,11 @@ pub async fn transcriptions(
     let file =
         file.ok_or_else(|| OpenAIError::invalid_request("Missing required form field: file"))?;
     let model_id = resolve_model(&model, ModelType::Transcription).await?;
-    let (client, remote_model) = transcription::endpoint_transcriber(&model_id)
+    // The model resolved: what is left to refuse is an endpoint that cannot transcribe.
+    let (client, remote_model, _endpoint_id) = transcription::endpoint_transcriber(&model_id)
         .map_err(|e| match e.downcast_ref::<NotATranscriptionEndpoint>() {
             Some(refused) => OpenAIError::model_not_supported(refused.to_string()),
-            None => OpenAIError::internal(e.to_string()),
-        })?
-        .ok_or_else(|| {
-            OpenAIError::invalid_request(format!(
-                "Model '{model}' has no endpoint: /v1/audio/transcriptions forwards to the \
-                 model's endpoint. Register the model on a transcription endpoint, or use a \
-                 transcription stream."
-            ))
+            None => OpenAIError::invalid_request(e.to_string()),
         })?;
 
     if let Some(agent_did) = auth.user_did() {

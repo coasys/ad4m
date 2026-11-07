@@ -48,12 +48,14 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// omitting it lets the server pick. 16k is large enough that a long
 /// interpretation answer is not clipped and small enough to bound a runaway.
 ///
-/// Nothing overrides it. `ModelApi` carries no options, and the `max_tokens`
+/// Nothing overrides it. A model carries no options, and the `max_tokens`
 /// a client sends to the compat surface is dropped before it reaches either
 /// provider. Threading that through is worth doing and is not done here.
 const DEFAULT_MAX_TOKENS: u32 = 16_384;
 
-/// A completion can legitimately run for minutes on a long prompt.
+/// A completion can legitimately run for minutes on a long prompt. Without a
+/// timeout a hung upstream would hold its caller (and its endpoint's concurrency
+/// slot, when the endpoint caps them) forever.
 const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct AnthropicChat {

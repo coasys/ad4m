@@ -135,6 +135,18 @@ impl OpenAIError {
         )
     }
 
+    /// The model did not make the tool call that `tool_choice` requires (`"required"` or a
+    /// named function), after being asked again. The executor answers rather than pass on a
+    /// reply that breaks the request's contract.
+    pub fn tool_call_not_made(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_GATEWAY,
+            message,
+            "upstream_error",
+            Some("tool_call_not_made"),
+        )
+    }
+
     fn upstream_failure(status: StatusCode, message: &str, kind: &str) -> Self {
         Self::new(status, message, kind, Some(kind))
     }

@@ -40,10 +40,6 @@
 #   AD4M_STAGING_UNIT           executor unit [ad4m-staging.service]
 #   AD4M_STAGING_URL            executor URL [http://127.0.0.1:12400]
 #   AD4M_STAGING_BUILD_TIMEOUT  build time limit, timeout(1) syntax [3h]
-#   AD4M_STAGING_CUDA_ROOT      CUDA toolkit for the staging build [/usr/local/cuda-12.8]
-#                                 cudarc 0.13.9 accepts 12.8 and rejects 13.0. /usr/local/cuda is 13.0.
-#                                 12.8's math_functions.h on this host is patched for glibc 2.41
-#                                 (see /usr/local/cuda-12.8/GLIBC241-PATCH.txt).
 #   AD4M_LINK_SERVER_DEPLOY     link-server deploy script [~/bin/deploy-link-server.sh]
 #   AD4M_LINK_SERVER_INSTANCE   link-server instance to move with this branch [staging]
 #                                 also deploys link.ad4m.dev (prod) when that instance exists
@@ -425,10 +421,9 @@ fi
 log "building $sha: $subject"
 set_status staging_sha "$sha" last_result "building $sha"
 build_log=$STATE/logs/build-$sha.log
-# The same steps as the CircleCI build job, in the source worktree ($1) at $2,
-# plus `--features cuda`. Staging's in-process candle models need that feature.
-# CircleCI does not pass it. cudarc links libcudart and does not set an rpath,
-# so the link adds one for $CUDA_ROOT/lib64.
+# The same steps as the CircleCI build job, in the source worktree ($1) at $2.
+# The executor runs no models in-process: its AI goes to the model servers that
+# the config's ai_endpoints name.
 # shellcheck disable=SC2016 # expanded by the inner bash
 if ! timeout "$BUILD_TIMEOUT" bash -euo pipefail -c '
   cd "$1"
@@ -439,11 +434,7 @@ if ! timeout "$BUILD_TIMEOUT" bash -euo pipefail -c '
   pnpm build-dapp
   (cd core && pnpm install --no-frozen-lockfile)
   pnpm run build-deno-snapshot
-  export CUDA_ROOT="${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda-12.8}"
-  # cudarc reads `nvcc` from PATH, not from CUDA_ROOT. /usr/local/cuda/bin is 13.0.
-  export PATH="${CUDA_ROOT}/bin:${PATH}"
-  export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-rpath,${CUDA_ROOT}/lib64"
-  (cd cli && cargo build --release --features cuda)
+  (cd cli && cargo build --release)
 ' build "$SRC" "$sha" >"$build_log" 2>&1; then
   set_status last_failed_sha "$sha"
   fail "build failed for $sha (logs/build-$sha.log in the state directory)"

@@ -1,5 +1,5 @@
-//! Transcription on an endpoint, and what both transcription paths share: billing and the
-//! `transcription-text` event.
+//! Transcription on an endpoint, and what streams and `/v1/audio/transcriptions` share:
+//! billing and the `transcription-text` event.
 //!
 //! The client cuts utterances (WE's worklet, by energy); the executor scores each one with
 //! Silero VAD ([`SpeechGate`], dev's gate and thresholds) and drops one that is not speech
@@ -87,32 +87,27 @@ impl SpeechGate {
         }
     }
 
-    /// Whether `samples` is speech, by dev's thresholds.
+    /// Whether `samples` is speech, by dev's thresholds (the stream logs the ratio itself).
+    #[cfg(test)]
     pub(crate) fn passes(&mut self, samples: &[f32]) -> bool {
         self.speech_ratio(samples) >= VAD_MIN_SPEECH_RATIO
     }
 }
 
-/// The client and upstream model id of the transcription model `model_id` when an endpoint
-/// serves it. `None` for local Whisper: a preset name, or a row without `api`.
-pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<Option<(OpenAiTranscribe, String)>> {
-    let Some(model) = crate::db_backend::db_backend().get_model(model_id.to_string())? else {
-        return Ok(None);
-    };
+/// The client of the endpoint that serves transcription model `model_id`, the id the
+/// endpoint knows the model by, and the endpoint's id.
+pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<(OpenAiTranscribe, String, String)> {
+    let model = crate::db_backend::db_backend()
+        .get_model(model_id.to_string())?
+        .ok_or_else(|| anyhow!("No transcription model has the id '{model_id}'"))?;
     if model.model_type != ModelType::Transcription {
         return Err(anyhow!(
             "Model '{}' is not a transcription model",
             model.name
         ));
     }
-    let Some(api) = model.api else {
-        return Ok(None);
-    };
-    let endpoint_id = model
-        .endpoint_id
-        .ok_or_else(|| anyhow!("Transcription model '{}' has no endpoint", model.name))?;
     let endpoint = crate::db_backend::db_backend()
-        .get_endpoint(&endpoint_id)?
+        .get_endpoint(&model.endpoint_id)?
         .ok_or_else(|| {
             anyhow!(
                 "The endpoint of transcription model '{}' is gone",
@@ -120,24 +115,23 @@ pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<Option<(OpenAiTrans
             )
         })?;
     require_transcription(&endpoint)?;
-    Ok(Some((
+    Ok((
         OpenAiTranscribe::for_endpoint(&endpoint)?,
-        api.model,
-    )))
+        model.remote_model,
+        endpoint.id,
+    ))
 }
 
 /// How long one upstream call of the transcription model `model_id` may take: its
 /// endpoint's `request_timeout_secs`, else the provider's
-/// [`REQUEST_TIMEOUT`](super::providers::audio::REQUEST_TIMEOUT). A model without an
-/// endpoint gets the provider's timeout too.
+/// [`REQUEST_TIMEOUT`](super::providers::audio::REQUEST_TIMEOUT).
 pub(crate) fn call_timeout(model_id: &str) -> std::time::Duration {
     let default = super::providers::audio::REQUEST_TIMEOUT;
     let db = crate::db_backend::db_backend();
     db.get_model(model_id.to_string())
         .ok()
         .flatten()
-        .and_then(|model| model.endpoint_id)
-        .and_then(|id| db.get_endpoint(&id).ok().flatten())
+        .and_then(|model| db.get_endpoint(&model.endpoint_id).ok().flatten())
         .map_or(default, |endpoint| {
             super::endpoints::request_timeout(&endpoint, default)
         })
@@ -216,6 +210,8 @@ pub(super) struct RemoteStream {
     pub model_id: String,
     /// The id the upstream knows.
     pub remote_model: String,
+    /// The endpoint `client` calls.
+    pub endpoint_id: String,
     pub client: Arc<dyn RemoteTranscribe>,
     pub agent_did: Option<String>,
     pub user_did: String,
@@ -237,8 +233,9 @@ impl RemoteStream {
 
     /// One upstream call, for an utterance the gate takes as speech. Each piece of text a
     /// streaming upstream decodes is published as it arrives; the words are billed once,
-    /// from the whole transcript. A failure is logged and returned to the feed; nothing more
-    /// is published, and only what was published is billed.
+    /// from the whole transcript. A failure is logged, acted on for the endpoint
+    /// (`endpoints::after_failed_request`) and returned to the feed; nothing more is
+    /// published, and only what was published is billed.
     async fn transcribe(&mut self, samples: Vec<f32>) -> Result<()> {
         if samples.is_empty() {
             return Ok(());
@@ -303,6 +300,7 @@ impl RemoteStream {
                     self.stream_id,
                     self.remote_model
                 );
+                super::endpoints::after_failed_request(&self.endpoint_id, &self.remote_model, &e);
                 let words = published.split_whitespace().count();
                 if words > 0 {
                     bill_transcription(self.agent_did.as_deref(), &self.model_id, words);
@@ -400,6 +398,7 @@ mod tests {
             stream_id: "s".into(),
             model_id: "m".into(),
             remote_model: "r".into(),
+            endpoint_id: "e".into(),
             client: Arc::new(NoUpstream),
             agent_did: None,
             user_did: "did:key:owner".into(),

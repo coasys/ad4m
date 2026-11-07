@@ -1,29 +1,17 @@
 use self::error::AIServiceError;
-use crate::events::{Audience, Event, Topic};
-use crate::pubsub::get_global_pubsub;
-use crate::types::ModelInput;
 use crate::types::RequestContext;
-#[allow(unused_imports)]
-use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
-use crate::types::{AITask, LocalModel, Model, ModelApi, ModelApiType, ModelType};
+use crate::types::{AITask, AITaskInput, Endpoint, Model, ModelInput, ModelType};
 use anyhow::{anyhow, Context};
-use candle_core::Device;
 use deno_core::error::AnyError;
-use holochain::test_utils::itertools::Itertools;
-use kalosm::language::*;
-use kalosm::sound::TextStream;
-use kalosm::sound::*;
 use std::collections::HashMap;
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
-mod default_embedding;
+use std::future::Future;
+use std::pin::Pin;
+
 pub mod endpoints;
 mod error;
 pub mod harness;
@@ -36,9 +24,7 @@ use providers::{ChatReply, ChatRequest, ChatTurn, RemoteChat, ToolSpec};
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
-/// Result of an LLM prompt call, with token counts for billing.
-/// Token counts are estimated (chars/4) with the current Kalosum backend.
-/// When Ollama is integrated, these will be exact from the API response.
+/// Result of an LLM prompt call, with token counts for billing (estimated, chars/4).
 #[derive(Debug, Clone)]
 pub struct PromptResult {
     pub text: String,
@@ -60,15 +46,12 @@ pub struct EmbedBatch {
     pub token_count: usize,
 }
 
-/// Rough token count estimation (~4 chars per token for English text).
-/// Used by the Kalosum backend to populate PromptResult/EmbedResult.
-/// Will be replaced by exact counts when Ollama is integrated.
+/// Rough token count estimation (~4 chars per token for English text), for the paths that
+/// bill without an upstream count.
 ///
-/// TODO(billing accuracy): materially off for non-English scripts (CJK,
-/// Arabic, Hindi tend to ~1 token/char → billing under-estimated ~4×),
-/// code/JSON (~2 chars/token → under-estimated ~2×), and repetitive text
-/// (BPE compresses well → over-estimated). Plumb real Kalosm token counts
-/// when the backend exposes them, or apply a per-model correction factor.
+/// Materially off for non-English scripts (CJK, Arabic, Hindi tend to ~1 token/char, so
+/// billing under-estimates ~4×), code/JSON (~2 chars/token) and repetitive text (BPE
+/// compresses well: over-estimated). `/v1` bills from the upstream's `usage` instead.
 ///
 /// `pub(crate)` so `api::openai_compat::tests` can lock in the current
 /// formula and catch accidental changes.
@@ -92,23 +75,27 @@ pub(crate) fn truncate_for_log(text: &str) -> String {
     format!("{head}… [+{} more chars]", total - LOG_TEXT_PREVIEW_CHARS)
 }
 
-static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
 pub(crate) static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
-    static ref PROGRESS_RATE_LIMITER: Arc<Mutex<HashMap<String, Instant>>> =
-        Arc::new(Mutex::new(HashMap::new()));
 }
 
-/// An open transcription stream. Removing it from the map closes it: its backend's senders
-/// drop, and the backend ends.
+/// An open transcription stream. Removing it from the map closes it: its sender drops, and
+/// its worker ([`transcription::RemoteStream`]) ends once it has answered the utterances
+/// fed before.
 struct TranscriptionSession {
-    backend: StreamBackend,
+    /// The worker's queue: it answers each utterance after the ones fed before it.
+    utterances: mpsc::UnboundedSender<transcription::Utterance>,
+    /// The model the stream transcribes with: a reload of it closes the stream, whose
+    /// worker holds the endpoint's URL and key as they were.
+    model_id: String,
+    /// When the stream was last fed, or last answered an utterance.
     last_activity: Arc<Mutex<tokio::time::Instant>>,
-    /// Utterances fed and not answered yet: a stream is not idle while one is upstream.
-    waiting: Arc<std::sync::atomic::AtomicUsize>,
+    /// The utterances fed and not answered yet. A stream waiting for its upstream is not
+    /// idle, however long the upstream takes.
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
     /// The stream's text, for `/v1/realtime`.
     text_broadcast_tx: tokio::sync::broadcast::Sender<String>,
     /// The managed agent that opened the stream, by DID: it pays, and only it reaches the
@@ -116,223 +103,138 @@ struct TranscriptionSession {
     agent_did: Option<String>,
 }
 
-enum StreamBackend {
-    /// Local Whisper on its own thread, for a model without an endpoint.
-    Whisper {
-        samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
-        /// Never sent: dropping it stops the thread, also mid-utterance.
-        _drop_tx: oneshot::Sender<()>,
-    },
-    /// An endpoint: the stream's worker ([`transcription::RemoteStream`]) answers each
-    /// utterance after the ones fed before it.
-    Remote {
-        utterances: mpsc::UnboundedSender<transcription::Utterance>,
-        /// The model the stream transcribes with: a reload of it closes the stream, whose
-        /// worker holds the endpoint's URL and key as they were.
-        model_id: String,
-    },
+type TranscriptionStreams = Arc<Mutex<HashMap<String, TranscriptionSession>>>;
+
+/// One utterance of a stream in flight, for as long as it lives: until its feed has its
+/// answer, or is dropped (its caller went away). Its end counts as activity, so a stream's
+/// idle time starts at its last answer.
+struct InFlight {
+    count: Arc<std::sync::atomic::AtomicUsize>,
+    last_activity: Arc<Mutex<tokio::time::Instant>>,
 }
 
-type TranscriptionStreams = Arc<Mutex<HashMap<String, TranscriptionSession>>>;
+impl InFlight {
+    fn count(stream: &TranscriptionSession) -> Self {
+        stream
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        InFlight {
+            count: stream.in_flight.clone(),
+            last_activity: stream.last_activity.clone(),
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        // Before the count drops, so the reaper cannot see the stream idle in between. When
+        // the reaper holds the lock, it sees the count above zero and keeps the stream.
+        if let Ok(mut last_activity) = self.last_activity.try_lock() {
+            *last_activity = tokio::time::Instant::now();
+        }
+        self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// What a feed answers, once its utterance is transcribed.
 pub type FeedAnswer = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
-/// An utterance of a stream on its way upstream. Answered, it counts as the stream's last
-/// activity; dropped (answered or not), the stream stops waiting for it.
-struct Waiting {
-    waiting: Arc<std::sync::atomic::AtomicUsize>,
-    last_activity: Arc<Mutex<tokio::time::Instant>>,
-}
-
-impl Waiting {
-    fn start(stream: &TranscriptionSession) -> Self {
-        stream
-            .waiting
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Waiting {
-            waiting: stream.waiting.clone(),
-            last_activity: stream.last_activity.clone(),
-        }
-    }
-
-    async fn answered(self) {
-        *self.last_activity.lock().await = tokio::time::Instant::now();
-    }
-}
-
-impl Drop for Waiting {
-    fn drop(&mut self) {
-        self.waiting
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
 #[cfg(test)]
 impl TranscriptionSession {
-    /// A Whisper-shaped session of `owner`, and the ends its thread would hold.
-    fn whisper_for_test(
-        owner: Option<&str>,
-    ) -> (
-        Self,
-        futures_channel::mpsc::UnboundedReceiver<Vec<f32>>,
-        oneshot::Receiver<()>,
-    ) {
-        let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded();
-        let (drop_tx, drop_rx) = oneshot::channel();
+    /// A session of `owner`, and the queue its worker would read.
+    fn for_test(owner: Option<&str>) -> (Self, mpsc::UnboundedReceiver<transcription::Utterance>) {
+        let (utterances, queue) = mpsc::unbounded_channel();
         let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
         let session = TranscriptionSession {
-            backend: StreamBackend::Whisper {
-                samples_tx,
-                _drop_tx: drop_tx,
-            },
+            utterances,
+            model_id: "m".into(),
             last_activity: Arc::new(Mutex::new(tokio::time::Instant::now())),
-            waiting: Default::default(),
+            in_flight: Default::default(),
             text_broadcast_tx,
             agent_did: owner.map(str::to_string),
         };
-        (session, samples_rx, drop_rx)
+        (session, queue)
     }
 }
 
+/// Every model the service runs is an upstream model on an endpoint: a client of the
+/// endpoint per model, held in a map by model id. A client is `Send + Sync` and takes
+/// concurrent requests; an endpoint's `max_concurrent` caps them.
 #[derive(Clone)]
 pub struct AIService {
-    /// What embeds for each embedding model, keyed by model id.
-    embedding_channel: Arc<Mutex<HashMap<String, Embedder>>>,
-    llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
+    /// The chat client of each LLM, keyed by model id.
+    llms: Arc<Mutex<HashMap<String, ChatModel>>>,
+    /// The embedding client of each embedding model, keyed by model id.
+    embedders: Arc<Mutex<HashMap<String, Embedder>>>,
     transcription_streams: TranscriptionStreams,
-    /// Shared Whisper models - ONE model per size, shared across ALL streams using that size
-    /// Key = WhisperSource (Tiny/Small/Medium/Large), Value = Arc<Whisper>
-    /// Cloning Arc is cheap (just increments ref count), model weights stay in memory once
-    /// Saves 500MB-1.5GB per stream!
-    shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
-    default_embedding: Arc<default_embedding::DefaultEmbedding>,
 }
 
-struct EmbeddingRequest {
-    pub texts: Vec<String>,
-    pub result_sender: oneshot::Sender<Result<Vec<Vec<f32>>>>,
-}
-
-/// What embeds for one model.
+/// What prompts one LLM: the client of its endpoint, and the id the endpoint knows the
+/// model by.
 #[derive(Clone)]
-enum Embedder {
-    /// Bert on its own thread: a model without an endpoint.
-    Bert(mpsc::UnboundedSender<EmbeddingRequest>),
-    /// `remote_model` on the endpoint that serves the model.
-    Remote {
-        client: Arc<dyn providers::embed::RemoteEmbed>,
-        remote_model: String,
-        endpoint: Box<crate::types::Endpoint>,
-    },
+struct ChatModel {
+    client: Arc<dyn RemoteChat>,
+    remote_model: String,
+    endpoint: Arc<Endpoint>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-struct LLMTaskSpawnRequest {
-    pub task: AITask,
-    pub result_sender: oneshot::Sender<Result<()>>,
-}
+impl ChatModel {
+    fn new(model: &Model, endpoint: Endpoint) -> Result<Self> {
+        Ok(ChatModel {
+            client: Arc::from(providers::chat_client(&endpoint)?),
+            remote_model: model.remote_model.clone(),
+            endpoint: Arc::new(endpoint),
+        })
+    }
 
-#[allow(dead_code)]
-struct LLMTaskPromptRequest {
-    pub task_id: String,
-    pub prompt: String,
-    /// Optional decoding constraint (a tool-call grammar).  `None` ⇒ normal
-    /// unconstrained generation, byte-for-byte the pre-tools behaviour.
-    /// Ignored on the remote path (upstream tool forwarding is a follow-up).
-    pub constraint: Option<ArcParser<()>>,
-    pub result_sender: oneshot::Sender<Result<String>>,
-}
+    /// One completion of `turns`, with `tools` as definitions and the reply constrained to
+    /// `json_schema` when given ([`ChatRequest::json_schema`]), within the endpoint's limits
+    /// ([`within_endpoint_limits`]).
+    async fn chat(
+        &self,
+        turns: Vec<ChatTurn>,
+        tools: Vec<ToolSpec>,
+        json_schema: Option<serde_json::Value>,
+    ) -> Result<ChatReply> {
+        let request = ChatRequest::new(self.remote_model.clone(), turns)
+            .with_tools(tools)
+            .with_json_schema(json_schema);
+        let reply = within_endpoint_limits(&self.endpoint, false, self.client.chat(request)).await;
+        self.after(reply)
+    }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-struct LLMTaskRemoveRequest {
-    pub task_id: String,
-    pub result_sender: oneshot::Sender<()>,
-}
+    /// [`Self::chat`] with the text sent to `tokens` as the model writes it (in one chunk
+    /// from a provider that does not stream).
+    async fn chat_stream(
+        &self,
+        turns: Vec<ChatTurn>,
+        tokens: mpsc::UnboundedSender<String>,
+    ) -> Result<ChatReply> {
+        let request = ChatRequest::new(self.remote_model.clone(), turns);
+        let reply = within_endpoint_limits(
+            &self.endpoint,
+            true,
+            self.client.chat_stream(request, tokens),
+        )
+        .await;
+        self.after(reply)
+    }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-struct LLMTaskShutdownRequest {
-    pub result_sender: oneshot::Sender<()>,
-}
-
-/// Streaming-prompt variant for the OpenAI-compatible chat endpoint.
-///
-/// Identical to [`LLMTaskPromptRequest`] but instead of a oneshot reply
-/// the caller receives an async stream of token chunks.  Used by
-/// `prompt_messages_stream` to back `POST /v1/chat/completions` with
-/// `stream: true`.
-///
-/// The receiver side is an `mpsc::Receiver<String>` so each `Token` arm
-/// can push without awaiting consumer backpressure; the HTTP handler
-/// converts each token into one SSE `chat.completion.chunk`.
-///
-/// `done_sender` fires once the model has emitted its final token (or
-/// errored) and carries `PromptResult` for the closing chunk's `usage`.
-#[allow(dead_code)]
-struct LLMTaskPromptStreamRequest {
-    pub task_id: String,
-    pub prompt: String,
-    /// See [`LLMTaskPromptRequest::constraint`].
-    pub constraint: Option<ArcParser<()>>,
-    pub token_sender: mpsc::UnboundedSender<String>,
-    pub done_sender: oneshot::Sender<Result<PromptResult>>,
-}
-
-// Manual `Debug` — these structs hold a non-`Debug` `ArcParser` constraint.
-// `LLMTaskRequest` must stay `Debug` so that `SendError<LLMTaskRequest>`
-// converts into `anyhow::Error` via `?` at the channel send sites.
-impl std::fmt::Debug for LLMTaskPromptRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LLMTaskPromptRequest")
-            .field("task_id", &self.task_id)
-            .field("prompt", &self.prompt)
-            .field("constrained", &self.constraint.is_some())
-            .finish()
+    /// `reply`, once a failure is acted on (`endpoints::after_failed_request`).
+    fn after(&self, reply: Result<ChatReply>) -> Result<ChatReply> {
+        reply.inspect_err(|e| {
+            endpoints::after_failed_request(&self.endpoint.id, &self.remote_model, e)
+        })
     }
 }
 
-impl std::fmt::Debug for LLMTaskPromptStreamRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LLMTaskPromptStreamRequest")
-            .field("task_id", &self.task_id)
-            .field("prompt", &self.prompt)
-            .field("constrained", &self.constraint.is_some())
-            .finish()
-    }
-}
-
-/// A prompt sent as a complete turn list, with tools handed over as
-/// definitions rather than rendered into the text.
-///
-/// Distinct from [`LLMTaskPromptRequest`] because it needs no ephemeral task:
-/// the turns are already the whole conversation, so there is no system prompt
-/// or example list for the worker to assemble one from.
-#[derive(Debug)]
-struct LLMTaskPromptTurnsRequest {
-    pub turns: Vec<ChatTurn>,
-    pub tools: Vec<ToolSpec>,
-    pub result_sender: oneshot::Sender<Result<ChatReply>>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-enum LLMTaskRequest {
-    Spawn(LLMTaskSpawnRequest),
-    Prompt(LLMTaskPromptRequest),
-    PromptTurns(LLMTaskPromptTurnsRequest),
-    PromptStream(LLMTaskPromptStreamRequest),
-    Remove(LLMTaskRemoveRequest),
-    Shutdown(LLMTaskShutdownRequest),
-}
-
-enum LlmModel {
-    Local(Llama),
-    /// A remote endpoint and the model string to ask it for. Which wire
-    /// protocol is behind the trait — see `ai_service::providers`.
-    Remote((Box<dyn RemoteChat>, String)),
+/// What embeds for one embedding model: the client of its endpoint, and the id the
+/// endpoint knows the model by.
+#[derive(Clone)]
+struct Embedder {
+    client: Arc<dyn providers::embed::RemoteEmbed>,
+    remote_model: String,
+    endpoint: Arc<Endpoint>,
 }
 
 /// Every part of one turn that reaches the wire.
@@ -385,34 +287,24 @@ fn estimate_reply_tokens(reply: &ChatReply) -> usize {
     estimate_token_count(&reply.text) + calls
 }
 
-/// One remote chat call of a model worker under the limits the operator set on the
-/// endpoint `endpoint_id` names (none without an endpoint): a slot by `max_concurrent`,
-/// shared with the calls `/v1` forwards, and for an answer that is not a stream,
-/// `request_timeout_secs` (default [`CHAT_TIMEOUT`], 600 s), the wait for the slot
-/// included. A stream gets the slot but no timeout here: its wait for the slot is not
-/// bounded, and its call has only the provider client's own bound.
+/// One remote chat call of a model under the limits the operator set on its `endpoint`: a
+/// slot by `max_concurrent`, shared with the calls `/v1` forwards, and for an answer that
+/// is not a stream, `request_timeout_secs` (default [`CHAT_TIMEOUT`], 600 s), the wait for
+/// the slot included. A stream gets the slot but no timeout here: its wait for the slot is
+/// not bounded, and its call has only the provider client's own bound.
 async fn within_endpoint_limits<T>(
-    endpoint_id: Option<&str>,
+    endpoint: &Endpoint,
     stream: bool,
     call: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    // A read error fails the call: without its endpoint, it would run without the slot and
-    // the timeout.
-    let endpoint = match endpoint_id {
-        Some(id) => crate::db_backend::db_backend().get_endpoint(id)?,
-        None => None,
-    };
-    let Some(endpoint) = endpoint else {
-        return call.await;
-    };
     let limited = async {
-        let _slot = endpoints::request_slot(&endpoint).await;
+        let _slot = endpoints::request_slot(endpoint).await;
         call.await
     };
     if stream {
         return limited.await;
     }
-    let timeout = endpoints::request_timeout(&endpoint, CHAT_TIMEOUT);
+    let timeout = endpoints::request_timeout(endpoint, CHAT_TIMEOUT);
     tokio::time::timeout(timeout, limited).await.map_err(|_| {
         anyhow::Error::from(providers::http::UpstreamUnreachable {
             url: endpoint.base_url.to_string(),
@@ -429,108 +321,24 @@ const CHAT_TIMEOUT: std::time::Duration = providers::http::CHAT_REQUEST_TIMEOUT;
 
 /// The turn list for a task-shaped prompt: the task's system prompt, its
 /// examples as alternating user/assistant turns, then the live prompt.
-///
-/// Local models get this shape from kalosm's own task builder
-/// (`llama.task(system).with_examples(..)`); remote ones have to be handed
-/// it explicitly, which is what this builds. Shared by the `Prompt` and
-/// `PromptStream` remote arms, which differ only in how the reply comes back.
 fn turns_for_task(task: &AITask, prompt: String) -> Vec<ChatTurn> {
-    let mut turns = Vec::with_capacity(2 + task.prompt_examples.len() * 2);
-    turns.push(ChatTurn::system(task.system_prompt.clone()));
-    for example in task.prompt_examples.iter() {
+    turns_for(&task.system_prompt, &task.prompt_examples, prompt)
+}
+
+/// A system prompt, its examples as alternating user/assistant turns, then `prompt`.
+fn turns_for(
+    system_prompt: &str,
+    examples: &[crate::types::AIPromptExamples],
+    prompt: String,
+) -> Vec<ChatTurn> {
+    let mut turns = Vec::with_capacity(2 + examples.len() * 2);
+    turns.push(ChatTurn::system(system_prompt.to_string()));
+    for example in examples {
         turns.push(ChatTurn::user(example.input.clone()));
         turns.push(ChatTurn::assistant(example.output.clone()));
     }
     turns.push(ChatTurn::user(prompt));
     turns
-}
-
-async fn publish_model_status(
-    model_name: String,
-    progress: f32,
-    status: &str,
-    downloaded: bool,
-    loaded: bool,
-) {
-    let model = AIModelLoadingStatus {
-        model: model_name.clone(),
-        progress: progress as f64,
-        status: status.to_string(),
-        downloaded,
-        loaded,
-    };
-
-    let _ = crate::db_backend::db_backend().create_or_update_model_status(
-        &model.model,
-        model.progress,
-        &model.status,
-        model.downloaded,
-        model.loaded,
-    );
-
-    // Model names and progress only: every session sees them.
-    get_global_pubsub().await.publish_event(Event::new(
-        Topic::AiModelLoadingStatus,
-        Audience::Everyone,
-        &model,
-    ));
-}
-
-async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
-    let progress = loading.progress() * 100.0;
-
-    // Rate limiting: Only update every 100ms to prevent task thrashing
-    let now = Instant::now();
-    let should_update = {
-        let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-
-        if let Some(last_update) = rate_limiter.get(&model_id) {
-            // If less than 100ms since last update, skip unless it's 100% completion
-            if now.duration_since(*last_update) < Duration::from_millis(100) && progress < 100.0 {
-                false
-            } else {
-                rate_limiter.insert(model_id.clone(), now);
-                true
-            }
-        } else {
-            // First update for this model
-            rate_limiter.insert(model_id.clone(), now);
-            true
-        }
-    };
-
-    if should_update {
-        let status = if progress < 100.0 {
-            "Loading".to_string()
-        } else {
-            "Loaded".to_string()
-        };
-
-        log::debug!(
-            "Publishing model status for {}: {}% - {}",
-            model_id,
-            progress,
-            status
-        );
-
-        // Clean up rate limiter entry when model is fully loaded
-        if progress >= 100.0 {
-            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            rate_limiter.remove(&model_id);
-            log::debug!(
-                "Cleaned up rate limiter entry for completed model: {}",
-                model_id
-            );
-        }
-
-        publish_model_status(model_id.clone(), progress, &status, false, false).await;
-    } else {
-        log::trace!(
-            "Rate limited progress update for {}: {}%",
-            model_id,
-            progress
-        );
-    }
 }
 
 /// The owner of a new transcription stream: the managed agent's DID (billing, ownership;
@@ -549,11 +357,7 @@ fn transcription_stream_owner(
 
 impl AIService {
     pub fn new() -> Result<Self> {
-        Self::with_embedding_loader(Self::bert_loader())
-    }
-
-    fn with_embedding_loader(loader: default_embedding::EmbeddingLoader) -> Result<Self> {
-        let service = Self::empty_with_loader(loader);
+        let service = Self::empty();
 
         let clone = service.clone();
         tokio::spawn(async move {
@@ -566,26 +370,13 @@ impl AIService {
         Ok(service)
     }
 
-    /// A service with no models, no streams and no background tasks. Its default
-    /// embedding model stays disabled until `load()`.
-    #[cfg(test)]
+    /// A service with no models, no streams and no background tasks.
     fn empty() -> Self {
-        Self::empty_with_loader(Self::bert_loader())
-    }
-
-    fn empty_with_loader(loader: default_embedding::EmbeddingLoader) -> Self {
         AIService {
-            embedding_channel: Arc::new(Mutex::new(HashMap::new())),
-            llm_channel: Arc::new(Mutex::new(HashMap::new())),
+            llms: Arc::new(Mutex::new(HashMap::new())),
+            embedders: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
-            shared_whisper_models: Arc::new(Mutex::new(HashMap::new())), // Models loaded on demand per size
-            default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(loader)),
         }
-    }
-
-    /// Loads an embedding model as Bert on its own thread.
-    fn bert_loader() -> default_embedding::EmbeddingLoader {
-        Arc::new(|model| Box::pin(Self::load_embedding_worker(model)))
     }
 
     /// Close the streams nobody fed for [`TRANSCRIPTION_TIMEOUT_SECS`], every
@@ -612,8 +403,7 @@ impl AIService {
         let mut map_lock = streams.lock().await;
         let mut idle = Vec::new();
         for (id, stream) in map_lock.iter() {
-            let waiting = stream.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
-            if !waiting
+            if stream.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 0
                 && stream.last_activity.lock().await.elapsed()
                     > Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS)
             {
@@ -626,100 +416,133 @@ impl AIService {
         }
     }
 
+    /// Build the client of every model in the database. A fresh executor has none, and
+    /// loads none: AI features answer that no model is configured until the operator adds
+    /// one. A model whose client does not build logs why and stays without one.
     pub async fn load(&self) -> Result<()> {
-        // Get all models
         let models = crate::db_backend::db_backend().get_models()?;
-
-        // Create a future for each, initialzing that model
-        let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
-
-        if models.is_empty() {
-            // No models configured: serve Bert for embeddings, loaded by the first embed call
-            self.enable_default_embedding().await;
-        } else {
-            for model in models.into_iter() {
-                futures.push(Box::pin(async move {
-                    if let Err(e) = self.init_model(model.clone()).await {
-                        error!("Error initializing model[{:?}]: {:?}", model, e);
-                    }
-                }));
-            }
-        }
-
-        // Wait for all initialization futures in parallel
-        futures::future::join_all(futures).await;
-
-        // Spawn tasks from the database. Individual failures (e.g. tasks that
-        // reference a model that has since been deleted, or per-model task
-        // rows keyed to a model id that no `add_model` call has yet
-        // registered) log and continue — one orphan task must not prevent
-        // other tasks from being registered with their LLM workers, or the
-        // race between `AIService::new()`'s background `load()` and any
-        // caller that just spawned a worker + Spawn'd a task into it can wipe
-        // that task_descriptions entry mid-flight when `load()` re-spawns
-        // the worker via `init_model` and then bails before re-registering.
-        let tasks = crate::db_backend::db_backend()
-            .get_tasks()
-            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-        for task in tasks {
-            let task_name = task.name.clone();
-            let task_id = task.task_id.clone();
-            if let Err(e) = self.spawn_task(task).await {
-                log::warn!(
-                    "AIService::load: skipping task '{task_name}' (task_id={task_id}): {e:#}"
+        for model in models {
+            if let Err(e) = self.init_model(&model).await {
+                error!(
+                    "AI model {:?} ({}) did not load: {e:#}",
+                    model.name, model.id
                 );
             }
         }
-
         Ok(())
     }
 
-    async fn init_model(&self, model: crate::types::Model) -> Result<()> {
+    /// Build `model`'s client from its endpoint, replacing the one it had. Transcription
+    /// streams and speech requests build theirs per stream and per request: nothing to hold.
+    async fn init_model(&self, model: &Model) -> Result<()> {
+        self.drop_clients(&model.id).await;
+        let endpoint = crate::db_backend::db_backend()
+            .get_endpoint(&model.endpoint_id)?
+            .ok_or_else(|| anyhow!("The endpoint of model {:?} is gone", model.name))?;
         match model.model_type {
-            ModelType::Llm => self.spawn_llm_model(model, None).await?,
-            ModelType::Embedding => self.spawn_embedding_model(model).await?,
-            ModelType::Transcription => Self::load_transcriber_model(&model).await,
-            // Nothing to load: a speech request goes to the model's endpoint as it comes.
+            ModelType::Llm => {
+                let chat = ChatModel::new(model, endpoint)?;
+                self.llms.lock().await.insert(model.id.clone(), chat);
+            }
+            ModelType::Embedding => {
+                let embedder = Embedder {
+                    client: Arc::from(providers::embed::embed_client(&endpoint)?),
+                    remote_model: model.remote_model.clone(),
+                    endpoint: Arc::new(endpoint),
+                };
+                self.embedders
+                    .lock()
+                    .await
+                    .insert(model.id.clone(), embedder);
+            }
+            // Nothing to hold, but the endpoint must serve it: a stream on it is refused.
+            ModelType::Transcription => {
+                providers::audio::require_transcription(&endpoint)?;
+                providers::audio::OpenAiTranscribe::for_endpoint(&endpoint)?;
+            }
             ModelType::Speech => {}
-        };
+        }
         Ok(())
     }
 
-    pub async fn add_model(&self, model: ModelInput) -> Result<String> {
+    /// Forget the clients of model `model_id`, whatever its type was.
+    async fn drop_clients(&self, model_id: &str) {
+        self.llms.lock().await.remove(model_id);
+        self.embedders.lock().await.remove(model_id);
+    }
+
+    /// Add a model and build its client. A model its endpoint cannot serve (a transcription
+    /// model on Ollama, an embedding model on Anthropic) is refused before it is written, so
+    /// the endpoint does not gain the capability either.
+    pub async fn add_model(&self, input: ModelInput) -> Result<String> {
+        Self::check_endpoint_serves(&input)?;
         let db = crate::db_backend::db_backend();
         let model = db
-            .add_model(&model)
-            .and_then(|id| db.get_model(id))
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-            .ok_or_else(|| anyhow::anyhow!("Model disappeared after add — concurrent removal?"))?;
-        self.init_model(model.clone()).await?;
+            .add_model(&input)
+            .and_then(|id| db.get_model(id))?
+            .ok_or_else(|| anyhow!("The model just added is gone"))?;
+        if let Err(e) = self.init_model(&model).await {
+            db.remove_model(&model.id)?;
+            return Err(crate::db::InvalidModel(format!("{e:#}")).into());
+        }
         Ok(model.id)
     }
 
-    pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
-        // Every model type has a default. Only an LLM default has tasks to move.
-        crate::db_backend::db_backend().set_default_model(model_type.clone(), &model_id)?;
-
-        if ModelType::Llm == model_type {
-            // Respawn task on new default model
-            let tasks = crate::db_backend::db_backend()
-                .get_tasks()
-                .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
-            for task in tasks.into_iter().filter(|t| t.model_id == "default") {
-                self.spawn_task(task).await?;
-            }
+    /// Refuses `input` (as an [`InvalidModel`](crate::db::InvalidModel)) when its endpoint
+    /// has no route for the model's type, or would get a key over plain HTTP: the client the
+    /// model needs does not build. A missing endpoint is left to the database's refusal.
+    fn check_endpoint_serves(input: &ModelInput) -> Result<()> {
+        let Some(endpoint) = crate::db_backend::db_backend().get_endpoint(&input.endpoint_id)?
+        else {
+            return Ok(());
         };
-        Ok(())
+        let served = match input.model_type {
+            ModelType::Llm => providers::chat_client(&endpoint).map(drop),
+            ModelType::Embedding => providers::embed::embed_client(&endpoint).map(drop),
+            ModelType::Transcription => {
+                providers::audio::OpenAiTranscribe::for_endpoint(&endpoint).map(drop)
+            }
+            ModelType::Speech if endpoint.kind.protocol() == crate::types::ModelApiType::OpenAi => {
+                Ok(())
+            }
+            ModelType::Speech => Err(anyhow!(
+                "Endpoint '{}' ({:?}) serves no /v1/audio/speech",
+                endpoint.name,
+                endpoint.kind
+            )),
+        };
+        served.map_err(|e| crate::db::InvalidModel(format!("Model {:?}: {e:#}", input.name)).into())
     }
 
-    pub async fn model_status(model_id: String) -> Result<AIModelLoadingStatus> {
-        let status = crate::db_backend::db_backend()
-            .get_model_status(&model_id)
-            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
-            .ok_or(AIServiceError::ModelNotFound)?;
+    pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
+        // Tasks on "default" resolve it when they are prompted: nothing to move.
+        crate::db_backend::db_backend().set_default_model(model_type, &model_id)
+    }
 
-        Ok(status)
+    /// Every model, as RPC results show it.
+    pub fn model_views() -> Result<Vec<crate::types::ModelView>> {
+        let db = crate::db_backend::db_backend();
+        // Two reads: a model whose endpoint is removed in between shows without a status.
+        let endpoints: HashMap<String, Endpoint> = db
+            .get_endpoints()?
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
+        Ok(db
+            .get_models()?
+            .iter()
+            .map(|m| m.view(endpoints.get(&m.endpoint_id)))
+            .collect())
+    }
+
+    /// Model `model_id`, as RPC results show it.
+    pub fn model_view(model_id: &str) -> Result<Option<crate::types::ModelView>> {
+        let db = crate::db_backend::db_backend();
+        let Some(model) = db.get_model(model_id.to_string())? else {
+            return Ok(None);
+        };
+        let endpoint = db.get_endpoint(&model.endpoint_id)?;
+        Ok(Some(model.view(endpoint.as_ref())))
     }
 
     pub async fn init_global_instance() -> Result<()> {
@@ -738,605 +561,6 @@ impl AIService {
     }
 
     // -------------------------------------
-    // LLM
-    // -------------------------------------
-
-    fn new_candle_device() -> Device {
-        if cfg!(feature = "cuda") {
-            log::info!("Using CUDA device");
-            let non_accelerated_message =
-                "Could not get accelerated CUDA device. Defaulting to CPU.";
-            Device::new_cuda(0).unwrap_or_else(|e| {
-                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
-                Device::Cpu
-            })
-        } else if cfg!(feature = "metal") {
-            Device::new_metal(0).unwrap_or_else(|e| {
-                let non_accelerated_message =
-                    "Could not get accelerated Metal device. Defaulting to CPU.";
-                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
-                Device::Cpu
-            })
-        } else {
-            log::warn!("Using CPU candle device");
-            Device::Cpu
-        }
-    }
-    async fn build_local_llama(model_id: String, model_config: LocalModel) -> Result<Llama> {
-        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-        let llama = Llama::builder().with_source(match model_config.file_name.as_str() {
-            // First check model name shortcuts
-            "Qwen2.5.1-Coder-7B-Instruct" => LlamaSource::new(FileSource::huggingface(
-                "bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF".to_string(),
-                "main".to_string(),
-                "Qwen2.5.1-Coder-7B-Instruct-Q4_K_M.gguf".to_string(),
-            )),
-            "deephermes-3-llama-3-8b-Q4" => LlamaSource::new(FileSource::huggingface(
-                "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
-                "main".to_string(),
-                "DeepHermes-3-Llama-3-8B-q4.gguf".to_string(),
-            ))
-            .with_override_stop_token_string("<|eot_id|>".to_string()),
-            "deephermes-3-llama-3-8b-Q6" => LlamaSource::new(FileSource::huggingface(
-                "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
-                "main".to_string(),
-                "DeepHermes-3-Llama-3-8B-q6.gguf".to_string(),
-            ))
-            .with_override_stop_token_string("<|eot_id|>".to_string()),
-            "deephermes-3-llama-3-8b-Q8" => LlamaSource::new(FileSource::huggingface(
-                "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
-                "main".to_string(),
-                "DeepHermes-3-Llama-3-8B-q8.gguf".to_string(),
-            ))
-            .with_override_stop_token_string("<|eot_id|>".to_string()),
-            "deepseek_r1_distill_qwen_1_5b" => LlamaSource::deepseek_r1_distill_qwen_1_5b(),
-            "deepseek_r1_distill_qwen_7b" => LlamaSource::deepseek_r1_distill_qwen_7b(),
-            "deepseek_r1_distill_qwen_14b" => LlamaSource::deepseek_r1_distill_qwen_14b(),
-            "deepseek_r1_distill_llama_8b" => LlamaSource::deepseek_r1_distill_llama_8b(),
-            "llama_tiny" => LlamaSource::tiny_llama_1_1b(),
-            "llama_tiny_1_1b_chat" => LlamaSource::tiny_llama_1_1b_chat(),
-            "llama_7b" => LlamaSource::llama_7b(),
-            "llama_7b_chat" => LlamaSource::llama_7b_chat(),
-            "llama_7b_code" => LlamaSource::llama_7b_code(),
-            "llama_8b" => LlamaSource::llama_8b(),
-            "llama_8b_chat" => LlamaSource::llama_8b_chat(),
-            "llama_3_1_8b_chat" => LlamaSource::llama_3_1_8b_chat(),
-            "llama_13b" => LlamaSource::llama_13b(),
-            "llama_13b_chat" => LlamaSource::llama_13b_chat(),
-            "llama_13b_code" => LlamaSource::llama_13b_code(),
-            "llama_34b_code" => LlamaSource::llama_34b_code(),
-            "llama_70b" => LlamaSource::llama_70b(),
-            "mistral_7b" => LlamaSource::mistral_7b(),
-            "mistral_7b_instruct" => LlamaSource::mistral_7b_instruct(),
-            "mistral_7b_instruct_2" => LlamaSource::mistral_7b_instruct_2(),
-            "solar_10_7b" => LlamaSource::solar_10_7b(),
-            "solar_10_7b_instruct" => LlamaSource::solar_10_7b_instruct(),
-
-            // Handle unknown models
-            _ => {
-                if let Some(repo) = model_config.huggingface_repo.clone() {
-                    log::info!(
-                        "Trying to load model from Huggingface:\n
-                        model_config.file_name: {:?}\n
-                        model_config.huggingface_repo: {:?}\n
-                        model_config.revision: {:?}",
-                        model_config.file_name,
-                        model_config.huggingface_repo,
-                        model_config.revision
-                    );
-                    let mut builder = LlamaSource::new(FileSource::huggingface(
-                        repo,
-                        model_config.revision.unwrap_or("main".to_string()),
-                        model_config.file_name,
-                    ));
-                    if let Some(tokenizer_source) = model_config.tokenizer_source {
-                        log::info!(
-                            "Trying to load tokenizer from Huggingface:\n
-                            tokenizer_source.repo: {:?}\n
-                            tokenizer_source.revision: {:?}\n
-                            tokenizer_source.file_name: {:?}",
-                            tokenizer_source.repo,
-                            tokenizer_source.revision,
-                            tokenizer_source.file_name
-                        );
-                        builder = builder.with_tokenizer(FileSource::huggingface(
-                            tokenizer_source.repo,
-                            tokenizer_source.revision,
-                            tokenizer_source.file_name,
-                        ));
-                    }
-                    builder
-                } else {
-                    // If no huggingface repo is set, treat as local file path
-                    log::info!(
-                        "Trying to load model from local file: {}",
-                        model_config.file_name
-                    );
-
-                    let model_path = PathBuf::from(&model_config.file_name);
-                    if !model_path.exists() {
-                        let error_msg =
-                            format!("Model file not found at path: {}", model_config.file_name);
-                        log::error!("{}", error_msg);
-                        return Err(anyhow!(error_msg));
-                    }
-
-                    let mut builder = LlamaSource::new(FileSource::local(model_path));
-
-                    // If a tokenizer is specified, add it
-                    if let Some(tokenizer_source) = model_config.tokenizer_source {
-                        if tokenizer_source.repo.is_empty() {
-                            // Empty repo means it's a local file path
-                            let tokenizer_path = PathBuf::from(&tokenizer_source.file_name);
-                            if !tokenizer_path.exists() {
-                                let error_msg = format!(
-                                    "Tokenizer file not found at path: {}",
-                                    tokenizer_source.file_name
-                                );
-                                log::error!("{}", error_msg);
-                                return Err(anyhow!(error_msg));
-                            }
-                            log::info!(
-                                "Loading tokenizer from local file: {}",
-                                tokenizer_source.file_name
-                            );
-                            builder = builder.with_tokenizer(FileSource::local(tokenizer_path));
-                        }
-                    }
-                    builder
-                }
-            }
-        });
-
-        // Build the local Llama model
-        let llama = llama
-            .with_device(Self::new_candle_device())
-            .build_with_loading_handler({
-                let model_id = model_id.clone();
-                move |progress| {
-                    tokio::spawn(handle_progress(model_id.clone(), progress));
-                }
-            })
-            .await?;
-
-        publish_model_status(model_id.clone(), 100.0, "Downloaded", true, false).await;
-
-        Ok(llama)
-    }
-
-    /// Build the provider client for a remote model.
-    ///
-    /// Which protocol is spoken is decided here, once, from the model's
-    /// `api_type` — everything downstream holds a `dyn RemoteChat` and does
-    /// not know or care. See `ai_service::providers`.
-    ///
-    /// Refuses a key that would cross the network in the clear. The WS
-    /// handlers refuse it too, but a model saved before they did still loads
-    /// through here, and would otherwise send its key with every completion.
-    /// The refusal fails this one model and shows in its status.
-    async fn build_remote_client(model_id: String, api: ModelApi) -> Result<Box<dyn RemoteChat>> {
-        if !api.api_key.is_empty() && !providers::http::is_transport_safe(&api.base_url) {
-            return Err(anyhow!(
-                "{} ({})",
-                providers::http::CLEARTEXT_KEY_REFUSAL,
-                api.base_url
-            ));
-        }
-
-        publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
-        // The provider client is the key's one receiver: it sends the key to the provider.
-        let api_key = api.api_key.expose_once();
-        let client: Box<dyn RemoteChat> = match api.api_type {
-            ModelApiType::OpenAi => {
-                Box::new(providers::openai::OpenAiChat::new(&api_key, api.base_url))
-            }
-            ModelApiType::Anthropic => Box::new(providers::anthropic::AnthropicChat::new(
-                &api_key,
-                api.base_url,
-            )),
-            ModelApiType::Ollama => Box::new(providers::ollama::OllamaChat::new(
-                &api_key,
-                api.base_url,
-                api.max_num_ctx,
-            )),
-        };
-        publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
-        Ok(client)
-    }
-
-    async fn spawn_llm_model(
-        &self,
-        model_config: crate::types::Model,
-        model_ready_sender: Option<oneshot::Sender<()>>,
-    ) -> Result<()> {
-        if model_config.local.is_none() && model_config.api.is_none() {
-            return Err(anyhow!(
-                "AI model definition {} doesn't have a body, nothing to spawn!",
-                model_config.name
-            ));
-        }
-
-        let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
-        self.llm_channel
-            .lock()
-            .await
-            .insert(model_config.id.clone(), llama_tx);
-        thread::spawn({
-            move || {
-                let model_id = model_config.id.clone();
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(publish_model_status(
-                    model_config.id.clone(),
-                    100.0,
-                    "Spawning model thread...",
-                    true,
-                    false,
-                ));
-                let maybe_model = rt
-                    .block_on(async {
-                        if let Some(local_model) = model_config.local {
-                            Self::build_local_llama(model_id, local_model)
-                                .await
-                                .map(LlmModel::Local)
-                        } else if let Some(api) = model_config.api {
-                            let model_string = api.model.clone();
-                            Self::build_remote_client(model_id, api)
-                                .await
-                                .map(|client| LlmModel::Remote((client, model_string)))
-                        } else {
-                            Err(anyhow!("AI model definition {} doesn't have a body, and this error should have been caught above", model_config.name))
-                        }
-                    });
-
-                let mut model = match maybe_model {
-                    Ok(m) => m,
-                    Err(e) => {
-                        error!("Failed to build LLM model: {}", e);
-                        rt.block_on(publish_model_status(
-                            model_config.id.clone(),
-                            100.0,
-                            &format!("Failed to build LLM model: {}", e),
-                            true,
-                            false,
-                        ));
-                        return;
-                    }
-                };
-
-                let mut tasks = HashMap::<String, Task<Llama>>::new();
-                let mut task_descriptions = HashMap::<String, AITask>::new();
-
-                rt.block_on(publish_model_status(
-                    model_config.id.clone(),
-                    100.0,
-                    "Ready",
-                    true,
-                    true,
-                ));
-
-                if let Some(model_ready_sender) = model_ready_sender {
-                    let _ = model_ready_sender.send(());
-                }
-
-                // Block on the channel — zero CPU while idle.
-                loop {
-                    match rt.block_on(llama_rx.recv()) {
-                        None => break,
-                        Some(task_request) => match task_request {
-                            LLMTaskRequest::Shutdown(shutdown_request) => {
-                                rt.block_on(publish_model_status(
-                                    model_config.id.clone(),
-                                    100.0,
-                                    "Shutting down",
-                                    true,
-                                    false,
-                                ));
-
-                                // Send confirmation before breaking
-                                let _ = shutdown_request.result_sender.send(());
-                                break;
-                            }
-                            LLMTaskRequest::Spawn(spawn_request) => match model {
-                                LlmModel::Remote(_) => {
-                                    task_descriptions.insert(
-                                        spawn_request.task.task_id.clone(),
-                                        spawn_request.task,
-                                    );
-                                    let _ = spawn_request.result_sender.send(Ok(()));
-                                }
-                                LlmModel::Local(ref mut llama) => {
-                                    rt.block_on(publish_model_status(
-                                        model_config.id.clone(),
-                                        100.0,
-                                        "Spawning task...",
-                                        true,
-                                        true,
-                                    ));
-                                    let task_description = spawn_request.task;
-
-                                    let task = llama
-                                        .task(task_description.system_prompt.clone())
-                                        .with_examples(
-                                            task_description
-                                                .prompt_examples
-                                                .clone()
-                                                .into_iter()
-                                                .map(|example| (example.input, example.output))
-                                                .collect::<Vec<(String, String)>>(),
-                                        );
-
-                                    rt.block_on(task.run("Test example prompt").all_text());
-
-                                    tasks.insert(task_description.task_id.clone(), task);
-                                    let _ = spawn_request.result_sender.send(Ok(()));
-
-                                    rt.block_on(publish_model_status(
-                                        model_config.id.clone(),
-                                        100.0,
-                                        "Ready",
-                                        true,
-                                        true,
-                                    ));
-                                }
-                            },
-
-                            LLMTaskRequest::PromptTurns(turns_request) => match model {
-                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
-                                    let request =
-                                        ChatRequest::new(model_string.clone(), turns_request.turns)
-                                            .with_tools(turns_request.tools);
-
-                                    let result = rt.block_on(within_endpoint_limits(
-                                        model_config.endpoint_id.as_deref(),
-                                        false,
-                                        remote_client.chat(request),
-                                    ));
-                                    let _ = turns_request.result_sender.send(result);
-                                }
-                                LlmModel::Local(_) => {
-                                    // Unreachable in practice: the caller
-                                    // checks `api_type_supports_native_tools`
-                                    // first, and no local model answers true.
-                                    // Refuse loudly rather than silently
-                                    // dropping the tools if that check is ever
-                                    // got wrong.
-                                    let _ = turns_request.result_sender.send(Err(anyhow!(
-                                        "Model {} is local; native tool calling needs a provider whose wire format carries tools",
-                                        model_config.id
-                                    )));
-                                }
-                            },
-
-                            LLMTaskRequest::Prompt(prompt_request) => match model {
-                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
-                                    if let Some(task) =
-                                        task_descriptions.get(&prompt_request.task_id)
-                                    {
-                                        let request = ChatRequest::new(
-                                            model_string.clone(),
-                                            turns_for_task(task, prompt_request.prompt),
-                                        );
-
-                                        let result = rt
-                                            .block_on(within_endpoint_limits(
-                                                model_config.endpoint_id.as_deref(),
-                                                false,
-                                                remote_client.chat(request),
-                                            ))
-                                            .map(|reply| reply.text);
-
-                                        let _ = prompt_request.result_sender.send(result);
-                                    } else {
-                                        let _ = prompt_request.result_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            prompt_request.task_id
-                                        )));
-                                    }
-                                }
-                                LlmModel::Local(_) => {
-                                    if let Some(task) = tasks.get(&prompt_request.task_id) {
-                                        rt.block_on(publish_model_status(
-                                            model_config.id.clone(),
-                                            100.0,
-                                            "Running inference...",
-                                            true,
-                                            true,
-                                        ));
-
-                                        let result = rt.block_on(async {
-                                            match prompt_request.constraint.clone() {
-                                                // Tool-call grammar: constrain decoding and
-                                                // accumulate the (guaranteed on-grammar) text.
-                                                Some(parser) => {
-                                                    use futures::StreamExt;
-                                                    let mut stream = Box::pin(
-                                                        task.run(prompt_request.prompt.clone())
-                                                            .with_constraints(parser),
-                                                    );
-                                                    let mut acc = String::new();
-                                                    while let Some(token) = stream.next().await {
-                                                        acc.push_str(&token);
-                                                    }
-                                                    acc
-                                                }
-                                                // No tools: unchanged unconstrained path.
-                                                None => {
-                                                    task.run(prompt_request.prompt.clone())
-                                                        .all_text()
-                                                        .await
-                                                }
-                                            }
-                                        });
-
-                                        rt.block_on(publish_model_status(
-                                            model_config.id.clone(),
-                                            100.0,
-                                            "Ready",
-                                            true,
-                                            true,
-                                        ));
-
-                                        let _ = prompt_request.result_sender.send(Ok(result));
-                                    } else {
-                                        let _ = prompt_request.result_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            prompt_request.task_id
-                                        )));
-                                    }
-                                }
-                            },
-
-                            LLMTaskRequest::PromptStream(stream_request) => match model {
-                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
-                                    // Whether this really streams is the
-                                    // provider's business: one that can
-                                    // pushes text as the model writes it,
-                                    // one that cannot answers in a single
-                                    // chunk through the trait's default. The
-                                    // SSE consumer sees the same protocol
-                                    // either way.
-                                    if let Some(task) =
-                                        task_descriptions.get(&stream_request.task_id)
-                                    {
-                                        let prompt_clone = stream_request.prompt.clone();
-                                        let request = ChatRequest::new(
-                                            model_string.clone(),
-                                            turns_for_task(task, prompt_clone.clone()),
-                                        );
-                                        let token_sender = stream_request.token_sender.clone();
-                                        match rt.block_on(within_endpoint_limits(
-                                            model_config.endpoint_id.as_deref(),
-                                            true,
-                                            remote_client.chat_stream(request, token_sender),
-                                        )) {
-                                            Err(e) => {
-                                                let _ = stream_request.done_sender.send(Err(e));
-                                            }
-                                            Ok(reply) => {
-                                                // Tokens have already gone out
-                                                // through `token_sender`; the
-                                                // reply is here only so the
-                                                // closing usage event can be
-                                                // billed on the whole text.
-                                                let text = reply.text;
-                                                let prompt_tokens =
-                                                    estimate_token_count(&prompt_clone);
-                                                let completion_tokens = estimate_token_count(&text);
-                                                let _ = stream_request.done_sender.send(Ok(
-                                                    PromptResult {
-                                                        text,
-                                                        prompt_tokens,
-                                                        completion_tokens,
-                                                        model_id: model_config.id.clone(),
-                                                    },
-                                                ));
-                                            }
-                                        }
-                                    } else {
-                                        let _ = stream_request.done_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            stream_request.task_id
-                                        )));
-                                    }
-                                }
-                                LlmModel::Local(_) => {
-                                    if let Some(task) = tasks.get(&stream_request.task_id) {
-                                        rt.block_on(publish_model_status(
-                                            model_config.id.clone(),
-                                            100.0,
-                                            "Running inference...",
-                                            true,
-                                            true,
-                                        ));
-
-                                        let prompt_clone = stream_request.prompt.clone();
-                                        let prompt_tokens = estimate_token_count(&prompt_clone);
-                                        let token_sender = stream_request.token_sender.clone();
-                                        // Forward each token through the
-                                        // mpsc back to the SSE handler.  We
-                                        // accumulate the full text so the
-                                        // closing event still carries a
-                                        // single concatenated string for
-                                        // billing + usage parity with the
-                                        // non-stream path.
-                                        let result = rt.block_on(async {
-                                            use futures::StreamExt;
-                                            // `task.run(...)` returns a
-                                            // `ChatResponseBuilder` which
-                                            // implements `Stream<Item=String>`;
-                                            // polling it yields one token
-                                            // chunk at a time.
-                                            let mut accumulated = String::new();
-                                            match stream_request.constraint.clone() {
-                                                // Tool-call grammar: constrained streaming.
-                                                Some(parser) => {
-                                                    let mut stream = Box::pin(
-                                                        task.run(prompt_clone.clone())
-                                                            .with_constraints(parser),
-                                                    );
-                                                    while let Some(token) = stream.next().await {
-                                                        accumulated.push_str(&token);
-                                                        if token_sender.send(token).is_err() {
-                                                            // consumer dropped — stop generating
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                // No tools: unchanged unconstrained streaming.
-                                                None => {
-                                                    let mut stream =
-                                                        Box::pin(task.run(prompt_clone.clone()));
-                                                    while let Some(token) = stream.next().await {
-                                                        accumulated.push_str(&token);
-                                                        if token_sender.send(token).is_err() {
-                                                            // consumer dropped — stop generating
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            accumulated
-                                        });
-
-                                        rt.block_on(publish_model_status(
-                                            model_config.id.clone(),
-                                            100.0,
-                                            "Ready",
-                                            true,
-                                            true,
-                                        ));
-
-                                        let completion_tokens = estimate_token_count(&result);
-                                        let _ = stream_request.done_sender.send(Ok(PromptResult {
-                                            text: result,
-                                            prompt_tokens,
-                                            completion_tokens,
-                                            model_id: model_config.id.clone(),
-                                        }));
-                                    } else {
-                                        let _ = stream_request.done_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            stream_request.task_id
-                                        )));
-                                    }
-                                }
-                            },
-
-                            LLMTaskRequest::Remove(remove_request) => {
-                                let _ = tasks.remove(&remove_request.task_id);
-                                let _ = task_descriptions.remove(&remove_request.task_id);
-                                let _ = remove_request.result_sender.send(());
-                            }
-                        },
-                    }
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    // -------------------------------------
     // Tasks
     // -------------------------------------
 
@@ -1348,7 +572,10 @@ impl AIService {
     }
 
     /// `agent_did` is the owning managed agent's DID; `None` makes a task of the main agent.
+    /// Refused unless the task's model is a loaded LLM.
     pub async fn add_task(&self, task: AITaskInput, agent_did: Option<&str>) -> Result<AITask> {
+        self.chat_model(&Self::replace_model_variables(&task.model_id)?)
+            .await?;
         let task_id = crate::db_backend::db_backend()
             .add_task(
                 task.name.clone(),
@@ -1363,12 +590,9 @@ impl AIService {
             )
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        let task = crate::db_backend::db_backend()
+        Ok(crate::db_backend::db_backend()
             .get_task(task_id)?
-            .expect("to get task that we just created");
-
-        self.spawn_task(task.clone()).await?;
-        Ok(task)
+            .expect("to get task that we just created"))
     }
 
     fn replace_model_variables(model_id: &String) -> Result<String> {
@@ -1381,39 +605,24 @@ impl AIService {
         })
     }
 
-    /// Register an already-persisted task row with its LLM worker.
-    ///
-    /// Public entry point for tasks minted outside [`AIService::add_task`] —
-    /// notably the generic interpretation task, which `ensure_interpretation_task`
-    /// inserts via `Ad4mDb::add_task` directly (to stay idempotent-by-name).
-    /// Without this, such a task sits in the DB unspawned until the next
-    /// executor restart's `load()` sweep, so its first `prompt` fails with
-    /// "Task not spawned". Callers spawn it right after creation instead.
-    pub async fn spawn_registered_task(&self, task: AITask) -> Result<()> {
-        self.spawn_task(task).await
+    /// The client of the LLM `model_id` (an id, after `default` was resolved). None is the
+    /// caller's mistake (an [`InvalidModel`](crate::db::InvalidModel)): a task names a model
+    /// that is not an LLM, or none.
+    async fn chat_model(&self, model_id: &str) -> Result<ChatModel> {
+        self.llms
+            .lock()
+            .await
+            .get(model_id)
+            .cloned()
+            .ok_or_else(|| {
+                crate::db::InvalidModel(format!("No LLM with id '{model_id}' is loaded")).into()
+            })
     }
 
-    async fn spawn_task(&self, task: AITask) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let llm_channel = self.llm_channel.lock().await;
-        let model_id = Self::replace_model_variables(&task.model_id)?;
-
-        if let Some(sender) = llm_channel.get(&model_id) {
-            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-                task: task.clone(),
-                result_sender: tx,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in LLM channel",
-                task.model_id
-            ));
-        }
-
-        rx.await?
-    }
-
+    /// Rewrites a task. Refused unless its model is a loaded LLM.
     pub async fn update_task(&self, task: AITask) -> Result<AITask> {
+        self.chat_model(&Self::replace_model_variables(&task.model_id)?)
+            .await?;
         let task_id = task.task_id.clone();
         crate::db_backend::db_backend()
             .update_task(
@@ -1426,161 +635,84 @@ impl AIService {
             )
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        self.remove_task(task_id.clone()).await?;
-
-        let updated_task = crate::db_backend::db_backend()
-            .get_task(task_id.clone())
+        crate::db_backend::db_backend()
+            .get_task(task_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
-            .ok_or(AIServiceError::TaskNotFound)?;
-
-        self.spawn_task(updated_task.clone()).await?;
-
-        Ok(updated_task)
+            .ok_or_else(|| AIServiceError::TaskNotFound.into())
     }
 
     pub async fn delete_task(&self, task_id: String) -> Result<bool> {
-        self.remove_task(task_id.clone()).await?;
         crate::db_backend::db_backend()
             .remove_task(task_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         Ok(true)
     }
 
-    async fn remove_task(&self, task_id: String) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let llm_channel = self.llm_channel.lock().await;
-        let task = Self::get_tasks()?
-            .into_iter()
-            .find(|t| t.task_id == task_id)
-            .ok_or_else(|| anyhow!("Task with ID {} not found", task_id))?;
-        let model_id = Self::replace_model_variables(&task.model_id)?;
-
-        if let Some(sender) = llm_channel.get(&model_id) {
-            sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
-                task_id,
-                result_sender: tx,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!("Model 'llama' not found in LLM channel"));
-        }
-
-        rx.await?;
-        Ok(())
-    }
-
-    /// Build an ephemeral, in-memory task from a list of `(system, user,
-    /// assistant)` messages and return its `task_id`.  Used by the
-    /// OpenAI-compatible `chat.completions` handler so each request is
-    /// stateless: spawn → prompt → remove.  Nothing touches the DB.
+    /// The turns of an OpenAI-style `(role, content)` message list, and the final user
+    /// message among them (the prompt, for logging and the estimate).
     ///
-    /// `messages` is in OpenAI order — system message(s) at the front,
-    /// then alternating user/assistant turns ending with a final user
-    /// message.  The final user message is returned separately so the
-    /// caller passes it as the prompt; everything before it becomes the
-    /// task's `system_prompt` + few-shot example pairs.
-    fn build_ephemeral_task(model_id: &str, messages: Vec<(String, String)>) -> (AITask, String) {
-        // Split: leading System messages → system_prompt; alternating
-        // User/Assistant pairs → examples; last User message → prompt.
+    /// Leading system messages join into one system turn; user/assistant pairs become the
+    /// examples; the last user message is the prompt. Tool and other roles are dropped:
+    /// the caller folded them into text before.
+    fn turns_for_messages(messages: Vec<(String, String)>) -> (Vec<ChatTurn>, String) {
         let mut system_prompt = String::new();
         let mut examples: Vec<crate::types::AIPromptExamples> = Vec::new();
         let mut current_user: Option<String> = None;
-        let mut final_prompt = String::new();
 
-        for (role, content) in &messages {
+        for (role, content) in messages {
             match role.as_str() {
                 "system" => {
                     if !system_prompt.is_empty() {
-                        system_prompt.push_str("\n");
+                        system_prompt.push('\n');
                     }
-                    system_prompt.push_str(content);
+                    system_prompt.push_str(&content);
                 }
                 "user" => {
-                    if let Some(prev_user) = current_user.take() {
-                        current_user = Some(format!("{}\n{}", prev_user, content));
-                    } else {
-                        current_user = Some(content.clone());
-                    }
+                    current_user = Some(match current_user.take() {
+                        Some(previous) => format!("{previous}\n{content}"),
+                        None => content,
+                    });
                 }
                 "assistant" => {
-                    if let Some(user_msg) = current_user.take() {
+                    if let Some(input) = current_user.take() {
                         examples.push(crate::types::AIPromptExamples {
-                            input: user_msg,
-                            output: content.clone(),
+                            input,
+                            output: content,
                         });
                     }
                 }
-                _ => { /* tool/function/developer — silently dropped */ }
+                _ => {}
             }
         }
-        if let Some(last_user) = current_user {
-            final_prompt = last_user;
-        }
-
-        let task_id = format!("openai-compat-{}", uuid::Uuid::new_v4());
-        let now = chrono::Utc::now().to_rfc3339();
-        let task = AITask {
-            name: format!("openai-compat-{}", &task_id[..8]),
-            task_id: task_id.clone(),
-            model_id: model_id.to_string(),
-            system_prompt,
-            prompt_examples: examples,
-            meta_data: None,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        (task, final_prompt)
+        let prompt = current_user.unwrap_or_default();
+        (turns_for(&system_prompt, &examples, prompt.clone()), prompt)
     }
 
-    /// Run a chat-style prompt on `model_id` with a stateless message
-    /// list and return the full response text + token counts.  Backs
-    /// `POST /v1/chat/completions`.
+    /// Run a chat-style prompt on `model_id` with a stateless message list and return the
+    /// full response text and token counts. Backs the `/v1/chat/completions` paths the
+    /// executor answers itself (Anthropic, the text tool fallback) and the harness.
+    ///
+    /// `json_schema` constrains the reply's text to JSON matching it, where the model's
+    /// server can decode against a schema ([`ChatRequest::json_schema`]); the caller
+    /// validates what comes back.
     pub async fn prompt_messages(
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
         bill_to: Option<String>,
-        constraint: Option<ArcParser<()>>,
+        json_schema: Option<serde_json::Value>,
     ) -> Result<PromptResult> {
         let resolved = Self::replace_model_variables(&model_id)?;
-        let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
+        let chat = self.chat_model(&resolved).await?;
+        let (turns, final_prompt) = Self::turns_for_messages(messages);
 
-        // Spawn + prompt + remove.  We use the existing per-model thread
-        // command channels so model state stays local to its thread and
-        // we don't duplicate the build-llama machinery.
-        let task_id = task.task_id.clone();
-        let (spawn_tx, spawn_rx) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-                task,
-                result_sender: spawn_tx,
-            }))?;
-        }
-        spawn_rx.await??;
-
-        let (prompt_tx, prompt_rx) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                task_id: task_id.clone(),
-                prompt: final_prompt.clone(),
-                constraint,
-                result_sender: prompt_tx,
-            }))?;
-        }
         let prompt_tokens = estimate_token_count(&final_prompt);
         log::debug!(
             "🤖 prompt_messages input model={} text={:?}",
             resolved,
             truncate_for_log(&final_prompt)
         );
-        let text = prompt_rx.await??;
+        let text = chat.chat(turns, Vec::new(), json_schema).await?.text;
         let completion_tokens = estimate_token_count(&text);
         log::debug!(
             "🤖 prompt_messages output model={} text={:?}",
@@ -1588,22 +720,8 @@ impl AIService {
             truncate_for_log(&text)
         );
 
-        // Clean up the ephemeral task entry on the LLM thread.
-        let (remove_tx, _) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            if let Some(sender) = llm_channel.get(&resolved) {
-                let _ = sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
-                    task_id: task_id.clone(),
-                    result_sender: remove_tx,
-                }));
-            }
-        }
-
-        // Bill via the shared host_rates helper (matches transcription
-        // worker + WS-RPC pattern). Rate = 0 (unpriced model) makes this
-        // a no-op. InsufficientCredits is returned to the caller so /v1
-        // can propagate 429; other errors are logged and swallowed.
+        // Rate = 0 (unpriced model) makes this a no-op. Insufficient credits are checked
+        // before the call (the /v1 handler answers 429); here they only log.
         Self::bill_prompt_if_authed(
             bill_to.as_deref(),
             &resolved,
@@ -1619,39 +737,29 @@ impl AIService {
         })
     }
 
-    /// Whether this model's provider carries tools as definitions rather than
-    /// as text rendered into the prompt.
-    ///
-    /// Asked of the stored config rather than of a built client, because the
-    /// caller has to decide how to render tools before anything reaches a
-    /// worker thread. Local models are always false — they have no wire format
-    /// to carry a tool in.
+    /// Whether this model takes tools as definitions rather than as text rendered into the
+    /// prompt: its endpoint's protocol can, and its `native_tools` flag says it should.
+    /// False for a model that does not exist.
     pub fn model_supports_native_tools(model_id: &str) -> bool {
-        let resolved = match Self::replace_model_variables(&model_id.to_string()) {
-            Ok(resolved) => resolved,
-            Err(_) => return false,
+        let Ok(resolved) = Self::replace_model_variables(&model_id.to_string()) else {
+            return false;
         };
-
-        crate::db_backend::db_backend()
-            .get_model(resolved)
+        let db = crate::db_backend::db_backend();
+        let Ok(Some(model)) = db.get_model(resolved) else {
+            return false;
+        };
+        db.get_endpoint(&model.endpoint_id)
             .ok()
             .flatten()
-            .and_then(|model| model.api)
-            .map(|api| api.uses_native_tools())
-            .unwrap_or(false)
+            .is_some_and(|endpoint| model.uses_native_tools(&endpoint))
     }
 
     /// Prompt a model with a complete turn list and tool definitions, getting
     /// back whatever text it wrote and any calls it wants dispatched.
     ///
-    /// The counterpart of [`Self::prompt_messages`] for providers whose wire
-    /// format carries tools. Gate it on [`Self::model_supports_native_tools`]:
-    /// a model that does not will refuse rather than silently drop the tools.
-    ///
-    /// No ephemeral task is spawned. `prompt_messages` needs one because it
-    /// has to reassemble a system prompt and examples out of a flattened
-    /// message list; here the turns *are* the conversation, so there is
-    /// nothing to rebuild and nothing to clean up afterwards.
+    /// The counterpart of [`Self::prompt_messages`] for models that take tools as
+    /// definitions. Gate it on [`Self::model_supports_native_tools`]: a client that does
+    /// not carry tools refuses rather than silently drops them.
     pub async fn prompt_with_tools(
         &self,
         model_id: String,
@@ -1660,6 +768,7 @@ impl AIService {
         bill_to: Option<String>,
     ) -> Result<ChatReply> {
         let resolved = Self::replace_model_variables(&model_id)?;
+        let chat = self.chat_model(&resolved).await?;
 
         // Estimated before the turns are handed over, because everything below
         // goes on the wire and the caller is charged for all of it. Billing
@@ -1675,21 +784,7 @@ impl AIService {
             }))
             .sum();
 
-        let (result_tx, result_rx) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::PromptTurns(LLMTaskPromptTurnsRequest {
-                turns,
-                tools,
-                result_sender: result_tx,
-            }))?;
-        }
-
-        let reply = result_rx.await??;
-
+        let reply = chat.chat(turns, tools, None).await?;
         let completion_tokens = estimate_reply_tokens(&reply);
 
         log::debug!(
@@ -1709,94 +804,37 @@ impl AIService {
         Ok(reply)
     }
 
-    /// Streaming variant of [`Self::prompt_messages`].  Returns a token
-    /// stream + a oneshot for the final [`PromptResult`] (carries the
-    /// full text + token counts for the closing SSE event).
-    ///
-    /// Billing happens when the stream completes: the worker's final
-    /// result is billed (on success only, matching
-    /// [`Self::prompt_messages`]) in a forwarder task before it reaches
-    /// the caller's `done_rx`.
+    /// Streaming variant of [`Self::prompt_messages`]. Returns the token stream, and a
+    /// oneshot for the final [`PromptResult`] (the full text and token counts, for the
+    /// closing SSE event). Billed when the stream completes, on success only.
     pub async fn prompt_messages_stream(
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
         bill_to: Option<String>,
-        constraint: Option<ArcParser<()>>,
     ) -> Result<(
         mpsc::UnboundedReceiver<String>,
         oneshot::Receiver<Result<PromptResult>>,
     )> {
         let resolved = Self::replace_model_variables(&model_id)?;
-        let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
-
-        let task_id = task.task_id.clone();
-        let (spawn_tx, spawn_rx) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-                task,
-                result_sender: spawn_tx,
-            }))?;
-        }
-        spawn_rx.await??;
+        let chat = self.chat_model(&resolved).await?;
+        let (turns, final_prompt) = Self::turns_for_messages(messages);
 
         let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
-        // worker -> forwarder -> caller: the billing hook runs between the
-        // worker's final result and the caller's done_rx, so stream:true
-        // requests are charged like the non-stream path (success only).
-        let (worker_done_tx, worker_done_rx) = oneshot::channel::<Result<PromptResult>>();
         let (done_tx, done_rx) = oneshot::channel::<Result<PromptResult>>();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::PromptStream(LLMTaskPromptStreamRequest {
-                task_id: task_id.clone(),
-                prompt: final_prompt,
-                constraint,
-                token_sender: token_tx,
-                done_sender: worker_done_tx,
-            }))?;
-        }
-
-        let billing_model_id = resolved.clone();
         tokio::spawn(async move {
-            // The worker always sends Ok/Err; the Err arm only covers a
-            // dropped sender (worker panic).
-            let result = match worker_done_rx.await {
-                Ok(inner) => inner,
-                Err(_) => Err(anyhow!("LLM stream ended without a final result")),
-            };
-            Self::bill_and_forward_stream_result(bill_to, &billing_model_id, result, done_tx).await;
-        });
-
-        // Schedule a Remove for after the prompt completes — best-effort
-        // background cleanup so the caller doesn't have to await it.
-        let llm_channel_clone = self.llm_channel.clone();
-        let resolved_clone = resolved.clone();
-        tokio::spawn(async move {
-            // Wait a little for the prompt to finish before removing the
-            // task entry; if the model is local, the thread holds the
-            // task in its `tasks` map for the duration of the call, so
-            // removing too early would race the inference.
-            //
-            // We don't have a reliable signal here without restructuring
-            // the channel; the LLM thread serialises requests anyway, so
-            // a Remove queued immediately will run after the
-            // PromptStream completes.  No sleep needed.
-            let (remove_tx, _) = oneshot::channel();
-            let llm_channel = llm_channel_clone.lock().await;
-            if let Some(sender) = llm_channel.get(&resolved_clone) {
-                let _ = sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
-                    task_id,
-                    result_sender: remove_tx,
-                }));
-            }
+            // Whether this really streams is the provider's business: one that can pushes
+            // text as the model writes it, one that cannot answers in a single chunk.
+            let result = chat
+                .chat_stream(turns, token_tx)
+                .await
+                .map(|reply| PromptResult {
+                    prompt_tokens: estimate_token_count(&final_prompt),
+                    completion_tokens: estimate_token_count(&reply.text),
+                    text: reply.text,
+                    model_id: resolved.clone(),
+                });
+            Self::bill_and_forward_stream_result(bill_to, &resolved, result, done_tx).await;
         });
 
         Ok((token_rx, done_rx))
@@ -1808,9 +846,6 @@ impl AIService {
         prompt: String,
         bill_to: Option<String>,
     ) -> Result<PromptResult> {
-        let (result_sender, rx) = oneshot::channel();
-
-        // Retrieve the task to find the associated model_id
         let task = crate::db_backend::db_backend()
             .get_task(task_id.clone())
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
@@ -1841,25 +876,13 @@ impl AIService {
 
         // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
         // line gets exactly one companion — either `done` on success or a
-        // `failed` line on error. Wrap the fallible section so we can log
-        // the failure before propagating.
+        // `failed` line on error.
         let text_result: Result<String> = async {
-            let llm_channel = self.llm_channel.lock().await;
-            if let Some(sender) = llm_channel.get(&model_id) {
-                sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                    task_id,
-                    prompt,
-                    result_sender,
-                    constraint: None,
-                }))?;
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Model '{}' not found in LLM channel",
-                    model_id
-                ));
-            }
-            drop(llm_channel);
-            Ok(rx.await??)
+            let chat = self.chat_model(&model_id).await?;
+            Ok(chat
+                .chat(turns_for_task(&task, prompt), Vec::new(), None)
+                .await?
+                .text)
         }
         .await;
 
@@ -1979,103 +1002,6 @@ impl AIService {
     // Embedding
     // -------------------------------------
 
-    /// Make `model` ready to embed, replacing what embedded for it before: the client of
-    /// its endpoint when it has one, else Bert on its own thread. When the client cannot be
-    /// built, the old one is removed too: it would send text to the old URL with the old key.
-    async fn spawn_embedding_model(&self, model_config: crate::types::Model) -> Result<()> {
-        let embedder = match &model_config.endpoint_id {
-            Some(id) => crate::db_backend::db_backend().get_endpoint(id),
-            None => Ok(None),
-        }
-        .and_then(|endpoint| match (endpoint, &model_config.api) {
-            (Some(endpoint), Some(api)) => Ok(Embedder::Remote {
-                client: Arc::from(providers::embed::embed_client(&endpoint)?),
-                remote_model: api.model.clone(),
-                endpoint: Box::new(endpoint),
-            }),
-            _ => Ok(Embedder::Bert(Self::spawn_bert(model_config.id.clone()).0)),
-        });
-        let mut embedders = self.embedding_channel.lock().await;
-        match embedder {
-            Ok(embedder) => {
-                embedders.insert(model_config.id, embedder);
-                Ok(())
-            }
-            Err(e) => {
-                embedders.remove(&model_config.id);
-                Err(e)
-            }
-        }
-    }
-
-    /// Bert on its own thread, embedding each request's texts in order. The receiver
-    /// resolves once the model has loaded or failed to. A failed build reports "Not loaded"
-    /// and ends the thread, so later requests fail instead of waiting.
-    fn spawn_bert(
-        model_id: String,
-    ) -> (
-        mpsc::UnboundedSender<EmbeddingRequest>,
-        oneshot::Receiver<Result<()>>,
-    ) {
-        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
-        let (ready_tx, ready_rx) = oneshot::channel();
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-
-            let model = rt.block_on(async {
-                publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-
-                Bert::builder()
-                    .with_device(Self::new_candle_device())
-                    .build_with_loading_handler({
-                        let model_id = model_id.clone();
-                        move |progress| {
-                            tokio::spawn(handle_progress(model_id.clone(), progress));
-                        }
-                    })
-                    .await
-            });
-            let model = match model {
-                Ok(model) => {
-                    rt.block_on(publish_model_status(
-                        model_id.clone(),
-                        100.0,
-                        "Loaded",
-                        true,
-                        true,
-                    ));
-                    let _ = ready_tx.send(Ok(()));
-                    model
-                }
-                Err(e) => {
-                    error!("couldn't build Bert model {model_id}: {e:?}");
-                    rt.block_on(publish_model_status(
-                        model_id.clone(),
-                        0.0,
-                        "Not loaded",
-                        false,
-                        false,
-                    ));
-                    let _ = ready_tx.send(Err(anyhow!("couldn't build Bert model: {e:?}")));
-                    return;
-                }
-            };
-
-            // Block on the channel — zero CPU while idle. Ends when the sender is dropped.
-            while let Some(request) = rt.block_on(bert_rx.recv()) {
-                let result: Result<Vec<Vec<f32>>> = rt.block_on(async {
-                    let mut vectors = Vec::with_capacity(request.texts.len());
-                    for text in request.texts {
-                        vectors.push(model.embed(text).await.map_err(|e| anyhow!(e))?.to_vec());
-                    }
-                    Ok(vectors)
-                });
-                let _ = request.result_sender.send(result);
-            }
-        });
-        (bert_tx, ready_rx)
-    }
-
     /// Embed one text. See [`Self::embed_batch`].
     pub async fn embed(
         &self,
@@ -2091,21 +1017,24 @@ impl AIService {
     }
 
     /// The id of the embedding model `requested` names: a model's id, else the name of an
-    /// embedding model, else the Bert a fresh executor loads.
+    /// embedding model.
     fn embedding_model_id(requested: &str) -> Result<String> {
         let models = crate::db_backend::db_backend().get_models()?;
-        let found = models.iter().find(|m| m.id == requested).or_else(|| {
-            models
-                .iter()
-                .find(|m| m.name == requested && m.model_type == ModelType::Embedding)
-        });
-        Ok(match found {
-            Some(model) => model.id.clone(),
-            None if requested == default_embedding::DEFAULT_EMBEDDING_MODEL => {
-                default_embedding::DEFAULT_EMBEDDING_MODEL_ID.to_string()
-            }
-            None => requested.to_string(),
-        })
+        models
+            .iter()
+            .find(|m| m.id == requested)
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.name == requested && m.model_type == ModelType::Embedding)
+            })
+            .map(|model| model.id.clone())
+            .ok_or_else(|| {
+                crate::db::InvalidModel(format!(
+                    "No EMBEDDING model has the id or name '{requested}' on this executor"
+                ))
+                .into()
+            })
     }
 
     /// Embed `texts` with the embedding model `model` (an id or a name), in one request to
@@ -2125,51 +1054,34 @@ impl AIService {
             estimate
         );
         let started = std::time::Instant::now();
-        self.ensure_default_embedding(&model_id).await?;
-        let embedder = {
-            let embedders = self.embedding_channel.lock().await;
-            embedders.get(&model_id).cloned().ok_or_else(|| {
-                anyhow!(
-                    "Model '{}' not found in embedding channel. We have: {}",
-                    model,
-                    embedders.keys().join(",")
-                )
-            })?
-        };
+        let embedder = self
+            .embedders
+            .lock()
+            .await
+            .get(&model_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("The embedding model '{model}' is not loaded"))?;
         let count = texts.len();
-        let (vectors, token_count) = match embedder {
-            Embedder::Bert(sender) => {
-                let (result_sender, rx) = oneshot::channel();
-                sender
-                    .send(EmbeddingRequest {
-                        texts,
-                        result_sender,
-                    })
-                    .map_err(|_| anyhow!("The embedding model {model_id} stopped"))?;
-                (rx.await??, estimate)
-            }
-            Embedder::Remote {
-                client,
-                remote_model,
-                endpoint,
-            } => {
-                let timeout =
-                    endpoints::request_timeout(&endpoint, providers::embed::EMBED_TIMEOUT);
-                let call = async {
-                    let _slot = endpoints::request_slot(&endpoint).await;
-                    client.embed(&remote_model, &texts).await
-                };
-                let reply = tokio::time::timeout(timeout, call).await.map_err(|_| {
-                    providers::http::UpstreamUnreachable {
-                        url: endpoint.base_url.to_string(),
-                        timed_out: true,
-                        detail: format!("no answer within {}s", timeout.as_secs()),
-                    }
-                })??;
-                let tokens = reply.prompt_tokens.map_or(estimate, |n| n as usize);
-                (reply.vectors, tokens)
-            }
+        let timeout =
+            endpoints::request_timeout(&embedder.endpoint, providers::embed::EMBED_TIMEOUT);
+        let call = async {
+            let _slot = endpoints::request_slot(&embedder.endpoint).await;
+            embedder.client.embed(&embedder.remote_model, &texts).await
         };
+        let reply = match tokio::time::timeout(timeout, call).await {
+            Ok(reply) => reply,
+            Err(_) => Err(providers::http::UpstreamUnreachable {
+                url: embedder.endpoint.base_url.to_string(),
+                timed_out: true,
+                detail: format!("no answer within {}s", timeout.as_secs()),
+            }
+            .into()),
+        }
+        .inspect_err(|e| {
+            endpoints::after_failed_request(&embedder.endpoint.id, &embedder.remote_model, e)
+        })?;
+        let token_count = reply.prompt_tokens.map_or(estimate, |n| n as usize);
+        let vectors = reply.vectors;
         log::debug!(
             "✅ 🤖 embed done model={} n={} latency={}ms tokens_in={}",
             model_id,
@@ -2187,219 +1099,38 @@ impl AIService {
     }
 
     // -------------------------------------
-    // Whisper / Transcription
+    // Transcription
     // -------------------------------------
 
-    fn whisper_string_to_model(whisper_string: String) -> Result<WhisperSource> {
-        match whisper_string.as_str() {
-            "whisper_tiny" => Ok(WhisperSource::Tiny),
-            "whisper_tiny_quantized" => Ok(WhisperSource::QuantizedTiny),
-            "whisper_tiny_en" => Ok(WhisperSource::TinyEn),
-            "whisper_tiny_en_quantized" => Ok(WhisperSource::QuantizedTinyEn),
-            "whisper_base" => Ok(WhisperSource::Base),
-            "whisper_base_en" => Ok(WhisperSource::BaseEn),
-            "whisper_small" => Ok(WhisperSource::Small),
-            "whisper_small_en" => Ok(WhisperSource::SmallEn),
-            "whisper_medium" => Ok(WhisperSource::Medium),
-            "whisper_medium_en" => Ok(WhisperSource::MediumEn),
-            "whisper_medium_en_quantized_distil" => Ok(WhisperSource::QuantizedDistilMediumEn),
-            "whisper_large" => Ok(WhisperSource::Large),
-            "whisper_large_v2" => Ok(WhisperSource::LargeV2),
-            "whisper_distil_medium_en" => Ok(WhisperSource::DistilMediumEn),
-            "whisper_distil_large_v2" => Ok(WhisperSource::DistilLargeV2),
-            "whisper_distil_large_v3" => Ok(WhisperSource::DistilLargeV3),
-            "whisper_distil_large_v3_quantized" => Ok(WhisperSource::QuantizedDistilLargeV3),
-            "whisper_large_v3_turbo_quantized" => Ok(WhisperSource::QuantizedLargeV3Turbo),
-            _ => Err(anyhow!("Unknown whisper model: {}", whisper_string)),
-        }
-    }
-
-    fn get_whisper_model_size(model_id: String) -> Result<WhisperSource> {
-        // Try to treat string as model size string first
-        if let Ok(model) = Self::whisper_string_to_model(model_id.clone()) {
-            return Ok(model);
-        }
-
-        // Try to get model from DB by ID
-        if let Ok(Some(model)) = crate::db_backend::db_backend().get_model(model_id.clone()) {
-            if model.model_type != ModelType::Transcription {
-                return Err(anyhow!("Model '{}' is not a transcription model", model_id));
-            }
-            // Use filename from local model config
-            if let Some(local) = model.local {
-                return Self::whisper_string_to_model(local.file_name);
-            }
-        }
-
-        // if nothing above works, see if we have a transcription model in the DB and use that
-        // Try to find first transcription model in DB
-        if let Ok(models) = crate::db_backend::db_backend().get_models() {
-            if let Some(model) = models
-                .into_iter()
-                .find(|m| m.model_type == ModelType::Transcription)
-            {
-                if let Some(local) = model.local {
-                    return Self::whisper_string_to_model(local.file_name);
-                }
-            }
-        }
-
-        // Default to tiny if nothing found
-        Ok(WhisperSource::Tiny)
-    }
-
-    /// Open a stream on the transcription model `model_id`: on its endpoint when it has one,
-    /// else on local Whisper.
+    /// Open a stream on the transcription model `model_id`: each utterance fed goes to its
+    /// endpoint as one request.
     pub async fn open_transcription_stream(
         &self,
         model_id: String,
         caller: &RequestContext,
     ) -> Result<String> {
-        if let Some((client, remote_model)) = transcription::endpoint_transcriber(&model_id)? {
-            let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
-            return Ok(self
-                .open_remote_stream(
-                    model_id,
-                    remote_model,
-                    Arc::new(client),
-                    agent_did,
-                    user_did,
-                )
-                .await);
-        }
-
-        let model_size = Self::get_whisper_model_size(model_id.clone())?;
+        let (client, remote_model, endpoint_id) = transcription::endpoint_transcriber(&model_id)?;
         let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
-
-        // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
-        // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
-        let whisper_model = {
-            let mut shared_models = self.shared_whisper_models.lock().await;
-            let model_key = format!("{:?}", model_size); // Use Debug format as key (e.g., "Small", "Medium")
-
-            if !shared_models.contains_key(&model_key) {
-                log::info!(
-                    "Loading shared Whisper model {} ({:?}) (ONE model per size, ~500MB-1.5GB)...",
-                    model_id,
-                    model_size
-                );
-
-                let model = WhisperBuilder::default()
-                    .with_source(model_size)
-                    .with_device(Self::new_candle_device())
-                    .build()
-                    .await?;
-
-                log::info!(
-                    "Shared Whisper model {:?} loaded! All streams using this size will reuse this model.",
-                    model_size
-                );
-                shared_models.insert(model_key.clone(), Arc::new(model));
-            } else {
-                log::info!(
-                    "Reusing existing shared Whisper model {:?} for new stream",
-                    model_size
-                );
-            }
-
-            // Clone the Arc - this is CHEAP! Just increments a reference count
-            shared_models.get(&model_key).unwrap().clone()
-        };
-
-        log::info!("Opening transcription stream with model {:?}", model_size);
-
-        let stream_id = uuid::Uuid::new_v4().to_string();
-        let stream_id_clone = stream_id.clone();
-        let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
-        let (drop_tx, drop_rx) = oneshot::channel::<()>();
-        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
-        let listeners = text_broadcast_tx.clone();
-        let billing_agent = agent_did.clone();
-
-        // Clone the streams map so the thread can remove itself on exit
-        let streams_map = self.transcription_streams.clone();
-
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-
-            rt.block_on(async {
-                // The model weights stay shared in memory.
-                let whisper = (*whisper_model).clone();
-                let mut samples_rx = samples_rx;
-                // dev's server-side gate: an utterance that is not speech never reaches
-                // Whisper, which makes text up for a cough or a keyboard.
-                let mut gate = transcription::SpeechGate::new();
-
-                tokio::select! {
-                    _ = drop_rx => {},
-                    _ = async {
-                        while let Some(audio_chunk) = samples_rx.next().await {
-                            if audio_chunk.is_empty() || !gate.passes(&audio_chunk) {
-                                continue;
-                            }
-                            // Checked again here, not only when the audio was fed: feeds queue,
-                            // and the bill of one lands before the next is transcribed.
-                            if let Some(agent_did) = billing_agent.as_deref() {
-                                if crate::billing::check_compute_credits(agent_did).is_err() {
-                                    log::info!("transcription stream={stream_id_clone}: dropped an utterance, no compute credits left");
-                                    continue;
-                                }
-                            }
-                            let buffer = rodio::buffer::SamplesBuffer::new(1, transcription::SAMPLE_RATE, audio_chunk);
-                            let mut segments = match whisper.transcribe(buffer) {
-                                Ok(segments) => segments,
-                                Err(e) => {
-                                    log::error!("Transcription error for stream {}: {:?}", stream_id_clone, e);
-                                    continue;
-                                }
-                            };
-                            while let Some(segment) = segments.next().await {
-                                let text = segment.text().to_string();
-                                let words = text.split_whitespace().count();
-                                log::debug!(
-                                    "🤖 transcription segment stream={} words={}",
-                                    stream_id_clone,
-                                    words
-                                );
-                                transcription::bill_transcription(billing_agent.as_deref(), &model_id, words);
-                                transcription::publish_text(&stream_id_clone, &user_did, &text, &listeners).await;
-                            }
-                        }
-                    } => {}
-                }
-            });
-
-            // Clean up the stream entry so feed calls get StreamNotFound
-            // instead of "receiver is gone" errors looping forever
-            rt.block_on(async {
-                streams_map.lock().await.remove(&stream_id_clone);
-                log::info!("Transcription stream {} cleaned up", stream_id_clone);
-            });
-        });
-
-        self.transcription_streams.lock().await.insert(
-            stream_id.clone(),
-            TranscriptionSession {
-                backend: StreamBackend::Whisper {
-                    samples_tx,
-                    _drop_tx: drop_tx,
-                },
-                last_activity: Arc::new(Mutex::new(tokio::time::Instant::now())),
-                waiting: Default::default(),
-                text_broadcast_tx,
+        Ok(self
+            .open_remote_stream(
+                model_id,
+                remote_model,
+                endpoint_id,
+                Arc::new(client),
                 agent_did,
-            },
-        );
-
-        Ok(stream_id)
+                user_did,
+            )
+            .await)
     }
 
     /// Open a stream whose utterances `client` transcribes with the upstream model
-    /// `remote_model`, billed as `model_id` to `agent_did`, its text sent to `user_did`.
+    /// `remote_model` on endpoint `endpoint_id`, billed as `model_id` to `agent_did`, its text
+    /// sent to `user_did`.
     async fn open_remote_stream(
         &self,
         model_id: String,
         remote_model: String,
+        endpoint_id: String,
         client: Arc<dyn providers::audio::RemoteTranscribe>,
         agent_did: Option<String>,
         user_did: String,
@@ -2412,6 +1143,7 @@ impl AIService {
             stream_id: stream_id.clone(),
             model_id: model_id.clone(),
             remote_model,
+            endpoint_id,
             client,
             agent_did: agent_did.clone(),
             user_did,
@@ -2423,12 +1155,10 @@ impl AIService {
         self.transcription_streams.lock().await.insert(
             stream_id.clone(),
             TranscriptionSession {
-                backend: StreamBackend::Remote {
-                    utterances,
-                    model_id,
-                },
+                utterances,
+                model_id,
                 last_activity: Arc::new(Mutex::new(tokio::time::Instant::now())),
-                waiting: Default::default(),
+                in_flight: Default::default(),
                 text_broadcast_tx,
                 agent_did,
             },
@@ -2438,10 +1168,9 @@ impl AIService {
 
     /// Feed one utterance (16 kHz mono) to a stream.
     ///
-    /// On an endpoint this answers once the utterance is transcribed and its text published,
-    /// after every utterance fed before it; an upstream failure is the error. The pieces a
-    /// streaming upstream sent before it failed stay published, and nothing more is. On
-    /// local Whisper it answers once the audio is queued.
+    /// Answers once the utterance is transcribed and its text published, after every
+    /// utterance fed before it; an upstream failure is the error. The pieces a streaming
+    /// upstream sent before it failed stay published, and nothing more is.
     pub async fn feed_transcription_stream(
         &self,
         stream_id: &String,
@@ -2468,36 +1197,27 @@ impl AIService {
             .ok_or(AIServiceError::StreamNotFound)?;
         Self::verify_stream_ownership(stream, caller)?;
         *stream.last_activity.lock().await = tokio::time::Instant::now();
-        let fed = |e: String| {
-            AIServiceError::CrazyError(format!("Failed to feed stream {stream_id}: {e}"))
-        };
-        match &stream.backend {
-            StreamBackend::Whisper { samples_tx, .. } => {
-                samples_tx
-                    .unbounded_send(audio_samples)
-                    .map_err(|e| fed(e.to_string()))?;
-                Ok(Box::pin(futures::future::ready(Ok(()))))
-            }
-            // Queued while the map is locked: two feeds keep the order they arrived in.
-            StreamBackend::Remote { utterances, .. } => {
-                let (done, outcome) = oneshot::channel();
-                utterances
-                    .send(transcription::Utterance {
-                        samples: audio_samples,
-                        done,
-                    })
-                    .map_err(|e| fed(e.to_string()))?;
-                let waiting = Waiting::start(stream);
-                let stream_id = stream_id.clone();
-                Ok(Box::pin(async move {
-                    let answered = outcome.await.map_err(|_| {
-                        anyhow!("Transcription stream {stream_id} ended before it answered")
-                    })?;
-                    waiting.answered().await;
-                    answered
-                }))
-            }
-        }
+        // Queued while the map is locked: two feeds keep the order they arrived in.
+        let (done, outcome) = oneshot::channel();
+        stream
+            .utterances
+            .send(transcription::Utterance {
+                samples: audio_samples,
+                done,
+            })
+            .map_err(|e| {
+                AIServiceError::CrazyError(format!("Failed to feed stream {stream_id}: {e}"))
+            })?;
+        // Counted while the map is still locked, so the reaper never sees the utterance
+        // queued and not counted. The answer holds it: answered or dropped, it ends.
+        let in_flight = InFlight::count(stream);
+        let stream_id = stream_id.clone();
+        Ok(Box::pin(async move {
+            let _in_flight = in_flight;
+            outcome
+                .await
+                .map_err(|_| anyhow!("Transcription stream {stream_id} ended before it answered"))?
+        }))
     }
 
     /// The text of a stream, as it is published (`/v1/realtime`).
@@ -2560,182 +1280,52 @@ impl AIService {
         }
     }
 
-    /// Download a local Whisper model's weights. A model on an endpoint has none to fetch:
-    /// it is ready when its endpoint serves it.
-    async fn load_transcriber_model(model: &Model) {
-        let model_id = model.id.clone();
-        if model.api.is_some() {
-            match transcription::endpoint_transcriber(&model_id) {
-                Ok(Some(_)) => publish_model_status(model_id, 100.0, "Ready", true, true).await,
-                Ok(None) => {}
-                Err(e) => {
-                    log::warn!("Transcription model {model_id} cannot run on its endpoint: {e:#}");
-                    publish_model_status(model_id, 0.0, "Not loaded", false, false).await;
-                }
-            }
-            return;
-        }
-        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-
-        let model_size = Self::get_whisper_model_size(model_id.clone())
-            .ok()
-            .unwrap_or(WHISPER_MODEL);
-
-        let _ = WhisperBuilder::default()
-            .with_source(model_size)
-            .with_device(Self::new_candle_device())
-            .build_with_loading_handler({
-                let name = model_id.clone();
-                move |progress| {
-                    tokio::spawn(handle_progress(name.clone(), progress));
-                }
-            })
-            .await;
-
-        publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
-    }
-
+    /// Rewrite model `model_id` and build its client again. A refused rewrite (an endpoint
+    /// that does not exist) changes nothing; a client that does not build is the error,
+    /// with the row already rewritten.
     pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
         log::info!("Updating model: {} with: {:?}", model_id, model_config);
-        // The model must exist before the row is rewritten.
         crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .map_err(|e| anyhow!("Database error: {}", e))?
+            .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
-
-        // Update the model in the database
-        // `context`, not a new error, so the API can still tell an `ApiKeyNotResent`.
+        Self::check_endpoint_serves(&model_config)?;
+        // `context`, not a new error, so the API can still tell an `InvalidModel`.
         crate::db_backend::db_backend()
             .update_model(&model_id, &model_config)
             .context("Failed to update model in database")?;
-
         self.reload_model(model_id).await
     }
 
-    /// Close the remote streams on `model_id`: each one keeps the URL and key of the
-    /// endpoint it opened with. The utterances they already took are answered.
-    async fn close_remote_streams_of(&self, model_id: &str) {
-        self.transcription_streams.lock().await.retain(|_, stream| {
-            !matches!(&stream.backend, StreamBackend::Remote { model_id: of, .. } if of == model_id)
-        });
+    /// Close the streams on `model_id`: each one keeps the URL and key of the endpoint it
+    /// opened with. The utterances they already took are answered.
+    async fn close_streams_of(&self, model_id: &str) {
+        self.transcription_streams
+            .lock()
+            .await
+            .retain(|_, stream| stream.model_id != model_id);
     }
 
     /// Builds a model's client again from its stored row, after the row changed: an update
     /// of the model, or of the endpoint it runs on.
     pub(crate) async fn reload_model(&self, model_id: String) -> Result<()> {
-        let updated_model = crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .map_err(|e| anyhow!("Database error: {}", e))?
+        let model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
-
-        log::info!("Updated model in DB: {:?}", updated_model);
-
         // A stream on the model keeps the client it opened with: closed, so no more audio
         // goes to the endpoint as it was.
-        self.close_remote_streams_of(&model_id).await;
-        if updated_model.model_type != ModelType::Embedding {
-            // A model that is no longer an embedding model no longer embeds.
-            self.embedding_channel.lock().await.remove(&model_id);
-        }
-        // Shut down the model's LLM thread, whatever its type is now: a model that is no
-        // longer an LLM must not keep one.
-        {
-            let mut llm_channel = self.llm_channel.lock().await;
-            if let Some(sender) = llm_channel.remove(&model_id) {
-                log::info!("Shutting down LLM model thread for {}", model_id);
-                let (tx, rx) = oneshot::channel();
-                if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
-                    result_sender: tx,
-                })) {
-                    // Wait for the thread to confirm shutdown
-                    let _ = rx.await;
-                    log::info!("LLM model thread for {} confirmed shutdown", model_id);
-                }
-            }
-        }
-
-        match updated_model.model_type {
-            ModelType::Llm => {
-                // Spawn the model with new configuration
-                log::info!(
-                    "Spawning new LLM model thread for {} with updated config",
-                    model_id
-                );
-                let (model_ready_tx, model_ready_rx) = oneshot::channel();
-                self.spawn_llm_model(updated_model, Some(model_ready_tx))
-                    .await?;
-                model_ready_rx.await?;
-
-                // Respawn all tasks for this model: by its id, or by "default" when it is
-                // the default LLM.
-                let tasks = crate::db_backend::db_backend()
-                    .get_tasks()
-                    .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
-                for task in tasks {
-                    if Self::replace_model_variables(&task.model_id).ok().as_ref()
-                        == Some(&model_id)
-                    {
-                        self.spawn_task(task).await?;
-                    }
-                }
-            }
-            ModelType::Embedding => self.spawn_embedding_model(updated_model).await?,
-            ModelType::Transcription => {
-                Self::load_transcriber_model(&updated_model).await;
-            }
-            ModelType::Speech => {}
-        }
-
-        Ok(())
+        self.close_streams_of(&model_id).await;
+        self.init_model(&model).await
     }
 
     pub async fn remove_model(&self, model_id: String) -> Result<()> {
-        // First get the existing model to determine its type
-        let existing_model = crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .map_err(|e| anyhow!("Database error: {}", e))?
+        crate::db_backend::db_backend()
+            .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
-
-        match existing_model.model_type {
-            ModelType::Llm => {
-                log::info!("Shutting down LLM model thread for {}", model_id);
-                // Shutdown the existing model thread
-                let mut llm_channel = self.llm_channel.lock().await;
-                if let Some(sender) = llm_channel.get(&model_id) {
-                    let (tx, rx) = oneshot::channel();
-                    if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
-                        result_sender: tx,
-                    })) {
-                        // Wait for the thread to confirm shutdown
-                        let _ = rx.await;
-                    }
-
-                    log::info!("LLM model thread for {} confirmed shutdown", model_id);
-
-                    // Remove the channel from the map
-                    llm_channel.remove(&model_id);
-                } else {
-                    log::warn!(
-                        "LLM model thread for {} not found. Nothing to shutdown",
-                        model_id
-                    );
-                }
-            }
-            ModelType::Embedding => {
-                // Dropping the sender ends a Bert thread.
-                self.embedding_channel.lock().await.remove(&model_id);
-            }
-            ModelType::Transcription => self.close_remote_streams_of(&model_id).await,
-            ModelType::Speech => {}
-        }
-
-        // Remove the model from the database
+        self.drop_clients(&model_id).await;
+        self.close_streams_of(&model_id).await;
         crate::db_backend::db_backend()
             .remove_model(&model_id)
-            .map_err(|e| anyhow!("Failed to remove model from database: {}", e))?;
-
-        Ok(())
+            .map_err(|e| anyhow!("Failed to remove model from database: {}", e))
     }
 }
 
@@ -2822,30 +1412,252 @@ mod tests {
     }
 
     use super::*;
-    use crate::types::{AIPromptExamplesInput, LocalModelInput};
-    use tokio::time::{sleep, Duration};
+    use crate::types::{AIPromptExamplesInput, EndpointKind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn remote_at(base_url: &str, api_key: &str) -> ModelApi {
-        ModelApi {
-            base_url: url::Url::parse(base_url).expect("test URL parses"),
-            api_key: api_key.into(),
-            model: "claude-test".to_string(),
-            api_type: ModelApiType::Anthropic,
-            max_num_ctx: None,
+    /// A fresh service on a fresh in-memory database.
+    fn service() -> AIService {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        AIService::empty()
+    }
+
+    /// A saved endpoint of `kind` at `url`, without a key.
+    fn saved_endpoint(kind: EndpointKind, url: &str) -> Endpoint {
+        let endpoint = Endpoint::for_test("upstream", kind, url, "");
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        endpoint
+    }
+
+    fn model_on(endpoint: &Endpoint, model_type: ModelType, remote: &str) -> ModelInput {
+        ModelInput {
+            name: format!("{model_type}-model"),
+            model_type,
+            endpoint_id: endpoint.id.clone(),
+            remote_model: remote.into(),
             native_tools: None,
         }
     }
 
     #[tokio::test]
-    async fn a_saved_model_with_a_key_over_plain_http_is_not_built() {
-        // The load path: a model saved before the WS handlers refused this
-        // reaches client construction without passing through them.
-        let error = match AIService::build_remote_client(
-            "m".to_string(),
-            remote_at("http://192.168.1.10:8080", "sk-ant"),
-        )
-        .await
-        {
+    async fn a_fresh_executor_loads_no_model() {
+        let service = service();
+        service.load().await.unwrap();
+        assert!(service.llms.lock().await.is_empty());
+        assert!(service.embedders.lock().await.is_empty());
+        let error = match service.embed("bert".into(), "text".into(), None).await {
+            Ok(_) => panic!("no embedding model is configured"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("No EMBEDDING model"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_task_prompts_its_model_on_its_endpoint() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "model": "qwen3:8b",
+                "messages": [
+                    { "role": "system", "content": "Answer in French." },
+                    { "role": "user", "content": "hi" },
+                    { "role": "assistant", "content": "salut" },
+                    { "role": "user", "content": "thanks" }
+                ]
+            })))
+            .with_body(r#"{"choices":[{"message":{"content":"merci"}}]}"#)
+            .create_async()
+            .await;
+        let endpoint = saved_endpoint(EndpointKind::LlamaServer, &upstream.url());
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "qwen3:8b"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "french".into(),
+                    model_id,
+                    system_prompt: "Answer in French.".into(),
+                    prompt_examples: vec![AIPromptExamplesInput {
+                        input: "hi".into(),
+                        output: "salut".into(),
+                    }],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let answer = service
+            .prompt(task.task_id, "thanks".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(answer.text, "merci");
+        completion.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_task_on_a_model_that_is_not_loaded_is_refused() {
+        let service = service();
+        let refused = service
+            .add_task(
+                AITaskInput {
+                    name: "t".into(),
+                    model_id: "no-such-model".into(),
+                    system_prompt: String::new(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await;
+        assert!(refused.is_err());
+        assert!(AIService::get_tasks().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_embedding_model_on_an_endpoint_without_embeddings_is_not_kept() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Anthropic, "https://api.anthropic.com");
+        assert!(service
+            .add_model(model_on(&endpoint, ModelType::Embedding, "claude"))
+            .await
+            .is_err());
+        assert!(Ad4mDb::with_global_instance(|db| db.get_models())
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The capabilities `endpoint` has in the database now.
+    fn stored_capabilities(endpoint: &Endpoint) -> Vec<crate::types::AiCapability> {
+        Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint.id))
+            .unwrap()
+            .unwrap()
+            .capabilities
+    }
+
+    #[tokio::test]
+    async fn an_audio_model_on_an_endpoint_without_an_audio_route_is_refused_and_leaves_it_as_it_was(
+    ) {
+        // Ollama has no /v1/audio routes: a transcription model on it used to be saved as
+        // READY, gave the endpoint the transcription capability, and failed only when a
+        // stream was opened.
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, "http://127.0.0.1:11434");
+        let before = stored_capabilities(&endpoint);
+        for model_type in [ModelType::Transcription, ModelType::Speech] {
+            let error = service
+                .add_model(model_on(&endpoint, model_type, "qwen3:8b"))
+                .await
+                .expect_err("Ollama serves no audio");
+            assert!(
+                error.downcast_ref::<crate::db::InvalidModel>().is_some(),
+                "a bad request, not an internal error: {error}"
+            );
+            assert!(error.to_string().contains("/v1/audio/"), "{error}");
+        }
+        assert!(Ad4mDb::with_global_instance(|db| db.get_models())
+            .unwrap()
+            .is_empty());
+        assert_eq!(stored_capabilities(&endpoint), before);
+    }
+
+    #[tokio::test]
+    async fn a_refused_embedding_model_does_not_give_its_endpoint_the_capability() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Anthropic, "https://api.anthropic.com");
+        let before = stored_capabilities(&endpoint);
+        assert!(service
+            .add_model(model_on(&endpoint, ModelType::Embedding, "claude"))
+            .await
+            .is_err());
+        assert_eq!(stored_capabilities(&endpoint), before);
+    }
+
+    #[tokio::test]
+    async fn an_audio_server_takes_transcription_and_speech_models() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::OpenAiAudio, "http://127.0.0.1:8000");
+        for model_type in [ModelType::Transcription, ModelType::Speech] {
+            service
+                .add_model(model_on(
+                    &endpoint,
+                    model_type,
+                    "Systran/faster-whisper-small",
+                ))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            Ad4mDb::with_global_instance(|db| db.get_models())
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_to_a_type_the_endpoint_cannot_serve_is_refused_and_keeps_the_model() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, "http://127.0.0.1:11434");
+        let id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "qwen3:8b"))
+            .await
+            .unwrap();
+        let error = service
+            .update_model(
+                id.clone(),
+                model_on(&endpoint, ModelType::Transcription, "qwen3:8b"),
+            )
+            .await
+            .expect_err("Ollama serves no transcription");
+        assert!(error.downcast_ref::<crate::db::InvalidModel>().is_some());
+        let model = Ad4mDb::with_global_instance(|db| db.get_model(id.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.model_type, ModelType::Llm);
+        assert!(service.llms.lock().await.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn a_model_updated_to_another_type_moves_to_that_types_clients() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, "http://127.0.0.1:11434");
+        let id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "qwen3:8b"))
+            .await
+            .unwrap();
+        assert!(service.llms.lock().await.contains_key(&id));
+
+        service
+            .update_model(
+                id.clone(),
+                model_on(&endpoint, ModelType::Embedding, "nomic-embed-text"),
+            )
+            .await
+            .unwrap();
+        assert!(!service.llms.lock().await.contains_key(&id));
+        let embedder = service.embedders.lock().await.get(&id).cloned().unwrap();
+        assert_eq!(embedder.remote_model, "nomic-embed-text");
+
+        service.remove_model(id.clone()).await.unwrap();
+        assert!(!service.embedders.lock().await.contains_key(&id));
+    }
+
+    #[test]
+    fn a_saved_endpoint_with_a_key_over_plain_http_builds_no_client() {
+        // The load path: an endpoint saved before the handlers refused this reaches client
+        // construction without passing through them.
+        let endpoint = Endpoint::for_test(
+            "lan",
+            EndpointKind::Anthropic,
+            "http://192.168.1.10:8080",
+            "sk-ant",
+        );
+        let error = match providers::chat_client(&endpoint) {
             Ok(_) => panic!("a key over plain http to a remote host is refused"),
             Err(error) => error,
         };
@@ -2856,265 +1668,140 @@ mod tests {
         );
     }
 
+    /// A client that counts the calls it is answering at once, and the most it saw.
+    #[derive(Default)]
+    struct Counting {
+        now: AtomicUsize,
+        most: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl RemoteChat for Counting {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatReply> {
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            sleep(Duration::from_millis(20)).await;
+            self.now.fetch_sub(1, Ordering::SeqCst);
+            Ok(ChatReply {
+                text: "ok".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    // There is no per-model thread to serialise prompts any more: the endpoint's cap is what
+    // limits them, on the task and harness paths as on /v1.
     #[tokio::test]
-    async fn test_progress_rate_limiting() {
-        // Test the rate limiting functionality by directly testing the rate limiter
-        let model_id = "test_model".to_string();
-
-        // Clear any existing rate limiter state
-        {
-            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            rate_limiter.clear();
-        }
-
-        // Test that rate limiter prevents rapid updates
-        let now = std::time::Instant::now();
-
-        // First update should set the timestamp
-        {
-            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            rate_limiter.insert(model_id.clone(), now);
-        }
-
-        // Immediate check should indicate rate limiting
-        {
-            let rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            let should_rate_limit = if let Some(last_update) = rate_limiter.get(&model_id) {
-                std::time::Instant::now().duration_since(*last_update) < Duration::from_millis(100)
-            } else {
-                false
+    async fn an_endpoints_concurrency_cap_holds_for_prompts_and_none_is_no_limit() {
+        for (cap, expected) in [(Some(1), 1), (None, 4)] {
+            let mut endpoint =
+                Endpoint::for_test("capped", EndpointKind::Vllm, "http://127.0.0.1:9", "");
+            endpoint.max_concurrent = cap;
+            let client = Arc::new(Counting::default());
+            let chat = ChatModel {
+                client: client.clone(),
+                remote_model: "m".into(),
+                endpoint: Arc::new(endpoint),
             };
-            assert!(should_rate_limit, "Should rate limit rapid updates");
-        }
-
-        // Wait for rate limit window to pass
-        sleep(Duration::from_millis(150)).await;
-
-        // Now updates should be allowed
-        {
-            let rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            let should_rate_limit = if let Some(last_update) = rate_limiter.get(&model_id) {
-                std::time::Instant::now().duration_since(*last_update) < Duration::from_millis(100)
-            } else {
-                false
-            };
-            assert!(
-                !should_rate_limit,
-                "Should allow updates after rate limit window"
-            );
-        }
-
-        // Clean up
-        {
-            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            rate_limiter.remove(&model_id);
+            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![], None));
+            for reply in futures::future::join_all(calls).await {
+                assert_eq!(reply.unwrap().text, "ok");
+            }
+            assert_eq!(client.most.load(Ordering::SeqCst), expected, "cap {cap:?}");
         }
     }
 
-    // TODO: We ignore these tests because they need a GPU to not take ages to run
-    // BUT: the model lifecycle and update tests show another problem:
-    // We can't run them in parallel with each other or other tests because
-    // the one global DB gets reseted for each test.
-    // -> need to refactor this so that services like AIService or PerspectiveInstance
-    // get an DB reference passed in, so we can write proper unit tests.
-
-    #[ignore]
-    #[tokio::test]
-    async fn test_embedding() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
-        let vector = service
-            .embed("bert".into(), "Test string".into(), None)
-            .await
-            .expect("embed to return a result");
-        assert!(vector.embeddings.len() > 300)
+    /// A loopback URL nothing listens on: a request to it is refused.
+    pub(super) fn dead_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
     }
 
-    #[ignore]
-    #[tokio::test]
-    async fn test_prompt() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
-
-        let task = service.add_task(AITaskInput {
-                name: "Test task".into(),
-                model_id: "llama".into(),
-                system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
-                prompt_examples: vec![AIPromptExamplesInput{
-                    input: "Test string".into(),
-                    output: "Yes, I'm working!".into()
-                }],
-                meta_data: None
-            }, None).await.expect("add_task to work without error");
-
-        let response = service
-            .prompt(task.task_id, "Test string".into(), None)
-            .await
-            .expect("prompt to return a result");
-        println!("Response: {}", response.text);
-        assert!(!response.text.is_empty())
+    /// An OpenAI endpoint at a dead URL whose last check found it up, serving `served`.
+    pub(super) fn endpoint_that_went_down(served: &str) -> Endpoint {
+        endpoint_of_kind_that_went_down(EndpointKind::OpenAi, served)
     }
 
-    #[ignore]
-    #[tokio::test]
-    async fn test_prompt_stress() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
-
-        let task = service.add_task(AITaskInput {
-                name: "Test task".into(),
-                model_id: "llama".into(),
-                system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
-                meta_data: None,
-                prompt_examples: vec![AIPromptExamplesInput{
-                    input: "Test string".into(),
-                    output: "Yes, I'm working!".into()
-                },
-                AIPromptExamplesInput{
-                    input: "What's up?".into(),
-                    output: "Nothing, I'm working!".into()
-                },
-                AIPromptExamplesInput{
-                    input: "Is this a test".into(),
-                    output: "Yes, it's working!".into()
-                },
-                AIPromptExamplesInput{
-                    input: "Test string loong".into(),
-                    output: "Yes, I'm working! This is a longer response to test the system's ability to handle more extensive outputs. It's important to ensure that the AI can generate and process longer strings of text, as real-world applications often require more detailed and nuanced responses. By including this extended output, we're stress-testing the system's capacity and verifying its robustness in handling varied lengths of text.".into()
-                },
-                AIPromptExamplesInput{
-                    input: "Test string super loong".into(),
-                    output: "Yes, I'm working! This is an extremely long response to thoroughly test the system's capacity for handling extensive outputs. In real-world scenarios, AI models often need to generate lengthy and detailed responses to complex queries. This test string is designed to push the limits of our system, ensuring it can process and store large amounts of text without issues. It's crucial to verify that our AI service can maintain coherence and relevance even in prolonged responses. By including various sentence structures, punctuation, and a mix of short and long phrases, we're also testing the linguistic versatility of our model. Furthermore, this extended output allows us to assess the performance impact of processing large text blocks, which is essential for optimizing our system's efficiency. It's worth noting that in practical applications, responses of this length might be common in scenarios such as content generation, detailed explanations, or comprehensive analyses. Therefore, ensuring our system can handle such verbose outputs is paramount for its real-world applicability and robustness.".into()
-                }],
-        }, None).await.expect("add_task to work without error");
-
-        let futures = (0..10)
-            .map(|_| service.prompt(task.task_id.clone(), "Test string".into(), None))
-            .collect::<Vec<_>>();
-
-        let responses = futures::future::join_all(futures)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()
-            .expect("all prompts to return results");
-
-        let response = responses
-            .iter()
-            .map(|r| r.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        println!("Responses: {}", response);
-        assert!(!response.is_empty())
-    }
-
-    #[ignore]
-    #[tokio::test]
-    async fn test_model_lifecycle() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
-
-        // Add a model
-        let model_input = ModelInput {
-            name: "Test Model".into(),
-            model_type: ModelType::Llm,
-            local: Some(LocalModelInput {
-                file_name: "llama_tiny_1_1b_chat".into(),
-                tokenizer_source: None,
-                huggingface_repo: None,
-                revision: None,
-            }),
-            api: None,
+    fn endpoint_of_kind_that_went_down(kind: EndpointKind, served: &str) -> Endpoint {
+        let mut endpoint = Endpoint::for_test("went-down", kind, &dead_url(), "");
+        endpoint.health = crate::types::EndpointHealth {
+            state: crate::types::EndpointState::Reachable,
+            checked_at: Some(1),
+            detail: None,
+            served_models: vec![served.to_string()],
         };
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        endpoint
+    }
 
+    /// Waits until the stored health of `endpoint` is no longer `REACHABLE` (a re-check ran).
+    pub(super) async fn rechecked(endpoint: &Endpoint) -> bool {
+        for _ in 0..100 {
+            let stored = Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint.id))
+                .unwrap()
+                .unwrap();
+            if stored.health.state != crate::types::EndpointState::Reachable {
+                return true;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    // WE showed a model READY with its Ollama stopped: a failed `ai.prompt` left the status
+    // to the 60 s health loop, where a failed `/v1` request re-checks the endpoint at once.
+    #[tokio::test]
+    async fn a_failed_prompt_re_checks_its_endpoint() {
+        // Each chat client: a refused connection keeps its type, or nothing can tell it.
+        for kind in [
+            EndpointKind::OpenAi,
+            EndpointKind::Ollama,
+            EndpointKind::Anthropic,
+        ] {
+            let service = service();
+            let endpoint = endpoint_of_kind_that_went_down(kind, "qwen3");
+            let model_id = service
+                .add_model(model_on(&endpoint, ModelType::Llm, "qwen3"))
+                .await
+                .unwrap();
+            let task = service
+                .add_task(
+                    AITaskInput {
+                        name: "t".into(),
+                        model_id,
+                        system_prompt: String::new(),
+                        prompt_examples: vec![],
+                        meta_data: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+
+            assert!(service
+                .prompt(task.task_id, "hi".into(), None)
+                .await
+                .is_err());
+            assert!(rechecked(&endpoint).await, "{kind:?}: not re-checked");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_embed_re_checks_its_endpoint() {
+        let service = service();
+        let endpoint = endpoint_that_went_down("bge-m3");
         let model_id = service
-            .add_model(model_input.clone())
+            .add_model(model_on(&endpoint, ModelType::Embedding, "bge-m3"))
             .await
-            .expect("model to be added");
+            .unwrap();
 
-        // Update the model
-        let updated_model = ModelInput {
-            name: "Updated Test Model".into(),
-            ..model_input.clone()
-        };
-        service
-            .update_model(model_id.clone(), updated_model)
-            .await
-            .expect("model to be updated");
-
-        // Verify the update
-        let model = crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .expect("to get model");
-        assert_eq!(model.unwrap().name, "Updated Test Model");
-
-        // Remove the model
-        service
-            .remove_model(model_id.clone())
-            .await
-            .expect("model to be removed");
-
-        // Verify removal
-        let model = crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .expect("to get model");
-        assert!(model.is_none());
-    }
-
-    #[ignore]
-    #[tokio::test]
-    async fn test_model_update_with_tasks() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
-
-        // Add a model
-        let model_input = ModelInput {
-            name: "Test Model".into(),
-            model_type: ModelType::Llm,
-            local: Some(LocalModelInput {
-                file_name: "llama_tiny_1_1b_chat".into(),
-                tokenizer_source: None,
-                huggingface_repo: None,
-                revision: None,
-            }),
-            api: None,
-        };
-
-        let model_id = service
-            .add_model(model_input.clone())
-            .await
-            .expect("model to be added");
-
-        // Create a task using this model
-        let task = service
-            .add_task(
-                AITaskInput {
-                    name: "Test task".into(),
-                    model_id: model_id.clone(),
-                    system_prompt: "Test prompt".into(),
-                    prompt_examples: vec![],
-                    meta_data: None,
-                },
-                None,
-            )
-            .await
-            .expect("task to be created");
-
-        // Update the model
-        let updated_model = ModelInput {
-            name: "Updated Test Model".into(),
-            ..model_input.clone()
-        };
-        service
-            .update_model(model_id.clone(), updated_model)
-            .await
-            .expect("model to be updated");
-
-        // Verify the task still works
-        let response = service
-            .prompt(task.task_id.clone(), "Test input".into(), None)
-            .await
-            .expect("prompt to work after model update");
-        assert!(!response.text.is_empty());
+        assert!(service.embed(model_id, "text".into(), None).await.is_err());
+        assert!(
+            rechecked(&endpoint).await,
+            "the endpoint was not re-checked"
+        );
     }
 
     // The wrapper cut a chat call to an endpoint with no timeout of its own at 300 s, where
@@ -3123,7 +1810,6 @@ mod tests {
     async fn a_chat_call_runs_as_long_as_the_provider_client_allows_unless_the_endpoint_says() {
         use crate::types::{Endpoint, EndpointHealth, EndpointKind};
         use std::time::Duration;
-        Ad4mDb::init_global_instance(":memory:").unwrap();
         let mut endpoint = Endpoint {
             id: uuid::Uuid::new_v4().to_string(),
             name: "ollama".into(),
@@ -3136,35 +1822,19 @@ mod tests {
             max_concurrent: None,
             health: EndpointHealth::default(),
         };
-        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
         let answer_after = |secs: u64| async move {
             tokio::time::sleep(Duration::from_secs(secs)).await;
             anyhow::Ok(())
         };
 
-        let long = super::within_endpoint_limits(Some(&endpoint.id), false, answer_after(590));
+        let long = super::within_endpoint_limits(&endpoint, false, answer_after(590));
         assert!(long.await.is_ok(), "a 590 s answer is not cut");
-        let too_long = super::within_endpoint_limits(Some(&endpoint.id), false, answer_after(610));
+        let too_long = super::within_endpoint_limits(&endpoint, false, answer_after(610));
         assert!(too_long.await.is_err());
 
         endpoint.request_timeout_secs = Some(10);
-        Ad4mDb::with_global_instance(|db| db.update_endpoint(&endpoint)).unwrap();
-        let past_own = super::within_endpoint_limits(Some(&endpoint.id), false, answer_after(20));
+        let past_own = super::within_endpoint_limits(&endpoint, false, answer_after(20));
         assert!(past_own.await.is_err(), "the endpoint's own timeout wins");
-    }
-
-    // A read error of the endpoint ran the call without the endpoint's slot and timeout.
-    #[tokio::test]
-    async fn a_call_whose_endpoint_cannot_be_read_does_not_run() {
-        let _closed = crate::test_utils::DbClosed::now();
-        let ran = std::sync::atomic::AtomicBool::new(false);
-        let call = async {
-            ran.store(true, std::sync::atomic::Ordering::SeqCst);
-            anyhow::Ok(())
-        };
-        let result = super::within_endpoint_limits(Some("endpoint-id"), false, call).await;
-        assert!(result.is_err());
-        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
 
@@ -3175,7 +1845,7 @@ mod stream_ownership_tests {
     use crate::test_utils::MultiUserMode;
 
     fn stream_of(owner: Option<&str>) -> TranscriptionSession {
-        TranscriptionSession::whisper_for_test(owner).0
+        TranscriptionSession::for_test(owner).0
     }
 
     // The operator's admin credential is not a JWT, so the old token decode refused it: in
@@ -3253,10 +1923,9 @@ mod stream_ownership_tests {
         let alice = RequestContext::user_for_test("did:key:alice", vec![]);
         let app =
             RequestContext::app_for_test(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]);
-        // The stream's receivers stay alive, as the Whisper thread's would: a feed and a
-        // close by its owner reach them.
-        let (session, mut samples_rx, mut drop_rx) =
-            TranscriptionSession::whisper_for_test(Some("did:key:alice"));
+        // The stream's queue stays alive, as its worker's would: a feed and a close by its
+        // owner reach it.
+        let (session, mut queue) = TranscriptionSession::for_test(Some("did:key:alice"));
         let id = "alices-stream".to_string();
         service
             .transcription_streams
@@ -3271,29 +1940,28 @@ mod stream_ownership_tests {
         assert!(service.close_transcription_stream(&id, &app).await.is_err());
         assert!(service.transcription_streams.lock().await.contains_key(&id));
         assert!(
-            samples_rx.try_recv().is_err(),
+            queue.try_recv().is_err(),
             "the app's samples reached the user's stream"
         );
-        assert!(
-            drop_rx.try_recv().is_err(),
-            "the app closed the user's stream"
-        );
 
+        // The worker answers the user's utterance.
+        let worker = tokio::spawn(async move {
+            let utterance = queue.recv().await.expect("the user's utterance");
+            assert_eq!(utterance.samples, vec![0.5]);
+            let _ = utterance.done.send(Ok(()));
+            queue
+        });
         service
             .feed_transcription_stream(&id, vec![0.5], &alice)
             .await
             .expect("the user feeds their own stream");
-        assert_eq!(samples_rx.try_recv().unwrap(), vec![0.5]);
+        let mut queue = worker.await.unwrap();
         service
             .close_transcription_stream(&id, &alice)
             .await
             .expect("the user closes their own stream");
         assert!(!service.transcription_streams.lock().await.contains_key(&id));
-        assert_eq!(
-            drop_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Closed),
-            "the close reached the stream"
-        );
+        assert!(queue.recv().await.is_none(), "the close reached the stream");
     }
 }
 
@@ -3303,6 +1971,8 @@ mod remote_stream_tests {
     use super::*;
     use crate::billing::test_seam;
     use crate::db::Ad4mDb;
+    use crate::events::{Audience, Topic};
+    use crate::pubsub::get_global_pubsub;
 
     /// An upstream that takes a millisecond per sample, answers `<samples> samples`, and
     /// fails an utterance of [`FAILS`] samples.
@@ -3351,6 +2021,7 @@ mod remote_stream_tests {
             .open_remote_stream(
                 "m".into(),
                 "remote-model".into(),
+                "e".into(),
                 Arc::new(Upstream),
                 agent_did.map(str::to_string),
                 "did:key:owner".into(),
@@ -3377,6 +2048,78 @@ mod remote_stream_tests {
         fast.unwrap();
         assert_eq!(text.recv().await.unwrap(), "78000 samples");
         assert_eq!(text.recv().await.unwrap(), "64000 samples");
+    }
+
+    /// Moves the last activity of stream `id` back past the reaper's timeout.
+    async fn backdate(service: &AIService, id: &str) {
+        let streams = service.transcription_streams.lock().await;
+        *streams[id].last_activity.lock().await =
+            tokio::time::Instant::now() - Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS + 1);
+    }
+
+    async fn is_open(service: &AIService, id: &str) -> bool {
+        service.transcription_streams.lock().await.contains_key(id)
+    }
+
+    // A slow upstream (a long utterance on a big model, or a server that stalls until the
+    // request times out) kept a stream busy past the reaper's timeout, and the reaper closed
+    // it mid-call: the next feed got "stream not found".
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_waiting_for_its_upstream_is_not_idle_and_its_answer_is_activity() {
+        let service = AIService::empty();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+
+        let reaper = async {
+            // The utterance is upstream (64 s), and was fed longer ago than the timeout.
+            sleep(Duration::from_millis(100)).await;
+            backdate(&service, &id).await;
+            AIService::close_idle_streams(&service.transcription_streams).await;
+            assert!(
+                is_open(&service, &id).await,
+                "the reaper closed a stream that was waiting for its upstream"
+            );
+        };
+        let (fed, ()) = tokio::join!(
+            service.feed_transcription_stream(&id, utterance(64_000), &operator),
+            reaper
+        );
+        fed.unwrap();
+
+        AIService::close_idle_streams(&service.transcription_streams).await;
+        assert!(
+            is_open(&service, &id).await,
+            "a stream answered a moment ago is not idle"
+        );
+        service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .expect("the stream still takes utterances");
+
+        backdate(&service, &id).await;
+        AIService::close_idle_streams(&service.transcription_streams).await;
+        assert!(
+            !is_open(&service, &id).await,
+            "a stream idle past the timeout is still closed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_feed_whose_caller_went_away_does_not_keep_its_stream_open() {
+        let service = AIService::empty();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+        // The caller gives up while the utterance is upstream.
+        let gave_up = tokio::time::timeout(
+            Duration::from_millis(100),
+            service.feed_transcription_stream(&id, utterance(64_000), &operator),
+        )
+        .await;
+        assert!(gave_up.is_err());
+
+        backdate(&service, &id).await;
+        AIService::close_idle_streams(&service.transcription_streams).await;
+        assert!(!is_open(&service, &id).await);
     }
 
     // A feed set `last_activity` only when it started, and an endpoint answers an utterance
@@ -3434,6 +2177,35 @@ mod remote_stream_tests {
         );
         assert_eq!(event.payload["streamId"], id.as_str());
         assert_eq!(event.payload["text"], "64000 samples");
+    }
+
+    // Not paused: the re-check is a real request to a dead port.
+    #[tokio::test]
+    async fn a_failed_utterance_re_checks_its_endpoint() {
+        let service = AIService::empty();
+        let _ = Ad4mDb::init_global_instance(":memory:");
+        let endpoint = super::tests::endpoint_that_went_down("whisper");
+        let client = providers::audio::OpenAiTranscribe::for_endpoint(&endpoint).unwrap();
+        let id = service
+            .open_remote_stream(
+                "m".into(),
+                "whisper".into(),
+                endpoint.id.clone(),
+                Arc::new(client),
+                None,
+                "did:key:owner".into(),
+            )
+            .await;
+
+        let operator = RequestContext::operator_for_test();
+        assert!(service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .is_err());
+        assert!(
+            super::tests::rechecked(&endpoint).await,
+            "the endpoint was not re-checked"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3560,6 +2332,7 @@ mod remote_stream_http_tests {
             .open_remote_stream(
                 "m".into(),
                 "remote-model".into(),
+                "e".into(),
                 Arc::new(OpenAiTranscribe::new(
                     "",
                     url::Url::parse(&server.url()).unwrap(),
@@ -3820,7 +2593,7 @@ mod stream_reaper_tests {
         service.start_stream_reaper();
         drop(service.clone());
 
-        let (session, _samples_rx, _drop_rx) = TranscriptionSession::whisper_for_test(None);
+        let (session, _queue) = TranscriptionSession::for_test(None);
         *session.last_activity.lock().await =
             tokio::time::Instant::now() - Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS + 1);
         service

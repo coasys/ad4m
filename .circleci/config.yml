@@ -1006,11 +1006,18 @@ jobs:
             tar -xJf "$dir/shellcheck.tar.xz" -C "$dir"
             # -x follows `source`d files, so a sourced helper is checked too.
             "$dir/shellcheck-v0.10.0/shellcheck" -x deploy/staging/update.sh deploy/staging/test/update.test.sh
+            # The image's AI endpoints from the environment (sourced by docker-entrypoint.sh).
+            "$dir/shellcheck-v0.10.0/shellcheck" -x -s bash docker/ai-env.sh docker/ai-env.test.sh
             rm -rf "$dir"
       - run:
           name: update.sh test
           # Stubbed build and systemd; see the job comment above.
           command: deploy/staging/test/update.test.sh
+      - run:
+          name: docker AI env test
+          # docker/ai-env.sh against a fake executor: the AD4M_AI_* variables register
+          # the endpoints, models and defaults they name, once.
+          command: bash docker/ai-env.test.sh
 
 workflows:
   version: 2

@@ -22,8 +22,7 @@
 //! * **Server → client**
 //!   - `{"type":"transcription_session.created","session_id":"<uuid>"}`
 //!   - `{"type":"conversation.item.input_audio_transcription.delta","delta":"<text>"}`
-//!     for each text the stream publishes (one per utterance on an endpoint, one per
-//!     segment on local Whisper).
+//!     for each text the stream publishes (one per committed utterance).
 //!   - `{"type":"error","error":{"message":"...","code":"..."}}`; `insufficient_quota`
 //!     when the caller's user has no compute credits left.
 //!

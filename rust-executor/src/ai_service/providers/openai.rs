@@ -7,7 +7,7 @@
 //! Tools go out as `tools[]` and come back as `tool_calls`, also when streamed: the
 //! deltas of one call arrive under one `index` and are joined here. `tool_choice` and
 //! `response_format` pass through as the caller wrote them. Whether a model is *handed*
-//! tools is the model's `native_tools` flag (`ModelApi::uses_native_tools`), because
+//! tools is the model's `native_tools` flag (`Model::uses_native_tools`), because
 //! OpenAI-shaped servers differ per model and per server flag in whether they honour them.
 //!
 //! A streamed request asks for `stream_options.include_usage`, so the final chunk carries
@@ -103,6 +103,14 @@ fn build_body(request: ChatRequest, stream: bool) -> Value {
     }
     if let Some(response_format) = request.response_format {
         body["response_format"] = response_format;
+    } else if let Some(schema) = request.json_schema {
+        // OpenAI's structured-output shape. llama-server reads `json_schema.schema` from it
+        // into its grammar (tools/server/server-common.cpp, "Handle response_format"), and
+        // vLLM's OpenAI-compatible server decodes against it (docs: features/structured_outputs).
+        body["response_format"] = json!({
+            "type": "json_schema",
+            "json_schema": { "name": "reply", "schema": schema },
+        });
     }
     if stream {
         body["stream"] = json!(true);
@@ -558,6 +566,34 @@ mod wire_tests {
         assert_eq!(reply.usage.output_tokens, Some(5));
     }
 
+    #[test]
+    fn a_json_schema_goes_out_as_response_format_and_the_callers_own_format_wins() {
+        let schema = json!({ "type": "object", "properties": { "a": { "type": "string" } } });
+        let constrained = ChatRequest::new("m", vec![ChatTurn::user("hi")])
+            .with_json_schema(Some(schema.clone()));
+        for stream in [false, true] {
+            let body = build_body(constrained.clone(), stream);
+            assert_eq!(
+                body["response_format"],
+                json!({
+                    "type": "json_schema",
+                    "json_schema": { "name": "reply", "schema": schema },
+                }),
+                "stream: {stream}"
+            );
+        }
+
+        let mut own = constrained;
+        own.response_format = Some(json!({ "type": "json_object" }));
+        assert_eq!(
+            build_body(own, false)["response_format"],
+            json!({ "type": "json_object" })
+        );
+
+        let free = build_body(ChatRequest::new("m", vec![ChatTurn::user("hi")]), false);
+        assert!(free.get("response_format").is_none(), "{free}");
+    }
+
     #[tokio::test]
     async fn no_key_means_no_authorization_header() {
         let mut server = mockito::Server::new_async().await;
@@ -615,14 +651,14 @@ mod wire_tests {
             .chat(ChatRequest::new("m", vec![]))
             .await
             .unwrap_err();
-        // Typed, so `/v1` answers a 503 for it (`OpenAIError::from_upstream`).
+        // Typed, so a caller can tell the endpoint is down (and re-check it), and `/v1`
+        // answers a 503 for it (`OpenAIError::from_upstream`).
         assert!(
             error
-                .downcast_ref::<super::super::http::UpstreamUnreachable>()
+                .downcast_ref::<crate::ai_service::providers::http::UpstreamUnreachable>()
                 .is_some(),
             "{error}"
         );
-        assert!(error.to_string().contains("Could not reach"), "{error}");
         assert!(!error.to_string().contains("sk-test"), "{error}");
 
         let error = OpenAiChat::new("sk-test", url(&server.url()))

@@ -37,10 +37,10 @@ use crate::db::{
 };
 use crate::secret::Secret;
 use crate::types::{
-    AIModelLoadingStatus, AIPromptExamples, AITask, AiCapability, Endpoint, EndpointHealth,
-    EntanglementProof, Expression, ImportResult, LinkExpression, LinkStatus, Model, ModelInput,
-    ModelType, Notification, NotificationInput, PerspectiveDiff, PerspectiveExpression,
-    PerspectiveHandle, SentMessage, UserInfo, UserStatistics,
+    AIPromptExamples, AITask, AiCapability, Endpoint, EndpointHealth, EntanglementProof,
+    Expression, ImportResult, LinkExpression, LinkStatus, Model, ModelInput, ModelType,
+    Notification, NotificationInput, PerspectiveDiff, PerspectiveExpression, PerspectiveHandle,
+    SentMessage, UserInfo, UserStatistics,
 };
 use url::Url;
 
@@ -175,19 +175,7 @@ macro_rules! ad4m_db_methods {
             fn delete_grants(&self, ids: &[String]) -> Ad4mDbResult<()>;
             fn delete_grants_expired_before(&self, cutoff: u64) -> Ad4mDbResult<()>;
 
-            // AI: model status, tasks, models
-            fn create_or_update_model_status(
-                &self,
-                model: &str,
-                progress: f64,
-                status: &str,
-                downloaded: bool,
-                loaded: bool
-            ) -> Result<(), rusqlite::Error>;
-            fn get_model_status(
-                &self,
-                model: &str
-            ) -> Result<Option<AIModelLoadingStatus>, rusqlite::Error>;
+            // AI: tasks, models
             fn add_task(
                 &self,
                 name: String,

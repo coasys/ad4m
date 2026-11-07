@@ -930,27 +930,6 @@ pub struct PerspectiveStateFilter {
     pub perspective: PerspectiveHandle,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(optional_fields)]
-pub struct ModelApiInput {
-    pub base_url: String,
-    /// The provider key. An empty key stores no key, and so does `ai.addModel` without
-    /// one. `ai.updateModel` without one keeps the stored key; it refuses the update if
-    /// `baseUrl` changes too, because a key goes only to the endpoint it was set for.
-    /// Never serialised back out.
-    #[serde(default, skip_serializing)]
-    #[ts(as = "Option<String>")]
-    pub api_key: Option<Secret>,
-    pub model: String,
-    pub api_type: String,
-    /// Optional ceiling for the provider's context window, in tokens.
-    /// See [`crate::types::ModelApi::max_num_ctx`].
-    pub max_num_ctx: Option<u32>,
-    /// See [`crate::types::ModelApiView::native_tools`].
-    pub native_tools: Option<bool>,
-}
-
 /// An endpoint to add, or the new settings of one (`ai.addEndpoint`, `ai.updateEndpoint`).
 #[derive(Debug, Deserialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
@@ -999,33 +978,20 @@ impl From<AIPromptExamples> for AIPromptExamplesInput {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(optional_fields)]
-pub struct LocalModelInput {
-    pub file_name: String,
-    pub tokenizer_source: Option<TokenizerSourceInput>,
-    pub huggingface_repo: Option<String>,
-    pub revision: Option<String>,
-}
-
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct TokenizerSourceInput {
-    pub repo: String,
-    pub revision: String,
-    pub file_name: String,
-}
-
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
+/// A model to add, or the new settings of one (`ai.addModel`, `ai.updateModel`): an
+/// upstream model on a registered endpoint.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct ModelInput {
     pub name: String,
-    pub api: Option<ModelApiInput>,
-    pub local: Option<LocalModelInput>,
-    #[serde(rename = "type")]
     pub model_type: ModelType,
+    pub endpoint_id: String,
+    /// The id the endpoint knows the model by (`ai.discoverModels` lists them).
+    pub remote_model: String,
+    /// Whether prompts with tools send them as tool definitions. Left out: yes on
+    /// Anthropic and Ollama endpoints, no on an OpenAI-shaped server.
+    pub native_tools: Option<bool>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -1111,16 +1077,6 @@ pub struct PerspectiveEvent {
 pub struct PerspectiveRemovedEvent {
     pub perspective_uuid: String,
     pub uuid: String,
-}
-
-#[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct AIModelLoadingStatus {
-    pub model: String,
-    pub progress: f64,
-    pub status: String,
-    pub downloaded: bool,
-    pub loaded: bool,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, TS)]

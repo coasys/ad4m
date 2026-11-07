@@ -266,7 +266,7 @@ pub(crate) async fn setup_interpretation_e2e(
     class_sdnas: &[(&str, &str)],
 ) -> (PerspectiveInstance, Vec<ModelShape>, AgentContext) {
     use crate::ai_service::AIService;
-    use crate::types::{ModelApiInput, ModelInput, ModelType};
+    use crate::types::{ModelInput, ModelType};
 
     let (perspective, shapes, ctx) = setup_perspective_no_llm(class_sdnas).await;
 
@@ -282,40 +282,21 @@ pub(crate) async fn setup_interpretation_e2e(
         .unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let model = std::env::var("INTERPRETATION_E2E_MODEL").unwrap_or_else(|_| "gemma3:12b".into());
     eprintln!("[e2e] interpretation against model '{model}' at {base_url}");
+    let endpoint = e2e_endpoint(
+        "e2e-llm",
+        &base_url,
+        &std::env::var("INTERPRETATION_E2E_API_KEY").unwrap_or_else(|_| "ollama".into()),
+    );
     let model_id = service
         .add_model(ModelInput {
             name: "e2e interpretation LLM".into(),
             model_type: ModelType::Llm,
-            local: None,
-            api: Some(ModelApiInput {
-                base_url,
-                api_key: Some(
-                    std::env::var("INTERPRETATION_E2E_API_KEY")
-                        .unwrap_or_else(|_| "ollama".into())
-                        .into(),
-                ),
-                model,
-                api_type: crate::types::ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
+            endpoint_id: endpoint.id,
+            remote_model: model,
+            native_tools: None,
         })
         .await
         .expect("add_model");
-    // Insert the interpretation task row BEFORE setting the default model:
-    // `register_interpretation_task` only writes the DB row (no spawn), and
-    // it's `set_default_model`'s respawn loop (over `model_id == "default"`
-    // tasks) that actually registers the task with the LLM worker. Priming it
-    // here makes every e2e test self-contained — otherwise running one in
-    // isolation (with no earlier test having inserted the row) leaves the task
-    // unspawned and the first `prompt()` fails with "Task ... not spawned".
-    //
-    // Do NOT call `ensure_interpretation_task` here: it spawns as part of its
-    // idempotency guarantee, and spawning resolves `model_id == "default"` at
-    // spawn-time via `get_default_model`. The default has not been set yet on
-    // this line, so the spawn would fail with "Task needs default model but no
-    // default set". `register_interpretation_task` (write-only) lets
-    // `set_default_model` do the spawn once the default is actually there.
     let _ = crate::perspectives::interpretation::register_interpretation_task();
     service
         .set_default_model(ModelType::Llm, model_id)
@@ -329,48 +310,58 @@ pub(crate) async fn setup_interpretation_e2e(
 /// embeds identity strings with. Its name is the one `semantic_from_env` passes to `embed`
 /// (`INTERPRETATION_EMBED_MODEL`, default `interpretation-embed`).
 ///
-/// With `INTERPRETATION_EMBED_BASE_URL` set, the model is that remote model (the same
-/// variable, default `nomic-embed-text`) on an OpenAI-shaped endpoint at that URL, which
-/// the model registers (`INTERPRETATION_EMBED_API_KEY`, default `ollama`, as the LLM's).
-/// Without it, a local Bert (CPU). Only the one semantic-dedup e2e needs it, so it isn't
+/// The model is that remote model (the same variable, default `nomic-embed-text`) on an
+/// OpenAI-shaped endpoint at `INTERPRETATION_EMBED_BASE_URL`, else at the LLM's
+/// `INTERPRETATION_E2E_BASE_URL` (Ollama serves both), with `INTERPRETATION_EMBED_API_KEY`
+/// (default `ollama`, as the LLM's). Only the one semantic-dedup e2e needs it, so it isn't
 /// part of the default setup.
 pub(crate) async fn register_interpretation_embedding_model() {
-    use crate::types::{ModelApiInput, ModelApiType, ModelInput, ModelType};
+    use crate::types::{ModelInput, ModelType};
     let service = crate::ai_service::AIService::global_instance()
         .await
         .expect("AIService global instance");
     let model = std::env::var("INTERPRETATION_EMBED_MODEL").ok();
-    let api = std::env::var("INTERPRETATION_EMBED_BASE_URL")
-        .ok()
-        .map(|base_url| ModelApiInput {
-            base_url,
-            api_key: Some(
-                std::env::var("INTERPRETATION_EMBED_API_KEY")
-                    .unwrap_or_else(|_| "ollama".into())
-                    .into(),
-            ),
-            model: model.clone().unwrap_or_else(|| "nomic-embed-text".into()),
-            api_type: ModelApiType::OpenAi.to_string(),
-            max_num_ctx: None,
-            native_tools: None,
-        });
-    eprintln!(
-        "[e2e] semantic dedup embeds with {}",
-        api.as_ref()
-            .map_or("a local Bert".to_string(), |api| format!(
-                "'{}' at {}",
-                api.model, api.base_url
-            ))
+    let base_url = std::env::var("INTERPRETATION_EMBED_BASE_URL")
+        .or_else(|_| std::env::var("INTERPRETATION_E2E_BASE_URL"))
+        .unwrap_or_else(|_| "http://localhost:11434/v1".into());
+    let remote_model = model.clone().unwrap_or_else(|| "nomic-embed-text".into());
+    eprintln!("[e2e] semantic dedup embeds with '{remote_model}' at {base_url}");
+    let endpoint = e2e_endpoint(
+        "e2e-embed",
+        &base_url,
+        &std::env::var("INTERPRETATION_EMBED_API_KEY").unwrap_or_else(|_| "ollama".into()),
     );
     service
         .add_model(ModelInput {
             name: model.unwrap_or_else(|| "interpretation-embed".into()),
             model_type: ModelType::Embedding,
-            local: None,
-            api,
+            endpoint_id: endpoint.id,
+            remote_model,
+            native_tools: None,
         })
         .await
         .expect("add_model(Embedding)");
+}
+
+/// The OpenAI-shaped endpoint at `base_url` with `api_key`: the one saved already (the LLM
+/// and the embedding model share an Ollama), else a new one named `name`, saved without a
+/// probe.
+fn e2e_endpoint(name: &str, base_url: &str, api_key: &str) -> crate::types::Endpoint {
+    let endpoint = crate::types::Endpoint::for_test(
+        name,
+        crate::types::EndpointKind::OpenAiCompatible,
+        base_url,
+        api_key,
+    );
+    let saved = Ad4mDb::with_global_instance(|db| db.get_endpoints())
+        .expect("read the endpoints")
+        .into_iter()
+        .find(|e| e.base_url == endpoint.base_url && e.api_key.expose_for_compare(api_key));
+    if let Some(saved) = saved {
+        return saved;
+    }
+    Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).expect("save the endpoint");
+    endpoint
 }
 
 /// Read back the links written under each affected `base`. Production

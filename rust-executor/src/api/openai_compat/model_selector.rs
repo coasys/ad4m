@@ -16,31 +16,20 @@
 use super::errors::{OpenAIError, OpenAIResult};
 use crate::types::{Endpoint, Model, ModelType};
 
-/// A registered model, with the endpoint that serves it. `endpoint` is `None` for a model
-/// without one (a local model): the executor runs it.
+/// A registered model, with the endpoint that serves it.
 pub struct Resolved {
     pub model: Model,
-    pub endpoint: Option<Endpoint>,
+    pub endpoint: Endpoint,
 }
 
 impl Resolved {
-    /// The id the endpoint knows the model by.
-    pub fn remote_model(&self) -> Option<&str> {
-        self.model.api.as_ref().map(|api| api.model.as_str())
-    }
-
-    /// The client's view of a failed call to this model: an upstream answer keeps its
-    /// status (plan §5.4, as on the passthrough), and an endpoint that failed is checked
-    /// again. A failure that did not come from an upstream is a 500.
+    /// The client's view of a failed call to this model through the AI service: an
+    /// upstream answer keeps its status (plan §5.4, as on the passthrough). The service has
+    /// acted on what the failure says about the endpoint already. A failure that is not the
+    /// endpoint's answer is a fixed 502 ([`OpenAIError::from_endpoint`]).
     pub fn failure(&self, error: anyhow::Error) -> OpenAIError {
-        match &self.endpoint {
-            Some(endpoint) => super::passthrough::upstream_failure(
-                endpoint,
-                self.remote_model().unwrap_or_default(),
-                error,
-            ),
-            None => OpenAIError::from_upstream(&error),
-        }
+        log::warn!("v1 model={}: {error}", self.model.name);
+        OpenAIError::from_endpoint(&error)
     }
 }
 
@@ -99,12 +88,12 @@ pub async fn resolve(requested: &str, expected_type: ModelType) -> OpenAIResult<
         )));
     }
 
-    let endpoint = match &model.endpoint_id {
-        Some(id) => crate::db_backend::db_backend()
-            .get_endpoint(id)
-            .map_err(db_error)?,
-        None => None,
-    };
+    let endpoint = crate::db_backend::db_backend()
+        .get_endpoint(&model.endpoint_id)
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            OpenAIError::internal(format!("The endpoint of model '{}' is gone", model.name))
+        })?;
     Ok(Resolved { model, endpoint })
 }
 
@@ -126,10 +115,7 @@ fn by_endpoint_and_remote(models: &[Model], requested: &str) -> OpenAIResult<Opt
     };
     Ok(models
         .iter()
-        .find(|m| {
-            m.endpoint_id.as_deref() == Some(endpoint.id.as_str())
-                && m.api.as_ref().is_some_and(|api| api.model == remote)
-        })
+        .find(|m| m.endpoint_id == endpoint.id && m.remote_model == remote)
         .cloned())
 }
 

@@ -14,8 +14,8 @@ use url::Url;
 use super::super::providers::http::is_transport_safe;
 use crate::secret::Secret;
 use crate::types::{
-    same_endpoint, AiCapability, Endpoint, EndpointHealth, EndpointKind, Model, ModelApiInput,
-    ModelInput, ModelType,
+    same_endpoint, AiCapability, Endpoint, EndpointHealth, EndpointKind, Model, ModelInput,
+    ModelType,
 };
 
 /// One `ai_endpoints` entry. The key is read from the environment variable `api_key_env`
@@ -46,7 +46,7 @@ pub struct AiModelSetting {
     pub model_type: ModelType,
     pub endpoint: String,
     pub remote_model: String,
-    /// See `ModelApiView::native_tools`.
+    /// See `ModelView::native_tools`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_tools: Option<bool>,
 }
@@ -189,28 +189,22 @@ fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no endpoint is named {:?}", setting.endpoint))?;
     let input = ModelInput {
         name: setting.name.clone(),
-        api: Some(ModelApiInput {
-            base_url: endpoint.base_url.to_string(),
-            api_key: Some(endpoint.api_key.clone()),
-            model: setting.remote_model.clone(),
-            api_type: endpoint.kind.protocol().to_string(),
-            max_num_ctx: endpoint.max_num_ctx,
-            native_tools: setting.native_tools,
-        }),
-        local: None,
         model_type: setting.model_type.clone(),
+        endpoint_id: endpoint.id,
+        remote_model: setting.remote_model.clone(),
+        native_tools: setting.native_tools,
     };
+    crate::ai_service::AIService::check_endpoint_serves(&input)?;
     let existing = model_named(&setting.name, |_| true)?;
     match existing {
         None => crate::db_backend::db_backend()
             .add_model(&input)
             .map(|_| ()),
         Some(model)
-            if model.endpoint_id.as_deref() == Some(endpoint.id.as_str())
-                && model.model_type == setting.model_type
-                && model.api.as_ref().is_some_and(|api| {
-                    api.model == setting.remote_model && api.native_tools == setting.native_tools
-                }) =>
+            if model.endpoint_id == input.endpoint_id
+                && model.model_type == input.model_type
+                && model.remote_model == input.remote_model
+                && model.native_tools == input.native_tools =>
         {
             Ok(())
         }
@@ -300,16 +294,12 @@ mod tests {
         assert_eq!(models.len(), 3);
         let by_name = |name: &str| models.iter().find(|m| m.name == name).unwrap();
         let gpt = by_name("gpt");
-        assert_eq!(gpt.endpoint_id.as_deref(), Some(openai.id.as_str()));
-        assert!(gpt
-            .api
-            .as_ref()
-            .unwrap()
-            .api_key
-            .expose_for_compare("sk-from-env"));
-        assert_eq!(gpt.api.as_ref().unwrap().native_tools, Some(true));
+        assert_eq!(gpt.endpoint_id, openai.id);
+        assert_eq!(gpt.remote_model, "gpt-5");
+        assert_eq!(gpt.native_tools, Some(true));
         let qwen = by_name("qwen");
-        assert_eq!(qwen.api.as_ref().unwrap().max_num_ctx, Some(8192));
+        assert_eq!(endpoints[0].max_num_ctx, Some(8192));
+        assert_eq!(qwen.endpoint_id, endpoints[0].id);
         assert_eq!(llm.as_deref(), Some(qwen.id.as_str()));
         assert_eq!(embedding.as_deref(), Some(by_name("nomic").id.as_str()));
     }
@@ -317,24 +307,21 @@ mod tests {
     #[test]
     fn an_entry_takes_over_the_endpoint_the_migration_made_for_its_server() {
         Ad4mDb::init_global_instance(":memory:").unwrap();
-        // A model the launcher added before the registry: the migration gives it an
+        // A model the launcher added before the registry: the migration gave it an
         // endpoint named by its host.
+        let by_host = stored_endpoint(
+            "127.0.0.1:11434",
+            EndpointKind::Ollama,
+            "http://127.0.0.1:11434",
+        );
         let launcher_model = Ad4mDb::with_global_instance(|db| {
-            let id = db.add_model(&ModelInput {
+            db.add_model(&ModelInput {
                 name: "launcher-qwen".into(),
-                api: Some(ModelApiInput {
-                    base_url: "http://127.0.0.1:11434".into(),
-                    api_key: None,
-                    model: "qwen3:8b".into(),
-                    api_type: "OLLAMA".into(),
-                    max_num_ctx: None,
-                    native_tools: None,
-                }),
-                local: None,
                 model_type: ModelType::Llm,
-            })?;
-            db.link_models_to_endpoints()?;
-            Ok::<_, anyhow::Error>(id)
+                endpoint_id: by_host.id.clone(),
+                remote_model: "qwen3:8b".into(),
+                native_tools: None,
+            })
         })
         .unwrap();
         let migrated = Ad4mDb::with_global_instance(|db| db.get_endpoints()).unwrap();
@@ -371,8 +358,8 @@ mod tests {
                 .endpoint_id
                 .clone()
         };
-        assert_eq!(endpoint_of("launcher-qwen"), Some(ollama.id.clone()));
-        assert_eq!(endpoint_of("qwen"), Some(ollama.id.clone()));
+        assert_eq!(endpoint_of("launcher-qwen"), ollama.id);
+        assert_eq!(endpoint_of("qwen"), ollama.id);
         let qwen = models.iter().find(|m| m.name == "qwen").unwrap();
         assert_eq!(llm.as_deref(), Some(qwen.id.as_str()));
         assert_ne!(qwen.id, launcher_model);
@@ -389,12 +376,11 @@ mod tests {
 
         let models = Ad4mDb::with_global_instance(|db| db.get_models()).unwrap();
         let qwen = models.iter().find(|m| m.name == "qwen").unwrap();
-        let api = qwen.api.as_ref().unwrap();
-        assert_eq!(api.model, "qwen3:14b");
-        assert_eq!(api.base_url.as_str(), "http://127.0.0.1:11435/");
+        assert_eq!(qwen.remote_model, "qwen3:14b");
         let endpoints = Ad4mDb::with_global_instance(|db| db.get_endpoints()).unwrap();
         assert_eq!(endpoints.len(), 2, "updated in place, not added");
-        assert_eq!(qwen.endpoint_id.as_deref(), Some(endpoints[0].id.as_str()));
+        assert_eq!(endpoints[0].base_url.as_str(), "http://127.0.0.1:11435/");
+        assert_eq!(qwen.endpoint_id, endpoints[0].id);
     }
 
     #[test]
@@ -408,6 +394,48 @@ mod tests {
         .unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(models.len(), 2);
+    }
+
+    // The file's models get the check `ai.addModel` makes: Ollama serves no transcription,
+    // so the model is skipped and the endpoint does not gain the capability.
+    #[test]
+    fn a_model_its_endpoint_cannot_serve_is_skipped() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let mut with_transcription = settings();
+        with_transcription.models.push(
+            serde_json::from_value(serde_json::json!({
+                "name": "whisper", "model_type": "TRANSCRIPTION", "endpoint": "ollama",
+                "remote_model": "whisper-1"
+            }))
+            .unwrap(),
+        );
+        apply(&with_transcription, env);
+        let (endpoints, models) = Ad4mDb::with_global_instance(|db| {
+            Ok::<_, anyhow::Error>((db.get_endpoints()?, db.get_models()?))
+        })
+        .unwrap();
+        assert!(models.iter().all(|m| m.name != "whisper"), "{models:?}");
+        assert!(!endpoints[0]
+            .capabilities
+            .contains(&AiCapability::Transcription));
+    }
+
+    /// An endpoint of `kind` named `name` on `url`, without a key, stored.
+    fn stored_endpoint(name: &str, kind: EndpointKind, url: &str) -> Endpoint {
+        let endpoint = Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            kind,
+            base_url: Url::parse(url).unwrap(),
+            api_key: Secret::new(""),
+            capabilities: kind.default_capabilities(),
+            max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
+            health: EndpointHealth::default(),
+        };
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        endpoint
     }
 
     #[test]
@@ -429,18 +457,17 @@ mod tests {
     #[test]
     fn a_model_name_two_models_have_is_left_alone() {
         Ad4mDb::init_global_instance(":memory:").unwrap();
+        let endpoint = stored_endpoint(
+            "twins",
+            EndpointKind::OpenAiCompatible,
+            "http://127.0.0.1:9931",
+        );
         let twin = |remote_model: &str| ModelInput {
             name: "qwen".into(),
-            api: Some(ModelApiInput {
-                base_url: "http://127.0.0.1:9931".into(),
-                api_key: None,
-                model: remote_model.into(),
-                api_type: "OPEN_AI".into(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
             model_type: ModelType::Llm,
+            endpoint_id: endpoint.id.clone(),
+            remote_model: remote_model.into(),
+            native_tools: None,
         };
         Ad4mDb::with_global_instance(|db| {
             db.add_model(&twin("a"))?;
@@ -457,7 +484,7 @@ mod tests {
         let mut remotes: Vec<String> = models
             .iter()
             .filter(|m| m.name == "qwen")
-            .map(|m| m.api.as_ref().unwrap().model.clone())
+            .map(|m| m.remote_model.clone())
             .collect();
         remotes.sort();
         assert_eq!(remotes, vec!["a", "b"]);

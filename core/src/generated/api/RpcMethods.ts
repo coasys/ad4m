@@ -1,7 +1,6 @@
 // Auto-generated from the executor's WS-RPC HandlerMap (rust-executor/src/api/ws_handler.rs).
 // Do NOT edit manually — regenerate with: pnpm run generate:api-types
 
-import type { AIModelLoadingStatus } from "./AIModelLoadingStatus";
 import type { AITask } from "./AITask";
 import type { AddAgentInfosRequest } from "./AddAgentInfosRequest";
 import type { Agent } from "./Agent";
@@ -21,7 +20,6 @@ import type { AiEndpoint } from "./AiEndpoint";
 import type { AiEndpointInput } from "./AiEndpointInput";
 import type { AiGetDefaultModelParams } from "./AiGetDefaultModelParams";
 import type { AiIdParams } from "./AiIdParams";
-import type { AiModelLoadingStatusParams } from "./AiModelLoadingStatusParams";
 import type { AiRemoveEndpointParams } from "./AiRemoveEndpointParams";
 import type { AiSetDefaultModelParams } from "./AiSetDefaultModelParams";
 import type { AiTranscriptionCloseParams } from "./AiTranscriptionCloseParams";
@@ -45,6 +43,7 @@ import type { DecoratedPerspective } from "./DecoratedPerspective";
 import type { DetectedEndpoint } from "./DetectedEndpoint";
 import type { DeviceView } from "./DeviceView";
 import type { DidResolutionResult } from "./DidResolutionResult";
+import type { DiscoveredModel } from "./DiscoveredModel";
 import type { EmbedRequest } from "./EmbedRequest";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
@@ -83,6 +82,7 @@ import type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesReques
 import type { LockAgentRequest } from "./LockAgentRequest";
 import type { LogParams } from "./LogParams";
 import type { Model } from "./Model";
+import type { ModelStatus } from "./ModelStatus";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
 import type { NeighbourhoodOnlineStatusParams } from "./NeighbourhoodOnlineStatusParams";
 import type { NeighbourhoodSignalParams } from "./NeighbourhoodSignalParams";
@@ -240,11 +240,11 @@ export interface RpcMethods {
   "ai.addTask": { params: AiAddTaskParams; result: AITask };
   "ai.deleteUpstreamModel": { params: AiUpstreamModelParams; result: boolean };
   "ai.detectEndpoints": { params: Record<string, never>; result: Array<DetectedEndpoint> };
-  "ai.discoverModels": { params: AiDiscoverModelsParams; result: Array<string> };
+  "ai.discoverModels": { params: AiDiscoverModelsParams; result: Array<DiscoveredModel> };
   "ai.embed": { params: EmbedRequest; result: string };
   "ai.endpoints": { params: Record<string, never>; result: Array<AiEndpoint> };
   "ai.getDefaultModel": { params: AiGetDefaultModelParams; result: Model | null };
-  "ai.modelLoadingStatus": { params: AiModelLoadingStatusParams; result: AIModelLoadingStatus };
+  "ai.modelStatus": { params: AiIdParams; result: ModelStatus };
   "ai.models": { params: Record<string, never>; result: Array<Model> };
   "ai.prompt": { params: PromptRequest; result: string };
   "ai.pullModel": { params: AiUpstreamModelParams; result: boolean };
@@ -444,7 +444,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.discoverModels",
   "ai.endpoints",
   "ai.getDefaultModel",
-  "ai.modelLoadingStatus",
+  "ai.modelStatus",
   "ai.models",
   "ai.tasks",
   "expression.get",
@@ -523,7 +523,6 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
 export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "agent.generate",
   "agent.unlock",
-  "ai.addModel",
   "ai.deleteUpstreamModel",
   "ai.embed",
   "ai.prompt",

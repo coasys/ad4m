@@ -1,7 +1,7 @@
 //! `/v1` as an aggregator: a request for a model on a registered endpoint is forwarded to
 //! that endpoint as the client wrote it (plan §5).
 //!
-//! Only `model` is rewritten, to the id the endpoint knows (`ModelApi::model`), and back to
+//! Only `model` is rewritten, to the id the endpoint knows (`Model::remote_model`), and back to
 //! the client's name in the answer, and, for a caller who pays, what bounds the cost
 //! ([`cap_cost`]). Every other field (`tools`, `tool_choice`,
 //! `response_format`, fields this executor has never heard of) reaches the upstream, and an
@@ -32,16 +32,14 @@ use tokio::time::Instant;
 
 use super::errors::OpenAIError;
 use super::model_selector::Resolved;
-use crate::ai_service::endpoints::{
-    check_health, publish_model_status, request_slot, request_timeout,
-};
+use crate::ai_service::endpoints::{after_failed_request, request_slot, request_timeout};
 use crate::ai_service::estimate_token_count;
 use crate::ai_service::providers::http::{
     credentialed_http, is_transport_safe, read_json, versioned_endpoint, UpstreamStatus,
     UpstreamUnreachable, CLEARTEXT_KEY_REFUSAL,
 };
 use crate::billing::{affordable_ai_units, check_compute_credits};
-use crate::types::{Endpoint, EndpointKind, Model, ModelState, ModelStatus, RequestContext};
+use crate::types::{Endpoint, EndpointKind, Model, RequestContext};
 
 /// How long a stream may take to start answering (plan §5.4).
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -96,38 +94,37 @@ impl Upstream {
     /// The upstream of `resolved` when `/v1` forwards to it: a model on an endpoint of any
     /// kind but Anthropic and Ollama. `None`: the executor answers, through the model's own
     /// client (Anthropic is translated there; Ollama goes to its native `/api/chat`, as its
-    /// OpenAI-compatible `/v1` ignores `num_ctx` and cuts long prompts without an error) or
-    /// a local model.
+    /// OpenAI-compatible `/v1` ignores `num_ctx` and cuts long prompts without an error).
     pub fn of(resolved: &Resolved) -> Option<Upstream> {
-        let endpoint = resolved.endpoint.clone()?;
         if matches!(
-            endpoint.kind,
+            resolved.endpoint.kind,
             EndpointKind::Anthropic | EndpointKind::Ollama
         ) {
             return None;
         }
         Some(Upstream {
-            remote_model: resolved.remote_model()?.to_string(),
+            remote_model: resolved.model.remote_model.clone(),
             model: resolved.model.clone(),
-            endpoint,
+            endpoint: resolved.endpoint.clone(),
         })
     }
 
     /// The upstream of a `/v1/chat/completions` `body` for `resolved`, by the rule of
-    /// [`Self::of`] plus one: a request with active tools (`tools` given, `tool_choice` not
+    /// [`Self::of`] plus two: a request with active tools (`tools` given, `tool_choice` not
     /// `"none"`) is forwarded only to a model that takes tools as definitions
-    /// (`ModelApi::uses_native_tools`). For any other, the executor renders the tools into
-    /// the prompt and reads the calls back out of the text.
+    /// (`Model::uses_native_tools`), and one that forces a call (`tool_choice: "required"`
+    /// or a named function) only to a server that enforces the choice
+    /// ([`enforces_tool_choice`]). For any other, the executor renders the tools into the
+    /// prompt and reads the calls back out of the text, a forced call under a schema the
+    /// server decodes against (`chat::constrained_tool_calls`).
     pub fn for_chat(resolved: &Resolved, body: &Value) -> Option<Upstream> {
         let upstream = Self::of(resolved)?;
-        let takes_tools = || {
-            resolved
-                .model
-                .api
-                .as_ref()
-                .is_some_and(|api| api.uses_native_tools())
-        };
-        (!tools_active(body) || takes_tools()).then_some(upstream)
+        if !tools_active(body) {
+            return Some(upstream);
+        }
+        let takes_tools = resolved.model.uses_native_tools(&resolved.endpoint);
+        let held_to_it = !forces_a_call(body) || enforces_tool_choice(resolved.endpoint.kind);
+        (takes_tools && held_to_it).then_some(upstream)
     }
 }
 
@@ -139,6 +136,40 @@ fn tools_active(body: &Value) -> bool {
     has_tools && body.get("tool_choice").and_then(Value::as_str) != Some("none")
 }
 
+/// Whether `body` forces a tool call: `tool_choice` is `"required"` or names a function.
+pub(super) fn forces_a_call(body: &Value) -> bool {
+    match body.get("tool_choice") {
+        Some(Value::String(choice)) => choice == "required",
+        Some(choice @ Value::Object(_)) => choice.pointer("/function/name").is_some(),
+        _ => false,
+    }
+}
+
+/// Whether a server of `kind` holds the model to a forced `tool_choice` itself. OpenAI does;
+/// vLLM does by structured outputs, with or without `--enable-auto-tool-choice`
+/// (docs.vllm.ai, features/tool_calling: named function calling and `required`).
+/// llama-server does not: b11669 lets a model answer `required` in text, and refuses the
+/// named form as the wrong type and falls back to `auto`. Ollama's OpenAI API lists
+/// `tool_choice` as unsupported (docs/api/openai-compatibility). An OpenAI-compatible
+/// server is unknown, so it is not trusted to.
+pub(super) fn enforces_tool_choice(kind: EndpointKind) -> bool {
+    matches!(kind, EndpointKind::OpenAi | EndpointKind::Vllm)
+}
+
+/// `body` for llama-server when it says `tool_choice: "none"`: without `tools` and
+/// `tool_choice`. llama-server still offers the tools to the model then, and their call
+/// markup comes back as text; a request without tools is what `none` asks for.
+fn without_refused_tools(kind: EndpointKind, body: &mut Value) {
+    let refused = body.get("tool_choice").and_then(Value::as_str) == Some("none");
+    if kind == EndpointKind::LlamaServer && refused {
+        if let Some(object) = body.as_object_mut() {
+            object.remove("tools");
+            object.remove("tool_choice");
+            object.remove("parallel_tool_calls");
+        }
+    }
+}
+
 /// Map a failure of `upstream` for the client, and act on what it says about the endpoint:
 /// down or refusing the key re-checks its health (which publishes the change), a missing
 /// model is published `MISSING`.
@@ -148,30 +179,8 @@ pub(super) fn upstream_failure(
     error: anyhow::Error,
 ) -> OpenAIError {
     log::warn!("AI endpoint {:?} ({remote_model}): {error}", endpoint.name);
-    let mapped = OpenAIError::from_endpoint(&error);
-    match mapped.error.code.as_deref() {
-        Some("upstream_unavailable" | "upstream_auth") => {
-            let endpoint = endpoint.clone();
-            tokio::spawn(async move {
-                if let Err(e) = check_health(&endpoint).await {
-                    log::warn!("AI endpoint health after a failed request: {e}");
-                }
-            });
-        }
-        Some("model_not_found") => {
-            let (endpoint_id, remote_model) = (endpoint.id.clone(), remote_model.to_string());
-            tokio::spawn(async move {
-                let status = ModelStatus {
-                    state: ModelState::Missing,
-                    progress: None,
-                    detail: Some("The endpoint does not serve this model".into()),
-                };
-                publish_model_status(&endpoint_id, &remote_model, status).await;
-            });
-        }
-        _ => {}
-    }
-    mapped
+    after_failed_request(&endpoint.id, remote_model, &error);
+    OpenAIError::from_endpoint(&error)
 }
 
 /// An upstream answer with a success status, and the slot it holds until it is read.
@@ -480,6 +489,9 @@ pub async fn forward_completion(
     }
     let client_model = body.get("model").cloned().unwrap_or(Value::Null);
     body["model"] = Value::String(upstream.remote_model.clone());
+    if route == Route::ChatCompletions {
+        without_refused_tools(upstream.endpoint.kind, &mut body);
+    }
     let stream = body.get("stream").and_then(Value::as_bool) == Some(true);
     let client_wants_usage = body
         .pointer("/stream_options/include_usage")
