@@ -896,10 +896,17 @@ impl Resolver {
     }
 
     /// Fills the key map for the signers of links about to be checked: each `(did:key,
-    /// anchor)` once. A link anchored past the trusted seq of its signer's log refreshes that
-    /// log from the store, at most once per [`ADMIT_FRESHNESS`].
+    /// anchor)` once. A listed signer's log is refreshed from the store when it last was more
+    /// than [`ADMIT_FRESHNESS`] ago, whatever the link's anchor: a cached head admits a key
+    /// for that long at most, so a revocation the store holds reaches a link anchored before
+    /// it (or unanchored) by the next admission, as [`verify_expression`] does for records.
+    /// Offline, a failed refresh leaves the cached head to answer for another window.
     pub async fn prepare(&self, signers: &[(String, Option<u64>)]) {
-        let now = super::service::now();
+        self.prepare_at(signers, super::service::now()).await
+    }
+
+    /// [`Resolver::prepare`] at the unix time `now` (tests move the clock).
+    pub(crate) async fn prepare_at(&self, signers: &[(String, Option<u64>)], now: u64) {
         let mut seen = std::collections::HashSet::new();
         for (did, anchor) in signers {
             if !seen.insert((did.as_str(), *anchor)) {
@@ -908,12 +915,10 @@ impl Resolver {
             let Some(key) = multikey_of(did) else {
                 continue;
             };
-            let KeyLookup::Listed { scid, log } = self.lookup_signer(key).await else {
+            let KeyLookup::Listed { scid, .. } = self.lookup_signer(key).await else {
                 continue;
             };
-            if anchor.is_some_and(|a| a > log.trusted)
-                && !self.cache.refreshed_within(&scid, now, ADMIT_FRESHNESS)
-            {
+            if !self.cache.refreshed_within(&scid, now, ADMIT_FRESHNESS) {
                 if let Err(e) = self
                     .cache
                     .refresh(self.backend.as_ref(), &did_of(&scid))
@@ -3545,6 +3550,53 @@ mod link_check_tests {
                     person: None,
                 },
                 "signed after the revocation, anchor {anchor:?}"
+            );
+        }
+    }
+
+    /// This executor accepted a person's head at seq 0 and cached it. The owner then revokes
+    /// the device at seq 1, which only the store knows. Whoever holds the revoked key keeps
+    /// signing links anchored at 0, or with no anchor: the cached head may answer for them
+    /// only for [`ADMIT_FRESHNESS`], after which the next admission reads the log again.
+    #[tokio::test]
+    async fn a_stale_cached_head_does_not_keep_admitting_a_revoked_key() {
+        let mut log = TestLog::new(72);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let resolver = resolver_on(store.clone());
+        let device = format!("did:key:{}", log.device.key());
+        let person = Some(did_of(&log.scid()));
+        let now = crate::identity::service::now();
+        let judge =
+            |expr: &Expression<Link>| check_signed_with(expr, resolver.cache.key_map(), None, NOW);
+
+        resolver.prepare_at(&[(device.clone(), Some(0))], now).await;
+        assert_eq!(judge(&signed_with(&log.device, Some(0))), valid_for(person));
+
+        // Revoked in the store only; the cached head still lists the key.
+        log.revoke_d1();
+        *store.events.lock().unwrap() = log.events.clone();
+
+        // Within the window the cached head answers, without another read of the store.
+        let reads = store.log_calls.load(Ordering::SeqCst);
+        resolver
+            .prepare_at(&[(device.clone(), Some(0))], now + 5)
+            .await;
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), reads);
+
+        // Past it, the next link by that key refreshes the log, whatever its anchor.
+        let later = now + ADMIT_FRESHNESS + 5;
+        for anchor in [Some(0), None] {
+            let expr = signed_with(&log.device, anchor);
+            resolver
+                .prepare_at(&[(device.clone(), anchor)], later)
+                .await;
+            assert_eq!(
+                judge(&expr),
+                CheckedLink {
+                    verdict: LinkVerdict::Flagged,
+                    person: None,
+                },
+                "stale head, anchor {anchor:?}"
             );
         }
     }
