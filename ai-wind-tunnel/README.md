@@ -85,7 +85,8 @@ export EXECUTOR_PATH=/path/to/ad4m-executor   # else ../../target/release/ad4m-e
 
 pnpm run ai-wind-tunnel -- --dry-run      # the matrix and this machine's class
 pnpm run ai-wind-tunnel                   # everything, repeat 3
-pnpm run ai-wind-tunnel -- --providers ollama,llama-server --services llm,embeddings --repeat 5
+# or a filtered run, to its own file (the default path holds one run per day and hardware):
+pnpm run ai-wind-tunnel -- --providers ollama,llama-server --services llm,embeddings --repeat 5 --out /tmp/filtered.json
 ```
 
 Options: `--providers`, `--services`, `--models` (manifest ids or provider names),
@@ -112,7 +113,7 @@ and starts nothing:
 
 | Variable | Provider |
 |---|---|
-| `AI_WT_OLLAMA_URL` | Ollama |
+| `AI_WT_OLLAMA_URL` | Ollama (its default port 11434 is in the harness's reserved ports: serve it on another port with `OLLAMA_HOST`, or remove 11434 from `AI_WT_RESERVED_PORTS` when no other service uses it) |
 | `AI_WT_LLAMA_SERVER_URL` (+ `AI_WT_LLAMA_BACKEND`, `AI_WT_LLAMA_SERVER_MODEL`) | llama-server |
 | `AI_WT_WHISPER_SERVER_URL` (+ `AI_WT_WHISPER_SERVER_MODEL`) | whisper-server started with `--request-path /v1/audio --inference-path /transcriptions` |
 | `AI_WT_SPEACHES_URL` | speaches |
@@ -215,7 +216,9 @@ vLLM cells are skipped on AMD.
    and hardware replaces the first; `--out` writes elsewhere).
 2. `pnpm run ai-wind-tunnel-recommend` regenerates `recommendations.json` from every evidence
    file. `-- --check` fails when the checked-in file is stale (the unit tests check this too).
-3. Commit both. Evidence files are reviewable: no host names, users or paths, only hardware.
+3. Read the evidence before you commit it. The harness records hardware, not host names,
+   users or paths, but a failure reason can quote an attached server's URL. Remove any host
+   name, path or credential you find, then commit both.
 
 How a recommendation is chosen (`SERVICE_RULES` in `recommend.ts`, also written into
 `recommendations.json`): per class and service, the cells that passed and fit the machine's
