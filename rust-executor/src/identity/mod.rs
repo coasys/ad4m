@@ -333,11 +333,57 @@ pub async fn prepare_link_signers(links: &[LinkExpression]) {
     let Some(service) = SERVICE.get() else {
         return;
     };
-    let signers: Vec<(String, Option<u64>)> = links
+    service.resolver.prepare(&signers_to_prepare(links)).await;
+}
+
+/// The `(did:key, anchor)` pairs of `links` worth asking the key index about: those whose
+/// signature holds for their own `author`. A link whose signature fails is `invalid` whatever
+/// any log says ([`verdict::judge`]), so a peer sending well-formed DIDs with bad signatures
+/// costs no lookup; the signature check is local.
+fn signers_to_prepare(links: &[LinkExpression]) -> Vec<(String, Option<u64>)> {
+    links
         .iter()
+        .filter(|l| {
+            // The same bytes `LinkExpression::check` verifies: the normalised data.
+            let expr = Expression::<crate::types::Link> {
+                author: l.author.clone(),
+                timestamp: l.timestamp.clone(),
+                data: l.data.normalize(),
+                proof: l.proof.clone(),
+            };
+            crate::agent::signatures::signature_holds(&expr)
+        })
         .map(|l| (l.author.clone(), l.proof.anchor))
-        .collect();
-    service.resolver.prepare(&signers).await;
+        .collect()
+}
+
+#[cfg(test)]
+mod prepare_tests {
+    use super::signers_to_prepare;
+    use crate::agent::signatures::TestSigner;
+    use crate::types::{Link, LinkExpression};
+
+    /// A peer floods a diff with well-formed `did:key` authors and empty or wrong signatures:
+    /// none of them reaches the key index. Only a link that verifies against its author does.
+    #[test]
+    fn only_a_link_whose_signature_holds_is_prepared() {
+        let link = |n: u32| Link {
+            source: "a".into(),
+            predicate: Some("p".into()),
+            target: format!("t{n}"),
+        };
+        let signed: LinkExpression = TestSigner::generate().sign(link(0)).into();
+        let mut unsigned: LinkExpression = TestSigner::generate().sign(link(1)).into();
+        unsigned.proof.signature = String::new();
+        let mut forged: LinkExpression = TestSigner::generate().sign(link(2)).into();
+        forged.author = TestSigner::generate().did;
+        let mut re_anchored: LinkExpression = TestSigner::generate().sign(link(3)).into();
+        re_anchored.proof.anchor = Some(4);
+        assert_eq!(
+            signers_to_prepare(&[signed.clone(), unsigned, forged, re_anchored]),
+            vec![(signed.author, None)]
+        );
+    }
 }
 
 /// The anchor of a link that the local agent `agent_did` signs now: the trusted seq of its
