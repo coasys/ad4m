@@ -1158,6 +1158,26 @@ fn registration_missing(
     }))
 }
 
+/// Whether the runtime on `port` was started with other models than `selection` has for
+/// `runtime`. A port this executor does not manage: no.
+fn serves_other_models(port: u16, selection: &Selection, runtime: &SelectedRuntime) -> bool {
+    let mut wanted: Vec<&str> = selection
+        .models_of(runtime.provider)
+        .iter()
+        .map(|m| m.model_id.as_str())
+        .collect();
+    wanted.sort_unstable();
+    MANAGED_PORTS
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&port)
+        .is_some_and(|managed| {
+            let mut served: Vec<&str> = managed.served.iter().map(String::as_str).collect();
+            served.sort_unstable();
+            served != wanted
+        })
+}
+
 async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
     let _lifecycle = LIFECYCLE.lock().await;
     let mut selection = Selection::load(paths)
@@ -1198,6 +1218,9 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
         // Failed (restarts spent, a binary that does not start) or stopped: start it again,
         // as a new runtime. Running or starting: its registration, unless it is there (one
         // that failed, or whose start was cancelled before it, nothing else repairs).
+        // A runtime that serves other models than the selection has for it
+        // (`ai.localInstall` with `start: false` while it ran): stopped and started again.
+        let mut stale: Option<Running> = None;
         let registered_as = {
             let mut running = RUNNING.lock().await;
             let live = running.get(&runtime.provider).map(|r| {
@@ -1218,10 +1241,21 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
                     }
                     None
                 }
+                Some((.., port)) if serves_other_models(port, &selection, &runtime) => {
+                    stale = running.remove(&runtime.provider);
+                    None
+                }
                 Some((_, endpoint_id, key, port)) => Some((endpoint_id, key, port)),
                 None => None,
             }
         };
+        if let Some(old) = stale {
+            log::info!(
+                "Local AI: {} serves other models than the selection: starting it again",
+                runtime.provider.as_str()
+            );
+            stop_runtime(old).await;
+        }
         if let Some((endpoint_id, key, port)) = registered_as {
             if registration_missing(&selection, &runtime, endpoint_id.as_deref())? {
                 log::info!(
@@ -1754,19 +1788,25 @@ async fn stop_running() {
         .collect();
     let mut endpoint_ids = Vec::new();
     for running in running {
-        let port = running.supervised.spec.port;
-        running.supervised.stop().await;
-        MANAGED_PORTS
-            .write()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&port);
-        endpoint_ids.extend(running.endpoint_id);
+        endpoint_ids.extend(stop_runtime(running).await);
     }
     for id in endpoint_ids {
         if let Ok(Some(endpoint)) = crate::db_backend::db_backend().get_endpoint(&id) {
             let _ = super::endpoints::check_health(&endpoint).await;
         }
     }
+}
+
+/// Stop `running` and forget its port. Answers its endpoint id, whose models stay
+/// registered (down).
+async fn stop_runtime(running: Running) -> Option<String> {
+    let port = running.supervised.spec.port;
+    running.supervised.stop().await;
+    MANAGED_PORTS
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&port);
+    running.endpoint_id
 }
 
 /// Remove the managed endpoints `chosen` picks, with their models (and the defaults that
@@ -3468,6 +3508,148 @@ mod tests {
             spawned_pids(&spawned).is_empty(),
             "no second copy: {left:?}"
         );
+    }
+
+    /// `ai.localInstall {start: false}` changed the models while the runtime ran. The next
+    /// `ai.localStart` registered the new models against the process that serves the old
+    /// ones. It starts the runtime again with the new models.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_restarts_a_running_runtime_whose_models_the_selection_changed() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = TEST_LOCK.lock().await;
+        crate::test_utils::ensure_test_db();
+        let saved = super::super::AI_SERVICE
+            .lock()
+            .await
+            .replace(AIService::empty());
+        let db = crate::db_backend::db_backend();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LocalPaths {
+            store: dir.path().join("store"),
+            state: dir.path().join("state"),
+        };
+        // The new runtime answers `/health`: a file server on the port it is given
+        // (`--host 127.0.0.1 --port N ...`).
+        let www = dir.path().join("www");
+        std::fs::create_dir_all(&www).unwrap();
+        std::fs::write(www.join("health"), "ok").unwrap();
+        let spawned = dir.path().join("spawned");
+        let binary = dir.path().join("llama-server");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\necho $$ >> '{}'\ncd '{}' && exec python3 -m http.server \"$4\" --bind 127.0.0.1\n",
+                spawned.display(),
+                www.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut new_chat = selected(Service::Llm, "new-chat", Provider::LlamaServer);
+        new_chat.path = dir.path().join("new-chat.gguf");
+        std::fs::write(&new_chat.path, "gguf").unwrap();
+        Selection {
+            runtimes: vec![SelectedRuntime {
+                provider: Provider::LlamaServer,
+                runtime_id: "fake".into(),
+                version: "0".into(),
+                build: "cpu".into(),
+                binary,
+                lib_dirs: vec![],
+                services: vec![Service::Llm],
+                backend: None,
+            }],
+            models: vec![new_chat],
+            ports: BTreeMap::new(),
+        }
+        .save(&paths)
+        .unwrap();
+
+        // The runtime as the old selection started it: it serves `old-chat`.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let old = Supervised::start(
+            ChildSpec {
+                name: "fake".into(),
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-c".into(), "exec sleep 60".into()],
+                env: vec![],
+                cwd: dir.path().to_path_buf(),
+                port,
+                readiness: Readiness::Tcp,
+                log_file: dir.path().join("fake.log"),
+            },
+            Timing {
+                start_timeout: Duration::from_secs(5),
+                probe_interval: Duration::from_millis(100),
+                backoff: Duration::from_millis(20),
+            },
+            RestartBudget::standard(),
+        );
+        let settled = old.wait_until_settled(Duration::from_secs(10)).await;
+        assert_eq!(settled.phase, Phase::Running);
+        let old_pid = settled.pid.expect("the old runtime has a pid");
+        MANAGED_PORTS.write().unwrap().insert(
+            port,
+            ManagedPort {
+                status: old.watch(),
+                readiness: Readiness::Tcp,
+                served: vec!["old-chat".into()],
+                lists_models: false,
+                stop: old.stop_handle(),
+            },
+        );
+        RUNNING.lock().await.insert(
+            Provider::LlamaServer,
+            Running {
+                supervised: old,
+                endpoint_id: None,
+                key: Secret::new("k3y"),
+            },
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(30), start_at(&paths, false)).await;
+        let endpoint = db.get_endpoint_by_name(LLAMA_ENDPOINT).unwrap();
+        let mut names: Vec<String> = endpoint
+            .iter()
+            .flat_map(|e| db.endpoint_model_ids(&e.id).unwrap())
+            .filter_map(|id| db.get_model(id).unwrap().map(|m| m.name))
+            .collect();
+        names.sort();
+        let running_pid = RUNNING
+            .lock()
+            .await
+            .get(&Provider::LlamaServer)
+            .and_then(|r| r.supervised.status().pid);
+        if let Some(left) = RUNNING.lock().await.remove(&Provider::LlamaServer) {
+            let left_port = left.supervised.spec.port;
+            left.supervised.stop().await;
+            MANAGED_PORTS.write().unwrap().remove(&left_port);
+        }
+        MANAGED_PORTS.write().unwrap().remove(&port);
+        drop(listener);
+        if let Some(endpoint) = &endpoint {
+            let service = AIService::global_instance().await.unwrap();
+            for id in db.endpoint_model_ids(&endpoint.id).unwrap() {
+                service.remove_model(id).await.unwrap();
+            }
+            db.remove_endpoint(&endpoint.id).unwrap();
+        }
+        *super::super::AI_SERVICE.lock().await = saved;
+        let old_left = wait_gone(&[old_pid]).await;
+        let new_left = wait_gone(&spawned_pids(&spawned)).await;
+
+        outcome.expect("the start ends").unwrap();
+        assert_eq!(
+            spawned_pids(&spawned).len(),
+            1,
+            "the runtime started again with the new models"
+        );
+        assert!(running_pid.is_some_and(|pid| pid != old_pid));
+        assert!(old_left.is_empty(), "the old runtime still runs");
+        assert!(new_left.is_empty(), "still running: {new_left:?}");
+        assert_eq!(names, vec!["new-chat"], "the endpoint lists the new models");
     }
 
     /// `pids.json` names a runtime from its spawn, not from the end of its model load: an
