@@ -11,9 +11,14 @@
 //!   only when the record lists the poster as a desktop or phone app; the record marks it
 //!   `holdsMaster: "offered"`.
 //! - `confirm-revoke`: the listed keys are revoked ([`super::revoke`]). One that asks for a
-//!   rotation too needs the 12 words, and is left for the rotation flow.
+//!   rotation too needs the 12 words: [`answer`] refuses it with [`ClientError::NeedsWords`],
+//!   and [`answer_with_words`] revokes the keys in a rotation ([`super::rotate`]).
 //!
-//! The answered request is deleted with a store request the master key signs.
+//! The answered request is deleted with a store request the master key signs (master *n*+1
+//! after a rotation).
+//!
+//! The device's side posts with its executor's device key: [`ask_for_master`] and
+//! [`ask_confirm_revoke`].
 
 use ad4m_hash_chain::{decode_proof_value, hash_bytes};
 use ad4m_identity_core::{verify_signed, KelChain, REQUEST_DOMAIN};
@@ -22,6 +27,7 @@ use ad4m_ldk::identity::{DeviceRequest, DeviceRequestBody, PostedRequest};
 use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::flows::master::{self, Sent};
 use crate::flows::revoke::{revoke_with, Revoked};
+use crate::flows::rotate::{master_of, rotate, Rotated};
 use crate::request::{
     body_bytes, chain_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
 };
@@ -35,6 +41,8 @@ pub enum Answered {
     MasterSent(Sent),
     /// `confirm-revoke`: the keys are revoked.
     Revoked(Revoked),
+    /// `confirm-revoke` with the words: the keys are revoked in a rotation.
+    Rotated(Rotated),
 }
 
 /// Checks that `request` of `did`'s box was posted by the device key it names: a device key
@@ -147,6 +155,75 @@ pub async fn answer<R: ExecutorRpc>(
             Ok(Answered::Revoked(revoked))
         }
     }
+}
+
+/// [`answer`] with the 12 `words`, which a `confirm-revoke` asking for a rotation needs: the
+/// listed keys are revoked in a `rotate` to master *n*+1 ([`super::rotate::rotate`], which this
+/// device keeps and sends to the apps that kept the master key), and the request is deleted
+/// with master *n*+1. Any other request is answered as [`answer`] does.
+pub async fn answer_with_words<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    request: &DeviceRequest,
+    words: &ad4m_identity_core::words::Words,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<Answered, ClientError> {
+    let DeviceRequestBody::ConfirmRevoke { key_ids, .. } = &request.body else {
+        return answer(executor, vault, did, request, clock, random).await;
+    };
+    let chain = chain_of(executor, did).await?;
+    check_poster(request, did, &chain)?;
+    check_current(request, &chain, clock.now())?;
+    let rotated = rotate(executor, vault, did, words, key_ids, clock, random).await?;
+    let signer = master_of(&ad4m_identity_core::words::seed(words), rotated.index)?;
+    let chain = chain_of(executor, did).await?;
+    delete(executor, &chain, did, &signer, &request.id, clock, random).await?;
+    Ok(Answered::Rotated(rotated))
+}
+
+/// The device's side: asks a holder for the current master key (a `send-master` request,
+/// posted with this executor's device key; it lives until `expires`, default 7 days). Answers
+/// the request's id.
+pub async fn ask_for_master<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    expires: Option<u64>,
+) -> Result<String, ClientError> {
+    Ok(executor
+        .post_request(&DeviceRequestBody::SendMaster {}, expires)
+        .await?)
+}
+
+/// The device's side: asks a holder to revoke `key_ids` of `did`, its executor's identity,
+/// and with `rotate` to replace the master key in the same event ("Also replace my master
+/// key"; the holder needs the 12 words for it). Refused before the post when no key is named
+/// or a named key is not valid at the head. Answers the request's id.
+pub async fn ask_confirm_revoke<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    key_ids: &[String],
+    rotate: bool,
+    expires: Option<u64>,
+) -> Result<String, ClientError> {
+    if key_ids.is_empty() {
+        return Err(ClientError::Protocol("a revocation names a key".into()));
+    }
+    let chain = chain_of(executor, did).await?;
+    let state = chain.state();
+    if let Some(id) = key_ids
+        .iter()
+        .find(|id| !state.keys.contains_key(*id) || !state.key_valid_at(id, chain.head().seq))
+    {
+        return Err(ClientError::Protocol(format!(
+            "{id} is no device key valid at the head"
+        )));
+    }
+    let body = DeviceRequestBody::ConfirmRevoke {
+        key_ids: key_ids.to_vec(),
+        rotate,
+    };
+    Ok(executor.post_request(&body, expires).await?)
 }
 
 /// Deletes request `id` with a store request `signer` signs at `chain`'s head. One the store

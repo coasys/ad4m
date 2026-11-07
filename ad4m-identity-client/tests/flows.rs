@@ -11,15 +11,21 @@ use std::sync::Arc;
 use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
 use ad4m_identity_client::flows::create::{resume, CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::{Claimed, LinkFlow};
-use ad4m_identity_client::flows::master::{retry_pushes, send_master, take_master};
-use ad4m_identity_client::flows::requests::{answer, check_poster, Answered};
-use ad4m_identity_client::flows::revoke::{key_id_of, revoke};
+use ad4m_identity_client::flows::master::{
+    refresh_master, remove_master, retry_pushes, send_master, take_master, Refreshed,
+};
+use ad4m_identity_client::flows::requests::{
+    answer, answer_with_words, ask_confirm_revoke, ask_for_master, check_poster, Answered,
+};
+use ad4m_identity_client::flows::restore::{ListedDevice, RestoreFlow};
+use ad4m_identity_client::flows::revoke::{key_id_of, revoke, revoke_and_rotate};
+use ad4m_identity_client::flows::rotate::{rotate, MAX_TRIES};
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::{
     ClientError, Clock, ExecutorRpc, MasterUse, MemoryVault, OsRandom, PendingPush, Random,
     RpcError, SystemClock, Vault, ViaExecutor,
 };
-use ad4m_identity_core::build::{cosign, Signer};
+use ad4m_identity_core::build::{self, cosign, Signer};
 use ad4m_identity_core::inbox::{
     self, check_payload, pre_address, sign_pre_auth, Accept, InboxAddress, InboxBody,
 };
@@ -140,6 +146,26 @@ impl TestStore {
         let value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
         (status, value)
     }
+}
+
+/// The signed request a record call passes, if any.
+fn given_request(p: &Value) -> Option<SignedRequest> {
+    (!p["request"].is_null()).then(|| serde_json::from_value(p["request"].clone()).unwrap())
+}
+
+/// The scid of a given record request, refused (as the executor does) unless it is a
+/// `method` of `/v1/private/{scid}`.
+fn record_scid(request: &SignedRequest, method: &str) -> Result<String, RpcError> {
+    let scid = request
+        .req
+        .path
+        .strip_prefix("/v1/private/")
+        .filter(|_| request.req.method == method)
+        .ok_or(RpcError {
+            code: 400,
+            message: "invalid: the request is not for this identity's record".into(),
+        })?;
+    Ok(scid.to_string())
 }
 
 /// An executor with one device key on the shared store.
@@ -675,11 +701,28 @@ impl ExecutorRpc for TestExecutor {
                     .await?;
                 Ok(json!(true))
             }
+            // As the executor does: a caller's signed request (the master key's, on a restore)
+            // goes to the store unchanged; without one, its device key signs.
             "identity.record" => {
-                let (scid, ..) = self.position().await?;
-                let (code, body) = self
-                    .as_device("GET", &format!("/v1/private/{scid}"), None)
-                    .await?;
+                let (code, body) = match given_request(&p) {
+                    Some(request) => {
+                        let scid = record_scid(&request, "GET")?;
+                        let path = format!("/v1/private/{scid}");
+                        let (code, body) = self
+                            .store
+                            .send("GET", &path, None, Some(encode_header(&request)))
+                            .await;
+                        if code >= 400 && code != 404 {
+                            return Err(Self::refused(code, &body));
+                        }
+                        (code, body)
+                    }
+                    None => {
+                        let (scid, ..) = self.position().await?;
+                        self.as_device("GET", &format!("/v1/private/{scid}"), None)
+                            .await?
+                    }
+                };
                 Ok(if code == 404 { Value::Null } else { body })
             }
             "identity.recordPut" => {
@@ -687,6 +730,22 @@ impl ExecutorRpc for TestExecutor {
                     return Err(Self::refused(409, &json!({ "error": "version" })));
                 }
                 self.record_puts.set(self.record_puts.get() + 1);
+                if let Some(request) = given_request(&p) {
+                    let scid = record_scid(&request, "PUT")?;
+                    let (code, body) = self
+                        .store
+                        .send(
+                            "PUT",
+                            &format!("/v1/private/{scid}"),
+                            Some(&p["record"]),
+                            Some(encode_header(&request)),
+                        )
+                        .await;
+                    if code >= 400 {
+                        return Err(Self::refused(code, &body));
+                    }
+                    return Ok(body);
+                }
                 let (scid, ..) = self.position().await?;
                 let (_, body) = self
                     .as_device("PUT", &format!("/v1/private/{scid}"), Some(&p["record"]))
@@ -741,6 +800,21 @@ impl ExecutorRpc for TestExecutor {
                     return Err(Self::refused(code, &body));
                 }
                 Ok(json!(true))
+            }
+            "identity.keyOwner" => {
+                let key = p["key"].as_str().unwrap();
+                let (code, body) = self
+                    .store
+                    .send("GET", &format!("/v1/keys/{key}"), None, None)
+                    .await;
+                match code {
+                    200 => Ok(json!({
+                        "did": body["did"], "keyId": body["keyId"],
+                        "added": body["added"], "revoked": body["revoked"],
+                    })),
+                    404 => Ok(Value::Null),
+                    _ => Err(Self::refused(code, &body)),
+                }
             }
             other => Err(RpcError {
                 code: 404,
@@ -807,7 +881,7 @@ fn confirmed(entropy: u8) -> CreateFlow {
 /// `create` on `executor` with fixed words; answers the identity.
 async fn create(executor: &ViaExecutor<TestExecutor>, vault: &MemoryVault, entropy: u8) -> String {
     confirmed(entropy)
-        .finish(executor, vault)
+        .finish(executor, vault, &OsRandom)
         .await
         .unwrap()
         .did
@@ -841,7 +915,7 @@ async fn create_makes_an_identity_that_lists_the_executor_as_d1() {
         &list[positions[1] - 1].to_uppercase(),
     ])
     .unwrap();
-    let created = flow.finish(&a, &vault).await.unwrap();
+    let created = flow.finish(&a, &vault, &OsRandom).await.unwrap();
 
     assert_eq!(created.device_key_id, "d1");
     assert_eq!(created.head.seq, 0);
@@ -889,7 +963,7 @@ async fn create_makes_an_identity_that_lists_the_executor_as_d1() {
         .confirm([&list[positions[0] - 1], &list[positions[1] - 1]])
         .unwrap();
     assert!(matches!(
-        again.finish(&a, &vault).await,
+        again.finish(&a, &vault, &OsRandom).await,
         Err(ClientError::HasIdentity(did)) if did == created.did
     ));
 }
@@ -905,6 +979,14 @@ impl Vault for RefusingVault {
         _secret: ad4m_identity_client::Secret<[u8; 32]>,
     ) -> Result<(), ad4m_identity_client::VaultError> {
         Err(ad4m_identity_client::VaultError::Cancelled)
+    }
+
+    fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.0.master_index(scid)
+    }
+
+    fn forget_master(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.forget_master(scid)
     }
 
     fn unlock(
@@ -947,7 +1029,7 @@ async fn create_publishes_nothing_when_the_vault_cannot_keep_the_master_key() {
     let a = ViaExecutor::new(TestExecutor::new(&store, 1));
 
     let refused = confirmed(6)
-        .finish(&a, &RefusingVault(MemoryVault::new()))
+        .finish(&a, &RefusingVault(MemoryVault::new()), &OsRandom)
         .await;
     assert!(
         matches!(
@@ -961,12 +1043,12 @@ async fn create_publishes_nothing_when_the_vault_cannot_keep_the_master_key() {
     assert_eq!(a.rpc().publishes.get(), 0, "nothing reached the store");
     assert_eq!(a.status().await.unwrap().did, None);
     let refusing = RefusingVault(MemoryVault::new());
-    let _ = confirmed(6).finish(&a, &refusing).await;
+    let _ = confirmed(6).finish(&a, &refusing, &OsRandom).await;
     assert!(refusing.pending_incepts().unwrap().is_empty());
 
     // Nothing public happened, so the same words make the identity once the vault works.
     let vault = MemoryVault::new();
-    let created = confirmed(6).finish(&a, &vault).await.unwrap();
+    let created = confirmed(6).finish(&a, &vault, &OsRandom).await.unwrap();
     assert_eq!(a.status().await.unwrap().did, Some(created.did.clone()));
     assert!(vault.unlock(&created.scid, MasterUse::Link, 0).is_ok());
 }
@@ -979,7 +1061,7 @@ async fn create_finishes_with_the_same_words_after_a_lost_publish_answer() {
 
     // The store takes the incept and the executor records it, but the answer never arrives.
     a.rpc().lose_publish_answer.set(true);
-    let lost = confirmed(8).finish(&a, &vault).await;
+    let lost = confirmed(8).finish(&a, &vault, &OsRandom).await;
     assert!(
         matches!(&lost, Err(ClientError::Rpc(e)) if e.code == 503),
         "{lost:?}"
@@ -993,7 +1075,7 @@ async fn create_finishes_with_the_same_words_after_a_lost_publish_answer() {
     assert_eq!(vault.pending_incepts().unwrap().len(), 1);
 
     // The same words finish the same identity: no second incept, the same master key.
-    let created = confirmed(8).finish(&a, &vault).await.unwrap();
+    let created = confirmed(8).finish(&a, &vault, &OsRandom).await.unwrap();
     assert_eq!(created.did, did);
     assert_eq!(created.head.seq, 0);
     assert_eq!(a.events(&did).await.unwrap().len(), 1);
@@ -1015,7 +1097,7 @@ async fn resume_finishes_a_create_from_the_vault_alone() {
 
     // The publish answer is lost and the flow (with the words) is gone.
     a.rpc().lose_publish_answer.set(true);
-    assert!(confirmed(10).finish(&a, &vault).await.is_err());
+    assert!(confirmed(10).finish(&a, &vault, &OsRandom).await.is_err());
     let did = a
         .status()
         .await
@@ -1024,7 +1106,7 @@ async fn resume_finishes_a_create_from_the_vault_alone() {
         .expect("the publish committed");
 
     // Other words are refused while the kept incept is not finished: no second identity.
-    let other = confirmed(11).finish(&a, &vault).await;
+    let other = confirmed(11).finish(&a, &vault, &OsRandom).await;
     assert!(
         matches!(&other, Err(ClientError::CreatePending(d)) if *d == did),
         "{other:?}"
@@ -1042,7 +1124,7 @@ async fn resume_finishes_a_create_from_the_vault_alone() {
     // Done: nothing left to resume, and another create is refused as before.
     assert!(resume(&a, &vault).await.unwrap().is_none());
     assert!(matches!(
-        confirmed(11).finish(&a, &vault).await,
+        confirmed(11).finish(&a, &vault, &OsRandom).await,
         Err(ClientError::HasIdentity(d)) if d == did
     ));
 }
@@ -1054,7 +1136,7 @@ async fn resume_publishes_an_incept_whose_publish_never_reached_the_store() {
     let vault = MemoryVault::new();
 
     a.rpc().refuse_publish.set(true);
-    let failed = confirmed(12).finish(&a, &vault).await;
+    let failed = confirmed(12).finish(&a, &vault, &OsRandom).await;
     assert!(
         matches!(&failed, Err(ClientError::Rpc(e)) if e.code == 503),
         "{failed:?}"
@@ -1116,7 +1198,7 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
         .unwrap();
     assert_eq!((linked.head.seq, linked.key_id.as_str()), (1, "d2"));
     assert!(linked.master.is_none());
-    assert_eq!(linked.record.unwrap(), 1);
+    assert_eq!(linked.record.unwrap(), 2);
 
     let joined = join(&b, &claimed_b["offerId"]).await;
     assert_eq!(
@@ -1126,7 +1208,7 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     // The record lists the new device, and both executors read it.
     for reader in [&a, &b] {
         let opened = record::read(reader, &did).await.unwrap().unwrap();
-        assert_eq!(opened.version, 1);
+        assert_eq!(opened.version, 2);
         assert_eq!(
             opened.record.devices["d2"],
             entry("node.example", DeviceKind::Server)
@@ -1217,14 +1299,15 @@ async fn a_confirm_after_a_failed_publish_succeeds() {
         .await
         .expect_err("the publish failed");
     assert_eq!(join(&b, &claimed_b["offerId"]).await["state"], "claimed");
-    assert!(record::read(&a, &did).await.unwrap().is_none());
+    // The record is still the one `create` wrote.
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
 
     let linked = flow
         .confirm(&claimed, entry("node.example", DeviceKind::Server), false)
         .await
         .unwrap();
     assert_eq!(linked.head.seq, 1);
-    assert_eq!(linked.record.unwrap(), 1);
+    assert_eq!(linked.record.unwrap(), 2);
     assert_eq!(join(&b, &claimed_b["offerId"]).await["state"], "spent");
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 }
@@ -1260,19 +1343,20 @@ async fn a_retried_confirm_pushes_the_master_key_and_writes_the_record_once() {
         .await
         .expect_err("the publish failed");
     assert!(vault.pending_pushes().unwrap().is_empty());
-    assert!(record::read(&a, &did).await.unwrap().is_none());
+    // The record is still the one `create` wrote.
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
 
     let linked = flow
         .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .unwrap();
     assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
-    assert_eq!(linked.record.unwrap(), 1);
+    assert_eq!(linked.record.unwrap(), 2);
 
     flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .expect_err("the offer is spent");
-    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 2);
     assert!(vault.pending_pushes().unwrap().is_empty());
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 
@@ -1327,7 +1411,8 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
         "spent"
     );
     assert!(vault.pending_pushes().unwrap().is_empty());
-    assert!(record::read(&a, &did).await.unwrap().is_none());
+    // The record is still the one `create` wrote.
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
 
     let linked = flow
         .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
@@ -1336,9 +1421,9 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
     assert_eq!(a.rpc().publishes.get(), publishes + 1, "no second publish");
     assert_eq!((linked.head.seq, linked.key_id.as_str()), (1, "d2"));
     assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
-    assert_eq!(linked.record.unwrap(), 1);
+    assert_eq!(linked.record.unwrap(), 2);
     let opened = record::read(&a, &did).await.unwrap().unwrap();
-    assert_eq!(opened.version, 1);
+    assert_eq!(opened.version, 2);
     assert_eq!(opened.record.devices["d2"].name, "Desk");
     assert_eq!(
         opened.record.devices["d2"].holds_master,
@@ -1350,7 +1435,7 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
     flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .expect_err("the offer is spent");
-    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 2);
     assert!(vault.pending_pushes().unwrap().is_empty());
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 
@@ -1413,14 +1498,15 @@ async fn a_confirm_of_a_spent_offer_whose_add_is_another_claim_is_refused() {
         .confirm(&claimed_b, entry("b.example", DeviceKind::Server), false)
         .await
         .expect_err("the add spends another offer");
-    assert!(record::read(&a, &did).await.unwrap().is_none());
+    // The record is still the one `create` wrote.
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
 
     let linked = flow_b
         .confirm(&claimed_b, entry("b.example", DeviceKind::Server), false)
         .await
         .unwrap();
     assert_eq!((linked.head.seq, linked.key_id.as_str()), (1, "d2"));
-    assert_eq!(linked.record.unwrap(), 1);
+    assert_eq!(linked.record.unwrap(), 2);
     let opened = record::read(&a, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices.len(), 1);
     assert_eq!(opened.record.devices["d2"].name, "b.example");
@@ -1468,7 +1554,7 @@ async fn confirm_after_the_offers_expiry_within_the_grace_signs_the_add() {
         .await
         .unwrap();
     assert_eq!(linked.head.seq, 1);
-    assert_eq!(linked.record.unwrap(), 1);
+    assert_eq!(linked.record.unwrap(), 2);
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 }
 
@@ -1579,12 +1665,15 @@ async fn revoke_ends_the_second_executors_key() {
     .unwrap();
     assert_eq!(revoked.head.seq, 2);
     // The record leaves the revoked device out, and is no longer wrapped to it.
-    assert_eq!(revoked.record.unwrap(), 4);
+    assert_eq!(revoked.record.unwrap(), 5);
     let opened = record::read(&a, &did).await.unwrap().unwrap();
     assert!(opened.record.devices.is_empty());
     assert!(opened.record.pending_revocations.is_empty());
     let sealed = a.record().await.unwrap().unwrap();
-    assert_eq!(sealed.wrapped.keys().collect::<Vec<_>>(), ["d1"]);
+    assert_eq!(
+        sealed.wrapped.keys().collect::<Vec<_>>(),
+        ["d1", "recovery"]
+    );
     let status = b.status().await.unwrap();
     assert_eq!(status.key_id.as_deref(), Some("d2"));
     assert_eq!(status.revoked, Some(2));
@@ -1808,7 +1897,7 @@ async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop(
         .unwrap();
     assert_eq!(linked.key_id, "d2");
     assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
-    assert_eq!(linked.record.unwrap(), 1);
+    assert_eq!(linked.record.unwrap(), 2);
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
     assert!(vault.pending_pushes().unwrap().is_empty());
     join(&desk, &claimed_desk["offerId"]).await;
@@ -1825,7 +1914,7 @@ async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop(
         .unwrap()
         .expect("a master key waits");
     assert_eq!((taken.did.as_str(), taken.index), (did.as_str(), 0));
-    assert_eq!(taken.record.unwrap(), 2);
+    assert_eq!(taken.record.unwrap(), 3);
     let scid = ad4m_identity_core::scid_of(&did).unwrap();
     let held = vault.unlock(scid, MasterUse::Link, 0).unwrap();
     let kept = desk_vault.unlock(scid, MasterUse::Link, 0).unwrap();
@@ -1841,7 +1930,7 @@ async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop(
     // Both devices read the same record: the desktop holds the master key now.
     for reader in [&a, &desk] {
         let opened = record::read(reader, &did).await.unwrap().unwrap();
-        assert_eq!(opened.version, 2);
+        assert_eq!(opened.version, 3);
         assert_eq!(opened.record.devices["d2"].holds_master, HoldsMaster::Yes);
         assert_eq!(opened.record.devices["d2"].name, "Desk");
     }
@@ -2079,7 +2168,7 @@ async fn record_writes_merge_into_the_newest_version() {
     )
     .await
     .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     assert_eq!(a.rpc().record_puts.get(), puts + 1);
     let opened = record::read(&a, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].name, "Studio Mac");
@@ -2147,7 +2236,7 @@ async fn the_holder_answers_a_devices_send_master_request() {
     else {
         panic!("expected the master key sent");
     };
-    assert_eq!(sent.record.unwrap(), 2);
+    assert_eq!(sent.record.unwrap(), 3);
     assert!(a.requests(0).await.unwrap().is_empty());
     let opened = record::read(&a, &did).await.unwrap().unwrap();
     assert_eq!(
@@ -2302,7 +2391,10 @@ async fn the_holder_answers_a_confirm_revoke_request() {
     let opened = record::read(&a, &did).await.unwrap().unwrap();
     assert!(!opened.record.devices.contains_key(&d3));
     let sealed = a.record().await.unwrap().unwrap();
-    assert_eq!(sealed.wrapped.keys().collect::<Vec<_>>(), ["d1", "d2"]);
+    assert_eq!(
+        sealed.wrapped.keys().collect::<Vec<_>>(),
+        ["d1", "d2", "recovery"]
+    );
     assert_eq!(
         vault.unlocks(),
         vec![MasterUse::Link, MasterUse::Link, MasterUse::Revoke]
@@ -2317,7 +2409,7 @@ async fn a_swapped_co_signed_incept_is_never_kept_or_published() {
     let a = ViaExecutor::new(TestExecutor::new(&store, 1));
     a.rpc().swap_incept.set(true);
     let vault = MemoryVault::new();
-    let refused = confirmed(15).finish(&a, &vault).await;
+    let refused = confirmed(15).finish(&a, &vault, &OsRandom).await;
     assert!(
         matches!(&refused, Err(ClientError::Protocol(_))),
         "{refused:?}"
@@ -2392,4 +2484,655 @@ fn a_create_screen_never_shows_the_words_in_debug_output() {
     let (_flow, screen) = CreateFlow::start(&OsRandom);
     assert!(matches!(&screen, CreateScreen::ShowWords(words) if words.expose().len() == 12));
     assert_eq!(format!("{screen:?}"), "ShowWords(<12 words>)");
+}
+
+/// Makes `b` an app that holds the master key of `did`: linked, it asks with `send-master`,
+/// `a` answers, and `b`'s vault takes the key (the record marks it holding). Answers `b`'s key
+/// id.
+async fn holding_app(
+    a: &ViaExecutor<TestExecutor>,
+    vault: &MemoryVault,
+    did: &str,
+    b: &ViaExecutor<TestExecutor>,
+    b_vault: &MemoryVault,
+    entry: DeviceEntry,
+) -> String {
+    let key_id = link_app(a, vault, did, b, entry).await;
+    let asked = ask_for_master(b, None).await.unwrap();
+    let listed = a.requests(0).await.unwrap();
+    let request = listed.iter().find(|r| r.id == asked).unwrap();
+    answer(a, vault, did, request, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(b, b_vault, &OsRandom).await.unwrap().unwrap();
+    taken.record.unwrap();
+    key_id
+}
+
+/// Checks that `seed` derives every master and commitment of `events`: the incept lists master
+/// #0 and commits to master #1; the rotation to master *n* reveals the words' master *n* with
+/// its salt and commits to master *n*+1. Answers the last master's index.
+fn assert_words_derive(events: &[Event], seed: &words::Seed) -> u32 {
+    let mut n = 0u32;
+    for event in events {
+        match &event.op {
+            Op::Incept { master, next, .. } => {
+                assert_eq!(master, &Signer::key(&words::master_key(seed, 0).unwrap()));
+                assert_eq!(next, &words::next_commitment(seed, 1).unwrap().0);
+            }
+            Op::Rotate {
+                master, salt, next, ..
+            } => {
+                n += 1;
+                let (_, expected_salt) = words::next_commitment(seed, n).unwrap();
+                assert_eq!(master, &Signer::key(&words::master_key(seed, n).unwrap()));
+                assert_eq!(salt, &expected_salt);
+                assert_eq!(
+                    next.as_ref(),
+                    Some(&words::next_commitment(seed, n + 1).unwrap().0)
+                );
+                assert_eq!(
+                    event.proof.len(),
+                    1,
+                    "a rotation is signed by its new master alone"
+                );
+            }
+            _ => {}
+        }
+    }
+    n
+}
+
+/// A rotation with the words reveals master #1 (signed by it alone), the vault keeps it in
+/// place of master #0, the app that kept the master key gets it in its inbox, and the record
+/// keeps the recovery key. The app's vault, still on master #0, takes master #1 from its inbox.
+#[tokio::test]
+async fn a_rotation_reveals_the_next_master_and_hands_it_to_the_kept_holder() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 23).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[23; 16]);
+    let seed = words::seed(&words);
+
+    let rotated = rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!((rotated.index, rotated.tries), (1, 1));
+    assert!(rotated.revoked.is_empty());
+    assert_eq!(rotated.pushes.len(), 1);
+    assert_eq!(rotated.pushes[0].0, d2);
+    assert!(rotated.pushes[0].1.is_ok(), "{:?}", rotated.pushes[0].1);
+    rotated.record.as_ref().unwrap();
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
+    assert_eq!(
+        assert_words_derive(&a.events(&did).await.unwrap(), &seed),
+        1
+    );
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices[&d2].holds_master,
+        HoldsMaster::Offered
+    );
+    assert_eq!(
+        opened.recovery_key,
+        Some(ad4m_identity_core::x25519_multikey_of(
+            &words::recovery_secret(&seed)
+        ))
+    );
+
+    assert_eq!(desk_vault.master_index(&scid).unwrap(), Some(0));
+    let Refreshed::Taken(taken) = refresh_master(&desk, &desk_vault, &did, &OsRandom)
+        .await
+        .unwrap()
+    else {
+        panic!("expected master #1 taken from the inbox");
+    };
+    assert_eq!(taken.index, 1);
+    taken.record.unwrap();
+    assert_eq!(desk_vault.master_index(&scid).unwrap(), Some(1));
+    assert!(matches!(
+        refresh_master(&desk, &desk_vault, &did, &OsRandom)
+            .await
+            .unwrap(),
+        Refreshed::Current
+    ));
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::Yes);
+    // The words alone rotated: the vault was never unlocked for it.
+    assert!(!vault.unlocks().contains(&MasterUse::Revoke));
+}
+
+/// An app whose push of the new master failed holds a replaced key: it forgets it and asks
+/// for the current one with `send-master`, and the holder's answer gives it master #1.
+#[tokio::test]
+async fn a_stale_holder_gets_the_new_master_through_send_master() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let phone = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let phone_vault = MemoryVault::new();
+    let did = create(&a, &vault, 24).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &phone,
+        &phone_vault,
+        entry("Phone", DeviceKind::PhoneApp),
+    )
+    .await;
+    let words = words::from_entropy(&[24; 16]);
+
+    a.rpc().refuse_inbox_put.set(true);
+    let rotated = rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(rotated.pushes[0].1.is_err());
+    // A push that may pass later stays on the retry list, and the record says "offered".
+    assert_eq!(vault.pending_pushes().unwrap().len(), 1);
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices[&d2].holds_master,
+        HoldsMaster::Offered
+    );
+
+    let Refreshed::Asked(id) = refresh_master(&phone, &phone_vault, &did, &OsRandom)
+        .await
+        .unwrap()
+    else {
+        panic!("expected a send-master request");
+    };
+    assert_eq!(phone_vault.master_index(&scid).unwrap(), None);
+    let listed = a.requests(0).await.unwrap();
+    let request = listed.iter().find(|r| r.id == id).unwrap();
+    assert_eq!(
+        (&request.by, &request.body),
+        (&d2, &DeviceRequestBody::SendMaster {})
+    );
+    let Answered::MasterSent(_) = answer(&a, &vault, &did, request, &SystemClock, &OsRandom)
+        .await
+        .unwrap()
+    else {
+        panic!("expected the master key sent");
+    };
+    let taken = take_master(&phone, &phone_vault, &OsRandom)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(taken.index, 1);
+    assert_eq!(phone_vault.master_index(&scid).unwrap(), Some(1));
+}
+
+/// A device removes its master key only while another app holds it, and the record says so
+/// before the vault forgets it; the last holder is refused.
+#[tokio::test]
+async fn removing_the_master_key_is_refused_on_its_only_holder() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 28).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+
+    // Before any app holds it, `a` is the only holder.
+    assert!(matches!(
+        remove_master(&a, &vault, &did, &OsRandom).await,
+        Err(ClientError::OnlyCopy)
+    ));
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(0));
+
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert_eq!(vault.master_index(&scid).unwrap(), None);
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::Yes);
+
+    // Now the desk is the only holder.
+    assert!(matches!(
+        remove_master(&desk, &desk_vault, &did, &OsRandom).await,
+        Err(ClientError::OnlyCopy)
+    ));
+    assert_eq!(desk_vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// What [`Racing`] appends before the next publish reaches the store.
+enum Race {
+    /// Another app rotates with the same words.
+    Rotate,
+    /// Another app revokes this key with the current master.
+    Revoke(String),
+}
+
+/// An executor where another app's event lands on the head just before each of the next
+/// publishes, so they meet a `409`.
+struct Racing<'a> {
+    inner: &'a TestExecutor,
+    seed: words::Seed,
+    races: RefCell<Vec<Race>>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for Racing<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let race = (method == "identity.publish" && !self.races.borrow().is_empty())
+            .then(|| self.races.borrow_mut().remove(0));
+        if let Some(race) = race {
+            let scid = self.inner.identity.borrow().clone().unwrap();
+            let chain = fold_page(&self.inner.log(&scid).await?);
+            let n = (chain.state().masters.len() - 1) as u32;
+            let event = match race {
+                Race::Rotate => {
+                    let (_, salt) = words::next_commitment(&self.seed, n + 1).unwrap();
+                    let (next, _) = words::next_commitment(&self.seed, n + 2).unwrap();
+                    let master = words::master_key(&self.seed, n + 1).unwrap();
+                    build::rotate(&chain, &master, &salt, Some(next), &[]).unwrap()
+                }
+                Race::Revoke(id) => {
+                    let master = words::master_key(&self.seed, n).unwrap();
+                    build::revoke(&chain, &master, &[id]).unwrap()
+                }
+            };
+            self.inner
+                .call(
+                    "identity.publish",
+                    json!({ "events": [serde_json::to_value(&event).unwrap()] }),
+                )
+                .await?;
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// A rotation that meets a `409` is built again on the new head: it revokes only the keys
+/// still valid there, and after another app's rotation with the same words it reveals the
+/// master after that one. A rotation whose answer was lost is found in the log, not published
+/// twice. A log that keeps moving stops it after `MAX_TRIES` builds.
+#[tokio::test]
+async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let host = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let server = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let extra = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 25).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &host,
+        entry("host", DeviceKind::CommunityHost),
+    )
+    .await;
+    let d3 = link_app(
+        &a,
+        &vault,
+        &did,
+        &server,
+        entry("server", DeviceKind::Server),
+    )
+    .await;
+    let words = words::from_entropy(&[25; 16]);
+    let racing = |races| {
+        ViaExecutor::new(Racing {
+            inner: a.rpc(),
+            seed: words::seed(&words),
+            races: RefCell::new(races),
+        })
+    };
+
+    // Another app rotated to master #1 first: this one reveals master #2.
+    let rotated = rotate(
+        &racing(vec![Race::Rotate]),
+        &vault,
+        &did,
+        &words,
+        std::slice::from_ref(&d2),
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert_eq!((rotated.index, rotated.tries), (2, 2));
+    assert_eq!(rotated.revoked, vec![d2.clone()]);
+    assert_eq!(host.status().await.unwrap().revoked, Some(4));
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(2));
+
+    // Another app revoked d3 first: the rebuilt rotation revokes nothing.
+    let rotated = rotate(
+        &racing(vec![Race::Revoke(d3.clone())]),
+        &vault,
+        &did,
+        &words,
+        std::slice::from_ref(&d3),
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert_eq!((rotated.index, rotated.tries), (3, 2));
+    assert!(rotated.revoked.is_empty());
+    assert_eq!(server.status().await.unwrap().revoked, Some(5));
+
+    // The rotation landed but its answer was lost: found in the log, not published again.
+    a.rpc().lose_publish_answer.set(true);
+    let publishes = a.rpc().publishes.get();
+    let rotated = rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!((rotated.index, rotated.tries), (4, 1));
+    assert_eq!(a.rpc().publishes.get(), publishes + 1);
+    assert_eq!(rotated.head.seq, 7);
+
+    // Another app with the same words made the very same rotation first: the store holds
+    // this event, so it stands.
+    let rotated = rotate(
+        &racing(vec![Race::Rotate]),
+        &vault,
+        &did,
+        &words,
+        &[],
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert_eq!((rotated.index, rotated.tries, rotated.head.seq), (5, 1, 8));
+
+    // Every build meets a 409.
+    let d4 = link_app(
+        &a,
+        &vault,
+        &did,
+        &extra,
+        entry("server 2", DeviceKind::Server),
+    )
+    .await;
+    let publishes = a.rpc().publishes.get();
+    let busy = rotate(
+        &racing((0..MAX_TRIES).map(|_| Race::Rotate).collect()),
+        &vault,
+        &did,
+        &words,
+        &[d4],
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    assert!(matches!(busy, Err(ClientError::LogBusy)), "{busy:?}");
+    assert_eq!(a.rpc().publishes.get(), publishes + 2 * MAX_TRIES);
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(5), "nothing kept");
+
+    let events = a.events(&did).await.unwrap();
+    assert_eq!(
+        assert_words_derive(&events, &words::seed(&words)),
+        5 + MAX_TRIES as u32
+    );
+}
+
+/// "Also replace my master key": a device asks for a revocation with a rotation, which the
+/// holder answers with the words; the holder revokes with a rotation by itself too. Wrong
+/// words, an empty list or an unknown key are refused before anything is published.
+#[tokio::test]
+async fn a_revocation_with_a_rotation_needs_the_words() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let phone = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 26).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &phone,
+        entry("Phone", DeviceKind::PhoneApp),
+    )
+    .await;
+    let d3 = link_app(
+        &a,
+        &vault,
+        &did,
+        &host,
+        entry("host", DeviceKind::CommunityHost),
+    )
+    .await;
+    let words = words::from_entropy(&[26; 16]);
+
+    for refused in [vec![], vec!["d9".to_string()]] {
+        assert!(matches!(
+            ask_confirm_revoke(&phone, &did, &refused, true, None).await,
+            Err(ClientError::Protocol(_))
+        ));
+    }
+    assert!(a.requests(0).await.unwrap().is_empty());
+    let id = ask_confirm_revoke(&phone, &did, std::slice::from_ref(&d3), true, None)
+        .await
+        .unwrap();
+    let listed = a.requests(0).await.unwrap();
+    let request = listed.iter().find(|r| r.id == id).unwrap();
+    assert_eq!(
+        request.body,
+        DeviceRequestBody::ConfirmRevoke {
+            key_ids: vec![d3.clone()],
+            rotate: true
+        }
+    );
+    let other = words::from_entropy(&[99; 16]);
+    assert!(matches!(
+        answer_with_words(&a, &vault, &did, request, &other, &SystemClock, &OsRandom).await,
+        Err(ClientError::NotTheseWords(_))
+    ));
+    assert_eq!(a.events(&did).await.unwrap().len(), 3, "nothing published");
+
+    let Answered::Rotated(rotated) =
+        answer_with_words(&a, &vault, &did, request, &words, &SystemClock, &OsRandom)
+            .await
+            .unwrap()
+    else {
+        panic!("expected a rotation");
+    };
+    assert_eq!(
+        (rotated.index, rotated.revoked.clone()),
+        (1, vec![d3.clone()])
+    );
+    assert_eq!(host.status().await.unwrap().revoked, Some(rotated.head.seq));
+    assert!(
+        a.requests(0).await.unwrap().is_empty(),
+        "deleted by master #1"
+    );
+    rotated.record.unwrap();
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert!(!opened.record.devices.contains_key(&d3));
+
+    assert!(matches!(
+        revoke_and_rotate(&a, &vault, &did, &[], &words, &SystemClock, &OsRandom).await,
+        Err(ClientError::Protocol(_))
+    ));
+    assert!(matches!(
+        revoke_and_rotate(
+            &a,
+            &vault,
+            &did,
+            &["d1".into()],
+            &words,
+            &SystemClock,
+            &OsRandom
+        )
+        .await,
+        Err(ClientError::Protocol(_))
+    ));
+    let rotated = revoke_and_rotate(
+        &a,
+        &vault,
+        &did,
+        std::slice::from_ref(&d2),
+        &words,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert_eq!((rotated.index, rotated.revoked), (2, vec![d2.clone()]));
+    assert_eq!(
+        phone.status().await.unwrap().revoked,
+        Some(rotated.head.seq)
+    );
+    assert_eq!(
+        assert_words_derive(&a.events(&did).await.unwrap(), &words::seed(&words)),
+        2
+    );
+}
+
+/// The words alone restore the identity on a new device: a wrong word is named, words of no
+/// identity are refused; the right ones find the identity by its master #0, list its devices
+/// by name (apps ticked), rotate to master #1 revoking the ticked ones, link this device, and
+/// write the record listing it as the holder.
+#[tokio::test]
+async fn the_words_restore_the_identity_on_a_new_device() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let new_vault = MemoryVault::new();
+    let did = create(&a, &vault, 27).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let d3 = link_app(
+        &a,
+        &vault,
+        &did,
+        &host,
+        entry("host", DeviceKind::CommunityHost),
+    )
+    .await;
+    let words = words::from_entropy(&[27; 16]);
+
+    let mut typed = words.words();
+    typed[4] = "zebrra";
+    match RestoreFlow::start(&new, &new_vault, &typed.join(" "), &SystemClock, &OsRandom).await {
+        Err(ClientError::Words(words::WordsError::UnknownWord { position, word, .. })) => {
+            assert_eq!((position, word.as_str()), (5, "zebrra"));
+        }
+        Err(e) => panic!("expected the word named, got {e:?}"),
+        Ok(_) => panic!("expected the word named"),
+    }
+    let unknown = words::from_entropy(&[98; 16]);
+    assert!(matches!(
+        RestoreFlow::start(&new, &new_vault, unknown.phrase(), &SystemClock, &OsRandom).await,
+        Err(ClientError::NotTheseWords(_))
+    ));
+
+    let flow = RestoreFlow::start(&new, &new_vault, words.phrase(), &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(flow.did(), did);
+    assert!(flow.record_error().is_none(), "{:?}", flow.record_error());
+    let mut devices = flow.devices().to_vec();
+    devices.sort_by(|x, y| x.key_id.cmp(&y.key_id));
+    assert_eq!(
+        devices,
+        vec![
+            ListedDevice {
+                key_id: "d1".into(),
+                name: None,
+                kind: None,
+                lock_out: true
+            },
+            ListedDevice {
+                key_id: d2.clone(),
+                name: Some("Desk".into()),
+                kind: Some(DeviceKind::DesktopApp),
+                lock_out: true
+            },
+            ListedDevice {
+                key_id: d3.clone(),
+                name: Some("host".into()),
+                kind: Some(DeviceKind::CommunityHost),
+                lock_out: false
+            },
+        ]
+    );
+    assert!(vault.unlocks().iter().all(|u| *u != MasterUse::Revoke));
+
+    let lock_out: Vec<String> = devices
+        .iter()
+        .filter(|d| d.lock_out)
+        .map(|d| d.key_id.clone())
+        .collect();
+    let restored = flow
+        .finish(&lock_out, entry("New phone", DeviceKind::PhoneApp))
+        .await
+        .unwrap();
+    assert_eq!((restored.index, restored.tries), (1, 1));
+    assert_eq!(restored.revoked, lock_out);
+    assert_eq!(restored.key_id, "d4");
+    assert!(restored.pushes.is_empty(), "the kept holder was locked out");
+    restored.record.as_ref().unwrap();
+    assert_eq!(new_vault.master_index(&scid).unwrap(), Some(1));
+
+    let status = new.status().await.unwrap();
+    assert_eq!(
+        (status.did.as_deref(), status.key_id.as_deref()),
+        (Some(did.as_str()), Some("d4"))
+    );
+    assert!(a.status().await.unwrap().revoked.is_some());
+    assert!(desk.status().await.unwrap().revoked.is_some());
+    assert!(host.status().await.unwrap().revoked.is_none());
+
+    let opened = record::read(&new, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices["d4"].name, "New phone");
+    assert_eq!(opened.record.devices["d4"].holds_master, HoldsMaster::Yes);
+    assert!(opened.record.devices.contains_key(&d3));
+    assert!(!opened.record.devices.contains_key(&d2));
+    let sealed = new.record().await.unwrap().unwrap();
+    assert_eq!(
+        sealed.wrapped.keys().collect::<Vec<_>>(),
+        [d3.as_str(), "d4", "recovery"]
+    );
+    assert_eq!(
+        assert_words_derive(&new.events(&did).await.unwrap(), &words::seed(&words)),
+        1
+    );
+
+    // The restored device holds the current master: it links and rotates as any holder.
+    let rotated = rotate(&new, &new_vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(rotated.index, 2);
 }

@@ -121,6 +121,12 @@ pub trait Vault: Send + Sync {
         index: u32,
         secret: Secret<[u8; 32]>,
     ) -> Result<(), VaultError>;
+    /// The index of the master key kept for `scid`; `None` when the vault keeps none. Reads no
+    /// secret, so it needs no unlock.
+    fn master_index(&self, scid: &str) -> Result<Option<u32>, VaultError>;
+    /// Forgets the master key of `scid` (no error when it keeps none): the person removed it
+    /// from this device, or it was replaced by a rotation.
+    fn forget_master(&self, scid: &str) -> Result<(), VaultError>;
     /// One unlock (one prompt where the OS needs it) for a flow that uses the master key `why`.
     /// `now` starts the unlock's [`MasterUse::ttl_s`] (pass `why` to [`Unlocked::new`]).
     fn unlock(&self, scid: &str, why: MasterUse, now: u64) -> Result<Unlocked, VaultError>;
@@ -254,6 +260,20 @@ mod memory {
             Ok(())
         }
 
+        fn master_index(&self, scid: &str) -> Result<Option<u32>, VaultError> {
+            Ok(self
+                .keys
+                .lock()
+                .map_err(poisoned)?
+                .get(scid)
+                .map(|(index, _)| *index))
+        }
+
+        fn forget_master(&self, scid: &str) -> Result<(), VaultError> {
+            self.keys.lock().map_err(poisoned)?.remove(scid);
+            Ok(())
+        }
+
         fn unlock(&self, scid: &str, why: MasterUse, now: u64) -> Result<Unlocked, VaultError> {
             let keys = self.keys.lock().map_err(poisoned)?;
             let (index, secret) = keys.get(scid).ok_or(VaultError::NotFound)?;
@@ -326,6 +346,23 @@ mod memory {
                 Err(VaultError::Expired)
             ));
             assert_eq!(vault.unlocks(), vec![MasterUse::Revoke]);
+        }
+
+        /// The index is read without an unlock, and a forgotten key is gone.
+        #[test]
+        fn the_index_needs_no_unlock_and_a_forgotten_key_is_gone() {
+            let vault = MemoryVault::new();
+            assert_eq!(vault.master_index("Qm").unwrap(), None);
+            vault.store_master("Qm", 2, Secret::new([3; 32])).unwrap();
+            assert_eq!(vault.master_index("Qm").unwrap(), Some(2));
+            assert!(vault.unlocks().is_empty());
+            vault.forget_master("Qm").unwrap();
+            vault.forget_master("Qm").unwrap();
+            assert_eq!(vault.master_index("Qm").unwrap(), None);
+            assert!(matches!(
+                vault.unlock("Qm", MasterUse::Revoke, 0),
+                Err(VaultError::NotFound)
+            ));
         }
 
         /// A link's unlock lasts until the store's confirm grace ends, so the `add` can be

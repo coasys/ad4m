@@ -13,6 +13,8 @@
 //!    fails or its answer is lost, [`resume`] (or `finish` with the same words) publishes the
 //!    kept incept again: the executor answers a repeat of the events its store holds with the
 //!    store's head, so the identity is made once, with the master key the vault holds.
+//! 6. The private record's first version, with the words' recovery key: a restore from the
+//!    words alone opens it and shows the devices by name.
 
 use ad4m_identity_core::build::{incept_human, Signer};
 use ad4m_identity_core::words::{self, Seed, Words};
@@ -20,6 +22,8 @@ use ad4m_identity_core::{DeviceKey, Event, KeyLife, Op};
 use ad4m_ldk::identity::SignedHead;
 
 use crate::executor::{ExecutorRpc, IdentityStatus, ViaExecutor};
+use crate::flows::rotate::recovery_key_of;
+use crate::record::{self, Reader};
 use crate::secret::Secret;
 use crate::vault::Vault;
 use crate::{fold, ClientError, Random};
@@ -50,13 +54,16 @@ impl std::fmt::Debug for CreateScreen {
 }
 
 /// The identity made.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Created {
     pub did: String,
     pub scid: String,
     /// The executor's device key's id in the log (`d1`).
     pub device_key_id: String,
     pub head: SignedHead,
+    /// The record write that sets the words' recovery key (`None` from [`resume`], which has
+    /// no words; a later rotation sets it). The identity stands either way.
+    pub record: Option<Result<u64, ClientError>>,
 }
 
 enum Step {
@@ -140,18 +147,41 @@ impl CreateFlow {
         self,
         executor: &ViaExecutor<R>,
         vault: &dyn Vault,
+        random: &dyn Random,
     ) -> Result<Created, ClientError> {
         let Some(Step::Confirmed(seed)) = self.step else {
             return Err(ClientError::Step("finish follows confirm"));
         };
-        create_from_seed(&seed, executor, vault).await
+        create_from_seed(&seed, executor, vault, random).await
     }
 }
 
-/// Steps 3 to 5 of `create` from the seed of confirmed words. When the vault keeps an incept of
+/// Steps 3 to 6 of `create` from the seed of confirmed words. When the vault keeps an incept of
 /// these words for this executor (an earlier `create` that did not see its publish answered),
 /// publishes that one again instead of making another.
 pub async fn create_from_seed<R: ExecutorRpc>(
+    seed: &Seed,
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    random: &dyn Random,
+) -> Result<Created, ClientError> {
+    let mut created = publish_from_seed(seed, executor, vault).await?;
+    created.record = Some(
+        record::write_as(
+            executor,
+            &created.did,
+            &Reader::Executor,
+            &[],
+            Some(&recovery_key_of(seed)),
+            random,
+        )
+        .await,
+    );
+    Ok(created)
+}
+
+/// Steps 3 to 5.
+async fn publish_from_seed<R: ExecutorRpc>(
     seed: &Seed,
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -253,5 +283,6 @@ async fn publish_kept<R: ExecutorRpc>(
         scid: incept.scid,
         device_key_id,
         head,
+        record: None,
     })
 }

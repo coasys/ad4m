@@ -81,6 +81,27 @@ pub struct ForkRecord {
     pub theirs: String,
 }
 
+/// `identity.keyOwner`: the identity a key belongs to, by the store's key index.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyOwner {
+    pub did: String,
+    /// `m0` for master #0, `d3` for a device key.
+    pub key_id: String,
+    pub added: u64,
+    pub revoked: Option<u64>,
+}
+
+/// `identity.claimOffer`: the claim is made; the holder shows the same match code.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfferClaimed {
+    pub did: String,
+    pub offer_id: String,
+    pub match_code: String,
+    pub expires: u64,
+}
+
 /// `identity.log`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -306,6 +327,57 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
             code: 502,
             message: "identity.recordPut answered no version".into(),
         })
+    }
+
+    /// The sealed private record of an identity the executor may not speak for, read with the
+    /// signed `request` of a `GET /v1/private/{scid}` (the current master key's, on a restore);
+    /// `None` before the first write.
+    pub async fn record_with(
+        &self,
+        request: &SignedRequest,
+    ) -> Result<Option<SealedRecord>, RpcError> {
+        self.call("identity.record", json!({ "request": json_of(request)? }))
+            .await
+    }
+
+    /// Writes the next version of a record with the signed `request` of its
+    /// `PUT /v1/private/{scid}`; answers the version stored.
+    pub async fn record_put_with(
+        &self,
+        record: &SealedRecord,
+        request: &SignedRequest,
+    ) -> Result<u64, RpcError> {
+        let stored: Value = self
+            .call(
+                "identity.recordPut",
+                json!({ "record": json_of(record)?, "request": json_of(request)? }),
+            )
+            .await?;
+        stored["version"].as_u64().ok_or(RpcError {
+            code: 502,
+            message: "identity.recordPut answered no version".into(),
+        })
+    }
+
+    /// The identity the signing multikey `key` belongs to, by the store's key index (master
+    /// keys included); `None` when it is in no log.
+    pub async fn key_owner(&self, key: &str) -> Result<Option<KeyOwner>, RpcError> {
+        self.call("identity.keyOwner", json!({ "key": key })).await
+    }
+
+    /// Claims the offer `offer` (its string or link) with this executor's device key, the
+    /// operator's call. `can_keep_master` needs an executor with the custody channel.
+    pub async fn claim_offer(
+        &self,
+        offer: &str,
+        hint: Option<&str>,
+        can_keep_master: bool,
+    ) -> Result<OfferClaimed, RpcError> {
+        let mut params = json!({ "offer": offer, "canKeepMaster": can_keep_master });
+        if let Some(hint) = hint {
+            params["hint"] = json!(hint);
+        }
+        self.call("identity.claimOffer", params).await
     }
 
     /// The record key that `wrapped` (the executor's entry of a record's `wrapped`) seals to
