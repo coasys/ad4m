@@ -307,7 +307,9 @@ impl MethodFlags<'_> {
     /// ([`Session::is_operator_on_this_machine`]). The dispatcher checks it after the guard;
     /// every other caller, a grant with every capability and the admin credential on a
     /// network listener included, gets 403 [`super::guards::LOCAL_ONLY`]. For calls that
-    /// replace, open or use the executor's own keys, files or process.
+    /// replace, open or use the executor's own keys, files or process. The custody service,
+    /// on a loopback listener by construction, reaches such a method only when it is one of
+    /// `identity::custody::CUSTODY_METHODS`.
     ///
     /// [`Session::is_operator_on_this_machine`]: crate::agent::session::Session::is_operator_on_this_machine
     pub fn local_only(self) -> Self {
@@ -510,6 +512,13 @@ impl HandlerMap {
             WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
         })?;
         match &entry.guard {
+            // The custody service is no operator and holds no capability: its allowlist stands
+            // in for the guard, and it is on this machine by construction (`Session::open`
+            // refuses the custody credential off loopback). The handlers of the channel's own
+            // calls check `identity::custody::admit` as well.
+            Some(_) if ctx.session.principal == crate::agent::session::Principal::Custody => {
+                crate::identity::custody::admit_call(msg_type, &ctx.session)
+            }
             Some(guard) => {
                 guard.admit(msg_type, params, ctx).await?;
                 if entry.local_only && !ctx.session.is_operator_on_this_machine() {

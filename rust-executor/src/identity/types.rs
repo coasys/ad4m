@@ -964,6 +964,8 @@ pub enum SessionRole {
     Tenant,
     /// A grant on the main agent.
     App,
+    /// The custody service: the custody credential on a loopback listener.
+    Custody,
     Anonymous,
 }
 

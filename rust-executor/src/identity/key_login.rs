@@ -604,6 +604,7 @@ fn end(grant: &Arc<LiveGrant>) {
 pub fn session_info(session: &Session) -> SessionInfo {
     let role = match &session.principal {
         Principal::Operator => SessionRole::Operator,
+        Principal::Custody => SessionRole::Custody,
         Principal::Agent(AgentContext::Managed { .. }) => SessionRole::Tenant,
         Principal::Agent(AgentContext::Main) => SessionRole::App,
         Principal::Anonymous => SessionRole::Anonymous,

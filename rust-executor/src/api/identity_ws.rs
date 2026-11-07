@@ -705,6 +705,86 @@ mod tests {
         );
     }
 
+    /// Review coasys/ad4m#1635: the custody credential opens a session for the custody calls
+    /// and no other method. The executor's own settings, its key and its lock refuse it before
+    /// their handlers run, while the calls the custody service makes pass.
+    #[tokio::test]
+    async fn the_custody_credential_reaches_only_the_custody_calls() {
+        use crate::agent::capabilities::ListenerReach;
+        use crate::agent::session::Session;
+        use crate::secret::Secret;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let map = crate::api::ws_handler::build_handler_map();
+        let admin = Some(Secret::new("the-admin-credential"));
+        let saved = crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        crate::config::set_global_config(crate::Ad4mConfig {
+            custody_channel: Some(true),
+            admin_credential: admin.clone(),
+            custody_credential: Some("custody-secret".into()),
+            ..Default::default()
+        });
+        let custody = Session::open("custody-secret", &admin, ListenerReach::Loopback).unwrap();
+        let ctx = RequestContext::for_session(custody);
+        let mut answers = vec![];
+        for (method, params) in [
+            (
+                "runtime.setConfig",
+                serde_json::json!({ "set": { "logLevel": "debug" } }),
+            ),
+            ("identity.rekey", serde_json::json!({})),
+            ("agent.lock", serde_json::json!({ "passphrase": "p" })),
+            ("agent.generate", serde_json::json!({ "passphrase": "p" })),
+            ("runtime.quit", serde_json::json!({})),
+            ("user.currentSession", serde_json::json!({})),
+            (
+                "identity.resetLog",
+                serde_json::json!({ "did": "did:scid:coasys:1:Qm" }),
+            ),
+        ] {
+            answers.push((method, map.admit(method, &params, &ctx).await));
+        }
+        let mut admitted = vec![];
+        for (method, params) in [
+            ("identity.custodyStatus", serde_json::json!({})),
+            ("identity.takeMaster", serde_json::json!({})),
+            ("identity.inboxAck", serde_json::json!({ "id": "m1" })),
+            ("identity.inbox", serde_json::json!({})),
+            ("identity.status", serde_json::json!({})),
+            (
+                "identity.claimOffer",
+                serde_json::json!({ "offer": "coasys:offer:1:x", "canKeepMaster": true }),
+            ),
+            ("identity.joinStatus", serde_json::json!({ "offerId": "o" })),
+            ("identity.prepareDevice", serde_json::json!({})),
+            ("identity.cosignIncept", serde_json::json!({ "event": {} })),
+            ("identity.publish", serde_json::json!({ "events": [] })),
+        ] {
+            admitted.push((method, map.admit(method, &params, &ctx).await));
+        }
+        *crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = saved;
+
+        for (method, answer) in answers {
+            let refused = answer.expect_err(method);
+            assert_eq!(refused.code, 403, "{method}");
+            assert!(
+                refused
+                    .message
+                    .starts_with(crate::identity::custody::NOT_A_CUSTODY_CALL),
+                "{method}: {}",
+                refused.message
+            );
+        }
+        for (method, answer) in admitted {
+            assert!(answer.is_ok(), "{method}: {answer:?}");
+        }
+    }
+
     /// With `--custody-channel`, the custody credential on a loopback listener gets this
     /// computer's device keys.
     #[tokio::test]
