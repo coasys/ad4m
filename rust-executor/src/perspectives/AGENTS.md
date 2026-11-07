@@ -47,18 +47,27 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   missing and removes every copy of each stale own link. Copies of an expected triple stay
   (two peers that registered the same shape agree); links other apps put on the class, shape
   or property nodes stay. It answers once the registry and the shape cache hold the new shape.
-- A class name (`class_name_of`, the IRI's local name) is unique in a perspective:
-  `register_shapes` refuses, writing nothing, a class whose name a stored class or another
-  shape in the call already has. Readers find a class by name with
-  `model_query::shape::find_class`; a class with two `ad4m://shape` links reads the least
-  shape URI (`shacl_parser::current_shape_uri`), in the registry and in `load_shape` alike.
+- A class name (`class_name_of`, the IRI's local name) is unique in a perspective. Readers
+  find a class by name with `model_query::shape::find_class`, which reads the least target
+  class IRI of that name; a class with two `ad4m://shape` links reads the least shape URI
+  (`shacl_parser::current_shape_uri`), in the registry and in `load_shape` alike.
+  `register_shapes` refuses, writing nothing, two classes of one name in one call, and a
+  class when `find_class` reads another class for its name. The check is local, so two
+  peers can still store two classes of one name before they sync; the one `find_class`
+  reads can always register again, so an app's `registerAll` keeps working on every peer,
+  and a new class never takes a name over, even one whose IRI sorts first.
+- The six hard-wired class names (`FlowInstance`, `FlowTransitionProposal`, `AutoProcessor`,
+  `ProcessingClaim`, `InterpretationRun`, `InterpretationOverlay`) are reserved:
+  `register_shapes` refuses a class of one of them under any IRI but the executor's
+  (`hardwired_class::reserved_target_class`), so the executor's flow and interpretation
+  paths always find their own class.
 - Hard-wired classes (`hardwired_class::ensure_subject_classes`) are upgrade-only: written when
   missing or when the stored shape lacks the newest path / declares a removed one
   (`HardwiredClass`), never over a newer stored shape. Only the executor registers them:
   `create_subject` registers one not stored yet before its first instance
   (`hardwired_class::ensure_before_write`), and a model query of one not stored yet reads as
-  empty without waiting or writing. A stored class of that name (an app's, a newer
-  executor's) is used as it is. The SDK's `@Model` copies (`FlowModels.ts`,
+  empty without waiting or writing. A stored revision of it (an app's `@Model` copy, a
+  newer executor's) is used as it is. The SDK's `@Model` copies (`FlowModels.ts`,
   `InterpretationModels.ts`) read them and are never registered by the SDK.
 - `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only
   `author`/`timestamp` with no other properties. Migrating it to `model_query` is planned (spec

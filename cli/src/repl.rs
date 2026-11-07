@@ -98,19 +98,6 @@ async fn all_links(perspective: &PerspectiveProxy, line: &String) -> bool {
     }
 }
 
-async fn subject_classes(perspective: &PerspectiveProxy, line: &String) -> bool {
-    if line == "classes" {
-        if let Ok(classes) = perspective.subject_classes().await {
-            for class in classes {
-                println!("\x1b[36mSubject Class: \x1b[97m{}", class);
-            }
-        }
-        true
-    } else {
-        false
-    }
-}
-
 async fn help_command(_perspective: &PerspectiveProxy, line: &String) -> bool {
     if line == "help" || line == "?" {
         println!("\x1b[97m================");
@@ -132,9 +119,6 @@ async fn help_command(_perspective: &PerspectiveProxy, line: &String) -> bool {
         println!();
 
         println!("\x1b[36m🧬 Subject Classes:");
-        println!("\x1b[97m  classes");
-        println!("\x1b[90m    List all available subject classes");
-        println!();
         println!("\x1b[97m  shapes [<class>]");
         println!("\x1b[90m    Show the registered classes: target class, shape hash, shape JSON");
         println!("\x1b[90m    Without <class>: every class; with <class>: only that one");
@@ -475,10 +459,6 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
         }
 
         if all_links(&perspective, &line).await {
-            continue;
-        }
-
-        if subject_classes(&perspective, &line).await {
             continue;
         }
 

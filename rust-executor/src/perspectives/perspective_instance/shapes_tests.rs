@@ -754,6 +754,7 @@ const OLD_TASK: &str = r#"{
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"old://kind","target":"old://task"}],
   "properties":[
     {"path":"old://title","name":"title","datatype":"xsd:string","max_count":1,
+     "where_predicates":{"title":"old://title","done":"old://done"},
      "setter":[{"action":"setSingleTarget","source":"this","predicate":"old://title","target":"value"}]}
   ]
 }"#;
@@ -761,8 +762,9 @@ const OLD_TASK: &str = r#"{
 /// The links the previous writer (`add_sdna` with SHACL JSON on
 /// perf/sdk-round-trips: `parse_shacl_to_links` and `add_sdna_inner`) stored
 /// for [`OLD_TASK`]: the name-index links, then the class, shape and property
-/// links with action lists serialised in struct field order.
-const OLD_WRITER_LINKS: [(&str, &str, &str); 16] = [
+/// links with action lists serialised in struct field order and maps
+/// (`where_predicates`) in whatever key order its map yielded.
+const OLD_WRITER_LINKS: [(&str, &str, &str); 17] = [
     (
         "ad4m://self",
         "ad4m://has_subject_class",
@@ -807,6 +809,11 @@ const OLD_WRITER_LINKS: [(&str, &str, &str); 16] = [
         "ad4m://setter",
         r#"literal:string:[{"action":"setSingleTarget","source":"this","predicate":"old://title","target":"value"}]"#,
     ),
+    (
+        "old://Task.title",
+        "ad4m://wherePredicates",
+        r#"literal:string:{"title":"old://title","done":"old://done"}"#,
+    ),
 ];
 
 #[tokio::test]
@@ -838,9 +845,20 @@ async fn classes_the_previous_writer_stored_are_read_and_rewritten_once() {
         "old://Task"
     );
 
-    // The previous writer wrote action lists in struct field order, the
-    // current one in canonical JSON: the first registration rewrites those
-    // two literals, and only them.
+    assert_eq!(
+        read[0].shape.properties[0]
+            .where_predicates
+            .as_ref()
+            .map(|m| m
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect::<Vec<_>>()),
+        Some(vec![("done", "old://done"), ("title", "old://title")])
+    );
+
+    // The previous writer wrote action lists in struct field order and maps
+    // in its map's key order, the current one in canonical JSON: the first
+    // registration rewrites those three literals, and only them.
     let before = all_links(&perspective);
     let result = perspective
         .register_shapes(vec![old_task.clone()], &ctx)
@@ -856,6 +874,7 @@ async fn classes_the_previous_writer_stored_are_read_and_rewritten_once() {
     let rewritten: BTreeSet<(String, String)> = [
         ("old://TaskShape", "ad4m://constructor"),
         ("old://Task.title", "ad4m://setter"),
+        ("old://Task.title", "ad4m://wherePredicates"),
     ]
     .into_iter()
     .map(|(s, p)| (s.to_string(), p.to_string()))

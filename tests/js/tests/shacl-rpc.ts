@@ -190,18 +190,25 @@ export default function shaclRpcTests(testContext: TestContext) {
                 });
             });
 
-            it("classes are told apart by their IRI, not their name", async () => {
+            it("refuses a second class under a name another class holds, and writes nothing", async () => {
                 await withPerspective("shacl-rpc-iri", async (p) => {
                     const a = new SHACLShape("a://Note");
                     a.addProperty({ name: "text", path: "a://text" });
                     const b = new SHACLShape("b://Note");
                     b.addProperty({ name: "body", path: "b://body" });
                     await p.registerShapes([a]);
-                    await p.registerShapes([b]);
+                    const before = await snapshot(p);
 
+                    let error: Error | undefined;
+                    try {
+                        await p.registerShapes([b]);
+                    } catch (e) {
+                        error = e as Error;
+                    }
+                    expect(error?.message).to.contain("Class 'a://Note' is already registered under the name 'Note'");
+                    expect(await snapshot(p)).to.deep.equal(before);
                     const notes = await p.shapes(["Note"]);
-                    expect(notes.map((s) => s.shape.targetClass)).to.deep.equal(["a://Note", "b://Note"]);
-                    expect(notes.map((s) => s.shape.properties.map((prop) => prop.name))).to.deep.equal([["text"], ["body"]]);
+                    expect(notes.map((s) => s.shape.targetClass)).to.deep.equal(["a://Note"]);
                 });
             });
 

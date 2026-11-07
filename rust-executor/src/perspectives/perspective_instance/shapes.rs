@@ -231,6 +231,10 @@ impl PerspectiveInstance {
                 ));
             }
         }
+        // The names of the hard-wired classes are the executor's.
+        for (name, target_class) in &names {
+            crate::perspectives::hardwired_class::refuse_reserved_name(name, target_class)?;
+        }
         let shape_uris: BTreeMap<&str, &str> = expected
             .iter()
             .flat_map(|(target_class, (_, links))| {

@@ -144,6 +144,15 @@ const recipes = await Recipe.findAll(perspective);
 
 This is the canonical path for sharing schemas across apps: the publisher serializes a shape to JSON (or Turtle for documentation), the consumer installs it with `registerShapes`, and from then on both apps read and write the same Subject Class against the same Perspective.
 
+#### Class Names
+
+Queries and creates find a class by its name, the last segment of its target class IRI (`Note` for `flux://Note`). A name belongs to one class per Perspective:
+
+- `registerShapes` refuses a class whose name another stored class holds, and the whole call it comes in, writing nothing. Once `b://Note` is registered, `a://Note` is refused too, though its IRI sorts first: a new class never takes a name over.
+- It refuses two classes of one name in one call.
+- When two peers register `a://Note` and `b://Note` before they sync, both end up in the Perspective. Readers then use the class with the least IRI (`a://Note`). That class can always be registered again; `b://Note` is refused from then on.
+- The names of the executor's own classes are reserved: `FlowInstance`, `FlowTransitionProposal`, `AutoProcessor`, `ProcessingClaim`, `InterpretationRun` and `InterpretationOverlay`. `registerShapes` refuses a class of one of these names under any IRI but the executor's (`ad4m://FlowInstance` and so on), so `app://FlowInstance` is refused.
+
 ### Option 3: From JSON Schema (Dynamic)
 
 Perfect for integrating with external systems or when you have existing JSON Schema definitions:

@@ -81,7 +81,7 @@ pub enum PerspectiveFunctions {
     /// array of shapes) in the given perspective
     RegisterShapes { id: String, file: String },
 
-    /// Get all defined Subject classes
+    /// List the names of the registered classes (`perspective.shapes`)
     SubjectClasses { id: String },
 
     /// Construct a new Subject instance of given class over given base

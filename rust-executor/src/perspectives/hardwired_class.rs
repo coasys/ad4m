@@ -135,9 +135,25 @@ fn all() -> &'static [(String, HardwiredClass)] {
     })
 }
 
-/// The hard-wired class `class_name` names when no class of that name is
-/// stored: by its name or its target class IRI, the match `find_class` makes.
-/// A stored class of that name, the executor's or an app's, is the one to use.
+/// The names of the hard-wired classes are reserved: `register_shapes`
+/// refuses a class `target_class` named `name` when `name` is a hard-wired
+/// class's and `target_class` is not that class's IRI. An app class of that
+/// name would be the class the executor's flow and interpretation paths find.
+pub(crate) fn refuse_reserved_name(name: &str, target_class: &str) -> anyhow::Result<()> {
+    match all()
+        .iter()
+        .find(|(target, _)| class_name_of(target) == name)
+    {
+        Some((reserved, _)) if reserved != target_class => Err(anyhow::anyhow!(
+            "The name '{name}' is reserved for the executor's class '{reserved}': class \
+             '{target_class}' needs another name."
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The hard-wired class `class_name` names (by its name or its target class
+/// IRI, the match `find_class` makes) when it is not stored yet.
 pub(crate) fn unstored(
     perspective: &PerspectiveInstance,
     class_name: &str,
@@ -451,27 +467,51 @@ mod tests {
         }
     }
 
-    /// An app's own class of a hard-wired class's name is the class that name
-    /// reads and writes: the executor does not register its own beside it.
+    /// The name of each hard-wired class is reserved: an app class of that
+    /// name under another IRI is refused, the whole call with it, and nothing
+    /// is written. The executor's own flow path still registers its class.
     #[tokio::test]
-    async fn an_app_class_of_a_hardwired_name_is_used_as_it_is() {
+    async fn an_app_class_of_a_hardwired_name_is_refused() {
+        use crate::perspectives::flow_classes::{
+            ensure_flow_model_classes, FLOW_INSTANCE_TARGET_CLASS,
+        };
+
         let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
-        let app: SHACLShape = serde_json::from_value(serde_json::json!({
-            "target_class": "app://FlowInstance",
-            "node_shape_uri": "app://FlowInstanceShape",
-            "properties": [{"path": "app://step", "name": "step", "max_count": 1}]
-        }))
-        .unwrap();
-        perspective.register_shapes(vec![app], &ctx).await.unwrap();
-        assert!(unstored(&perspective, "FlowInstance").unwrap().is_none());
-        let links = triples(&perspective);
-        ensure_before_write(&mut perspective, "FlowInstance", &ctx)
+        let before = triples(&perspective);
+        for (target_class, _) in all() {
+            let name = class_name_of(target_class);
+            let app: SHACLShape = serde_json::from_value(serde_json::json!({
+                "target_class": format!("app://{name}"),
+                "properties": [{"path": "app://step", "name": "step", "max_count": 1}]
+            }))
+            .unwrap();
+            let fine: SHACLShape = serde_json::from_value(serde_json::json!({
+                "target_class": "app://Note",
+                "properties": [{"path": "app://text", "name": "text", "max_count": 1}]
+            }))
+            .unwrap();
+            let err = perspective
+                .register_shapes(vec![fine, app], &ctx)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains(&format!(
+                    "The name '{name}' is reserved for the executor's class '{target_class}'"
+                )),
+                "{err}"
+            );
+            assert_eq!(triples(&perspective), before, "{name}: nothing is written");
+        }
+        assert!(perspective.shapes(None).unwrap().is_empty());
+
+        ensure_flow_model_classes(&mut perspective, &ctx)
             .await
             .unwrap();
-        assert_eq!(triples(&perspective), links);
-        assert!(unstored(&perspective, "FlowTransitionProposal")
-            .unwrap()
-            .is_some());
+        let flow = perspective
+            .shapes(Some(vec!["FlowInstance".into()]))
+            .unwrap();
+        assert_eq!(flow.len(), 1);
+        assert_eq!(flow[0].shape.target_class, FLOW_INSTANCE_TARGET_CLASS);
     }
 
     #[tokio::test]
