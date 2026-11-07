@@ -8021,6 +8021,8 @@ mod tests {
                 trusted: 0,
             },
         );
+        // The store confirmed that head just now.
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
         let person = ad4m_identity_core::did_of(&log.scid());
         let device = log.device.clone();
         let key = device.key();
@@ -8127,6 +8129,96 @@ mod tests {
             0,
             "a re-check is idempotent"
         );
+        map.forget(&log.scid());
+    }
+
+    /// A link that arrives while the signer's cached head is older than `ADMIT_FRESHNESS` is
+    /// not counted, whatever its anchor: the store may hold a revocation the cache missed. Once
+    /// a refresh brings that revocation, the re-check for the key flags the stored links.
+    #[tokio::test]
+    async fn a_link_on_a_stale_head_is_not_counted_and_the_revocation_flags_it() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+        use ad4m_identity_core::build::Signer;
+
+        let perspective = setup().await;
+        let mut log = TestLog::new(97);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+        let device = log.device.clone();
+        let key = device.key();
+        let signed = |anchor: Option<u64>| {
+            let data = create_link().normalize();
+            let now = chrono::Utc::now();
+            let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes = match anchor {
+                Some(anchor) => {
+                    crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, anchor)
+                        .unwrap()
+                }
+                None => crate::agent::signatures::hash_data_and_timestamp(&data, &now),
+            };
+            LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(device.sign(&bytes)),
+                    anchor,
+                },
+                status: Some(LinkStatus::Shared),
+            }
+        };
+
+        // The key is revoked in the store, but the cache still holds the head before it.
+        let links = [signed(Some(0)), signed(None)];
+        for link in &links {
+            perspective.sparql_store.add_link(link).unwrap();
+        }
+        for stored in perspective.sparql_store.get_all_links().unwrap() {
+            assert_eq!(stored.verdict, Some(LinkVerdict::CantCheck));
+            assert_eq!(stored.person, None);
+        }
+        assert!(perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .iter()
+            .all(|l| l.proof.valid != Some(true)));
+
+        // A refresh brings the revocation; the re-check for the key flags both links.
+        log.revoke_d1();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 1,
+            },
+        );
+        map.note_confirmed(&log.scid(), now);
+        let signers = std::collections::BTreeSet::from([links[0].author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap(),
+            2
+        );
+        for stored in perspective.sparql_store.get_all_links().unwrap() {
+            assert_eq!(stored.verdict, Some(LinkVerdict::Flagged));
+            assert_eq!(stored.person, None);
+            assert_ne!(stored.proof.valid, Some(true));
+        }
         map.forget(&log.scid());
     }
 

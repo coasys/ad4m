@@ -333,6 +333,19 @@ pub fn check_signed_with<T: serde::Serialize>(
         entered_after_revoke,
         now,
     });
+    // A link not counted yet is admitted only on a head the store confirmed within
+    // `ADMIT_FRESHNESS`, whatever its anchor: an older head may miss a revocation of its key.
+    // A stale head says `CantCheck` until a refresh lands (the periodic re-check reads those
+    // links again). A link already counted keeps its order (`Some(false)`).
+    let verdict = match (&verdict, &lookup, signer) {
+        (LinkVerdict::Valid, KeyLookup::Listed { scid, .. }, Some(key))
+            if entered_after_revoke != Some(false)
+                && !map.admits(scid, key, now, ADMIT_FRESHNESS) =>
+        {
+            LinkVerdict::CantCheck
+        }
+        _ => verdict,
+    };
     let person = match (&verdict, &lookup, signer) {
         (LinkVerdict::Valid, KeyLookup::Listed { scid, log }, Some(key)) => {
             match author_in(scid, log, key) {
@@ -896,10 +909,16 @@ impl Resolver {
     }
 
     /// Fills the key map for the signers of links about to be checked: each `(did:key,
-    /// anchor)` once. A link anchored past the trusted seq of its signer's log refreshes that
-    /// log from the store, at most once per [`ADMIT_FRESHNESS`].
+    /// anchor)` once. A link anchored past the trusted seq of its signer's log, or a signer
+    /// whose log the store has not confirmed within [`ADMIT_FRESHNESS`] (`KeyMap::admits`),
+    /// refreshes that log from the store, at most once per [`ADMIT_FRESHNESS`]. A refresh
+    /// that fails leaves the head unconfirmed: a new link on it is `CantCheck`.
     pub async fn prepare(&self, signers: &[(String, Option<u64>)]) {
-        let now = super::service::now();
+        self.prepare_at(signers, super::service::now()).await
+    }
+
+    /// [`Resolver::prepare`] by the clock `now` (unix seconds).
+    pub(crate) async fn prepare_at(&self, signers: &[(String, Option<u64>)], now: u64) {
         let mut seen = std::collections::HashSet::new();
         for (did, anchor) in signers {
             if !seen.insert((did.as_str(), *anchor)) {
@@ -911,7 +930,11 @@ impl Resolver {
             let KeyLookup::Listed { scid, log } = self.lookup_signer(key).await else {
                 continue;
             };
-            if anchor.is_some_and(|a| a > log.trusted)
+            let stale = !self
+                .cache
+                .key_map()
+                .admits(&scid, key, now, ADMIT_FRESHNESS);
+            if (stale || anchor.is_some_and(|a| a > log.trusted))
                 && !self.cache.refreshed_within(&scid, now, ADMIT_FRESHNESS)
             {
                 if let Err(e) = self
@@ -3524,6 +3547,72 @@ mod link_check_tests {
             .await;
         assert_eq!(
             check_signed_with(&expr, resolver.cache.key_map(), None, NOW),
+            valid_for(Some(did_of(&log.scid())))
+        );
+    }
+
+    /// A cached head older than `ADMIT_FRESHNESS` admits no new link, whatever its anchor:
+    /// the store may hold a revocation the cache has not seen. `prepare` re-reads that log;
+    /// with the store down the link stays `CantCheck`, and once the read brings the
+    /// revocation the link is flagged.
+    #[tokio::test]
+    async fn a_stale_head_is_read_again_before_it_admits_a_new_link() {
+        let mut log = TestLog::new(72);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let resolver = resolver_on(store.clone());
+        let now = super::super::service::now();
+        let signers = |links: &[Expression<Link>]| -> Vec<(String, Option<u64>)> {
+            links
+                .iter()
+                .map(|l| (l.author.clone(), l.proof.anchor))
+                .collect()
+        };
+        let fresh = signed_with(&log.device, Some(0));
+        resolver
+            .prepare_at(&signers(std::slice::from_ref(&fresh)), now)
+            .await;
+        assert_eq!(
+            check_signed_with(&fresh, resolver.cache.key_map(), None, now),
+            valid_for(Some(did_of(&log.scid())))
+        );
+
+        // The store takes the revocation; the cached head does not know it.
+        log.revoke_d1();
+        *store.events.lock().unwrap() = log.events.clone();
+        let later = now + ADMIT_FRESHNESS + 5;
+        let links = [
+            signed_with(&log.device, Some(0)),
+            signed_with(&log.device, None),
+        ];
+        let verdicts = |at: u64| {
+            links
+                .iter()
+                .map(|l| check_signed_with(l, resolver.cache.key_map(), None, at).verdict)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            verdicts(later),
+            [LinkVerdict::CantCheck, LinkVerdict::CantCheck]
+        );
+
+        store.store_down.store(true, Ordering::SeqCst);
+        resolver.prepare_at(&signers(&links), later).await;
+        assert_eq!(
+            verdicts(later),
+            [LinkVerdict::CantCheck, LinkVerdict::CantCheck],
+            "the store is unreachable: nothing confirms the head"
+        );
+
+        store.store_down.store(false, Ordering::SeqCst);
+        let after = later + ADMIT_FRESHNESS + 5;
+        resolver.prepare_at(&signers(&links), after).await;
+        assert_eq!(
+            verdicts(after),
+            [LinkVerdict::Flagged, LinkVerdict::Flagged]
+        );
+        // A link a counted row stands for keeps its verdict: no fresh head is asked of it.
+        assert_eq!(
+            check_signed_with(&fresh, resolver.cache.key_map(), Some(false), after),
             valid_for(Some(did_of(&log.scid())))
         );
     }

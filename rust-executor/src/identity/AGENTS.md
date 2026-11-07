@@ -281,9 +281,20 @@ the offer's state).
   the seq that added the key. With an anchor: no log lists the key, `invalid`; nothing known
   or the anchor past the trusted seq, `cantCheck`; a master key, `invalid`; the key added
   after the anchor or revoked at or before it, `invalid`; a bot key whose scope is past its
-  `expires` by the clock now, `invalid`. A key revoked after the anchor: `flagged` when the
-  link entered the space's ordered history after the `revoke`, else `valid`. No link language
-  gives that order today, so `check_signed` passes none.
+  `expires` by the clock now, `invalid`. A key revoked after the anchor: `valid` only when the
+  link is known to have entered before the `revoke`, else `flagged`. No link language gives a
+  space order today; the one order the executor knows is its own store's: a link it already
+  counted (stored `valid`) before the revocation was accepted (`check_entered(Some(false))`).
+- **Admission needs a confirmed head** (`check_signed_with`, `KeyMap::admits`). A new link
+  counts (`valid`) only when the store confirmed the signer's trusted head (`accept`,
+  `KeyMap::note_confirmed`) less than `ADMIT_FRESHNESS` ago, whatever its anchor: an older
+  head may miss a revocation of the key. Otherwise the link is `cantCheck`, and `prepare`
+  re-reads the log (at most once per window); with the store unreachable it stays
+  `cantCheck` and the 60 s re-check tries again. Exempt: this executor's own keys
+  (`KeyMap::note_own`, from `anchor_for`), so local links count offline, and a link already
+  counted. A restart confirms nothing until each log is read again. A link admitted in the
+  window before a revocation reaches the cache stays counted: without the store's append
+  order the executor cannot tell it from one signed before.
 - **Unknown is not "no log".** A failed key-index call answers `Unavailable` and is never
   kept; the index is not asked again for 30 s (`BREAKER`). An unanchored link by an unknown
   key stays `valid` with no person; an anchored one is `cantCheck`.

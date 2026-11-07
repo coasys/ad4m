@@ -354,6 +354,10 @@ pub fn anchor_for(agent_did: &str) -> Option<u64> {
         let db = db.lock().ok()?;
         db.as_ref()?.agent_identity(agent_did).ok().flatten()?
     };
+    // This executor signs with the key: its links need no fresh head to count here.
+    if let Some(key) = resolver::multikey_of(agent_did) {
+        service.cache.key_map().note_own(key);
+    }
     anchor_in(service.cache.key_map(), agent_did, &scid)
 }
 

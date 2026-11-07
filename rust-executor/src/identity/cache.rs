@@ -98,6 +98,11 @@ struct KeyMapInner {
     no_log: HashMap<String, Instant>,
     /// The SCIDs of local identities (a row in `identity_agents`): the bound never drops them.
     pinned: HashSet<String>,
+    /// SCID → when (unix seconds, this run) the configured store last confirmed its trusted
+    /// head ([`KelCache::accept`]): what a new link is admitted against.
+    confirmed: HashMap<String, u64>,
+    /// The signing keys this executor signs links with (its agents bound to an identity).
+    own: HashSet<String>,
 }
 
 /// The key map: what every trusted log in the cache says, readable without `await`, so the
@@ -149,10 +154,15 @@ impl KeyMap {
         };
         if inner.logs.len() >= KEY_MAP_BOUND && !inner.logs.contains_key(scid) {
             let KeyMapInner {
-                keys, logs, pinned, ..
+                keys,
+                logs,
+                pinned,
+                confirmed,
+                ..
             } = &mut *inner;
             logs.retain(|held, _| pinned.contains(held));
             keys.retain(|_, held| pinned.contains(held));
+            confirmed.retain(|held, _| pinned.contains(held));
         }
         let trusted = log.trusted;
         for record in log.state.masters.iter().chain(log.state.keys.values()) {
@@ -217,8 +227,41 @@ impl KeyMap {
     pub fn forget(&self, scid: &str) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.logs.remove(scid);
+            inner.confirmed.remove(scid);
             inner.keys.retain(|_, held| held != scid);
         }
+    }
+
+    /// Notes that the configured store confirmed the trusted head of `scid` at `at` (unix
+    /// seconds): it signed that head in an answer this executor just read.
+    pub fn note_confirmed(&self, scid: &str, at: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.confirmed.insert(scid.to_string(), at);
+        }
+    }
+
+    /// Notes that this executor signs links with the signing multikey `key` (a local agent's).
+    pub fn note_own(&self, key: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if !inner.own.contains(key) {
+                inner.own.insert(key.to_string());
+            }
+        }
+    }
+
+    /// Whether a new link by `key`, listed in the log of `scid`, may be admitted on the map's
+    /// answer at `now`: the store confirmed that log's trusted head less than `window` seconds
+    /// before, or `key` is this executor's own (it signed the link itself, so no revocation
+    /// it has not seen can be at stake).
+    pub fn admits(&self, scid: &str, key: &str, now: u64, window: u64) -> bool {
+        let Ok(inner) = self.inner.lock() else {
+            return false;
+        };
+        inner.own.contains(key)
+            || inner
+                .confirmed
+                .get(scid)
+                .is_some_and(|at| now.saturating_sub(*at) < window)
     }
 }
 
@@ -976,6 +1019,8 @@ impl KelCache {
         }
         if ours.seq == head.seq {
             self.accept_head(head)?;
+            // First, so a re-check the new head starts admits on it.
+            self.key_map.note_confirmed(scid, now());
             self.publish_trusted(scid, chain.state(), head.seq);
         }
         Ok(Some(ours))
