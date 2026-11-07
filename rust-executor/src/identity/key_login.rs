@@ -59,7 +59,8 @@ pub const CLOCK_SKEW: u64 = 120;
 /// The oldest read of a key's log a login takes; an older one goes to the store. A renewal
 /// always reads the store.
 pub const LOGIN_MAX_AGE: u64 = 5 * 60;
-/// How often the keys of live key-bound grants are read again.
+/// How often the keys of live key-bound grants are read again from the store: the longest a
+/// revocation the store holds leaves a session open when the cache's change missed it.
 pub const KEY_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How long a key-bound grant lasts on its last valid verdict while the store cannot be read:
 /// a renewal proceeds, and the re-check keeps it, until then.
@@ -883,9 +884,11 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
     }
 }
 
-/// Reads the key of every live key-bound grant again (at most [`KEY_RECHECK_INTERVAL`] old):
-/// a key no longer valid, or a bot's, ends its grants; a valid one records the check. While the
-/// store cannot be read, grants whose last valid check is [`STORE_OUTAGE_GRACE`] old end.
+/// Reads the key of every live key-bound grant again from the store, whatever the cache's age
+/// (a cached read up to an interval old would let a revocation the cache missed stand for two
+/// intervals): a key no longer valid, or a bot's, ends its grants; a valid one records the
+/// check. While the store cannot be read, grants whose last valid check is
+/// [`STORE_OUTAGE_GRACE`] old end.
 /// Returns how many active grants ended.
 pub async fn recheck_key_grants(service: &IdentityService, now: u64) -> usize {
     let mut by_key: BTreeMap<(String, String), Vec<Arc<LiveGrant>>> = BTreeMap::new();
@@ -899,10 +902,7 @@ pub async fn recheck_key_grants(service: &IdentityService, now: u64) -> usize {
     }
     let mut ended = 0;
     for ((scid, key), grants) in by_key {
-        let read = service
-            .resolver
-            .session_key(&scid, &key, KEY_RECHECK_INTERVAL.as_secs())
-            .await;
+        let read = service.resolver.session_key(&scid, &key, 0).await;
         let to_end: Vec<Arc<LiveGrant>> = match read {
             Ok(found) if found.admits() => {
                 for grant in &grants {
@@ -1702,8 +1702,8 @@ mod tests {
         no_operator();
     }
 
-    // The re-check reads each key again: a revocation the subscription missed ends the
-    // session; a valid key records the check; a store outage ends only grants whose last
+    // The re-check reads each key again from the store: a revocation the subscription missed
+    // ends the session, however fresh the cache; a valid key records the check; a store outage ends only grants whose last
     // valid check is an hour old.
     #[tokio::test]
     async fn the_recheck_ends_the_sessions_of_keys_no_longer_valid() {
@@ -1715,31 +1715,30 @@ mod tests {
 
         // Valid: the check is recorded.
         let t = now();
-        world.service.cache.note_refreshed(&world.log.scid(), 0);
         recheck_key_grants(&world.service, t + 10).await;
         assert!(session.check().is_ok());
         assert_eq!(binding.checked_at(), t + 10);
 
         // The store is down: kept within the hour, ended after it.
         world.store.store_down.store(true, Ordering::SeqCst);
-        world.service.cache.note_refreshed(&world.log.scid(), 0);
         recheck_key_grants(&world.service, t + 20).await;
         assert!(session.check().is_ok(), "kept on the last valid verdict");
-        world.service.cache.note_refreshed(&world.log.scid(), 0);
         recheck_key_grants(&world.service, t + 10 + STORE_OUTAGE_GRACE).await;
         assert_eq!(session.check(), Err(AuthError::Revoked), "fail closed");
 
-        // A revocation on the store, never published to this executor's subscribers.
+        // A login takes a read up to LOGIN_MAX_AGE old: with an older one, the outage fails it.
+        world.service.cache.note_refreshed(&world.log.scid(), 0);
         let again = world.login_as(&world.phone).await;
         assert_eq!(again.unwrap_err(), KeyLoginError::StoreUnavailable);
         world.store.store_down.store(false, Ordering::SeqCst);
         let fresh = world.login_as(&world.phone).await.unwrap();
         let fresh_session = open(&fresh.token).unwrap();
+        // A revocation on the store, never published to this executor's subscribers, right
+        // after that login read the log: the re-check reads the store all the same.
         let revoke_phone =
             revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
-        world.service.cache.note_refreshed(&world.log.scid(), 0);
         assert_eq!(recheck_key_grants(&world.service, now()).await, 1);
         assert_eq!(fresh_session.check(), Err(AuthError::Revoked));
         no_operator();

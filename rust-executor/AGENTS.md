@@ -134,8 +134,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `OperatorSource::Key`, within the grant) or `Agent` on the local agent that speaks for the
   identity. Its expiry is atomic: `user.renewSession` moves it and `Session::over` follows it,
   so open sockets stay open. `Grants::revoke_key` ends a key's grants on the key-log cache's
-  `VerdictChange` and on the 5-minute re-check (which also ends grants whose key could not be
-  read for an hour). `user.logout` ends any grant; `user.endAllSessions` every grant of the
+  `VerdictChange` and on the 5-minute re-check, which reads the store whatever the cache's
+  age, so a revocation the change missed ends its sessions within 5 minutes (it also ends
+  grants whose key could not be read for an hour). `user.logout` ends any grant; `user.endAllSessions` every grant of the
   caller's identity (and of a managed agent).
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,
