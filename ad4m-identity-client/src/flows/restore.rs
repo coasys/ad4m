@@ -351,8 +351,10 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             self.random,
         )
         .await?;
+        // The restored device holds the new master: the claim says it may keep it, so the log
+        // lets it (`may_keep_master`): sent later rotations, a keeper, another copy.
         self.executor
-            .claim_offer(&flow.offer_string(), Some(&this_device.name), false)
+            .claim_offer(&flow.offer_string(), Some(&this_device.name), true)
             .await?;
         let claimed = flow.wait_for_claim().await?;
         if claimed.device_key != status.device_key {

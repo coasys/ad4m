@@ -5157,3 +5157,226 @@ async fn a_rotation_whose_staged_key_another_rebuild_replaced_still_keeps_the_la
     let unlocked = shared.unlock(&scid, MasterUse::Link, 0).unwrap();
     assert_eq!(unlocked.signer(0).unwrap().index(), 2);
 }
+
+/// Lal's P2-1 at 7117f0b10: the restore's enrolment claims its offer with `canKeepMaster:
+/// false`, so the log never lets the restored device keep the master key, although its vault
+/// holds the new master. It then counts for nothing: not sent later rotations, not a keeper for
+/// `send_master`, and not "another copy" when an older holder removes its key.
+#[tokio::test]
+async fn a_restored_device_is_a_keeper_in_the_log() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let vault = MemoryVault::new();
+    let new_vault = MemoryVault::new();
+    let did = create(&a, &vault, 54).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let words = words::from_entropy(&[54; 16]);
+
+    let mut flow = RestoreFlow::start(&new, &new_vault, words.phrase(), &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let restored = flow
+        .finish(&[], entry("New laptop", DeviceKind::DesktopApp))
+        .await
+        .unwrap();
+    let enrolled = restored.enrolled.unwrap();
+    assert_eq!(new_vault.master_index(&scid).unwrap(), Some(1));
+    let events = a.events(&did).await.unwrap();
+    assert!(
+        link::may_keep_master(&events, &enrolled.key_id),
+        "the log lets the restored device keep the master key it holds"
+    );
+
+    // d1 kept #0 and was sent #1; it takes it, then removes its copy: the restored laptop holds
+    // the other one.
+    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert!(matches!(refreshed, Refreshed::Taken(_)), "{refreshed:?}");
+    remove_master(&a, &vault, &did, &OsRandom)
+        .await
+        .expect("the restored device holds the current master key");
+    assert_eq!(vault.master_index(&scid).unwrap(), None);
+}
+
+/// Lal's P2-2 at 7117f0b10. As `a_rotation_whose_staged_key_another_rebuild_replaced_still_keeps_the_landed_key`,
+/// but B's answer comes back only after A's rotation to #2 landed and A promoted #2. B's promote
+/// of #1 finds nothing staged, and its fallback stores #1 from the words over the kept #2: the
+/// vault goes back a generation while the log is at #2.
+#[tokio::test]
+async fn a_late_rotation_answer_does_not_overwrite_a_newer_kept_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &shared, 55).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    link_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        entry("Other app", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    let d3 = link_app(
+        &a,
+        &shared,
+        &did,
+        &host,
+        entry("host", DeviceKind::CommunityHost),
+        false,
+    )
+    .await;
+    let words = words::from_entropy(&[55; 16]);
+    let (vault_a, vault_b) = (SharedVault(shared.clone()), SharedVault(shared.clone()));
+
+    let gated_a = ViaExecutor::new(GatedPublishes::new(a.rpc()));
+    let held_b = ViaExecutor::new(HeldPublish::new(b.rpc(), false));
+    let a_done = Cell::new(false);
+    let (by_a, by_b, ()) = tokio::join!(
+        async {
+            let rotated = rotate(
+                &gated_a,
+                &vault_a,
+                &did,
+                &words,
+                std::slice::from_ref(&d3),
+                &SystemClock,
+                &OsRandom,
+            )
+            .await;
+            a_done.set(true);
+            rotated
+        },
+        async {
+            gated_a.rpc().until_reached(1).await;
+            rotate(
+                &held_b,
+                &vault_b,
+                &did,
+                &words,
+                &[],
+                &SystemClock,
+                &OsRandom,
+            )
+            .await
+        },
+        async {
+            gated_a.rpc().until_reached(1).await;
+            held_b.rpc().until_held().await;
+            // B's #1 landed; A's first publish is answered 409, A rebuilds and stages #2.
+            gated_a.rpc().opened.set(1);
+            gated_a.rpc().until_reached(2).await;
+            assert_eq!(shared.staged_index(&scid).unwrap(), Some(2));
+            // A's #2 lands and A promotes it, all before B hears back.
+            gated_a.rpc().opened.set(2);
+            while !a_done.get() {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(shared.master_index(&scid).unwrap(), Some(2), "A kept #2");
+            assert_eq!(shared.staged_index(&scid).unwrap(), None);
+            held_b.rpc().release.set(true);
+        }
+    );
+    let by_a = by_a.unwrap();
+    assert_eq!(by_a.index, 2);
+    assert!(by_a.kept.is_ok(), "{:?}", by_a.kept);
+    let by_b = by_b.unwrap();
+    assert_eq!(by_b.index, 1);
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().masters.len(), 3, "the log is at #2");
+    assert_eq!(
+        shared.master_index(&scid).unwrap(),
+        Some(2),
+        "B's late completion of #1 must not replace the kept #2 (B's kept: {:?})",
+        by_b.kept
+    );
+    let unlocked = shared.unlock(&scid, MasterUse::Link, 0).unwrap();
+    assert_eq!(unlocked.signer(0).unwrap().index(), 2);
+}
+
+/// An executor whose `identity.takeMaster` is preceded by another app installing master #1 in
+/// the shared vault (its own take or promote landing), as a refresh in this app awaits the call.
+struct InstallDuringTake<'a> {
+    inner: &'a TestExecutor,
+    other_vault: SharedVault,
+    scid: String,
+    key: [u8; 32],
+    installed: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for InstallDuringTake<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.takeMaster" && !self.installed.replace(true) {
+            self.other_vault
+                .store_master(&self.scid, 1, ad4m_identity_client::Secret::new(self.key))
+                .unwrap();
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Lal's P2-3 at 7117f0b10: `refresh_master` reads the kept index (#0, behind the log at #1),
+/// awaits `take_master`, and forgets on the index it read. Another app sharing the vault installs
+/// #1 while the call is in flight, and the forget deletes the current key.
+#[tokio::test]
+async fn a_refresh_forgets_only_the_key_it_decided_on() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &shared, 56).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[56; 16]);
+    // The desk rotates to #1; its push of #1 to d1 fails, so d1's inbox stays empty.
+    desk.rpc().refuse_inbox_put.set(true);
+    let rotated = rotate(
+        &desk,
+        &desk_vault,
+        &did,
+        &words,
+        &[],
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rotated.index, 1);
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(0));
+    let key1 = words::master_key(&words::seed(&words), 1)
+        .unwrap()
+        .to_bytes();
+
+    let racing = ViaExecutor::new(InstallDuringTake {
+        inner: a.rpc(),
+        other_vault: SharedVault(shared.clone()),
+        scid: scid.clone(),
+        key: key1,
+        installed: Cell::new(false),
+    });
+    let refreshed = refresh_master(&racing, &SharedVault(shared.clone()), &did, &OsRandom)
+        .await
+        .unwrap();
+    assert!(
+        racing.rpc().installed.get(),
+        "the other app installed #1 mid-refresh"
+    );
+    assert_eq!(
+        shared.master_index(&scid).unwrap(),
+        Some(1),
+        "the current master installed by another app survives this refresh ({refreshed:?})"
+    );
+}
