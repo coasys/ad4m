@@ -467,7 +467,7 @@ impl HandlerMap {
         ctx: Arc<RequestContext>,
     ) -> Result<Value, WsRpcError> {
         let entry = self.entry(msg_type)?;
-        let answer = match Self::admit_entry(entry, msg_type, &params, &ctx).await {
+        let answer = match Self::admit_entry(entry, msg_type, &params, &ctx, true).await {
             Ok(()) => (entry.handler)(params, ctx).await,
             Err(e) => Err(e),
         };
@@ -491,7 +491,7 @@ impl HandlerMap {
         params: &Value,
         ctx: &RequestContext,
     ) -> Result<(), WsRpcError> {
-        Self::admit_entry(self.entry(msg_type)?, msg_type, params, ctx).await
+        Self::admit_entry(self.entry(msg_type)?, msg_type, params, ctx, false).await
     }
 
     fn entry(&self, msg_type: &str) -> Result<&Entry, WsRpcError> {
@@ -500,17 +500,25 @@ impl HandlerMap {
             .ok_or_else(|| WsRpcError::not_found(format!("Unknown type: {}", msg_type)))
     }
 
+    /// `record`: the call runs if admitted, so a bot's call goes to its activity log
+    /// (`crate::bots::admit`); a check alone (`admit`) records nothing.
     async fn admit_entry(
         entry: &Entry,
         msg_type: &str,
         params: &Value,
         ctx: &RequestContext,
+        record: bool,
     ) -> Result<(), WsRpcError> {
         (entry.params)(params).map_err(|e| {
             WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
         })?;
         match &entry.guard {
             Some(guard) => {
+                // A bot's session acts within its owner's grant first, whatever its
+                // capabilities: a bot's token holds a user's default ones.
+                if let Some(bot) = ctx.session.managed_did().and_then(crate::bots::registered) {
+                    crate::bots::admit(&bot, msg_type, guard, params, ctx, record).await?;
+                }
                 guard.admit(msg_type, params, ctx).await?;
                 if entry.local_only && !ctx.session.is_operator_on_this_machine() {
                     return Err(WsRpcError::forbidden(super::guards::LOCAL_ONLY));
@@ -571,6 +579,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::sfu_ws::register_ws_handlers(&mut map);
     super::identity_ws::register_ws_handlers(&mut map);
     super::key_login_ws::register_ws_handlers(&mut map);
+    super::bots_ws::register_ws_handlers(&mut map);
     // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.
     map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
     map.inline::<NoParams, bool>(super::event_interest::UNWATCH);

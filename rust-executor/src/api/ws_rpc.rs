@@ -469,6 +469,9 @@ impl Connection {
         };
 
         let params = parsed.get("params").cloned().unwrap_or(json!({}));
+        // Why the caller makes the call (`meta.reason`): a bot's write needs one, and its
+        // activity log keeps it.
+        let reason = crate::bots::reason_of(&parsed);
 
         // `events.watch` / `events.unwatch` set this connection's event
         // filter (see `event_interest`), so they are handled inline too.
@@ -577,6 +580,7 @@ impl Connection {
             // so handlers can clone it into long-running operations.
             let mut req_ctx = (*base_ctx).clone();
             req_ctx.cancel_token = Some(cancel_token.clone());
+            req_ctx.reason = reason;
             let req_ctx = Arc::new(req_ctx);
 
             // Race the handler against cancellation.  On cancel, we

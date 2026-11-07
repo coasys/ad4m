@@ -9,6 +9,7 @@
 //! kept, after `fold`, in the executor database ([`cache`]).
 
 pub mod backend;
+pub mod bot_key;
 pub mod cache;
 pub mod claim;
 pub mod custody;

@@ -424,7 +424,7 @@ impl IdentityService {
     /// config or the seed: `super::no_store_keys_cause`): the cache then accepts no head, so the
     /// executor could never bind the agent to the log, but the store would already hold the
     /// events and the agent's key would be taken for every identity.
-    pub(super) fn refuse_without_store_keys(&self) -> Result<(), WsRpcError> {
+    pub(crate) fn refuse_without_store_keys(&self) -> Result<(), WsRpcError> {
         if self.cache.trusts_a_store() {
             return Ok(());
         }

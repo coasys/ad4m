@@ -2,6 +2,7 @@
 extern crate lazy_static;
 
 pub mod api;
+pub mod bots;
 pub mod config;
 pub mod config_file;
 pub mod config_rpc;
@@ -539,6 +540,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .as_str(),
     )
     .expect("Failed to initialize Ad4mDb");
+
+    // The bots and their grants, which every call of a bot's session reads.
+    if let Err(e) = crate::bots::init() {
+        error!("bots: {e}");
+    }
 
     // The seed names the network's identity store, which the identity module reads below.
     info!("Initializing Runtime service...");

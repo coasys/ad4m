@@ -9,7 +9,11 @@
 //! run (`--custody-channel`, no operator record, the main agent of no identity) a claim goes
 //! ahead and records nothing; the identity the main agent joins (`join_status` binds it once the
 //! holder's add lists the key) becomes the operator (`OperatorSetBy::FirstRun`). Until then the
-//! desktop may claim again, for any identity. Claims for a hosted tenant's agent are not here yet.
+//! desktop may claim again, for any identity.
+//!
+//! `claim_for_agent` is the claim itself, for any local agent: `claim_for_main` runs it after
+//! its rules, and `bot.createAgent` runs it for a new bot agent (`crate::bots`), whose offer the
+//! holder opened as a bot offer. Claims for a hosted tenant's agent are not here yet.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::did_of;
@@ -85,6 +89,41 @@ impl ClaimService<'_> {
         };
         let first_link = first_link_check(record.as_ref(), &offer_did, desktop_first_run)
             .map_err(first_link_error)?;
+        // The row goes in before the store call: when the store commits the claim and its
+        // answer is lost, a retry gets `gone` once the add spent the offer, and only this row
+        // lets `joinStatus` follow the offer and record the binding.
+        let claimed = self
+            .claim_for_agent(&main, offer, can_keep_master, hint, || {
+                db(|db| {
+                    db.add_join(&JoinRow {
+                        offer_id: offer.offer_id.clone(),
+                        scid: offer.scid.clone(),
+                        claimed_at: now(),
+                    })
+                })
+            })
+            .await?;
+        if first_link == FirstLink::FirstRun {
+            log::info!("identity: this desktop executor claimed an offer of {offer_did}; it becomes the operator when the holder confirms and the main agent joins");
+        }
+        Ok(claimed)
+    }
+
+    /// Claims `offer` with the wallet key of `agent` and that key's `enc` key: the steps every
+    /// claim takes, whoever it is for (the main agent, a bot agent). `before_store` runs after
+    /// the claim is signed and before the store sees it: the caller records what lets it
+    /// follow the offer when the store's answer is lost. Refuses `no-store-keys`, an offer of
+    /// another store than this executor's (`offer-store`), and a malformed secret.
+    pub async fn claim_for_agent(
+        &self,
+        agent: &AgentContext,
+        offer: &OfferString,
+        can_keep_master: bool,
+        hint: Option<String>,
+        before_store: impl FnOnce() -> Result<(), WsRpcError>,
+    ) -> Result<ClaimOfferResult, WsRpcError> {
+        self.identity.refuse_without_store_keys()?;
+        let offer_did = did_of(&offer.scid);
         if let Some(ours) = &self.identity.store_url {
             if store_base(ours) != store_base(&offer.store) {
                 return Err(WsRpcError::bad_request(format!(
@@ -95,9 +134,9 @@ impl ClaimService<'_> {
         }
         let secret = link::decode_secret(&offer.s)
             .ok_or_else(|| WsRpcError::bad_request("invalid: the offer's secret is malformed"))?;
-        let (_, key) = device_key(&main).map_err(WsRpcError::internal)?;
+        let (_, key) = device_key(agent).map_err(WsRpcError::internal)?;
         let enc = enc_key_of(&key).map_err(WsRpcError::internal)?;
-        let signer = WalletSigner::new(&main).map_err(WsRpcError::internal)?;
+        let signer = WalletSigner::new(agent).map_err(WsRpcError::internal)?;
         let claim = link::make_claim(
             &offer.scid,
             &offer.offer_id,
@@ -111,25 +150,13 @@ impl ClaimService<'_> {
         signer.check().map_err(WsRpcError::internal)?;
         let claim: ad4m_ldk::identity::Claim =
             convert(&claim).map_err(|e| WsRpcError::internal(e.to_string()))?;
-        // The row goes in before the store call: when the store commits the claim and its
-        // answer is lost, a retry gets `gone` once the add spent the offer, and only this row
-        // lets `joinStatus` follow the offer and record the binding.
-        db(|db| {
-            db.add_join(&JoinRow {
-                offer_id: offer.offer_id.clone(),
-                scid: offer.scid.clone(),
-                claimed_at: now(),
-            })
-        })?;
+        before_store()?;
         let receipt = self
             .identity
             .backend
             .claim_offer(&offer_did, &offer.offer_id, &claim)
             .await
             .map_err(backend_error)?;
-        if first_link == FirstLink::FirstRun {
-            log::info!("identity: this desktop executor claimed an offer of {offer_did}; it becomes the operator when the holder confirms and the main agent joins");
-        }
         Ok(ClaimOfferResult {
             did: offer_did,
             match_code: link::match_code(&offer.scid, &offer.offer_id, signer.key().as_str()),

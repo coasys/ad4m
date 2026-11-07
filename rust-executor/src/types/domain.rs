@@ -31,6 +31,10 @@ pub struct RequestContext {
     /// per socket. Live queries belong to it and end when it closes. `None`
     /// outside the WS RPC socket (REST, `/api/v1/ws/events`, internal code).
     pub connection_id: Option<String>,
+    /// Why the caller makes this call, from the request's `meta.reason` (cut to
+    /// `bots::REASON_MAX` characters). A bot gives one with every write; its activity log
+    /// keeps it (`crate::bots`).
+    pub reason: Option<String>,
 }
 
 impl RequestContext {
@@ -50,6 +54,7 @@ impl RequestContext {
             cancel_token: None,
             session: std::sync::Arc::new(session),
             connection_id: None,
+            reason: None,
         })
     }
 
@@ -86,6 +91,7 @@ impl RequestContext {
             cancel_token: None,
             session: std::sync::Arc::new(session),
             connection_id: None,
+            reason: None,
         }
     }
 
@@ -123,6 +129,12 @@ impl RequestContext {
     /// The same context, arriving on the RPC connection `id`.
     pub(crate) fn on_connection(mut self, id: &str) -> RequestContext {
         self.connection_id = Some(id.to_string());
+        self
+    }
+
+    /// The same context, with `reason` as the call's `meta.reason`.
+    pub(crate) fn with_reason(mut self, reason: &str) -> RequestContext {
+        self.reason = Some(reason.to_string());
         self
     }
 }
