@@ -810,7 +810,12 @@ describe("AI wind tunnel (unit)", () => {
       const sampledGpu = llm("sampled", "4B", 30, 500, { backend: "rocm" });
       sampledGpu.metrics.peakRssBytes = 1e9;
       sampledGpu.metrics.tokenCountSource = "usage";
-      const r = deriveRecommendations([{ path: "e.json", evidence: evidence("cpu-16gb", [chunked, attachedGpu, sampledGpu, llm("small", "1B", 30, 500)]) }], "t");
+      const attachedUnlabelled = llm("unlabelled", "8B", 90, 100);
+      attachedUnlabelled.metrics.peakRssBytes = null;
+      const r = deriveRecommendations(
+        [{ path: "e.json", evidence: evidence("cpu-16gb", [chunked, attachedGpu, attachedUnlabelled, sampledGpu, llm("small", "1B", 30, 500)]) }],
+        "t",
+      );
       expect(r.classes["cpu-16gb"].llm).to.deep.include({ modelId: "sampled", candidates: 2 });
     });
     it("gives every LLM and completion model a parameter count to rank by size", () => {

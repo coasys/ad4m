@@ -221,13 +221,17 @@ How a recommendation is chosen (`SERVICE_RULES` in `recommend.ts`, also written 
 `recommendations.json`): per class and service, the cells that passed and fit the machine's
 memory are candidates; a candidate's metrics are the median of its medians across evidence
 files; those over the service's floor (LLM: ≥ 15 decode tokens/s and ≤ 2 s to first token;
-embeddings: ≥ 10 texts/s; STT: real-time factor ≤ 0.5; TTS: ≤ 1) are ranked (LLM: the most
-parameters, then decode rate; STT: the mean WER over the clips in 0.02 buckets, then
-real-time factor; TTS: round-trip
-WER, then real-time factor; embeddings: throughput). The first wins and cites every evidence
-file that measured it. The newest evidence for a candidate decides: if its newest run failed,
-it is not recommended. Cells measured through the harness's OpenAI-shaped front
-(`metrics.adapter`) are never candidates, because a local setup has no such front. A class with no evidence, or no candidate over the floor, has no
+completion: ≤ 3 s latency; embeddings: ≥ 10 texts/s and an MRR of 1, so every retrieval query
+ranks its passage first; STT: real-time factor ≤ 0.5; TTS: ≤ 1) are ranked (LLM: the most
+parameters, then decode rate; completion: the most parameters, then latency; STT: the mean WER
+over the clips in 0.02 buckets, then real-time factor; TTS: round-trip WER, then real-time
+factor; embeddings: throughput). The first wins and cites every evidence file that measured
+it. The newest evidence for a candidate decides: if its newest run failed, it is not
+recommended. Three kinds of cell are never candidates: a cell measured through the harness's
+OpenAI-shaped front (`metrics.adapter`), because a local setup has no such front; an LLM cell
+whose rates count stream chunks, not tokens (`tokenCountSource: "chunks"`); and a cell not
+labelled `cpu` with no memory sample (an attached server), because no offload check showed
+where the model ran. A class with no evidence, or no candidate over the floor, has no
 recommendation; the executor's local setup then falls back to the nearest smaller measured
 class of the same family, then to the CPU classes (`fallbackClasses` in `hardware-class.ts`).
 
