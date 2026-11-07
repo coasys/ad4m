@@ -3,9 +3,9 @@
 //! The rule lives in `model_query::abstract_classes`; this module caches and
 //! wires it, as a child of `perspective_instance` to reach its private state.
 //!
-//! A write through an abstract class dispatches to the record's own classes
-//! among those the abstract class reads (`subject_classes_of` ∩ the
-//! resolution). An update runs each class's setter for the property that
+//! A write through an abstract class dispatches to the record's own classes,
+//! by target class IRI, that the abstract class reads (`subject_class_iris_of`,
+//! each viewed through it). An update runs each class's setter for the property that
 //! answers to the abstract name; a delete runs each class's destructor.
 //! Commands two classes share run once. Values are not converted: what one
 //! class stores as HTML another gets as is. Creating one is refused.
@@ -255,20 +255,41 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// The classes `base` is, by target class IRI, that `abstract_class`
+    /// reads. By IRI because two classes may share a name (`a://Task`,
+    /// `b://Task`): a write on a `b://Task` record runs `b://Task`'s actions,
+    /// never those of the class the name finds.
+    fn record_classes_through(
+        &self,
+        abstract_class: &str,
+        base: &str,
+    ) -> Result<Vec<String>, AnyError> {
+        let own = crate::perspectives::subject_classes_of::subject_class_iris_of(
+            &self.sparql_store,
+            &self.shape_resolver(),
+            &[base.to_string()],
+        )?
+        .remove(base)
+        .unwrap_or_default();
+        let index = self.abstract_index()?;
+        let (alias_key, shape) = self.abstract_shape(abstract_class)?;
+        let mut classes = Vec::new();
+        for class in own {
+            let concrete = self.get_shape(&class)?;
+            if abstract_classes::view_through(&index, &alias_key, &shape, &class, &concrete)
+                .is_some()
+            {
+                classes.push(class);
+            }
+        }
+        Ok(classes)
+    }
+
     /// The classes of `base` a write through `abstract_class` reaches: those
     /// it is, among those the abstract class reads. Never empty.
     fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
-        let own = self
-            .subject_classes_of(&[base.to_string()])?
-            .remove(base)
-            .unwrap_or_default();
-        let targets: Vec<String> = resolution
-            .classes
-            .iter()
-            .filter(|c| own.contains(c))
-            .cloned()
-            .collect();
+        let targets = self.record_classes_through(abstract_class, base)?;
         if targets.is_empty() {
             return Err(anyhow!(
                 "'{base}' is not a record of any class '{abstract_class}' reads ({}): there is \
@@ -638,17 +659,12 @@ impl PerspectiveInstance {
         if values.as_object().is_some_and(|o| o.len() != 1) {
             return Ok(None);
         }
-        let resolution = self.resolve_abstract(CONTAINER_URI)?;
-        let own = self
-            .subject_classes_of(&[base.to_string()])?
-            .remove(base)
-            .unwrap_or_default();
         let index = self.abstract_index()?;
         let alias_key = builtin(CONTAINER_URI)
             .map(|b| b.name)
             .unwrap_or("Container");
         let mut beside_own = false;
-        for class in resolution.classes.iter().filter(|c| own.contains(c)) {
+        for class in &self.record_classes_through(CONTAINER_URI, base)? {
             let shape = self.get_shape(class)?;
             let Some(own_name) = index.own_name(class, &shape, "children", alias_key) else {
                 continue;

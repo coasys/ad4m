@@ -753,3 +753,75 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
         .unwrap_err();
     assert!(err.to_string().contains("abstract class"), "{err}");
 }
+
+/// A task of `ns`: a `kind` flag, a `text` (so TextContent reads it) and
+/// `children` (so Container reads it), each on `ns`'s own predicates.
+fn task_of(ns: &str) -> String {
+    json!({
+        "target_class": format!("{ns}Task"),
+        "constructor_actions": [{"action": "addLink", "source": "this",
+            "predicate": format!("{ns}kind"), "target": format!("{ns}task")}],
+        "properties": [
+            {"path": format!("{ns}kind"), "name": "kind", "has_value": format!("{ns}task"),
+             "min_count": 1, "max_count": 1},
+            {"path": format!("{ns}text"), "name": "text", "max_count": 1,
+             "setter": [{"action": "setSingleTarget", "source": "this",
+                         "predicate": format!("{ns}text"), "target": "value"}]},
+            {"path": format!("{ns}child"), "name": "children", "relation_kind": "hasMany",
+             "adder": [{"action": "addLink", "source": "this",
+                        "predicate": format!("{ns}child"), "target": "value"}],
+             "remover": [{"action": "removeLink", "source": "this",
+                          "predicate": format!("{ns}child"), "target": "value"}]}
+        ]
+    })
+    .to_string()
+}
+
+/// Two apps' `Task`s, `a://Task` and `b://Task`, both read by TextContent
+/// and Container. A write or read through either on a `b://Task` record
+/// goes through `b://Task`'s own actions and predicates, never through
+/// `a://Task`'s, whose IRI sorts first.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abstract_class_over_two_classes_of_one_name_uses_the_records_class() {
+    use crate::perspectives::model_query::builtin_classes::{CONTAINER_URI, TEXT_CONTENT_URI};
+    let (a, b) = (task_of("a://"), task_of("b://"));
+    let (mut p, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Task", a.as_str()), ("Task", b.as_str())]).await;
+    create(
+        &mut p,
+        &ctx,
+        "b://Task",
+        "ad4m://bt",
+        json!({"text": "old"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(targets_on(&p, "ad4m://bt", "b://kind"), ["b://task"]);
+
+    update(
+        &mut p,
+        &ctx,
+        TEXT_CONTENT_URI,
+        "ad4m://bt",
+        json!({"text": "new"}),
+    )
+    .await
+    .unwrap();
+    let added = json!({"children": {"action": "adder", "value": ["ad4m://c1"]}});
+    update(&mut p, &ctx, CONTAINER_URI, "ad4m://bt", added)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        links_on(&p, "ad4m://bt", "a://text"),
+        0,
+        "a://Task's setter ran"
+    );
+    assert_eq!(
+        links_on(&p, "ad4m://bt", "a://child"),
+        0,
+        "a://Task's adder ran"
+    );
+    assert_eq!(read(&p, "b://Task", "ad4m://bt", "text").await, "new");
+    assert_eq!(targets_on(&p, "ad4m://bt", "b://child"), ["ad4m://c1"]);
+}

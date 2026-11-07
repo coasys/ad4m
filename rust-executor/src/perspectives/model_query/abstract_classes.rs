@@ -115,11 +115,12 @@ impl AbstractIndex {
             .any(|c| c == class || class_name_of(c) == class)
     }
 
-    /// The name `property` of `class` answers to read through
-    /// `abstract_class`: its alias for it, or its own name.
+    /// The name `property` of `class` (a class name, or a target class IRI)
+    /// answers to read through `abstract_class`: its alias for it, or its own
+    /// name. Aliases are keyed by the class's local name.
     fn name_through<'a>(&'a self, class: &str, property: &'a str, abstract_class: &str) -> &'a str {
         self.aliases
-            .get(class)
+            .get(&local_name(class))
             .and_then(|props| props.get(property))
             .and_then(|map| map.get(abstract_class))
             .map(String::as_str)
