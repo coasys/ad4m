@@ -26,7 +26,8 @@ const holderBinary = () => path.join(targetDir(), "release", "examples", "holder
  * them (the integration runners compile no Rust); locally this builds them when missing.
  */
 export function buildIdentityTools() {
-    if (existsSync(storeBinary()) && existsSync(holderBinary())) return;
+    // Always ask cargo: it rebuilds only what changed. A binary that merely exists can be one an
+    // older checkout built into the same target, and its holder lacks this branch's commands.
     const opts = { cwd: REPO_ROOT, stdio: "inherit" as const };
     // One invocation with `ad4m`, as CI builds them: only `ad4m`'s graph vendors OpenSSL.
     execSync(
