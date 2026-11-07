@@ -155,8 +155,11 @@ pub struct LinkFacts<'a> {
 ///    anchor past the trusted seq, `CantCheck`; a master key, `Invalid(MasterKey)`; the key not
 ///    added yet at the anchor, `Invalid(NotYetValid)`; revoked at or before it,
 ///    `Invalid(Revoked)`; past an expiry, `Invalid(Expired)`.
-/// 5. Revoked after the anchor (at or below the trusted seq): `Flagged` when the link entered
-///    the space's history after the revocation did, else `Valid`.
+/// 5. Revoked after the anchor (at or below the trusted seq): `Valid` only when the link is
+///    known to have entered the space's history before the revocation did
+///    (`entered_after_revoke == Some(false)`), else `Flagged`. With no order known, whoever
+///    still holds the revoked key could sign today and name an anchor before the revocation
+///    (or no anchor at all), so the link is shown with its verdict and does not count.
 pub fn judge(facts: &LinkFacts) -> LinkVerdict {
     use LinkVerdict::*;
     if !facts.signature_holds {
@@ -199,7 +202,7 @@ pub fn judge(facts: &LinkFacts) -> LinkVerdict {
     if !state.key_valid_at_time(id, at, facts.now) {
         return Invalid(InvalidReason::Expired);
     }
-    if revoked.is_some() && facts.entered_after_revoke == Some(true) {
+    if revoked.is_some() && facts.entered_after_revoke != Some(false) {
         return Flagged;
     }
     Valid
@@ -384,7 +387,11 @@ mod tests {
             trusted: 1,
         };
         let mut f = facts(listed, &device, Some(0));
-        assert_eq!(judge(&f), LinkVerdict::Valid, "no order: valid");
+        assert_eq!(
+            judge(&f),
+            LinkVerdict::Flagged,
+            "no order: the holder of the revoked key could have signed it today"
+        );
         f.entered_after_revoke = Some(false);
         assert_eq!(judge(&f), LinkVerdict::Valid, "entered before the revoke");
         f.entered_after_revoke = Some(true);
@@ -451,7 +458,13 @@ mod tests {
             trusted: 1,
         };
         let mut f = facts(listed, &device, None);
-        assert_eq!(judge(&f), LinkVerdict::Valid, "added at 0, revoked at 1");
+        assert_eq!(
+            judge(&f),
+            LinkVerdict::Flagged,
+            "added at 0, revoked at 1, no order"
+        );
+        f.entered_after_revoke = Some(false);
+        assert_eq!(judge(&f), LinkVerdict::Valid, "entered before the revoke");
         f.entered_after_revoke = Some(true);
         assert_eq!(judge(&f), LinkVerdict::Flagged);
     }

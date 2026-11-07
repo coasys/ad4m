@@ -305,10 +305,26 @@ fn listed_signers(service: &IdentityService) -> Vec<String> {
 }
 
 /// The verdict of a signed expression (a link) and its person, from the executor's key map,
-/// with no I/O ([`resolver::check_signed_with`]). No space order is known here: a link signed
-/// before its key's revocation counts.
+/// with no I/O ([`resolver::check_signed_with`]). No space order is known here: a link by a
+/// key revoked after its anchor is `flagged` ([`check_signed_entered`] for the one order the
+/// executor does know).
 pub fn check_signed<T: serde::Serialize>(expr: &Expression<T>) -> CheckedLink {
-    resolver::check_signed_with(expr, &cache::global_key_map(), None, service::now())
+    check_signed_entered(expr, None)
+}
+
+/// [`check_signed`] with what the caller knows of the order: `Some(false)` for a link this
+/// executor held as `valid` before the signer's revocation reached its key map (the link store
+/// at a re-judgement), `Some(true)` for one that arrived after, `None` when nothing is known.
+pub fn check_signed_entered<T: serde::Serialize>(
+    expr: &Expression<T>,
+    entered_after_revoke: Option<bool>,
+) -> CheckedLink {
+    resolver::check_signed_with(
+        expr,
+        &cache::global_key_map(),
+        entered_after_revoke,
+        service::now(),
+    )
 }
 
 /// Fills the key map for the signers of `links` before they are checked and stored: the key
