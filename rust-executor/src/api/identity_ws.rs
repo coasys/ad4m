@@ -213,7 +213,16 @@ async fn take_master(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     )
 }
 
-async fn inbox_ack(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+/// `identity.inboxAck`: deletes a joined message. With the custody channel the joined inbox
+/// holds master keys for the custody service, which takes one until it acknowledges it: only
+/// the custody service acknowledges, so the admin credential an app's window may hold cannot
+/// drop a master key before the custody service has it. Stale and false messages are dropped
+/// inside the executor (`identity::inbox`), with no call.
+async fn inbox_ack(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let channel_on = crate::config::custody_channel_on();
+    if channel_on {
+        crate::identity::custody::admit(&ctx.session, channel_on)?;
+    }
     let p: InboxAckParams = parse(params)?;
     answer(
         crate::identity::service()?
@@ -329,6 +338,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read()
         .local_only()
         .guard(Guard::Operator);
+    // With the custody channel, only the custody service acknowledges (`inbox_ack`).
     map.method::<InboxAckParams, bool>("identity.inboxAck", inbox_ack)
         .local_only()
         .guard(Guard::Operator);
@@ -700,6 +710,42 @@ mod tests {
                 .message
                 .starts_with(crate::identity::custody::NO_CUSTODY_CHANNEL),
             "refused by something else than the custody guard: {} {}",
+            refused.code,
+            refused.message
+        );
+    }
+
+    /// Review coasys/ad4m#1635: `identity.inboxAck` is `Guard::Operator`, so the renderer, which
+    /// holds the admin credential, can delete a sealed master transfer before the custody service
+    /// has taken and stored it. Acknowledging must be custody-only like `takeMaster`. Fails at
+    /// 6e0ac329e (the error is not the custody guard's).
+    #[tokio::test]
+    async fn the_renderers_admin_credential_does_not_acknowledge_an_inbox_message() {
+        use crate::agent::capabilities::ListenerReach;
+        use crate::agent::session::Session;
+        use crate::secret::Secret;
+
+        let token = "a023150c-c1ef-449a-b17d-8139b1ea5d55";
+        let renderer =
+            Session::open(token, &Some(Secret::new(token)), ListenerReach::Loopback).unwrap();
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let channel = crate::config::CustodyChannelForTest::on();
+        let answer = map
+            .dispatch(
+                "identity.inboxAck",
+                serde_json::json!({ "id": "m1" }),
+                Arc::new(RequestContext::for_session(renderer)),
+            )
+            .await;
+        drop(channel);
+        let refused = answer.expect_err("the renderer does not acknowledge inbox messages");
+        assert!(
+            refused.code == 403
+                && refused
+                    .message
+                    .starts_with(crate::identity::custody::NO_CUSTODY_CHANNEL),
+            "not refused by the custody guard: {} {}",
             refused.code,
             refused.message
         );

@@ -419,7 +419,9 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
 - **`identity.takeMaster`** (custody channel, `custody::admit`) refreshes the log, opens the
   joined messages oldest first and runs `check_payload` against the cached log: `KeepMaster`
   answers `TakenMaster {messageId, did, index, secret}` (wiped when dropped, never cloned,
-  `Debug` without the secret) and leaves the message for `identity.inboxAck`; `Stale` and a
+  `Debug` without the secret) and leaves the message for `identity.inboxAck`, which with the
+  custody channel on also passes `custody::admit` (only the custody service, which stored the
+  key, says it may go; the admin credential gets 403 `no-custody-channel`); `Stale` and a
   failed check are deleted and the next one is tried; none answers `null`; a locked wallet is
   503 `unavailable`. The secret goes into the RPC answer only: no store, log line, event or
   language sees it.

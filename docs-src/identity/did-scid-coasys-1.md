@@ -746,7 +746,8 @@ a new string ends the read of the last one.
   against its refreshed copy of the log as above, and answers the first current master key
   (`{messageId, did, index, secret}`) or `null`. A stale key, or one that fails a check, is
   deleted. The message stays until the custody service acknowledges it
-  (`identity.inboxAck`) after storing the key. Only the custody credential (which only the
+  (`identity.inboxAck`, which on such an executor only the custody credential may call) after
+  storing the key. Only the custody credential (which only the
   custody service holds) on a loopback listener of an executor started with
   `--custody-channel` gets this answer. The custody service hands the executor that
   credential as the first line of its stdin at start, and the executor keeps it in memory
