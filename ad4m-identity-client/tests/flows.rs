@@ -3907,7 +3907,8 @@ async fn a_rotation_cut_off_after_its_publish_is_promoted_by_refresh() {
         (HoldsMaster::Yes, Some(1))
     );
 
-    // A key staged for a rotation that never landed (#5 is in no log) is discarded.
+    // A key staged ahead of the log (#5 is in no log yet) may belong to a rotation whose
+    // publish is still on its way: refresh leaves it staged.
     vault
         .stage_master(&scid, 5, ad4m_identity_client::Secret::new([5; 32]))
         .unwrap();
@@ -3915,8 +3916,286 @@ async fn a_rotation_cut_off_after_its_publish_is_promoted_by_refresh() {
         refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
         Refreshed::Current
     ));
-    assert_eq!(vault.staged_index(&scid).unwrap(), None);
+    assert_eq!(vault.staged_index(&scid).unwrap(), Some(5));
     assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
+}
+
+/// An executor whose `identity.publish` is held until `release` is set: before it reaches the
+/// store (`before`), or after the store took it and before the answer comes back. `held` says
+/// the publish reached the hold.
+struct HeldPublish<'a> {
+    inner: &'a TestExecutor,
+    before: bool,
+    held: Cell<bool>,
+    release: Cell<bool>,
+}
+
+impl<'a> HeldPublish<'a> {
+    fn new(inner: &'a TestExecutor, before: bool) -> Self {
+        HeldPublish {
+            inner,
+            before,
+            held: Cell::new(false),
+            release: Cell::new(false),
+        }
+    }
+
+    async fn hold(&self) {
+        self.held.set(true);
+        while !self.release.get() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn until_held(&self) {
+        while !self.held.get() {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for HeldPublish<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method != "identity.publish" {
+            return self.inner.call(method, params).await;
+        }
+        if self.before {
+            self.hold().await;
+        }
+        let answer = self.inner.call(method, params).await;
+        if !self.before {
+            self.hold().await;
+        }
+        answer
+    }
+}
+
+/// From the review of #1667 (custody read mid-publish): another app on this computer reads
+/// the custody status (`refresh_master` through its own handle on the same vault storage)
+/// while a rotation's publish is on its way. The staged #1 is one ahead of the log, the normal
+/// state then: the refresh leaves it, the publish lands, and the rotation keeps #1 here.
+/// Nothing asks another device for it.
+#[tokio::test]
+async fn a_refresh_while_a_rotation_publishes_keeps_its_staged_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 48).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let words = words::from_entropy(&[48; 16]);
+    // The other app's handle on the same storage.
+    let other: &dyn Vault = &vault;
+
+    let held = ViaExecutor::new(HeldPublish::new(a.rpc(), true));
+    let (rotated, refreshed) = tokio::join!(
+        rotate(&held, &vault, &did, &words, &[], &SystemClock, &OsRandom),
+        async {
+            held.rpc().until_held().await;
+            assert_eq!(other.staged_index(&scid).unwrap(), Some(1), "staged");
+            let refreshed = refresh_master(&a, other, &did, &OsRandom).await;
+            held.rpc().release.set(true);
+            refreshed
+        }
+    );
+    let refreshed = refreshed.unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    let rotated = rotated.unwrap();
+    assert_eq!(rotated.index, 1);
+    assert!(rotated.kept.is_ok(), "{:?}", rotated.kept);
+    rotated.record.unwrap();
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
+    assert_eq!(vault.staged_index(&scid).unwrap(), None);
+    let unlocked = vault.unlock(&scid, MasterUse::Link, 0).unwrap();
+    assert_eq!(unlocked.signer(0).unwrap().index(), 1);
+    drop(unlocked);
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let d1 = &opened.record.devices["d1"];
+    assert_eq!(
+        (d1.holds_master, d1.master_index),
+        (HoldsMaster::Yes, Some(1))
+    );
+    assert!(matches!(
+        refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
+        Refreshed::Current
+    ));
+    assert!(a.requests(0).await.unwrap().is_empty(), "nothing asked");
+}
+
+/// A refresh through another handle that runs after the rotation landed and before its answer
+/// came back promotes the staged #1 first: the rotation's own promote finds nothing staged and
+/// the vault keeping #1, and reports the key kept.
+#[tokio::test]
+async fn a_refresh_that_promotes_first_leaves_the_rotation_kept() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 49).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let words = words::from_entropy(&[49; 16]);
+    let other: &dyn Vault = &vault;
+
+    let held = ViaExecutor::new(HeldPublish::new(a.rpc(), false));
+    let (rotated, refreshed) = tokio::join!(
+        rotate(&held, &vault, &did, &words, &[], &SystemClock, &OsRandom),
+        async {
+            held.rpc().until_held().await;
+            let refreshed = refresh_master(&a, other, &did, &OsRandom).await;
+            held.rpc().release.set(true);
+            refreshed
+        }
+    );
+    let refreshed = refreshed.unwrap();
+    assert!(
+        matches!(refreshed, Refreshed::Promoted { index: 1, .. }),
+        "{refreshed:?}"
+    );
+    let rotated = rotated.unwrap();
+    assert!(rotated.kept.is_ok(), "{:?}", rotated.kept);
+    rotated.record.unwrap();
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
+    assert_eq!(vault.staged_index(&scid).unwrap(), None);
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let d1 = &opened.record.devices["d1"];
+    assert_eq!(
+        (d1.holds_master, d1.master_index),
+        (HoldsMaster::Yes, Some(1))
+    );
+    assert!(a.requests(0).await.unwrap().is_empty(), "nothing asked");
+}
+
+/// A key staged behind the log's current master (a later rotation superseded it, or its
+/// publish was refused long ago) is discarded by refresh; the kept key is untouched.
+#[tokio::test]
+async fn a_key_staged_behind_the_log_is_discarded_by_refresh() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 50).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let words = words::from_entropy(&[50; 16]);
+    rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(2));
+
+    let seed = words::seed(&words);
+    let one = words::master_key(&seed, 1).unwrap();
+    vault
+        .stage_master(&scid, 1, ad4m_identity_client::Secret::new(one.to_bytes()))
+        .unwrap();
+    assert!(matches!(
+        refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
+        Refreshed::Current
+    ));
+    assert_eq!(vault.staged_index(&scid).unwrap(), None, "discarded");
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(2));
+    let unlocked = vault.unlock(&scid, MasterUse::Link, 0).unwrap();
+    assert_eq!(unlocked.signer(0).unwrap().index(), 2);
+}
+
+/// A vault shared with another app that promotes the staged key just before this flow does
+/// (its `refresh_master` ran between this flow's read and its promote): this flow's promote
+/// finds nothing staged.
+struct PromotedFirst(MemoryVault);
+
+impl Vault for PromotedFirst {
+    fn store_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.store_master(scid, index, secret)
+    }
+    fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.0.master_index(scid)
+    }
+    fn forget_master(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.forget_master(scid)
+    }
+    fn stage_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.stage_master(scid, index, secret)
+    }
+    fn staged_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.0.staged_index(scid)
+    }
+    fn promote_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        // The other app's promote, then this flow's.
+        self.0.promote_master(scid, index)?;
+        self.0.promote_master(scid, index)
+    }
+    fn discard_staged(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.discard_staged(scid, index)
+    }
+    fn unlock(
+        &self,
+        scid: &str,
+        why: MasterUse,
+        now: u64,
+    ) -> Result<ad4m_identity_client::Unlocked, ad4m_identity_client::VaultError> {
+        self.0.unlock(scid, why, now)
+    }
+    fn store_pending_incept(&self, incept: &Event) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.store_pending_incept(incept)
+    }
+    fn pending_incepts(&self) -> Result<Vec<Event>, ad4m_identity_client::VaultError> {
+        self.0.pending_incepts()
+    }
+    fn incept_published(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.incept_published(scid)
+    }
+    fn keep_push(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.keep_push(push)
+    }
+    fn pending_pushes(&self) -> Result<Vec<PendingPush>, ad4m_identity_client::VaultError> {
+        self.0.pending_pushes()
+    }
+    fn push_done(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.push_done(push)
+    }
+}
+
+/// A restore whose staged key another app promoted first: the enrolment still keeps #1.
+#[tokio::test]
+async fn a_restore_whose_staged_key_was_promoted_first_enrols() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 51).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let words = words::from_entropy(&[51; 16]);
+
+    let new_vault = PromotedFirst(MemoryVault::new());
+    let mut flow = RestoreFlow::start(&new, &new_vault, words.phrase(), &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let restored = flow
+        .finish(&[], entry("New laptop", DeviceKind::DesktopApp))
+        .await
+        .unwrap();
+    assert_eq!(restored.index, 1);
+    let enrolled = restored.enrolled.as_ref().unwrap();
+    enrolled.record.as_ref().unwrap();
+    assert_eq!(new_vault.master_index(&scid).unwrap(), Some(1));
+    assert_eq!(new_vault.staged_index(&scid).unwrap(), None);
 }
 
 /// From the review of #1667, inverted: a restore whose vault refuses the new key. Staged

@@ -119,8 +119,11 @@ impl Unlocked {
 /// the kept master key once the publish landed ([`Vault::promote_master`]). A staged key is
 /// never used to sign and never replaces the kept one by itself: a publish that failed
 /// discards it ([`Vault::discard_staged`]); a flow cut off between the publish and the promote
-/// leaves it staged, and `flows::master::refresh_master` promotes it when the log's current
-/// master index is the staged one, or discards it when the log does not name it.
+/// leaves it staged. `flows::master::refresh_master`, run by any app sharing the vault,
+/// promotes it when the log's current master index is the staged one, leaves it while the
+/// staged index is ahead of the log (a publish may be on its way), and discards it once the
+/// log is past it. A flow whose promote answers `NotFound` while the vault keeps its index
+/// was promoted by another app first: the key is kept.
 pub trait Vault: Send + Sync {
     /// Stores master `index` for `scid`, replacing the kept one. Used where the key is already
     /// current in the log (`create`'s #0 before its incept, a key taken from the inbox).

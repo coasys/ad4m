@@ -784,10 +784,17 @@ a new string ends the read of the last one.
   in a restore too) stages master *n*+1 in the vault before it publishes the `rotate`: staged,
   the key is durable but signs nothing, and the vault's kept key is still master *n*. A vault
   that refuses to stage stops the rotation before anything is published. A publish the host
-  refuses discards the staged key and revokes nothing. Once the `rotate` landed, the vault
-  promotes the staged key to its kept key; a failed promotion is reported with the rotation,
-  which stands. A device that finds a staged key on its next refresh promotes it when its
-  index is the log's current master (and lists itself holding it), and discards it otherwise.
+  refuses for good discards the staged key and revokes nothing; after a publish whose answer
+  never came the key stays staged, since that publish may still land. Once the `rotate`
+  landed, the vault promotes the staged key to its kept key; a failed promotion is reported
+  with the rotation, which stands. Every app on the device shares the vault, so a refresh in
+  any of them may find a staged key, and judges it by its master index against the log's
+  current master index: **equal**, it promotes it (and lists the device holding it);
+  **ahead**, it leaves it staged (a rotation's publish may be on its way); **behind**, or the
+  identity has ended, it discards it (a later rotation superseded it, or its publish was
+  refused long ago). A rotation whose own promotion finds the key already promoted by such a
+  refresh keeps it all the same. Promotion goes by master index only: the words derive the
+  key at each index, and the staged key is not checked against the commitment in the log.
 - *Finishes a restore without the words again.* A restore whose rotation landed but whose
   enrolment (the vault's promotion, the link of this device) failed reports the rotation as
   standing with the failure; the restore finishes from the master key it already holds, without a second

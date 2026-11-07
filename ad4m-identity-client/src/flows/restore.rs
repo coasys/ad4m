@@ -35,12 +35,12 @@ use ad4m_ldk::identity::SignedHead;
 use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::flows::link::LinkFlow;
 use crate::flows::rotate::{
-    current_index, hand_over, master_of, publish_rotation, recovery_key_of, ThisDevice,
+    current_index, hand_over, master_of, promote, publish_rotation, recovery_key_of, ThisDevice,
 };
 use crate::record::{self, Reader};
 use crate::request::{chain_of, scid_of};
 use crate::secret::Secret;
-use crate::vault::{MasterSigner, Vault};
+use crate::vault::{MasterSigner, Vault, VaultError};
 use crate::{ClientError, Clock, Random};
 
 /// A device key of the log, as the lock-out screen shows it.
@@ -274,13 +274,16 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
                 "master #{index} of this restore was replaced; restore again with the words"
             )));
         }
-        if self.vault.staged_index(&scid)? == Some(index) {
-            self.vault.promote_master(&scid, index)?;
-        } else if self.vault.master_index(&scid)? != Some(index) {
-            // Current in the log: stored as a key taken from the inbox would be.
-            let key = words::master_key(&self.seed, index)?;
-            self.vault
-                .store_master(&scid, index, Secret::new(key.to_bytes()))?;
+        // Promoted here or by another app's refresh first ([`promote`]); nothing staged at
+        // `index` and not kept: current in the log, stored as a key taken from the inbox would be.
+        match promote(self.vault, &scid, index) {
+            Ok(()) => {}
+            Err(VaultError::NotFound) => {
+                let key = words::master_key(&self.seed, index)?;
+                self.vault
+                    .store_master(&scid, index, Secret::new(key.to_bytes()))?;
+            }
+            Err(e) => return Err(e.into()),
         }
         let key_id = self.link_this(&this_device).await?;
         let signer = master_of(&self.seed, index)?;

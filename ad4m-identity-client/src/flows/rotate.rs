@@ -13,11 +13,13 @@
 //!    the next master on), and revokes only the listed keys still valid there. A rotation that
 //!    landed while its answer was lost is found in the log by its hash and not published again.
 //! 3. The vault promotes the staged master *n*+1 in place of master *n*
-//!    ([`Vault::promote_master`]). A publish that failed discards the staged key; one whose
-//!    answer was lost, or a flow cut off before the promote, leaves it staged, and
-//!    [`super::master::refresh_master`] promotes it when the log's current master is *n*+1 (or
-//!    discards it when the log does not name it). A promote that fails is reported in
-//!    [`Rotated::kept`]: the rotation stands.
+//!    ([`Vault::promote_master`]); a promote another app sharing the vault made first (its
+//!    `refresh_master` saw the publish land) counts as kept. A publish refused for good
+//!    discards the staged key; one whose answer was lost, or a flow cut off before the
+//!    promote, leaves it staged, and [`super::master::refresh_master`] promotes it when the
+//!    log's current master index is *n*+1, leaves it while the log is behind it, and discards
+//!    it once the log is past it. A promote that fails is reported in [`Rotated::kept`]: the
+//!    rotation stands.
 //! 4. Master *n*+1 goes to every other device that kept the master key: each device the record
 //!    lists as holding it (`true` or `"offered"`), valid at the head, that the log after the
 //!    rotation lets keep it ([`ad4m_identity_core::link::may_keep_master`]; the record's device
@@ -40,7 +42,7 @@ use crate::flows::revoke::check_keys;
 use crate::record::{self, Change, Reader};
 use crate::request::{self, chain_of, scid_of};
 use crate::secret::Secret;
-use crate::vault::{KeySigner, MasterSigner, Vault};
+use crate::vault::{KeySigner, MasterSigner, Vault, VaultError};
 use crate::{fold, ClientError, Clock, Random};
 
 /// Rotations built and published before [`ClientError::LogBusy`]: the first, and a rebuild on
@@ -110,6 +112,16 @@ pub(crate) fn stage(
     Ok(())
 }
 
+/// The vault promotes staged master `index` of `scid` ([`Vault::promote_master`]). Every app on
+/// the computer shares the vault, so another one's `refresh_master` may have promoted it
+/// already: a `NotFound` while the vault keeps master `index` is the key kept, `Ok`.
+pub(crate) fn promote(vault: &dyn Vault, scid: &str, index: u32) -> Result<(), VaultError> {
+    match vault.promote_master(scid, index) {
+        Err(VaultError::NotFound) if vault.master_index(scid)? == Some(index) => Ok(()),
+        promoted => promoted,
+    }
+}
+
 /// The log of `did` read fresh, with the head the executor accepted, folded here.
 async fn log_of<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
@@ -144,9 +156,10 @@ pub(crate) struct Published {
 ///
 /// **Custody before publish**: each build stages its master *n*+1 in `vault` (for `scid`)
 /// before the publish, so a vault that refuses leaves nothing public. On `Ok` the staged key is
-/// left for the caller to promote. On an error the staged key is discarded, unless the last
-/// publish went unanswered (its outcome is unknown): then it stays staged, and
-/// `master::refresh_master` promotes it if the rotation landed, or discards it if not.
+/// left for the caller to promote. On an error the staged key is discarded only when every
+/// publish was answered (refused): after one whose answer never came the outcome is unknown and
+/// the answer may still land, so it stays staged, and `master::refresh_master` promotes it once
+/// the log's current master is its index (or discards it once the log is past it).
 pub(crate) async fn publish_rotation<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -166,8 +179,8 @@ pub(crate) async fn publish_rotation<R: ExecutorRpc>(
     published
 }
 
-/// What [`publish_staged`] left behind: the index it staged last, and whether its last publish
-/// went unanswered.
+/// What [`publish_staged`] left behind: the index it staged last, and whether any of its
+/// publishes went unanswered (that one may still land, so the staged key must stay).
 #[derive(Default)]
 struct Attempt {
     staged: Option<u32>,
@@ -231,17 +244,13 @@ async fn publish_staged<R: ExecutorRpc>(
                 })
             }
             Err(e) if e.code == 409 => {
-                attempt.unanswered = false;
                 sent.push((event, revoked));
             }
             Err(e) if transient(&ClientError::Rpc(e.clone())) => {
                 attempt.unanswered = true;
                 sent.push((event, revoked));
             }
-            Err(e) => {
-                attempt.unanswered = false;
-                return Err(e.into());
-            }
+            Err(e) => return Err(e.into()),
         }
     }
 }
@@ -405,9 +414,7 @@ pub async fn rotate<R: ExecutorRpc>(
     let published = publish_rotation(executor, vault, &scid, did, &seed, revoke).await?;
     let index = published.signer.index();
     // The rotation is public from here: what fails after it is reported, not returned.
-    let kept = vault
-        .promote_master(&scid, index)
-        .map_err(ClientError::from);
+    let kept = promote(vault, &scid, index).map_err(ClientError::from);
     let (pushes, record) = hand_over(
         executor,
         vault,

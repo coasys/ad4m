@@ -21,7 +21,9 @@
 //! `masterIndex` in the record.
 //!
 //! **After a rotation** ([`refresh_master`]): a device whose own rotation was cut off after
-//! its publish promotes the key its vault staged; a device whose vault keeps a master key the
+//! its publish promotes the key its vault staged once the log's current master index is the
+//! staged one, leaves a key staged ahead of the log (its publish may still land) and discards
+//! one behind it; a device whose vault keeps a master key the
 //! log has replaced takes the new one when the rotating app sent it; when none waits (the push
 //! failed, or the device was offline past it), it forgets the replaced key and asks for the
 //! new one with a `send-master` request, which a holder answers ([`super::requests::answer`]).
@@ -353,10 +355,14 @@ pub enum Refreshed {
 /// A device whose vault may keep a replaced master key of `did`, its executor's identity, or a
 /// staged one: brings the vault to the log's current master where it can, in this order.
 ///
-/// 1. A key staged by a rotation of this device (cut off between its publish and its promote,
-///    or whose publish answer was lost): promoted when it is the log's current master
-///    ([`Refreshed::Promoted`]), discarded when it is not (an older one, or one the log does
-///    not name: that rotation did not land).
+/// 1. A key staged by a rotation on this computer (cut off between its publish and its
+///    promote, or whose publish answer was lost), by its master index against the log's
+///    current one: **equal**, promoted ([`Refreshed::Promoted`]; a promote another app on the
+///    computer made first counts); **ahead**, left staged (a publish may still be on its way,
+///    in this app or another one sharing the vault); **behind**, or the identity ended,
+///    discarded (a later rotation superseded it, or its publish was refused long ago). The
+///    promotion goes by index only: the words derive the key at each index, and the staged key
+///    is not checked against the log's commitment.
 /// 2. The vault keeps the current master: [`Refreshed::Current`].
 /// 3. The current master waits in the inbox: taken ([`take_master`], [`Refreshed::Taken`]).
 /// 4. The vault's key is **known** to be replaced ([`Vault::master_index`], authenticated,
@@ -376,9 +382,10 @@ pub async fn refresh_master<R: ExecutorRpc>(
     let live = state.current_master().is_some();
     let current = u32::try_from(state.masters.len().saturating_sub(1))
         .map_err(|_| ClientError::Protocol("the log lists too many masters".into()))?;
-    if let Some(staged) = vault.staged_index(&scid)? {
-        if live && staged == current {
-            vault.promote_master(&scid, staged)?;
+    match vault.staged_index(&scid)? {
+        // The rotation to it landed: promote (or another app on this computer did first).
+        Some(staged) if live && staged == current => {
+            super::rotate::promote(vault, &scid, staged)?;
             let record = async {
                 let key_id = executor.status().await?.key_id.ok_or_else(|| {
                     ClientError::Protocol("the executor's device key is in no log".into())
@@ -400,7 +407,13 @@ pub async fn refresh_master<R: ExecutorRpc>(
                 record,
             });
         }
-        vault.discard_staged(&scid, staged)?;
+        // Behind the log (a later rotation superseded it, or its publish was refused long
+        // ago), or the identity ended: it can never become current.
+        Some(staged) if !live || staged < current => vault.discard_staged(&scid, staged)?,
+        // Ahead of the log: a rotation's publish may be on its way (in this app or another one
+        // sharing the vault). Left as it is; the rotating flow discards it when its publish is
+        // refused, and the next stage replaces it.
+        Some(_) | None => {}
     }
     let kept = vault.master_index(&scid)?;
     if live && kept == Some(current) {
