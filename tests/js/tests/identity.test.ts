@@ -19,6 +19,7 @@ import { fileURLToPath } from "url";
 import { ChildProcess, execSync } from "child_process";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import WebSocket from "ws";
+import { v4 as uuidv4 } from "uuid";
 import {
     baseUrl, executorBinary, executorDataPath, pollUntil, quitExecutor, spawnExecutor, startExecutor,
 } from "../utils/utils";
@@ -806,5 +807,198 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         } finally {
             await restorer.stop();
         }
+    });
+});
+
+describe("Identity: a bot acts for its owner in the spaces of its grant, gives its reasons, and stops when revoked", function () {
+    this.timeout(600_000);
+    const CREDENTIAL = "bots-admin-credential";
+    const CUSTODY = "bots-custody-credential";
+    const DIFF_SYNC = () => fs.readFileSync(path.join(__dirname, "..", "scripts", "perspective-diff-sync-hash"), "utf8").trim();
+
+    let store: IdentityStore;
+    let holder: Holder;
+    const nodes: Node[] = [];
+    let home: Node, desk: Node;
+    let did = "";
+    let botDid = "";
+    let bot: Ad4mClient;
+    // Three neighbourhoods the owner made on the desktop; the grant names the first two.
+    const spaces: { uuid: string; url: string }[] = [];
+    // The perspective the bot acts in: the first neighbourhood, as the bot joined it.
+    let botSpace = "";
+
+    async function start(
+        name: string,
+        opts: { credential?: string; env?: Record<string, string>; custodyCredential?: string } = {},
+    ): Promise<Node> {
+        const ports = await getFreePorts(3);
+        registerPorts(ports);
+        const dataPath = path.join(TEST_DIR, "agents", `identity-${name}`);
+        fs.mkdirSync(path.dirname(dataPath), { recursive: true });
+        const process = await startExecutor(
+            dataPath, SEED_PATH, ports[0], ports[1], ports[2],
+            false, opts.credential, undefined, undefined, undefined, false, undefined, undefined,
+            false,          // runHolochain
+            true,           // sharedStores
+            { ...store.executorEnv(), ...(opts.env ?? {}) },
+            [],
+            opts.custodyCredential,
+        );
+        const client = new Ad4mClient(baseUrl(ports[0]), opts.credential);
+        await client.agent.generate("passphrase");
+        const node = { name, dataPath, ports, process, client };
+        nodes.push(node);
+        return node;
+    }
+
+    async function refused(call: Promise<unknown>): Promise<string> {
+        try {
+            await call;
+        } catch (e) {
+            return e instanceof Error ? e.message : String(e);
+        }
+        throw new Error("the call was not refused");
+    }
+
+    const note = (n: number) => ({ source: "ad4m://self", predicate: "test://note", target: `literal://string:note-${n}` });
+
+    before(async () => {
+        if (!fs.existsSync(TEST_DIR)) throw Error("run prepare-test-local before the identity suite");
+        writeIdentitySeed();
+        buildIdentityTools();
+        const [storePort] = await getFreePorts(1);
+        registerPorts([storePort]);
+        store = await IdentityStore.start(path.join(TEST_DIR, "identity-store-bots"), storePort);
+        home = await start("bots-home");
+        holder = new Holder();
+        await holder.send({ cmd: "connect", url: baseUrl(home.ports[0]), token: "" });
+        ({ did } = await holder.send({ cmd: "create" }));
+        // The bots' executor is a desktop with the custody channel: one person, no multi-user mode.
+        desk = await start("bots-desktop", {
+            credential: CREDENTIAL,
+            env: { AD4M_CUSTODY_CHANNEL: "true" },
+            custodyCredential: CUSTODY,
+        });
+    });
+
+    after(async () => {
+        bot?.close();
+        await holder?.stop();
+        for (const node of nodes) {
+            if (node.process) await quitExecutor(node.process, node.ports[0]);
+            deregisterPorts(node.ports);
+        }
+        await store?.stop();
+        if (store) deregisterPorts([store.port]);
+    });
+
+    it("makes a bot agent on a desktop with the custody channel, and the owner's log lists its key with the bot mark", async () => {
+        // A person stays the desktop's only person.
+        const person = await desk.client.agent.createUser("person@example.org", "password");
+        expect(person.success).to.be.false;
+
+        const expires = Math.floor(Date.now() / 1000) + 3600;
+        const opened = await holder.send({ cmd: "openBot", did, store: store.url, can: ["read", "write", "join"], expires });
+        const created = await desk.client.bot.createAgent(opened.offerString, "Gardener");
+        botDid = created.did;
+        expect(created.did).to.equal(`did:key:${created.key}`);
+        expect(created.owner).to.equal(did);
+        expect(created.offerId).to.equal(opened.offerId);
+        expect(created.token).to.be.a("string").and.not.empty;
+
+        const claimed = await holder.send({ cmd: "waitClaim" });
+        expect(claimed.matchCode).to.equal(created.matchCode);
+        expect(claimed.deviceKey).to.equal(created.key);
+        expect(claimed.hint).to.equal("Gardener");
+        expect(claimed.canKeepMaster).to.be.false;
+        const confirmed = await holder.send({ cmd: "confirm" });
+        expect(confirmed.keyId).to.equal("d2");
+
+        const view = await desk.client.bot.grant(botDid);
+        expect(view).to.include({ did: botDid, name: "Gardener", owner: did });
+        expect(view.grant).to.include({ state: "active", version: 1 });
+        expect(view.grant.spaces).to.deep.equal([]);
+        expect(view.key).to.deep.equal({ keyId: "d2", verdict: "valid", can: ["read", "write", "join"], expires });
+        expect((await desk.client.bot.list()).map((b) => b.did)).to.deep.equal([botDid]);
+
+        bot = new Ad4mClient(baseUrl(desk.ports[0]), created.token);
+        // Its own session answers before any grant.
+        expect((await bot.agent.status()).did).to.equal(botDid);
+    });
+
+    it("grants two of three spaces: the bot joins and writes there with its reasons, and the third answers bot-grant", async () => {
+        for (const n of [1, 2, 3]) {
+            const perspective = await desk.client.perspective.add(`bots space ${n}`);
+            const language = await desk.client.languages.applyTemplateAndPublish(
+                DIFF_SYNC(), JSON.stringify({ uid: uuidv4(), name: `bots space ${n}` }),
+            );
+            const url = await desk.client.neighbourhood.publishFromPerspective(perspective.uuid, language.address, new Perspective());
+            spaces.push({ uuid: perspective.uuid, url });
+        }
+        const granted = await desk.client.bot.setGrant(botDid, {
+            spaces: [spaces[0].url, spaces[1].url], can: ["read", "write", "join"], state: "active", version: 1,
+        });
+        expect(granted.grant).to.include({ state: "active", version: 2 });
+
+        // A write and a join give a reason.
+        expect(await refused(bot.neighbourhood.joinFromUrl(spaces[0].url))).to.contain("reason-required");
+        bot.setReason("tend the garden board");
+        const joined = await bot.neighbourhood.joinFromUrl(spaces[0].url);
+        botSpace = joined.uuid;
+        await bot.neighbourhood.joinFromUrl(spaces[1].url);
+        await bot.perspective.addLink(botSpace, note(1));
+        bot.setReason("log the first sowing");
+        await bot.perspective.addLink(botSpace, note(2));
+        const links = await bot.perspective.queryLinks(botSpace, { predicate: "test://note" } as any);
+        expect(links.map((l: any) => l.data.target).sort()).to.deep.equal(["literal://string:note-1", "literal://string:note-2"]);
+
+        const third = await refused(bot.neighbourhood.joinFromUrl(spaces[2].url));
+        expect(third).to.contain("bot-grant");
+        // The owner's work outside any space is no bot's either.
+        expect(await refused(bot.perspective.add("bot's own"))).to.contain("bot-grant");
+    });
+
+    it("pauses the bot: its calls in its spaces answer bot-paused, then work again on resume", async () => {
+        await desk.client.bot.pause(botDid);
+        expect(await refused(bot.perspective.addLink(botSpace, note(3)))).to.contain("bot-paused");
+        expect(await refused(bot.perspective.queryLinks(botSpace, {} as any))).to.contain("bot-paused");
+        const resumed = await desk.client.bot.resume(botDid);
+        expect(resumed.grant).to.include({ state: "active", version: 4 });
+        await bot.perspective.addLink(botSpace, note(3));
+    });
+
+    it("narrows the grant to reading: a write answers not-in-can and a read still answers", async () => {
+        const view = await desk.client.bot.grant(botDid);
+        await desk.client.bot.setGrant(botDid, { ...view.grant, can: ["read"] });
+        expect(await refused(bot.perspective.addLink(botSpace, note(4)))).to.contain("not-in-can");
+        const links = await bot.perspective.queryLinks(botSpace, { predicate: "test://note" } as any);
+        expect(links).to.have.length(3);
+    });
+
+    it("revokes the bot: its calls are refused, its grant stays revoked, and its log keeps every entry", async () => {
+        const revoked = await desk.client.bot.revoke(botDid);
+        expect(revoked.grant.state).to.equal("revoked");
+        const after = await refused(bot.perspective.queryLinks(botSpace, {} as any));
+        expect(after).to.match(/bot-revoked|revoked|Unauthorized/);
+        // A revoked grant is for good.
+        const again = await refused(desk.client.bot.resume(botDid));
+        expect(again).to.contain("bot-revoked");
+
+        const log = await desk.client.bot.log(botDid);
+        const allowed = log.filter((e) => e.outcome === "allowed");
+        expect(allowed.map((e) => [e.method, e.reason])).to.deep.include.members([
+            ["neighbourhood.join", "tend the garden board"],
+            ["perspective.addLink", "log the first sowing"],
+            ["perspective.addLink", "tend the garden board"],
+        ]);
+        expect(allowed.every((e) => e.action === "write" || e.action === "join")).to.be.true;
+        const outcomes = log.map((e) => e.outcome);
+        for (const code of ["reason-required", "bot-grant", "bot-paused", "not-in-can"]) {
+            expect(outcomes, code).to.include(code);
+        }
+        // Newest first.
+        expect(log.map((e) => e.at)).to.deep.equal([...log.map((e) => e.at)].sort((x, y) => y - x));
+        expect((await desk.client.bot.log(botDid, { limit: 2 }))).to.have.length(2);
     });
 });
