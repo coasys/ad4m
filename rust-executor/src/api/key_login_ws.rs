@@ -153,7 +153,8 @@ mod tests {
         };
         let statement = serde_json::json!({
             "v": 1, "purpose": "login", "scid": "did:scid:coasys:1:QmS", "key": "z6Mk",
-            "executor": "did:key:z6Mk", "challenge": "c", "client": {"kind": "native"},
+            "executor": "did:key:z6Mk", "audience": "http://127.0.0.1:12000",
+            "challenge": "c", "client": {"kind": "native"},
             "issuedAt": 1
         });
         let login = serde_json::json!({
@@ -203,7 +204,8 @@ mod tests {
     fn statement_of_renew() -> Value {
         serde_json::json!({
             "v": 1, "purpose": "renew", "scid": "did:scid:coasys:1:QmS", "key": "z6Mk",
-            "executor": "did:key:z6Mk", "challenge": "c", "client": {"kind": "native"},
+            "executor": "did:key:z6Mk", "audience": "http://127.0.0.1:12000",
+            "challenge": "c", "client": {"kind": "native"},
             "grant": "g", "issuedAt": 1
         })
     }

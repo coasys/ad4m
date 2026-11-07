@@ -1,8 +1,10 @@
 //! The custody channel: the path by which the desktop app's custody service takes a master key
 //! that arrived sealed to this computer's device key. It is no listener of its own: it is the
-//! admin credential on a loopback listener of an executor started with `--custody-channel`.
-//! [`admit`] is its one guard. `identity.custodyStatus` is its only call so far; the calls that
-//! carry a master key use the same guard.
+//! custody credential (`AD4M_CUSTODY_CREDENTIAL`) on a loopback listener of an executor started
+//! with `--custody-channel`. The admin credential never opens it: an app's window may hold that
+//! one, and must not take a master key. [`admit`] is its one guard, for `identity.custodyStatus`,
+//! `identity.takeMaster` and a claim that keeps the master key (`identity.claimOffer` with
+//! `canKeepMaster`).
 
 use ad4m_identity_core::Multikey;
 
@@ -15,21 +17,22 @@ use super::types::DeviceKeys;
 /// What the channel answers a caller it does not admit.
 pub const NO_CUSTODY_CHANNEL: &str = "no-custody-channel";
 
-/// Admits only the admin credential on a loopback listener, on an executor started with
-/// `--custody-channel`. A tokenless operator on an executor without an admin credential is
-/// refused too: only a credential the supervisor handed to this process opens the channel.
+/// Admits only the custody credential on a loopback listener, on an executor started with
+/// `--custody-channel`. The admin credential, a tokenless operator and an operator from a key
+/// login are refused: only the credential the supervisor handed to the custody service alone
+/// opens the channel.
 pub fn admit(session: &Session, channel_on: bool) -> Result<(), WsRpcError> {
     if !channel_on {
         return Err(WsRpcError::forbidden(format!(
             "{NO_CUSTODY_CHANNEL}: this executor was not started with --custody-channel"
         )));
     }
-    if session.operator_source() != Some(OperatorSource::Credential)
+    if session.operator_source() != Some(OperatorSource::Custody)
         || !session.is_operator_on_this_machine()
     {
         return Err(WsRpcError::forbidden(format!(
-            "{NO_CUSTODY_CHANNEL}: only the admin credential on a loopback listener reaches the \
-             custody channel"
+            "{NO_CUSTODY_CHANNEL}: only the custody credential on a loopback listener reaches \
+             the custody channel"
         )));
     }
     Ok(())
@@ -53,15 +56,27 @@ mod tests {
         result.map_err(|e| (e.code, e.message.starts_with(NO_CUSTODY_CHANNEL)))
     }
 
-    /// Only the admin credential on a loopback listener, and only with the flag.
+    /// Only the custody credential on a loopback listener, and only with the flag: the admin
+    /// credential, which an app's window may hold, is refused.
     #[test]
-    fn the_custody_channel_admits_only_the_admin_credential_on_loopback() {
-        let local = Session::for_test(Principal::Operator);
-        assert_eq!(code(admit(&local, true)), Ok(()));
-        assert_eq!(code(admit(&local, false)), Err((403, true)), "no flag");
+    fn the_custody_channel_admits_only_the_custody_credential_on_loopback() {
+        let custody = Session::for_test(Principal::Operator).as_custody();
+        assert_eq!(code(admit(&custody, true)), Ok(()));
+        assert_eq!(code(admit(&custody, false)), Err((403, true)), "no flag");
+
+        let custody_on_network = Session::for_test(Principal::Operator)
+            .as_custody()
+            .on_network();
+        assert_eq!(code(admit(&custody_on_network, true)), Err((403, true)));
+
+        let admin = Session::for_test(Principal::Operator);
+        assert_eq!(code(admit(&admin, true)), Err((403, true)), "admin");
 
         let on_network = Session::for_test(Principal::Operator).on_network();
         assert_eq!(code(admit(&on_network, true)), Err((403, true)));
+
+        let key_login = Session::for_test(Principal::Operator).from_key_login();
+        assert_eq!(code(admit(&key_login, true)), Err((403, true)));
 
         let tokenless = Session::for_test(Principal::Operator).without_credential();
         assert_eq!(code(admit(&tokenless, true)), Err((403, true)));

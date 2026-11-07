@@ -1,7 +1,8 @@
 //! The store client through the executor (`ViaExecutor`): every log read, append
 //! and offer goes through the executor's `identity.*` calls, so the executor checks what it
 //! passes and keeps its cache current. The transport is [`ExecutorRpc`]: the desktop custody
-//! service calls its executor over the shell's loopback channel with the admin credential;
+//! service calls its executor over the shell's loopback channel with the custody credential
+//! (`AD4M_CUSTODY_CREDENTIAL`; the admin credential never opens the custody channel);
 //! `ad4m-client`'s WebSocket client serves it natively (feature `ws`).
 
 use ad4m_identity_core::inbox::InboxAddress;

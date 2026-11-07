@@ -582,14 +582,20 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // may also be on in the database, from `user.setMultiUserEnabled` on an earlier run.
     let multi_user_on = crate::user_management::is_multi_user_enabled();
     if let Err(reason) =
-        crate::config::refuse_multi_user_from_db(&config.admin_credential, multi_user_on).and_then(
-            |()| {
+        crate::config::refuse_multi_user_from_db(&config.admin_credential, multi_user_on)
+            .and_then(|()| {
                 crate::config::refuse_custody_channel_with_multi_user(
                     config.custody_channel == Some(true),
                     multi_user_on,
                 )
-            },
-        )
+            })
+            .and_then(|()| {
+                crate::config::refuse_custody_channel_without_its_credential(
+                    config.custody_channel == Some(true),
+                    &config.custody_credential,
+                    &config.admin_credential,
+                )
+            })
     {
         return refused_start(
             exit::StartRefused::new(exit::ExitReason::ConfigRefused, reason).into(),

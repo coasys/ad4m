@@ -42,6 +42,7 @@ ignored, and the error names the key by its path, e.g.
 |---|---|---|---|
 | `app_data_path` | string | `~/.ad4m` | `--app-data-path` / `AD4M_APP_DATA_PATH` |
 | `port` | number | `12000` | `--port` / `AD4M_PORT` |
+| `public_origins` | list of origins | none: key login from this machine only | `--public-origin` (repeat it, or separate with `,`) / `AD4M_PUBLIC_ORIGINS` |
 | `hc_admin_port` | number | first free from 2000 | `--hc-admin-port` / `AD4M_HC_ADMIN_PORT` |
 | `hc_app_port` | number | first free from 1337 | `--hc-app-port` / `AD4M_HC_APP_PORT` |
 | `localhost` | bool | `true` | `--localhost` / `AD4M_LOCALHOST` |
@@ -141,6 +142,22 @@ the seed's `identityStore`.
   "storeKeys": ["z6Mk…"] } }
 ```
 
+**`public_origins`** lists the origins (`scheme://host[:port]`) clients reach
+this executor at, such as `["https://ad4m.example.org"]`. A key login
+(`user.loginWithKey`, `user.renewSession`) signs the origin the client dialed
+into its statement, and the executor accepts the statement only when that
+origin, normalised (`wss` reads as `https`, `ws` as `http`, the host in lower
+case, a default port left out), is one of these. So a server that passes this
+executor's challenge on to a person's app gets a statement for its own origin,
+which this executor refuses. Without `public_origins` the executor accepts only
+its own loopback origins (`http://127.0.0.1:<port>`, `http://localhost:<port>`,
+`http://[::1]:<port>`), and refuses a statement for any other origin with 403
+`no-public-origin`. Once the key is set, only the listed origins count: list a
+loopback origin too if local apps log in with a key. The executor never reads
+the origin from the connection's `Host` or `Origin` header, which a caller
+chooses. A value that is not an origin (a path, a query, no host) stops the
+start with an error that names `public_origins`.
+
 **`log_config`** sets a level (`error`, `warn`, `info`, `debug`, `trace`)
 per crate over the defaults `rust_executor: info`, `holochain: warn`,
 `wasmer_compiler_cranelift: warn`, `warp::server: info`.
@@ -183,7 +200,7 @@ write, with a reason:
 
 `restart` keys: `mcp_enabled`, `mcp_port`, `log_config`,
 `auto_permit_cap_requests`. Every other key is a `machine` key: paths,
-listeners, ports, `multi_user_config`, `identity`, `log_dir`. A write
+listeners, ports, `public_origins`, `multi_user_config`, `identity`, `log_dir`. A write
 publishes `config-changed` to the operator.
 
 ## Running under a supervisor
@@ -194,7 +211,7 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
 |---|---|---|
 | 0 | stopped: `runtime.quit`, SIGTERM, SIGINT, or stdin closed with `--watch-stdin true` | nothing |
 | 75 | `runtime.restart` | start the executor again with the same arguments |
-| 78 | the config or a flag is refused (also `--custody-channel` with multi-user mode) | do not retry: it fails the same way |
+| 78 | the config or a flag is refused (also `--custody-channel` with multi-user mode, or without `AD4M_CUSTODY_CREDENTIAL`) | do not retry: it fails the same way |
 | 79 | another executor holds this data folder (`<app_data_path>/executor.lock`) | report it |
 | 80 | the API port does not bind | pick another port and start again |
 | other, or a signal | a crash | restart with a delay |
@@ -212,9 +229,16 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
   the run before), and a file stops at 50 MiB. `runtime.logTail { lines }`
   (operator, at most 2000) returns its newest lines.
 - **`--custody-channel`**: this executor serves the custody channel
-  (`identity.custodyStatus`) to the admin credential on a loopback listener
-  only. Multi-user mode refuses it: `run` exits 78, and
-  `user.setMultiUserEnabled(true)` answers 403.
+  (`identity.custodyStatus`, `identity.takeMaster`) to the custody credential
+  on a loopback listener only. The custody credential is a second secret,
+  given only to the custody service: pass it in the environment
+  (`AD4M_CUSTODY_CREDENTIAL`, or `AD4M_CUSTODY_CREDENTIAL_FILE`), never on
+  the command line, and give a new one at each start. It must differ from
+  the admin credential; the admin credential (which an app's window may
+  hold) gets 403 `no-custody-channel`. Without the variable, or with the
+  admin credential's value, `run` exits 78. Multi-user mode refuses the
+  channel too: `run` exits 78, and `user.setMultiUserEnabled(true)` answers
+  403.
 - **Local only**: `runtime.quit`, `runtime.restart`, `agent.unlock`,
   `agent.signSessionStatement`, `identity.rekey` and `identity.custodyStatus`
   answer only the operator on a loopback listener.
@@ -251,6 +275,7 @@ Secrets come from files or environment variables:
 | Secret | From a file | From a value | In the config file |
 |---|---|---|---|
 | Admin credential | `AD4M_ADMIN_CREDENTIAL_FILE` | `AD4M_ADMIN_CREDENTIAL` | — |
+| Custody credential (`--custody-channel`) | `AD4M_CUSTODY_CREDENTIAL_FILE` | `AD4M_CUSTODY_CREDENTIAL` | — |
 | SMTP password | `AD4M_SMTP_PASSWORD_FILE` | `AD4M_SMTP_PASSWORD` | `smtp_config.password_file` |
 | Agent passphrase | `AD4M_UNLOCK_PASSPHRASE_FILE` | — | — |
 

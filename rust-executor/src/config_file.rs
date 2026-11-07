@@ -230,6 +230,13 @@ pub struct ExecutorConfigFile {
     /// The folder of the executor's own rotated log files. Unset: stdout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_dir: Option<String>,
+    /// The origins clients reach this executor at (`scheme://host[:port]`, e.g.
+    /// `https://ad4m.example.org`). A key login or a session renewal is accepted only when its
+    /// signed statement's `audience` is one of them. Unset: only this executor's own loopback
+    /// origins (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`), so
+    /// key logins come only from this machine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_origins: Option<Vec<String>>,
 }
 
 /// `identity` in the config file.
@@ -271,6 +278,8 @@ pub(crate) const INLINE_SECRETS: &[(&str, &str)] = &[
 #[derive(Clone, Default)]
 pub struct ExecutorSecrets {
     pub admin_credential: Option<Secret>,
+    /// The custody channel's own credential (`--custody-channel`): the only one that opens it.
+    pub custody_credential: Option<Secret>,
     pub smtp_password: Option<String>,
     pub unlock_passphrase: Option<String>,
 }
@@ -282,6 +291,10 @@ impl fmt::Debug for ExecutorSecrets {
             .field(
                 "admin_credential",
                 &self.admin_credential.as_ref().map(|_| REDACTED),
+            )
+            .field(
+                "custody_credential",
+                &self.custody_credential.as_ref().map(|_| REDACTED),
             )
             .field("smtp_password", &shown(&self.smtp_password))
             .field("unlock_passphrase", &shown(&self.unlock_passphrase))
@@ -299,6 +312,7 @@ impl ExecutorSecrets {
     /// | secret | value variable | file variable | config key |
     /// |---|---|---|---|
     /// | admin credential | `AD4M_ADMIN_CREDENTIAL` | `AD4M_ADMIN_CREDENTIAL_FILE` | |
+    /// | custody credential | `AD4M_CUSTODY_CREDENTIAL` | `AD4M_CUSTODY_CREDENTIAL_FILE` | |
     /// | SMTP password | `AD4M_SMTP_PASSWORD` | `AD4M_SMTP_PASSWORD_FILE` | `smtp_config.password_file` |
     /// | unlock passphrase | | `AD4M_UNLOCK_PASSPHRASE_FILE` | |
     ///
@@ -317,6 +331,13 @@ impl ExecutorSecrets {
                 &env,
                 Some("AD4M_ADMIN_CREDENTIAL"),
                 "AD4M_ADMIN_CREDENTIAL_FILE",
+                None,
+            )?
+            .map(Secret::from),
+            custody_credential: secret_from_env(
+                &env,
+                Some("AD4M_CUSTODY_CREDENTIAL"),
+                "AD4M_CUSTODY_CREDENTIAL_FILE",
                 None,
             )?
             .map(Secret::from),
@@ -545,7 +566,9 @@ impl ExecutorConfigFile {
             identity_store_keys: self.identity.as_ref().and_then(|i| i.store_keys.clone()),
             identity_allow_private_src: self.identity.as_ref().and_then(|i| i.allow_private_src),
             log_dir: self.log_dir.clone(),
+            public_origins: self.public_origins.clone(),
             admin_credential: secrets.admin_credential.clone(),
+            custody_credential: secrets.custody_credential.clone(),
             ..Ad4mConfig::unprepared()
         })
     }
@@ -595,6 +618,22 @@ mod tests {
         assert_eq!(unset.identity_store_url, None);
         assert_eq!(unset.identity_store_keys, None);
         assert_eq!(unset.identity_allow_private_src, None);
+    }
+
+    /// `public_origins` reaches the executor's config.
+    #[test]
+    fn public_origins_reach_the_executor_config() {
+        let file = parse(r#"{"public_origins": ["https://ad4m.example.org"]}"#).unwrap();
+        let config = file.to_ad4m_config(&ExecutorSecrets::default()).unwrap();
+        assert_eq!(
+            config.public_origins,
+            Some(vec!["https://ad4m.example.org".to_string()])
+        );
+        let unset = parse("{}")
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap();
+        assert_eq!(unset.public_origins, None);
     }
 
     /// The SFU keys an operator behind NAT sets reach the executor's config.
@@ -960,7 +999,19 @@ mod tests {
         let secrets = ExecutorSecrets::from_env(env_of(vec![]), &file).unwrap();
         assert_eq!(secrets.smtp_password.as_deref(), Some("config-pw"));
         assert!(secrets.admin_credential.is_none());
+        assert!(secrets.custody_credential.is_none());
         assert_eq!(secrets.unlock_passphrase, None);
+
+        let secrets = ExecutorSecrets::from_env(
+            env_of(vec![("AD4M_CUSTODY_CREDENTIAL", "custody".to_string())]),
+            &file,
+        )
+        .unwrap();
+        assert!(secrets
+            .custody_credential
+            .as_ref()
+            .is_some_and(|c| c.expose_for_compare("custody")));
+        assert!(!format!("{secrets:?}").contains("\"custody\""));
 
         let path = |p: &PathBuf| p.to_string_lossy().into_owned();
         let secrets = ExecutorSecrets::from_env(

@@ -384,8 +384,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, DeviceKeys>("identity.rekey", rekey)
         .local_only()
         .guard(Guard::Operator);
-    // The custody channel: the admin credential on a loopback listener of an executor started
-    // with --custody-channel (`identity::custody::admit`); any other caller gets 403.
+    // The custody channel: the custody credential on a loopback listener of an executor started
+    // with --custody-channel (`identity::custody::admit`); any other caller, the admin
+    // credential included, gets 403.
     map.method::<NoParams, DeviceKeys>("identity.custodyStatus", custody_status)
         .read()
         .local_only()
@@ -602,6 +603,19 @@ mod tests {
             .await
             .unwrap_err(),
         );
+        // With the flag, the admin credential on loopback is not the custody service either:
+        // an app's window may hold it.
+        for method in ["identity.custodyStatus", "identity.takeMaster"] {
+            no_channel.push(
+                map.dispatch(
+                    method,
+                    serde_json::json!({}),
+                    Arc::new(RequestContext::operator_for_test()),
+                )
+                .await
+                .unwrap_err(),
+            );
+        }
         *crate::config::GLOBAL_AD4M_CONFIG
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = saved;
@@ -619,7 +633,7 @@ mod tests {
 
     /// A claim that says it keeps the master key needs the custody channel's caller: an
     /// executor without the channel would delete every master key sent to it, and with the
-    /// channel only the admin credential on loopback (the custody service) takes one.
+    /// channel only the custody credential on loopback (the custody service) takes one.
     #[tokio::test]
     async fn a_claim_keeps_the_master_key_only_through_the_custody_channel() {
         use crate::agent::session::{Principal, Session};
@@ -647,6 +661,10 @@ mod tests {
             Session::for_test(Principal::Operator).from_key_login(),
             Session::for_test(Principal::Operator).on_network(),
             Session::for_test(Principal::Operator).without_credential(),
+            Session::for_test(Principal::Operator),
+            Session::for_test(Principal::Operator)
+                .as_custody()
+                .on_network(),
         ] {
             refused.push(
                 map.dispatch(
@@ -673,10 +691,56 @@ mod tests {
         }
     }
 
-    /// With `--custody-channel`, the admin credential on a loopback listener gets this
+    /// The WE main renderer's socket is the admin credential on a loopback listener: an operator
+    /// on this machine, but not the custody channel. The custody guard refuses it, and
+    /// `identity.takeMaster` with it (review on coasys/ad4m#1649; before the custody credential
+    /// it passed both).
+    #[tokio::test]
+    async fn the_renderers_admin_credential_does_not_pass_the_custody_guard() {
+        use crate::agent::capabilities::ListenerReach;
+        use crate::agent::session::{OperatorSource, Session};
+        use crate::secret::Secret;
+
+        let token = "a023150c-c1ef-449a-b17d-8139b1ea5d55";
+        let admin_credential = Some(Secret::new(token));
+        let renderer = Session::open(token, &admin_credential, ListenerReach::Loopback).unwrap();
+        assert_eq!(renderer.operator_source(), Some(OperatorSource::Credential));
+        assert!(renderer.is_operator_on_this_machine());
+        let refused = crate::identity::custody::admit(&renderer, true).unwrap_err();
+        assert!(
+            refused
+                .message
+                .starts_with(crate::identity::custody::NO_CUSTODY_CHANNEL),
+            "{}",
+            refused.message
+        );
+
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let channel = crate::config::CustodyChannelForTest::on();
+        let answer = map
+            .dispatch(
+                "identity.takeMaster",
+                serde_json::json!({}),
+                Arc::new(RequestContext::for_session(renderer)),
+            )
+            .await;
+        drop(channel);
+        let refused = answer.expect_err("the renderer does not reach takeMaster");
+        assert!(
+            refused
+                .message
+                .starts_with(crate::identity::custody::NO_CUSTODY_CHANNEL),
+            "refused by something else than the custody guard: {} {}",
+            refused.code,
+            refused.message
+        );
+    }
+
+    /// With `--custody-channel`, the custody credential on a loopback listener gets this
     /// computer's device keys.
     #[tokio::test]
-    async fn the_custody_channel_answers_the_admin_credential_on_loopback() {
+    async fn the_custody_channel_answers_the_custody_credential_on_loopback() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let mut map = HandlerMap::new();
@@ -689,7 +753,12 @@ mod tests {
             .dispatch(
                 "identity.custodyStatus",
                 serde_json::json!({}),
-                Arc::new(RequestContext::operator_for_test()),
+                Arc::new(RequestContext::for_session(
+                    crate::agent::session::Session::for_test(
+                        crate::agent::session::Principal::Operator,
+                    )
+                    .as_custody(),
+                )),
             )
             .await;
         crate::config::set_global_config(crate::Ad4mConfig::default());

@@ -3479,10 +3479,16 @@ mod link_check_tests {
             check(&cache, &signed_with(&log.device, Some(1))).verdict,
             LinkVerdict::Invalid(InvalidReason::Revoked)
         );
+        let before = signed_with(&log.device, Some(0));
         assert_eq!(
-            check(&cache, &signed_with(&log.device, Some(0))),
+            check_signed_with(&before, cache.key_map(), Some(false), NOW),
             valid_for(Some(did_of(&log.scid()))),
-            "signed before the revocation"
+            "signed before the revocation, and in the space before it"
+        );
+        assert_eq!(
+            check(&cache, &before).verdict,
+            LinkVerdict::Flagged,
+            "signed before the revocation, order unknown"
         );
     }
 
@@ -3529,14 +3535,21 @@ mod link_check_tests {
         assert_eq!(check(&cache, &expr), valid_for(person.clone()));
 
         // Revoked later: judged at the seq that listed the key, so it stays the person's
-        // unless the space saw it after the revocation.
+        // where the space is known to have held it before the revocation, and is flagged
+        // otherwise.
         log.revoke_d1();
         accept_signed(&cache, &log.events).await;
-        assert_eq!(check(&cache, &expr), valid_for(person));
         assert_eq!(
-            check_signed_with(&expr, cache.key_map(), Some(true), NOW).verdict,
-            LinkVerdict::Flagged
+            check_signed_with(&expr, cache.key_map(), Some(false), NOW),
+            valid_for(person)
         );
+        for entered in [None, Some(true)] {
+            assert_eq!(
+                check_signed_with(&expr, cache.key_map(), entered, NOW).verdict,
+                LinkVerdict::Flagged,
+                "entered {entered:?}"
+            );
+        }
     }
 
     fn resolver_on(store: Arc<FakeStore>) -> Resolver {
@@ -3610,5 +3623,26 @@ mod link_check_tests {
             check_signed_with(&expr, resolver.cache.key_map(), None, NOW),
             valid_for(Some(did_of(&log.scid())))
         );
+    }
+
+    /// Whoever holds a revoked device key (a thief, say) signs a link today, after the
+    /// revocation is accepted, and names an anchor before it, or no anchor at all. The
+    /// executor knows no space order, so the link is flagged and speaks for nobody.
+    #[tokio::test]
+    async fn a_revoked_key_cannot_backdate_an_anchor_to_speak_for_its_person() {
+        let mut log = TestLog::new(71);
+        log.revoke_d1();
+        let cache = cache_with(&log).await;
+        for anchor in [Some(0), None] {
+            let expr = signed_with(&log.device, anchor);
+            assert_eq!(
+                check(&cache, &expr),
+                CheckedLink {
+                    verdict: LinkVerdict::Flagged,
+                    person: None,
+                },
+                "signed after the revocation, anchor {anchor:?}"
+            );
+        }
     }
 }
