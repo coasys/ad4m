@@ -1,10 +1,12 @@
 use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
+use super::model_query::shape::find_class;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::check_consensus_rule_links;
+use super::shacl_parser::property_node_name;
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
@@ -3774,6 +3776,37 @@ impl PerspectiveInstance {
         // its includes reach get whatever this wait leaves (see the retry
         // around `execute_model_query` below).
         let deadline = Instant::now() + shape_wait;
+        // A hard-wired class not stored here has no instances here: the
+        // executor registers it before writing the first (`ensure_before_write`
+        // and its own write paths). It reads as nothing, at once, and the read
+        // writes nothing.
+        let unstored_hardwired = classes
+            .names()
+            .iter()
+            .map(|name| super::hardwired_class::unstored(self, name).map(|c| c.is_some()))
+            .collect::<Result<Vec<bool>, _>>()?;
+        let classes = &match classes {
+            super::model_query::QueryClasses::Union(names) => {
+                super::model_query::QueryClasses::Union(
+                    names
+                        .iter()
+                        .zip(&unstored_hardwired)
+                        .filter(|(_, unstored)| !**unstored)
+                        .map(|(name, _)| name.clone())
+                        .collect(),
+                )
+            }
+            one => one.clone(),
+        };
+        if unstored_hardwired.iter().all(|u| *u) {
+            return serde_json::to_string(&super::model_query::ModelQueryResult {
+                instances: vec![],
+                total_count: query_input.count.unwrap_or(false).then_some(0),
+            })
+            .map_err(|e| {
+                deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+            });
+        }
         for class_name in classes.names() {
             // A built-in abstract class is not stored (#1446).
             if super::model_query::builtin_classes::builtin(class_name).is_some() {
@@ -5023,20 +5056,45 @@ impl PerspectiveInstance {
         class_name: &str,
         predicate: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        // Query SPARQL store for links with the given predicate whose source ends with {ClassName}Shape
-        let shape_suffix = format!("{}Shape", class_name);
-        let _uuid = self.uuid.clone();
+        let Some(class) = find_class(&self.sparql_store, class_name)? else {
+            return Ok(None);
+        };
+        self.first_target(&class.shape_uri, predicate)?
+            .map(|target| Self::parse_actions_from_literal(&target))
+            .transpose()
+    }
 
-        let links = self
+    /// The least target of `source`'s links with `predicate`: one answer
+    /// whatever order the store yields them in.
+    fn first_target(&self, source: &str, predicate: &str) -> Result<Option<String>, AnyError> {
+        Ok(self
             .sparql_store
-            .get_links_by_predicate_and_source_suffix(predicate, &shape_suffix)?;
+            .query_links(Some(source), Some(predicate), None, None, None, None)?
+            .into_iter()
+            .map(|l| l.data.target)
+            .min())
+    }
 
-        // Return the first match
-        if let Some(link) = links.first() {
-            return Self::parse_actions_from_literal(&link.data.target).map(Some);
-        }
-
-        Ok(None)
+    /// The shape node of `class_name`'s property `property`: the one its
+    /// shape lists under `sh://property` with that name.
+    fn property_node(&self, class_name: &str, property: &str) -> Result<Option<String>, AnyError> {
+        let Some(class) = find_class(&self.sparql_store, class_name)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .sparql_store
+            .query_links(
+                Some(&class.shape_uri),
+                Some("sh://property"),
+                None,
+                None,
+                None,
+                None,
+            )?
+            .into_iter()
+            .map(|l| l.data.target)
+            .filter(|node| property_node_name(&class.target_class, node) == property)
+            .min())
     }
 
     /// Get actions from SHACL links for a property-level predicate (setter/adder/remover)
@@ -5046,20 +5104,12 @@ impl PerspectiveInstance {
         property: &str,
         predicate: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        // Property shape URI format: {namespace}{ClassName}.{propertyName}
-        let prop_suffix = format!("{}.{}", class_name, property);
-        let _uuid = self.uuid.clone();
-
-        let links = self
-            .sparql_store
-            .get_links_by_predicate_and_source_suffix(predicate, &prop_suffix)?;
-
-        // Return the first match
-        if let Some(link) = links.first() {
-            return Self::parse_actions_from_literal(&link.data.target).map(Some);
-        }
-
-        Ok(None)
+        let Some(node) = self.property_node(class_name, property)? else {
+            return Ok(None);
+        };
+        self.first_target(&node, predicate)?
+            .map(|target| Self::parse_actions_from_literal(&target))
+            .transpose()
     }
 
     /// Get the resolve language address (`ad4m://resolveLanguage`) for a property.
@@ -5078,22 +5128,18 @@ impl PerspectiveInstance {
         class_name: &str,
         property: &str,
     ) -> Result<Option<String>, AnyError> {
-        let prop_suffix = format!("{}.{}", class_name, property);
-
-        let links = self
-            .sparql_store
-            .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
-
-        if let Some(link) = links.first() {
+        let Some(node) = self.property_node(class_name, property)? else {
+            return Ok(None);
+        };
+        if let Some(target) = self.first_target(&node, "ad4m://resolveLanguage")? {
             // Extract value from literal:string:{value} or legacy literal://string:{value}
-            let encoded_value =
-                if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
-                    rest
-                } else if let Some(rest) = link.data.target.strip_prefix("literal:string:") {
-                    rest
-                } else {
-                    return Ok(Some(link.data.target.clone()));
-                };
+            let encoded_value = if let Some(rest) = target.strip_prefix("literal://string:") {
+                rest
+            } else if let Some(rest) = target.strip_prefix("literal:string:") {
+                rest
+            } else {
+                return Ok(Some(target.clone()));
+            };
             let decoded = urlencoding::decode(encoded_value)
                 .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
             return Ok(Some(decoded.to_string()));
@@ -5254,6 +5300,9 @@ impl PerspectiveInstance {
             .await?;
         //log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
         self.refuse_abstract_create(&class_name)?;
+        // A hard-wired class (a flow run, an auto-processor) is the
+        // executor's to register: the first instance written registers it.
+        super::hardwired_class::ensure_before_write(self, &class_name, context).await?;
 
         //let constructor_start = std::time::Instant::now();
         let mut commands = self.get_constructor_actions(&class_name).await?;

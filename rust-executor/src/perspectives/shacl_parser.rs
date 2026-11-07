@@ -1664,8 +1664,9 @@ pub fn shape_links(mut shape: SHACLShape, class_name: &str) -> Result<Vec<Link>,
 
     // Extract namespace from target_class (e.g., "recipe://Recipe" -> "recipe://")
     let namespace = extract_namespace(&shape.target_class)?;
-    // Shape actions are found by the `{ClassName}Shape` suffix
-    // (`get_shape_actions_from_shacl`), so a given URI must keep it.
+    // A given shape URI keeps the `{ClassName}Shape` form of the default.
+    // Readers find the shape through the class's `ad4m://shape` link
+    // (`model_query::shape::find_class`), never by this suffix.
     let shape_suffix = format!("{}Shape", class_name);
     let shape_uri = match shape.node_shape_uri.take() {
         Some(uri) if !uri.ends_with(&shape_suffix) => {
@@ -2101,25 +2102,46 @@ pub fn class_name_of(target_class: &str) -> String {
 
 /// JSON with every object's keys sorted by UTF-16 code units (the RFC 8785
 /// order), so equal values always give equal bytes, whatever order a map was
-/// built in.
+/// built in. The string is written here, key by key: it does not depend on
+/// the iteration order of `serde_json::Map` (sorted without serde_json's
+/// `preserve_order`, insertion order with it). The SDK's `canonicalJson`
+/// (`core/src/shacl/SHACLShape.ts`) writes the same bytes.
 pub fn canonical_json<T: Serialize + ?Sized>(value: &T) -> String {
-    fn sorted(value: serde_json::Value) -> serde_json::Value {
+    fn write(value: &serde_json::Value, out: &mut String) {
         match value {
             serde_json::Value::Object(map) => {
-                let mut entries: Vec<(String, serde_json::Value)> =
-                    map.into_iter().map(|(k, v)| (k, sorted(v))).collect();
+                let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
                 entries.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
-                serde_json::Value::Object(entries.into_iter().collect())
+                out.push('{');
+                for (i, (key, item)) in entries.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String(key.clone()).to_string());
+                    out.push(':');
+                    write(item, out);
+                }
+                out.push('}');
             }
             serde_json::Value::Array(items) => {
-                serde_json::Value::Array(items.into_iter().map(sorted).collect())
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write(item, out);
+                }
+                out.push(']');
             }
-            other => other,
+            scalar => out.push_str(&scalar.to_string()),
         }
     }
-    serde_json::to_value(value)
-        .map(|v| sorted(v).to_string())
-        .unwrap_or_default()
+    let Ok(value) = serde_json::to_value(value) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    write(&value, &mut out);
+    out
 }
 
 pub const SUBJECT_CLASS: &str = "ad4m://SubjectClass";
@@ -2217,6 +2239,29 @@ fn literal_value(target: &str) -> String {
         .to_string()
 }
 
+/// The shape a class reads while it has more than one `ad4m://shape` link
+/// (briefly, while a moved shape syncs): the least URI. Every reader of a
+/// class's shape (`shape_from_links` for the registry, `model_query::shape::
+/// find_class` for queries and writes) picks with this.
+pub fn current_shape_uri<'a>(shape_uris: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    shape_uris.into_iter().min()
+}
+
+/// The name of the property whose shape node is `node`, in the class
+/// `target_class`: the node URI after `{namespace}{ClassName}.`, else after
+/// its last `.`.
+pub fn property_node_name(target_class: &str, node: &str) -> String {
+    let prefix = format!(
+        "{}{}.",
+        extract_namespace(target_class).unwrap_or_default(),
+        class_name_of(target_class)
+    );
+    node.strip_prefix(&prefix)
+        .or_else(|| node.rsplit_once('.').map(|(_, name)| name))
+        .unwrap_or(node)
+        .to_string()
+}
+
 /// Rebuild a class's shape from its own links (any spelling the store reads
 /// back). `None` when the class has no `ad4m://shape` link.
 ///
@@ -2255,23 +2300,20 @@ pub fn shape_from_links(target_class: &str, links: &[Link]) -> Option<SHACLShape
         raw.and_then(|raw| serde_json::from_str(&raw).ok())
     }
 
-    let shape_uri = first(target_class, SHAPE_PREDICATE)?;
-    let class_name = class_name_of(target_class);
-    let prefix = format!(
-        "{}{}.",
-        extract_namespace(target_class).unwrap_or_default(),
-        class_name
-    );
+    let shape_uri = current_shape_uri(
+        values
+            .get(&(target_class, SHAPE_PREDICATE))
+            .into_iter()
+            .flatten()
+            .copied(),
+    )?
+    .to_string();
 
     let mut properties: Vec<PropertyShape> = all(&shape_uri, "sh://property")
         .into_iter()
         .filter_map(|node| {
             let path = first(&node, "sh://path")?;
-            let name = node
-                .strip_prefix(&prefix)
-                .or_else(|| node.rsplit_once('.').map(|(_, name)| name))
-                .unwrap_or(&node)
-                .to_string();
+            let name = property_node_name(target_class, &node);
             let has_value = first(&node, "sh://hasValue").map(|v| {
                 if v.starts_with("literal:string:") {
                     literal_value(&v)
@@ -2762,6 +2804,31 @@ mod tests {
         map.insert("\u{FB01}".into(), 1.into());
         map.insert("\u{1F600}".into(), 2.into());
         assert_eq!(canonical_json(&map), "{\"\u{1F600}\":2,\"\u{FB01}\":1}");
+    }
+
+    /// The same object and the same expected string as the SDK's
+    /// `canonicalJson` test in `core/src/shacl/SHACLShape.test.ts`: the two
+    /// write identical bytes. Integer-like keys sort as text (a JS object
+    /// would put them first), uppercase before lowercase, and the non-BMP
+    /// key sorts by its UTF-16 surrogate (0xD83D) before U+FF61. Keys are
+    /// inserted in reverse of the expected order at every level, so the
+    /// result does not lean on the map's iteration order.
+    #[test]
+    fn canonical_json_matches_the_sdk_byte_for_byte() {
+        let mut inner = serde_json::Map::new();
+        inner.insert("z".into(), serde_json::json!([{"y": 1, "x": 2}]));
+        inner.insert("10".into(), true.into());
+        let mut map = serde_json::Map::new();
+        map.insert("\u{FF61}".into(), serde_json::Value::Null);
+        map.insert("\u{1F600}".into(), "e\"\n".into());
+        map.insert("a".into(), inner.into());
+        map.insert("B".into(), 3.into());
+        map.insert("2".into(), 2.into());
+        map.insert("10".into(), 1.into());
+        assert_eq!(
+            canonical_json(&map),
+            "{\"10\":1,\"2\":2,\"B\":3,\"a\":{\"10\":true,\"z\":[{\"x\":2,\"y\":1}]},\"\u{1F600}\":\"e\\\"\\n\",\"\u{FF61}\":null}"
+        );
     }
 
     #[test]

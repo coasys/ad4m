@@ -77,13 +77,9 @@ pub enum PerspectiveFunctions {
     /// Interactive Perspective shell based on Prolog/SDNA runtime
     Repl { id: String },
 
-    /// Set Social DNA of given perspective with SDNA code from file
-    AddDna {
-        id: String,
-        name: String,
-        file: String,
-        dna_type: String,
-    },
+    /// Register the classes of a SHACL shape JSON file (one shape or an
+    /// array of shapes) in the given perspective
+    RegisterShapes { id: String, file: String },
 
     /// Get all defined Subject classes
     SubjectClasses { id: String },
@@ -277,17 +273,18 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
         PerspectiveFunctions::Repl { id } => {
             repl_loop(ad4m_client.perspectives.get(id).await?).await?;
         }
-        PerspectiveFunctions::AddDna {
-            id,
-            file,
-            name,
-            dna_type,
-        } => {
-            let dna = std::fs::read_to_string(file.clone())
-                .with_context(|| anyhow!("Could not read provided SDNA file {}", file))?;
+        PerspectiveFunctions::RegisterShapes { id, file } => {
+            let json = std::fs::read_to_string(file.clone())
+                .with_context(|| anyhow!("Could not read shape file {}", file))?;
+            let shapes = match serde_json::from_str::<serde_json::Value>(&json)
+                .with_context(|| anyhow!("Shape file {} is not JSON", file))?
+            {
+                serde_json::Value::Array(shapes) => shapes,
+                shape => vec![shape],
+            };
             let perspective = ad4m_client.perspectives.get(id).await?;
-            perspective.add_dna(name, dna, dna_type).await?;
-            println!("SDNA set successfully");
+            let result = perspective.register_shapes(shapes).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         PerspectiveFunctions::SubjectClasses { id } => {
             let perspective = ad4m_client.perspectives.get(id).await?;

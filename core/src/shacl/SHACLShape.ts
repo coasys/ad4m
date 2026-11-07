@@ -83,13 +83,32 @@ function parseAlias(raw: string): Record<string, string> | undefined {
 
 /**
  * JSON with every object's keys sorted by UTF-16 code units, as the executor
+ * (`canonical_json` in `rust-executor/src/perspectives/shacl_parser.rs`)
  * writes the JSON in a shape's literals: one value, one spelling.
+ *
+ * Written by hand: an object built from sorted keys would still put
+ * integer-like keys ("2", "10") first, in numeric order. `Array.prototype.sort`
+ * without a comparator compares UTF-16 code units, the executor's order.
  */
 function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, (_key, v) =>
-    v && typeof v === 'object' && !Array.isArray(v)
-      ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]]))
-      : v);
+  if (value !== null && typeof value === 'object' && typeof (value as any).toJSON === 'function') {
+    return canonicalJson((value as any).toJSON());
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(item => {
+      const s = canonicalJson(item);
+      return s === undefined ? 'null' : s;
+    }).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries: string[] = [];
+    for (const key of Object.keys(value).sort()) {
+      const s = canonicalJson((value as Record<string, unknown>)[key]);
+      if (s !== undefined) entries.push(`${JSON.stringify(key)}:${s}`);
+    }
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 /** Whether the executor stores a property as a collection (`ad4m://CollectionShape`). */

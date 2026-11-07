@@ -47,6 +47,19 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   missing and removes every copy of each stale own link. Copies of an expected triple stay
   (two peers that registered the same shape agree); links other apps put on the class, shape
   or property nodes stay. It answers once the registry and the shape cache hold the new shape.
+- A class name (`class_name_of`, the IRI's local name) is unique in a perspective:
+  `register_shapes` refuses, writing nothing, a class whose name a stored class or another
+  shape in the call already has. Readers find a class by name with
+  `model_query::shape::find_class`; a class with two `ad4m://shape` links reads the least
+  shape URI (`shacl_parser::current_shape_uri`), in the registry and in `load_shape` alike.
+- Hard-wired classes (`hardwired_class::ensure_subject_classes`) are upgrade-only: written when
+  missing or when the stored shape lacks the newest path / declares a removed one
+  (`HardwiredClass`), never over a newer stored shape. Only the executor registers them:
+  `create_subject` registers one not stored yet before its first instance
+  (`hardwired_class::ensure_before_write`), and a model query of one not stored yet reads as
+  empty without waiting or writing. A stored class of that name (an app's, a newer
+  executor's) is used as it is. The SDK's `@Model` copies (`FlowModels.ts`,
+  `InterpretationModels.ts`) read them and are never registered by the SDK.
 - `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only
   `author`/`timestamp` with no other properties. Migrating it to `model_query` is planned (spec
   item 1). Prefer `model_query` for reads.

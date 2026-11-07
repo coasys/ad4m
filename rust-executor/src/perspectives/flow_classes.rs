@@ -20,7 +20,7 @@
 //! surfaces at build time.
 
 use crate::agent::AgentContext;
-use crate::perspectives::hardwired_class::ensure_subject_classes;
+use crate::perspectives::hardwired_class::{ensure_subject_classes, HardwiredClass};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::{Link, LinkStatus};
 
@@ -36,9 +36,8 @@ pub(crate) const FLOW_BASE_PREDICATE: &str = "ad4m://flow/base";
 /// was written before #1424, as a `Local` link. Nothing writes or reads it any
 /// more — the state lives in
 /// [`replica_state`](crate::perspectives::flow_instance::replica_state) — and
-/// old links under it are dead data. Tests use it to check that nothing
-/// reads it and that the `FlowInstance` shape no longer declares it.
-#[cfg(test)]
+/// old links under it are dead data. A stored `FlowInstance` shape that still
+/// declares it is older than this one ([`ensure_flow_model_classes`]).
 pub(crate) const LEGACY_FLOW_CURRENT_STATE_PREDICATE: &str = "ad4m://flow/current_state";
 
 pub(crate) const FLOW_TRANSITION_PROPOSAL_CLASS: &str = "FlowTransitionProposal";
@@ -50,22 +49,35 @@ pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
 /// Idempotently register both hard-wired flow-runtime subject classes into the
 /// perspective. Mirrors [`super::interpretation::overlay::classes::ensure_interpretation_overlay_classes`].
 ///
-/// A registered shape from another revision is replaced: one that lacks
+/// A registered shape from an older revision is upgraded: one that lacks
 /// `acceptedBy` (#1108's `nonce`, #1104's `outputs_hash`) reads proposals
 /// without their votes, and one that still declares the old `Local`
 /// bookkeeping (`currentState`, `resolvedAs`, removed by #1424) would hydrate
-/// those dead links as if they were current.
+/// those dead links as if they were current. A newer one stays
+/// (`hardwired_class`).
 pub(crate) async fn ensure_flow_model_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
     ensure_subject_classes(
         perspective,
-        &[FLOW_INSTANCE_SDNA, FLOW_TRANSITION_PROPOSAL_SDNA],
+        &[FLOW_INSTANCE, FLOW_TRANSITION_PROPOSAL],
         context,
     )
     .await
 }
+
+pub(crate) const FLOW_INSTANCE: HardwiredClass = HardwiredClass {
+    sdna: FLOW_INSTANCE_SDNA,
+    newest_path: None,
+    removed_path: Some(LEGACY_FLOW_CURRENT_STATE_PREDICATE),
+};
+
+pub(crate) const FLOW_TRANSITION_PROPOSAL: HardwiredClass = HardwiredClass {
+    sdna: FLOW_TRANSITION_PROPOSAL_SDNA,
+    newest_path: Some(crate::perspectives::flow_instance::atom::ACCEPTED_BY_PREDICATE),
+    removed_path: Some(crate::perspectives::flow_instance::atom::LEGACY_RESOLVED_AS_PREDICATE),
+};
 
 /// URI scheme for a freshly-minted `FlowInstance` node: `ad4m://flow/instance/{id}`.
 /// Kept separate from the class' target-class URI (`ad4m://FlowInstance`) so a
@@ -691,14 +703,20 @@ mod tests {
     async fn add_flow_registers_runtime_classes() {
         let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
 
-        // Before registration, both classes are absent — model_query must error.
-        let before = perspective
-            .model_query("FlowTransitionProposal", "{}")
-            .await;
-        assert!(
-            before.is_err(),
-            "FlowTransitionProposal must not be queryable before any flow is added (got Ok)"
-        );
+        // Before registration the class is absent: the read is empty and
+        // registers nothing (a read never writes).
+        let before: Value = serde_json::from_str(
+            &perspective
+                .model_query("FlowTransitionProposal", "{}")
+                .await
+                .expect("a hard-wired class not stored yet reads as empty"),
+        )
+        .unwrap();
+        assert_eq!(before["instances"], serde_json::json!([]));
+        assert!(perspective
+            .shapes(Some(vec!["FlowTransitionProposal".into()]))
+            .unwrap()
+            .is_empty());
 
         ensure_flow_model_classes(&mut perspective, &ctx)
             .await

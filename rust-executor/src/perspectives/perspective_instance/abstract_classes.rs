@@ -78,7 +78,7 @@ impl PerspectiveInstance {
 
     /// How many times the installed shapes have changed. Read it *before*
     /// resolving, so a change landing mid-resolution is seen.
-    pub(super) fn shapes_generation(&self) -> u64 {
+    pub(crate) fn shapes_generation(&self) -> u64 {
         self.abstract_cache.read().unwrap().generation
     }
 

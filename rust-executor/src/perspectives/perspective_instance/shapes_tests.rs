@@ -4,6 +4,7 @@
 use super::*;
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+use crate::perspectives::perspective_instance::SubjectClassOption;
 use crate::types::LinkExpression;
 use std::collections::BTreeSet;
 
@@ -124,20 +125,28 @@ async fn refresh_keeps_foreign_annotations() {
         .await
         .unwrap();
     let title = property_node("title");
+    // Another app's annotations, a type among them: only the types the
+    // writer gives are the class's own.
+    let annotations = [
+        ("app://label", "literal:string:mine"),
+        ("rdf://type", "app://Tagged"),
+    ];
     for source in ["ns://Note", "ns://NoteShape", title.as_str()] {
-        perspective
-            .add_link(
-                Link {
-                    source: source.into(),
-                    predicate: Some("app://label".into()),
-                    target: "literal:string:mine".into(),
-                },
-                LinkStatus::Shared,
-                None,
-                &ctx,
-            )
-            .await
-            .unwrap();
+        for (predicate, target) in annotations {
+            perspective
+                .add_link(
+                    Link {
+                        source: source.into(),
+                        predicate: Some(predicate.into()),
+                        target: target.into(),
+                    },
+                    LinkStatus::Shared,
+                    None,
+                    &ctx,
+                )
+                .await
+                .unwrap();
+        }
     }
 
     let result = perspective
@@ -147,11 +156,13 @@ async fn refresh_keeps_foreign_annotations() {
 
     assert_eq!(result.written, vec!["Note".to_string()]);
     for source in ["ns://Note", "ns://NoteShape", title.as_str()] {
-        assert_eq!(
-            count(&perspective, source, "app://label", "literal:string:mine"),
-            1,
-            "the annotation on {source} stays"
-        );
+        for (predicate, target) in annotations {
+            assert_eq!(
+                count(&perspective, source, predicate, target),
+                1,
+                "the annotation {predicate} {target} on {source} stays"
+            );
+        }
     }
     assert_eq!(
         count(&perspective, &title, "sh://datatype", "xsd:string"),
@@ -323,7 +334,7 @@ async fn registration_writes_exactly_two_index_links() {
 }
 
 #[tokio::test]
-async fn same_local_name_in_two_namespaces() {
+async fn same_local_name_in_two_namespaces_is_refused() {
     let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
     let task = |ns: &str| -> SHACLShape {
         serde_json::from_value(serde_json::json!({
@@ -332,34 +343,19 @@ async fn same_local_name_in_two_namespaces() {
         }))
         .unwrap()
     };
+    let before = all_links(&perspective);
 
-    let result = perspective
+    let err = perspective
         .register_shapes(vec![task("a://"), task("b://")], &ctx)
         .await
-        .unwrap();
-    assert_eq!(result.written, vec!["Task".to_string(), "Task".to_string()]);
-    // Registering one again leaves the other alone.
-    let again = perspective
-        .register_shapes(vec![task("b://")], &ctx)
-        .await
-        .unwrap();
-    assert_eq!(again.unchanged, vec!["Task".to_string()]);
+        .unwrap_err();
 
-    let targets: Vec<String> = perspective
-        .shapes(Some(vec!["Task".into()]))
-        .unwrap()
-        .into_iter()
-        .map(|s| s.shape.target_class)
-        .collect();
-    assert_eq!(targets, ["a://Task", "b://Task"]);
-    assert_eq!(
-        count(&perspective, "a://Task", SHAPE_PREDICATE, "a://TaskShape"),
-        1
+    assert!(
+        err.to_string()
+            .contains("Classes 'a://Task' and 'b://Task' in one call are both named 'Task'"),
+        "{err}"
     );
-    assert_eq!(
-        count(&perspective, "b://Task", SHAPE_PREDICATE, "b://TaskShape"),
-        1
-    );
+    assert_eq!(all_links(&perspective), before);
 }
 
 #[tokio::test]
@@ -514,19 +510,384 @@ async fn one_call_refuses_a_class_twice_and_a_shared_shape_uri() {
         "{twice}"
     );
 
-    let task = |ns: &str| -> SHACLShape {
+    let class = |target_class: &str| -> SHACLShape {
         serde_json::from_value(serde_json::json!({
-            "target_class": format!("{ns}Task"),
-            "node_shape_uri": "a://TaskShape",
-            "properties": [{"path": format!("{ns}title"), "name": "title"}]
+            "target_class": target_class,
+            // Ends with `TaskShape` and with `XTaskShape`.
+            "node_shape_uri": "a://XTaskShape",
+            "properties": [{"path": "a://title", "name": "title"}]
         }))
         .unwrap()
     };
     let shared = perspective
-        .register_shapes(vec![task("a://"), task("b://")], &ctx)
+        .register_shapes(vec![class("a://Task"), class("b://XTask")], &ctx)
         .await
         .unwrap_err();
     assert!(shared.to_string().contains("share a shape URI"), "{shared}");
 
     assert_eq!(all_links(&perspective), before);
+}
+
+/// A task class in `ns`, with a title and a done flag, made by a
+/// constructor that marks it with `{ns}kind`.
+fn task(ns: &str) -> SHACLShape {
+    serde_json::from_value(serde_json::json!({
+        "target_class": format!("{ns}Task"),
+        "constructor_actions": [
+            {"action": "addLink", "source": "this", "predicate": format!("{ns}kind"), "target": format!("{ns}task")}
+        ],
+        "properties": [
+            {"path": format!("{ns}kind"), "name": "kind", "has_value": format!("{ns}task"),
+             "min_count": 1, "max_count": 1},
+            {"path": format!("{ns}title"), "name": "title", "datatype": "xsd:string",
+             "max_count": 1, "writable": true,
+             "setter": [{"action": "setSingleTarget", "source": "this",
+                         "predicate": format!("{ns}title"), "target": "value"}]}
+        ]
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_class_name_another_class_has_is_refused() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    perspective
+        .register_shapes(vec![task("a://")], &ctx)
+        .await
+        .unwrap();
+    let before = all_links(&perspective);
+    let generation = perspective.shapes_generation();
+
+    // Stored `a://Task` holds the name: `b://Task` is refused, and so is
+    // the whole call it came in, the class that was fine with it too.
+    let err = perspective
+        .register_shapes(vec![note(), task("b://")], &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Class 'a://Task' is already registered under the name 'Task'"),
+        "{err}"
+    );
+    assert_eq!(all_links(&perspective), before, "nothing is written");
+    assert_eq!(perspective.shapes_generation(), generation);
+    let names: Vec<_> = perspective
+        .shapes(None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.shape.target_class)
+        .collect();
+    assert_eq!(names, ["a://Task"]);
+
+    // Two classes of one name in one call.
+    let (mut fresh, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let both = fresh
+        .register_shapes(vec![task("a://"), task("b://")], &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        both.to_string()
+            .contains("Classes 'a://Task' and 'b://Task' in one call are both named 'Task'"),
+        "{both}"
+    );
+    assert!(fresh.shapes(None).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_query_and_a_create_by_name_use_the_registered_class() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    // `MyTask`'s shape `a://MyTaskShape` and its `a://MyTask.title` end
+    // like `Task`'s: a lookup by URI suffix could take its actions.
+    let mut my_task = task("a://");
+    my_task.target_class = "a://MyTask".into();
+    my_task.constructor_actions[0].predicate = "a://mykind".into();
+    my_task.properties[1].setter[0].predicate = "a://mytitle".into();
+    perspective
+        .register_shapes(vec![my_task], &ctx)
+        .await
+        .unwrap();
+    perspective
+        .register_shapes(vec![task("a://")], &ctx)
+        .await
+        .unwrap();
+    // Refused: `a://Task` stays the one class named `Task`.
+    perspective
+        .register_shapes(vec![task("b://")], &ctx)
+        .await
+        .unwrap_err();
+
+    perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("Task".into()),
+                query: None,
+            },
+            "expr://t1".into(),
+            Some(serde_json::json!({"title": "Write tests"})),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    // The create ran `a://Task`'s constructor and setter, nothing of `b://`.
+    assert_eq!(count(&perspective, "expr://t1", "a://kind", "a://task"), 1);
+    let titles: Vec<_> = perspective
+        .sparql_store
+        .query_links(Some("expr://t1"), Some("a://title"), None, None, None, None)
+        .unwrap();
+    assert_eq!(titles.len(), 1);
+    assert!(perspective
+        .sparql_store
+        .get_links_by_source("expr://t1")
+        .unwrap()
+        .iter()
+        .all(|l| {
+            let p = l.data.predicate.as_deref().unwrap_or("");
+            !p.starts_with("b://") && p != "a://mykind" && p != "a://mytitle"
+        }));
+
+    // A query by the name reads `a://Task`'s shape: it finds the instance
+    // by `a://kind` and reads its title through `a://title`.
+    let shape = perspective.get_shape("Task").unwrap();
+    assert_eq!(shape.target_class, "a://Task");
+    let rows = crate::perspectives::interpretation_test_support::model_instances(
+        &perspective,
+        "Task",
+        &["title"],
+    )
+    .await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["id"], "expr://t1", "{rows:?}");
+    assert_eq!(rows[0]["title"], "Write tests", "{rows:?}");
+}
+
+/// A class is found by its exact name: `Message` is not `ChatMessage`,
+/// though `ChatMessageShape` ends with `MessageShape`.
+#[tokio::test]
+async fn a_name_finds_only_the_class_of_exactly_that_name() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let chat_message: SHACLShape = serde_json::from_value(serde_json::json!({
+        "target_class": "chat://ChatMessage",
+        "constructor_actions": [{"action": "addLink", "source": "this",
+                                 "predicate": "chat://kind", "target": "chat://message"}],
+        "properties": [{"path": "chat://body", "name": "body", "max_count": 1,
+            "setter": [{"action": "setSingleTarget", "source": "this",
+                        "predicate": "chat://body", "target": "value"}]}]
+    }))
+    .unwrap();
+    perspective
+        .register_shapes(vec![chat_message], &ctx)
+        .await
+        .unwrap();
+    let before = all_links(&perspective);
+
+    let created = perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("Message".into()),
+                query: None,
+            },
+            "expr://m1".into(),
+            Some(serde_json::json!({"body": "hi"})),
+            None,
+            &ctx,
+        )
+        .await;
+
+    assert!(created.is_err(), "{created:?}");
+    assert_eq!(all_links(&perspective), before, "nothing written");
+    assert!(perspective.get_shape("Message").is_err());
+    assert!(perspective.get_shape("ChatMessage").is_ok());
+    assert!(crate::perspectives::model_query::shape::find_class(
+        &perspective.sparql_store,
+        "Message"
+    )
+    .unwrap()
+    .is_none());
+}
+
+/// A task in `old://`, as an app registered it before this revision.
+const OLD_TASK: &str = r#"{
+  "target_class":"old://Task",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"old://kind","target":"old://task"}],
+  "properties":[
+    {"path":"old://title","name":"title","datatype":"xsd:string","max_count":1,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"old://title","target":"value"}]}
+  ]
+}"#;
+
+/// The links the previous writer (`add_sdna` with SHACL JSON on
+/// perf/sdk-round-trips: `parse_shacl_to_links` and `add_sdna_inner`) stored
+/// for [`OLD_TASK`]: the name-index links, then the class, shape and property
+/// links with action lists serialised in struct field order.
+const OLD_WRITER_LINKS: [(&str, &str, &str); 16] = [
+    (
+        "ad4m://self",
+        "ad4m://has_subject_class",
+        "literal:string:Task",
+    ),
+    (
+        "literal:string:Task",
+        "ad4m://sdna",
+        "literal:string:%2F%2F%20SHACL",
+    ),
+    (
+        "ad4m://self",
+        "ad4m://has_shacl",
+        "literal:string:shacl://Task",
+    ),
+    (
+        "literal:string:shacl://Task",
+        "ad4m://shacl_shape_uri",
+        "old://TaskShape",
+    ),
+    ("old://Task", "rdf://type", "ad4m://SubjectClass"),
+    ("old://Task", "ad4m://shape", "old://TaskShape"),
+    ("old://TaskShape", "rdf://type", "sh://NodeShape"),
+    ("old://TaskShape", "sh://targetClass", "old://Task"),
+    (
+        "old://TaskShape",
+        "ad4m://constructor",
+        r#"literal:string:[{"action":"addLink","source":"this","predicate":"old://kind","target":"old://task"}]"#,
+    ),
+    ("old://TaskShape", "ad4m://destructor", "literal:string:[]"),
+    ("old://TaskShape", "sh://property", "old://Task.title"),
+    ("old://Task.title", "rdf://type", "sh://PropertyShape"),
+    ("old://Task.title", "sh://path", "old://title"),
+    ("old://Task.title", "sh://datatype", "xsd:string"),
+    (
+        "old://Task.title",
+        "sh://maxCount",
+        "literal:1^^xsd:integer",
+    ),
+    (
+        "old://Task.title",
+        "ad4m://setter",
+        r#"literal:string:[{"action":"setSingleTarget","source":"this","predicate":"old://title","target":"value"}]"#,
+    ),
+];
+
+#[tokio::test]
+async fn classes_the_previous_writer_stored_are_read_and_rewritten_once() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    for (source, predicate, target) in OLD_WRITER_LINKS {
+        perspective
+            .add_link(
+                Link {
+                    source: source.into(),
+                    predicate: Some(predicate.into()),
+                    target: target.into(),
+                },
+                LinkStatus::Shared,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+    }
+    let old_task: SHACLShape = serde_json::from_str(OLD_TASK).unwrap();
+
+    // Read as stored: the same shape the current writer would store.
+    let read = perspective.shapes(Some(vec!["Task".into()])).unwrap();
+    assert_eq!(read.len(), 1, "{read:?}");
+    assert_eq!(read[0].shape, stored_form(&old_task));
+    assert_eq!(
+        perspective.get_shape("Task").unwrap().target_class,
+        "old://Task"
+    );
+
+    // The previous writer wrote action lists in struct field order, the
+    // current one in canonical JSON: the first registration rewrites those
+    // two literals, and only them.
+    let before = all_links(&perspective);
+    let result = perspective
+        .register_shapes(vec![old_task.clone()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(result.written, vec!["Task".to_string()]);
+    let after = all_links(&perspective);
+    let changed = |a: &BTreeSet<_>, b: &BTreeSet<_>| -> BTreeSet<(String, String)> {
+        a.difference(b)
+            .map(|l: &(String, String, String, String, String)| (l.0.clone(), l.1.clone()))
+            .collect()
+    };
+    let rewritten: BTreeSet<(String, String)> = [
+        ("old://TaskShape", "ad4m://constructor"),
+        ("old://Task.title", "ad4m://setter"),
+    ]
+    .into_iter()
+    .map(|(s, p)| (s.to_string(), p.to_string()))
+    .collect();
+    assert_eq!(changed(&before, &after), rewritten, "removed");
+    assert_eq!(changed(&after, &before), rewritten, "added");
+    // The old name-index links are not the class's own: they stay.
+    for (source, predicate, target) in &OLD_WRITER_LINKS[..4] {
+        assert_eq!(count(&perspective, source, predicate, target), 1);
+    }
+    assert_eq!(
+        perspective.shapes(Some(vec!["Task".into()])).unwrap()[0].shape,
+        stored_form(&old_task)
+    );
+
+    let again = perspective
+        .register_shapes(vec![old_task], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(again.unchanged, vec!["Task".to_string()]);
+}
+
+#[tokio::test]
+async fn two_concurrent_registrations_of_one_shape_write_once() {
+    let (perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut first, mut second) = (perspective.clone(), perspective.clone());
+    let (a, b) = tokio::join!(
+        first.register_shapes(vec![note()], &ctx),
+        second.register_shapes(vec![note()], &ctx)
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+
+    // One wrote, the other found the shape stored.
+    let mut outcomes = [
+        (a.written.clone(), a.unchanged.clone()),
+        (b.written.clone(), b.unchanged.clone()),
+    ];
+    outcomes.sort();
+    let note_name = vec!["Note".to_string()];
+    assert_eq!(
+        outcomes,
+        [(vec![], note_name.clone()), (note_name, vec![])],
+        "{a:?} {b:?}"
+    );
+    assert_eq!(a.generation, b.generation);
+
+    // Every own link once.
+    let expected = shape_links(note(), "Note").unwrap();
+    let nodes: BTreeSet<&str> = expected.iter().map(|l| l.source.as_str()).collect();
+    let triples: Vec<Triple> = perspective
+        .sparql_store
+        .get_all_links()
+        .unwrap()
+        .iter()
+        .filter(|l| nodes.contains(l.data.source.as_str()))
+        .map(|l| triple(&l.data))
+        .collect();
+    let distinct: BTreeSet<&Triple> = triples.iter().collect();
+    assert_eq!(triples.len(), distinct.len(), "a triple stored twice");
+    assert_eq!(triples.len(), expected.len());
+    assert_eq!(
+        count(&perspective, "ns://Note", "rdf://type", SUBJECT_CLASS),
+        1
+    );
+    for link in &expected {
+        assert!(distinct.contains(&triple(link)), "missing {link:?}");
+    }
+    assert_eq!(
+        perspective.shapes(None).unwrap(),
+        first.shapes(None).unwrap()
+    );
+    assert_eq!(
+        perspective.shapes(None).unwrap()[0].shape,
+        stored_form(&note())
+    );
 }

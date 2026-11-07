@@ -566,13 +566,13 @@ describe("Multi-User Simple integration tests", () => {
         
         before(async () => {
             // Import necessary decorators and classes
-            const { Model, Property } = await import("@coasys/ad4m");
+            const { Ad4mModel, Model, Property } = await import("@coasys/ad4m");
 
             // Define a proper subject class with decorators
             @Model({
                 name: "TestSubject"
             })
-            class TestSubjectClass {
+            class TestSubjectClass extends Ad4mModel {
                 @Property({
                     through: "test://name",
                     initial: "test://initial",

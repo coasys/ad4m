@@ -16,8 +16,11 @@
 
 use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
+use crate::perspectives::shacl_parser::{
+    class_name_of, current_shape_uri, SHAPE_PREDICATE, SUBJECT_CLASS,
+};
 use crate::perspectives::sparql_store::SparqlStore;
-use deno_core::anyhow::{anyhow, Error};
+use deno_core::anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
@@ -51,6 +54,50 @@ pub(crate) fn load_shape_from_store(
     load_shape(store, class_name)
 }
 
+/// A registered class and the shape node it reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClassShape {
+    pub(crate) target_class: String,
+    pub(crate) shape_uri: String,
+}
+
+/// The class registered under `class_name` (or with that target class IRI)
+/// and its current shape. A class's
+/// name is `class_name_of` its target class IRI, the name `registerShapes`
+/// keeps unique per perspective; its shape is the one `current_shape_uri`
+/// picks, as the registry (`PerspectiveInstance::shapes`) reads it. Every
+/// reader that finds a class by name (model queries, create and update)
+/// comes here. Should two classes still share the name (written before the
+/// name was unique), the least target class IRI is read, never whichever
+/// the store yields first.
+pub(crate) fn find_class(
+    store: &SparqlStore,
+    class_name: &str,
+) -> Result<Option<ClassShape>, Error> {
+    // The triples themselves, as the rest of `load_shape` reads them.
+    let rows: Vec<Value> = serde_json::from_str(&store.query(&format!(
+        "SELECT ?class ?shape WHERE {{ ?class <rdf://type> <{SUBJECT_CLASS}> . \
+         ?class <{SHAPE_PREDICATE}> ?shape . }}"
+    ))?)?;
+    let mut shapes: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for row in &rows {
+        if let (Some(target_class), Some(shape_uri)) =
+            (row["class"].as_str(), row["shape"].as_str())
+        {
+            if target_class == class_name || class_name_of(target_class) == class_name {
+                shapes.entry(target_class).or_default().push(shape_uri);
+            }
+        }
+    }
+    let class = shapes.into_iter().next().and_then(|(target_class, uris)| {
+        current_shape_uri(uris).map(|shape_uri| ClassShape {
+            target_class: target_class.to_string(),
+            shape_uri: shape_uri.to_string(),
+        })
+    });
+    Ok(class)
+}
+
 /// Load a model shape from the SHACL links stored in the Oxigraph store.
 ///
 /// The SHACL links follow this pattern (set up by `parse_shacl_to_links`):
@@ -63,39 +110,16 @@ pub(crate) fn load_shape_from_store(
 /// - `<namespace://ClassName.propName> ad4m://targetClassName literal:string:Ingredient`
 /// - etc.
 pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
-    let safe_name = escape_sparql_string(class_name);
-    // Step 1: Find the shape URI and target class via SPARQL
-    // Use exact suffix matching (/{name} or #{name}) to avoid "Recipe" matching "MyRecipe"
-    let hash_suffix = format!("#{safe_name}");
-    let query = format!(
-        r#"
-        SELECT ?shapeUri ?targetClass WHERE {{
-            ?targetClass <rdf://type> <ad4m://SubjectClass> .
-            ?targetClass <ad4m://shape> ?shapeUri .
-            FILTER(STRENDS(STR(?targetClass), "/{safe_name}") || STRENDS(STR(?targetClass), "{hash_suffix}") || STR(?targetClass) = "{safe_name}")
-        }}
-        LIMIT 1
-        "#
-    );
-
-    let result_json = store.query(&query)?;
-    let results: Vec<Value> = serde_json::from_str(&result_json)?;
-
-    if results.is_empty() {
+    let Some(ClassShape {
+        target_class,
+        shape_uri,
+    }) = find_class(store, class_name)?
+    else {
         return Err(MissingShape {
             class_name: class_name.to_string(),
         }
         .into());
-    }
-
-    let shape_uri = results[0]["shapeUri"]
-        .as_str()
-        .ok_or_else(|| anyhow!("Missing shapeUri in SHACL query result"))?
-        .to_string();
-    let target_class = results[0]["targetClass"]
-        .as_str()
-        .ok_or_else(|| anyhow!("Missing targetClass in SHACL query result"))?
-        .to_string();
+    };
 
     // Step 2: Load all property shapes for this shape.  Fetches every
     // predicate the SHACL writer emits in one batched SELECT.  Using
@@ -272,7 +296,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let initial_value = if is_flag {
             has_value.clone()
         } else {
-            initial_value_from_constructor(store, &target_class, &path)
+            initial_value_from_constructor(store, &shape_uri, &path)
         };
 
         // Suppress writable-derived metadata: when explicitly false the
@@ -390,26 +414,12 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 /// `predicate` matches `predicate`.
 fn initial_value_from_constructor(
     store: &SparqlStore,
-    target_class: &str,
+    shape_uri: &str,
     predicate: &str,
 ) -> Option<String> {
-    // The constructor link is anchored to the shape URI, not the target
-    // class.  Resolve the shape URI from the target class so we can
-    // query for its constructor.
-    let safe_tc = escape_sparql_string(target_class);
-    let shape_query = format!(
-        r#"
-        SELECT ?shapeUri WHERE {{
-            <{safe_tc}> <ad4m://shape> ?shapeUri .
-        }}
-        LIMIT 1
-        "#
-    );
-    let shape_result_json = store.query(&shape_query).ok()?;
-    let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
-    let shape_uri = shape_rows.first()?["shapeUri"].as_str()?.to_string();
-
-    let safe_shape = escape_sparql_string(&shape_uri);
+    // The constructor link is anchored to the shape the class reads
+    // (`find_class`), not the target class.
+    let safe_shape = escape_sparql_string(shape_uri);
     let ctor_query = format!(
         r#"
         SELECT ?ctor WHERE {{
@@ -577,8 +587,8 @@ pub(crate) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCo
 #[cfg(test)]
 pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Error> {
     use super::types::TransformExpression;
-    let meta: Value =
-        serde_json::from_str(json).map_err(|e| anyhow!("Failed to parse shape JSON: {}", e))?;
+    let meta: Value = serde_json::from_str(json)
+        .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse shape JSON: {}", e))?;
 
     let target_class = meta["className"].as_str().unwrap_or(class_name).to_string();
 

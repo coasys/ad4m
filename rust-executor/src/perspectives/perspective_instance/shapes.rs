@@ -200,7 +200,9 @@ impl PerspectiveInstance {
     ///
     /// Answers once the registry and the shape cache hold the new shapes.
     /// Refuses, before writing anything: a shape the encoder refuses, two
-    /// shapes for one target class, and a shape URI another class holds.
+    /// shapes for one target class, a shape URI another class holds, and a
+    /// class name (`class_name_of` its target class) another class has, in
+    /// the call or stored: readers find a class by its name.
     pub async fn register_shapes(
         &mut self,
         shapes: Vec<SHACLShape>,
@@ -217,6 +219,15 @@ impl PerspectiveInstance {
             {
                 return Err(anyhow!(
                     "Two shapes for class '{target_class}' in one call: give each class once."
+                ));
+            }
+        }
+        let mut names: BTreeMap<&str, &str> = BTreeMap::new();
+        for (target_class, (name, _)) in &expected {
+            if let Some(other) = names.insert(name, target_class) {
+                return Err(anyhow!(
+                    "Classes '{other}' and '{target_class}' in one call are both named \
+                     '{name}': a class name is unique in a perspective."
                 ));
             }
         }
@@ -254,6 +265,37 @@ impl PerspectiveInstance {
                     "Shape '{shape_uri}' already belongs to class '{}': class '{target_class}' \
                      needs its own shape URI.",
                     other.data.source
+                ));
+            }
+        }
+
+        // A class is found by its name (`model_query::shape::find_class`):
+        // two classes of one name would make every query and create read
+        // whichever the store yields. A stored class is one a reader finds,
+        // a SubjectClass with a shape.
+        for stored in self.sparql_store.query_links(
+            None,
+            Some("rdf://type"),
+            Some(SUBJECT_CLASS),
+            None,
+            None,
+            None,
+        )? {
+            let stored = stored.data.source;
+            let Some(target_class) = names.get(class_name_of(&stored).as_str()) else {
+                continue;
+            };
+            if stored != *target_class
+                && !self
+                    .sparql_store
+                    .query_links(Some(&stored), Some(SHAPE_PREDICATE), None, None, None, None)?
+                    .is_empty()
+            {
+                return Err(anyhow!(
+                    "Class '{stored}' is already registered under the name '{}': class \
+                     '{target_class}' needs another name, a class name is unique in a \
+                     perspective.",
+                    class_name_of(&stored)
                 ));
             }
         }

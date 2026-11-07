@@ -3,8 +3,9 @@
  * flow runtime. Apps can import these to query the perspective graph for
  * pending flow-transition proposals without knowing the raw link predicates.
  *
- * Registration:
- *   await FlowTransitionProposal.register(perspective);
+ * Do not register them: the classes are hard-wired in the executor, which
+ * registers each before writing its first instance and reads one not
+ * registered yet as empty.
  *
  * Querying:
  *   const pending = await FlowTransitionProposal.findAll(perspective);

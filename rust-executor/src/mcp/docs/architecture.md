@@ -113,7 +113,7 @@ Subject classes impose structure on the link graph using SHACL (Shapes Constrain
 
 ### How It Works
 
-Classes are registered via the `add_model` MCP tool (the `perspective.registerShapes` RPC; `register_shapes()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective. A class is its target class IRI. Registering the same shape again writes nothing.
+Classes are registered via the `add_model` MCP tool (the `perspective.registerShapes` RPC; `register_shapes()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective. A class is its target class IRI. Registering the same shape again writes nothing. A class name (the IRI's local name) is unique in a perspective: a class whose name another registered class already has is refused.
 
 Each instance's identity is its base expression — a freshly generated, content-independent `ad4m://obj/<id>` IRI (see [Links Alone Don't Give You Uniqueness](#links-alone-dont-give-you-uniqueness) above). This is what makes subject classes the canonical way to model anything where two instances might end up with identical property values.
 

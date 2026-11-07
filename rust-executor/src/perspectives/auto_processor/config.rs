@@ -33,7 +33,9 @@ use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClas
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 
 use super::scalar_string;
-use crate::perspectives::hardwired_class::{ensure_subject_classes, subject_class_registered};
+use crate::perspectives::hardwired_class::{
+    ensure_subject_classes, subject_class_registered, HardwiredClass,
+};
 
 /// Instances already reported as unloadable, so each is complained about once.
 ///
@@ -246,8 +248,16 @@ pub async fn ensure_auto_processor_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    ensure_subject_classes(perspective, &[AUTO_PROCESSOR_SDNA], context).await
+    ensure_subject_classes(perspective, &[AUTO_PROCESSOR], context).await
 }
+
+/// The hard-wired `AutoProcessor` class. `flows` is its newest property: a
+/// shape without it is older.
+pub(crate) const AUTO_PROCESSOR: HardwiredClass = HardwiredClass {
+    sdna: AUTO_PROCESSOR_SDNA,
+    newest_path: Some("ad4m://flow"),
+    removed_path: None,
+};
 
 /// Register the class if needed, then mint the processor as a subject instance.
 /// Writing the same `processor_id` twice overwrites its scalars (the setters

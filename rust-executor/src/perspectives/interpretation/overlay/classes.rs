@@ -2,7 +2,7 @@
 //! their idempotent registration, and run-node minting.
 
 use crate::agent::AgentContext;
-use crate::perspectives::hardwired_class::ensure_subject_classes;
+use crate::perspectives::hardwired_class::{ensure_subject_classes, HardwiredClass};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::AITask;
 use sha2::{Digest, Sha256};
@@ -96,19 +96,31 @@ impl InterpretationRunMeta {
 
 /// Idempotently register the hard-wired [`INTERP_RUN_CLASS`] +
 /// [`INTERP_OVERLAY_CLASS`] subject classes into the perspective. A
-/// perspective that registered an older revision of either gets this one, so
-/// `write_processor` finds every setter it writes through.
+/// perspective that registered an older revision of the run class (before
+/// `debug_response`, its newest property) gets this one, so `write_processor`
+/// finds every setter it writes through.
 pub(crate) async fn ensure_interpretation_overlay_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
     ensure_subject_classes(
         perspective,
-        &[INTERP_OVERLAY_SDNA, INTERP_RUN_SDNA],
+        &[INTERPRETATION_OVERLAY, INTERPRETATION_RUN],
         context,
     )
     .await
 }
+
+/// The hard-wired `InterpretationOverlay` class.
+pub(crate) const INTERPRETATION_OVERLAY: HardwiredClass = HardwiredClass::new(INTERP_OVERLAY_SDNA);
+
+/// The hard-wired `InterpretationRun` class; `debugResponse` is its newest
+/// property.
+pub(crate) const INTERPRETATION_RUN: HardwiredClass = HardwiredClass {
+    sdna: INTERP_RUN_SDNA,
+    newest_path: Some("ad4m://interp/debug_response"),
+    removed_path: None,
+};
 
 /// Mint the per-pass [`INTERP_RUN_CLASS`] node in the `ad4m://interp/run/`
 /// coordination namespace and return its URI (to thread onto the pass's overlays

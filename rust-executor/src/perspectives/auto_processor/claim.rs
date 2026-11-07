@@ -68,7 +68,9 @@ use crate::types::{Link, LinkStatus};
 use sha2::{Digest, Sha256};
 
 use super::scalar_string;
-use crate::perspectives::hardwired_class::{ensure_subject_classes, subject_class_registered};
+use crate::perspectives::hardwired_class::{
+    ensure_subject_classes, subject_class_registered, HardwiredClass,
+};
 
 /// Local subject-class name of a claim.
 pub(crate) const PROCESSING_CLAIM_CLASS: &str = "ProcessingClaim";
@@ -140,8 +142,11 @@ pub async fn ensure_processing_claim_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    ensure_subject_classes(perspective, &[PROCESSING_CLAIM_SDNA], context).await
+    ensure_subject_classes(perspective, &[PROCESSING_CLAIM], context).await
 }
+
+/// The hard-wired `ProcessingClaim` class.
+pub(crate) const PROCESSING_CLAIM: HardwiredClass = HardwiredClass::new(PROCESSING_CLAIM_SDNA);
 
 /// Write a claim for `claimant` on `(processor, batch)` expiring at `expires_ms`
 /// and hang it off the shared batch node. `claimant` is instance *data*, so a
