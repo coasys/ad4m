@@ -699,7 +699,14 @@ fn write_link_quads_proof(
     // stale verdict onto disk; tests that want `valid` must carry a real signature.
     // `proofValid` stays for the readers that test it: `true` exactly when the
     // verdict is `valid`.
-    let checked = link.check();
+    //
+    // A link this store already counts was here before any revocation its key
+    // map holds now: the one order the executor knows (`entered_after_revoke`).
+    // Nothing stored, or a stored verdict that does not count: no order known.
+    let counted_before = annotation_values(tx, &reifier_iri, ONT_LINK_VERDICT)?
+        .iter()
+        .any(|v| v == "valid");
+    let checked = link.check_entered(counted_before.then_some(false));
     let incoming_valid = checked.verdict.counts();
     let valid_str = incoming_valid.to_string();
     let verdict_str = checked.verdict.stored();

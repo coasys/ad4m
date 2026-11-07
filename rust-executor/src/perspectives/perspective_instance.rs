@@ -4443,7 +4443,10 @@ impl PerspectiveInstance {
         crate::identity::prepare_link_signers(&links).await;
         let mut changed = 0;
         for (before, link) in stored.iter().zip(&links) {
-            let now = link.check();
+            // A link this store already counted was here before the revocation reached the
+            // key map: the one order the executor knows. The store judges the same way.
+            let entered = (before.verdict == Some(LinkVerdict::Valid)).then_some(false);
+            let now = link.check_entered(entered);
             if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
                 continue;
             }
@@ -7987,6 +7990,135 @@ mod tests {
             "the link stays stored"
         );
         let signers = std::collections::BTreeSet::from([link.author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap(),
+            0,
+            "a re-check is idempotent"
+        );
+        map.forget(&log.scid());
+    }
+
+    /// A link the store counted before its key's revocation stays counted after it: the store
+    /// held it first, the one order the executor knows. A link by the revoked key that arrives
+    /// after the revocation is stored `flagged` and speaks for nobody, whether it names an
+    /// anchor before the revocation or none: whoever holds the key could have signed it today.
+    #[tokio::test]
+    async fn a_link_counted_before_a_revocation_stays_counted_and_a_later_one_is_flagged() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+
+        let perspective = setup().await;
+        let mut log = TestLog::new(92);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let person = ad4m_identity_core::did_of(&log.scid());
+        let device = log.device.clone();
+        let key = device.key();
+        let signed = |anchor: Option<u64>| {
+            let data = create_link().normalize();
+            let now = chrono::Utc::now();
+            let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes = match anchor {
+                Some(anchor) => {
+                    crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, anchor)
+                        .unwrap()
+                }
+                None => crate::agent::signatures::hash_data_and_timestamp(&data, &now),
+            };
+            LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(device.sign(&bytes)),
+                    anchor,
+                },
+                status: Some(LinkStatus::Shared),
+            }
+        };
+
+        let before = signed(Some(0));
+        perspective.sparql_store.add_link(&before).unwrap();
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
+
+        // The device is revoked at seq 1, and the re-check for its key runs.
+        log.revoke_d1();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 1,
+            },
+        );
+        let signers = std::collections::BTreeSet::from([before.author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers.clone()))
+                .await
+                .unwrap(),
+            0,
+            "the link the store counted before the revocation stays counted"
+        );
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
+
+        // Whoever holds the revoked key signs again: anchored before the revocation, and
+        // with no anchor at all.
+        let later = [signed(Some(0)), signed(None)];
+        for link in &later {
+            perspective.sparql_store.add_link(link).unwrap();
+        }
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let verdict_of = |link: &LinkExpression| {
+            stored
+                .iter()
+                .find(|s| s.proof.signature == link.proof.signature)
+                .map(|s| (s.verdict.clone(), s.person.clone()))
+                .expect("stored")
+        };
+        assert_eq!(
+            verdict_of(&before),
+            (Some(LinkVerdict::Valid), Some(person.clone()))
+        );
+        for link in &later {
+            assert_eq!(
+                verdict_of(link),
+                (Some(LinkVerdict::Flagged), None),
+                "anchor {:?}",
+                link.proof.anchor
+            );
+        }
+        // A logic read counts the first link only; a display read shows all three.
+        let counted = perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|l| l.proof.valid == Some(true))
+            .count();
+        assert_eq!(counted, 1);
+        assert_eq!(
+            perspective
+                .get_links_shown(&LinkQuery::default())
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
         assert_eq!(
             perspective
                 .recheck_links(&crate::perspectives::Recheck::Signers(signers))
