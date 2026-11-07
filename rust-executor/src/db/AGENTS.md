@@ -8,7 +8,7 @@ with its own `impl Ad4mDb` block. Child modules can use the private `conn` field
 
 | File | Content |
 |---|---|
-| `rekey.rs` | The rows `identity.rekey` moves to the main agent's new DID: notification owners; and the claims the old key made, which it forgets |
+| `rekey.rs` | The rows `identity.rekey` moves to the main agent's new DID: notification owners, the flow bookkeeping (`flow_replica_state`, `flow_fired_mark`); and the claims the old key made, which it forgets |
 | `grants.rs` | The `grants` table: one row per token the executor issued, read by `agent::grants` |
 | `tasks.rs` | Owner-scoped reads of the `tasks` table: `get_task_owner`, `get_tasks_owned_by` |
 | `identity.rs` | `operator_record`, `identity_agents`, `identity_joins` (created in `Ad4mDb::new`), read by `identity/`. The operator record functions also take a bare connection for `ad4m-executor init --operator`, which runs before any executor. The key logs and `identity_heads`/`identity_fork_signers` are `identity::cache::KelCache`'s own connection to the same file |

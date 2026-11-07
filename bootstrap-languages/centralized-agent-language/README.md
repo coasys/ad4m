@@ -39,10 +39,10 @@ serves the identity interface, both on the shared identity store (`identity-stor
 - No token interface: the executor answers `disabled`.
 
 The store's base URL is the `storeUrl` language setting (`{"storeUrl": "https://…"}`), read on
-every call; without it, `https://store.ad4m.dev` (the staging network's store; a build for another
-network sets `storeUrl`). It must be `https`, or plain `http` to a
-loopback address (a store on the same machine); any other URL is `invalid` (`store-url`) and
-nothing is sent.
+every call. The executor writes it from its network's seed (or its `identity.storeUrl`). The
+language has no default store. Without a `storeUrl`, or with one that is not `https` or plain
+`http` to a loopback address (a store on the same machine), every call is `invalid` (`store-url`)
+and nothing is sent.
 
 The `storeKeys` setting (`{"storeKeys": ["z6Mk…"]}`, the executor's `identity.storeKeys`)
 lists the store keys the language trusts. To check a `did:scid` record it reads the person's

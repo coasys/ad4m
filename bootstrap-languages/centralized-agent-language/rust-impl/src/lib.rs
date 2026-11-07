@@ -8,9 +8,10 @@
 //! - [`agents`]: `expressionCreate`/`expressionGet` on the store's `/v1/agents/{did}`, in
 //!   place of mock.ad4m.dev.
 //!
-//! The store's base URL is the `storeUrl` language setting (the executor fills it from
-//! `identity.storeUrl`), read on every call; without one, `DEFAULT_STORE_URL` (the staging network's store). It must be
-//! `https`, or plain `http` to a loopback address. The `storeKeys` setting (from
+//! The store's base URL is the `storeUrl` language setting (the executor fills it from its
+//! network's seed or `identity.storeUrl`), read on every call. The language has no default
+//! store: without one, every call is `invalid` (`store-url`). It must be `https`, or plain `http`
+//! to a loopback address. The `storeKeys` setting (from
 //! `identity.storeKeys`) lists the store keys whose signed heads the language trusts when it
 //! reads a log to check a `did:scid` record; without it no such record verifies. The language
 //! does not implement the token interface: the executor answers `disabled`.

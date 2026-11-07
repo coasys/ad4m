@@ -749,7 +749,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .local_only()
         .guard(Guard::Executor(RUNTIME_QUIT_CAPABILITY.clone()));
     // Answers, then exits 75: the supervisor (the desktop app, systemd) starts it again.
+    // Without a supervisor that is a stop, so it stays on this machine like `runtime.quit`.
     map.method::<NoParams, bool>("runtime.restart", restart_runtime)
+        .local_only()
         .guard(Guard::Operator);
     map.method::<LogTailParams, LogTail>("runtime.logTail", log_tail)
         .read()

@@ -7,7 +7,7 @@ import type { ConfigKeyInfo } from "./ConfigKeyInfo";
 export type RuntimeConfig = { 
 /**
  * The file's keys and values: what the next start reads. The file holds no secret (a
- * secret is named by a `*_file` path), so neither does this.
+ * secret is named by a `*_file` path), and a secret pasted into it is left out.
  */
 values: Record<string, unknown>, 
 /**

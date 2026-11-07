@@ -509,6 +509,10 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
         .is_unlocked();
 
     if is_unlocked {
+        // The wallet now lists the retired keys: finish the moves of a re-key the process
+        // did not live through, once the perspectives are open.
+        crate::identity::rekey::finish_moves_at_start();
+
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
 

@@ -346,7 +346,7 @@ pub async fn rekey(executor_url: &str, token: &str) -> Result<()> {
     if !is_loopback_url(executor_url) {
         bail!(
             "rekey runs only on the executor's own machine: {executor_url} is not a loopback \
-             address (use ws://127.0.0.1:<port>/api/v1/ws)"
+             address (use http://127.0.0.1:<port>)"
         );
     }
     let client = WsRpcClient::connect(executor_url, token)
@@ -378,6 +378,7 @@ mod tests {
 
     #[test]
     fn rekey_reaches_only_a_loopback_executor() {
+        assert!(is_loopback_url("http://127.0.0.1:12000"));
         assert!(is_loopback_url("ws://127.0.0.1:12000/api/v1/ws"));
         assert!(is_loopback_url("ws://[::1]:12000/api/v1/ws"));
         assert!(is_loopback_url("ws://localhost:12000/api/v1/ws"));

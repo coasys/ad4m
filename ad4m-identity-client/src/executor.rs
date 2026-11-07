@@ -39,6 +39,20 @@ pub struct IdentityStatus {
     /// Set while the executor's configured store answers the log behind its cache.
     #[serde(default)]
     pub store_behind: Option<StoreBehind>,
+    /// The identity store the executor uses (its config's, else its network seed's) and whether
+    /// it trusts a key for it; `None` without a store.
+    pub store: Option<StoreInfo>,
+}
+
+/// The executor's identity store (`identity.status.store`): its base URL, and whether the
+/// executor trusts a key for it. Untrusted, the executor accepts no head from it, so no
+/// `did:scid` record verifies and `identity.publish` / `identity.claimOffer` refuse
+/// `no-store-keys`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreInfo {
+    pub url: String,
+    pub trusted: bool,
 }
 
 /// The executor's configured store answering a log behind its cache, since `since` (unix

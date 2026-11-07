@@ -428,9 +428,19 @@ impl Grants {
     /// ones too: `revoke` ends a grant before its write, so after a failed write the
     /// grant is ended here but active in the database, which a restart loads.
     pub fn revoke_agent(&self, agent: &AgentContext) -> Result<usize, GrantError> {
+        self.revoke_where(|g| g.agent == *agent)
+    }
+
+    /// Revokes every grant of every agent, as [`Grants::revoke_agent`] does for one: the key
+    /// that signed their tokens is gone (`identity.rekey` on the local wallet).
+    pub fn revoke_all(&self) -> Result<usize, GrantError> {
+        self.revoke_where(|_| true)
+    }
+
+    fn revoke_where(&self, matches: impl Fn(&LiveGrant) -> bool) -> Result<usize, GrantError> {
         let grants: Vec<Arc<LiveGrant>> = read(&self.live)
             .values()
-            .filter(|g| g.agent == *agent)
+            .filter(|g| matches(g))
             .cloned()
             .collect();
         if grants.is_empty() {
@@ -478,7 +488,7 @@ impl Grants {
     /// Revokes every grant bound to the device key `key` (a multikey): its key stopped being
     /// valid in its identity's log. Returns how many were active.
     pub fn revoke_key(&self, key: &str) -> Result<usize, GrantError> {
-        self.revoke_where(|g| g.key.as_ref().is_some_and(|k| k.key == key))
+        self.revoke_unexpired_where(|g| g.key.as_ref().is_some_and(|k| k.key == key))
     }
 
     /// Revokes every grant bound to a key of the identity `scid` (`did:scid:…`), except the
@@ -490,7 +500,7 @@ impl Grants {
         keep: Option<&TokenId>,
         before: Option<u64>,
     ) -> Result<usize, GrantError> {
-        self.revoke_where(|g| {
+        self.revoke_unexpired_where(|g| {
             g.key.as_ref().is_some_and(|k| k.scid == scid)
                 && Some(&g.id) != keep
                 && before.is_none_or(|before| g.created_at < before)
@@ -505,7 +515,7 @@ impl Grants {
         keep: Option<&TokenId>,
         before: Option<u64>,
     ) -> Result<usize, GrantError> {
-        self.revoke_where(|g| {
+        self.revoke_unexpired_where(|g| {
             g.agent == *agent
                 && g.role == GrantRole::Agent
                 && Some(&g.id) != keep
@@ -515,7 +525,10 @@ impl Grants {
 
     /// Revokes the unexpired grants that `matches`, ended ones included (a failed write left
     /// them active in the database). Returns how many were active.
-    fn revoke_where(&self, matches: impl Fn(&LiveGrant) -> bool) -> Result<usize, GrantError> {
+    fn revoke_unexpired_where(
+        &self,
+        matches: impl Fn(&LiveGrant) -> bool,
+    ) -> Result<usize, GrantError> {
         let now = now();
         let grants: Vec<Arc<LiveGrant>> = read(&self.live)
             .values()

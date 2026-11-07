@@ -663,6 +663,10 @@ mod tests {
         crate::config::set_global_config(crate::Ad4mConfig::default());
         let keys: DeviceKeys = serde_json::from_value(answer.unwrap()).unwrap();
         assert_eq!(keys.sign, crate::agent::did());
-        assert!(keys.enc.starts_with("z6LS"), "{}", keys.enc);
+        let signing = crate::identity::device::multikey_of(&keys.sign).unwrap();
+        assert_eq!(
+            keys.enc,
+            crate::identity::device::enc_key_of(&signing).unwrap()
+        );
     }
 }

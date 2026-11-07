@@ -811,6 +811,12 @@ mod audience_matrix_tests {
                 event(Topic::AgentUpdated, Audience::Dids(vec![])),
                 vec![],
             ),
+            // `runtime.setConfig` wrote the config file: the operator only.
+            (
+                "config-changed".into(),
+                event(Topic::ConfigChanged, Audience::Operator),
+                vec!["operator"],
+            ),
         ];
         // Agent topics go to the agent the payload names (`matches_agent_did` before), or to
         // every session that may read agents while the status names no agent (before

@@ -794,6 +794,7 @@ mod tests {
             store_url: None,
             challenges: Default::default(),
             inbox: Default::default(),
+            store_keys_source: crate::identity::StoreSource::Config,
         }
     }
 
@@ -814,6 +815,7 @@ mod tests {
                 store_url: None,
                 challenges: Default::default(),
                 inbox: Default::default(),
+                store_keys_source: crate::identity::StoreSource::Config,
             };
             self.store = store;
             self
