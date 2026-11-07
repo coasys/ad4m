@@ -45,6 +45,7 @@ export * from "./utils";
 export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
 export * from "./identity/IdentityClient"
+export * from "./bot/BotClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeTypes"
 export { Model as AIModel, ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"
