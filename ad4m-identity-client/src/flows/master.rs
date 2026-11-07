@@ -1,6 +1,8 @@
-//! The master key for a device that keeps it (spec section 17): an app the person lets keep it
-//! (a claim with `canKeepMaster` on a `device` offer, or a device the record lists as a desktop
-//! or phone app, sent by the person's choice or on its `send-master` request).
+//! The master key for a device that keeps it (spec section 17): a device the key log lets keep it
+//! ([`ad4m_identity_core::link::may_keep_master`]: a standing key of the incept, or an `add`
+//! whose claim co-signature said `canKeepMaster`), sent at the link (a `device` offer), by the
+//! person's choice, or on its `send-master` request. The private record's device kind never
+//! decides it: any linked device can write the record.
 //!
 //! The holder's side ([`send_master`], and inside [`super::link::LinkFlow::confirm`]): the
 //! current master key seals itself ([`crate::MasterSigner::seal_self`]) into
@@ -30,14 +32,15 @@
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{InboxAddress, InboxError};
-use ad4m_identity_core::record::{DeviceKind, HoldsMaster};
-use ad4m_identity_core::{KelChain, KeyId};
+use ad4m_identity_core::link::may_keep_master;
+use ad4m_identity_core::record::HoldsMaster;
+use ad4m_identity_core::{Event, KelChain, KeyId};
 use ad4m_ldk::identity::InboxWrite;
 
 use crate::executor::{ExecutorRpc, RpcError, ViaExecutor};
 use crate::record::{self, Change};
 use crate::request::{
-    body_bytes, chain_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
+    body_bytes, chain_of, log_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
 };
 use crate::vault::{KeySigner, MasterSigner, MasterUse, PendingPush, Vault};
 use crate::{ClientError, Clock, Random};
@@ -77,26 +80,34 @@ pub(crate) fn transient(e: &ClientError) -> bool {
     matches!(e, ClientError::Rpc(RpcError { code, .. }) if *code >= 500 || *code == 429)
 }
 
-/// The device key `key_id` of `chain` that can take a master key: valid at the head, without
-/// the bot mark, with an `enc` key. Answers its signing key and `enc` key.
-fn keeper<'c>(chain: &'c KelChain, key_id: &str) -> Result<(&'c str, &'c str), ClientError> {
+/// The device key `key_id` of `chain` that may be sent the master key: valid at the head,
+/// without the bot mark, with an `enc` key, and let keep it by the log `events` (`chain`'s
+/// events, [`may_keep_master`]). Answers its signing key and `enc` key.
+fn keeper<'c>(
+    events: &[Event],
+    chain: &'c KelChain,
+    key_id: &str,
+) -> Result<(&'c str, &'c str), ClientError> {
     let state = chain.state();
     state
         .keys
         .get(key_id)
         .filter(|k| k.scopes.is_empty() && state.key_valid_at(key_id, chain.head().seq))
+        .filter(|_| may_keep_master(events, key_id))
         .and_then(|k| Some((k.sign.as_str(), k.enc.as_deref()?)))
         .ok_or_else(|| ClientError::NotAKeeper(key_id.to_string()))
 }
 
 /// Puts the master key `signer` (the current one at `chain`'s head) into the joined inbox of
-/// device `key_id` of `did`, sealed to its `enc` key in the log. The push is on the vault's
+/// device `key_id` of `did`, sealed to its `enc` key in the log; refused unless the log
+/// `events` lets the device keep it ([`keeper`]). The push is on the vault's
 /// retry list from the start, and stays there when it fails in a way a later try may pass (the
 /// executor or the store unreachable or busy). Answers the inbox message's id.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn push<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
+    events: &[Event],
     chain: &KelChain,
     did: &str,
     signer: &dyn MasterSigner,
@@ -104,7 +115,7 @@ pub(crate) async fn push<R: ExecutorRpc>(
     clock: &dyn Clock,
     random: &dyn Random,
 ) -> Result<String, ClientError> {
-    let (sign, enc) = keeper(chain, key_id)?;
+    let (sign, enc) = keeper(events, chain, key_id)?;
     let scid = chain.id().to_string();
     let pending = PendingPush {
         scid: scid.clone(),
@@ -144,7 +155,7 @@ pub(crate) async fn push<R: ExecutorRpc>(
 
 /// Sends the current master key of `did` to its device `key_id` (the person chose it: "Keep my
 /// master key on this device too", or "send it again"), with one unlock, and marks the device
-/// `holdsMaster: "offered"` in the record. Refused before the unlock unless [`check_app`]
+/// `holdsMaster: "offered"` in the record. Refused before the unlock unless [`check_keeper`]
 /// passes.
 pub async fn send_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
@@ -155,38 +166,33 @@ pub async fn send_master<R: ExecutorRpc>(
     random: &dyn Random,
 ) -> Result<Sent, ClientError> {
     let scid = scid_of(did)?;
-    let chain = chain_of(executor, did).await?;
-    check_app(executor, did, &chain, key_id).await?;
+    let (events, chain) = log_of(executor, did).await?;
+    check_keeper(&events, &chain, key_id)?;
     let unlocked = vault.unlock(&scid, MasterUse::SendMaster, clock.now())?;
     let signer = unlocked.signer(clock.now())?;
-    send_with(executor, vault, &chain, did, signer, key_id, clock, random).await
+    send_with(
+        executor, vault, &events, &chain, did, signer, key_id, clock, random,
+    )
+    .await
 }
 
-/// Refused unless the device key `key_id` of `did` may be sent the master key outside a link:
-/// a device key of the log that can take one ([`keeper`]) and that the record lists as a
-/// desktop or phone app.
-pub(crate) async fn check_app<R: ExecutorRpc>(
-    executor: &ViaExecutor<R>,
-    did: &str,
+/// Refused unless the device key `key_id` may be sent the master key: a device key of `chain`,
+/// valid at the head, that the log `events` lets keep it ([`keeper`], [`may_keep_master`]). The
+/// record's device kind is not read: any linked device can write it.
+pub(crate) fn check_keeper(
+    events: &[Event],
     chain: &KelChain,
     key_id: &str,
 ) -> Result<(), ClientError> {
-    keeper(chain, key_id)?;
-    let kind = record::read(executor, did)
-        .await?
-        .and_then(|opened| opened.record.devices.get(key_id).map(|entry| entry.kind));
-    if matches!(kind, Some(DeviceKind::DesktopApp | DeviceKind::PhoneApp)) {
-        Ok(())
-    } else {
-        Err(ClientError::NotAKeeper(key_id.to_string()))
-    }
+    keeper(events, chain, key_id).map(|_| ())
 }
 
-/// [`send_master`] under an unlock the caller holds, after [`check_app`].
+/// [`send_master`] under an unlock the caller holds, after [`check_keeper`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_with<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
+    events: &[Event],
     chain: &KelChain,
     did: &str,
     signer: &dyn MasterSigner,
@@ -194,7 +200,10 @@ pub(crate) async fn send_with<R: ExecutorRpc>(
     clock: &dyn Clock,
     random: &dyn Random,
 ) -> Result<Sent, ClientError> {
-    let message_id = push(executor, vault, chain, did, signer, key_id, clock, random).await?;
+    let message_id = push(
+        executor, vault, events, chain, did, signer, key_id, clock, random,
+    )
+    .await?;
     let record = record::write(
         executor,
         did,
@@ -232,10 +241,10 @@ pub async fn retry_pushes<R: ExecutorRpc>(
     if pending.is_empty() {
         return Ok(retried);
     }
-    let chain = chain_of(executor, did).await?;
+    let (events, chain) = log_of(executor, did).await?;
     let mut live = Vec::new();
     for push in pending {
-        if keeper(&chain, &push.key_id).is_ok() {
+        if keeper(&events, &chain, &push.key_id).is_ok() {
             live.push(push.key_id);
         } else {
             vault.push_done(&push)?;
@@ -248,7 +257,10 @@ pub async fn retry_pushes<R: ExecutorRpc>(
     let signer = unlocked.signer(clock.now())?;
     let mut offered = Vec::new();
     for key_id in live {
-        let sent = push(executor, vault, &chain, did, signer, &key_id, clock, random).await;
+        let sent = push(
+            executor, vault, &events, &chain, did, signer, &key_id, clock, random,
+        )
+        .await;
         if sent.is_ok() {
             offered.push(Change::HoldsMaster {
                 key_id: key_id.clone(),

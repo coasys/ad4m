@@ -4,7 +4,7 @@
 
 use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
 use ad4m_identity_core::link::SignedBy;
-use ad4m_identity_core::{signing_bytes, KelChain, REQUEST_DOMAIN};
+use ad4m_identity_core::{signing_bytes, Event, KelChain, REQUEST_DOMAIN};
 use ad4m_ldk::identity::{RequestBody, SignedRequest};
 use serde::Serialize;
 
@@ -27,7 +27,18 @@ pub(crate) async fn chain_of<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     did: &str,
 ) -> Result<KelChain, ClientError> {
-    fold(&executor.events(did).await?)
+    Ok(log_of(executor, did).await?.1)
+}
+
+/// [`chain_of`] with the events it folded, for a check that reads the events themselves (the
+/// master-key rule, [`ad4m_identity_core::link::may_keep_master`]).
+pub(crate) async fn log_of<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+) -> Result<(Vec<Event>, KelChain), ClientError> {
+    let events = executor.events(did).await?;
+    let chain = fold(&events)?;
+    Ok((events, chain))
 }
 
 /// The `did:key` of the store whose head the executor accepted for `did`: a signed request is

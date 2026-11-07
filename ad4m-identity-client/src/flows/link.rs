@@ -33,7 +33,7 @@ use serde_json::json;
 use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::record::{self, Change};
 use crate::request::{
-    b58_random, body_bytes, chain_of, master_at_head, master_request, scid_of, store_of,
+    b58_random, body_bytes, chain_of, log_of, master_at_head, master_request, scid_of, store_of,
     MasterPosition,
 };
 use crate::secret::Secret;
@@ -268,7 +268,10 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
     }
 
     /// Whether the card may offer "Keep my master key on this device too" for `claimed`: a
-    /// `device` offer whose claim says the device may keep it.
+    /// `device` offer whose claim says the device may keep it. The claim's co-signature covers
+    /// `canKeepMaster` and the `add` carries it, so this is the log's rule
+    /// ([`ad4m_identity_core::link::may_keep_master`]) before the add; the push after the add
+    /// checks the log itself. The record's device kind never decides it.
     pub fn may_keep(&self, claimed: &Claimed) -> bool {
         self.offer.kind == OfferKind::Device && claimed.can_keep_master
     }
@@ -384,17 +387,19 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                         && *co_sig == claimed.claim.co_sig
                         && add.iter().any(|k| k.sign == claimed.device_key))
             });
-        let (head, chain) = if landed {
+        let (head, events, chain) = if landed {
             let head = log.head.ok_or_else(|| {
                 ClientError::Protocol("the executor accepted no head for the log".into())
             })?;
-            (head, fold(&events)?)
+            let chain = fold(&events)?;
+            (head, events, chain)
         } else {
             let chain = fold(&events)?;
             let signer = self.unlocked.signer(self.clock.now())?;
             let event = add_claimed(&chain, signer, &self.offer, &claimed.claim)?;
             let head = self.executor.publish(std::slice::from_ref(&event)).await?;
-            (head, chain_of(self.executor, &self.did).await?)
+            let (events, chain) = log_of(self.executor, &self.did).await?;
+            (head, events, chain)
         };
         let key_id = chain
             .state()
@@ -414,6 +419,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                 super::master::push(
                     self.executor,
                     self.vault,
+                    &events,
                     &chain,
                     &self.did,
                     signer,

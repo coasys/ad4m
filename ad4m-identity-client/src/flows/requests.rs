@@ -8,7 +8,8 @@
 //! holds, over the hash of `JCS({body, expires})`; and that it still holds (not expired, and a
 //! `confirm-revoke` names keys valid at the head). Then:
 //! - `send-master`: the master key goes to the poster as a link's does ([`super::master`]),
-//!   only when the record lists the poster as a desktop or phone app; the record marks it
+//!   only when the key log lets the poster keep it (a standing key of the incept, or an `add`
+//!   whose claim said `canKeepMaster`; never the record's device kind); the record marks it
 //!   `holdsMaster: "offered"`.
 //! - `confirm-revoke`: the listed keys are revoked ([`super::revoke`]). One that asks for a
 //!   rotation too needs the 12 words: [`answer`] refuses it with [`ClientError::NeedsWords`],
@@ -29,7 +30,7 @@ use crate::flows::master::{self, Sent};
 use crate::flows::revoke::{revoke_with, Revoked};
 use crate::flows::rotate::{master_of, rotate, Rotated};
 use crate::request::{
-    body_bytes, chain_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
+    body_bytes, chain_of, log_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
 };
 use crate::vault::{MasterSigner, MasterUse, Vault};
 use crate::{ClientError, Clock, Random};
@@ -113,7 +114,7 @@ fn check_current(request: &DeviceRequest, chain: &KelChain, now: u64) -> Result<
 /// with one unlock, then deletes it. Refused before the unlock when its poster did not sign it
 /// ([`check_poster`]), when it no longer holds against the log and the clock (expired, or a
 /// `confirm-revoke` naming a key not valid at the head), or when the poster may not keep the
-/// master key ([`master::check_app`]).
+/// master key ([`master::check_keeper`]).
 pub async fn answer<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -123,17 +124,18 @@ pub async fn answer<R: ExecutorRpc>(
     random: &dyn Random,
 ) -> Result<Answered, ClientError> {
     let scid = scid_of(did)?;
-    let chain = chain_of(executor, did).await?;
+    let (events, chain) = log_of(executor, did).await?;
     check_poster(request, did, &chain)?;
     check_current(request, &chain, clock.now())?;
     match &request.body {
         DeviceRequestBody::SendMaster {} => {
-            master::check_app(executor, did, &chain, &request.by).await?;
+            master::check_keeper(&events, &chain, &request.by)?;
             let unlocked = vault.unlock(&scid, MasterUse::SendMaster, clock.now())?;
             let signer = unlocked.signer(clock.now())?;
             let sent = master::send_with(
                 executor,
                 vault,
+                &events,
                 &chain,
                 did,
                 signer,

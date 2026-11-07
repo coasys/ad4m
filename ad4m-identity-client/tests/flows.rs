@@ -1803,14 +1803,15 @@ fn device_string(device: &ViaExecutor<TestExecutor>, store: &str, exp: u64) -> D
     }
 }
 
-/// `a` links `b` with an unbound `device` offer and `entry`, without the master key; answers
-/// the new key's id.
+/// `a` links `b` with an unbound `device` offer and `entry`, without the master key; `b`'s
+/// claim says `can_keep_master`. Answers the new key's id.
 async fn link_app(
     a: &ViaExecutor<TestExecutor>,
     vault: &MemoryVault,
     did: &str,
     b: &ViaExecutor<TestExecutor>,
     entry: DeviceEntry,
+    can_keep_master: bool,
 ) -> String {
     let flow = LinkFlow::open(
         a,
@@ -1824,7 +1825,14 @@ async fn link_app(
     )
     .await
     .unwrap();
-    let claimed_b = claim(b, &flow.offer_string(), None).await.unwrap();
+    let claimed_b = b
+        .rpc()
+        .call(
+            "identity.claimOffer",
+            json!({ "offer": flow.offer_string(), "canKeepMaster": can_keep_master }),
+        )
+        .await
+        .unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
     let linked = flow.confirm(&claimed, entry, false).await.unwrap();
     linked.record.unwrap();
@@ -2051,6 +2059,7 @@ async fn a_failed_push_stays_on_the_retry_list_until_it_passes() {
         &did,
         &desk,
         entry("Desk", DeviceKind::DesktopApp),
+        true,
     )
     .await;
 
@@ -2141,6 +2150,7 @@ async fn record_writes_merge_into_the_newest_version() {
         &did,
         &desk,
         entry("Desk", DeviceKind::DesktopApp),
+        true,
     )
     .await;
 
@@ -2201,6 +2211,7 @@ async fn the_holder_answers_a_devices_send_master_request() {
         &did,
         &desk,
         entry("Desk", DeviceKind::DesktopApp),
+        true,
     )
     .await;
 
@@ -2269,8 +2280,9 @@ async fn the_holder_answers_a_devices_send_master_request() {
     );
 }
 
-/// The master key goes only to a device the record lists as an app: neither on the server's
-/// request nor by the person's choice, and the vault is never unlocked for it.
+/// The master key goes only to a device the key log lets keep it: not to a server whose claim
+/// said no, neither on its request nor by the person's choice, nor to a key the log does not
+/// list; and the vault is never unlocked for it.
 #[tokio::test]
 async fn a_server_that_asks_for_the_master_key_gets_none() {
     let store = TestStore::new();
@@ -2278,7 +2290,15 @@ async fn a_server_that_asks_for_the_master_key_gets_none() {
     let server = ViaExecutor::new(TestExecutor::new(&store, 2));
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 18).await;
-    let d2 = link_app(&a, &vault, &did, &server, entry("node", DeviceKind::Server)).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &server,
+        entry("node", DeviceKind::Server),
+        false,
+    )
+    .await;
     server
         .post_request(&DeviceRequestBody::SendMaster {}, None)
         .await
@@ -2292,13 +2312,108 @@ async fn a_server_that_asks_for_the_master_key_gets_none() {
         send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom).await,
         Err(ClientError::NotAKeeper(_))
     ));
-    // Nor to a device key the record does not list at all.
+    // Nor to a device key the log does not list at all.
     assert!(matches!(
-        send_master(&a, &vault, &did, "d1", &SystemClock, &OsRandom).await,
+        send_master(&a, &vault, &did, "d9", &SystemClock, &OsRandom).await,
         Err(ClientError::NotAKeeper(_))
     ));
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
     assert!(vault.pending_pushes().unwrap().is_empty());
+}
+
+/// A device whose claim did not say `canKeepMaster` writes itself into the record as a desktop
+/// app (any linked device can write the record) and asks for the master key: the holder
+/// refuses, before any unlock, because the log decides and the record's kind grants nothing.
+#[tokio::test]
+async fn a_device_the_record_calls_an_app_but_the_log_does_not_let_keep_gets_no_master_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let device = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 21).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &device,
+        entry("node", DeviceKind::Server),
+        false,
+    )
+    .await;
+    // The device rewrites its own entry: now the record says it is a desktop app.
+    record::write(
+        &device,
+        &did,
+        &[Change::Device {
+            key_id: d2.clone(),
+            entry: entry("Desk", DeviceKind::DesktopApp),
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].kind, DeviceKind::DesktopApp);
+
+    device
+        .post_request(&DeviceRequestBody::SendMaster {}, None)
+        .await
+        .unwrap();
+    let listed = a.requests(0).await.unwrap();
+    let refused = answer(&a, &vault, &did, &listed[0], &SystemClock, &OsRandom).await;
+    assert!(
+        matches!(&refused, Err(ClientError::NotAKeeper(k)) if *k == d2),
+        "{refused:?}"
+    );
+    let refused = send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom).await;
+    assert!(
+        matches!(&refused, Err(ClientError::NotAKeeper(k)) if *k == d2),
+        "{refused:?}"
+    );
+    assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
+    assert!(vault.pending_pushes().unwrap().is_empty());
+    assert!(take_master(&device, &MemoryVault::new(), &OsRandom)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// A device whose claim said `canKeepMaster`, listed in the record as a server, asks for the
+/// master key: the log lets it keep it, so the holder sends it; the record's kind refuses
+/// nothing either.
+#[tokio::test]
+async fn a_device_the_log_lets_keep_gets_the_master_key_whatever_the_record_says() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let device = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 22).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &device,
+        entry("node", DeviceKind::Server),
+        true,
+    )
+    .await;
+    device
+        .post_request(&DeviceRequestBody::SendMaster {}, None)
+        .await
+        .unwrap();
+    let listed = a.requests(0).await.unwrap();
+    let sent = answer(&a, &vault, &did, &listed[0], &SystemClock, &OsRandom).await;
+    assert!(matches!(&sent, Ok(Answered::MasterSent(_))), "{sent:?}");
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].kind, DeviceKind::Server);
+    assert_eq!(
+        opened.record.devices[&d2].holds_master,
+        HoldsMaster::Offered
+    );
+    assert!(take_master(&device, &MemoryVault::new(), &OsRandom)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 /// A request answered after it expired is refused before the unlock, and stays in the box.
@@ -2315,6 +2430,7 @@ async fn an_expired_request_is_refused() {
         &did,
         &desk,
         entry("Desk", DeviceKind::DesktopApp),
+        true,
     )
     .await;
     desk.post_request(
@@ -2357,6 +2473,7 @@ async fn the_holder_answers_a_confirm_revoke_request() {
         &did,
         &phone,
         entry("Phone", DeviceKind::PhoneApp),
+        true,
     )
     .await;
     let d3 = link_app(
@@ -2365,6 +2482,7 @@ async fn the_holder_answers_a_confirm_revoke_request() {
         &did,
         &host,
         entry("host", DeviceKind::CommunityHost),
+        false,
     )
     .await;
 

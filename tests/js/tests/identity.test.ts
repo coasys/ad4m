@@ -734,9 +734,11 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
     });
 
     it("deletes a master key on an executor without the custody channel and never hands it out", async () => {
-        // The master key goes only to a device the record lists as an app: a server is refused.
-        expect(await refused(holder.send({ cmd: "sendMaster", did, keyId: "d1" }))).to.contain("may not keep");
-        await holder.send({ cmd: "recordDevice", did, keyId: "d1", name: "Home", kind: "desktop-app" });
+        // The log decides who may keep the master key, never the record's kind: d1 made the
+        // identity (a standing key of the incept), so the holder sends it even though the record
+        // calls it a server; a key the log does not list is refused.
+        await holder.send({ cmd: "recordDevice", did, keyId: "d1", name: "Home", kind: "server" });
+        expect(await refused(holder.send({ cmd: "sendMaster", did, keyId: "d9" }))).to.contain("may not keep");
         await holder.send({ cmd: "sendMaster", did, keyId: "d1" });
         expect(await home.client.identity.inbox()).to.deep.equal([]);
         expect(await refused(home.client.identity.takeMaster())).to.contain("no-custody-channel");
