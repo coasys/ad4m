@@ -297,6 +297,44 @@ async fn an_output_edited_after_completion_stops_being_a_valid_output() {
     assert!(verdict.is_verified(), "the ratchet holds — got: {verdict}");
 }
 
+/// An output committed under its class's bare name (`Task`, as a client may
+/// name it in `proposeTransition`) answers a query that names the class by
+/// its IRI (`ns://Task`, as the SDK does), and one by the name: the name is
+/// the class it reads here.
+///
+/// Red if the filter compares the committed name with the query's key alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_output_committed_by_name_answers_a_query_by_iri() {
+    use crate::perspectives::flow_instance::produced::mint_flow_receipt;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    let by_name = OutputRef {
+        class_name: "Task".to_string(),
+        id: TASK.to_string(),
+    };
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[by_name],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+
+    let filter = serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } });
+    for class in ["ns://Task", "Task"] {
+        let (ids, total) = ids_of_class(&f, class, filter.clone()).await;
+        assert_eq!(ids, vec![TASK.to_string()], "queried as {class}");
+        assert_eq!(total, 1, "queried as {class}");
+    }
+}
+
 /// The filter runs BEFORE the page is cut (the #1093 `limitPerAnchor`
 /// guarantee, restated for verification): with forged receipts planted for
 /// two other tasks, `limit: 2` still returns the two VALID outputs — never

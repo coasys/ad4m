@@ -26,7 +26,7 @@
 //! structure.
 
 use super::types::{ModelShape, ShapeResolver};
-use crate::perspectives::shacl_parser::{ABSTRACT_PREDICATE, ALIAS_PREDICATE};
+use crate::perspectives::shacl_parser::{class_name_of, ABSTRACT_PREDICATE, ALIAS_PREDICATE};
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::perspectives::subject_classes_of::{concrete_subject_class_names, local_name};
 use deno_core::anyhow::Error;
@@ -38,6 +38,7 @@ use std::sync::Arc;
 /// cached by the perspective until the installed shapes change.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AbstractIndex {
+    /// By target class IRI.
     abstract_classes: BTreeSet<String>,
     /// class name → property name → { abstract class name → alias }.
     aliases: HashMap<String, HashMap<String, BTreeMap<String, String>>>,
@@ -58,8 +59,8 @@ impl AbstractIndex {
         let abstract_classes = rows
             .iter()
             .filter_map(|r| r["targetClass"].as_str())
-            .map(local_name)
-            .filter(|n| !n.is_empty())
+            .filter(|c| !local_name(c).is_empty())
+            .map(str::to_string)
             .collect();
 
         let aliased = format!(
@@ -107,8 +108,11 @@ impl AbstractIndex {
         })
     }
 
-    pub fn is_abstract(&self, class_name: &str) -> bool {
-        self.abstract_classes.contains(class_name)
+    /// Whether `class` (a target class IRI, or a class name) is abstract.
+    pub fn is_abstract(&self, class: &str) -> bool {
+        self.abstract_classes
+            .iter()
+            .any(|c| c == class || class_name_of(c) == class)
     }
 
     /// The name `property` of `class` answers to read through

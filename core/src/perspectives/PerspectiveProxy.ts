@@ -1285,12 +1285,16 @@ export class PerspectiveProxy {
         return SHACLFlow.fromLinks(flowLinks, flowUri);
     }
 
-    /** The class name of `subjectClass`: the string itself, the `@Model`
-     *  name of a decorated class or instance, else the first registered class
-     *  that has the template object's properties; `null` when none does. */
+    /** The key the executor addresses `subjectClass` by: the string itself
+     *  (a name or a target class IRI), the target class IRI of a decorated
+     *  class or instance (`Ad4mModel.queriedAs`), else the name of the first
+     *  registered class that has the template object's properties; `null`
+     *  when none does. */
     async #classNameOf(subjectClass: unknown): Promise<string | null> {
         if (typeof subjectClass === "string") return subjectClass;
         const obj = subjectClass as any;
+        const model = typeof obj === "function" ? obj : obj.constructor;
+        if (model?.className && typeof model.queriedAs === "function") return model.queriedAs();
         return obj.className || obj.constructor?.className || obj.constructor?.prototype?.className
             || await this.findClassByProperties(obj);
     }
@@ -1367,15 +1371,9 @@ export class PerspectiveProxy {
      * and won't be executed until the batch is committed.
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
-        // A built-in abstract class (`TextContent`, #1446) is never stored,
-        // so it has no marker: the executor dispatches it by its URI.
-        const ctor = (subjectClass as any)?.constructor;
-        if (typeof subjectClass === "object" && ctor && Object.prototype.hasOwnProperty.call(ctor, 'builtinUri')) {
-            await this.#client.removeSubject(this.#handle.uuid, ctor.builtinUri, exprAddr, batchId);
-            return;
-        }
         // The executor runs the class's destructor: for an abstract class
-        // (#1435), the destructors of the record's classes it reads.
+        // (#1435), the destructors of the record's classes it reads. A
+        // built-in one (`TextContent`, #1446) goes by its URI.
         const className = await this.#className(subjectClass);
         await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
     }

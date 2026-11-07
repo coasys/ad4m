@@ -2490,7 +2490,9 @@ pub struct PerspectiveDiscardBatchParams {
     pub body: DiscardBatchRequest,
 }
 
-/// `names` restricts the reply to those classes; unknown names are left out.
+/// `names` restricts the reply to those classes, each named by its name
+/// (every class of that name) or its target class IRI; unknown ones are left
+/// out.
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct PerspectiveShapesParams {

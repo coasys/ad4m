@@ -614,7 +614,7 @@ impl Walk<'_> {
                         .include_relations
                         .iter()
                         .find(|r| r.name == *key && !r.target_class_name.is_empty())
-                        .and_then(|r| self.resolver.get_shape(&r.target_class_name).ok());
+                        .and_then(|r| self.resolver.get_shape(r.target()).ok());
                     let Some(target) = target else {
                         // The quantified records' class is unknown, so there is
                         // no flag to recognise one by.
@@ -657,7 +657,7 @@ impl Walk<'_> {
             };
             self.rules.via.add(&rel.predicate);
             let target = (!rel.target_class_name.is_empty())
-                .then(|| self.resolver.get_shape(&rel.target_class_name).ok())
+                .then(|| self.resolver.get_shape(rel.target()).ok())
                 .flatten();
             match target {
                 Some(target) => {
@@ -688,7 +688,7 @@ impl Walk<'_> {
             let target = (!sub.polymorphic.unwrap_or(false))
                 .then_some(())
                 .filter(|_| !rel.target_class_name.is_empty())
-                .and_then(|_| self.resolver.get_shape(&rel.target_class_name).ok());
+                .and_then(|_| self.resolver.get_shape(rel.target()).ok());
             match target {
                 Some(target) => {
                     self.watch_class(&target);
@@ -723,7 +723,7 @@ impl Walk<'_> {
                     .include_relations
                     .iter()
                     .find(|r| r.name == proj.from && !r.target_class_name.is_empty())
-                    .map(|r| r.target_class_name.clone())
+                    .map(|r| r.target().to_string())
             });
             let target = target_name.and_then(|n| self.resolver.get_shape(&n).ok());
             if proj.transitive {

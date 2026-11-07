@@ -25,6 +25,7 @@ use crate::perspectives::model_query::containment::{self, ContainmentEdges};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
 use crate::perspectives::perspective_instance::SubjectClassOption;
+use crate::perspectives::shacl_parser::class_name_of;
 use serde_json::Value;
 
 /// What the installed shapes say about abstract classes, and how many times
@@ -106,14 +107,15 @@ impl PerspectiveInstance {
 
     /// The name aliases key `abstract_class` by, and its shape. A built-in
     /// by its URI, from `builtin_classes`, never from the store: an app class
-    /// of the same name does not change what it reads or writes.
-    fn abstract_shape<'a>(
-        &self,
-        abstract_class: &'a str,
-    ) -> Result<(&'a str, Arc<ModelShape>), AnyError> {
+    /// of the same name does not change what it reads or writes. A stored
+    /// class by its IRI or its name; aliases name it by its name.
+    fn abstract_shape(&self, abstract_class: &str) -> Result<(String, Arc<ModelShape>), AnyError> {
         Ok(match builtin(abstract_class) {
-            Some(b) => (b.name, b.shape.clone()),
-            None => (abstract_class, self.get_shape(abstract_class)?),
+            Some(b) => (b.name.to_string(), b.shape.clone()),
+            None => (
+                class_name_of(abstract_class),
+                self.get_shape(abstract_class)?,
+            ),
         })
     }
 
@@ -137,7 +139,7 @@ impl PerspectiveInstance {
             &self.sparql_store,
             &self.shape_resolver(),
             &index,
-            alias_key,
+            &alias_key,
             &shape,
         )?;
         // A built-in that reads its own rows (`Container`'s class-less
@@ -349,7 +351,7 @@ impl PerspectiveInstance {
             let mut has_action = false;
             for class in &targets {
                 let own_shape = self.get_shape(class)?;
-                let Some(own) = index.own_name(class, &own_shape, name, alias_key) else {
+                let Some(own) = index.own_name(class, &own_shape, name, &alias_key) else {
                     continue;
                 };
                 let Some(actions) = self.actions_for(class, own, op, membership).await? else {

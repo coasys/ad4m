@@ -23,7 +23,6 @@ use ts_rs::TS;
 
 use super::PerspectiveInstance;
 use crate::agent::AgentContext;
-use crate::perspectives::model_query::shape::find_class;
 use crate::perspectives::shacl_parser::{
     canonical_json, class_name_of, is_own_link, shape_from_links, shape_links, SHACLShape,
     ShapeNode, SHAPE_PREDICATE, SUBJECT_CLASS,
@@ -163,7 +162,9 @@ impl PerspectiveInstance {
         Ok(registry)
     }
 
-    /// The registered classes named in `names` (all of them for `None`).
+    /// The registered classes `names` names (all of them for `None`), each
+    /// by its name (every class of that name, the least IRI first) or its
+    /// target class IRI.
     pub fn shapes(&self, names: Option<Vec<String>>) -> Result<Vec<ShapeSummary>, AnyError> {
         let registry = self.shape_registry()?;
         Ok(match names {
@@ -172,7 +173,7 @@ impl PerspectiveInstance {
                 let names: HashSet<String> = names.into_iter().collect();
                 registry
                     .iter()
-                    .filter(|s| names.contains(&s.name))
+                    .filter(|s| names.contains(&s.name) || names.contains(&s.shape.target_class))
                     .cloned()
                     .collect()
             }
@@ -201,9 +202,10 @@ impl PerspectiveInstance {
     ///
     /// Answers once the registry and the shape cache hold the new shapes.
     /// Refuses, before writing anything: a shape the encoder refuses, two
-    /// shapes for one target class, a shape URI another class holds, and a
-    /// class name (`class_name_of` its target class) another class has, in
-    /// the call or stored as the class readers find by that name.
+    /// shapes for one target class, and a shape URI another class holds.
+    /// Two classes may share a name (`class_name_of` their target classes,
+    /// `a://Task` and `b://Task`): each is addressed by its IRI, and the bare
+    /// name reads the least IRI (`model_query::shape::find_class`).
     pub async fn register_shapes(
         &mut self,
         shapes: Vec<SHACLShape>,
@@ -222,19 +224,6 @@ impl PerspectiveInstance {
                     "Two shapes for class '{target_class}' in one call: give each class once."
                 ));
             }
-        }
-        let mut names: BTreeMap<&str, &str> = BTreeMap::new();
-        for (target_class, (name, _)) in &expected {
-            if let Some(other) = names.insert(name, target_class) {
-                return Err(anyhow!(
-                    "Classes '{other}' and '{target_class}' in one call are both named \
-                     '{name}': a class name is unique in a perspective."
-                ));
-            }
-        }
-        // The names of the hard-wired classes are the executor's.
-        for (name, target_class) in &names {
-            crate::perspectives::hardwired_class::refuse_reserved_name(name, target_class)?;
         }
         let shape_uris: BTreeMap<&str, &str> = expected
             .iter()
@@ -274,24 +263,6 @@ impl PerspectiveInstance {
             }
         }
 
-        // A class is found by its name (`model_query::shape::find_class`):
-        // a second class of a name would move every query and create of it.
-        // The class `find_class` reads for a name may register again, also
-        // when two peers each registered one before they synced and both
-        // are stored: refusing it too would lock its app out on every peer.
-        for (name, target_class) in &names {
-            if let Some(found) = find_class(&self.sparql_store, name)? {
-                if found.target_class != *target_class {
-                    return Err(anyhow!(
-                        "Class '{}' is already registered under the name '{name}': class \
-                         '{target_class}' needs another name, a class name is unique in a \
-                         perspective.",
-                        found.target_class
-                    ));
-                }
-            }
-        }
-
         let mut unchanged = Vec::new();
         let mut written = Vec::new();
         let mut mutations = LinkMutations::default();
@@ -319,22 +290,24 @@ impl PerspectiveInstance {
                     .filter(|l| !wanted.contains(&triple(&l.data)))
                     .map(Into::into),
             );
-            written.push(name);
+            written.push((name, target_class));
         }
 
         if !written.is_empty() {
             self.link_mutations(mutations, LinkStatus::Shared, context)
                 .await?;
-            for name in &written {
-                self.invalidate_shape(name);
-            }
+            // The cache is keyed by what readers ask for: a class's IRI and
+            // its name. A new class of a name can change which class the name
+            // reads (the least IRI), so every entry goes.
+            self.clear_shape_cache();
         }
         self.shape_registry()?;
-        for name in &written {
-            if let Err(e) = self.get_shape(name) {
-                log::warn!("register_shapes: '{name}' is stored but does not load: {e:#}");
+        for (_, target_class) in &written {
+            if let Err(e) = self.get_shape(target_class) {
+                log::warn!("register_shapes: '{target_class}' is stored but does not load: {e:#}");
             }
         }
+        let mut written: Vec<String> = written.into_iter().map(|(name, _)| name).collect();
         unchanged.sort();
         written.sort();
         Ok(RegisterResult {

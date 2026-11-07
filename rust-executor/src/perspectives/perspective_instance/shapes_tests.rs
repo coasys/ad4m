@@ -279,7 +279,11 @@ async fn register_answers_after_the_cache_holds_the_shape() {
         let registry = cache.registry.as_ref().expect("the registry is warm");
         assert!(registry.iter().any(|s| s.name == "Note"));
     }
-    assert!(perspective.shape_cache.read().unwrap().contains_key("Note"));
+    assert!(perspective
+        .shape_cache
+        .read()
+        .unwrap()
+        .contains_key("ns://Note"));
     assert_eq!(result.generation, perspective.shapes_generation());
 }
 
@@ -372,31 +376,6 @@ async fn registration_writes_exactly_two_index_links() {
         self_links,
         "nothing indexed on ad4m://self"
     );
-}
-
-#[tokio::test]
-async fn same_local_name_in_two_namespaces_is_refused() {
-    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
-    let task = |ns: &str| -> SHACLShape {
-        serde_json::from_value(serde_json::json!({
-            "target_class": format!("{ns}Task"),
-            "properties": [{"path": format!("{ns}title"), "name": "title", "max_count": 1}]
-        }))
-        .unwrap()
-    };
-    let before = all_links(&perspective);
-
-    let err = perspective
-        .register_shapes(vec![task("a://"), task("b://")], &ctx)
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("Classes 'a://Task' and 'b://Task' in one call are both named 'Task'"),
-        "{err}"
-    );
-    assert_eq!(all_links(&perspective), before);
 }
 
 #[tokio::test]
@@ -589,49 +568,216 @@ fn task(ns: &str) -> SHACLShape {
     .unwrap()
 }
 
-#[tokio::test]
-async fn a_class_name_another_class_has_is_refused() {
-    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+/// Create `id` as `class` with `title`.
+async fn create_task(
+    perspective: &mut PerspectiveInstance,
+    class: &str,
+    id: &str,
+    title: &str,
+    ctx: &AgentContext,
+) {
     perspective
-        .register_shapes(vec![task("a://")], &ctx)
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some(class.into()),
+                query: None,
+            },
+            id.into(),
+            Some(serde_json::json!({ "title": title })),
+            None,
+            ctx,
+        )
         .await
         .unwrap();
-    let before = all_links(&perspective);
-    let generation = perspective.shapes_generation();
+}
 
-    // Stored `a://Task` holds the name: `b://Task` is refused, and so is
-    // the whole call it came in, the class that was fine with it too.
-    let err = perspective
-        .register_shapes(vec![note(), task("b://")], &ctx)
+/// The predicates of the links from `id`.
+fn predicates_of(perspective: &PerspectiveInstance, id: &str) -> BTreeSet<String> {
+    perspective
+        .sparql_store
+        .get_links_by_source(id)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.data.predicate.unwrap_or_default())
+        .collect()
+}
+
+/// The property names of the shape `key` finds, sorted.
+fn property_names(perspective: &PerspectiveInstance, key: &str) -> Vec<String> {
+    let mut names: Vec<String> = perspective
+        .get_shape(key)
+        .unwrap()
+        .properties
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Two classes of one name, `a://Task` and `b://Task`, are both
+/// registered and each is addressed by its IRI: a create and a query
+/// through an IRI use that class only, a relation whose `sh:class` is
+/// `b://TaskShape` reads `b://Task`, and the bare name reads the least
+/// IRI. The shape cache keeps the IRI and the name keys apart across
+/// re-registration.
+#[tokio::test]
+async fn two_classes_of_one_name_coexist_by_iri() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let project: SHACLShape = serde_json::from_value(serde_json::json!({
+        "target_class": "p://Project",
+        "constructor_actions": [
+            {"action": "addLink", "source": "this", "predicate": "p://kind", "target": "p://project"}
+        ],
+        "properties": [
+            {"path": "p://kind", "name": "kind", "has_value": "p://project",
+             "min_count": 1, "max_count": 1},
+            {"path": "p://tasks", "name": "tasks", "relation_kind": "hasMany",
+             "target_class_name": "Task", "class": "b://TaskShape"}
+        ]
+    }))
+    .unwrap();
+
+    let result = perspective
+        .register_shapes(vec![task("b://"), task("a://"), project], &ctx)
         .await
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Class 'a://Task' is already registered under the name 'Task'"),
-        "{err}"
-    );
-    assert_eq!(all_links(&perspective), before, "nothing is written");
-    assert_eq!(perspective.shapes_generation(), generation);
-    let names: Vec<_> = perspective
-        .shapes(None)
+        .unwrap();
+    let mut written = result.written.clone();
+    written.sort();
+    assert_eq!(written, ["Project", "Task", "Task"]);
+    let classes: Vec<_> = perspective
+        .shapes(Some(vec!["Task".into()]))
         .unwrap()
         .into_iter()
         .map(|s| s.shape.target_class)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
-    assert_eq!(names, ["a://Task"]);
+    assert_eq!(classes, ["a://Task", "b://Task"]);
+    let by_iri = perspective.shapes(Some(vec!["b://Task".into()])).unwrap();
+    assert_eq!(by_iri.len(), 1);
+    assert_eq!(by_iri[0].shape.target_class, "b://Task");
 
-    // Two classes of one name in one call.
-    let (mut fresh, _, ctx) = setup_perspective_no_llm(&[]).await;
-    let both = fresh
-        .register_shapes(vec![task("a://"), task("b://")], &ctx)
-        .await
-        .unwrap_err();
-    assert!(
-        both.to_string()
-            .contains("Classes 'a://Task' and 'b://Task' in one call are both named 'Task'"),
-        "{both}"
+    // A create through each IRI runs that class's constructor and setter.
+    create_task(&mut perspective, "a://Task", "expr://a1", "A", &ctx).await;
+    create_task(&mut perspective, "b://Task", "expr://b1", "B", &ctx).await;
+    assert_eq!(
+        predicates_of(&perspective, "expr://a1"),
+        BTreeSet::from(["a://kind".to_string(), "a://title".to_string()])
     );
-    assert!(fresh.shapes(None).unwrap().is_empty());
+    assert_eq!(
+        predicates_of(&perspective, "expr://b1"),
+        BTreeSet::from(["b://kind".to_string(), "b://title".to_string()])
+    );
+
+    // A query through each IRI reads that class only; the bare name reads
+    // the least IRI.
+    for (key, id, title) in [
+        ("a://Task", "expr://a1", "A"),
+        ("b://Task", "expr://b1", "B"),
+        ("Task", "expr://a1", "A"),
+    ] {
+        let rows = crate::perspectives::interpretation_test_support::model_instances(
+            &perspective,
+            key,
+            &["title"],
+        )
+        .await;
+        assert_eq!(rows.len(), 1, "{key}: {rows:?}");
+        assert_eq!(rows[0]["id"], id, "{key}: {rows:?}");
+        assert_eq!(rows[0]["title"], title, "{key}: {rows:?}");
+    }
+    assert_eq!(
+        perspective.get_shape("Task").unwrap().target_class,
+        "a://Task"
+    );
+
+    // The relation reads `b://Task`, the class of its `sh:class`, though
+    // the bare name `Task` reads `a://Task`.
+    perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("p://Project".into()),
+                query: None,
+            },
+            "expr://p1".into(),
+            None,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    for target in ["expr://a1", "expr://b1"] {
+        perspective
+            .add_link(
+                Link {
+                    source: "expr://p1".into(),
+                    predicate: Some("p://tasks".into()),
+                    target: target.into(),
+                },
+                LinkStatus::Shared,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+    }
+    let read: serde_json::Value = serde_json::from_str(
+        &perspective
+            .model_query("p://Project", r#"{"include": {"tasks": true}}"#)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let tasks = read["instances"][0]["tasks"].as_array().unwrap().clone();
+    assert_eq!(tasks.len(), 1, "{read}");
+    assert_eq!(tasks[0]["id"], "expr://b1", "{read}");
+    assert_eq!(tasks[0]["title"], "B", "{read}");
+
+    // Re-registering either class: every key reads its own class's
+    // current shape.
+    let property = |path: &str, name: &str| -> crate::perspectives::shacl_parser::PropertyShape {
+        serde_json::from_value(serde_json::json!({"path": path, "name": name, "max_count": 1}))
+            .unwrap()
+    };
+    for key in ["Task", "a://Task", "b://Task"] {
+        perspective.get_shape(key).unwrap();
+    }
+    let mut b_task = task("b://");
+    b_task.properties.push(property("b://done", "done"));
+    perspective
+        .register_shapes(vec![b_task], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(
+        property_names(&perspective, "b://Task"),
+        ["done", "kind", "title"]
+    );
+    assert_eq!(property_names(&perspective, "a://Task"), ["kind", "title"]);
+    assert_eq!(property_names(&perspective, "Task"), ["kind", "title"]);
+
+    let mut a_task = task("a://");
+    a_task.properties.push(property("a://due", "due"));
+    perspective
+        .register_shapes(vec![a_task], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(
+        property_names(&perspective, "Task"),
+        ["due", "kind", "title"]
+    );
+    assert_eq!(
+        property_names(&perspective, "a://Task"),
+        ["due", "kind", "title"]
+    );
+    assert_eq!(
+        property_names(&perspective, "b://Task"),
+        ["done", "kind", "title"]
+    );
+    assert_eq!(
+        perspective.get_shape("Task").unwrap().target_class,
+        "a://Task"
+    );
 }
 
 #[tokio::test]
@@ -651,11 +797,11 @@ async fn a_query_and_a_create_by_name_use_the_registered_class() {
         .register_shapes(vec![task("a://")], &ctx)
         .await
         .unwrap();
-    // Refused: `a://Task` stays the one class named `Task`.
+    // `b://Task` shares the name; the name reads the least IRI, `a://Task`.
     perspective
         .register_shapes(vec![task("b://")], &ctx)
         .await
-        .unwrap_err();
+        .unwrap();
 
     perspective
         .create_subject(
@@ -954,10 +1100,9 @@ async fn two_concurrent_registrations_of_one_shape_write_once() {
 
 /// Two peers register a class of one name, each before it saw the other's,
 /// and sync brings each the other's links. `find_class` reads the class of
-/// the least IRI, `a://Task`, on both: registering it again answers, so an
-/// app that registers its classes on every start still starts. Registering
-/// `b://Task` is refused, and so is a new class that would take the name
-/// from the stored one, though its IRI sorts first.
+/// the least IRI, `a://Task`, on both, and each IRI reads its own class.
+/// Registering both again writes nothing, so an app that registers its
+/// classes on every start still starts.
 #[tokio::test]
 async fn a_class_name_two_peers_registered_answers_for_the_class_readers_find() {
     let (mut a_side, _, a_ctx) = setup_perspective_no_llm(&[]).await;
@@ -986,38 +1131,35 @@ async fn a_class_name_two_peers_registered_answers_for_the_class_readers_find() 
 
     for (side, ctx) in [(&mut a_side, &a_ctx), (&mut b_side, &b_ctx)] {
         assert_eq!(side.get_shape("Task").unwrap().target_class, "a://Task");
+        for class in ["a://Task", "b://Task"] {
+            assert_eq!(side.get_shape(class).unwrap().target_class, class);
+        }
         let before = all_links(side);
 
-        let again = side.register_shapes(vec![task("a://")], ctx).await.unwrap();
-        assert_eq!(again.unchanged, vec!["Task".to_string()]);
-
-        let err = side
-            .register_shapes(vec![task("b://")], ctx)
+        let again = side
+            .register_shapes(vec![task("a://"), task("b://")], ctx)
             .await
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Class 'a://Task' is already registered under the name 'Task'"),
-            "{err}"
-        );
+            .unwrap();
+        assert_eq!(again.unchanged, ["Task", "Task"]);
+        assert!(again.written.is_empty());
         assert_eq!(all_links(side), before, "nothing is written");
     }
 
-    // Stored `b://Task` holds the name: `a://Task` sorts first, but taking
-    // the name would move every reader of `Task` to another class.
+    // A class registered later whose IRI sorts first takes the bare name;
+    // the IRI still reads the earlier class.
     let (mut fresh, _, ctx) = setup_perspective_no_llm(&[]).await;
     fresh
         .register_shapes(vec![task("b://")], &ctx)
         .await
         .unwrap();
-    let err = fresh
+    assert_eq!(fresh.get_shape("Task").unwrap().target_class, "b://Task");
+    fresh
         .register_shapes(vec![task("a://")], &ctx)
         .await
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Class 'b://Task' is already registered under the name 'Task'"),
-        "{err}"
+        .unwrap();
+    assert_eq!(fresh.get_shape("Task").unwrap().target_class, "a://Task");
+    assert_eq!(
+        fresh.get_shape("b://Task").unwrap().target_class,
+        "b://Task"
     );
-    assert_eq!(fresh.get_shape("Task").unwrap().target_class, "b://Task");
 }

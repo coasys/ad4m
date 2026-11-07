@@ -3,6 +3,7 @@ import { Link, LinkExpression } from '../links/Links';
 import { LinkQuery } from './LinkQuery';
 import { Literal } from '../Literal';
 import { SHACLFlow } from '../shacl/SHACLFlow';
+import { TextContent } from './TextContent';
 
 function createProxy(client: any): PerspectiveProxy {
   return new PerspectiveProxy(
@@ -478,8 +479,7 @@ describe('PerspectiveProxy reads after write RPCs are fresh', () => {
     const c = client();
     const proxy = createProxy(c);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    const row = { constructor: { builtinUri: 'ad4m://TextContent' } };
-    await proxy.removeSubject(row, 'ad4m://m/1');
+    await proxy.removeSubject(new TextContent(proxy, 'ad4m://m/1'), 'ad4m://m/1');
     expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'ad4m://TextContent', 'ad4m://m/1', undefined);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
   });

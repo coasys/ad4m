@@ -72,11 +72,9 @@ use crate::perspectives::hardwired_class::{
     ensure_subject_classes, subject_class_registered, HardwiredClass,
 };
 
-/// Local subject-class name of a claim.
-pub(crate) const PROCESSING_CLAIM_CLASS: &str = "ProcessingClaim";
-/// Target-class URI of [`PROCESSING_CLAIM_CLASS`] — used to detect prior
-/// registration.
-const PROCESSING_CLAIM_TARGET_CLASS: &str = "ad4m://ProcessingClaim";
+/// The subject class of a claim, by its IRI: an app class named
+/// `ProcessingClaim` is another class.
+pub(crate) const PROCESSING_CLAIM_CLASS: &str = "ad4m://ProcessingClaim";
 const P_HAS_CLAIM: &str = "ad4m://has_claim";
 const STATUS_ACTIVE: &str = "active";
 
@@ -261,7 +259,7 @@ pub async fn active_claimants(
     now_ms: i64,
 ) -> anyhow::Result<Vec<String>> {
     // Nothing has ever claimed on this perspective ⇒ no class, no claims.
-    if !subject_class_registered(perspective, PROCESSING_CLAIM_TARGET_CLASS).await? {
+    if !subject_class_registered(perspective, PROCESSING_CLAIM_CLASS).await? {
         return Ok(Vec::new());
     }
     let query = serde_json::json!({

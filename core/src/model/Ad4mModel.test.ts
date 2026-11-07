@@ -2016,7 +2016,7 @@ describe("deepQuery — getter evaluation", () => {
       // Should make exactly 1 RPC call via perspective.evaluateGetters
       expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
       const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
-      expect(className).toBe("DeepQueryTestMessage");
+      expect(className).toBe("flux://DeepQueryTestMessage");
       expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
       expect(propertyNames).toEqual(["replyingTo"]);
       // No querySparql calls — all done in-process
@@ -2030,7 +2030,7 @@ describe("deepQuery — getter evaluation", () => {
 
       expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
       const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
-      expect(className).toBe("DeepQueryTestMessage");
+      expect(className).toBe("flux://DeepQueryTestMessage");
       expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
       expect(propertyNames).toBeUndefined();
     });
@@ -2389,7 +2389,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     const qi = JSON.parse(queryJson);
 
     // targetClassName drives the executor's cache lookup for the target shape.
-    expect(qi.projections?.$signalCount?.targetClassName).toBe("Signal");
+    expect(qi.projections?.$signalCount?.targetClassName).toBe("signal://Signal");
   });
 
   it("leaves targetClassName absent when relation has no target decorator", async () => {
@@ -2445,7 +2445,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
     expect(posts.include).toBeUndefined();
     // Read against the relation's target, so it is tagged as a top-level one would be.
-    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+    expect(posts.projections.$signalCount.targetClassName).toBe("signal://Signal");
   });
 
   it("keeps the nested relations beside the projections it moves", async () => {
@@ -2475,7 +2475,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
     expect(posts.include).toBeUndefined();
     // Tagged against Post, the class two relations down.
-    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+    expect(posts.projections.$signalCount.targetClassName).toBe("signal://Signal");
   });
 
   it("leaves a projection untagged under a polymorphic relation that declares a target", async () => {
@@ -3621,14 +3621,14 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
 
   const rows = {
     instances: [
-      { id: "u://t1", status: "open", __subjectClass: "UnionTaskU", __subjectClasses: ["UnionTaskU"] },
-      { id: "u://n1", body: "hi", __subjectClass: "UnionNoteU", __subjectClasses: ["UnionNoteU"] },
+      { id: "u://t1", status: "open", __subjectClass: "u://UnionTaskU", __subjectClasses: ["UnionTaskU"] },
+      { id: "u://n1", body: "hi", __subjectClass: "u://UnionNoteU", __subjectClasses: ["UnionNoteU"] },
       { id: "u://x", __subjectClass: "Other", __subjectClasses: ["Other"] },
     ],
     totalCount: 7,
   };
 
-  it("sends every class name and builds each row as its own class", async () => {
+  it("sends every class's target class IRI and builds each row as its own class", async () => {
     const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
     const results = await Ad4mModel.findAllOf(perspective, [UnionTaskU, UnionNoteU], {
       where: { status: "open" },
@@ -3638,7 +3638,7 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
     });
 
     const [classNames, queryJson] = perspective.modelQuery.mock.calls[0];
-    expect(classNames).toEqual(["UnionTaskU", "UnionNoteU"]);
+    expect(classNames).toEqual(["u://UnionTaskU", "u://UnionNoteU"]);
     const sent = JSON.parse(queryJson);
     expect(sent.where).toEqual({ status: "open" });
     expect(sent.order).toEqual([["status", "DESC"]]);

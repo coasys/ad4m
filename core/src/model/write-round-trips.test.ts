@@ -244,7 +244,7 @@ describe("RPCs per write", () => {
   });
 });
 
-describe("class name a write resolves", () => {
+describe("class a write addresses", () => {
   @Model({ name: "RoundTripDerivedNote" })
   class RoundTripDerivedNote extends RoundTripNote {
     @Property({ through: "rt://body" })
@@ -259,18 +259,18 @@ describe("class name a write resolves", () => {
     return createdAs(sent);
   }
 
-  it("is the decorated name of an instance and of its class", async () => {
-    expect(await resolve([RoundTripNote], new RoundTripNote(undefined as any))).toBe("RoundTripNote");
-    expect(await resolve([RoundTripNote], RoundTripNote)).toBe("RoundTripNote");
+  it("is the target class IRI of an instance and of its class", async () => {
+    expect(await resolve([RoundTripNote], new RoundTripNote(undefined as any))).toBe("rt://RoundTripNote");
+    expect(await resolve([RoundTripNote], RoundTripNote)).toBe("rt://RoundTripNote");
   });
 
   it("is the base class for a base instance when a derived class has its properties too", async () => {
     const both = [RoundTripDerivedNote, RoundTripNote];
-    expect(await resolve(both, new RoundTripNote(undefined as any))).toBe("RoundTripNote");
-    expect(await resolve(both, new RoundTripDerivedNote(undefined as any))).toBe("RoundTripDerivedNote");
+    expect(await resolve(both, new RoundTripNote(undefined as any))).toBe("rt://RoundTripNote");
+    expect(await resolve(both, new RoundTripDerivedNote(undefined as any))).toBe("rt://RoundTripDerivedNote");
   });
 
-  it("is the decorated name even when the class is not registered and another class has its properties", async () => {
+  it("is the target class IRI even when the class is not registered and another class has its properties", async () => {
     const { proxy, calls } = countingProxy([]);
     const byProperties = jest.spyOn(proxy as any, "findClassByProperties").mockResolvedValue("RoundTripTwin" as never);
     await proxy.createSubject(new RoundTripNote(undefined as any), "rt://note/1");
@@ -282,8 +282,8 @@ describe("class name a write resolves", () => {
     expect(await resolve([RoundTripNote], { className: "RoundTripNote" })).toBe("RoundTripNote");
   });
 
-  it("is the abstract name for an abstract class", async () => {
-    expect(await resolve([RoundTripReadable], RoundTripReadable)).toBe("RoundTripReadable");
+  it("is the abstract class's IRI for an abstract class", async () => {
+    expect(await resolve([RoundTripReadable], RoundTripReadable)).toBe("rt://RoundTripReadable");
   });
 
   it("is a string as given", async () => {
@@ -298,27 +298,27 @@ describe("class name a write resolves", () => {
     expect(calls).toEqual(["shapes", "createSubject"]);
   });
 
-  it("creates the record under the model's name", async () => {
+  it("creates the record under the model's target class IRI", async () => {
     const { proxy, sent } = countingProxy([RoundTripNote]);
     await createNote(proxy);
-    expect(createdAs(sent)).toBe("RoundTripNote");
+    expect(createdAs(sent)).toBe("rt://RoundTripNote");
   });
 
-  it("deletes an abstract-class record through the executor under the abstract name", async () => {
+  it("deletes an abstract-class record through the executor under the abstract class's IRI", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripReadable]);
     await new RoundTripReadable(proxy, "rt://note/1").delete();
     expect(sent.find((c) => c[0] === "removeSubject")).toEqual(
-      ["removeSubject", "rt-uuid", "RoundTripReadable", "rt://note/1", undefined],
+      ["removeSubject", "rt-uuid", "rt://RoundTripReadable", "rt://note/1", undefined],
     );
     // removeSubject, incoming links
     expect(calls).toEqual(["removeSubject", "queryLinks"]);
   });
 
-  it("createSubject with a decorated instance sends its name in one RPC", async () => {
+  it("createSubject with a decorated instance sends its target class IRI in one RPC", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripNote]);
     await proxy.createSubject(new RoundTripNote(undefined as any), "rt://note/2");
     expect(calls).toEqual(["createSubject"]);
-    expect(createdAs(sent)).toBe("RoundTripNote");
+    expect(createdAs(sent)).toBe("rt://RoundTripNote");
   });
 });
 

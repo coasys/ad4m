@@ -190,25 +190,37 @@ export default function shaclRpcTests(testContext: TestContext) {
                 });
             });
 
-            it("refuses a second class under a name another class holds, and writes nothing", async () => {
+            it("keeps two classes of one name apart by their target class IRIs", async () => {
                 await withPerspective("shacl-rpc-iri", async (p) => {
-                    const a = new SHACLShape("a://Note");
-                    a.addProperty({ name: "text", path: "a://text" });
-                    const b = new SHACLShape("b://Note");
-                    b.addProperty({ name: "body", path: "b://body" });
-                    await p.registerShapes([a]);
-                    const before = await snapshot(p);
+                    const note = (ns: string, field: string) => {
+                        const shape = new SHACLShape(`${ns}Note`);
+                        shape.addProperty({
+                            name: field, path: `${ns}${field}`, maxCount: 1,
+                            setter: [{ action: "setSingleTarget", source: "this", predicate: `${ns}${field}`, target: "value" }],
+                        });
+                        return shape;
+                    };
+                    expect((await p.registerShapes([note("b://", "body")])).written).to.deep.equal(["Note"]);
+                    expect((await p.registerShapes([note("a://", "text")])).written).to.deep.equal(["Note"]);
 
-                    let error: Error | undefined;
-                    try {
-                        await p.registerShapes([b]);
-                    } catch (e) {
-                        error = e as Error;
-                    }
-                    expect(error?.message).to.contain("Class 'a://Note' is already registered under the name 'Note'");
-                    expect(await snapshot(p)).to.deep.equal(before);
+                    // A name lists every class of that name, the least IRI first; an IRI only its own.
                     const notes = await p.shapes(["Note"]);
-                    expect(notes.map((s) => s.shape.targetClass)).to.deep.equal(["a://Note"]);
+                    expect(notes.map((s) => s.shape.targetClass)).to.deep.equal(["a://Note", "b://Note"]);
+                    const [b] = await p.shapes(["b://Note"]);
+                    expect(b.shape.properties.map((prop) => prop.path)).to.deep.equal(["b://body"]);
+
+                    // Each IRI writes its own class.
+                    await p.createSubject("a://Note", "note://a1", { text: "A" });
+                    await p.createSubject("b://Note", "note://b1", { body: "B" });
+                    expect(await p.get(new LinkQuery({ source: "note://a1", predicate: "a://text" }))).to.have.length(1);
+                    expect(await p.get(new LinkQuery({ source: "note://b1", predicate: "b://body" }))).to.have.length(1);
+                    expect(await p.get(new LinkQuery({ source: "note://b1", predicate: "a://text" }))).to.deep.equal([]);
+
+                    // Registering both again writes nothing.
+                    const before = await snapshot(p);
+                    const again = await p.registerShapes([note("a://", "text"), note("b://", "body")]);
+                    expect(again.written).to.deep.equal([]);
+                    expect(await snapshot(p)).to.deep.equal(before);
                 });
             });
 

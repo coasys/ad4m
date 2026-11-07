@@ -24,9 +24,9 @@ use crate::perspectives::hardwired_class::{ensure_subject_classes, HardwiredClas
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::{Link, LinkStatus};
 
-pub(crate) const FLOW_INSTANCE_CLASS: &str = "FlowInstance";
-#[cfg(test)]
-pub(crate) const FLOW_INSTANCE_TARGET_CLASS: &str = "ad4m://FlowInstance";
+/// The class the flow runtime reads and writes, by its IRI: an app class
+/// named `FlowInstance` (`app://FlowInstance`) is another class.
+pub(crate) const FLOW_INSTANCE_CLASS: &str = "ad4m://FlowInstance";
 pub(crate) const FLOW_INSTANCE_SDNA: &str = include_str!("hardwired_sdna/flow_instance.json");
 /// `FlowInstance → flowUri` — the row's identity: which `SHACLFlow` it runs.
 pub(crate) const FLOW_URI_PREDICATE: &str = "ad4m://flow/flow_uri";
@@ -40,9 +40,7 @@ pub(crate) const FLOW_BASE_PREDICATE: &str = "ad4m://flow/base";
 /// declares it is older than this one ([`ensure_flow_model_classes`]).
 pub(crate) const LEGACY_FLOW_CURRENT_STATE_PREDICATE: &str = "ad4m://flow/current_state";
 
-pub(crate) const FLOW_TRANSITION_PROPOSAL_CLASS: &str = "FlowTransitionProposal";
-#[cfg(test)]
-pub(crate) const FLOW_TRANSITION_PROPOSAL_TARGET_CLASS: &str = "ad4m://FlowTransitionProposal";
+pub(crate) const FLOW_TRANSITION_PROPOSAL_CLASS: &str = "ad4m://FlowTransitionProposal";
 pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
     include_str!("hardwired_sdna/flow_transition_proposal.json");
 
@@ -377,7 +375,7 @@ mod tests {
     fn flow_instance_sdna_shape() {
         let v = parse(FLOW_INSTANCE_SDNA);
         assert_eq!(
-            v["target_class"], FLOW_INSTANCE_TARGET_CLASS,
+            v["target_class"], FLOW_INSTANCE_CLASS,
             "target_class in JSON must match the constant slice-7 imports"
         );
         let props = v["properties"]
@@ -409,7 +407,7 @@ mod tests {
     fn flow_transition_proposal_sdna_shape() {
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
         assert_eq!(
-            v["target_class"], FLOW_TRANSITION_PROPOSAL_TARGET_CLASS,
+            v["target_class"], FLOW_TRANSITION_PROPOSAL_CLASS,
             "target_class in JSON must match the constant slice-7 imports"
         );
         let props = v["properties"]

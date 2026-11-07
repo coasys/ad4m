@@ -814,18 +814,15 @@ impl PerspectiveInstance {
         self.fail_next_commit.store(true, Ordering::SeqCst);
     }
 
-    /// Look up a cached `ModelShape` for the given class name, loading it
-    /// from the perspective's SHACL triples on cache miss.  Returns an
-    /// `Arc<ModelShape>` shared across query and subscription re-evaluation.
+    /// Look up a cached `ModelShape` for a class, by its target class IRI or
+    /// its bare name (`find_class`: the least IRI of that name), loading it
+    /// from the perspective's SHACL triples on cache miss. The cache keeps
+    /// each key as asked; every write of SHACL (`register_shapes`, a synced
+    /// diff, a reload) clears all of it, so an IRI key and a name key never
+    /// hold a stale or another class's shape. Returns an `Arc<ModelShape>`
+    /// shared across query and subscription re-evaluation.
     pub fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
         self.shape_resolver().get_shape(class_name)
-    }
-
-    /// Drop any cached `ModelShape` for `class_name`.  Called when SHACL is
-    /// (re-)written for the class so the next query re-parses fresh state.
-    pub fn invalidate_shape(&self, class_name: &str) {
-        self.shape_cache.write().unwrap().remove(class_name);
-        self.forget_derived_shapes();
     }
 
     /// Like [`get_shape`], but for perspectives joined to a
@@ -2068,11 +2065,11 @@ impl PerspectiveInstance {
         self.schedule_flow_pass_on_definition_change(decorated_diff);
         // A class's SHACL written or removed by any path — `register_shapes`, a raw
         // link write, a wipe — can change which classes are abstract, their
-        // aliases and which classes an abstract class reads (#1435). Shapes
-        // are cached per class and refreshed where they are written; what is
-        // derived from them spans every class, so any such write drops it.
+        // aliases, which classes an abstract class reads (#1435) and which
+        // class a bare name reads (the least IRI of that name), so any such
+        // write drops every cached shape and what is derived from them.
         if inbound_touches_shacl(decorated_diff) {
-            self.forget_derived_shapes();
+            self.clear_shape_cache();
         }
         // A `FlowInstance` minted by an agent this executor acts for gets its
         // bookkeeping row now, before any pass can treat it as a catch-up
@@ -3857,9 +3854,14 @@ impl PerspectiveInstance {
             let allowed: std::collections::BTreeSet<String> = valid
                 .into_iter()
                 .filter(|v| {
+                    let resolved = self
+                        .get_shape(&v.output.class_name)
+                        .ok()
+                        .map(|s| s.target_class.clone());
                     shapes.iter().any(|(class_name, shape)| {
                         super::flow_instance::produced::output_matches_class(
                             &v.output,
+                            resolved.as_deref(),
                             class_name,
                             &shape.target_class,
                         )
@@ -8944,24 +8946,6 @@ mod tests {
         assert_eq!(first.target_class, "ns://Recipe");
     }
 
-    #[tokio::test]
-    async fn test_invalidate_shape_forces_reparse() {
-        let mut perspective = setup().await;
-        let shacl = cache_test_shacl("Recipe", "ns://");
-        perspective
-            .register_shape_json(&shacl, &AgentContext::main_agent())
-            .await
-            .expect("register the shape");
-        let first = perspective.get_shape("Recipe").expect("first lookup");
-        perspective.invalidate_shape("Recipe");
-        let second = perspective.get_shape("Recipe").expect("re-parse");
-        assert!(
-            !Arc::ptr_eq(&first, &second),
-            "invalidation should cause a fresh Arc"
-        );
-        assert_eq!(second.target_class, first.target_class);
-    }
-
     /// Registering a changed shape replaces the cached shape at once.
     #[tokio::test]
     async fn test_register_changed_shape_replaces_cached_shape() {
@@ -9055,7 +9039,7 @@ mod tests {
         assert!(err.to_string().contains("datatype"), "{err}");
         assert_eq!(all_links(&perspective), links_before, "re-registration");
         // Re-read from the store, not the cache.
-        perspective.invalidate_shape("Post");
+        perspective.clear_shape_cache();
         assert_eq!(
             shape_summary(&perspective.get_shape("Post").expect("original shape")),
             shape_before

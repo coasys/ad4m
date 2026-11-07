@@ -8,9 +8,9 @@ use crate::types::AITask;
 use sha2::{Digest, Sha256};
 
 /// Local subject-class name of the per-pass run node.
-pub(crate) const INTERP_RUN_CLASS: &str = "InterpretationRun";
+pub(crate) const INTERP_RUN_CLASS: &str = "ad4m://InterpretationRun";
 /// Local subject-class name of the per-base overlay node.
-pub(crate) const INTERP_OVERLAY_CLASS: &str = "InterpretationOverlay";
+pub(crate) const INTERP_OVERLAY_CLASS: &str = "ad4m://InterpretationOverlay";
 
 /// Hard-wired SDNA for the [`INTERP_RUN_CLASS`] subject class. No dedicated
 /// `ad4m://type` flag — Nico 2026-08-19: "type flags are an anti-pattern

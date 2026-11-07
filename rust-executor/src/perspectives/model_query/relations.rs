@@ -24,6 +24,7 @@ use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter};
+use crate::perspectives::shacl_parser::class_name_of;
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::LinkStatus;
 
@@ -298,7 +299,11 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 pub(super) fn choose<'a>(matched: &'a [String], preferred: &[String]) -> Option<&'a String> {
     preferred
         .iter()
-        .find_map(|want| matched.iter().find(|have| *have == want))
+        .find_map(|want| {
+            matched
+                .iter()
+                .find(|have| *have == want || class_name_of(have) == *want)
+        })
         .or_else(|| matched.first())
 }
 
@@ -314,8 +319,11 @@ async fn hydrate_polymorphic(
 ) -> Result<(), Error> {
     // `limit`/`offset` were refused before either resolver ran — see
     // `reject_pagination_on_polymorphic`. Nothing to check here.
-    let classes =
-        crate::perspectives::subject_classes_of::subject_classes_of(store, resolver, target_ids)?;
+    // By class IRI: two classes may share a name, and each target hydrates
+    // through the class it conforms to.
+    let classes = crate::perspectives::subject_classes_of::subject_class_iris_of(
+        store, resolver, target_ids,
+    )?;
 
     // Group by class, keeping the ids of each group in the order they arrived so
     // a group's own results stay stable.
@@ -345,14 +353,15 @@ async fn hydrate_polymorphic(
         }
     }
 
-    for (class_name, ids) in by_class {
-        let target_shape = match resolver.get_shape(&class_name) {
+    for (class, ids) in by_class {
+        let target_shape = match resolver.get_shape(&class) {
             Ok(s) => s,
             Err(e) => {
-                log::warn!("polymorphic include: no shape for '{class_name}': {e}");
+                log::warn!("polymorphic include: no shape for '{class}': {e}");
                 continue;
             }
         };
+        let class_name = class_name_of(&class);
 
         let mut group_query = sub_query.clone();
         let mut wc = group_query.where_clause.take().unwrap_or_default();
@@ -382,10 +391,20 @@ async fn hydrate_polymorphic(
                     // The readings this one was chosen over. Costs nothing to
                     // return — the classification that picked the head had to
                     // produce the whole set to rank it.
-                    let all = classes
+                    let mut all: Vec<String> = Vec::new();
+                    for name in classes
                         .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| vec![class_name.clone()]);
+                        .into_iter()
+                        .flatten()
+                        .map(|c| class_name_of(c))
+                    {
+                        if !all.contains(&name) {
+                            all.push(name);
+                        }
+                    }
+                    if all.is_empty() {
+                        all.push(class_name.clone());
+                    }
                     obj.insert(
                         SUBJECT_CLASSES_KEY.to_string(),
                         Value::Array(all.into_iter().map(Value::String).collect()),
@@ -483,7 +502,7 @@ async fn resolve_forward_include(
                 rel.name
             ));
         }
-        let target_shape = resolver.get_shape(&rel.target_class_name)?;
+        let target_shape = resolver.get_shape(rel.target())?;
         let result = Box::pin(execute_model_query_inner(
             store,
             target_shape.as_ref(),
@@ -671,7 +690,7 @@ async fn resolve_reverse_include(
                     rel.name
                 ));
             }
-            let target_shape = resolver.get_shape(&rel.target_class_name)?;
+            let target_shape = resolver.get_shape(rel.target())?;
             let result = Box::pin(execute_model_query_inner(
                 store,
                 target_shape.as_ref(),

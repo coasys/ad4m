@@ -34,7 +34,7 @@ describe("TextContent", () => {
       @Property({ through: "app://extra" })
       extra: string = "";
     }
-    expect((OwnText as any).prepareModelQueryParams({}).className).toBe("OwnText");
+    expect((OwnText as any).prepareModelQueryParams({}).className).toBe("ad4m://OwnText");
   });
 
   it("is sent by its URI in a union too, so the executor refuses it as abstract", async () => {
@@ -45,7 +45,7 @@ describe("TextContent", () => {
     }
     expect(Ad4mModel.prepareUnionQueryParams([TextContent, UnionPeer] as any, {}).classNames).toEqual([
       "ad4m://TextContent",
-      "UnionPeer",
+      "app://UnionPeer",
     ]);
     const sent: any[] = [];
     const perspective: any = {
@@ -55,7 +55,7 @@ describe("TextContent", () => {
       },
     };
     await expect(Ad4mModel.findAllOf(perspective, [TextContent, UnionPeer] as any)).rejects.toThrow("abstract class");
-    expect(sent).toEqual([["ad4m://TextContent", "UnionPeer"]]);
+    expect(sent).toEqual([["ad4m://TextContent", "app://UnionPeer"]]);
   });
 
   it("is implemented through an alias", () => {

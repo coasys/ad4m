@@ -135,23 +135,6 @@ fn all() -> &'static [(String, HardwiredClass)] {
     })
 }
 
-/// The names of the hard-wired classes are reserved: `register_shapes`
-/// refuses a class `target_class` named `name` when `name` is a hard-wired
-/// class's and `target_class` is not that class's IRI. An app class of that
-/// name would be the class the executor's flow and interpretation paths find.
-pub(crate) fn refuse_reserved_name(name: &str, target_class: &str) -> anyhow::Result<()> {
-    match all()
-        .iter()
-        .find(|(target, _)| class_name_of(target) == name)
-    {
-        Some((reserved, _)) if reserved != target_class => Err(anyhow::anyhow!(
-            "The name '{name}' is reserved for the executor's class '{reserved}': class \
-             '{target_class}' needs another name."
-        )),
-        _ => Ok(()),
-    }
-}
-
 /// The hard-wired class `class_name` names (by its name or its target class
 /// IRI, the match `find_class` makes) when it is not stored yet.
 pub(crate) fn unstored(
@@ -389,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn an_app_uses_a_hardwired_class_without_registering_it() {
         use crate::perspectives::flow_classes::{
-            ensure_flow_model_classes, FLOW_INSTANCE_SDNA, FLOW_INSTANCE_TARGET_CLASS,
+            ensure_flow_model_classes, FLOW_INSTANCE_CLASS, FLOW_INSTANCE_SDNA,
         };
         use crate::perspectives::perspective_instance::SubjectClassOption;
 
@@ -427,7 +410,7 @@ mod tests {
             .pop()
             .expect("the create registered the class")
             .shape;
-        assert_eq!(stored.target_class, FLOW_INSTANCE_TARGET_CLASS);
+        assert_eq!(stored.target_class, FLOW_INSTANCE_CLASS);
         // The executor's revision: the links its shape gives.
         let sdna: SHACLShape = serde_json::from_str(FLOW_INSTANCE_SDNA).unwrap();
         let links_of = |shape: &SHACLShape| {
@@ -467,51 +450,105 @@ mod tests {
         }
     }
 
-    /// The name of each hard-wired class is reserved: an app class of that
-    /// name under another IRI is refused, the whole call with it, and nothing
-    /// is written. The executor's own flow path still registers its class.
+    /// An app class may share a hard-wired class's name: `app://FlowInstance`
+    /// is stored beside `ad4m://FlowInstance`, and the executor's flow paths,
+    /// which address their classes by IRI, still register and read the
+    /// executor's class.
     #[tokio::test]
-    async fn an_app_class_of_a_hardwired_name_is_refused() {
-        use crate::perspectives::flow_classes::{
-            ensure_flow_model_classes, FLOW_INSTANCE_TARGET_CLASS,
-        };
+    async fn an_app_class_of_a_hardwired_name_coexists_with_it() {
+        use crate::perspectives::flow_classes::{ensure_flow_model_classes, FLOW_INSTANCE_CLASS};
+        use crate::perspectives::perspective_instance::SubjectClassOption;
 
         let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
-        let before = triples(&perspective);
-        for (target_class, _) in all() {
-            let name = class_name_of(target_class);
-            let app: SHACLShape = serde_json::from_value(serde_json::json!({
-                "target_class": format!("app://{name}"),
-                "properties": [{"path": "app://step", "name": "step", "max_count": 1}]
-            }))
+        let apps: Vec<SHACLShape> = all()
+            .iter()
+            .map(|(target_class, _)| {
+                let name = class_name_of(target_class);
+                serde_json::from_value(serde_json::json!({
+                    "target_class": format!("app://{name}"),
+                    "constructor_actions": [{"action": "addLink", "source": "this",
+                        "predicate": "app://step", "target": "app://start"}],
+                    "properties": [{"path": "app://step", "name": "step",
+                        "has_value": "app://start", "min_count": 1, "max_count": 1}]
+                }))
+                .unwrap()
+            })
+            .collect();
+        perspective.register_shapes(apps, &ctx).await.unwrap();
+        let app_flow = perspective
+            .shapes(Some(vec!["FlowInstance".into()]))
             .unwrap();
-            let fine: SHACLShape = serde_json::from_value(serde_json::json!({
-                "target_class": "app://Note",
-                "properties": [{"path": "app://text", "name": "text", "max_count": 1}]
-            }))
-            .unwrap();
-            let err = perspective
-                .register_shapes(vec![fine, app], &ctx)
-                .await
-                .unwrap_err();
-            assert!(
-                err.to_string().contains(&format!(
-                    "The name '{name}' is reserved for the executor's class '{target_class}'"
-                )),
-                "{err}"
-            );
-            assert_eq!(triples(&perspective), before, "{name}: nothing is written");
-        }
-        assert!(perspective.shapes(None).unwrap().is_empty());
+        assert_eq!(app_flow.len(), 1);
+        assert_eq!(app_flow[0].shape.target_class, "app://FlowInstance");
+        // The bare name reads the one class of that name stored so far.
+        assert_eq!(
+            perspective.get_shape("FlowInstance").unwrap().target_class,
+            "app://FlowInstance"
+        );
 
+        // The executor's flow path registers its own class by IRI.
         ensure_flow_model_classes(&mut perspective, &ctx)
             .await
             .unwrap();
-        let flow = perspective
+        let stored: Vec<String> = perspective
             .shapes(Some(vec!["FlowInstance".into()]))
+            .unwrap()
+            .into_iter()
+            .map(|s| s.shape.target_class)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(stored, [FLOW_INSTANCE_CLASS, "app://FlowInstance"]);
+
+        // A create and a read through the executor's IRI use its class only;
+        // the app's IRI reads the app's class only.
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some(FLOW_INSTANCE_CLASS.into()),
+                    query: None,
+                },
+                "ad4m://flow/instance/1".into(),
+                Some(serde_json::json!({"flowUri": "x://DFlow", "subject": "ad4m://task/1"})),
+                None,
+                &ctx,
+            )
+            .await
             .unwrap();
-        assert_eq!(flow.len(), 1);
-        assert_eq!(flow[0].shape.target_class, FLOW_INSTANCE_TARGET_CLASS);
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("app://FlowInstance".into()),
+                    query: None,
+                },
+                "app://flow/1".into(),
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        for (class, id) in [
+            (FLOW_INSTANCE_CLASS, "ad4m://flow/instance/1"),
+            ("app://FlowInstance", "app://flow/1"),
+        ] {
+            let read: serde_json::Value =
+                serde_json::from_str(&perspective.model_query(class, "{}").await.unwrap()).unwrap();
+            let ids: Vec<_> = read["instances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["id"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(ids, [id], "{class}");
+        }
+        assert_eq!(
+            perspective
+                .get_shape(FLOW_INSTANCE_CLASS)
+                .unwrap()
+                .target_class,
+            FLOW_INSTANCE_CLASS
+        );
     }
 
     #[tokio::test]

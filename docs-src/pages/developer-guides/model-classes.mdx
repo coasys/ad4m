@@ -146,12 +146,15 @@ This is the canonical path for sharing schemas across apps: the publisher serial
 
 #### Class Names
 
-Queries and creates find a class by its name, the last segment of its target class IRI (`Note` for `flux://Note`). A name belongs to one class per Perspective:
+A class is addressed by its target class IRI (`flux://Note`). Its name, the last segment of that IRI (`Note`), is for people: `getClassName()` gives the name, `getTargetClass()` the IRI.
 
-- `registerShapes` refuses a class whose name another stored class holds, and the whole call it comes in, writing nothing. Once `b://Note` is registered, `a://Note` is refused too, though its IRI sorts first: a new class never takes a name over.
-- It refuses two classes of one name in one call.
-- When two peers register `a://Note` and `b://Note` before they sync, both end up in the Perspective. Readers then use the class with the least IRI (`a://Note`). That class can always be registered again; `b://Note` is refused from then on.
-- The names of the executor's own classes are reserved: `FlowInstance`, `FlowTransitionProposal`, `AutoProcessor`, `ProcessingClaim`, `InterpretationRun` and `InterpretationOverlay`. `registerShapes` refuses a class of one of these names under any IRI but the executor's (`ad4m://FlowInstance` and so on), so `app://FlowInstance` is refused.
+- Every SDK call that names a model's class (queries, creates, updates, deletes, includes, getters) sends its target class IRI, so `we://Topic` and `flux://Topic` live side by side in one Perspective, each read and written as its own class.
+- `registerShapes` takes a class whatever name other classes hold. It refuses one target class twice in one call, a shape URI another class holds, and a shape URI that does not end in `{Name}Shape`.
+- A bare name passed to the executor (`perspective.createSubject("Note", ...)`, an MCP tool) reads the class of that name with the least IRI: `a://Note` over `b://Note`. Pass the IRI to reach any other.
+- `perspective.shapes(["Note"])` lists every class of that name, least IRI first; `perspective.shapes(["b://Note"])` only that one.
+- A relation to another class resolves through the target class of the shape it names, so `sh:class b://NoteShape` reaches `b://Note` even when `a://Note` exists.
+- The executor's own classes (`ad4m://FlowInstance`, `ad4m://AutoProcessor`, ...) are addressed by IRI too, so an app may register `app://FlowInstance` beside them.
+- `Ad4mModel.fromSHACL(shape, name)` keeps the shape's target class, so the hydrated model addresses the class it was built from.
 
 ### Option 3: From JSON Schema (Dynamic)
 

@@ -62,40 +62,62 @@ pub(crate) struct ClassShape {
 }
 
 /// The class registered under `class_name` (or with that target class IRI)
-/// and its current shape. A class's
-/// name is `class_name_of` its target class IRI, the name `registerShapes`
-/// keeps unique per perspective; its shape is the one `current_shape_uri`
-/// picks, as the registry (`PerspectiveInstance::shapes`) reads it. Every
-/// reader that finds a class by name (model queries, create and update)
-/// comes here. Should two classes still share the name (written before the
-/// name was unique), the least target class IRI is read, never whichever
-/// the store yields first.
+/// and its current shape. A class's name is `class_name_of` its target class
+/// IRI; its shape is the one `current_shape_uri` picks, as the registry
+/// (`PerspectiveInstance::shapes`) reads it. An IRI finds exactly its class.
+/// Two classes may share a name (`a://Task`, `b://Task`): the bare name reads
+/// the least target class IRI, never whichever the store yields first.
 pub(crate) fn find_class(
     store: &SparqlStore,
     class_name: &str,
 ) -> Result<Option<ClassShape>, Error> {
+    Ok(find_in(&class_index(store)?, class_name))
+}
+
+/// Every registered class with each shape it points to, as
+/// (target class, shape URI) pairs.
+fn class_index(store: &SparqlStore) -> Result<Vec<(String, String)>, Error> {
     // The triples themselves, as the rest of `load_shape` reads them.
     let rows: Vec<Value> = serde_json::from_str(&store.query(&format!(
         "SELECT ?class ?shape WHERE {{ ?class <rdf://type> <{SUBJECT_CLASS}> . \
          ?class <{SHAPE_PREDICATE}> ?shape . }}"
     ))?)?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row["class"].as_str()?.to_string(),
+                row["shape"].as_str()?.to_string(),
+            ))
+        })
+        .collect())
+}
+
+/// [`find_class`] over a [`class_index`].
+fn find_in(index: &[(String, String)], class_name: &str) -> Option<ClassShape> {
     let mut shapes: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for row in &rows {
-        if let (Some(target_class), Some(shape_uri)) =
-            (row["class"].as_str(), row["shape"].as_str())
-        {
-            if target_class == class_name || class_name_of(target_class) == class_name {
-                shapes.entry(target_class).or_default().push(shape_uri);
-            }
+    for (target_class, shape_uri) in index {
+        if target_class == class_name || class_name_of(target_class) == class_name {
+            shapes.entry(target_class).or_default().push(shape_uri);
         }
     }
-    let class = shapes.into_iter().next().and_then(|(target_class, uris)| {
+    shapes.into_iter().next().and_then(|(target_class, uris)| {
         current_shape_uri(uris).map(|shape_uri| ClassShape {
             target_class: target_class.to_string(),
             shape_uri: shape_uri.to_string(),
         })
-    });
-    Ok(class)
+    })
+}
+
+/// The class a relation's `sh:class` names: the class that holds that shape
+/// URI (shape URIs belong to one class), or the class of that IRI.
+fn class_of_shape(index: &[(String, String)], uri: &str) -> Option<String> {
+    index
+        .iter()
+        .filter(|(class, shape)| shape == uri || class == uri)
+        .map(|(class, _)| class)
+        .min()
+        .cloned()
 }
 
 /// Load a model shape from the SHACL links stored in the Oxigraph store.
@@ -110,10 +132,11 @@ pub(crate) fn find_class(
 /// - `<namespace://ClassName.propName> ad4m://targetClassName literal:string:Ingredient`
 /// - etc.
 pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
+    let index = class_index(store)?;
     let Some(ClassShape {
         target_class,
         shape_uri,
-    }) = find_class(store, class_name)?
+    }) = find_in(&index, class_name)
     else {
         return Err(MissingShape {
             class_name: class_name.to_string(),
@@ -336,7 +359,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 local: is_local,
             });
 
+            let target_class = target_class_uri
+                .as_deref()
+                .and_then(|uri| class_of_shape(&index, uri));
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
+                if let Some(class) = &target_class {
+                    return class_name_of(class);
+                }
                 target_class_uri
                     .as_deref()
                     .map(extract_class_local_name)
@@ -356,6 +385,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 max_count: max_count.map(|m| m as usize),
                 target_class_name: resolved_target_class_name,
                 target_class_uri: target_class_uri.clone().unwrap_or_default(),
+                target_class: target_class.unwrap_or_default(),
             });
         } else {
             properties.push(ShapeProperty {
@@ -722,6 +752,10 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                     max_count,
                     target_class_name,
                     target_class_uri,
+                    target_class: target_shape["targetClass"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
                 });
             }
         }

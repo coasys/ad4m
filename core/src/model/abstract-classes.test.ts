@@ -142,7 +142,7 @@ describe("abstract classes", () => {
     row.text = "edited";
     calls.length = 0;
     await row.save("batch");
-    expect(calls).toEqual([["updateSubject", "Readable", "ad4m://m/1", { text: "edited" }, "batch"]]);
+    expect(calls).toEqual([["updateSubject", "test://Readable", "ad4m://m/1", { text: "edited" }, "batch"]]);
 
     calls.length = 0;
     await row.delete("batch");
@@ -168,9 +168,9 @@ describe("abstract classes", () => {
     await row.setChildren([{ id: "ad4m://child/2" }, "ad4m://child/3"], "batch");
     // No link at the abstract predicate (test://child): only the dispatch.
     expect(calls).toEqual([
-      ["updateSubject", "Folderish", "ad4m://folder/1", { children: { action: "adder", value: ["ad4m://child/1"] } }, "batch"],
-      ["updateSubject", "Folderish", "ad4m://folder/1", { children: { action: "remover", value: ["ad4m://child/1"] } }, "batch"],
-      ["updateSubject", "Folderish", "ad4m://folder/1", { children: { action: "setter", value: ["ad4m://child/2", "ad4m://child/3"] } }, "batch"],
+      ["updateSubject", "test://Folderish", "ad4m://folder/1", { children: { action: "adder", value: ["ad4m://child/1"] } }, "batch"],
+      ["updateSubject", "test://Folderish", "ad4m://folder/1", { children: { action: "remover", value: ["ad4m://child/1"] } }, "batch"],
+      ["updateSubject", "test://Folderish", "ad4m://folder/1", { children: { action: "setter", value: ["ad4m://child/2", "ad4m://child/3"] } }, "batch"],
     ]);
   });
 
@@ -190,7 +190,7 @@ describe("abstract classes", () => {
     calls.length = 0;
     await row.save("batch");
     expect(calls).toEqual([
-      ["updateSubject", "Folderish", "ad4m://folder/1", { children: ["ad4m://child/2", "ad4m://child/3"] }, "batch"],
+      ["updateSubject", "test://Folderish", "ad4m://folder/1", { children: ["ad4m://child/2", "ad4m://child/3"] }, "batch"],
     ]);
   });
 

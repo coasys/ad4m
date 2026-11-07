@@ -102,11 +102,9 @@ fn log_flow_selection_once(cfg: &AutoProcessorConfig) {
     }
 }
 
-/// Local subject-class name of a processor config.
-pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
-/// Target-class URI of [`AUTO_PROCESSOR_CLASS`] — used to detect prior
-/// registration.
-const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
+/// The subject class of a processor config, by its IRI: an app class named
+/// `AutoProcessor` is another class.
+pub(crate) const AUTO_PROCESSOR_CLASS: &str = "ad4m://AutoProcessor";
 
 /// Hard-wired SDNA for the [`AUTO_PROCESSOR_CLASS`] subject class.
 ///
@@ -521,7 +519,7 @@ pub async fn load_processors(
 ) -> anyhow::Result<Vec<AutoProcessorConfig>> {
     // The watcher polls this on every perspective, most of which never declare
     // a processor: no registered class ⇒ no shape to query ⇒ nothing to load.
-    if !subject_class_registered(perspective, AUTO_PROCESSOR_TARGET_CLASS).await? {
+    if !subject_class_registered(perspective, AUTO_PROCESSOR_CLASS).await? {
         return Ok(Vec::new());
     }
     // Property names MUST match the camelCase names in AUTO_PROCESSOR_SDNA
@@ -958,7 +956,7 @@ mod tests {
             vec![Link {
                 source: processor_node("partial"),
                 predicate: Some("rdf://type".into()),
-                target: AUTO_PROCESSOR_TARGET_CLASS.into(),
+                target: AUTO_PROCESSOR_CLASS.into(),
             }],
             LinkStatus::Shared,
             None,

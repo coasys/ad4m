@@ -39,28 +39,28 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - SHACL triples are the source of truth for shapes. A class is its target class IRI; the name
   index is two links on it: `rdf://type ad4m://SubjectClass` and `ad4m://shape <shape URI>`.
   Links from older versions (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://has_shacl`,
-  `ad4m://shacl_shape_uri`) are not read and not written. `shape_cache` and the registry are
-  invalidated by `register_shapes` and by inbound diffs that touch shape links.
-  `get_shape(class)` → `Arc<ModelShape>`.
+  `ad4m://shacl_shape_uri`) are not read and not written. `shape_cache` is keyed by the key
+  the caller passed (a target class IRI or a name); it and the registry are cleared whole
+  (`clear_shape_cache`) by `register_shapes` and by every local or inbound diff that touches
+  shape links, so an IRI key and a name key never hold a stale or crossed shape.
+  `get_shape(class)` → `Arc<ModelShape>`, `class` a target class IRI or a name.
 - `register_shapes` compares the own links a shape gives with the own links stored, as
   triples. Equal sets write nothing (`unchanged`); otherwise one Shared diff adds what is
   missing and removes every copy of each stale own link. Copies of an expected triple stay
   (two peers that registered the same shape agree); links other apps put on the class, shape
   or property nodes stay. It answers once the registry and the shape cache hold the new shape.
-- A class name (`class_name_of`, the IRI's local name) is unique in a perspective. Readers
-  find a class by name with `model_query::shape::find_class`, which reads the least target
-  class IRI of that name; a class with two `ad4m://shape` links reads the least shape URI
-  (`shacl_parser::current_shape_uri`), in the registry and in `load_shape` alike.
-  `register_shapes` refuses, writing nothing, two classes of one name in one call, and a
-  class when `find_class` reads another class for its name. The check is local, so two
-  peers can still store two classes of one name before they sync; the one `find_class`
-  reads can always register again, so an app's `registerAll` keeps working on every peer,
-  and a new class never takes a name over, even one whose IRI sorts first.
-- The six hard-wired class names (`FlowInstance`, `FlowTransitionProposal`, `AutoProcessor`,
-  `ProcessingClaim`, `InterpretationRun`, `InterpretationOverlay`) are reserved:
-  `register_shapes` refuses a class of one of them under any IRI but the executor's
-  (`hardwired_class::reserved_target_class`), so the executor's flow and interpretation
-  paths always find their own class.
+- A class is addressed by its target class IRI; the SDK sends it on every call. Many classes
+  may share a name (`class_name_of`, the IRI's local name): `we://Topic` and `flux://Topic`
+  coexist. `model_query::shape::find_class` matches an IRI exactly; a bare name (MCP tools,
+  old callers) reads the least target class IRI of that name. A class with two `ad4m://shape`
+  links reads the least shape URI (`shacl_parser::current_shape_uri`), in the registry and
+  in `load_shape` alike. `register_shapes` refuses, writing nothing, one target class twice
+  in one call, a shape URI another class holds, and a shape URI not ending in `{Name}Shape`.
+  A relation resolves through `ShapeRelation::target_class` (the class owning its
+  `sh:class` shape), the name only when that shape is not stored.
+- The executor's own paths address the six hard-wired classes by IRI (`ad4m://FlowInstance`,
+  `flow_classes::FLOW_INSTANCE_CLASS` and the like), so an app's `app://FlowInstance` is
+  stored beside them and never read in their place.
 - Hard-wired classes (`hardwired_class::ensure_subject_classes`) are upgrade-only: written when
   missing or when the stored shape lacks the newest path / declares a removed one
   (`HardwiredClass`), never over a newer stored shape. Only the executor registers them:
