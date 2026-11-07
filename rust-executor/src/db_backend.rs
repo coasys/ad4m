@@ -33,7 +33,7 @@ use tokio::sync::OnceCell;
 
 use crate::db::{
     Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinRow,
-    OperatorRecordRow, PaymentRequest,
+    OperatorRecordRow, OperatorSetBy, PaymentRequest,
 };
 use crate::types::{
     AIModelLoadingStatus, AIPromptExamples, AITask, EntanglementProof, Expression, ImportResult,
@@ -383,6 +383,7 @@ macro_rules! ad4m_db_methods {
             // Identity: the operator record, the identity each local agent speaks for, the
             // claims this executor made (`db/identity.rs`)
             fn operator_record(&self) -> Ad4mDbResult<Option<OperatorRecordRow>>;
+            fn set_operator_record_if_empty(&self, scid: &str, set_at: u64, set_by: OperatorSetBy) -> Ad4mDbResult<OperatorRecordRow>;
             fn agent_identity(&self, agent_did: &str) -> Ad4mDbResult<Option<String>>;
             fn set_agent_identity(&self, agent_did: &str, scid: &str, set_at: u64) -> Ad4mDbResult<()>;
             fn agents_of_identity(&self, scid: &str) -> Ad4mDbResult<Vec<String>>;

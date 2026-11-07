@@ -50,6 +50,8 @@ ctrlc = "3.4.0"
 serde_cbor = "0.11"
 ratatui = "0.26.0"
 crossterm = "0.27.0"
+# The device string's terminal QR code (`ad4m-executor link-code`); no image backends.
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

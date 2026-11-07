@@ -533,6 +533,31 @@ pub trait WalletBackend: Send + Sync {
     fn retire_key(&self, _name: &str, _retired_name: &str) -> Result<(), AnyError> {
         Err(anyhow!("this wallet backend cannot rename keys"))
     }
+
+    /// Opens a device-inbox message sealed for `address` to the X25519 `enc` key of the key
+    /// `name` (the key `did_key` derives from the Ed25519 key, no second secret). The secret
+    /// and its X25519 form stay inside this call and are wiped; only the payload leaves, and
+    /// the caller wipes a secret it carries.
+    fn open_sealed(
+        &self,
+        name: &str,
+        address: &ad4m_identity_core::inbox::InboxAddress,
+        sealed: &str,
+    ) -> Result<ad4m_identity_core::inbox::InboxPayload, AnyError> {
+        let secret = Zeroizing::new(
+            self.get_secret_key(name)
+                .ok_or_else(|| anyhow!("{name} key not found"))?,
+        );
+        let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
+            secret
+                .get(..32)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| anyhow!("the {name} key is not an Ed25519 secret"))?,
+        );
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let enc = ad4m_identity_core::x25519_secret_of_ed25519(&key);
+        ad4m_identity_core::inbox::open(&enc, address, sealed).map_err(|e| anyhow!("{e}"))
+    }
 }
 
 // ── Global accessor ─────────────────────────────────────────────────────────

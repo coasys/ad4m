@@ -602,6 +602,12 @@ impl KelCache {
         !self.store_keys.is_empty()
     }
 
+    /// `identity.storeKeys` (multikeys): the first names the store a request is for when no
+    /// head names it yet (a pre-join read).
+    pub fn store_keys(&self) -> &[String] {
+        &self.store_keys
+    }
+
     /// Calls `listener` for each fork recorded for the first time.
     pub fn set_fork_listener(&mut self, listener: ForkListener) {
         self.on_fork = Some(listener);
@@ -1195,8 +1201,10 @@ pub(crate) mod tests {
     use ad4m_identity_core::build::{cosign, incept_human, revoke, Signer};
     use ad4m_identity_core::{DeviceKey, KeyLife};
     use ad4m_ldk::identity::{
-        AgentRecord, AppendRequest, Claim, ClaimReceipt, KeyIndexEntry, LogPage, OfferListing,
-        OfferOpened, OfferProgress, SignedOffer, SignedRequest,
+        AgentRecord, AppendRequest, Claim, ClaimReceipt, DeviceRequest, InboxAddress, InboxAuth,
+        InboxMessage, InboxStored, InboxWrite, KeyIndexEntry, LogPage, OfferListing, OfferOpened,
+        OfferProgress, PostedRequest, RecordStored, RequestPosted, SealedRecord, SignedOffer,
+        SignedRequest,
     };
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
@@ -1375,6 +1383,18 @@ pub(crate) mod tests {
         pub puts: StdMutex<Vec<(AgentRecord, Option<SignedRequest>)>>,
         /// A `put_agent` call fails as unavailable.
         pub put_down: AtomicBool,
+        /// The inbox messages it holds, with their address.
+        pub inbox: StdMutex<Vec<(InboxAddress, InboxMessage)>>,
+        /// The ids of the inbox messages acknowledged, in order.
+        pub acks: StdMutex<Vec<String>>,
+        /// Each inbox read's and acknowledgement's authentication.
+        pub inbox_auths: StdMutex<Vec<InboxAuth>>,
+        /// The claims made, with their offer id.
+        pub claims: StdMutex<Vec<(String, Claim)>>,
+        /// The private record it holds.
+        pub record: StdMutex<Option<SealedRecord>>,
+        /// The signed requests of the record and request-box calls, by call name.
+        pub requests: StdMutex<Vec<(&'static str, SignedRequest)>>,
         /// The most events a page holds, when set (the head stays the log's).
         pub page_limit: StdMutex<Option<usize>>,
         /// How many times a page serves each of its events (1: once), as a store that pads its
@@ -1395,9 +1415,39 @@ pub(crate) mod tests {
                 key_owner_calls: AtomicUsize::new(0),
                 puts: StdMutex::new(vec![]),
                 put_down: AtomicBool::new(false),
+                inbox: StdMutex::new(vec![]),
+                acks: StdMutex::new(vec![]),
+                inbox_auths: StdMutex::new(vec![]),
+                claims: StdMutex::new(vec![]),
+                record: StdMutex::new(None),
+                requests: StdMutex::new(vec![]),
                 page_limit: StdMutex::new(None),
                 repeat: AtomicUsize::new(1),
             }
+        }
+
+        /// Holds `sealed` at `address` as the store would keep it.
+        pub fn deliver(&self, address: InboxAddress, id: &str, sealed: String) {
+            let writer = match &address {
+                InboxAddress::Pre { .. } => ad4m_ldk::identity::InboxWriter::Offer {
+                    scid: "Qm".into(),
+                    offer_id: "o".into(),
+                },
+                InboxAddress::Joined { scid, .. } => ad4m_ldk::identity::InboxWriter::Master {
+                    scid: scid.clone(),
+                    key_id: "m0".into(),
+                },
+            };
+            self.inbox.lock().unwrap().push((
+                address,
+                InboxMessage {
+                    id: id.into(),
+                    sealed,
+                    writer,
+                    stored_at: 1,
+                    expires: u64::MAX / 2,
+                },
+            ));
         }
 
         /// The page from seq `from` with a signed head; `None` while it holds no log. Also
@@ -1543,10 +1593,18 @@ pub(crate) mod tests {
         async fn claim_offer(
             &self,
             _: &str,
-            _: &str,
-            _: &Claim,
+            offer_id: &str,
+            claim: &Claim,
         ) -> Result<ClaimReceipt, IdentityError> {
-            unimplemented_call("claim_offer")
+            self.claims
+                .lock()
+                .unwrap()
+                .push((offer_id.to_string(), claim.clone()));
+            Ok(ClaimReceipt {
+                state: "claimed".into(),
+                kind: ad4m_ldk::identity::OfferKind::Device,
+                expires: u64::MAX / 2,
+            })
         }
         async fn offer_state(
             &self,
@@ -1556,6 +1614,115 @@ pub(crate) mod tests {
             _: u8,
         ) -> Result<OfferProgress, IdentityError> {
             unimplemented_call("offer_state")
+        }
+        async fn inbox_put(
+            &self,
+            address: &InboxAddress,
+            write: &InboxWrite,
+            _: &SignedRequest,
+        ) -> Result<InboxStored, IdentityError> {
+            let id = format!("m{}", self.inbox.lock().unwrap().len());
+            self.deliver(address.clone(), &id, write.sealed.clone());
+            Ok(InboxStored {
+                id,
+                expires: u64::MAX / 2,
+            })
+        }
+        async fn inbox_list(
+            &self,
+            address: &InboxAddress,
+            auth: &InboxAuth,
+            _: u8,
+        ) -> Result<Vec<InboxMessage>, IdentityError> {
+            // Answers after a yield, as a store over the network does: reads at once interleave.
+            tokio::task::yield_now().await;
+            self.inbox_auths.lock().unwrap().push(auth.clone());
+            Ok(self
+                .inbox
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(at, _)| at == address)
+                .map(|(_, m)| m.clone())
+                .collect())
+        }
+        async fn inbox_ack(
+            &self,
+            address: &InboxAddress,
+            id: &str,
+            auth: &InboxAuth,
+        ) -> Result<(), IdentityError> {
+            self.inbox_auths.lock().unwrap().push(auth.clone());
+            let mut inbox = self.inbox.lock().unwrap();
+            let before = inbox.len();
+            inbox.retain(|(at, m)| !(at == address && m.id == id));
+            if inbox.len() == before {
+                return Err(IdentityError::NotFound);
+            }
+            self.acks.lock().unwrap().push(id.to_string());
+            Ok(())
+        }
+        async fn get_record(
+            &self,
+            _: &str,
+            req: &SignedRequest,
+        ) -> Result<Option<SealedRecord>, IdentityError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(("get_record", req.clone()));
+            Ok(self.record.lock().unwrap().clone())
+        }
+        async fn put_record(
+            &self,
+            _: &str,
+            record: &SealedRecord,
+            req: &SignedRequest,
+        ) -> Result<RecordStored, IdentityError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(("put_record", req.clone()));
+            *self.record.lock().unwrap() = Some(record.clone());
+            Ok(RecordStored {
+                version: record.version,
+            })
+        }
+        async fn post_request(
+            &self,
+            _: &str,
+            _: &PostedRequest,
+            req: &SignedRequest,
+        ) -> Result<RequestPosted, IdentityError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(("post_request", req.clone()));
+            Ok(RequestPosted { id: "r1".into() })
+        }
+        async fn list_requests(
+            &self,
+            _: &str,
+            _: u64,
+            req: &SignedRequest,
+        ) -> Result<Vec<DeviceRequest>, IdentityError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(("list_requests", req.clone()));
+            Ok(vec![])
+        }
+        async fn delete_request(
+            &self,
+            _: &str,
+            _: &str,
+            req: &SignedRequest,
+        ) -> Result<(), IdentityError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(("delete_request", req.clone()));
+            Ok(())
         }
     }
 

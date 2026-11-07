@@ -14,12 +14,14 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
 | `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages; one fetch per log at a time, and a waiter takes the answer of a fetch that began after it called), `ingest`, `accept` (a lower store head: `Behind` or `Conflict`, a fork only with a valid rival), `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh), `store_behind`; fork checks `rival_signer`, `holding_rival` (one fork per signing master, `identity_fork_signers`); `KeyMap` (every trusted log by signing key, and the store's "no log" answers for 15 minutes; `global_key_map`), `subscribe` (a `VerdictChange` when an accepted head changes a key's verdict) |
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
-| `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
+| `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner`, `store_request` (a store request signed by a device key at a store-signed head) and `body_bytes` (the JCS bytes its `bodyHash` covers) |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
-| `custody.rs` | The custody channel's guard `admit` (the admin credential on a loopback listener of an executor started with `--custody-channel`; else 403 `no-custody-channel`) and `main_device_keys`; `identity.custodyStatus` is its one call so far |
+| `custody.rs` | The custody channel's guard `admit` (the custody credential = `OperatorSource::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`). The credential is the first line of stdin at start (`config::read_custody_credential`), held in memory only and wiped on drop: never the environment or a flag, which `/proc/<pid>/environ` and `/proc/<pid>/cmdline` show to other processes and to the admin credential's host file reads. `run` exits 78 without the line, with an empty line, with the admin credential's value, or with `AD4M_CUSTODY_CREDENTIAL`/`_FILE` set, and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
+| `inbox.rs` | The device inbox: `Inbox` (the joined messages opened here, by id and type, never a body; one read of the joined inbox at a time; the open pre-join read; the pull's wake-up), `pull_inbox` (`identity.inbox`), `take_master` (`identity.takeMaster`), `inbox_ack`, `inbox_put`, `prepare_device` (`identity.prepareDevice`: the device string and the pre-join read; `take_ticket` claims and, once claimed, sends `link-ticket`), `run_pull` / `run_schedule` / `wake` (at start, at unlock and binding, every 15 minutes) |
+| `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
 | `person.rs` | the person's profile: `person_record` (the agent record under the `did:scid` and its signed request, by the device key at the trusted head), `IdentityService::publish_person_profile` |
-| `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key, never `canKeepMaster`), `join_status` (the main agent's claims only) |
+| `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key; `canKeepMaster` as the caller says, which only the custody channel may: `custody::admit` on the RPC path, the channel itself on the ticket path), `join_status` (the main agent's claims only) |
 | `service.rs` | `IdentityService`: status, log, resetLog, cosignIncept, publish, openOffer, offers, devices; error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity`; the key session contracts (`KeyStatement`, `SignedKeyStatement`, `SessionChallenge`, `KeySessionResult`, `SessionInfo`, ...) |
 
@@ -173,7 +175,13 @@ the offer's state).
   call `invalid` (`store-url`), which reaches callers as an error, never a panic.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
   first-link rule itself: `already-linked` while the main key is valid in its identity's log at
-  the trusted seq, `no-operator` without a record, `first-link` for another identity.
+  the trusted seq, `no-operator` without a record, `first-link` for another identity. One
+  exception (`FirstLink::FirstRun`): a `--custody-channel` executor (a desktop app, which never
+  runs `init --operator`) with no record and no identity for its main agent claims the first
+  offer, and once the store accepts that claim records the offer's identity as operator
+  (`OperatorSetBy::FirstRun`, `set_operator_record_if_empty`). From then on the rule applies as
+  above: a claim for any other identity is `first-link`. Both the ticket path and
+  `identity.claimOffer` (a pasted link) go through `claim_for_main`, so both get it.
 - With an operator record the main key may speak only for the operator's identity:
   `cosignIncept` for the main agent runs `main_incept_check` and refuses (`first-link`) an
   incept of any other identity, and `publish` of an incept by the main agent runs it again
@@ -181,7 +189,7 @@ the offer's state).
   not bound by the record.
 - `cosignIncept` and `publish` bind the caller's agent for good, and every app holds
   `agent:SIGN` and `agent:UPDATE` by default, so their guard is `Guard::UserOrOperator`: for
-  the main agent only the operator (the admin credential the custody service holds), never an
+  the main agent only the operator (the admin or the custody credential), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
   managed agent.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through
@@ -389,10 +397,49 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   start) drops the public filter and the up-front IP check for tests and local development;
   redirects stay unfollowed.
 
+## The device inbox (`inbox.rs`, spec section 17)
+
+- A message is sealed to the device's `enc` key, the X25519 form of its wallet key: only
+  `WalletBackend::open_sealed` opens it (the secret and its X25519 form stay in that call), and
+  every opened payload (`Opened`) wipes its secret (a master key, an offer's `s`) on drop. A
+  locked wallet opens nothing and deletes nothing.
+- **The joined inbox** of the main agent is read at start, at each `inbox::wake` (the wallet
+  unlocked: `agent.generate`/`agent.unlock`; the main agent bound to an identity) and every
+  15 minutes (`run_pull`), and by `identity.inbox`; one read at a time (`Inbox::pulling`).
+  **With the custody channel** each new message is opened for its body type, wiped at once,
+  left in the store, and announced once (`inbox-message {id, kind}`, audience
+  `Audience::LocalOperator`); one that does not open is deleted. **Without it** (a server, a
+  host, Coasys cloud) the executor keeps no master key, and a master key is the only body a
+  joined inbox carries, so each message is deleted at the pull unopened, with an error in the
+  log, and nothing is listed or announced.
+- **`identity.takeMaster`** (custody channel, `custody::admit`) refreshes the log, opens the
+  joined messages oldest first and runs `check_payload` against the cached log: `KeepMaster`
+  answers `TakenMaster {messageId, did, index, secret}` (wiped when dropped, never cloned,
+  `Debug` without the secret) and leaves the message for `identity.inboxAck`; `Stale` and a
+  failed check are deleted and the next one is tried; none answers `null`; a locked wallet is
+  503 `unavailable`. The secret goes into the RPC answer only: no store, log line, event or
+  language sees it.
+- **`identity.prepareDevice`** makes the main key's device string (`sign`, `enc`, a fresh
+  `r`, `exp` 5 minutes ahead, `identity.storeUrl`) and reads `Pre(a)` with pre-join reads
+  (`sign_pre_auth` by the device key, for the first key of `identity.storeKeys`) until `exp`,
+  at most one read a second; a new call ends the last read. `claim_for_main` (the first-link
+  rule) claims a ticket that passes `check_payload` (its signed offer checked against the
+  identity's log, refreshed from the store) with `canKeepMaster` exactly when the custody
+  channel is on; a claim sends `link-ticket {did, offerId, matchCode}` to the operator on this
+  machine, a refused one sends nothing; the message is deleted either way. A ticket whose log
+  cannot be read now waits for the next round; a store that is behind (`Behind`, `Conflict`)
+  is no such case: the cached log at its trusted seq checks the ticket. A master key in a pre-join inbox is dropped
+  with an error in the log.
+- The record and the request box pass a request the caller signed with the identity's master
+  key (the custody service, a restoring app), or sign one with the agent's device key at its
+  `DevicePosition`; `identity.postRequest` always signs with the device key (the store refuses
+  a master key's post). The executor never opens the record, so `identity.devices` has no
+  names: the app joins the opened record's entries by key id.
+
 ## Do not
 
-- Do not read the words or a master key here, or add a call that carries one: the executor
-  holds device keys only.
+- Do not read the words here, or a master key outside `identity.takeMaster`: the executor
+  holds device keys only; a master key opens here only inside that call and is never kept.
 - Do not trust a store's hash or head: `import`/`fold` and `verify_head` decide.
 - Do not pass a `src` to the backend (the agent language reads only its store), and do not
   read a foreign host with another client than `SrcFetch`.

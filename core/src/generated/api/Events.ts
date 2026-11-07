@@ -12,6 +12,8 @@ import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { FlowStateChangedEvent } from "./FlowStateChangedEvent";
 import type { HostingUserInfo } from "./HostingUserInfo";
 import type { IdentityForkEvent } from "./IdentityForkEvent";
+import type { InboxMessageEvent } from "./InboxMessageEvent";
+import type { LinkTicketEvent } from "./LinkTicketEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
 import type { PerspectiveEvent } from "./PerspectiveEvent";
@@ -54,6 +56,8 @@ export interface EventMap {
   "flow-state-changed": FlowStateChangedEvent;
   "identity-fork": IdentityForkEvent;
   "config-changed": ConfigChanged;
+  "link-ticket": LinkTicketEvent;
+  "inbox-message": InboxMessageEvent;
 }
 
 export type EventName = keyof EventMap;

@@ -550,6 +550,9 @@ impl RunArgs {
         config.custody_channel = self.custody_channel;
         config.config_file = self.config.clone();
         config.pinned_config_keys = pinned;
+        // The custody credential is not resolved here: `run` reads it from stdin
+        // (`read_custody_credential`), and `ExecutorSecrets::from_env` refused it in the
+        // environment.
         rust_executor::config::refuse_custody_channel_with_multi_user(
             config.custody_channel == Some(true),
             config.enable_multi_user == Some(true),
@@ -688,6 +691,8 @@ pub(crate) mod tests {
         .config;
         assert_eq!(resolved.watch_stdin, Some(true));
         assert_eq!(resolved.custody_channel, Some(true));
+        // The custody credential is read from stdin after the resolve, by `run` only.
+        assert!(resolved.custody_credential.is_none());
         assert_eq!(resolved.log_dir.as_deref(), Some("/data/adam/logs"));
         assert_eq!(resolved.config_file.as_deref(), Some(Path::new(&config)));
         let mut pinned = resolved.pinned_config_keys.clone();
@@ -729,6 +734,36 @@ pub(crate) mod tests {
         )
         .is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The custody credential never comes from the environment: `run` refuses
+    /// `AD4M_CUSTODY_CREDENTIAL` or `AD4M_CUSTODY_CREDENTIAL_FILE`, with or without the channel,
+    /// naming the variable. Without them the channel resolves; `run` then reads the credential
+    /// from stdin.
+    #[test]
+    fn the_custody_credential_in_the_environment_is_refused() {
+        let _env = lock_env();
+        for variable in rust_executor::config::CUSTODY_CREDENTIAL_VARIABLES {
+            for argv in [&["--custody-channel"][..], &[]] {
+                let refused = resolve(
+                    argv,
+                    &[("AD4M_ADMIN_CREDENTIAL", "secret"), (variable, "custody")],
+                )
+                .err()
+                .expect("refused");
+                let message = format!("{refused:#}");
+                let expected =
+                    rust_executor::config::custody_credential_in_environment_error(variable);
+                assert!(message.contains(&expected), "{message}");
+                assert!(!message.contains("\"custody\""), "{message}");
+            }
+        }
+        assert!(resolve(
+            &["--custody-channel"],
+            &[("AD4M_ADMIN_CREDENTIAL", "secret")]
+        )
+        .is_ok());
+        assert!(resolve(&[], &[("AD4M_ADMIN_CREDENTIAL", "secret")]).is_ok());
     }
 
     #[cfg(unix)]

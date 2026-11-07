@@ -44,6 +44,51 @@ pub fn enc_key_of(key: &str) -> Result<Multikey, String> {
     Ok(ad4m_identity_core::encode_x25519_multikey(&bytes))
 }
 
+/// How long a store request this executor signs stays valid (the store takes at most 300 s).
+pub const REQUEST_TTL_S: u64 = 60;
+
+/// A store request (`X-Coasys-Request`) for `method path` with the raw `body` (empty for a
+/// read), signed by `signer`, the device key `key_id` of `did`, at `head` (a head the store
+/// signed: its seq and hash are a position the store holds, its `store` the store the request
+/// is for). Valid until `expires`.
+#[allow(clippy::too_many_arguments)]
+pub fn store_request(
+    signer: &dyn Signer,
+    did: &str,
+    key_id: &str,
+    head: &ad4m_ldk::identity::SignedHead,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    expires: u64,
+) -> Result<ad4m_ldk::identity::SignedRequest, String> {
+    let req = ad4m_ldk::identity::RequestBody {
+        did: did.to_string(),
+        store: head.store.clone(),
+        key_id: key_id.to_string(),
+        kel_seq: head.seq,
+        kel_hash: head.hash.clone(),
+        method: method.into(),
+        path: path.into(),
+        body_hash: ad4m_hash_chain::hash_bytes(body),
+        nonce: bs58::encode(rand::random::<[u8; 16]>()).into_string(),
+        expires,
+    };
+    let bytes = ad4m_identity_core::signing_bytes(ad4m_identity_core::REQUEST_DOMAIN, &req)
+        .map_err(|e| e.to_string())?;
+    let sig = ad4m_hash_chain::encode_proof_value(&signer.sign(&bytes));
+    Ok(ad4m_ldk::identity::SignedRequest { req, sig })
+}
+
+/// The canonical JSON of `body`: the bytes the agent language sends, so the bytes a request's
+/// `bodyHash` covers.
+pub fn body_bytes<T: serde::Serialize>(body: &T) -> Result<Vec<u8>, String> {
+    let value = serde_json::to_value(body).map_err(|e| e.to_string())?;
+    ad4m_hash_chain::canonical_json(&value)
+        .map(String::into_bytes)
+        .map_err(|e| e.to_string())
+}
+
 /// Signs with `agent`'s wallet key. `Signer::sign` cannot fail, so a wallet failure (a locked
 /// wallet, a missing key) leaves a zero signature and is kept: call [`WalletSigner::check`]
 /// after signing.

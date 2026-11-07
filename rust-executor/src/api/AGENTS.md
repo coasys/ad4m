@@ -124,10 +124,14 @@ local only admits it as the operator, as its guard says. That is the rule for th
 that create, import or lock the executor's agent and move its data folder: `agent.generate`,
 `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` are not local
 only, so a remote operator (a key login, or the admin credential on a network listener) may
-move the whole data folder. The guard table marks the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
-`machine` key to a caller off this machine (`config_rpc`). `identity.custodyStatus` adds the
-custody channel's own check (`identity::custody::admit`: the admin credential, not a tokenless
-operator, and `--custody-channel`).
+move the whole data folder. The guard table marks the local-only methods "local only".
+`runtime.setConfig` is not local only as a whole: it refuses each `machine` key to a caller
+off this machine (`config_rpc`). `identity.custodyStatus` and `identity.takeMaster` (the one
+call whose answer carries a master key) add the custody channel's own check
+(`identity::custody::admit`: the admin credential, not a tokenless operator, and
+`--custody-channel`); every other caller gets 403 `no-custody-channel`. The events only
+local-only methods read (`link-ticket`, `inbox-message`) go to `Audience::LocalOperator`, the
+operator's sessions on this machine.
 
 Notes on some methods:
 
@@ -172,7 +176,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-217 methods: Cap 81, Executor 33, Open 8, Operator 25, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 6.
+227 methods: Cap 87, Executor 33, Open 8, Operator 29, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 10.
 
 | Method | Guard |
 |---|---|
@@ -231,16 +235,26 @@ the guard checked:
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
 | `identity.custodyStatus` | `Operator`, local only |
+| `identity.deleteRequest` | `Cap(agent:UPDATE)` |
 | `identity.devices` | `Cap(agent:READ)` |
+| `identity.inbox` | `Operator`, local only |
+| `identity.inboxAck` | `Operator`, local only |
+| `identity.inboxPut` | `Cap(agent:UPDATE)` |
 | `identity.joinStatus` | `Cap(agent:READ)` |
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
+| `identity.postRequest` | `Cap(agent:UPDATE)` |
+| `identity.prepareDevice` | `Operator`, local only |
 | `identity.publish` | `UserOrOperator(agent:UPDATE)` |
+| `identity.record` | `Cap(agent:READ)` |
+| `identity.recordPut` | `Cap(agent:UPDATE)` |
 | `identity.rekey` | `Operator`, local only |
+| `identity.requests` | `Cap(agent:READ)` |
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
+| `identity.takeMaster` | `Operator`, local only |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |

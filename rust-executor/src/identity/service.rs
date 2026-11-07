@@ -165,6 +165,9 @@ pub struct IdentityService {
     pub resolver: Arc<super::resolver::Resolver>,
     /// The open challenges of key logins (`user.sessionChallenge`).
     pub challenges: super::key_login::Challenges,
+    /// The device inbox: what this executor read of it, the open pre-join read, the pull's
+    /// wake-up.
+    pub inbox: super::inbox::Inbox,
     /// The origins a key statement's `audience` may name: `public_origins`, else this
     /// executor's own loopback origins.
     pub audiences: super::key_login::Audiences,
@@ -373,6 +376,8 @@ impl IdentityService {
             // The main agent's status gains its identity (a managed agent's status event names
             // the main agent's, so only the main agent's changes here).
             if agent.is_main_agent() {
+                // A device that joined reads its inbox at once.
+                super::inbox::wake();
                 let mut status = crate::agent::AgentService::with_global_instance(|a| a.dump());
                 status.identity = self.identity_of(&agent_did).await;
                 crate::pubsub::get_global_pubsub()
@@ -542,8 +547,8 @@ impl IdentityService {
         convert(&listings).map_err(|e| WsRpcError::internal(e.to_string()))
     }
 
-    /// `identity.devices`: the identity's device keys, from the log (the executor has no
-    /// private record yet, so no names).
+    /// `identity.devices`: the identity's device keys, from the log (the executor never opens
+    /// the private record, so no names).
     pub async fn devices(&self, agent: &AgentContext) -> Result<Vec<DeviceView>, WsRpcError> {
         let (agent_did, key) = device_key(agent).map_err(WsRpcError::internal)?;
         let Some(scid) = db(|db| db.agent_identity(&agent_did))? else {
@@ -711,6 +716,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
             audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         }
@@ -747,6 +753,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
             audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
@@ -795,6 +802,7 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
+                inbox: Default::default(),
                 audiences: Default::default(),
                 store_keys_source: crate::identity::StoreSource::Config,
             }
@@ -851,6 +859,7 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 challenges: Default::default(),
+                inbox: Default::default(),
                 audiences: Default::default(),
                 store_keys_source,
             }
@@ -917,10 +926,7 @@ mod tests {
         let claim = || async {
             service
                 .claims()
-                .claim_for_main(&crate::identity::types::ClaimOfferParams {
-                    offer: offer.encode(),
-                    hint: None,
-                })
+                .claim_for_main(&offer, false, None)
                 .await
                 .expect_err("the claim is refused")
         };
@@ -1109,6 +1115,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
             audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
@@ -1205,6 +1212,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
             audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         }
@@ -1318,6 +1326,69 @@ mod tests {
                 .filter(|_| state == "spent");
             Ok(ad4m_ldk::identity::OfferProgress { state, seq })
         }
+        async fn inbox_put(
+            &self,
+            address: &ad4m_ldk::identity::InboxAddress,
+            write: &ad4m_ldk::identity::InboxWrite,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<ad4m_ldk::identity::InboxStored, IdentityError> {
+            self.inner.inbox_put(address, write, req).await
+        }
+        async fn inbox_list(
+            &self,
+            address: &ad4m_ldk::identity::InboxAddress,
+            auth: &ad4m_ldk::identity::InboxAuth,
+            wait_s: u8,
+        ) -> Result<Vec<ad4m_ldk::identity::InboxMessage>, IdentityError> {
+            self.inner.inbox_list(address, auth, wait_s).await
+        }
+        async fn inbox_ack(
+            &self,
+            address: &ad4m_ldk::identity::InboxAddress,
+            id: &str,
+            auth: &ad4m_ldk::identity::InboxAuth,
+        ) -> Result<(), IdentityError> {
+            self.inner.inbox_ack(address, id, auth).await
+        }
+        async fn get_record(
+            &self,
+            did: &str,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<Option<ad4m_ldk::identity::SealedRecord>, IdentityError> {
+            self.inner.get_record(did, req).await
+        }
+        async fn put_record(
+            &self,
+            did: &str,
+            record: &ad4m_ldk::identity::SealedRecord,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<ad4m_ldk::identity::RecordStored, IdentityError> {
+            self.inner.put_record(did, record, req).await
+        }
+        async fn post_request(
+            &self,
+            did: &str,
+            post: &ad4m_ldk::identity::PostedRequest,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<ad4m_ldk::identity::RequestPosted, IdentityError> {
+            self.inner.post_request(did, post, req).await
+        }
+        async fn list_requests(
+            &self,
+            did: &str,
+            since: u64,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<Vec<ad4m_ldk::identity::DeviceRequest>, IdentityError> {
+            self.inner.list_requests(did, since, req).await
+        }
+        async fn delete_request(
+            &self,
+            did: &str,
+            id: &str,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<(), IdentityError> {
+            self.inner.delete_request(did, id, req).await
+        }
     }
 
     /// With no store key (`identity.storeUrl` set, `identity.storeKeys` unset), the executor
@@ -1347,6 +1418,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
             audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
@@ -1381,10 +1453,7 @@ mod tests {
         };
         let refused = service
             .claims()
-            .claim_for_main(&crate::identity::types::ClaimOfferParams {
-                offer: offer.encode(),
-                hint: None,
-            })
+            .claim_for_main(&offer, false, None)
             .await
             .expect_err("a claim the executor cannot finish is refused");
         assert!(
@@ -1491,7 +1560,6 @@ mod tests {
     /// (a retry would get `gone`).
     #[tokio::test]
     async fn a_claim_keeps_its_join_row_when_the_store_call_fails() {
-        use crate::identity::types::ClaimOfferParams;
         use ad4m_identity_core::link::OfferString;
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
@@ -1512,10 +1580,6 @@ mod tests {
             offer_id: bs58::encode([id; 16]).into_string(),
             s: bs58::encode([1u8; 32]).into_string(),
         };
-        let params = |offer: &OfferString| ClaimOfferParams {
-            offer: offer.encode(),
-            hint: None,
-        };
         let claims = || backend.claims.load(std::sync::atomic::Ordering::SeqCst);
 
         // The store refuses the claim: the row stays and reports the offer's state.
@@ -1523,7 +1587,7 @@ mod tests {
         let refused = offer(3);
         service
             .claims()
-            .claim_for_main(&params(&refused))
+            .claim_for_main(&refused, false, None)
             .await
             .expect_err("the store refused");
         assert_eq!(claims(), 1);
@@ -1544,7 +1608,7 @@ mod tests {
         let lost = offer(4);
         service
             .claims()
-            .claim_for_main(&params(&lost))
+            .claim_for_main(&lost, false, None)
             .await
             .expect_err("the answer was lost");
         assert_eq!(claims(), 2);
@@ -1560,5 +1624,96 @@ mod tests {
             db(|db| db.agent_identity(&main_did)).unwrap(),
             Some(incept.scid.clone())
         );
+    }
+
+    /// A desktop app's executor at its first run (`--custody-channel`, no operator record, the
+    /// main agent of no identity) claims; once the store takes the claim the offer's identity is
+    /// the operator (`first-run`), and once the add spends the offer the main agent is a device
+    /// of it. A claim for another identity is then refused `first-link`. Without the custody
+    /// channel a missing record stays `no-operator`, before the store.
+    #[tokio::test]
+    async fn a_desktop_with_no_operator_record_records_its_first_claims_identity() {
+        use crate::db::OperatorSetBy;
+        use ad4m_identity_core::link::OfferString;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = AgentContext::main_agent();
+        let (main_did, _) = device_key(&main).unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+        let incept = test_service()
+            .cosign_incept(&main, &incept_listing(&main, 59))
+            .await
+            .unwrap();
+        let incept = Event::from_json(&incept).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![incept.clone()], false));
+        let service = service_on(backend.clone());
+        let offer = |scid: &str, id: u8| OfferString {
+            store: "https://store.example".into(),
+            scid: scid.into(),
+            offer_id: bs58::encode([id; 16]).into_string(),
+            s: bs58::encode([1u8; 32]).into_string(),
+        };
+        let claims = || backend.claims.load(std::sync::atomic::Ordering::SeqCst);
+        let record = || db(|db| db.operator_record()).unwrap();
+
+        // Not a desktop app's executor: no record is `no-operator`, and nothing is recorded.
+        let refused = service
+            .claims()
+            .claim_for_main(&offer(&incept.scid, 5), false, None)
+            .await
+            .expect_err("no operator");
+        assert!(
+            refused.message.starts_with("no-operator"),
+            "{}",
+            refused.message
+        );
+        assert_eq!((claims(), record()), (0, None));
+
+        let channel = crate::config::CustodyChannelForTest::on();
+        let first = offer(&incept.scid, 6);
+        service
+            .claims()
+            .claim_for_main(&first, true, None)
+            .await
+            .expect("a desktop's first claim goes ahead");
+        assert_eq!(claims(), 1);
+        let recorded = record().expect("the claim recorded the operator");
+        assert_eq!(
+            (recorded.scid.as_str(), recorded.set_by),
+            (did_of(&incept.scid).as_str(), OperatorSetBy::FirstRun)
+        );
+
+        // The record exists now: an offer of another identity is refused before the store.
+        let other = TestLog::new(60).scid();
+        let refused = service
+            .claims()
+            .claim_for_main(&offer(&other, 7), true, None)
+            .await
+            .expect_err("another identity");
+        assert!(
+            refused.message.starts_with("first-link"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.code, 403);
+        assert_eq!(claims(), 1);
+        assert_eq!(record().unwrap().scid, did_of(&incept.scid));
+
+        *backend.offer.lock().unwrap() = "spent".into();
+        let status = service
+            .claims()
+            .join_status(&main, &first.offer_id)
+            .await
+            .unwrap();
+        assert_eq!(status.key_id.as_deref(), Some("d1"));
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
+            Some(incept.scid.clone())
+        );
+
+        drop(channel);
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
     }
 }

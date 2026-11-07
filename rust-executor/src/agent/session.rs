@@ -66,6 +66,10 @@ pub enum OperatorSource {
     /// operator record's identity. Never the operator on this machine, whatever listener it
     /// arrived on: local-only methods refuse it.
     Key,
+    /// It presented the custody credential of an executor started with `--custody-channel`:
+    /// the custody service beside it. The one source the custody channel admits
+    /// (`identity::custody::admit`).
+    Custody,
 }
 
 impl OperatorSource {
@@ -75,6 +79,7 @@ impl OperatorSource {
             OperatorSource::Credential => "credential",
             OperatorSource::Loopback => "loopback",
             OperatorSource::Key => "key",
+            OperatorSource::Custody => "custody",
         }
     }
 }
@@ -159,6 +164,15 @@ impl Session {
         admin_credential: &Option<Secret>,
         reach: ListenerReach,
     ) -> Result<Session, AuthError> {
+        // The custody credential first: it differs from the admin credential (`run` refuses
+        // the two equal), and only an executor serving the custody channel has one.
+        if crate::config::is_custody_credential(token) {
+            return Ok(Session {
+                reach,
+                operator_source: Some(OperatorSource::Custody),
+                ..Session::without_token(Principal::Operator, vec![ALL_CAPABILITY.clone()])
+            });
+        }
         if is_admin_credential_token_on(token, admin_credential, reach) {
             let source = match admin_credential {
                 Some(_) => OperatorSource::Credential,
@@ -427,6 +441,7 @@ impl Session {
         let in_audience = match &event.audience {
             Audience::Everyone => true,
             Audience::Operator => self.is_operator(),
+            Audience::LocalOperator => self.is_operator_on_this_machine(),
             Audience::Dids(dids) => self.acts_as_did().is_some_and(|did| dids.contains(&did)),
         };
         in_audience && self.may(&event.capability)
@@ -507,6 +522,14 @@ impl Session {
     pub(crate) fn without_credential(self) -> Session {
         Session {
             operator_source: Some(OperatorSource::Loopback),
+            ..self
+        }
+    }
+
+    /// This operator session, proved by the custody credential: the custody service.
+    pub(crate) fn as_custody(self) -> Session {
+        Session {
+            operator_source: Some(OperatorSource::Custody),
             ..self
         }
     }
@@ -641,6 +664,52 @@ mod resolution_tests {
         assert_eq!(key.operator_source(), Some(OperatorSource::Key));
         assert!(!key.is_operator_on_this_machine());
         assert!(!key.on_network().is_operator_on_this_machine());
+    }
+
+    /// The custody credential opens a custody session, the operator on this machine on a
+    /// loopback listener, only on an executor started with `--custody-channel`; the admin
+    /// credential stays a credential session there.
+    #[test]
+    fn the_custody_credential_opens_a_custody_session_only_with_the_channel() {
+        ensure_db();
+        let saved = crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let with = |channel: Option<bool>| {
+            crate::config::set_global_config(crate::Ad4mConfig {
+                custody_channel: channel,
+                admin_credential: admin(),
+                custody_credential: Some("custody-secret".into()),
+                ..Default::default()
+            })
+        };
+
+        with(Some(true));
+        let custody = Session::open("custody-secret", &admin(), ListenerReach::Loopback).unwrap();
+        let custody_remote =
+            Session::open("custody-secret", &admin(), ListenerReach::Network).unwrap();
+        let admin_local = Session::open(ADMIN, &admin(), ListenerReach::Loopback).unwrap();
+        with(None);
+        let no_channel = Session::open("custody-secret", &admin(), ListenerReach::Loopback);
+        *crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = saved;
+
+        assert_eq!(custody.operator_source(), Some(OperatorSource::Custody));
+        assert!(custody.is_operator_on_this_machine());
+        assert_eq!(
+            custody_remote.operator_source(),
+            Some(OperatorSource::Custody)
+        );
+        assert!(!custody_remote.is_operator_on_this_machine());
+        assert_eq!(
+            admin_local.operator_source(),
+            Some(OperatorSource::Credential)
+        );
+        // Without the channel the custody credential is no credential: the token does not
+        // decode as a grant.
+        assert!(!no_channel.is_ok_and(|s| s.is_operator()));
     }
 
     #[test]

@@ -18,6 +18,6 @@ scid: string | null,
  */
 keyId: string | null, grantId: string | null, expiresAt: number | null, 
 /**
- * `credential`, `loopback` or `key`, for the operator.
+ * `credential`, `loopback`, `key` or `custody`, for the operator.
  */
 operatorSource: string | null, };

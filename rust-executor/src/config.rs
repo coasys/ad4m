@@ -44,6 +44,30 @@ pub fn custody_channel_on() -> bool {
         .unwrap_or(false)
 }
 
+/// Tests: the global config with `--custody-channel` on, as a desktop app's executor runs, until
+/// dropped; the config before it comes back then.
+#[cfg(test)]
+pub(crate) struct CustodyChannelForTest(Option<Ad4mConfig>);
+
+#[cfg(test)]
+impl CustodyChannelForTest {
+    pub(crate) fn on() -> Self {
+        let mut global = GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = global.clone();
+        let mut config = saved.clone().unwrap_or_default();
+        config.custody_channel = Some(true);
+        *global = Some(config);
+        CustodyChannelForTest(saved)
+    }
+}
+
+#[cfg(test)]
+impl Drop for CustodyChannelForTest {
+    fn drop(&mut self) {
+        *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = self.0.take();
+    }
+}
+
 /// Get a clone of the global Ad4mConfig.
 /// Recovers from a poisoned mutex (see `set_global_config` for rationale).
 pub fn get_global_config() -> Ad4mConfig {
@@ -144,10 +168,19 @@ pub struct Ad4mConfig {
     /// so the executor never outlives it (`--watch-stdin`).
     pub watch_stdin: Option<bool>,
     /// This executor serves the custody channel: the desktop app's custody service takes a
-    /// master key that arrived sealed to this computer from it, with the admin credential on a
-    /// loopback listener (`--custody-channel`). Never together with multi-user mode
-    /// ([`refuse_custody_channel_with_multi_user`]).
+    /// master key that arrived sealed to this computer from it, with the custody credential on
+    /// a loopback listener (`--custody-channel`). Never together with multi-user mode
+    /// ([`refuse_custody_channel_with_multi_user`]), never without a custody credential
+    /// ([`refuse_custody_channel_without_its_credential`]).
     pub custody_channel: Option<bool>,
+    /// The custody channel's own credential: the first line of stdin at start
+    /// ([`read_custody_credential`]), never the environment or a flag, which other processes
+    /// can read. Not a config file key. The operator on this machine, like the admin credential,
+    /// and the only caller the custody channel admits: the admin credential, which an app's
+    /// window may hold, never reaches it. Must differ from the admin credential. Serialises as
+    /// `"<redacted>"`.
+    #[serde(serialize_with = "crate::secret::serialize_redacted")]
+    pub custody_credential: Option<Secret>,
     /// The folder of the executor's own rotated log files (`--log-dir`). Unset: stdout.
     pub log_dir: Option<String>,
     /// The config file the executor started with (`--config`): the file `runtime.setConfig`
@@ -264,6 +297,7 @@ impl Ad4mConfig {
         // after prepare() (the startup check, REST/WS capabilities, the MCP
         // bind host and auth) agrees on it.
         self.admin_credential = self.admin_credential.take().filter(|c| !c.is_empty());
+        self.custody_credential = self.custody_credential.take().filter(|c| !c.is_empty());
 
         // Read shared-backend config from environment variables when not set
         // programmatically. This allows Docker containers to configure the
@@ -401,6 +435,7 @@ impl Ad4mConfig {
         };
         for pointer in [
             "/adminCredential",
+            "/custodyCredential",
             "/internalApiToken",
             "/smtpConfig/password",
         ] {
@@ -460,6 +495,111 @@ pub fn refuse_custody_channel_with_multi_user(
         return Err(CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR.to_string());
     }
     Ok(())
+}
+
+/// The custody channel opens only with its own credential, and that credential is not the
+/// admin credential: whoever holds the admin credential (an app's window among them) must not
+/// take a master key. The CLI (exit 78) and `run` call it.
+pub fn refuse_custody_channel_without_its_credential(
+    custody_channel: bool,
+    custody_credential: &Option<Secret>,
+    admin_credential: &Option<Secret>,
+) -> Result<(), String> {
+    if !custody_channel {
+        return Ok(());
+    }
+    let Some(custody) = custody_credential.as_ref().filter(|c| !c.is_empty()) else {
+        return Err(CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR.to_string());
+    };
+    if admin_credential
+        .as_ref()
+        .is_some_and(|admin| admin.expose_for_compare(custody.expose()))
+    {
+        return Err(CUSTODY_CREDENTIAL_IS_ADMIN_CREDENTIAL_ERROR.to_string());
+    }
+    Ok(())
+}
+
+/// Reads the custody credential of `--custody-channel` from `input`, the executor's stdin: its
+/// first line, without the line ending (`\n` or `\r\n`). Only that line is consumed; a
+/// buffered `input` keeps what follows for the next reader (`--watch-stdin`'s watcher).
+///
+/// Stdin, because every other way in is readable by someone else: a process's environment and
+/// command line are files (`/proc/<pid>/environ`, `/proc/<pid>/cmdline`) other processes of the
+/// user can read, and the admin credential, which an app's window holds, reads host files. The
+/// pipe's contents are gone once read.
+///
+/// Refused (the CLI exits 78): `input` ends before a line ends, an empty or whitespace-only
+/// line, a line that is not UTF-8, and the admin credential's value. The value is never in the
+/// error. The read buffer is wiped.
+pub fn read_custody_credential(
+    input: &mut impl std::io::BufRead,
+    admin_credential: &Option<Secret>,
+) -> Result<Secret, String> {
+    let mut line = zeroize::Zeroizing::new(Vec::new());
+    input.read_until(b'\n', &mut line).map_err(|e| {
+        format!(
+            "{CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR} (stdin: {})",
+            e.kind()
+        )
+    })?;
+    let Some(value) = line.strip_suffix(b"\n") else {
+        return Err(CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR.to_string());
+    };
+    let value = value.strip_suffix(b"\r").unwrap_or(value);
+    let Ok(value) = std::str::from_utf8(value) else {
+        return Err(CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR.to_string());
+    };
+    if value.trim().is_empty() {
+        return Err(CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR.to_string());
+    }
+    if admin_credential
+        .as_ref()
+        .is_some_and(|admin| admin.expose_for_compare(value))
+    {
+        return Err(CUSTODY_CREDENTIAL_IS_ADMIN_CREDENTIAL_ERROR.to_string());
+    }
+    Ok(Secret::new(value))
+}
+
+/// Why an executor refuses the custody channel without a custody credential.
+pub const CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR: &str =
+    "Refusing the custody channel without its credential: --custody-channel needs the custody \
+     credential, a secret only the custody service holds, as the first line of stdin (the \
+     value, then a newline). Write it there, or start without --custody-channel.";
+
+/// Why an executor refuses a custody credential equal to the admin credential.
+pub const CUSTODY_CREDENTIAL_IS_ADMIN_CREDENTIAL_ERROR: &str =
+    "Refusing the custody channel: the custody credential on stdin is the admin credential. \
+     The custody channel needs a credential of its own, which only the custody service holds.";
+
+/// Why an executor refuses to start with a custody credential in its environment.
+pub fn custody_credential_in_environment_error(variable: &str) -> String {
+    format!(
+        "Refusing to start: {variable} is set. The custody credential is never read from the \
+         environment, which other processes can read (/proc/<pid>/environ); the custody \
+         service writes it as the first line of stdin with --custody-channel. Unset {variable}."
+    )
+}
+
+/// The environment variables that once carried the custody credential: set, they stop a start.
+pub const CUSTODY_CREDENTIAL_VARIABLES: [&str; 2] =
+    ["AD4M_CUSTODY_CREDENTIAL", "AD4M_CUSTODY_CREDENTIAL_FILE"];
+
+/// Whether `token` is the custody credential of an executor that serves the custody channel.
+/// `false` without a global config, without the channel or without the credential, so a check
+/// on it fails closed. Never panics.
+pub fn is_custody_credential(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|config| config.custody_channel == Some(true))
+        .and_then(|config| config.custody_credential.as_ref())
+        .is_some_and(|custody| !custody.is_empty() && custody.expose_for_compare(token))
 }
 
 /// Why an executor refuses the custody channel with multi-user mode.
@@ -605,6 +745,7 @@ impl Ad4mConfig {
             pid_file: None,
             watch_stdin: None,
             custody_channel: None,
+            custody_credential: None,
             log_dir: None,
             config_file: None,
             pinned_config_keys: Vec::new(),
@@ -750,6 +891,116 @@ mod tests {
         assert!(refuse_custody_channel_with_multi_user(true, false).is_ok());
         assert!(refuse_custody_channel_with_multi_user(false, true).is_ok());
         assert!(refuse_custody_channel_with_multi_user(false, false).is_ok());
+    }
+
+    /// The custody channel needs its own credential, not the admin credential; without the
+    /// channel neither matters.
+    #[test]
+    fn the_custody_channel_needs_its_own_credential() {
+        let secret = |s: &str| Some(Secret::from(s));
+        assert_eq!(
+            refuse_custody_channel_without_its_credential(true, &None, &secret("admin"))
+                .unwrap_err(),
+            CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR
+        );
+        assert_eq!(
+            refuse_custody_channel_without_its_credential(true, &secret(""), &secret("admin"))
+                .unwrap_err(),
+            CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR
+        );
+        assert_eq!(
+            refuse_custody_channel_without_its_credential(true, &secret("admin"), &secret("admin"))
+                .unwrap_err(),
+            CUSTODY_CREDENTIAL_IS_ADMIN_CREDENTIAL_ERROR
+        );
+        assert!(refuse_custody_channel_without_its_credential(
+            true,
+            &secret("custody"),
+            &secret("admin")
+        )
+        .is_ok());
+        assert!(
+            refuse_custody_channel_without_its_credential(true, &secret("custody"), &None).is_ok()
+        );
+        assert!(refuse_custody_channel_without_its_credential(false, &None, &None).is_ok());
+        assert!(CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR.contains("first line of stdin"));
+    }
+
+    /// The custody credential is stdin's first line, without its line ending; the rest stays in
+    /// the buffer for the next reader (`--watch-stdin`). Every other first line is refused, and
+    /// the error never carries the value.
+    #[test]
+    fn the_custody_credential_is_the_first_line_of_stdin() {
+        use std::io::Read;
+        let admin = Some(Secret::from("admin"));
+        let mut input = std::io::Cursor::new(b"custody\nthe watcher's\n".to_vec());
+        let custody = read_custody_credential(&mut input, &admin).unwrap();
+        assert!(custody.expose_for_compare("custody"));
+        let mut rest = String::new();
+        input.read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "the watcher's\n");
+
+        let mut crlf = std::io::Cursor::new(b"custody\r\n".to_vec());
+        assert!(read_custody_credential(&mut crlf, &admin)
+            .unwrap()
+            .expose_for_compare("custody"));
+
+        for refused in [
+            &b""[..],
+            b"custody",
+            b"\n",
+            b"\r\n",
+            b"  \t\n",
+            b"\xff\xfe\n",
+        ] {
+            let error = read_custody_credential(&mut std::io::Cursor::new(refused), &admin)
+                .err()
+                .expect("refused");
+            assert_eq!(
+                error, CUSTODY_CHANNEL_WITHOUT_CREDENTIAL_ERROR,
+                "{refused:?}"
+            );
+        }
+        let error = read_custody_credential(&mut std::io::Cursor::new(b"admin\n"), &admin)
+            .err()
+            .expect("refused");
+        assert_eq!(error, CUSTODY_CREDENTIAL_IS_ADMIN_CREDENTIAL_ERROR);
+        assert!(!error.contains("admin\n"));
+    }
+
+    /// A pipe, as a supervisor gives stdin: the line is read once it is written, before the
+    /// pipe closes, and a buffered reader leaves what follows for the watcher.
+    #[test]
+    fn the_custody_line_and_the_watcher_share_one_buffered_pipe() {
+        let (reader, mut writer) = std::io::pipe().expect("a pipe");
+        std::io::Write::write_all(&mut writer, b"custody\nmore").unwrap();
+        let mut reader = std::io::BufReader::new(reader);
+        let custody = read_custody_credential(&mut reader, &None).unwrap();
+        assert!(custody.expose_for_compare("custody"));
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let watcher = crate::exit::stop_when_closed(reader, move || closed_tx.send(()).unwrap());
+        assert!(closed_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err());
+        drop(writer);
+        closed_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the watcher sees the pipe close after the line");
+        watcher.join().unwrap();
+    }
+
+    /// `runtime.config`'s echo, `config print` and `Debug` never carry the custody credential.
+    #[test]
+    fn the_custody_credential_is_redacted_everywhere_the_config_shows() {
+        let config = Ad4mConfig {
+            custody_channel: Some(true),
+            custody_credential: Some(Secret::from("custody-secret-value")),
+            ..Default::default()
+        };
+        let json = config.redacted_json();
+        assert_eq!(json["custodyCredential"], crate::config_file::REDACTED);
+        assert!(!json.to_string().contains("custody-secret-value"));
+        assert!(!format!("{config:?}").contains("custody-secret-value"));
     }
 
     /// Both startup gates for multi-user mode, as `run()` applies them: the start flag

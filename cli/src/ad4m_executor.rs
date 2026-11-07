@@ -149,6 +149,12 @@ enum Domain {
     /// the admin credential from AD4M_ADMIN_CREDENTIAL_FILE (or --admin-credential,
     /// AD4M_ADMIN_CREDENTIAL). The old key stays for history.
     Rekey,
+    /// Show this executor's device string and its QR code for an app to scan (for a server
+    /// with no address an app can reach). The executor reads its pre-join inbox for 5 minutes;
+    /// once it claimed the offer the app sent, this prints the identity and the match code, and waits
+    /// until the app confirms. Runs only on the executor's own machine, with the admin
+    /// credential (as `rekey`), and needs an operator recorded with `init --operator`.
+    LinkCode,
     /// Inspect the settings `run` would start with
     Config {
         #[command(subcommand)]
@@ -192,6 +198,7 @@ async fn main() -> Result<()> {
         operator,
     } = args.domain
     {
+        let with_operator = operator.is_some();
         let done = identity::init_with_operator(
             data_path,
             network_bootstrap_seed,
@@ -206,6 +213,15 @@ async fn main() -> Result<()> {
         if let Err(e) = done {
             eprintln!("{e}");
             std::process::exit(1);
+        }
+        if with_operator {
+            // The device key comes with the agent (`agent.generate`, after `run`), and only a
+            // running executor reads its pre-join inbox: the device string comes from there.
+            println!(
+                "To link it: start it (`ad4m-executor run`), then claim an offer with \
+                 `ad4m-executor claim <link>`, or show its device string and QR code with \
+                 `ad4m-executor link-code`."
+            );
         }
         return Ok(());
     };
@@ -251,6 +267,24 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Domain::LinkCode = args.domain {
+        let executor_url = match args.executor_url {
+            Some(url) => url,
+            None => startup::get_executor_url()?,
+        };
+        let shown = match identity::admin_credential(args.admin_credential, |name| {
+            std::env::var(name).ok()
+        }) {
+            Ok(token) => identity::link_code(&executor_url, &token).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = shown {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     if let Domain::Config {
         command: ConfigCommand::Print(run_args),
     } = args.domain
@@ -271,7 +305,7 @@ async fn main() -> Result<()> {
             exit(rust_executor::exit::ExitReason::ConfigRefused.code());
         };
         let ResolvedRun {
-            config,
+            mut config,
             unlock_passphrase,
         } = run_args
             .resolve(process_env)
@@ -281,6 +315,18 @@ async fn main() -> Result<()> {
         if let Err(message) = checked.check_admin_credential() {
             refused(message);
         }
+        // The custody credential is the first line of stdin, read here before anything else
+        // reads stdin: never the environment or a flag, which other processes (and the admin
+        // credential's host file reads) can see. Only that line leaves the process's buffered
+        // stdin; `--watch-stdin`'s watcher reads on from the same buffer.
+        if config.custody_channel == Some(true) {
+            let read = rust_executor::config::read_custody_credential(
+                &mut std::io::stdin().lock(),
+                &checked.admin_credential,
+            );
+            config.custody_credential = Some(read.unwrap_or_else(|message| refused(message)));
+        }
+        drop(checked);
         let startup = tokio::spawn(async move { rust_executor::run(config).await }).await;
         // Exit 1 when the REST API fails (e.g. the port is taken), instead of
         // running on with no API.

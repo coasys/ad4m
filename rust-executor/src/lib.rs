@@ -389,6 +389,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     // A supervisor's pipe: when it closes, the supervisor is gone and the executor stops.
     // After the PID file, so the stop that removes it never comes before it is written.
+    // `std::io::stdin()` is the process's one buffered reader: with `--custody-channel` the CLI
+    // took the credential line from it (`config::read_custody_credential`), and the watcher
+    // reads on from what is left in the same buffer.
     if config.watch_stdin == Some(true) {
         exit::stop_when_closed(std::io::stdin(), || {
             info!("stdin closed (--watch-stdin): stopping");
@@ -582,14 +585,20 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // may also be on in the database, from `user.setMultiUserEnabled` on an earlier run.
     let multi_user_on = crate::user_management::is_multi_user_enabled();
     if let Err(reason) =
-        crate::config::refuse_multi_user_from_db(&config.admin_credential, multi_user_on).and_then(
-            |()| {
+        crate::config::refuse_multi_user_from_db(&config.admin_credential, multi_user_on)
+            .and_then(|()| {
                 crate::config::refuse_custody_channel_with_multi_user(
                     config.custody_channel == Some(true),
                     multi_user_on,
                 )
-            },
-        )
+            })
+            .and_then(|()| {
+                crate::config::refuse_custody_channel_without_its_credential(
+                    config.custody_channel == Some(true),
+                    &config.custody_credential,
+                    &config.admin_credential,
+                )
+            })
     {
         return refused_start(
             exit::StartRefused::new(exit::ExitReason::ConfigRefused, reason).into(),

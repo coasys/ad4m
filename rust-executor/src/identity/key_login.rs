@@ -916,6 +916,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
             audiences: Audiences::loopback(LOCAL_PORT),
             store_keys_source: crate::identity::StoreSource::Config,
         }
@@ -937,6 +938,7 @@ mod tests {
                 cache: self.service.cache.clone(),
                 store_url: None,
                 challenges: Default::default(),
+                inbox: Default::default(),
                 audiences: Audiences::loopback(LOCAL_PORT),
                 store_keys_source: crate::identity::StoreSource::Config,
             };

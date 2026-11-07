@@ -35,7 +35,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `config.rs` | `Ad4mConfig` + global config accessor | — |
 | `config_file.rs` | The `run --config` JSON file shared with the launcher (`launcher-state.json` key names), secret resolution (`AD4M_*_FILE`), and the one mapping to `Ad4mConfig` | `docs-src/pages/developer-guides/executor-config.mdx` |
 | `config_rpc.rs` | The config file as RPC (`runtime.config`, `runtime.setConfig`, handlers in `api/config_ws.rs`): key classes (`restart`, `machine`), atomic 0600 writes, pinned keys, validators (`register_config_key`), `config-changed`. A value is written only when the file still maps to `Ad4mConfig` as the next start maps it (`to_ad4m_config`), else `invalid` | — |
-| `exit.rs` | The run contract a supervisor reads: `ExitReason` (0, 75, 78, 79, 80), `StartRefused`, the graceful stop (`request_shutdown`), `--watch-stdin` (`stop_when_closed`), the data-folder lock (`executor.lock`, taken before the log folder rotates, so a refused start leaves the running executor's log alone and reports to stdout), no core dumps on Linux | — |
+| `exit.rs` | The run contract a supervisor reads: `ExitReason` (0, 75, 78, 79, 80), `StartRefused`, the graceful stop (`request_shutdown`), `--watch-stdin` (`stop_when_closed`, on the process's buffered `Stdin`, after the custody line when `--custody-channel` took one), the data-folder lock (`executor.lock`, taken before the log folder rotates, so a refused start leaves the running executor's log alone and reports to stdout), no core dumps on Linux | — |
 | `log_files.rs` | `--log-dir`: one file per run (`executor-0.log`), five runs kept, 50 MiB cap per file, `tail` for `runtime.logTail` | — |
 | `api/` | axum WS RPC (`/api/v1/ws`), event stream, OpenAI-compatible `/v1` | `src/api/AGENTS.md` |
 | `mcp/` | MCP server + tools (static + SHACL-generated dynamic tools) | `src/mcp/AGENTS.md` |
@@ -46,7 +46,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `tool_bundles/` | Tool bundles: an app's JS for its agents' tools, one bare `JsRuntime` per bundle with two ops (random bytes, a log line); time limit on load and every call, memory cap on heap and ArrayBuffers. `builtin.rs` compiles in WE's template tools (`template_read` / `template_update` in `mcp/`), downloaded from a WE release by `build.rs` (version and sha256 pinned there) | `src/tool_bundles/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
 | `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
-| `identity/` | `did:scid:coasys:1` on the executor: `KelCache` (key logs on `ad4m-hash-chain`'s `SqliteChainStore` in `ad4m_db.sqlite`), the agent-language backend, the operator record and first-link rule, `ClaimService`, the `identity.*` calls (handlers in `api/identity_ws.rs`), the `identity-fork` event | `src/identity/AGENTS.md` |
+| `identity/` | `did:scid:coasys:1` on the executor: `KelCache` (key logs on `ad4m-hash-chain`'s `SqliteChainStore` in `ad4m_db.sqlite`), the agent-language backend, the operator record and first-link rule, `ClaimService`, the `identity.*` calls (handlers in `api/identity_ws.rs`), the device inbox, the private record and the request box, the `identity-fork`, `link-ticket` and `inbox-message` events | `src/identity/AGENTS.md` |
 | `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`. Executor code reaches it through `db_backend::db_backend()`, never `Ad4mDb` directly. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
 | `db_backend.rs` | `DbBackend`: the executor's database, one domain method per `Ad4mDb` method that executor code calls (`ad4m_db_methods!`), plus key-value methods for the shared records. `LocalDb` runs on SQLite; `SharedDb` (`config.db_backend == "shared"`) serves the key-value methods from the platform Worker over HTTP and every domain method from SQLite | `src/db/AGENTS.md` |
 | `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event (live query updates too, as `Event::for_connection`); feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
@@ -68,7 +68,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **The run contract** (`exit.rs`), for a supervisor (the desktop app, systemd, a host). Exit
   codes: 0 stopped (`runtime.quit`, SIGTERM, SIGINT, stdin closed with `--watch-stdin true`),
   75 `runtime.restart`, 78 a refused config (the CLI's resolve, the admin-credential check,
-  `--custody-channel` with multi-user mode), 79 another executor holds
+  `--custody-channel` with multi-user mode, without a custody credential on stdin's first line,
+  or with `AD4M_CUSTODY_CREDENTIAL` set), 79 another
+  executor holds
   `<app_data_path>/executor.lock`, 80 the API port does not bind; any other code is a crash.
   `run` returns a refused start through its handle as a `StartRefused`, and
   `exit_when_api_fails` exits with its code. Readiness: `GET /health` answers once the API
@@ -81,7 +83,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   executor without one, on a loopback listener). The method's guard answers first (403 "Admin
   credential required" for a caller without the credential); the admin credential on a
   network listener gets 403 `local-only`. It is on `agent.unlock`,
-  `identity.rekey`, `identity.custodyStatus`, `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
+  `agent.signSessionStatement`, `identity.rekey`, `identity.custodyStatus`,
+  `identity.takeMaster`, `identity.prepareDevice`, `identity.inbox`, `identity.inboxAck`,
+  `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
   refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
   An operator from a key login is never on this machine, so these refuse it too; it calls
   every other method as the operator, `agent.generate`, `agent.import`, `agent.lock`,
@@ -190,8 +194,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   only while the backup holds exactly those keys. Write the agent file only through
   `AgentService::save` / `try_save`.
 - **Identity** (`identity/`): an agent's device key (the wallet key) may speak
-  for a `did:scid` whose log lists it; the master key and the 12 words never reach the executor
-  (apps hold them through `ad4m-identity-client`). The configured store's logs come through the
+  for a `did:scid` whose log lists it; the 12 words never reach the executor and the master key
+  rests in none (apps hold them through `ad4m-identity-client`; a master key sealed to the
+  desktop app's computer opens only inside `identity.takeMaster`, for its custody service). The configured store's logs come through the
   agent language (`Capability::Identity*`, refused on any other language); a DID URL's foreign
   `src` is read by the executor itself (`identity/src_fetch.rs`, public addresses only at
   connect). The configured store's logs are kept after `fold` in `KelCache`; a foreign `src`
@@ -217,7 +222,20 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `ad4m-executor rekey`) gives the main agent a new wallet key and moves the places that hold
   its DID (`identity/rekey.rs`); tokens signed with the old key stop working. A perspective
   that is not open at the time keeps the retired DID as owner until a later unlock moves it.
-  `identity.custodyStatus` is the custody channel (`identity/custody.rs`).
+  `identity.custodyStatus` and `identity.takeMaster` are the custody channel
+  (`identity/custody.rs`): only the custody credential (a session with
+  `OperatorSource::Custody`) on a loopback listener opens it, never the admin credential,
+  which an app's window may hold. The credential arrives as the first line of stdin
+  (`config::read_custody_credential`, read by `ad4m-executor run` before anything else reads
+  stdin; `--watch-stdin` then reads on from the same buffered `Stdin`), never from the
+  environment or a flag: both are files another process, or the admin credential's host file
+  reads, can open (`/proc/<pid>/environ`, `/proc/<pid>/cmdline`). `AD4M_CUSTODY_CREDENTIAL`
+  (or `_FILE`) set refuses the start, exit 78. Do not add another way in. The device inbox (`identity/inbox.rs`): the main agent's joined
+  inbox is read at start, unlock, binding and every 15 minutes; an executor with the custody
+  channel keeps a master key message for `identity.takeMaster`, every other deletes it
+  unopened. `identity.prepareDevice` (and `ad4m-executor link-code`) shows a device string and
+  claims the ticket a holder pushes to its pre-join inbox (`link-ticket`); the private record
+  and the request box pass through `identity/record.rs`.
 
 ## Do / don't
 
