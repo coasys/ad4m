@@ -3,6 +3,8 @@ import type {
   AiEndpoint,
   DiscoveredModel,
   EndpointKind,
+  LocalAiPlannedModel,
+  LocalAiStatus,
   ModelType,
 } from "@coasys/ad4m";
 
@@ -19,6 +21,27 @@ export const ENDPOINT_KINDS: { kind: EndpointKind; label: string; baseUrl: strin
 
 export function kindLabel(kind: EndpointKind): string {
   return ENDPOINT_KINDS.find((k) => k.kind === kind)?.label ?? kind;
+}
+
+/**
+ * How the launcher names an endpoint's server. A managed endpoint (local AI) by the runtime
+ * the executor runs for it, not by the kind's examples: its transcription server is
+ * nemo-speech, which no user-added transcription server need be.
+ */
+export function endpointLabel(endpoint: Pick<AiEndpoint, "kind" | "managed">): string {
+  if (endpoint.managed) {
+    if (endpoint.kind === "LLAMA_SERVER") return "llama-server";
+    if (endpoint.kind === "OPEN_AI_AUDIO") return "nemo-speech (Parakeet)";
+  }
+  return kindLabel(endpoint.kind);
+}
+
+/**
+ * The note beside a planned local model the wind tunnel did not measure on this hardware
+ * (`basis: "default"`: the manifest's smallest model for the service), else none.
+ */
+export function basisNote(model: Pick<LocalAiPlannedModel, "basis">): string | null {
+  return model.basis === "default" ? "not measured on this hardware" : null;
 }
 
 /** The capability a model type needs from its endpoint. */
@@ -149,4 +172,35 @@ export async function registerModel(
     await client.ai.setDefaultModel(modelType, id);
   }
   return id;
+}
+
+/**
+ * Whether local AI's chat model is registered here and the runtime that serves it runs. A
+ * failed or stopped runtime keeps its registered model: that alone is not ready.
+ */
+export function localChatReady(status: Pick<LocalAiStatus, "models" | "runtimes"> | null): boolean {
+  if (!status) return false;
+  const registered = status.models.some((m) => m.service === "llm" && !!m.model);
+  const runtime = status.runtimes.find((r) => r.services.includes("llm"));
+  return registered && runtime?.phase === "running";
+}
+
+/**
+ * What the local AI panel offers: `running` when every runtime of the selection runs, `start`
+ * when it is installed with its files in, else `install`. A selection without the chat model
+ * the plan has (first-use setup installed only embeddings or transcription) offers the
+ * install, also when the chat model's files are downloaded already: a start would not add it.
+ */
+export function localAction(
+  status: Pick<LocalAiStatus, "installed" | "models" | "runtimes"> | null,
+  plan: { models: Pick<LocalAiPlannedModel, "service">[]; downloadBytes: number },
+  installing: boolean
+): "running" | "start" | "install" {
+  if (!status?.installed || installing) return "install";
+  const lacksChat =
+    plan.models.some((m) => m.service === "llm") && !status.models.some((m) => m.service === "llm");
+  if (lacksChat) return "install";
+  const running = status.runtimes.filter((r) => r.phase === "running").length;
+  if (running > 0 && running === status.runtimes.length) return "running";
+  return plan.downloadBytes === 0 ? "start" : "install";
 }

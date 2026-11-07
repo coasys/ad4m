@@ -11,6 +11,7 @@ import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { FlowStateChangedEvent } from "./FlowStateChangedEvent";
 import type { HostingUserInfo } from "./HostingUserInfo";
 import type { IdentityForkEvent } from "./IdentityForkEvent";
+import type { LocalAiProgress } from "./LocalAiProgress";
 import type { ModelStatusEvent } from "./ModelStatusEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
@@ -45,6 +46,7 @@ export interface EventMap {
   "transcription-text": TranscriptionTextFilter;
   "model-status": ModelStatusEvent;
   "ai-endpoint-status": AiEndpointStatusEvent;
+  "ai-local-progress": LocalAiProgress;
   "query-subscription-update": QuerySubscriptionUpdateEvent;
   "auto-processor-event": AutoProcessorEvent;
   "auto-processor-neighbourhood-state": AutoProcessorNeighbourhoodState;

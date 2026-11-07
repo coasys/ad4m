@@ -57,11 +57,7 @@ pub async fn embeddings(
     let batch_started = std::time::Instant::now();
     let batch_n = inputs.len();
     let batch = service
-        .embed_batch(
-            &resolved.model.id,
-            inputs,
-            auth.user_did().map(str::to_string),
-        )
+        .embed_batch(&resolved.model.id, inputs, Some(&auth))
         .await
         // `embed_batch` already acted on what the failure says about the endpoint.
         .map_err(|e| resolved.failure(e))?;

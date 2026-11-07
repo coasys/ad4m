@@ -34,6 +34,7 @@ pub enum Topic {
     AiTranscriptionText,
     AiModelStatus,
     AiEndpointStatus,
+    AiLocalProgress,
     PerspectiveQuerySubscription,
     AutoProcessorEvent,
     AutoProcessorNeighbourhoodState,
@@ -47,7 +48,7 @@ pub enum Topic {
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 26] = [
+    pub const ALL: [Topic; 27] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -65,6 +66,7 @@ impl Topic {
         Topic::AiTranscriptionText,
         Topic::AiModelStatus,
         Topic::AiEndpointStatus,
+        Topic::AiLocalProgress,
         Topic::PerspectiveQuerySubscription,
         Topic::AutoProcessorEvent,
         Topic::AutoProcessorNeighbourhoodState,
@@ -97,6 +99,7 @@ impl Topic {
             Topic::AiTranscriptionText => "transcription-text",
             Topic::AiModelStatus => "model-status",
             Topic::AiEndpointStatus => "ai-endpoint-status",
+            Topic::AiLocalProgress => "ai-local-progress",
             Topic::PerspectiveQuerySubscription => "query-subscription-update",
             Topic::AutoProcessorEvent => "auto-processor-event",
             Topic::AutoProcessorNeighbourhoodState => "auto-processor-neighbourhood-state",
@@ -168,6 +171,9 @@ impl Topic {
             Topic::AiModelStatus | Topic::AiEndpointStatus => {
                 caps::AI_READ_CAPABILITY.clone()
             }
+            // `ai.localStatus`; published to the operator only, as `ai.localInstall` is
+            // the operator's.
+            Topic::AiLocalProgress => caps::AI_READ_CAPABILITY.clone(),
             // The `sfu.*` reads check NEIGHBOURHOOD_READ (#712 gave the SFU streams the same).
             // A call names its neighbourhood by URL, not by perspective, so on every
             // perspective.

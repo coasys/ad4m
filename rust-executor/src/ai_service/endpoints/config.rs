@@ -136,12 +136,19 @@ fn apply_endpoint(
             .get_endpoints()?
             .into_iter()
             .find(|stored| {
-                stored.kind.protocol() == setting.kind.protocol()
+                // Local AI's own endpoints are the supervisor's, never the migration's.
+                !stored.managed
+                    && stored.kind.protocol() == setting.kind.protocol()
                     && same_endpoint(stored.base_url.as_str(), setting.base_url.as_str())
                     && stored.api_key.expose_for_compare(api_key.expose())
                     && !named.contains(&stored.name.as_str())
             }),
     };
+    // Local AI's own endpoint: its supervisor sets it. An update would clear `managed`, and
+    // local AI would then refuse the endpoint as someone else's.
+    if existing.as_ref().is_some_and(|e| e.managed) {
+        anyhow::bail!("local AI manages the endpoint of this name: rename the entry");
+    }
     let endpoint = Endpoint {
         id: existing
             .as_ref()
@@ -159,6 +166,7 @@ fn apply_endpoint(
         max_num_ctx: setting.max_num_ctx,
         request_timeout_secs: setting.request_timeout_secs,
         max_concurrent: setting.max_concurrent,
+        managed: false,
         health: existing
             .as_ref()
             .map(|e| e.health.clone())
@@ -365,6 +373,51 @@ mod tests {
         assert_ne!(qwen.id, launcher_model);
     }
 
+    // Local AI's endpoint for a server is the supervisor's: a file entry for the same server
+    // does not take it over (it would lose `managed`, and the supervisor its endpoint).
+    #[test]
+    fn an_entry_does_not_take_over_local_ais_endpoint() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let local = Endpoint {
+            managed: true,
+            ..stored_endpoint("local-llm", EndpointKind::Ollama, "http://127.0.0.1:11434")
+        };
+        Ad4mDb::with_global_instance(|db| db.update_endpoint(&local)).unwrap();
+
+        apply(&settings(), env);
+
+        let kept = Ad4mDb::with_global_instance(|db| db.get_endpoint(&local.id))
+            .unwrap()
+            .expect("local AI's endpoint stays");
+        assert_eq!(kept.name, "local-llm");
+        assert!(kept.managed);
+    }
+
+    // An entry with the name of local AI's endpoint and other settings is skipped: an
+    // update would clear `managed`, and local AI would then refuse its own endpoint.
+    #[test]
+    fn an_entry_named_as_local_ais_endpoint_leaves_it_alone() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let local = Endpoint {
+            managed: true,
+            ..stored_endpoint(
+                "ollama",
+                EndpointKind::LlamaServer,
+                "http://127.0.0.1:41234",
+            )
+        };
+        Ad4mDb::with_global_instance(|db| db.update_endpoint(&local)).unwrap();
+
+        apply(&settings(), env);
+
+        let kept = Ad4mDb::with_global_instance(|db| db.get_endpoint(&local.id))
+            .unwrap()
+            .expect("local AI's endpoint stays");
+        assert!(kept.managed);
+        assert_eq!(kept.base_url.as_str(), "http://127.0.0.1:41234/");
+        assert_eq!(kept.kind, EndpointKind::LlamaServer);
+    }
+
     #[test]
     fn a_changed_file_updates_its_entries_in_place() {
         Ad4mDb::init_global_instance(":memory:").unwrap();
@@ -432,6 +485,7 @@ mod tests {
             max_num_ctx: None,
             request_timeout_secs: None,
             max_concurrent: None,
+            managed: false,
             health: EndpointHealth::default(),
         };
         Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();

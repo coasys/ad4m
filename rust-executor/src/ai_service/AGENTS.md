@@ -86,6 +86,96 @@ A model's status (`ModelView::status`, `ai.modelStatus`) is computed from its en
 last health check (`Endpoint::model_status`): `READY` when the endpoint lists it,
 `MISSING` when it answers without it, `ENDPOINT_DOWN`, or `UNKNOWN` before a check.
 
+## `local/` (one-click local AI)
+
+The executor still runs no model in-process: `local/` installs and supervises model
+*servers* as child processes and registers them as **managed** endpoints
+(`Endpoint::managed`, column `ai_endpoints.managed`).
+
+| File | Does |
+|---|---|
+| `data.rs` | embeds `local/manifest.json` (runtime builds and model files: URL, size, sha256, memory) and `ai-wind-tunnel/{recommendations,hardware-classes}.json` (schema v1); `classify` (passes `ai-wind-tunnel/hardware-class-fixtures.json`, as the wind tunnel's TS `classify` does) and `chain` (its `fallbackClasses`: the family's smaller tiers, then the cpu family); `Recommendations::get` skips rows the executor cannot run (`completion`, speech on speaches); the manifest keeps only runtimes and models of a `Provider` (llama-server, nemo-speech): whisper-server and sherpa-onnx are the wind tunnel's baselines. The wind tunnel owns these files |
+| `hardware.rs` | `ai.localHardware`: sysinfo (RAM, CPU, disk), std CPU features, NVML and the Vulkan loader opened with `libloading` when present (no `wgpu`), amdgpu sysfs, macOS sysctl. GPU probes run once per process. `memory_budget` = min(GPU − 1 GiB, RAM − 4 GiB); the GPU is `primary_gpu`: the largest discrete GPU of the vendor the preferred GPU backend runs on (CUDA: NVIDIA, ROCm: AMD, Metal: Apple; Vulkan: any), so with two vendors the budget is the GPU's the build uses |
+| `plan.rs` | pure `plan()`: per service the recommendation of the class or the nearest smaller measured one (no evidence = unmeasured), else the manifest's smallest model of the service whose runtime runs here (`basis: default`, also when the measured provider has no build here), memory sum vs budget with step-down, build per provider (recommended, else CUDA > Metal > Vulkan > ROCm > CPU; a recommended ROCm build becomes Vulkan where Vulkan runs: the ROCm build silently runs on the CPU without the system ROCm libraries), each model's `serverFlags` (measured, else `default_flags`: `--reasoning off` for chat), disk check |
+| `install.rs` | the store (`downloads/`, `runtime/<id>/<version>-<build>/`, `models/`), `download` (`.part` + `Range` resume, sha256 and size before rename; a redirect only to https), `unpack` (tar.gz, zip; no path escapes) into `<version>-<build>.partial` (the whole name: `with_extension` would cut at the version's last dot), macOS quarantine strip |
+| `supervisor.rs` | `Supervised` child (owns it: dropping it stops the child, so a start cancelled before `RUNNING` has it leaves nothing running): loopback port (`choose_port`, never the `detect.rs` ports), readiness (llama `/health`, nemo-speech `/ready`), `RestartBudget` (3, reset after 5 healthy min), SIGTERM then SIGKILL, Linux `PR_SET_PDEATHSIG` from one long-lived spawner thread, `reap_stale` by pid + exe path |
+| `mod.rs` | `install` / `start` / `stop` / `remove` / `status`, `register` (endpoints `This device (llama.cpp)` / `This device (NeMo Speech)`, models named by manifest id; a nemo-speech model's `remote_model` is the id its `/v1/models` lists, `parakeet-tdt-0.6b-v3.oss-align.q8_0`, since it refuses any other; the chat model `native_tools: true`; defaults), `managed_health` (what `check_health` uses for a managed endpoint: the supervisor's phase, then llama-server's liveness or nemo-speech's listing), `autostart` (`local_ai_autostart`), `stop_on_exit` (run by the executor's shutdown, `clean_up_before_exit` in `lib.rs`, and by `runtime.quit`: SIGTERM to all at once, SIGKILL after 2 s, inside the 4 s a signal leaves the shutdown), `stop_children_blocking` (the same from a thread that cannot await: the launcher's Quit, which exits without the executor's shutdown) |
+
+- Storage: the store is per user, shared by agents (`local_ai_dir` / `AD4M_LOCAL_AI_DIR`,
+  else `dirs::data_local_dir()/ad4m/local-ai`; never the temporary directory: without a
+  per-user data directory `store_root` is an error that asks for `local_ai_dir`), made
+  absolute (a runtime starts in its own directory); per-executor state (`selection.json`,
+  `pids.json`, `llama-models.ini`, `<provider>.log`) is `<app_data_path>/local-ai/`. Tests set
+  the directories explicitly; never let one write to `~/.local/share/ad4m`. Docker: an image
+  without local AI sets `AD4M_LOCAL_AI_DIR=/data/local-ai/store` (`docker/ai-env.sh`
+  `seed_local_ai`), so the store stays in the volume beside the selection. `start_at` checks
+  that the selection's binaries and models exist; when one is gone it starts nothing and
+  refuses "run ai.localInstall again".
+- Lifecycle: `LIFECYCLE` (one `tokio::sync::Mutex`) is held by `start_at`, `stop_all`
+  (`ai.localStop`, the install paths) and all of `remove`, so they run one at a time: a
+  second start waits and finds the runtime in `RUNNING`. `stop_on_exit` does not take it
+  (an exit must not wait for a start); every `ManagedPort` holds the supervisor's
+  `StopHandle` (weak: a dropped `Supervised` still stops its child), so
+  `stop_children_blocking` stops a runtime that is still starting too. `start_at` starts
+  again a runtime whose entry is `Failed` or `Stopped`, registers again a running one whose
+  endpoint or model rows are missing (`registration_missing`: a registration that failed
+  or was cancelled; `Running` keeps the runtime's key for it), and removes the managed
+  endpoints whose runtime the selection does not have. `spawn_pid_follower` starts at the
+  spawn and writes `pids.json` (the runtimes in `RUNNING` and the one loading) when the
+  runtime gets a pid and when a restart gives it a new one; the start writes it again
+  after each `RUNNING.insert`. `register` first removes the model rows on its endpoint
+  that the selection does not name (and so the defaults that named them), then registers
+  the selection's models, so a type whose default went gets the new model as its default
+  also without `make_default`; it asks a running nemo-speech for its listing up to 5
+  times (1 s apart) before it falls back to the manifest id. `ensure_service` takes the
+  install flag (`take_install_flag`, waiting while an install runs) before it reads the
+  selection, and sets up nothing when a model of the type exists by then. `autostart`
+  waits for `AIService::wait_loaded` (the start's load of the stored models) first: a
+  load after the registration would put back the clients of the old endpoint settings.
+  The health follower probes the endpoint at its start and at each phase change
+  (`probe_health`, not the debounced `check_health`); the GPU check of a runtime that is
+  gone (its status sender closed) publishes nothing. Download progress is published at
+  once (`publish_progress_now`), in order. `install::download` waits at most
+  `IDLE_TIMEOUT` for the response headers as for each chunk. The plan of an install with
+  `services` covers only those (`plan_services`), so it fits by them; when a measured
+  model exceeds the budget, the manifest's smaller default is the last step down.
+- llama-server runs in router mode: `--models-preset` names the chat and embedding models
+  (`embeddings = true` on the latter, `load-on-startup`), each model's server flags become its preset keys (`-c 8192` is `c = 8192`), chat runs
+  with `reasoning = off` (Qwen3.5 otherwise thinks until the context is full and `ai.prompt`
+  answers ""), the key (`LLAMA_API_KEY`, in the environment so `ps` does not show it) is new
+  per start, and after a start on a GPU build `spawn_gpu_check` reads the DRM fdinfo of its
+  processes: under half the chat model's size in GPU memory is `onGpu: false` (Linux, AMD
+  or Intel; NVIDIA is not checked; `drm-resident-*` counts, `drm-memory-*` only where no
+  resident key is printed: amdgpu from 6.13 prints both for the same memory),
+  `--offline`, `jinja = true` on the chat model (tool calls through its chat template).
+  nemo-speech: `serve --config <state>/nemo-speech.yaml --asr-model <gguf> --host 127.0.0.1
+  --port P --device <the build's backend> --no-ui`; the key is `http.api-key` in that YAML
+  (mode 0600, so `ps` does not show it); a measured `--device` is replaced by the build's,
+  so a CPU fallback never asks for Vulkan.
+- `ai.updateEndpoint` / `ai.removeEndpoint` refuse a managed endpoint (`refuse_managed`);
+  `ai.detectEndpoints` skips the managed ports. A config-file `ai_endpoints` entry that
+  names a managed endpoint is skipped (an update would clear `managed`). A backup keeps
+  `managed`; the import restores it only for local AI's endpoint names on loopback.
+- `hardware.rs` adds CUDA only when NVML lists a device (`cuda_usable`); the disk reading
+  takes the store path absolute, so a relative store that does not exist yet has one.
+- RPCs (`api/ai_ws.rs`): `ai.localHardware` / `localPlan` / `localStatus` are
+  `Executor(AI_READ)` reads; `ai.localInstall` (long) / `localStart` (long) / `localStop` /
+  `localRemove` are `Guard::Operator`. Progress: the `ai-local-progress` event (operator).
+  `ai.transcriptionOpen` is long too: a first use sets up local AI before it answers.
+- Tests of `local/mod.rs` that touch `RUNNING`, `MANAGED_PORTS`, `GPU_CHECKS`, the install
+  flag or the global service take `TEST_LOCK` first: a plain `cargo test` runs them in
+  parallel.
+- First-use setup (`AIService::default_model`: `ai.embed` or `ai.transcriptionOpen` on
+  `"default"` with no model of the type) is the operator's too: it checks
+  `RequestContext::is_operator` before `local::ensure_service`. Any other caller, and the
+  executor's own embeds (`None`), get `LocalAiRefused` "No default <TYPE> model on this
+  executor: ask the operator to set up local AI". `/v1` never sets up (no default: 404).
+  On macOS the ONNX Runtime fetch for the speech gate (`onnx_runtime.rs`) starts only from
+  an operator's stream with `local_ai_autostart` on; other streams run ungated meanwhile.
+- Model names live in `manifest.json` and the recommendations, as data (the rule below).
+  Updating a pin: new URL, `sizeBytes` and `sha256` (GitHub `digest`, HF `lfs.oid`), and an
+  HF URL with a commit, never `main` (a unit test checks).
+
 ## Transcription
 
 `transcription.rs` holds the endpoint path and what streams and `/v1` share:
@@ -135,8 +225,9 @@ edges; item 7 moves harness + interpretation + flows + auto_processor into `agen
 
 - Never call a model without a billing decision: use the existing `bill_*_if_authed` /
   `CreditGate` path.
-- Model names are data: the onboarding recommendations live in one place
-  (`core/src/ai/recommendedModels.ts`); don't scatter new ones in Rust.
+- Model names are data: the onboarding recommendations for model servers live in
+  `core/src/ai/recommendedModels.ts`, the local AI models in `local/manifest.json` and
+  `ai-wind-tunnel/recommendations.json`; don't scatter new ones in Rust code.
 - Streaming responses the executor answers itself (Anthropic, the text tool fallback) go
   through `prompt_messages_stream`. `/v1` forwards a model on an
   OpenAI-shaped endpoint itself (`api/openai_compat/passthrough.rs`).

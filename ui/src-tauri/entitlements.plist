@@ -19,17 +19,21 @@
 	<true/>
 
 	<!--
-	  These two are carried over from the notarized 0.12.0 release, which was
-	  signed with them. They are NOT yet shown to be required: the evidence is
-	  only that the shipped launcher had them, not that it needs them.
-
-	  To settle it, once notarization is unblocked: produce one signed build
-	  without these two, launch it, and see whether the executor still starts.
-	  If it does, drop them — the hardened runtime is worth more the narrower
-	  its exceptions are.
+	  Carried over from the notarized 0.12.0 release, which was signed with it.
+	  NOT yet shown to be required: the evidence is only that the shipped
+	  launcher had it, not that it needs it. To settle it, once notarization is
+	  unblocked: produce one signed build without it, launch it, and see whether
+	  the executor still starts. If it does, drop it: the hardened runtime is
+	  worth more the narrower its exceptions are.
 	-->
 	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
 	<true/>
+	<!--
+	  Required: the executor's speech gate loads ONNX Runtime at run time on
+	  macOS, Microsoft's build, downloaded into the local AI store on first use
+	  (rust-executor/src/ai_service/local/onnx_runtime.rs). Library validation
+	  refuses a library not signed by this app's team, and the gate stays off.
+	-->
 	<key>com.apple.security.cs.disable-library-validation</key>
 	<true/>
 </dict>

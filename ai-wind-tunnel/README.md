@@ -236,7 +236,9 @@ whose rates count stream chunks, not tokens (`tokenCountSource: "chunks"`); and 
 labelled `cpu` with no memory sample (an attached server), because no offload check showed
 where the model ran. A class with no evidence, or no candidate over the floor, has no
 recommendation; the executor's local setup then falls back to the nearest smaller measured
-class of the same family, then to the CPU classes (`fallbackClasses` in `hardware-class.ts`).
+class of the same family, then to the CPU classes (`fallbackClasses` in `hardware-class.ts`),
+and where none of those is measured, to the manifest's smallest model of the service, marked
+`basis: "default"` in the plan.
 
 ## Not in CI
 

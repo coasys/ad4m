@@ -106,6 +106,7 @@ impl Ad4mDb {
             max_num_ctx: api.max_num_ctx,
             request_timeout_secs: None,
             max_concurrent: None,
+            managed: false,
             health: EndpointHealth::default(),
         };
         self.insert_endpoint(&endpoint)?;
@@ -169,12 +170,16 @@ impl Ad4mDb {
                     )?;
                 }
                 None => {
+                    // dev's in-process models (its default `bert`, Whisper, Llama) map to
+                    // the type's default: an embed or a stream that names `default` on an
+                    // executor without a model of the type sets up local AI's
+                    // (`AIService::default_model`).
                     log::warn!(
                         "AI model {:?} ({}) ran in-process, which this executor no longer does: \
-                         it is deleted. Register a model on an endpoint (Ollama, llama-server, \
-                         speaches, ...) instead.",
+                         it is deleted. {}",
                         row.name,
                         row.model_type.trim_matches('"'),
+                        LegacyRow::in_process_advice(&row.model_type),
                     );
                     tx.execute("DELETE FROM models WHERE id = ?1", params![row.id])?;
                     tx.execute(
@@ -287,6 +292,22 @@ impl LegacyRow {
             },
             AiCapability::from(&model_type),
         ))
+    }
+
+    /// What to do instead of an in-process model of `model_type` (the column's JSON text). An
+    /// embed or a transcription stream naming `default` sets up local AI's model on first use;
+    /// a task naming `default` does not (it needs a default chat model already).
+    fn in_process_advice(model_type: &str) -> &'static str {
+        match serde_json::from_str::<ModelType>(model_type) {
+            Ok(ModelType::Embedding | ModelType::Transcription) => {
+                "Name the model 'default' instead (local AI sets one up on first use), or \
+                 register a model on an endpoint (Ollama, llama-server, speaches, ...)."
+            }
+            _ => {
+                "Install local AI (ai.localInstall), or register a model on an endpoint \
+                 (Ollama, llama-server, ...) and make it the default."
+            }
+        }
     }
 }
 
@@ -443,6 +464,70 @@ mod tests {
         assert_eq!(status_table, 0);
     }
 
+    /// Opens an in-memory global database when dropped, even after a panic. A test that opens
+    /// the global database on a file in a temporary directory declares it after the directory,
+    /// so it drops first: later tests that reuse the global database would otherwise write to a
+    /// deleted file (SQLite: "attempt to write a readonly database").
+    struct GlobalDbInMemoryOnDrop;
+
+    impl Drop for GlobalDbInMemoryOnDrop {
+        fn drop(&mut self) {
+            let db = Ad4mDb::global_instance();
+            let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *db = Some(Ad4mDb::new(":memory:").expect("an in-memory database"));
+        }
+    }
+
+    // dev's default embedding model, stored: after the move an embed that names the default
+    // asks local AI for an embedding model, as dev's first embed loaded `bert`.
+    #[tokio::test]
+    async fn a_stored_bert_becomes_local_ais_embedding_model_on_first_use() {
+        let (_dir, path) = legacy_db("");
+        {
+            let conn = Connection::open(&path).unwrap();
+            insert_local(&conn, "bert", "\"EMBEDDING\"");
+            conn.execute(
+                "INSERT INTO default_models VALUES ('\"EMBEDDING\"', 'bert')",
+                [],
+            )
+            .unwrap();
+        }
+        Ad4mDb::init_global_instance(&path).unwrap();
+        let _in_memory_after = GlobalDbInMemoryOnDrop;
+        Ad4mDb::with_global_instance(|db| {
+            assert!(db.get_models().unwrap().is_empty());
+            assert_eq!(db.get_default_model(ModelType::Embedding).unwrap(), None);
+        });
+
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = asked.clone();
+        let service = crate::ai_service::AIService::empty().with_local_setup(std::sync::Arc::new(
+            move |service: crate::ai_service::local::data::Service| {
+                recorded.lock().unwrap().push(service);
+                futures::FutureExt::boxed(async { Err(anyhow::anyhow!("no download in a test")) })
+            },
+        ));
+        let error = match service
+            .embed(
+                crate::ai_service::DEFAULT_MODEL.into(),
+                "text".into(),
+                Some(&crate::types::RequestContext::operator_for_test()),
+            )
+            .await
+        {
+            Ok(_) => panic!("the fake setup registers nothing"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("no download in a test"),
+            "{error}"
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![crate::ai_service::local::data::Service::Embeddings]
+        );
+    }
+
     #[test]
     fn a_database_linked_by_the_endpoint_registry_keeps_its_links_and_settings() {
         let (_dir, path) =
@@ -524,5 +609,18 @@ mod tests {
 
         let db = Ad4mDb::new(&path).unwrap();
         assert_eq!(db.get_model(id).unwrap().unwrap().remote_model, "qwen");
+    }
+
+    /// A deleted in-process chat model gets advice that works: a task naming 'default' does
+    /// not set up local AI, so naming 'default' is advice only for embeddings and
+    /// transcription.
+    #[test]
+    fn the_advice_for_a_deleted_model_fits_its_type() {
+        let llm = super::LegacyRow::in_process_advice("\"LLM\"");
+        assert!(llm.contains("ai.localInstall"), "{llm}");
+        assert!(!llm.contains("'default'"), "{llm}");
+        for model_type in ["\"EMBEDDING\"", "\"TRANSCRIPTION\""] {
+            assert!(super::LegacyRow::in_process_advice(model_type).contains("'default'"));
+        }
     }
 }

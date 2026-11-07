@@ -24,8 +24,10 @@ const PORTS: [u16; 5] = [11434, 9931, 8080, 8000, 5092];
 /// IPv4 first: a server on both answers once, as its IPv4 address.
 const HOSTS: [&str; 2] = ["127.0.0.1", "[::1]"];
 
-/// The model servers on this machine's loopback ports.
+/// The model servers on this machine's loopback ports, without the ports this executor's
+/// local AI runs on: those are registered already, as managed endpoints.
 pub async fn detect_endpoints() -> Vec<DetectedEndpoint> {
+    let managed = managed_ports();
     let candidates = HOSTS
         .iter()
         .flat_map(|host| {
@@ -33,8 +35,23 @@ pub async fn detect_endpoints() -> Vec<DetectedEndpoint> {
                 Url::parse(&format!("http://{host}:{port}")).expect("a loopback URL parses")
             })
         })
+        .filter(|url| !url.port().is_some_and(|port| managed.contains(&port)))
         .collect();
     detect_on(candidates).await
+}
+
+/// The ports detection probes, for the local AI supervisor to stay off.
+pub const PROBED_PORTS: [u16; 5] = PORTS;
+
+/// The loopback ports of the managed endpoints (`Endpoint::managed`).
+fn managed_ports() -> Vec<u16> {
+    crate::db_backend::db_backend()
+        .get_endpoints()
+        .unwrap_or_default()
+        .iter()
+        .filter(|endpoint| endpoint.managed)
+        .filter_map(|endpoint| endpoint.base_url.port())
+        .collect()
 }
 
 /// The model servers among `candidates`, one per port and kind, in candidate order.

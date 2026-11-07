@@ -153,6 +153,20 @@ fn refuse_unsafe_key(endpoint: &Endpoint) -> Result<()> {
     Ok(())
 }
 
+/// Refuses an operator's write to an endpoint the local AI supervisor runs: its URL and key
+/// change at every start, so an edit would not hold. `ai.localStop` / `ai.localRemove` do
+/// what an operator wants there.
+fn refuse_managed(endpoint: &Endpoint) -> Result<()> {
+    if endpoint.managed {
+        return Err(InvalidEndpoint(format!(
+            "Endpoint {:?} is this executor's local AI: use ai.localStop or ai.localRemove",
+            endpoint.name
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Refuses a context ceiling of 0: it is copied to the models as Ollama's `num_ctx`.
 fn refuse_zero_ceiling(endpoint: &Endpoint) -> Result<()> {
     if endpoint.max_num_ctx == Some(0) {
@@ -273,12 +287,16 @@ pub async fn check_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
 /// serves added to its own, and publish them when they changed. Nothing is stored or
 /// published when the endpoint moved to another URL during the check. A pull or a delete
 /// calls it directly: what the endpoint serves has just changed.
-async fn probe_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
+pub(crate) async fn probe_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
     let mut capabilities = endpoint.capabilities.clone();
     // Add and update refuse such an endpoint, but a migrated or imported one can hold a
     // key for a plain-HTTP remote host, or a credential in its URL: probing it would send
     // the credential.
-    let health = if let Err(refusal) = refuse_unsafe_key(endpoint) {
+    let health = if endpoint.managed {
+        // The supervisor knows a runtime that is starting or stopped; a running one is
+        // checked by its listing (nemo-speech) or liveness (llama-server).
+        crate::ai_service::local::managed_health(endpoint).await
+    } else if let Err(refusal) = refuse_unsafe_key(endpoint) {
         EndpointHealth {
             state: EndpointState::Unreachable,
             checked_at: Some(chrono::Utc::now().timestamp_millis()),
@@ -441,6 +459,7 @@ impl AIService {
             max_num_ctx: input.max_num_ctx,
             request_timeout_secs: input.request_timeout_secs,
             max_concurrent: input.max_concurrent,
+            managed: false,
             health: EndpointHealth::default(),
         };
         refuse_unsafe_key(&endpoint)?;
@@ -453,7 +472,7 @@ impl AIService {
     /// Replace endpoint `id`'s settings, probed once first. Without a key the stored one
     /// stays, for the same base URL only. The models it serves follow it.
     pub async fn update_endpoint(&self, id: &str, input: EndpointInput) -> Result<EndpointView> {
-        stored_endpoint(id)?;
+        refuse_managed(&stored_endpoint(id)?)?;
         let api_key = match input.api_key {
             Some(key) => key,
             None => crate::db_backend::db_backend().kept_endpoint_key(id, &input.base_url)?,
@@ -468,6 +487,7 @@ impl AIService {
             max_num_ctx: input.max_num_ctx,
             request_timeout_secs: input.request_timeout_secs,
             max_concurrent: input.max_concurrent,
+            managed: false,
             health: EndpointHealth::default(),
         };
         refuse_unsafe_key(&endpoint)?;
@@ -486,7 +506,7 @@ impl AIService {
     /// Remove endpoint `id`. Refused while models run on it, unless `cascade` removes them
     /// first.
     pub async fn remove_endpoint(&self, id: &str, cascade: bool) -> Result<()> {
-        stored_endpoint(id)?;
+        refuse_managed(&stored_endpoint(id)?)?;
         if cascade {
             for model_id in crate::db_backend::db_backend().endpoint_model_ids(id)? {
                 self.remove_model(model_id).await?;

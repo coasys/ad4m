@@ -241,6 +241,17 @@ pub struct ExecutorConfigFile {
     /// The default model per type (`llm`, `embedding`, `transcription`), by name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_defaults: Option<AiDefaultsSetting>,
+    /// The per-user store of local AI runtimes and models (`ai.localInstall`).
+    /// Unset: the user's data directory, `ad4m/local-ai`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ai_dir: Option<String>,
+    /// Start the installed local AI runtimes with the executor. Unset: true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ai_autostart: Option<bool>,
+    /// The device local AI runs its models on: `cpu`, `cuda`, `metal`, `vulkan` or `rocm`.
+    /// Unset: the best one detected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ai_device: Option<crate::ai_service::local::hardware::Backend>,
 }
 
 /// `identity` in the config file.
@@ -563,6 +574,9 @@ impl ExecutorConfigFile {
                 models: self.ai_models.clone().unwrap_or_default(),
                 defaults: self.ai_defaults.clone().unwrap_or_default(),
             }),
+            local_ai_dir: self.local_ai_dir.clone(),
+            local_ai_autostart: self.local_ai_autostart,
+            local_ai_device: self.local_ai_device,
             admin_credential: secrets.admin_credential.clone(),
             ..Ad4mConfig::unprepared()
         })
@@ -672,6 +686,31 @@ mod tests {
     #[test]
     fn an_out_of_range_sfu_udp_port_is_refused() {
         assert!(parse(r#"{"sfu_udp_port": 70000}"#).is_err());
+    }
+
+    /// The local AI device is one of the backends a runtime build is made for.
+    #[test]
+    fn local_ai_device_names_a_backend_or_is_refused() {
+        use crate::ai_service::local::hardware::Backend;
+        for (name, backend) in [
+            ("cpu", Backend::Cpu),
+            ("cuda", Backend::Cuda),
+            ("metal", Backend::Metal),
+            ("vulkan", Backend::Vulkan),
+            ("rocm", Backend::Rocm),
+        ] {
+            let config = parse(&format!(r#"{{"local_ai_device": "{name}"}}"#))
+                .unwrap()
+                .to_ad4m_config(&ExecutorSecrets::default())
+                .unwrap();
+            assert_eq!(config.local_ai_device, Some(backend), "{name}");
+        }
+        for wrong in [r#""gpu""#, r#""CUDA""#, r#""auto""#, "1"] {
+            assert!(
+                parse(&format!(r#"{{"local_ai_device": {wrong}}}"#)).is_err(),
+                "{wrong} is not a device"
+            );
+        }
     }
 
     fn scratch_dir(name: &str) -> PathBuf {

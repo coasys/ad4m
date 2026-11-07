@@ -1,7 +1,7 @@
 import type { AiEndpoint } from "@coasys/ad4m";
 import { useState } from "react";
 import "../index.css";
-import { kindLabel } from "./aiSetup";
+import { endpointLabel } from "./aiSetup";
 
 /** What a model's status says, in words. */
 const STATE_TEXT: Record<string, string> = {
@@ -73,7 +73,7 @@ export default function ModelCard(props: {
             style={{ maxWidth: "100%", overflowWrap: "break-word" }}
           >
             {endpoint
-              ? `${endpoint.name} (${kindLabel(endpoint.kind)}, ${endpoint.baseUrl})`
+              ? `${endpoint.name} (${endpointLabel(endpoint)}, ${endpoint.baseUrl})`
               : "Gone"}
           </j-text>
         </j-flex>

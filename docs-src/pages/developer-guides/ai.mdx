@@ -17,6 +17,46 @@ AD4M gives applications language models, embeddings, speech-to-text and text-to-
 
 A fresh executor has no models. Features that need one answer that no model is configured until one is added.
 
+## Local AI on this device
+
+The quickest setup needs no model server: the executor installs and runs one itself. The launcher's onboarding offers it first ("Set up local AI"), and WE's AI settings use the same calls.
+
+1. **Detect.** `ai.localHardware` reads the OS, CPU, RAM, GPUs (NVIDIA through NVML, every other GPU through the Vulkan loader, AMD memory from sysfs, Apple Silicon's unified memory) and the backends a runtime can use: CUDA, Metal, Vulkan, ROCm (with the system ROCm libraries), CPU. It gives the device a hardware class (`apple-silicon-16`, `nvidia-12gb`, `amd-igpu-uma-128`, `cpu-8gb`, ...), by the AI wind tunnel's rules.
+2. **Plan.** `ai.localPlan` picks, per service, the model the AI wind tunnel measured for that class (or the nearest smaller measured class: the family's smaller tiers, then the CPU classes; with none, the manifest's smallest model for the service, `basis: "default"`), with the server flags it was measured with, and the runtime build for the best backend. On AMD, Vulkan replaces a recommended ROCm build: that build runs on the CPU, unannounced, without the system ROCm libraries. Chat runs without Qwen3.5's thinking (`--reasoning off`). The models run at once, so their memory adds up: it fits when the sum is at most min(GPU memory − 1 GB, RAM − 4 GB); when it does not, the largest model steps down. The plan says what it downloads, how much, and why it fits or not. `local_ai_device` (`cpu`, `cuda`, `metal`, `vulkan` or `rocm`; `--local-ai-device` / `AD4M_LOCAL_AI_DEVICE`) holds the plan to one backend: only its builds are used (the CPU build for a runtime with none for it), and the memory budget and the hardware class follow, so `cpu` plans by RAM on a machine with a GPU. The plan names the device it was held to (`device`).
+3. **Install.** `ai.localInstall` downloads the pinned [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` and [NVIDIA NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp) `nemo-speech` builds from their GitHub releases and the models from Hugging Face. Every file is checked against the sha256 the manifest pins before it is used (a file that changed upstream fails the install rather than running); an interrupted download resumes. Progress arrives as `ai-local-progress` events.
+4. **Run.** The executor starts both servers as its own child processes on free `127.0.0.1` ports (never 9931 or 8080, the upstream defaults), each with a random API key, and restarts one that crashes (3 times, given back after 5 healthy minutes). llama-server serves chat and embeddings; nemo-speech serves transcription with NVIDIA's Parakeet TDT 0.6B v3 (25 European languages; it does not report the language it heard), on Vulkan on Linux where Vulkan runs, on Metal on a Mac, else on the CPU. After a start on a GPU build it checks the runtime holds GPU memory (`onGpu` in `ai.localStatus`; Linux with an AMD or Intel GPU). They stop with the executor and start with it again (`local_ai_autostart`).
+
+**No setup at all.** `ai.embed("default", text)` and `ai.transcriptionOpen("default")` use the default model of their type (else the first one registered). On an executor with no model of that type, the operator's first such call sets up local AI for it (that service only; the other defaults stay) and then answers, as the in-process `bert` and Whisper models loaded on first use before. Setup downloads and starts runtimes for the whole executor, so only the operator causes it, as with `ai.localInstall`: an app or a managed user gets "No default EMBEDDING model on this executor: ask the operator to set up local AI" (or TRANSCRIPTION), and nothing is set up. With `local_ai_autostart: false` the operator's call fails with what to do instead. On macOS, the operator's first transcription stream also fetches ONNX Runtime for the speech gate (not with `local_ai_autostart: false`); until it is there, streams send all audio. A name that is no model (`bert`, a removed model) is an error, not the default.
+5. **Register.** They appear as two endpoints, `This device (llama.cpp)` (chat and embeddings, llama-server in router mode) and `This device (NeMo Speech)` (transcription), marked `managed`, with their models as the defaults. The chat model takes tools as definitions (`nativeTools`): llama-server renders them with the model's chat template and parses the calls. A managed endpoint is not edited or removed with `ai.updateEndpoint` / `ai.removeEndpoint`: use `ai.localStop` / `ai.localRemove`. Its health is the supervisor's check (starting, stopped, failed), and once it runs, llama-server's liveness and nemo-speech's model listing.
+
+```typescript
+const plan = await ad4m.ai.localPlan();
+console.log(plan.hardwareClass, plan.models.map((m) => m.modelId), plan.downloadBytes, plan.fits);
+
+if (plan.fits) {
+  const status = await ad4m.ai.localInstall({}, (p) =>
+    console.log(p.phase, p.item, p.doneBytes, '/', p.totalBytes));
+  console.log(status.runtimes.map((r) => `${r.provider}: ${r.phase} on ${r.port}`));
+}
+
+await ad4m.ai.localStop();         // the endpoints stay, down
+await ad4m.ai.localStart();
+await ad4m.ai.localRemove(false);  // true also deletes the downloaded files
+```
+
+| Method | Who | What |
+|---|---|---|
+| `ai.localHardware` | the main agent's sessions (AI READ) | this device |
+| `ai.localPlan` | the main agent's sessions (AI READ) | what an install would do, and whether it fits |
+| `ai.localStatus` | the main agent's sessions (AI READ) | what is installed, and each runtime's phase, port, restarts |
+| `ai.localInstall` | the operator | download, start, register (long) |
+| `ai.localStart`, `ai.localStop` | the operator | the runtimes |
+| `ai.localRemove` | the operator | stop and unregister; `deleteFiles` also deletes the files |
+
+**Storage.** Runtimes and models go to one per-user directory that every agent and app of the user shares, not into each agent's data: `~/.local/share/ad4m/local-ai` on Linux, `~/Library/Application Support/ad4m/local-ai` on macOS, `%LOCALAPPDATA%\ad4m\local-ai` on Windows (`local_ai_dir` / `--local-ai-dir` / `AD4M_LOCAL_AI_DIR` moves it). Each executor keeps only its own state (the chosen models, ports, pids and the runtimes' logs) in `<app data>/local-ai/`. In the Docker image the store is `/data/local-ai/store`, in the data volume, unless the image ships local AI or `AD4M_LOCAL_AI_DIR` names another place. When the store has lost a file the selection names, `ai.localStart` starts nothing and says to run `ai.localInstall` again.
+
+**Known gaps.** The models are chosen from the AI wind tunnel's measurements, and few hardware classes are measured yet. Elsewhere the plan takes, per service, the manifest's smallest model (by memory) on the best build the device runs, and marks it `basis: "default"` (the launcher shows "not measured on this hardware"); a measured recommendation always wins. nemo-speech's Metal build is not yet measured on a Mac. There is no local text-to-speech yet.
+
 ## Setting up model servers
 
 The launcher's onboarding (and Settings, AI) looks for model servers on this machine. Onboarding lists the chat models a server already serves first and preselects one, so a running server needs no download. It also offers the recommended models: a 4-8B instruct model that calls tools (`qwen3:8b`), an embedding model (`nomic-embed-text`) and, on a transcription server, `Systran/faster-whisper-small`. The SDK exports the list as `AI_RECOMMENDED_MODELS`.
@@ -89,6 +129,10 @@ The executor config file can declare endpoints, models and defaults, applied at 
 ```
 
 The Docker image registers model servers from the environment: Ollama (`AD4M_AI_OLLAMA_URL`, `AD4M_AI_LLM_MODEL`, `AD4M_AI_EMBEDDING_MODEL`), llama-server (`AD4M_AI_LLAMA_SERVER_URL`, `AD4M_AI_LLAMA_SERVER_API_KEY`, `AD4M_AI_LLAMA_SERVER_LLM_MODEL`, `AD4M_AI_LLAMA_SERVER_EMBEDDING_MODEL`), any other OpenAI-shaped server (`AD4M_AI_OPENAI_COMPATIBLE_URL`, `AD4M_AI_OPENAI_COMPATIBLE_API_KEY`, `AD4M_AI_OPENAI_COMPATIBLE_LLM_MODEL`, `AD4M_AI_OPENAI_COMPATIBLE_EMBEDDING_MODEL`) and a transcription server (`AD4M_AI_TRANSCRIPTION_URL`, `AD4M_AI_TRANSCRIPTION_API_KEY`, `AD4M_AI_TRANSCRIPTION_MODEL`). The first server that names a model of a type supplies that type's default. `docker/compose.ai.yml` runs it with Ollama and speaches; `docker/ai-env.sh` documents every variable.
+
+An image built with `--build-arg INCLUDE_MODELS=true` needs no model server and no download: the build runs the executor's own local AI installer (`ad4m-executor local-ai install --store … --state … [--device cpu|cuda|vulkan|rocm] [--services llm,embeddings,stt]`, the plan for the build machine held to `LOCAL_AI_DEVICE`, default `cpu`) into `/opt/ad4m/local-ai`, and the container's executor starts those runtimes and models at its first start and makes them the defaults. A later `ai.localInstall` in the container writes to the container's own layer, not to the `/data` volume.
+
+The image installs no GPU runtime. With `LOCAL_AI_DEVICE=cuda`, run the container with the NVIDIA Container Toolkit (`--gpus all`). With `vulkan`, add a Vulkan loader and driver to the image (`libvulkan1`, `mesa-vulkan-drivers`) and pass `/dev/dri` in. With `rocm`, add the ROCm runtime and pass `/dev/kfd` and `/dev/dri` in. Without them the runtimes do not become ready.
 
 ## Using AI in Your Application
 

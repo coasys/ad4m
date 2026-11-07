@@ -13,6 +13,7 @@ import {
   capabilityOf,
   endpointFor,
   ENDPOINT_KINDS,
+  endpointLabel,
   kindLabel,
   parseMaxNumCtx,
   serves,
@@ -223,7 +224,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: AIMode
             <j-menu style={{ zIndex: 2 }}>
               <j-menu-group
                 collapsible
-                title={endpoint ? `${endpoint.name} (${kindLabel(endpoint.kind)})` : "None selected"}
+                title={endpoint ? `${endpoint.name} (${endpointLabel(endpoint)})` : "None selected"}
                 id="endpoints"
               >
                 {endpoints.map((e) => (
@@ -236,7 +237,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: AIMode
                       closeMenu("endpoints");
                     }}
                   >
-                    {e.name} ({kindLabel(e.kind)}, {e.health.state.toLowerCase()})
+                    {e.name} ({endpointLabel(e)}, {e.health.state.toLowerCase()})
                   </j-menu-item>
                 ))}
               </j-menu-group>

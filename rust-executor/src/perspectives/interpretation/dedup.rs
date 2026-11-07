@@ -122,7 +122,7 @@ pub(crate) async fn embed_via_ai_service(
     let mut vectors = Vec::with_capacity(texts.len());
     for batch in texts.chunks(EMBED_BATCH) {
         let embedded = service
-            // Internal caller (SHACL dedup) — no user auth context; billing skipped.
+            // Internal caller (SHACL dedup): no user to bill, and it sets up no local AI.
             .embed_batch(model_id, batch.to_vec(), None)
             .await
             .map_err(|e| anyhow::anyhow!("semantic dedup: embed('{model_id}') failed: {e:#}"))?;
@@ -890,6 +890,7 @@ mod tests {
             max_num_ctx: None,
             request_timeout_secs: None,
             max_concurrent: None,
+            managed: false,
             health: Default::default(),
         };
         crate::db::Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();

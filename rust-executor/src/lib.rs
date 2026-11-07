@@ -314,24 +314,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     tokio::spawn(async move {
         if shutdown_rx.await.is_ok() {
             info!("Shutdown signal received, cleaning up...");
-
-            // 1. Shut down Holochain conductor gracefully
-            if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await
-            {
-                info!("Shutting down Holochain conductor...");
-                match holochain_service.shutdown().await {
-                    Ok(()) => info!("Holochain conductor shut down cleanly"),
-                    Err(e) => warn!("Error shutting down Holochain conductor: {}", e),
-                }
-            }
-
-            // 2. Remove PID file if it was configured
-            let shutdown_config = crate::config::get_global_config();
-            if let Some(ref pid_file) = shutdown_config.pid_file {
-                let _ = std::fs::remove_file(pid_file);
-                info!("Removed PID file: {}", pid_file);
-            }
-
+            clean_up_before_exit().await;
             info!("Graceful shutdown complete, exiting.");
             std::process::exit(0);
         }
@@ -577,6 +560,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     });
     // After the agent loads: health events go to the sessions acting as the main agent.
     ai_service::endpoints::spawn_health_loop();
+    // The installed local AI runtimes, in the background.
+    ai_service::local::autostart();
 
     // Notifications of older executors name their owner by email; move them to DIDs.
     if let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) {
@@ -886,6 +871,28 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
         result
     })
+}
+
+/// What the executor's graceful shutdown (`SHUTDOWN_TX`, which a signal fires) cleans up before
+/// the process exits. The Holochain conductor and the local AI runtimes stop at once,
+/// not one after the other, so both fit in the deadline a signal leaves the shutdown.
+pub(crate) async fn clean_up_before_exit() {
+    let holochain = async {
+        if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await {
+            info!("Shutting down Holochain conductor...");
+            match holochain_service.shutdown().await {
+                Ok(()) => info!("Holochain conductor shut down cleanly"),
+                Err(e) => warn!("Error shutting down Holochain conductor: {}", e),
+            }
+        }
+    };
+    // The local AI runtimes are this executor's children: they stop with it.
+    tokio::join!(holochain, ai_service::local::stop_on_exit());
+
+    if let Some(ref pid_file) = crate::config::get_global_config().pid_file {
+        let _ = std::fs::remove_file(pid_file);
+        info!("Removed PID file: {}", pid_file);
+    }
 }
 
 /// The handle [`run`] returns when the executor cannot start: it ends at once with `reason`, as

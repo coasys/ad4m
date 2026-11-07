@@ -36,6 +36,7 @@
 //! | `transcription-text`          | (inline)      | the stream owner's DID | AI transcription text                |
 //! | `model-status`                | (inline)      | everyone               | An upstream model's status, e.g. `ai.pullModel` progress |
 //! | `ai-endpoint-status`          | (inline)      | the main agent's DID   | An AI endpoint's health or capabilities changed |
+//! | `ai-local-progress`           | (inline)      | the operator           | `ai.localInstall` progress: bytes per item, phase |
 //! | `query-subscription-update`   | (inline)      | the subscriber among the owners, on its own connection (passes `events.watch`) | Live query delta update, or `{ lagged: true }` |
 //! | `auto-processor-event`        | (inline)      | the pass owner, if it reads the perspective | Auto-processor pass step signal |
 //! | `auto-processor-neighbourhood-state` | (inline) | owners                | Coarse-grained neighbourhood view of "someone is auto-processing" |
@@ -129,6 +130,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<TranscriptionTextFilter>(AiTranscriptionText, false),
         EventSpec::of::<crate::types::ModelStatusEvent>(AiModelStatus, false),
         EventSpec::of::<crate::types::AiEndpointStatusEvent>(AiEndpointStatus, false),
+        EventSpec::of::<crate::ai_service::local::ProgressEvent>(AiLocalProgress, false),
         EventSpec::of::<QuerySubscriptionUpdateEvent>(PerspectiveQuerySubscription, true),
         EventSpec::of::<AutoProcessorEvent>(AutoProcessorEvent, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AutoProcessorNeighbourhoodState, true),
@@ -260,6 +262,7 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::AiTranscriptionText
         | Topic::AiModelStatus
         | Topic::AiEndpointStatus
+        | Topic::AiLocalProgress
         | Topic::PerspectiveQuerySubscription
         | Topic::AutoProcessorEvent
         | Topic::AutoProcessorNeighbourhoodState
@@ -2221,6 +2224,18 @@ mod event_spec_tests {
                     endpoint_id: "e".into(),
                     health: Default::default(),
                     capabilities: vec![],
+                }),
+            ),
+            (
+                Topic::AiLocalProgress,
+                serde_json::to_value(crate::ai_service::local::ProgressEvent {
+                    phase: "download".into(),
+                    item: Some("llama.cpp".into()),
+                    item_done_bytes: 1,
+                    item_total_bytes: 2,
+                    done_bytes: 1,
+                    total_bytes: 4,
+                    detail: None,
                 }),
             ),
             (

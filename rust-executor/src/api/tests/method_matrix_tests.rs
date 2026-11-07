@@ -1138,6 +1138,10 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
     assert_eq!(
         operator_methods,
         vec![
+            "ai.localInstall",
+            "ai.localRemove",
+            "ai.localStart",
+            "ai.localStop",
             "identity.claimOffer",
             "identity.resetLog",
             "runtime.grantNotification",
