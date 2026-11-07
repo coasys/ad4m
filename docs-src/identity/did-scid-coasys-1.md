@@ -728,7 +728,7 @@ a new string ends the read of the last one.
   credential as the first line of its stdin at start, and the executor keeps it in memory
   only: never in its environment or on its command line, which other processes of the user
   can read (`/proc/<pid>/environ`), as can the admin credential, which reads host files. An
-  executor with `AD4M_CUSTODY_CREDENTIAL` set refuses to start. The admin credential, an app,
+  executor with `AD4M_CUSTODY_CREDENTIAL` or `AD4M_CUSTODY_CREDENTIAL_FILE` set refuses to start. The admin credential, an app,
   a network listener, a device-key login and an operator without a credential are refused (403
   `no-custody-channel`). The key reaches the answer only: no log line, event, store or
   language, and the executor wipes its copy.
@@ -740,6 +740,40 @@ a new string ends the read of the last one.
   executor has the custody channel; only a claim made shows the identity and the match code
   (`link-ticket`). The ticket is deleted either way; one whose log cannot be read now waits
   for the next read.
-- The executor never opens the private record. It passes the record and request-box calls
+- The executor never decrypts the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key
-  (always for a post).
+  (always for a post). For the app on its machine whose device it is (the desktop's custody
+  service, which has no `enc` key of its own), the operator there may have it open the record
+  key of its own entry of `wrapped` (`identity.unwrapRecordKey`, local only); the app
+  decrypts the record with that key.
+
+**The holder's side.** An app that holds the current master key:
+
+- *Links with the holder scanning.* It reads a device string, refuses one past its `exp` or
+  naming another host, opens an offer bound to the string's `sign`, and puts the offer ticket,
+  signed by the master key and sealed to the string's `enc`, at the string's pre-join address
+  with `bind {scid, offerId, sign, r}`. Then it waits for the claim and confirms with the match
+  code as for any link.
+- *Gives the master key to a device that keeps it*, only to a device key valid at the head
+  that the log lets keep it: a standing key of the `incept`, or a standing key whose `add`
+  carries a co-signature over a claim that said `canKeepMaster: true` (the co-signature covers
+  the flag, so the log proves it; at a link, only on a `device` offer). A key the log does not
+  list, or a revoked one, gets nothing. The record's device kind decides nothing here: any
+  linked device can write the record, so its kind is shown to people and grants nothing. After
+  the `add`, the master key seals itself into a `master` body, signed by itself, to the `enc` key the log
+  lists for the device key, and writes it to the device's joined inbox. Before the write the
+  app keeps the push on a retry list of its own; it forgets it once the host takes it, or when
+  the host refuses it for good, or when the device key has left the log, and retries what is
+  left at each start and unlock. The holder marks the device `holdsMaster: "offered"`; the
+  device marks itself `true` once its vault keeps the key.
+- *Writes the record* by reading the newest version, applying its own changes (a device's
+  entry, a name, `holdsMaster`, a pending revocation) and dropping the entries of keys no
+  longer valid at the head, sealing the result as the next version to every reader of the
+  log, and writing it. When the host answers a stale version, or that the readers changed, it
+  reads and merges again. The holder writes after each link and each revocation.
+- *Answers the request box* only on the person's yes, after checking that the device named
+  posted the request (its signed store request, by that device key at a position the log
+  holds, covers `JCS({body, expires})`) and that it still holds (not past `expires`; a
+  `confirm-revoke` names keys valid at the head): `send-master` as above, `confirm-revoke` with a
+  `revoke` signed by the master key (one with `rotate` needs the 12 words). It then deletes the
+  request with a store request the master key signs.

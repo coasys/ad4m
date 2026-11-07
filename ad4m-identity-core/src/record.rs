@@ -288,29 +288,53 @@ pub fn open_record(
     entry: &str,
     secret: &X25519Secret,
 ) -> Result<PrivateRecord, RecordError> {
-    use base64::Engine;
     let wrapped = sealed
         .wrapped
         .get(entry)
         .ok_or_else(|| RecordError::NoEntry(entry.to_string()))?;
+    let key = unwrap_key(wrapped, scid, secret)?;
+    decrypt_record(sealed, scid, &key)
+}
+
+/// The record key that `wrapped` (one entry of a record's `wrapped`) seals for identity `scid`,
+/// opened with that reader's X25519 `secret`.
+pub fn unwrap_key(
+    wrapped: &str,
+    scid: &str,
+    secret: &X25519Secret,
+) -> Result<Zeroizing<[u8; RECORD_KEY_LEN]>, RecordError> {
     let key = seal::open(secret, &wrap_info(scid), wrapped).map_err(|_| RecordError::Open)?;
+    let mut out = Zeroizing::new([0u8; RECORD_KEY_LEN]);
     if key.len() != RECORD_KEY_LEN {
         return Err(RecordError::Open);
     }
+    out.copy_from_slice(&key);
+    Ok(out)
+}
+
+/// Decrypts `sealed` of identity `scid` with its record `key` (from [`unwrap_key`]).
+pub fn decrypt_record(
+    sealed: &SealedRecord,
+    scid: &str,
+    key: &[u8; RECORD_KEY_LEN],
+) -> Result<PrivateRecord, RecordError> {
+    use base64::Engine;
     let aad = record_aad(scid, sealed.version)?;
     let nonce = decode_nonce(&sealed.nonce)?;
     let ciphertext = b64()
         .decode(&sealed.ciphertext)
         .map_err(|_| malformed("ciphertext is base64url"))?;
-    let plain = XChaCha20Poly1305::new(key.as_slice().into())
-        .decrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: &ciphertext,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| RecordError::Open)?;
+    let plain = Zeroizing::new(
+        XChaCha20Poly1305::new(key.into())
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| RecordError::Open)?,
+    );
     serde_json::from_slice(&plain).map_err(|e| malformed(e.to_string()))
 }
 

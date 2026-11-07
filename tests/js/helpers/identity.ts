@@ -26,7 +26,8 @@ const holderBinary = () => path.join(targetDir(), "release", "examples", "holder
  * them (the integration runners compile no Rust); locally this builds them when missing.
  */
 export function buildIdentityTools() {
-    if (existsSync(storeBinary()) && existsSync(holderBinary())) return;
+    // Always ask cargo: it rebuilds only what changed. A binary that merely exists can be one an
+    // older checkout built into the same target, and its holder lacks this branch's commands.
     const opts = { cwd: REPO_ROOT, stdio: "inherit" as const };
     // One invocation with `ad4m`, as CI builds them: only `ad4m`'s graph vendors OpenSSL.
     execSync(
@@ -67,6 +68,9 @@ export class IdentityStore {
                 IDENTITY_STORE_KEY: path.join(this.dir, "store-key"),
                 IDENTITY_STORE_LISTEN: `127.0.0.1:${this.port}`,
                 POW_BITS: "8",
+                // A suite makes an identity's writes (offers, inbox puts, record writes, posts)
+                // within seconds; the store's per-identity bucket is not under test here.
+                IDENTITY_BURST: "100",
             },
         });
         child.stderr!.on("data", (d) => console.log(`[identity-store] ${d}`));
@@ -154,7 +158,8 @@ export class Holder {
             ? this.answers.shift()!
             : await new Promise<string>((resolve) => this.waiting.push(resolve));
         const answer = JSON.parse(line);
-        if (answer.error) throw new Error(answer.error);
+        // `null` is an answer too (`takeMaster` with none waiting, `record` before the first write).
+        if (answer?.error) throw new Error(answer.error);
         return answer;
     }
 

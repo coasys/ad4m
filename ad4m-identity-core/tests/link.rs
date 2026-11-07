@@ -133,6 +133,27 @@ fn a_claim_verifies_and_its_cosig_covers_enc_key_and_can_keep_master() {
     assert_eq!(verify_claim("QmOther", &claim), Err(LinkError::CoSig));
 }
 
+/// The log decides which device may keep the master key: a standing key of the incept, or an
+/// `add` whose co-signature is over a claim that said `canKeepMaster`. A claim that said no, a
+/// co-signature that is no claim's, a bot key and a key the log does not list are not let.
+#[test]
+fn the_log_says_which_device_may_keep_the_master_key() {
+    let mut log = Log::new();
+    let offer = link_offer(&log, OfferKind::Device, None);
+    for (n, can_keep_master) in [(2, true), (3, false)] {
+        let view = claim_view(&link_claim(&log, n, can_keep_master), LINK_NOW + 5);
+        let add = build::add_claimed(&log.chain, &master(0), &offer, &view).unwrap();
+        log.push(add);
+    }
+    let d4 = log.add(KeyLife::Standing);
+    let d5 = log.add(bot(&["read"], 1_800_000_000));
+    assert_eq!(
+        ["d1", "d2", "d3", d4.as_str(), d5.as_str(), "d9", "m0"]
+            .map(|id| may_keep_master(&log.events, id)),
+        [true, true, false, false, false, false, false]
+    );
+}
+
 #[test]
 fn the_holder_checks_the_stores_claim_view_before_signing_the_add() {
     let log = Log::new();

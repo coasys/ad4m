@@ -544,20 +544,39 @@ pub trait WalletBackend: Send + Sync {
         address: &ad4m_identity_core::inbox::InboxAddress,
         sealed: &str,
     ) -> Result<ad4m_identity_core::inbox::InboxPayload, AnyError> {
-        let secret = Zeroizing::new(
-            self.get_secret_key(name)
-                .ok_or_else(|| anyhow!("{name} key not found"))?,
-        );
-        let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
-            secret
-                .get(..32)
-                .and_then(|s| s.try_into().ok())
-                .ok_or_else(|| anyhow!("the {name} key is not an Ed25519 secret"))?,
-        );
-        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
-        let enc = ad4m_identity_core::x25519_secret_of_ed25519(&key);
+        let enc = enc_secret_of(self.get_secret_key(name), name)?;
         ad4m_identity_core::inbox::open(&enc, address, sealed).map_err(|e| anyhow!("{e}"))
     }
+
+    /// Opens the private record's key that `wrapped` (one entry of a record of identity
+    /// `scid`) seals to the X25519 `enc` key of the key `name`. As in [`Self::open_sealed`],
+    /// the secret and its X25519 form stay inside this call and are wiped.
+    fn unwrap_record_key(
+        &self,
+        name: &str,
+        scid: &str,
+        wrapped: &str,
+    ) -> Result<Zeroizing<[u8; 32]>, AnyError> {
+        let enc = enc_secret_of(self.get_secret_key(name), name)?;
+        ad4m_identity_core::record::unwrap_key(wrapped, scid, &enc).map_err(|e| anyhow!("{e}"))
+    }
+}
+
+/// The X25519 `enc` secret of the wallet key `name`, whose secret is `secret`: the form
+/// `did_key` derives from its Ed25519 key. The secret and the seed are wiped here.
+fn enc_secret_of(
+    secret: Option<Vec<u8>>,
+    name: &str,
+) -> Result<ad4m_identity_core::X25519Secret, AnyError> {
+    let secret = Zeroizing::new(secret.ok_or_else(|| anyhow!("{name} key not found"))?);
+    let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
+        secret
+            .get(..32)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| anyhow!("the {name} key is not an Ed25519 secret"))?,
+    );
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    Ok(ad4m_identity_core::x25519_secret_of_ed25519(&key))
 }
 
 // ── Global accessor ─────────────────────────────────────────────────────────

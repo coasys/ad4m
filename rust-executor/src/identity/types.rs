@@ -537,6 +537,34 @@ pub struct RecordStored {
     pub version: u64,
 }
 
+/// `identity.unwrapRecordKey` params: this executor's entry of a record's `wrapped`.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UnwrapRecordKeyParams {
+    pub wrapped: String,
+}
+
+/// `identity.unwrapRecordKey`: the record key of one version of the private record, for the
+/// app on this machine that opens the record. Wiped when dropped; `Debug` without the key.
+#[derive(PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordKey {
+    /// 32 bytes, base58btc.
+    pub key: String,
+}
+
+impl Drop for RecordKey {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.key);
+    }
+}
+
+impl std::fmt::Debug for RecordKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordKey").finish_non_exhaustive()
+    }
+}
+
 /// What a device asks in the request box.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "kebab-case")]

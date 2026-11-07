@@ -1,11 +1,21 @@
 //! The store client through the executor (`ViaExecutor`): every log read, append
 //! and offer goes through the executor's `identity.*` calls, so the executor checks what it
 //! passes and keeps its cache current. The transport is [`ExecutorRpc`]: the desktop custody
-//! service calls its executor over the shell's loopback channel with the admin credential;
+//! service calls its executor over the shell's loopback channel with the custody credential
+//! (which the custody service writes as the first line of its executor's stdin at start; the
+//! admin credential never opens the custody channel);
 //! `ad4m-client`'s WebSocket client serves it natively (feature `ws`).
 
+use ad4m_identity_core::inbox::InboxAddress;
+use ad4m_identity_core::record::{SealedRecord, RECORD_KEY_LEN};
 use ad4m_identity_core::Event;
-use ad4m_ldk::identity::{OfferListing, OfferOpened, SignedHead, SignedOffer, SignedRequest};
+use ad4m_ldk::identity::{
+    DeviceRequest, DeviceRequestBody, InboxBind, InboxStored, OfferListing, OfferOpened,
+    SignedHead, SignedOffer, SignedRequest,
+};
+use zeroize::Zeroize;
+
+use crate::secret::Secret;
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -81,6 +91,51 @@ pub struct IdentityLog {
     pub events: Vec<Value>,
     pub head: Option<SignedHead>,
     pub fork: Option<ForkRecord>,
+}
+
+/// `identity.takeMaster`: a master key sealed to this device, opened by its executor for the
+/// custody service. The secret is wiped when this drops.
+pub struct TakenMaster {
+    /// Acknowledge it (`identity.inboxAck`) once the vault keeps the key.
+    pub message_id: String,
+    pub did: String,
+    pub index: u32,
+    pub secret: Secret<[u8; 32]>,
+}
+
+impl std::fmt::Debug for TakenMaster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TakenMaster")
+            .field("message_id", &self.message_id)
+            .field("did", &self.did)
+            .field("index", &self.index)
+            .finish_non_exhaustive()
+    }
+}
+
+/// 32 bytes of base58btc in `value[field]`, taken out of the JSON and wiped there.
+fn take_secret(value: &mut Value, method: &str, field: &str) -> Result<Secret<[u8; 32]>, RpcError> {
+    let bad = || RpcError {
+        code: 502,
+        message: format!("{method} answered no 32-byte {field}"),
+    };
+    let Value::String(mut text) = value[field].take() else {
+        return Err(bad());
+    };
+    let decoded = bs58::decode(&text).into_vec();
+    text.zeroize();
+    let mut bytes = decoded.map_err(|_| bad())?;
+    let secret = <[u8; 32]>::try_from(bytes.as_slice()).map(Secret::new);
+    bytes.zeroize();
+    secret.map_err(|_| bad())
+}
+
+/// An inbox address as the executor's calls name it: `{pre}` or `{scid, keyId}`.
+fn address_json(address: &InboxAddress) -> Value {
+    match address {
+        InboxAddress::Pre(pre) => json!({ "pre": pre }),
+        InboxAddress::Joined { scid, key_id } => json!({ "scid": scid, "keyId": key_id }),
+    }
 }
 
 /// The executor's identity calls, typed.
@@ -180,6 +235,125 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
             json!({ "request": json_of(request)?, "wait": wait }),
         )
         .await
+    }
+
+    /// Puts a sealed message into an inbox with the master-signed `request` of the write
+    /// (`bind` names the bound offer of a pre-join address).
+    pub async fn inbox_put(
+        &self,
+        address: &InboxAddress,
+        sealed: &str,
+        bind: Option<&InboxBind>,
+        request: &SignedRequest,
+    ) -> Result<InboxStored, RpcError> {
+        let mut params = json!({
+            "address": address_json(address),
+            "sealed": sealed,
+            "request": json_of(request)?,
+        });
+        if let Some(bind) = bind {
+            params["bind"] = json_of(bind)?;
+        }
+        self.call("identity.inboxPut", params).await
+    }
+
+    /// The custody channel's call: the oldest current master key sealed to this device, opened
+    /// by the executor; `None` when none waits.
+    pub async fn take_master(&self) -> Result<Option<TakenMaster>, RpcError> {
+        const METHOD: &str = "identity.takeMaster";
+        let mut value = self.rpc.call(METHOD, json!({})).await?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let secret = take_secret(&mut value, METHOD, "secret")?;
+        let field = |name: &str| {
+            value[name].as_str().map(str::to_string).ok_or(RpcError {
+                code: 502,
+                message: format!("{METHOD} answered no {name}"),
+            })
+        };
+        Ok(Some(TakenMaster {
+            message_id: field("messageId")?,
+            did: field("did")?,
+            index: value["index"]
+                .as_u64()
+                .and_then(|i| u32::try_from(i).ok())
+                .ok_or(RpcError {
+                    code: 502,
+                    message: format!("{METHOD} answered no index"),
+                })?,
+            secret,
+        }))
+    }
+
+    /// Acknowledges message `id` of this device's inbox: the store deletes it.
+    pub async fn inbox_ack(&self, id: &str) -> Result<(), RpcError> {
+        let _: Value = self.call("identity.inboxAck", json!({ "id": id })).await?;
+        Ok(())
+    }
+
+    /// The sealed private record of the executor's identity, read with its device key; `None`
+    /// before the first write.
+    pub async fn record(&self) -> Result<Option<SealedRecord>, RpcError> {
+        self.call("identity.record", json!({})).await
+    }
+
+    /// Writes the next version of the record with the executor's device key; answers the
+    /// version stored.
+    pub async fn record_put(&self, record: &SealedRecord) -> Result<u64, RpcError> {
+        let stored: Value = self
+            .call("identity.recordPut", json!({ "record": json_of(record)? }))
+            .await?;
+        stored["version"].as_u64().ok_or(RpcError {
+            code: 502,
+            message: "identity.recordPut answered no version".into(),
+        })
+    }
+
+    /// The record key that `wrapped` (the executor's entry of a record's `wrapped`) seals to
+    /// the executor's device key, opened in its wallet.
+    pub async fn unwrap_record_key(
+        &self,
+        wrapped: &str,
+    ) -> Result<Secret<[u8; RECORD_KEY_LEN]>, RpcError> {
+        const METHOD: &str = "identity.unwrapRecordKey";
+        let mut value = self.rpc.call(METHOD, json!({ "wrapped": wrapped })).await?;
+        take_secret(&mut value, METHOD, "key")
+    }
+
+    /// The request box since `since` (unix seconds), read with the executor's device key.
+    pub async fn requests(&self, since: u64) -> Result<Vec<DeviceRequest>, RpcError> {
+        self.call("identity.requests", json!({ "since": since }))
+            .await
+    }
+
+    /// Posts `body` to the request box with the executor's device key; it lives until
+    /// `expires` (default: the longest, 7 days). Answers the request's id.
+    pub async fn post_request(
+        &self,
+        body: &DeviceRequestBody,
+        expires: Option<u64>,
+    ) -> Result<String, RpcError> {
+        let mut params = json!({ "body": json_of(body)? });
+        if let Some(expires) = expires {
+            params["expires"] = json!(expires);
+        }
+        let posted: Value = self.call("identity.postRequest", params).await?;
+        posted["id"].as_str().map(str::to_string).ok_or(RpcError {
+            code: 502,
+            message: "identity.postRequest answered no id".into(),
+        })
+    }
+
+    /// Deletes request `id` with the master-signed `request`.
+    pub async fn delete_request(&self, id: &str, request: &SignedRequest) -> Result<(), RpcError> {
+        let _: Value = self
+            .call(
+                "identity.deleteRequest",
+                json!({ "id": id, "request": json_of(request)? }),
+            )
+            .await?;
+        Ok(())
     }
 }
 

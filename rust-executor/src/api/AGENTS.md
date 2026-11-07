@@ -128,8 +128,8 @@ move the whole data folder. The guard table marks the local-only methods "local 
 `runtime.setConfig` is not local only as a whole: it refuses each `machine` key to a caller
 off this machine (`config_rpc`). `identity.custodyStatus` and `identity.takeMaster` (the one
 call whose answer carries a master key) add the custody channel's own check
-(`identity::custody::admit`: the admin credential, not a tokenless operator, and
-`--custody-channel`); every other caller gets 403 `no-custody-channel`. The events only
+(`identity::custody::admit`: only the custody credential, `OperatorSource::Custody`, on a
+loopback listener of an executor started with `--custody-channel`; not the admin credential); every other caller gets 403 `no-custody-channel`. The events only
 local-only methods read (`link-ticket`, `inbox-message`) go to `Audience::LocalOperator`, the
 operator's sessions on this machine.
 
@@ -176,7 +176,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-227 methods: Cap 87, Executor 33, Open 8, Operator 29, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 10.
+228 methods: Cap 87, Executor 33, Open 8, Operator 30, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 11.
 
 | Method | Guard |
 |---|---|
@@ -255,6 +255,7 @@ the guard checked:
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
 | `identity.takeMaster` | `Operator`, local only |
+| `identity.unwrapRecordKey` | `Operator`, local only |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |

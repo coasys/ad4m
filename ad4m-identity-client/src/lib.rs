@@ -7,7 +7,14 @@
 //!   `d1`, the executor's co-signature, publish, then the vault keeps master #0.
 //! - [`flows::link`]: an offer signed by the current master key, the offer link, the claim,
 //!   the match code both sides show, and the `add` that spends the claim.
+//! - [`flows::link`] also links with the holder scanning a device string: an offer bound to
+//!   the device's key, its ticket in the device's pre-join inbox.
+//! - [`flows::master`]: the master key sealed to a device that keeps it, the retry list of
+//!   pushes that failed, and the device's side that takes it from its executor.
 //! - [`flows::revoke`]: a `revoke` signed by the current master key, published.
+//! - [`flows::requests`]: the holder's answer to a device's request (send the master key,
+//!   confirm a revocation).
+//! - [`record`]: the private details record, opened, merged and written in one place.
 //!
 //! No custody key: no service keeps a copy of a master key for the person. The library has no
 //! clock, randomness or network of its own: [`Clock`], [`Random`] and [`executor::ExecutorRpc`]
@@ -15,6 +22,8 @@
 
 pub mod executor;
 pub mod flows;
+pub mod record;
+mod request;
 pub mod secret;
 pub mod vault;
 
@@ -22,7 +31,7 @@ pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
-pub use vault::{MasterSigner, MasterUse, Unlocked, Vault, VaultError};
+pub use vault::{MasterSigner, MasterUse, PendingPush, Unlocked, Vault, VaultError};
 
 /// Unix seconds, from the surface.
 pub trait Clock {
@@ -57,6 +66,28 @@ impl Random for OsRandom {
     }
 }
 
+/// A surface's [`Random`] as the RNG the identity core's seals take.
+pub(crate) struct RandomRng<'a>(pub &'a dyn Random);
+
+impl rand_core::RngCore for RandomRng<'_> {
+    fn next_u32(&mut self) -> u32 {
+        rand_core::impls::next_u32_via_fill(self)
+    }
+    fn next_u64(&mut self) -> u64 {
+        rand_core::impls::next_u64_via_fill(self)
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.0.fill(dest);
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.0.fill(dest);
+        Ok(())
+    }
+}
+
+/// The surface's random source is a cryptographic one (the OS's, the browser's crypto).
+impl rand_core::CryptoRng for RandomRng<'_> {}
+
 /// Why a flow stopped.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -70,6 +101,10 @@ pub enum ClientError {
     Build(#[from] ad4m_identity_core::build::BuildError),
     #[error("offer or claim: {0}")]
     Link(#[from] ad4m_identity_core::link::LinkError),
+    #[error("inbox message: {0}")]
+    Inbox(#[from] ad4m_identity_core::inbox::InboxError),
+    #[error("private record: {0}")]
+    Record(#[from] ad4m_identity_core::record::RecordError),
     #[error("the log does not fold: {0}")]
     Fold(String),
     /// The executor's device key speaks for an identity already.
@@ -88,6 +123,20 @@ pub enum ClientError {
     /// The offer ended before it was claimed or confirmed.
     #[error("the offer is {0}")]
     OfferEnded(String),
+    /// The master key goes only to a device key, valid at the head, that the key log lets keep
+    /// it: a standing key of the incept, or one whose `add` carries a claim that said
+    /// `canKeepMaster` (and at a link, only on a `device` offer). Never by the record's kind.
+    #[error("{0} may not keep the master key")]
+    NotAKeeper(String),
+    /// A request asks for a rotation, which needs the 12 words.
+    #[error("the request asks for a rotation, which needs the 12 words")]
+    NeedsWords,
+    /// A request of the box that its poster did not sign as the log lists it.
+    #[error("the request is not signed by its poster: {0}")]
+    Poster(String),
+    /// The record's version moved under every write tried.
+    #[error("the private record kept changing; try again")]
+    RecordBusy,
     #[error("{0}")]
     Protocol(String),
 }

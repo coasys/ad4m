@@ -7,18 +7,28 @@
 //! {"cmd":"connect","url":"http://127.0.0.1:12000","token":""}  -> {"ok":true}
 //! {"cmd":"create"}                                              -> {"did","scid","seq"}
 //! {"cmd":"open","did":"did:scid:…","store":"http://…"}           -> {"link","offerString","offerId"}
-//! {"cmd":"waitClaim"}                                           -> {"matchCode","deviceKey","hint"}
-//! {"cmd":"confirm"}                                             -> {"seq"}
-//! {"cmd":"revoke","did":"did:scid:…","keyIds":["d2"]}            -> {"seq"}
-//! {"cmd":"sealMaster","did":"did:scid:…","keyId":"d1"}          -> {"id","secret"}
-//! {"cmd":"openBound","did":"…","store":"http://…","device":"coasys:device:1:…"} -> {"offerId","messageId"}
+//! {"cmd":"scan","did":"…","store":"http://…","device":"coasys:device:1:…"} -> {"offerId"}
+//! {"cmd":"waitClaim"}                                -> {"matchCode","deviceKey","hint","canKeepMaster"}
+//! {"cmd":"confirm","name":"Desk","kind":"desktop-app","keepMaster":true}
+//!                                                    -> {"seq","keyId","master","record"}
+//! {"cmd":"revoke","did":"did:scid:…","keyIds":["d2"]}            -> {"seq","record"}
+//! {"cmd":"sendMaster","did":"did:scid:…","keyId":"d2"}           -> {"id","secret","record"}
+//! {"cmd":"takeMaster"}                                          -> {"did","index","record"} | null
+//! {"cmd":"record","did":"did:scid:…"}                            -> {"version","record"} | null
+//! {"cmd":"recordDevice","did":"…","keyId":"d1","name":"Home","kind":"desktop-app"} -> {"record"}
+//! {"cmd":"postRequest","body":{"kind":"send-master"}}           -> {"id"}
+//! {"cmd":"requests"}                                            -> [DeviceRequest]
+//! {"cmd":"answer","did":"did:scid:…","id":"…"}                   -> {"answered","record"}
 //! ```
 //!
-//! `sealMaster` seals the current master key to the device `keyId`'s `enc` key in the log and
-//! writes it to that device's inbox through the executor (`identity.inboxPut`); it answers the
-//! secret so a test can compare what the device takes. `openBound` opens an offer bound to the
-//! device string's key and pushes its ticket into the device's pre-join inbox; `waitClaim` and
-//! `confirm` then follow it as for `open`.
+//! `scan` is the holder scanning a device string: a bound offer whose ticket goes into the
+//! device's pre-join inbox; `waitClaim` and `confirm` then follow it as for `open`. `confirm`
+//! names the device's record entry (`kind` defaults to `server` for an `open` offer and to
+//! `desktop-app` for a scan) and with `keepMaster` puts the master key into its inbox.
+//! `sendMaster` answers the secret too, from the words this holder made it with, so a test
+//! can compare what the device takes. `takeMaster` is the device's side, for a holder that
+//! connects to the device's executor as its custody service. `record` and `master`/`record`
+//! fields answer a record write's version, or `{"error"}`.
 //!
 //! Build: `cargo build -p ad4m-identity-client --example holder --features ws,test-vault`.
 
@@ -26,17 +36,17 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 use ad4m_client::ws_rpc::WsRpcClient;
-use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
 use ad4m_identity_client::flows::create::{CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::{Claimed, LinkFlow};
+use ad4m_identity_client::flows::master::{send_master, take_master};
+use ad4m_identity_client::flows::requests::{answer, Answered};
 use ad4m_identity_client::flows::revoke::revoke;
-use ad4m_identity_client::{Clock, ExecutorRpc, MemoryVault, OsRandom, SystemClock, ViaExecutor};
-use ad4m_identity_core::build::Signer;
-use ad4m_identity_core::inbox::{pre_address, seal, sign_payload, InboxAddress, InboxBody};
-use ad4m_identity_core::link::{DeviceString, OfferKind, SignedBy};
-use ad4m_identity_core::{signing_bytes, words, KelChain, REQUEST_DOMAIN};
-use ad4m_ldk::identity::{InboxBind, InboxWrite, RequestBody, SignedRequest};
-use ed25519_dalek::SigningKey;
+use ad4m_identity_client::record::{self, Change};
+use ad4m_identity_client::{ClientError, MemoryVault, OsRandom, SystemClock, ViaExecutor};
+use ad4m_identity_core::link::{DeviceString, OfferKind};
+use ad4m_identity_core::record::{DeviceEntry, DeviceKind, HoldsMaster};
+use ad4m_identity_core::words;
+use ad4m_ldk::identity::DeviceRequestBody;
 use serde_json::{json, Value};
 
 static CLOCK: SystemClock = SystemClock;
@@ -48,9 +58,43 @@ fn field<'a>(command: &'a Value, name: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("the command needs a string `{name}`"))
 }
 
-/// The master keys of the identities this holder made, by DID: master #0 from the words, as
-/// the vault holds it (the vault never gives its bytes out, and `sealMaster` sends them).
-type Masters = HashMap<String, SigningKey>;
+/// The record entry a command names: `name` (else `name_default`, else "device") and `kind`
+/// (else `kind_default`), an executor without the master key.
+fn device_entry(
+    command: &Value,
+    name_default: Option<&str>,
+    kind_default: DeviceKind,
+) -> Result<DeviceEntry, String> {
+    let kind = match command.get("kind") {
+        Some(kind) => serde_json::from_value(kind.clone()).map_err(|e| format!("kind: {e}"))?,
+        None => kind_default,
+    };
+    Ok(DeviceEntry {
+        name: command["name"]
+            .as_str()
+            .or(name_default)
+            .unwrap_or("device")
+            .to_string(),
+        kind,
+        place: None,
+        address: None,
+        runs_executor: true,
+        holds_master: HoldsMaster::No,
+        operator: None,
+    })
+}
+
+/// A record write's outcome as JSON: its version, or `{"error"}`.
+fn written(record: &Result<u64, ClientError>) -> Value {
+    match record {
+        Ok(version) => json!(version),
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
+/// The master #0 secret of each identity this holder made, base58btc, from the words: what
+/// `sendMaster` answers so a test can compare what the device takes. The flows never see it.
+type Masters = HashMap<String, String>;
 
 async fn create(
     executor: &ViaExecutor<WsRpcClient>,
@@ -75,182 +119,11 @@ async fn create(
         .finish(executor, vault)
         .await
         .map_err(|e| e.to_string())?;
-    masters.insert(created.did.clone(), master);
+    masters.insert(
+        created.did.clone(),
+        bs58::encode(master.to_bytes()).into_string(),
+    );
     Ok(json!({ "did": created.did, "scid": created.scid, "seq": created.head.seq }))
-}
-
-/// The log of `did` through the executor, and the store the executor accepted its head from.
-async fn log_of(
-    executor: &ViaExecutor<WsRpcClient>,
-    did: &str,
-) -> Result<(KelChain, String), String> {
-    let events = executor.events(did).await.map_err(|e| e.to_string())?;
-    let chain = ad4m_identity_core::fold(&events).map_err(|e| format!("{e:?}"))?;
-    let store = executor
-        .log(did, 0, false)
-        .await
-        .map_err(|e| e.to_string())?
-        .head
-        .ok_or("the executor accepted no head")?
-        .store;
-    Ok((chain, store))
-}
-
-/// The current master's position at `chain`'s head.
-fn by_master(chain: &KelChain) -> Result<SignedBy, String> {
-    let head = chain.head();
-    Ok(SignedBy {
-        key_id: chain
-            .state()
-            .current_master()
-            .ok_or("the identity has ended")?
-            .id
-            .clone(),
-        kel_seq: head.seq,
-        kel_hash: head.hash.clone(),
-    })
-}
-
-/// A store request for `method path` with the canonical JSON of `body`, signed by `master`.
-fn master_request(
-    master: &SigningKey,
-    did: &str,
-    store: &str,
-    by: &SignedBy,
-    method: &str,
-    path: &str,
-    body: &impl serde::Serialize,
-) -> Result<SignedRequest, String> {
-    let body = canonical_json(&json!(body)).map_err(|e| e.to_string())?;
-    let mut nonce = [0u8; 16];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
-    let req = RequestBody {
-        did: did.to_string(),
-        store: store.to_string(),
-        key_id: by.key_id.clone(),
-        kel_seq: by.kel_seq,
-        kel_hash: by.kel_hash.clone(),
-        method: method.into(),
-        path: path.into(),
-        body_hash: hash_bytes(body.as_bytes()),
-        nonce: bs58::encode(nonce).into_string(),
-        expires: CLOCK.now() + 60,
-    };
-    let bytes = signing_bytes(REQUEST_DOMAIN, &req).map_err(|e| e.to_string())?;
-    let sig = encode_proof_value(&Signer::sign(master, &bytes));
-    Ok(SignedRequest { req, sig })
-}
-
-/// Seals `body` from `master` (at `by`) to the device `to` (its `enc` key `to_enc`) for
-/// `address`.
-fn sealed_for(
-    master: &SigningKey,
-    by: &SignedBy,
-    to: &str,
-    to_enc: &str,
-    address: &InboxAddress,
-    body: InboxBody,
-) -> Result<String, String> {
-    let payload = sign_payload(to.into(), body, CLOCK.now(), by.clone(), master)
-        .map_err(|e| e.to_string())?;
-    seal(to_enc, address, &payload, &mut rand_core::OsRng).map_err(|e| e.to_string())
-}
-
-/// `sealMaster`: the current master key, sealed to device `key_id`'s `enc` key in the log, into
-/// that device's inbox.
-async fn seal_master(
-    executor: &ViaExecutor<WsRpcClient>,
-    masters: &Masters,
-    did: &str,
-    key_id: &str,
-) -> Result<Value, String> {
-    let master = masters
-        .get(did)
-        .ok_or("this holder did not make that identity")?;
-    let (chain, store) = log_of(executor, did).await?;
-    let state = chain.state();
-    let device = state.keys.get(key_id).ok_or("the log lists no such key")?;
-    let index = state
-        .masters
-        .iter()
-        .position(|m| m.sign == Signer::key(master))
-        .ok_or("the log does not list this master key")?;
-    let secret = bs58::encode(master.to_bytes()).into_string();
-    let by = by_master(&chain)?;
-    let scid = chain.id().to_string();
-    let address = InboxAddress::Joined {
-        scid: scid.clone(),
-        key_id: key_id.to_string(),
-    };
-    let body = InboxBody::Master {
-        did: did.to_string(),
-        index: index as u32,
-        secret: secret.clone(),
-    };
-    let enc = device
-        .enc
-        .as_deref()
-        .ok_or("the log lists no enc key for it")?;
-    let sealed = sealed_for(master, &by, &device.sign, enc, &address, body)?;
-    let write = InboxWrite {
-        sealed: sealed.clone(),
-        bind: None,
-    };
-    let path = format!("/v1/inbox/{scid}/{key_id}");
-    let request = master_request(master, did, &store, &by, "PUT", &path, &write)?;
-    let stored = ExecutorRpc::call(
-        executor.rpc(),
-        "identity.inboxPut",
-            json!({ "address": { "scid": scid, "keyId": key_id }, "sealed": sealed, "request": request }),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(json!({ "id": stored["id"], "secret": secret }))
-}
-
-/// Pushes `flow`'s ticket into the pre-join inbox of the device string `device`.
-async fn push_ticket(
-    executor: &ViaExecutor<WsRpcClient>,
-    masters: &Masters,
-    did: &str,
-    device: &DeviceString,
-    flow: &LinkFlow<'_, WsRpcClient>,
-) -> Result<Value, String> {
-    let master = masters
-        .get(did)
-        .ok_or("this holder did not make that identity")?;
-    let (chain, store) = log_of(executor, did).await?;
-    let by = by_master(&chain)?;
-    let pre = pre_address(&device.sign, &device.r).map_err(|e| e.to_string())?;
-    let ticket = InboxBody::OfferTicket(Box::new(flow.ticket()));
-    let sealed = sealed_for(
-        master,
-        &by,
-        &device.sign,
-        &device.enc,
-        &InboxAddress::Pre(pre.clone()),
-        ticket,
-    )?;
-    let bind = InboxBind {
-        scid: chain.id().to_string(),
-        offer_id: flow.offer_id().to_string(),
-        sign: device.sign.clone(),
-        r: device.r.clone(),
-    };
-    let write = InboxWrite {
-        sealed: sealed.clone(),
-        bind: Some(bind.clone()),
-    };
-    let path = format!("/v1/inbox/pre/{pre}");
-    let request = master_request(master, did, &store, &by, "PUT", &path, &write)?;
-    let stored = ExecutorRpc::call(
-        executor.rpc(),
-        "identity.inboxPut",
-        json!({ "address": { "pre": pre }, "sealed": sealed, "bind": bind, "request": request }),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(json!({ "offerId": flow.offer_id(), "messageId": stored["id"] }))
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -292,7 +165,7 @@ async fn main() {
         }
     }
     let executor = executor.expect("connected above");
-    let mut link: Option<LinkFlow<'_, WsRpcClient>> = None;
+    let mut link: Option<(LinkFlow<'_, WsRpcClient>, DeviceKind)> = None;
     let mut claimed: Option<Claimed> = None;
     let mut masters = Masters::new();
 
@@ -307,39 +180,6 @@ async fn main() {
         };
         let answer: Result<Value, String> = match command["cmd"].as_str() {
             Some("create") => create(&executor, &vault, &mut masters).await,
-            Some("sealMaster") => {
-                async {
-                    let did = field(&command, "did")?;
-                    let key_id = field(&command, "keyId")?;
-                    seal_master(&executor, &masters, did, key_id).await
-                }
-                .await
-            }
-            Some("openBound") => {
-                async {
-                    let did = field(&command, "did")?;
-                    let store = field(&command, "store")?;
-                    let device = DeviceString::parse(field(&command, "device")?)
-                        .map_err(|e| e.to_string())?;
-                    let flow = LinkFlow::open(
-                        &executor,
-                        &vault,
-                        did,
-                        OfferKind::Device,
-                        Some(&device.sign),
-                        store,
-                        &CLOCK,
-                        &RANDOM,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    let answer = push_ticket(&executor, &masters, did, &device, &flow).await?;
-                    link = Some(flow);
-                    claimed = None;
-                    Ok(answer)
-                }
-                .await
-            }
             Some("open") => {
                 async {
                     let did = field(&command, "did")?;
@@ -361,7 +201,32 @@ async fn main() {
                         "offerString": flow.offer_string(),
                         "offerId": flow.offer_id(),
                     });
-                    link = Some(flow);
+                    link = Some((flow, DeviceKind::Server));
+                    claimed = None;
+                    Ok(answer)
+                }
+                .await
+            }
+            Some("scan") => {
+                async {
+                    let did = field(&command, "did")?;
+                    let store = field(&command, "store")?;
+                    let device = DeviceString::parse(field(&command, "device")?)
+                        .map_err(|e| e.to_string())?;
+                    let flow = LinkFlow::scan(
+                        &executor,
+                        &vault,
+                        did,
+                        OfferKind::Device,
+                        &device,
+                        store,
+                        &CLOCK,
+                        &RANDOM,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    let answer = json!({ "offerId": flow.offer_id() });
+                    link = Some((flow, DeviceKind::DesktopApp));
                     claimed = None;
                     Ok(answer)
                 }
@@ -369,12 +234,13 @@ async fn main() {
             }
             Some("waitClaim") => {
                 async {
-                    let flow = link.as_ref().ok_or("open a link first")?;
+                    let (flow, _) = link.as_ref().ok_or("open a link first")?;
                     let claim = flow.wait_for_claim().await.map_err(|e| e.to_string())?;
                     let answer = json!({
                         "matchCode": claim.match_code,
                         "deviceKey": claim.device_key,
                         "hint": claim.hint,
+                        "canKeepMaster": claim.can_keep_master,
                     });
                     claimed = Some(claim);
                     Ok(answer)
@@ -383,14 +249,27 @@ async fn main() {
             }
             Some("confirm") => {
                 async {
-                    let flow = link.as_ref().ok_or("open a link first")?;
+                    let (flow, kind) = link.as_ref().ok_or("open a link first")?;
                     let claim = claimed.as_ref().ok_or("wait for the claim first")?;
-                    let head = flow.confirm(claim).await.map_err(|e| e.to_string())?;
+                    let entry = device_entry(&command, claim.hint.as_deref(), *kind)?;
+                    let keep = command["keepMaster"].as_bool().unwrap_or(false);
+                    let linked = flow
+                        .confirm(claim, entry, keep)
+                        .await
+                        .map_err(|e| e.to_string())?;
                     // Kept until the add is in: a failed publish can be confirmed again while
                     // the claim is still `claimed`.
                     link = None;
                     claimed = None;
-                    Ok(json!({ "seq": head.seq }))
+                    Ok(json!({
+                        "seq": linked.head.seq,
+                        "keyId": linked.key_id,
+                        "master": linked.master.map(|m| match m {
+                            Ok(id) => json!(id),
+                            Err(e) => json!({ "error": e.to_string() }),
+                        }),
+                        "record": written(&linked.record),
+                    }))
                 }
                 .await
             }
@@ -399,10 +278,107 @@ async fn main() {
                     let did = field(&command, "did")?;
                     let ids: Vec<String> = serde_json::from_value(command["keyIds"].clone())
                         .map_err(|e| format!("keyIds: {e}"))?;
-                    let head = revoke(&executor, &vault, did, &ids, &CLOCK)
+                    let revoked = revoke(&executor, &vault, did, &ids, &CLOCK, &RANDOM)
                         .await
                         .map_err(|e| e.to_string())?;
-                    Ok(json!({ "seq": head.seq }))
+                    Ok(json!({ "seq": revoked.head.seq, "record": written(&revoked.record) }))
+                }
+                .await
+            }
+            Some("sendMaster") => {
+                async {
+                    let did = field(&command, "did")?;
+                    let key_id = field(&command, "keyId")?;
+                    let sent = send_master(&executor, &vault, did, key_id, &CLOCK, &RANDOM)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(json!({
+                        "id": sent.message_id,
+                        "secret": masters.get(did),
+                        "record": written(&sent.record),
+                    }))
+                }
+                .await
+            }
+            Some("takeMaster") => match take_master(&executor, &vault, &RANDOM).await {
+                Ok(Some(taken)) => Ok(json!({
+                    "did": taken.did,
+                    "index": taken.index,
+                    "record": written(&taken.record),
+                })),
+                Ok(None) => Ok(Value::Null),
+                Err(e) => Err(e.to_string()),
+            },
+            Some("record") => {
+                async {
+                    let did = field(&command, "did")?;
+                    let opened = record::read(&executor, did)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(opened.map_or(
+                        Value::Null,
+                        |o| json!({ "version": o.version, "record": o.record }),
+                    ))
+                }
+                .await
+            }
+            Some("recordDevice") => {
+                async {
+                    let did = field(&command, "did")?;
+                    let key_id = field(&command, "keyId")?;
+                    let entry = device_entry(&command, None, DeviceKind::Server)?;
+                    let change = Change::Device {
+                        key_id: key_id.to_string(),
+                        entry,
+                    };
+                    let version = record::write(&executor, did, &[change], &RANDOM)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(json!({ "record": version }))
+                }
+                .await
+            }
+            Some("postRequest") => {
+                async {
+                    let body: DeviceRequestBody = serde_json::from_value(command["body"].clone())
+                        .map_err(|e| format!("body: {e}"))?;
+                    let id = executor
+                        .post_request(&body, None)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(json!({ "id": id }))
+                }
+                .await
+            }
+            Some("requests") => executor
+                .requests(0)
+                .await
+                .map(|r| json!(r))
+                .map_err(|e| e.to_string()),
+            Some("answer") => {
+                async {
+                    let did = field(&command, "did")?;
+                    let id = field(&command, "id")?;
+                    let listed = executor.requests(0).await.map_err(|e| e.to_string())?;
+                    let request = listed
+                        .iter()
+                        .find(|r| r.id == id)
+                        .ok_or("no such request")?;
+                    match answer(&executor, &vault, did, request, &CLOCK, &RANDOM)
+                        .await
+                        .map_err(|e| e.to_string())?
+                    {
+                        Answered::MasterSent(sent) => Ok(json!({
+                            "answered": "send-master",
+                            "id": sent.message_id,
+                            "record": written(&sent.record),
+                        })),
+                        Answered::Revoked(revoked) => Ok(json!({
+                            "answered": "confirm-revoke",
+                            "seq": revoked.head.seq,
+                            "record": written(&revoked.record),
+                        })),
+                    }
                 }
                 .await
             }

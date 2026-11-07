@@ -57,6 +57,25 @@ fn the_record_is_wrapped_to_every_device_key_and_the_recovery_key_and_not_to_a_b
     assert_eq!(check_sealed(&s, &log.chain), Ok(()));
 }
 
+/// A reader that holds its `enc` secret elsewhere (an executor's wallet) unwraps the record key
+/// there and decrypts with the key alone; the key of one version opens no other.
+#[test]
+fn the_record_key_unwrapped_alone_decrypts_its_version_only() {
+    let log = devices_log();
+    let v1 = sealed(&log, 1, false);
+    let key = unwrap_key(&v1.wrapped["d2"], &scid(&log), &enc_secret(2)).unwrap();
+    assert_eq!(decrypt_record(&v1, &scid(&log), &key), Ok(record_fixture()));
+    assert_eq!(
+        unwrap_key(&v1.wrapped["d2"], &scid(&log), &enc_secret(1)).map(|k| *k),
+        Err(RecordError::Open)
+    );
+    let v2 = sealed(&log, 2, false);
+    assert_eq!(
+        decrypt_record(&v2, &scid(&log), &key),
+        Err(RecordError::Open)
+    );
+}
+
 #[test]
 fn a_revoked_device_cannot_open_the_next_version() {
     let mut log = devices_log();
