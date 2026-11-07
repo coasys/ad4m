@@ -17,7 +17,8 @@ use ad4m_identity_core::link::{
     SignedOffer,
 };
 use ad4m_identity_core::record::{
-    seal_record, DeviceEntry, DeviceKind, HoldsMaster, Place, PrivateRecord, SealedRecord,
+    attest_recovery_key, seal_record, DeviceEntry, DeviceKind, HoldsMaster, Place, PrivateRecord,
+    Recovery, SealedRecord,
 };
 use ad4m_identity_core::REQUEST_DOMAIN;
 use ad4m_identity_core::{
@@ -468,16 +469,23 @@ impl Person {
     }
 
     /// A private record of `version`, wrapped to the readers of the person's log at its head
-    /// (and to `recovery`, when given), signed by d1.
+    /// (and to `recovery`, when given, attested by the current master), signed by d1.
     pub fn sealed_record(&self, version: u64, recovery: Option<String>) -> SealedRecord {
+        let recovery = recovery.map(|key| self.attest_recovery(key));
         self.sealed_record_by(version, recovery, &self.device_key(1))
     }
 
-    /// [`Person::sealed_record`] signed by `signer`, a device key or a master key of the log.
+    /// `key` attested as the recovery key by the current master.
+    pub fn attest_recovery(&self, key: String) -> Recovery {
+        attest_recovery_key(&self.chain, key, &self.current_master()).unwrap()
+    }
+
+    /// [`Person::sealed_record`] carrying `recovery` as given, signed by `signer`, a device key
+    /// or a master key of the log.
     pub fn sealed_record_by(
         &self,
         version: u64,
-        recovery: Option<String>,
+        recovery: Option<Recovery>,
         signer: &SigningKey,
     ) -> SealedRecord {
         let mut record = PrivateRecord::default();

@@ -557,6 +557,7 @@ fn identity_inbox_record_and_request_calls() {
             .into_iter()
             .collect(),
         recovery_key: None,
+        recovery_attestation: None,
         nonce: "zNonce".into(),
         ciphertext: "BBBB".into(),
         signer: "d1".into(),
@@ -649,12 +650,17 @@ fn inbox_record_and_request_wire_types_use_the_stores_field_names() {
                 .into_iter()
                 .collect(),
             recovery_key: Some("z6LSRec".into()),
+            recovery_attestation: Some(RecoveryAttestation {
+                key_id: "m0".into(),
+                sig: "zAtt".into(),
+            }),
             nonce: "zNonce".into(),
             ciphertext: "BBBB".into(),
             signer: "d1".into(),
             sig: "zSig".into(),
         },
-        json!({"version": 2, "wrapped": {"d1": "AAAA"}, "recoveryKey": "z6LSRec", "nonce": "zNonce", "ciphertext": "BBBB", "signer": "d1", "sig": "zSig"}),
+        json!({"version": 2, "wrapped": {"d1": "AAAA"}, "recoveryKey": "z6LSRec", "recoveryAttestation": {"keyId": "m0", "sig": "zAtt"},
+               "nonce": "zNonce", "ciphertext": "BBBB", "signer": "d1", "sig": "zSig"}),
     );
     wire(
         &PostedRequest {

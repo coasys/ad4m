@@ -68,7 +68,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `GET /inbox/{scid}/{keyId}?wait=` signed by `keyId` | `200 [InboxMessage]` · `403 signer` |
 | `DELETE /inbox/{scid}/{keyId}/{id}` signed by `keyId` | `204` · `403 signer` · `404` |
 | `GET /private/{scid}` signed (device key or master) | `200 SealedRecord` · `403` · `404` none yet |
-| `PUT /private/{scid}` `SealedRecord` + signed request | `200 {version}` · `400 malformed`/`signer`/`signature`/`wrapped`/`recovery-key` · `403` · `409 {version}` · `413` · `429 identity` |
+| `PUT /private/{scid}` `SealedRecord` + signed request | `200 {version}` · `400 malformed`/`signer`/`signature`/`attestation`/`wrapped`/`recovery-key` · `403` · `409 {version}` · `413` · `429 identity` |
 | `POST /requests/{scid}` `{body, expires}` signed by a device key | `201 {id}` · `400 malformed`/`expires` · `403 signer` · `429 identity` (16 open, or the bucket) |
 | `GET /requests/{scid}?since=` signed (device key or master) | `200 [DeviceRequest]` oldest first |
 | `DELETE /requests/{scid}/{id}` by the poster or the master | `204` · `403 signer` · `404` |
@@ -381,7 +381,12 @@ tests name them by these names.
   without the bot mark valid at the head or the current master (`record::verify_envelope`,
   `400 signer`/`signature`; the writer need not be the request's signer), and wrapped to
   exactly the log's readers at the head (`record::check_sealed`, `400 wrapped`), its version must be the stored one plus
-  one, an absent record counting as version 0 so the first write is version 1 (`409 {version}`), and a recovery key once set is kept (`400 recovery-key`). The signed
+  one, an absent record counting as version 0 so the first write is version 1 (`409 {version}`). A `recoveryKey` needs the current master's
+  attestation (`record::verify_attestation`, `400 attestation`). A device-signed write copies
+  the stored record's counting recovery key and attestation unchanged (`record::recovery_of`),
+  or carries none when that is none (`400 recovery-key`). Only a master-signed write installs,
+  replaces or drops it. After a rotation the old master's attestation is refused, and a device
+  write drops the key until the new master attests it again. The signed
   request is checked inside the write's transaction (`Store::verify_request_in`), against the
   held fold at the head it reads; the request box's post and delete do the same.
 - **Request box rules.** Only a device key without the bot mark posts (a master gets

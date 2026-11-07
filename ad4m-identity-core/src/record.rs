@@ -16,6 +16,11 @@
 //! identity's keys can sign. The store keeps only the [`SealedRecord`] and checks its shape, its
 //! signature and that it is wrapped to exactly the log's readers.
 //!
+//! A recovery key counts only with an attestation by the log's current master
+//! ([`RecoveryAttestation`], domain `coasys:recovery-key`): only the master key's holder installs
+//! or replaces it, a device writer copies it with its attestation ([`recovery_of`]), and the
+//! store refuses a write whose recovery key the current master has not attested.
+//!
 //! Every version is a whole envelope, so a store can serve back an older one: a reader keeps the
 //! highest version it has read per identity and refuses a lower one.
 //!
@@ -42,6 +47,8 @@ use crate::{KelChain, KeyId, KeyState};
 pub const RECORD_LABEL: &str = "coasys:record";
 /// The signing domain of a record envelope.
 pub const RECORD_DOMAIN: &str = "coasys:private-record";
+/// The signing domain of a recovery key's attestation by the current master.
+pub const RECOVERY_DOMAIN: &str = "coasys:recovery-key";
 /// The entry of `wrapped` for the recovery key.
 pub const RECOVERY_ENTRY: &str = "recovery";
 /// Bytes of the record key.
@@ -58,10 +65,14 @@ pub struct SealedRecord {
     pub version: u64,
     /// Key id (`"d3"`) or `"recovery"` → the record key sealed to that key.
     pub wrapped: BTreeMap<String, String>,
-    /// The X25519 public key the words derive (`words::recovery_secret`). Every later writer
-    /// copies it unchanged; `None` only for a record whose person skipped setting it.
+    /// The X25519 public key the words derive (`words::recovery_secret`); `None` for a record
+    /// without one. It counts only with `recovery_attestation` by the current master
+    /// ([`recovery_of`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_key: Option<Multikey>,
+    /// The current master's attestation of `recovery_key`; present exactly when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_attestation: Option<RecoveryAttestation>,
     /// 24 bytes, base58btc.
     pub nonce: String,
     /// base64url of XChaCha20-Poly1305(recordKey, nonce, JCS(PrivateRecord), aad = [`record_aad`]).
@@ -71,6 +82,28 @@ pub struct SealedRecord {
     pub signer: KeyId,
     /// That key over [`envelope_signing_bytes`], base58btc (`z…`).
     pub sig: String,
+}
+
+/// A master key's word that `recoveryKey` is the identity's recovery key: `sig` is master
+/// `keyId` over `signing_bytes("coasys:recovery-key", {scid, recoveryKey, keyId})`. Only the
+/// holder of the master key (who holds the words the recovery key comes from) can install or
+/// replace a recovery key; a device writer copies the attestation unchanged. It counts while
+/// `keyId` is the log's current master: after a rotation the new master attests again, and
+/// until it does a device writer drops the recovery key ([`recovery_of`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryAttestation {
+    /// The master key's id (`"m0"`).
+    pub key_id: KeyId,
+    /// base58btc (`z…`).
+    pub sig: String,
+}
+
+/// A recovery key with its attestation, as a writer passes it to [`seal_record`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recovery {
+    pub key: Multikey,
+    pub attestation: RecoveryAttestation,
 }
 
 /// Who wrote a record whose signature verified ([`verify_envelope`]).
@@ -214,6 +247,8 @@ pub enum RecordError {
     Signer(String),
     #[error("the record's signature does not verify")]
     Signature,
+    #[error("the recovery key is not attested by the current master: {0}")]
+    Attestation(String),
 }
 
 impl RecordError {
@@ -226,6 +261,7 @@ impl RecordError {
             RecordError::Wrapped(_) => "wrapped",
             RecordError::Signer(_) => "signer",
             RecordError::Signature => "signature",
+            RecordError::Attestation(_) => "attestation",
         }
     }
 }
@@ -255,6 +291,10 @@ fn envelope_value(scid: &str, sealed: &SealedRecord) -> Value {
         "version": sealed.version,
         "wrapped": sealed.wrapped,
         "recoveryKey": sealed.recovery_key,
+        "recoveryAttestation": sealed.recovery_attestation.as_ref().map(|a| json!({
+            "keyId": a.key_id,
+            "sig": a.sig,
+        })),
         "nonce": sealed.nonce,
         "ciphertext": sealed.ciphertext,
         "signer": sealed.signer,
@@ -262,7 +302,8 @@ fn envelope_value(scid: &str, sealed: &SealedRecord) -> Value {
 }
 
 /// The bytes the writer signs: `signing_bytes("coasys:private-record", {scid, version, wrapped,
-/// recoveryKey, nonce, ciphertext, signer})`, an absent `recoveryKey` as `null`.
+/// recoveryKey, recoveryAttestation, nonce, ciphertext, signer})`, an absent `recoveryKey` or
+/// `recoveryAttestation` as `null`.
 pub fn envelope_signing_bytes(scid: &str, sealed: &SealedRecord) -> Result<Vec<u8>, RecordError> {
     signing_bytes(RECORD_DOMAIN, &envelope_value(scid, sealed))
         .map_err(|e| malformed(e.to_string()))
@@ -275,6 +316,11 @@ pub fn envelope_signing_bytes(scid: &str, sealed: &SealedRecord) -> Result<Vec<u
 pub fn verify_envelope(sealed: &SealedRecord, chain: &KelChain) -> Result<Writer, RecordError> {
     if sealed.version > ad4m_hash_chain::MAX_SAFE_INTEGER {
         return Err(malformed("version is not a safe integer"));
+    }
+    if sealed.recovery_key.is_some() != sealed.recovery_attestation.is_some() {
+        return Err(malformed(
+            "recoveryAttestation is present exactly when recoveryKey is",
+        ));
     }
     let (writer, key) = writer_of(&sealed.signer, chain)?;
     let sig = decode_proof_value(&sealed.sig).ok_or(RecordError::Signature)?;
@@ -304,6 +350,124 @@ fn writer_of<'a>(signer: &str, chain: &'a KelChain) -> Result<(Writer, &'a Multi
     }
 }
 
+fn attestation_value(scid: &str, key: &str, key_id: &str) -> Value {
+    json!({ "scid": scid, "recoveryKey": key, "keyId": key_id })
+}
+
+/// The bytes a master signs to attest `key` as the recovery key of `scid`:
+/// `signing_bytes("coasys:recovery-key", {scid, recoveryKey, keyId})`.
+pub fn attestation_signing_bytes(
+    scid: &str,
+    key: &str,
+    key_id: &str,
+) -> Result<Vec<u8>, RecordError> {
+    signing_bytes(RECOVERY_DOMAIN, &attestation_value(scid, key, key_id))
+        .map_err(|e| malformed(e.to_string()))
+}
+
+/// Checks that `attestation` is the log's current master over `key` for the identity of
+/// `chain`. An attestation by a master a rotation replaced no longer counts.
+pub fn verify_attestation(
+    key: &str,
+    attestation: &RecoveryAttestation,
+    chain: &KelChain,
+) -> Result<(), RecordError> {
+    let master = chain
+        .state()
+        .current_master()
+        .filter(|m| m.id == attestation.key_id)
+        .ok_or_else(|| {
+            RecordError::Attestation(format!(
+                "{} is not the current master key",
+                attestation.key_id
+            ))
+        })?;
+    attestation_by(key, attestation, chain.id(), &master.sign)
+}
+
+fn attestation_by(
+    key: &str,
+    attestation: &RecoveryAttestation,
+    scid: &str,
+    master: &Multikey,
+) -> Result<(), RecordError> {
+    let sig = decode_proof_value(&attestation.sig)
+        .ok_or_else(|| RecordError::Attestation("sig is not base58btc".into()))?;
+    if verify_signed(
+        RECOVERY_DOMAIN,
+        &attestation_value(scid, key, &attestation.key_id),
+        master,
+        &sig,
+    ) {
+        Ok(())
+    } else {
+        Err(RecordError::Attestation(format!(
+            "{} did not sign this recovery key",
+            attestation.key_id
+        )))
+    }
+}
+
+/// The envelope's attestation, if any, checked against the master it names, current or
+/// replaced: what a reader refuses outright is a recovery key no master of the identity ever
+/// attested. Whether it still counts is [`recovery_of`].
+fn check_attested_by_some_master(
+    sealed: &SealedRecord,
+    chain: &KelChain,
+) -> Result<(), RecordError> {
+    let (Some(key), Some(attestation)) = (&sealed.recovery_key, &sealed.recovery_attestation)
+    else {
+        return Ok(());
+    };
+    let master = chain
+        .state()
+        .masters
+        .iter()
+        .find(|m| m.id == attestation.key_id)
+        .ok_or_else(|| {
+            RecordError::Attestation(format!("{} is not a master key", attestation.key_id))
+        })?;
+    attestation_by(key, attestation, chain.id(), &master.sign)
+}
+
+/// The recovery key of `sealed` that counts: present only with a valid attestation by the log's
+/// current master. A reader trusts only this, and a device writer passes it unchanged to
+/// [`seal_record`]; `None` after a rotation until the new master attests again.
+pub fn recovery_of(sealed: &SealedRecord, chain: &KelChain) -> Option<Recovery> {
+    let key = sealed.recovery_key.clone()?;
+    let attestation = sealed.recovery_attestation.clone()?;
+    verify_attestation(&key, &attestation, chain).ok()?;
+    Some(Recovery { key, attestation })
+}
+
+/// The current master `master` attests `key` as the recovery key of the identity of `chain`. A
+/// master-signed write installs or replaces the recovery key with this.
+#[cfg(feature = "build")]
+pub fn attest_recovery_key(
+    chain: &KelChain,
+    key: Multikey,
+    master: &dyn crate::build::Signer,
+) -> Result<Recovery, RecordError> {
+    if !is_x25519_multikey(&key) {
+        return Err(malformed("recoveryKey is an X25519 multikey"));
+    }
+    let signer = master.key();
+    let key_id = chain
+        .state()
+        .current_master()
+        .filter(|m| m.sign == signer)
+        .map(|m| m.id.clone())
+        .ok_or_else(|| {
+            RecordError::Attestation(format!("{signer} is not the current master key"))
+        })?;
+    let bytes = attestation_signing_bytes(chain.id(), &key, &key_id)?;
+    let attestation = RecoveryAttestation {
+        key_id,
+        sig: ad4m_hash_chain::encode_proof_value(&master.sign(&bytes)),
+    };
+    Ok(Recovery { key, attestation })
+}
+
 /// The `info` of a wrapped record key: `"coasys:record" ‖ 0x00 ‖ scid`.
 pub fn wrap_info(scid: &str) -> Vec<u8> {
     seal::info(RECORD_LABEL, scid)
@@ -331,24 +495,30 @@ pub fn readers(
 
 /// Encrypts `record` as `version` under a fresh record key, wraps that key to every reader of
 /// the log at its head ([`readers`]), and signs the envelope with `signer`: a device key without
-/// the bot mark valid at the head, or the current master.
+/// the bot mark valid at the head, or the current master. `recovery` must carry the current
+/// master's attestation: a device writer passes [`recovery_of`] of the record it read, a
+/// master writer installs or replaces it with [`attest_recovery_key`].
 #[cfg(feature = "build")]
 pub fn seal_record<R: CryptoRng + RngCore>(
     chain: &KelChain,
     version: u64,
     record: &PrivateRecord,
-    recovery_key: Option<Multikey>,
+    recovery: Option<Recovery>,
     signer: &dyn crate::build::Signer,
     rng: &mut R,
 ) -> Result<SealedRecord, RecordError> {
     use base64::Engine;
     let scid = chain.id();
-    if recovery_key
-        .as_deref()
-        .is_some_and(|k| !is_x25519_multikey(k))
-    {
-        return Err(malformed("recoveryKey is an X25519 multikey"));
+    if let Some(r) = &recovery {
+        if !is_x25519_multikey(&r.key) {
+            return Err(malformed("recoveryKey is an X25519 multikey"));
+        }
+        verify_attestation(&r.key, &r.attestation, chain)?;
     }
+    let (recovery_key, recovery_attestation) = match recovery {
+        Some(r) => (Some(r.key), Some(r.attestation)),
+        None => (None, None),
+    };
     let aad = record_aad(scid, version, recovery_key.as_deref())?;
     let state = chain.state();
     let signer_key = signer.key();
@@ -383,6 +553,7 @@ pub fn seal_record<R: CryptoRng + RngCore>(
         version,
         wrapped,
         recovery_key,
+        recovery_attestation,
         nonce: bs58::encode(nonce).into_string(),
         ciphertext: b64().encode(ciphertext),
         signer: signer_id,
@@ -397,7 +568,9 @@ pub fn seal_record<R: CryptoRng + RngCore>(
 /// Opens `sealed` of the identity whose log is `chain` through its `wrapped[entry]` (a key id,
 /// or `"recovery"`) with that reader's X25519 `secret`. The envelope's signature is checked
 /// against the log first ([`verify_envelope`]): a record no key of the identity signed is
-/// refused before any of its fields is used.
+/// refused before any of its fields is used, and so is a recovery key no master of the log
+/// attested. A record written before a rotation still opens; whether its recovery key still
+/// counts is [`recovery_of`].
 ///
 /// It does not know which versions the caller read before: a store can serve back an older
 /// envelope whole, so a reader keeps the highest version it has read per identity and refuses
@@ -410,6 +583,7 @@ pub fn open_record(
 ) -> Result<PrivateRecord, RecordError> {
     use base64::Engine;
     verify_envelope(sealed, chain)?;
+    check_attested_by_some_master(sealed, chain)?;
     let scid = chain.id();
     let wrapped = sealed
         .wrapped
@@ -451,7 +625,8 @@ fn decode_nonce(text: &str) -> Result<[u8; NONCE_LEN], RecordError> {
 /// The store's check of a record it is asked to keep for the log `chain`: well-formed, signed
 /// by a writer the log lets write ([`verify_envelope`]), and wrapped to exactly [`readers`] of
 /// the log at its head (a key that left the log, a bot key or a missing device is refused),
-/// with `wrapped["recovery"]` exactly when `recoveryKey` is set. The store cannot open it, so
+/// with `wrapped["recovery"]` exactly when `recoveryKey` is set, and a `recoveryKey` only with
+/// the current master's attestation ([`verify_attestation`]). The store cannot open it, so
 /// this is all it can check of the wraps. Answers the writer.
 pub fn check_sealed(sealed: &SealedRecord, chain: &KelChain) -> Result<Writer, RecordError> {
     if sealed.version > ad4m_hash_chain::MAX_SAFE_INTEGER {
@@ -472,6 +647,9 @@ pub fn check_sealed(sealed: &SealedRecord, chain: &KelChain) -> Result<Writer, R
         return Err(malformed(format!("wrapped[{entry}] is base64url")));
     }
     let writer = verify_envelope(sealed, chain)?;
+    if let (Some(key), Some(attestation)) = (&sealed.recovery_key, &sealed.recovery_attestation) {
+        verify_attestation(key, attestation, chain)?;
+    }
     let want = readers(
         chain.state(),
         chain.head().seq,

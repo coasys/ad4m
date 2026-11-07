@@ -273,7 +273,7 @@ test("identity: inbox, record and request-box calls pass their arguments through
     await identityInboxAck!(joined, "zMsg", request);
     assert.deepEqual(calls.at(-1), ["inboxAck", [joined, "zMsg", request]]);
     assert.equal(await identityGetRecord!("did:scid:zScid", request), null);
-    const record: SealedRecord = { version: 2, wrapped: { d1: "AAAA", recovery: "BBBB" }, recoveryKey: "z6LSRec", nonce: "zN", ciphertext: "CCCC", signer: "d1", sig: "zSig" };
+    const record: SealedRecord = { version: 2, wrapped: { d1: "AAAA", recovery: "BBBB" }, recoveryKey: "z6LSRec", recoveryAttestation: { keyId: "m0", sig: "zAtt" }, nonce: "zN", ciphertext: "CCCC", signer: "d1", sig: "zSig" };
     assert.deepEqual(await identityPutRecord!("did:scid:zScid", record, request), { version: 2 });
     assert.equal(calls.at(-1)![1][1], record);
     const post: PostedRequest = { body: { kind: "confirm-revoke", keyIds: ["d2"], rotate: false }, expires: 5 };

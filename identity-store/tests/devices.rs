@@ -6,10 +6,11 @@ mod common;
 use ad4m_hash_chain::{canonical_json, hash_bytes};
 use ad4m_identity_core::inbox::{check_payload, Accept, InboxAddress, JOINED_TTL_S};
 use ad4m_identity_core::link::OfferKind;
-use ad4m_identity_core::record::open_record;
+use ad4m_identity_core::record::{self, open_record, RecoveryAttestation, SealedRecord};
 use ad4m_identity_core::requests::REQUEST_TTL_S;
 use ad4m_identity_core::{x25519_multikey_of, BotScope, X25519Secret};
 use axum::http::StatusCode;
+use ed25519_dalek::SigningKey;
 use identity_store::Fault;
 use serde_json::{json, Value};
 
@@ -663,8 +664,13 @@ async fn a_record_is_kept_with_rising_versions_and_read_by_the_identitys_keys() 
         StatusCode::NOT_FOUND
     );
 
+    // The master installs the recovery key (a device cannot); d1 sends the request.
     let recovery = X25519Secret::from([5u8; 32]);
-    let v1 = alice.sealed_record(1, Some(x25519_multikey_of(&recovery)));
+    let v1 = alice.sealed_record_by(
+        1,
+        Some(alice.attest_recovery(x25519_multikey_of(&recovery))),
+        &alice.current_master(),
+    );
     let v1_json = serde_json::to_value(&v1).unwrap();
     let reply = signed_body(&t, &alice, "PUT", &path, &v1_json, d1).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
@@ -802,6 +808,127 @@ async fn a_record_no_writer_of_the_identity_signed_is_refused() {
     // Signed by d1, it is kept.
     let good = serde_json::to_value(alice.sealed_record(1, None)).unwrap();
     let reply = signed_body(&t, &alice, "PUT", &path, &good, d1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+/// `sealed` signed again by `key` under the id `signer`, after a change to its fields.
+fn resign(alice: &Person, sealed: &mut SealedRecord, signer: &str, key: &SigningKey) {
+    sealed.signer = signer.into();
+    let bytes = record::envelope_signing_bytes(&alice.scid(), sealed).unwrap();
+    sealed.sig =
+        ad4m_hash_chain::encode_proof_value(&ed25519_dalek::Signer::sign(key, &bytes).to_bytes());
+}
+
+#[tokio::test]
+async fn the_recovery_key_needs_the_current_masters_attestation() {
+    let t = TestStore::with_identity_burst(100);
+    let (mut alice, phone) = alice_with_phone(&t).await;
+    let path = format!("/v1/private/{}", alice.scid());
+    let d1_key = alice.device_key(1);
+    let d1 = ("d1", &d1_key);
+    let put = |sealed: &SealedRecord| serde_json::to_value(sealed).unwrap();
+    let key_a = x25519_multikey_of(&X25519Secret::from([5u8; 32]));
+    let key_b = x25519_multikey_of(&X25519Secret::from([7u8; 32]));
+
+    // A device installs a recovery key with no attestation: malformed.
+    let mut bare = alice.sealed_record(1, Some(key_a.clone()));
+    bare.recovery_attestation = None;
+    resign(&alice, &mut bare, "d1", &d1_key);
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&bare), d1).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "malformed");
+    // Attested by d1 itself, under its own id or naming the master: 400 attestation.
+    for key_id in ["d1", "m0"] {
+        let mut self_attested = alice.sealed_record(1, Some(key_a.clone()));
+        let bytes = record::attestation_signing_bytes(&alice.scid(), &key_a, key_id).unwrap();
+        self_attested.recovery_attestation = Some(RecoveryAttestation {
+            key_id: key_id.into(),
+            sig: ad4m_hash_chain::encode_proof_value(
+                &ed25519_dalek::Signer::sign(&d1_key, &bytes).to_bytes(),
+            ),
+        });
+        resign(&alice, &mut self_attested, "d1", &d1_key);
+        let reply = signed_body(&t, &alice, "PUT", &path, &put(&self_attested), d1).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::BAD_REQUEST,
+            "{key_id}: {}",
+            reply.body
+        );
+        assert_eq!(reply.body["error"], "attestation", "{key_id}");
+    }
+    // The master's attestation of key A carried with key B: 400 attestation.
+    let mut other = alice.sealed_record(1, Some(key_b.clone()));
+    other.recovery_attestation = Some(alice.attest_recovery(key_a.clone()).attestation);
+    resign(&alice, &mut other, "d1", &d1_key);
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&other), d1).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "attestation");
+    // Even with the master's attestation, a device does not install the recovery key: only a
+    // master-signed write does.
+    let by_device = alice.sealed_record(1, Some(key_a.clone()));
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&by_device), d1).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "recovery-key");
+    assert_eq!(
+        signed(&t, &alice, "GET", &path, d1).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // The master installs key A.
+    let master = alice.current_master();
+    let attested_a = alice.attest_recovery(key_a.clone());
+    let v1 = alice.sealed_record_by(1, Some(attested_a.clone()), &master);
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&v1), d1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // The phone copies it unchanged.
+    let v2 = alice.sealed_record_by(2, Some(attested_a.clone()), &phone.key);
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&v2), d1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // The phone changes it to key B, master-attested or not, or drops it: 400 recovery-key.
+    for recovery in [Some(alice.attest_recovery(key_b.clone())), None] {
+        let changed = alice.sealed_record_by(3, recovery, &phone.key);
+        let reply = signed_body(&t, &alice, "PUT", &path, &put(&changed), d1).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+        assert_eq!(reply.body["error"], "recovery-key");
+    }
+    // The master corrects it to key B.
+    let attested_b = alice.attest_recovery(key_b.clone());
+    let v3 = alice.sealed_record_by(3, Some(attested_b.clone()), &master);
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&v3), d1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // The phone cannot put key A back with its old attestation.
+    let back = alice.sealed_record_by(4, Some(attested_a), &phone.key);
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&back), d1).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "recovery-key");
+
+    // After a rotation m0's attestation no longer counts: a write carrying it is refused, a
+    // device write drops the key, and the new master attests it again.
+    let rotate = alice.rotate(&[]);
+    let reply = t.append_push(&mut alice, rotate).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // (`seal_record` refuses the stale attestation, so the phone's write carries it by hand)
+    let mut stale = alice.sealed_record_by(4, None, &phone.key);
+    let wrap = stale.wrapped["d1"].clone();
+    stale.wrapped.insert("recovery".into(), wrap);
+    stale.recovery_key = Some(attested_b.key.clone());
+    stale.recovery_attestation = Some(attested_b.attestation.clone());
+    resign(&alice, &mut stale, "d2", &phone.key);
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&stale), d1).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "attestation");
+    let dropped = alice.sealed_record_by(4, None, &phone.key);
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&dropped), d1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(alice.master_id(), "m1");
+    let v5 = alice.sealed_record_by(
+        5,
+        Some(alice.attest_recovery(key_b)),
+        &alice.current_master(),
+    );
+    assert_eq!(v5.recovery_attestation.as_ref().unwrap().key_id, "m1");
+    let reply = signed_body(&t, &alice, "PUT", &path, &put(&v5), d1).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
 }
 
