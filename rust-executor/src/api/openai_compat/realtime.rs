@@ -16,8 +16,8 @@
 //!     At most `MAX_PENDING_COMMITS` (8) commits wait for their transcript; one more gets
 //!     `rate_limit_exceeded`. A refused commit keeps the buffer, so a later commit sends it.
 //!   - `{"type":"session.close"}` — close the session and the socket, once the commits sent
-//!     before it are answered and their text is sent (at most the 30 s of
-//!     `TRANSCRIPTION_TIMEOUT_SECS`).
+//!     before it are answered and their text is sent (at most the timeout of one call to
+//!     the model's endpoint: its `request_timeout_secs`, else 120 s).
 //!
 //! * **Server → client**
 //!   - `{"type":"transcription_session.created","session_id":"<uuid>"}`
@@ -101,6 +101,8 @@ where
     let mut token_ended = false;
 
     let mut stream_id: Option<String> = None;
+    // The model of the open stream: its call timeout bounds the wait of a close.
+    let mut stream_model: Option<String> = None;
     let mut delta_rx: Option<broadcast::Receiver<String>> = None;
     let mut audio_format = AudioFormat::Pcm16;
     // The utterance being appended, sent on commit.
@@ -319,6 +321,7 @@ where
                 });
                 let _ = socket.send(Message::Text(created.to_string().into())).await;
                 stream_id = Some(sid);
+                stream_model = Some(model_id);
             }
             "input_audio_buffer.append" => {
                 if stream_id.is_none() {
@@ -414,14 +417,13 @@ where
                 }
             }
             // The text of the commits queued before the close still goes out, and they are
-            // billed: wait for their answers, at most the transcription timeout.
+            // billed: wait for their answers, at most as long as one upstream call may take.
             "session.close" => {
-                closing = Some(
-                    tokio::time::Instant::now()
-                        + std::time::Duration::from_secs(
-                            crate::ai_service::TRANSCRIPTION_TIMEOUT_SECS,
-                        ),
-                );
+                let wait = stream_model
+                    .as_deref()
+                    .map(crate::ai_service::transcription::call_timeout)
+                    .unwrap_or(crate::ai_service::providers::audio::REQUEST_TIMEOUT);
+                closing = Some(tokio::time::Instant::now() + wait);
             }
             _ => {
                 let _ = send_error(

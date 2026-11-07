@@ -126,6 +126,23 @@ pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<Option<(OpenAiTrans
     )))
 }
 
+/// How long one upstream call of the transcription model `model_id` may take: its
+/// endpoint's `request_timeout_secs`, else the provider's
+/// [`REQUEST_TIMEOUT`](super::providers::audio::REQUEST_TIMEOUT). A model without an
+/// endpoint gets the provider's timeout too.
+pub(crate) fn call_timeout(model_id: &str) -> std::time::Duration {
+    let default = super::providers::audio::REQUEST_TIMEOUT;
+    let db = crate::db_backend::db_backend();
+    db.get_model(model_id.to_string())
+        .ok()
+        .flatten()
+        .and_then(|model| model.endpoint_id)
+        .and_then(|id| db.get_endpoint(&id).ok().flatten())
+        .map_or(default, |endpoint| {
+            super::endpoints::request_timeout(&endpoint, default)
+        })
+}
+
 /// Bill `words` transcribed by `model_id` to the managed agent `agent_did` (`None`: the main
 /// agent, which pays nothing). The one place transcription is billed: streams and
 /// `/v1/audio/transcriptions` both come here, once per transcript.

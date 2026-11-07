@@ -20,7 +20,7 @@ use crate::ai_service::endpoints::{request_slot, request_timeout};
 use crate::types::{AiCapability, Endpoint, ModelApiType};
 
 /// A minute of speech takes seconds on a GPU and can take most of a minute on a CPU.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// One encoded audio file, as the upload's `file` part.
 pub struct AudioFile {

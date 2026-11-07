@@ -1153,6 +1153,56 @@ async fn the_streams_of_a_transcription_model_close_when_it_reloads() {
     upstream.assert_async().await;
 }
 
+// A stream kept sending audio with the endpoint's key after its model was removed, by
+// itself or with its endpoint.
+#[tokio::test]
+async fn the_streams_of_a_transcription_model_close_when_it_is_removed() {
+    for with_endpoint in [false, true] {
+        let mut server = mockito::Server::new_async().await;
+        let upstream = server
+            .mock("POST", Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        fresh();
+        let id = transcription_model(&server);
+        crate::ai_service::AIService::init_global_instance()
+            .await
+            .unwrap();
+        let service = crate::ai_service::AIService::global_instance()
+            .await
+            .unwrap();
+        let operator = RequestContext::operator_for_test();
+        let stream = service
+            .open_transcription_stream(id.clone(), &operator)
+            .await
+            .unwrap();
+
+        if with_endpoint {
+            let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name("speaches"))
+                .unwrap()
+                .unwrap();
+            service.remove_endpoint(&endpoint.id, true).await.unwrap();
+        } else {
+            service.remove_model(id).await.unwrap();
+        }
+        let fed = service
+            .feed_transcription_stream(
+                &stream,
+                crate::ai_service::transcription::speech_fixture(),
+                &operator,
+            )
+            .await;
+        assert!(
+            fed.is_err(),
+            "the stream still took audio (endpoint removed: {with_endpoint})"
+        );
+        upstream.assert_async().await;
+    }
+}
+
 // A transcription model whose endpoint can no longer serve it was published as ready.
 #[tokio::test]
 async fn a_transcription_model_its_endpoint_cannot_serve_is_not_ready() {
@@ -1226,6 +1276,37 @@ async fn a_users_transcription_is_billed_to_the_user_by_its_words() {
     assert_eq!(calls[0].agent_did, USER);
     assert_eq!(calls[0].operation, concat!("ai_", "transcription"));
     assert_eq!(calls[0].amount, 1.5, "3 words at 0.5");
+}
+
+// An upstream 429 reached the client without its Retry-After, and a 404 without
+// `model_not_found`: unlike the other /v1 routes.
+#[tokio::test]
+async fn a_transcription_upstream_throttle_or_unknown_model_maps_as_on_other_routes() {
+    for (status, code) in [(429, "rate_limit_exceeded"), (404, "model_not_found")] {
+        fresh();
+        let mut server = mockito::Server::new_async().await;
+        let upstream = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_status(status)
+            .with_header("retry-after", "7")
+            .with_body(r#"{"error":{"message":"no"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        transcription_model(&server);
+
+        let response = audio::transcriptions(transcriber(), transcription_form("stt").await)
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), status as u16);
+        if status == 429 {
+            assert_eq!(response.headers()["retry-after"], "7");
+        }
+        assert_eq!(body_json(response).await["error"]["code"], code, "{status}");
+        upstream.assert_async().await;
+        assert!(test_seam::calls().is_empty(), "a failure was billed");
+    }
 }
 
 /// A model the executor answers itself (not forwarded), loaded into a fresh AIService.
@@ -1591,6 +1672,29 @@ async fn realtime_sends_the_text_of_the_commits_before_a_close() {
             "type": "conversation.item.input_audio_transcription.delta",
             "delta": "the last sentence",
         })]
+    );
+}
+
+// A close waited 30 s for its commits, while one call to the endpoint may take 120 s (or
+// the endpoint's own timeout): a slow last utterance was billed and its text lost.
+#[tokio::test]
+async fn a_realtime_close_waits_as_long_as_one_call_to_the_endpoint_may_take() {
+    let server = mockito::Server::new_async().await;
+    fresh();
+    let id = transcription_model(&server);
+    assert_eq!(
+        crate::ai_service::transcription::call_timeout(&id),
+        std::time::Duration::from_secs(120)
+    );
+
+    let mut slow = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name("speaches"))
+        .unwrap()
+        .unwrap();
+    slow.request_timeout_secs = Some(300);
+    Ad4mDb::with_global_instance(|db| db.update_endpoint(&slow)).unwrap();
+    assert_eq!(
+        crate::ai_service::transcription::call_timeout(&id),
+        std::time::Duration::from_secs(300)
     );
 }
 

@@ -2612,6 +2612,14 @@ impl AIService {
         self.reload_model(model_id).await
     }
 
+    /// Close the remote streams on `model_id`: each one keeps the URL and key of the
+    /// endpoint it opened with. The utterances they already took are answered.
+    async fn close_remote_streams_of(&self, model_id: &str) {
+        self.transcription_streams.lock().await.retain(|_, stream| {
+            !matches!(&stream.backend, StreamBackend::Remote { model_id: of, .. } if of == model_id)
+        });
+    }
+
     /// Builds a model's client again from its stored row, after the row changed: an update
     /// of the model, or of the endpoint it runs on.
     pub(crate) async fn reload_model(&self, model_id: String) -> Result<()> {
@@ -2623,10 +2631,8 @@ impl AIService {
         log::info!("Updated model in DB: {:?}", updated_model);
 
         // A stream on the model keeps the client it opened with: closed, so no more audio
-        // goes to the endpoint as it was. The utterances it already took are answered.
-        self.transcription_streams.lock().await.retain(|_, stream| {
-            !matches!(&stream.backend, StreamBackend::Remote { model_id: of, .. } if *of == model_id)
-        });
+        // goes to the endpoint as it was.
+        self.close_remote_streams_of(&model_id).await;
         if updated_model.model_type != ModelType::Embedding {
             // A model that is no longer an embedding model no longer embeds.
             self.embedding_channel.lock().await.remove(&model_id);
@@ -2720,9 +2726,7 @@ impl AIService {
                 // Dropping the sender ends a Bert thread.
                 self.embedding_channel.lock().await.remove(&model_id);
             }
-            ModelType::Transcription => {
-                // TODO: Handle transcription model removal
-            }
+            ModelType::Transcription => self.close_remote_streams_of(&model_id).await,
             ModelType::Speech => {}
         }
 
