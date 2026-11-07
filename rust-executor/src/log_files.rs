@@ -62,12 +62,20 @@ impl LogFile {
     }
 
     fn open_with(dir: &Path, keep: usize, max_bytes: u64) -> io::Result<LogFile> {
-        std::fs::create_dir_all(dir)?;
+        let mut folder = std::fs::DirBuilder::new();
+        folder.recursive(true);
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        // The log names users, DIDs and profiles: what this makes, only its owner reads.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+            folder.mode(0o700);
+            options.mode(0o600);
+        }
+        folder.create(dir)?;
         rotate(dir, keep)?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file(dir, 0))?;
+        let file = options.open(log_file(dir, 0))?;
         Ok(LogFile {
             file,
             written: 0,
@@ -122,15 +130,18 @@ pub fn tail(dir: &Path, lines: usize) -> io::Result<Vec<String>> {
     let mut file = File::open(log_file(dir, 0))?;
     let size = file.metadata()?.len();
     let start = size.saturating_sub(MAX_TAIL_BYTES);
-    file.seek(SeekFrom::Start(start))?;
+    // From the byte before the window, so a first line that starts at the window is whole.
+    file.seek(SeekFrom::Start(start.saturating_sub(1)))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    let text = String::from_utf8_lossy(&bytes);
-    let mut all: Vec<&str> = text.lines().collect();
-    // A read that starts inside the file may start inside a line: drop that part line.
-    if start > 0 && !all.is_empty() {
-        all.remove(0);
-    }
+    // A read that starts inside the file may start inside a line: drop up to its end.
+    let window = match (start > 0, bytes.iter().position(|b| *b == b'\n')) {
+        (false, _) => &bytes[..],
+        (true, Some(end)) => &bytes[end + 1..],
+        (true, None) => &[][..],
+    };
+    let text = String::from_utf8_lossy(window);
+    let all: Vec<&str> = text.lines().collect();
     let from = all.len().saturating_sub(lines);
     Ok(all[from..].iter().map(|line| line.to_string()).collect())
 }
@@ -185,6 +196,35 @@ mod tests {
         assert_eq!(most.len(), MAX_TAIL_LINES);
         assert_eq!(most[0], "line 500");
         assert!(tail(dir.path(), 0).unwrap().is_empty());
+    }
+
+    /// A read window that starts right after a line's end keeps that whole first line.
+    #[test]
+    fn the_tail_keeps_a_whole_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = LogFile::open_with(dir.path(), KEPT_RUNS, u64::MAX).unwrap();
+        file.write_all(b"before the window\n").unwrap();
+        // 1024 lines of 4096 bytes: exactly the window, so it starts after a newline.
+        let line = "x".repeat(4095) + "\n";
+        for _ in 0..(MAX_TAIL_BYTES as usize / line.len()) {
+            file.write_all(line.as_bytes()).unwrap();
+        }
+        let tail = tail(dir.path(), MAX_TAIL_LINES).unwrap();
+        assert_eq!(tail.len(), 1024);
+        assert!(tail.iter().all(|l| l.len() == 4095));
+    }
+
+    /// Only this user reads the log: it names users, DIDs and profiles.
+    #[cfg(unix)]
+    #[test]
+    fn the_log_folder_and_file_are_the_owners_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("logs");
+        LogFile::open(&dir).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&log_file(&dir, 0)), 0o600);
     }
 
     #[test]

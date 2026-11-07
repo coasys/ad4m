@@ -1105,8 +1105,8 @@ async fn no_local_only_method_admits_an_operator_from_a_key_login() {
 }
 
 /// The calls that stay on this machine: opening and replacing the executor's own key, signing
-/// as this device, the custody channel and stopping its process. [`OPERATOR_ANYWHERE`] are not
-/// among them.
+/// as this device, the custody channel and stopping or restarting its process.
+/// [`OPERATOR_ANYWHERE`] are not among them.
 #[test]
 fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
     assert_eq!(
@@ -1117,6 +1117,7 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
             "identity.custodyStatus",
             "identity.rekey",
             "runtime.quit",
+            "runtime.restart",
         ]
     );
 }
@@ -1216,6 +1217,24 @@ async fn an_app_grant_does_not_call_the_operators_data_folder_methods() {
             .unwrap_err();
         assert_eq!(refused.code, 403, "user: {method}");
     }
+}
+
+/// With no supervisor, a restart is a stop: the operator on a network listener cannot.
+#[tokio::test]
+async fn runtime_restart_admits_only_the_operator_on_this_machine() {
+    let map = build_handler_map();
+    let operator = context(Caller::Operator, None);
+    assert!(map
+        .admit("runtime.restart", &json!({}), &operator)
+        .await
+        .is_ok());
+    let network = context(Caller::OperatorOnNetwork, None);
+    let refused = map
+        .admit("runtime.restart", &json!({}), &network)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, 403);
+    assert_eq!(refused.message, crate::api::guards::LOCAL_ONLY);
 }
 
 #[tokio::test]

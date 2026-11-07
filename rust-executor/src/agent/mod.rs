@@ -984,16 +984,19 @@ impl AgentService {
     }
 
     pub fn store_agent_profile(&self) {
-        let agent = self.agent.as_ref().expect("Agent profile not found");
-        std::fs::write(
-            self.file_profile.as_str(),
-            serde_json::to_string(&agent).unwrap(),
-        )
-        .expect("Failed to write agent profile file");
+        self.write_agent_profile()
+            .expect("Failed to write agent profile file");
 
         // Note: callers who need the agent published to the agent language
         // should call publish_agent_to_language() separately (this method
         // is sync and cannot await).
+    }
+
+    /// Writes the profile file, and says when it cannot. Through `write_json_atomically`, so a
+    /// crash mid-write leaves the old file, not a truncated one.
+    pub(crate) fn write_agent_profile(&self) -> Result<(), AnyError> {
+        let agent = self.agent.as_ref().expect("Agent profile not found");
+        write_json_atomically(path::Path::new(self.file_profile.as_str()), agent)
     }
 
     pub fn save_agent_profile(&mut self, agent: Agent) {
@@ -1283,25 +1286,65 @@ impl AgentService {
             backend.load(&dump.keystore);
         }
 
-        if std::path::Path::new(self.file_profile.as_str()).exists() {
-            let file_profile = std::fs::read_to_string(self.file_profile.as_str())
-                .expect("Failed to read agent profile file");
-            self.agent =
-                Some(serde_json::from_str(&file_profile).expect("Failed to parse agent profile"));
-        } else if let Some(agent) = dump.agent {
+        let profile_file_exists = std::path::Path::new(self.file_profile.as_str()).exists();
+        // A profile file that is there but cannot be read (a permission or I/O error) may hold
+        // a profile newer than the agent file's: it is left alone, and the agent file's profile
+        // serves in memory. Only a file that reads but does not parse is rewritten below.
+        let mut profile_file_readable = false;
+        let file_profile: Option<Agent> = profile_file_exists
+            .then(|| {
+                // Bytes, not a string: a write cut inside a multi-byte character is not UTF-8.
+                let bytes = match std::fs::read(self.file_profile.as_str()) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        log::warn!("Could not read the agent profile file: {e}: using the agent file's profile");
+                        return None;
+                    }
+                };
+                profile_file_readable = true;
+                match serde_json::from_slice::<Agent>(&bytes) {
+                    Ok(agent) => Some(agent),
+                    // A write cut short (a crash mid-write) left no profile here.
+                    Err(e) => {
+                        log::warn!("Could not parse the agent profile file: {e}: using the agent file's profile");
+                        None
+                    }
+                }
+            })
+            .flatten();
+        match (file_profile, dump.agent) {
+            // A profile file with another DID than the agent file is older than it: a re-key
+            // saved the agent file and stopped before the profile file. The agent file's
+            // profile wins and goes back into the file.
+            (Some(file), Some(saved)) if file.did != dump.did => {
+                log::warn!("The agent profile file names {}, the agent file {}: using the agent file's profile", file.did, dump.did);
+                self.agent = Some(saved);
+                if let Err(e) = self.write_agent_profile() {
+                    log::warn!("Could not rewrite the agent profile file: {e}");
+                }
+            }
+            (Some(file), _) => self.agent = Some(file),
             // Restore agent profile from agent.json (save() embeds it there).
             // agentProfile.json may not exist if the profile was only saved via save().
-            self.agent = Some(agent);
-        } else {
+            (None, Some(saved)) => {
+                self.agent = Some(saved);
+                if profile_file_readable {
+                    if let Err(e) = self.write_agent_profile() {
+                        log::warn!("Could not rewrite the agent profile file: {e}");
+                    }
+                }
+            }
             // No profile anywhere - create a minimal placeholder with just the DID.
             // DO NOT call check_keys_and_create() here because that would initialize
             // wallet keys without a passphrase, making is_unlocked() return true
             // before the user has actually entered their password.
-            self.agent = Some(Agent {
-                did: dump.did.clone(),
-                perspective: Some(Perspective { links: vec![] }),
-                direct_message_language: None,
-            });
+            (None, None) => {
+                self.agent = Some(Agent {
+                    did: dump.did.clone(),
+                    perspective: Some(Perspective { links: vec![] }),
+                    direct_message_language: None,
+                });
+            }
         }
     }
 

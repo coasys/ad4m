@@ -33,7 +33,8 @@ impl AgentService {
     /// Gives the main agent a new wallet key and keeps the old one under its retired name.
     /// Moves this service's own copies of the DID: the DID, its document, the signing key id
     /// and the profile (the profile's DID; its links stay as signed), and saves the agent
-    /// file and the profile file. Needs an unlocked agent whose passphrase is in memory, and
+    /// file and the profile file; when the agent file cannot be saved, it changes nothing
+    /// (the new key stays only as a retired key). Needs an unlocked agent whose passphrase is in memory, and
     /// a wallet that can rename keys (not the shared one).
     pub fn rekey_main_key(&mut self) -> Result<Rekeyed, AnyError> {
         self.signing_checks()?;
@@ -52,6 +53,11 @@ impl AgentService {
             .did
             .clone()
             .ok_or_else(|| anyhow!("the main agent has no DID"))?;
+        let before = (
+            self.did_document.clone(),
+            self.signing_key_id.clone(),
+            self.agent.clone(),
+        );
         backend.retire_key(KEY_NAME_MAIN, &retired_key_name(&old_did))?;
         backend.generate_keypair(KEY_NAME_MAIN)?;
         let document = did_document();
@@ -59,14 +65,28 @@ impl AgentService {
         self.did_document = Some(serde_json::to_string(&document)?);
         self.did = Some(new_did.clone());
         self.signing_key_id = Some(signing_key_id());
-        MAIN_KEY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(agent) = self.agent.as_mut() {
             agent.did = new_did.clone();
         }
-        if self.agent.is_some() {
-            self.store_agent_profile();
+        // The agent file holds the keystore: without it saved, the old key is `main` again
+        // and the new one, which signed nothing, stays retired.
+        if let Err(e) = self.try_save(&passphrase) {
+            (self.did_document, self.signing_key_id, self.agent) = before;
+            self.did = Some(old_did.clone());
+            backend
+                .retire_key(KEY_NAME_MAIN, &retired_key_name(&new_did))
+                .and_then(|()| backend.retire_key(&retired_key_name(&old_did), KEY_NAME_MAIN))
+                .map_err(|undo| anyhow!("{e}; and the old key is not back: {undo}"))?;
+            return Err(e);
         }
-        self.try_save(&passphrase)?;
+        // The new key is saved, so the re-key stands. A profile file left behind is repaired at
+        // the next load, from the profile the agent file holds.
+        if self.agent.is_some() {
+            if let Err(e) = self.write_agent_profile() {
+                log::warn!("identity.rekey: could not write the profile file: {e}");
+            }
+        }
+        MAIN_KEY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Rekeyed { old_did, new_did })
     }
 }
@@ -84,6 +104,7 @@ mod tests {
         let app_path = dir.path().to_string_lossy().into_owned();
         std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
         crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         AgentService::init_global_instance(app_path);
         let old_did = AgentService::with_mutable_global_instance(|svc| {
             svc.create_new_keys();
@@ -141,7 +162,182 @@ mod tests {
             &new_signature
         )
         .unwrap());
+
+        // A restart reads the same from the saved files: the new key signs as the new DID,
+        // and the old key is in the saved keystore under its retired name.
+        wallet_backend().lock("scratch");
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.passphrase = None;
+            svc.load();
+            svc.unlock("rekey-test".to_string())
+        })
+        .unwrap();
+        assert_eq!(
+            did_for_context(&AgentContext::main_agent()).unwrap(),
+            rekeyed.new_did
+        );
+        let reloaded_signature = crate::agent::sign_string_hex(message.clone()).unwrap();
+        assert!(crate::agent::signatures::verify_string_signed_by_did(
+            &rekeyed.new_did,
+            &message,
+            &reloaded_signature
+        )
+        .unwrap());
+        assert_eq!(
+            wallet_backend()
+                .get_did_document(&retired_key_name(&old_did))
+                .map(|document| document.id),
+            Some(old_did)
+        );
         crate::test_utils::setup_agent();
+    }
+
+    /// A re-key whose agent file cannot be saved changes nothing: the old key is `main` again,
+    /// the service keeps the old DID, and the profile file is not written.
+    #[test]
+    fn a_rekey_that_cannot_save_keeps_the_old_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        let old_did = AgentService::with_mutable_global_instance(|svc| {
+            svc.create_new_keys();
+            svc.passphrase = Some("p".into());
+            svc.store_agent_profile();
+            svc.save("p".into());
+            svc.did.clone().unwrap()
+        });
+        // A folder where the agent file is: the save cannot replace it.
+        let agent_file = dir.path().join("ad4m/agent.json");
+        std::fs::remove_file(&agent_file).unwrap();
+        std::fs::create_dir(&agent_file).unwrap();
+
+        let refused = AgentService::with_mutable_global_instance(|svc| svc.rekey_main_key());
+        let did = did_for_context(&AgentContext::main_agent()).unwrap();
+        let main_key = wallet_backend()
+            .get_did_document(KEY_NAME_MAIN)
+            .map(|d| d.id);
+        let profile_file =
+            std::fs::read_to_string(dir.path().join("ad4m/agentProfile.json")).unwrap();
+        crate::test_utils::setup_agent();
+
+        assert!(refused.is_err());
+        assert_eq!(did, old_did);
+        assert_eq!(main_key, Some(old_did.clone()));
+        assert!(profile_file.contains(&old_did), "{profile_file}");
+    }
+
+    /// A re-key that saved the agent file and stopped before the profile file: the next load
+    /// takes the profile the agent file holds, and writes it back to the profile file.
+    #[test]
+    fn a_load_after_a_rekey_cut_short_takes_the_agent_files_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.create_new_keys();
+            svc.passphrase = Some("p".into());
+            svc.store_agent_profile();
+            svc.save("p".into());
+        });
+        let profile_path = dir.path().join("ad4m/agentProfile.json");
+        let old_profile = std::fs::read_to_string(&profile_path).unwrap();
+
+        let rekeyed =
+            AgentService::with_mutable_global_instance(|svc| svc.rekey_main_key()).unwrap();
+        // The process stopped before the profile file was written.
+        std::fs::write(&profile_path, &old_profile).unwrap();
+        let profile_did = AgentService::with_mutable_global_instance(|svc| {
+            svc.load();
+            svc.agent.as_ref().map(|agent| agent.did.clone())
+        });
+        let profile_file = std::fs::read_to_string(&profile_path).unwrap();
+        crate::test_utils::setup_agent();
+
+        assert_eq!(profile_did, Some(rekeyed.new_did.clone()));
+        assert!(profile_file.contains(&rekeyed.new_did), "{profile_file}");
+    }
+
+    /// A re-key, or a start-up repair, that stopped in the middle of writing the profile file
+    /// left a truncated one: the next load takes the profile the agent file holds, and writes
+    /// it back.
+    #[test]
+    fn a_load_after_a_profile_write_cut_short_takes_the_agent_files_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.create_new_keys();
+            svc.passphrase = Some("p".into());
+            svc.store_agent_profile();
+            svc.save("p".into());
+        });
+        let profile_path = dir.path().join("ad4m/agentProfile.json");
+
+        let rekeyed =
+            AgentService::with_mutable_global_instance(|svc| svc.rekey_main_key()).unwrap();
+        // The process stopped in the middle of the profile file write, inside a two-byte
+        // character (`é` is 0xC3 0xA9), so the file is neither JSON nor UTF-8.
+        std::fs::write(&profile_path, b"{\"did\":\"did:key:z\xC3").unwrap();
+        let profile_did = AgentService::with_mutable_global_instance(|svc| {
+            svc.load();
+            svc.agent.as_ref().map(|agent| agent.did.clone())
+        });
+        let profile_file = std::fs::read_to_string(&profile_path).unwrap();
+        crate::test_utils::setup_agent();
+
+        assert_eq!(profile_did, Some(rekeyed.new_did.clone()));
+        assert!(profile_file.contains(&rekeyed.new_did), "{profile_file}");
+    }
+
+    /// A profile file that is there but cannot be read (here: no read permission) is not one a
+    /// crash cut short: the load serves the agent file's profile in memory and leaves the file
+    /// alone, so a profile edit newer than the agent file survives a transient read error.
+    #[cfg(unix)]
+    #[test]
+    fn a_load_that_cannot_read_the_profile_file_leaves_it_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.create_new_keys();
+            svc.passphrase = Some("p".into());
+            svc.store_agent_profile();
+            svc.save("p".into());
+            // A profile edit after the save: only the profile file holds it.
+            let mut agent = svc.agent.clone().unwrap();
+            agent.direct_message_language = Some("lang://edited".into());
+            svc.save_agent_profile(agent);
+        });
+        let profile_path = dir.path().join("ad4m/agentProfile.json");
+        let edited = std::fs::read_to_string(&profile_path).unwrap();
+        std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&profile_path).is_ok() {
+            // root reads a 0o000 file: nothing to probe here.
+            crate::test_utils::setup_agent();
+            return;
+        }
+
+        let loaded = AgentService::with_mutable_global_instance(|svc| {
+            svc.load();
+            svc.agent
+                .as_ref()
+                .and_then(|agent| agent.direct_message_language.clone())
+        });
+        std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let profile_file = std::fs::read_to_string(&profile_path).unwrap();
+        crate::test_utils::setup_agent();
+
+        assert_eq!(loaded, None, "the agent file's profile serves in memory");
+        assert_eq!(profile_file, edited, "the unreadable file is left alone");
     }
 
     #[test]
@@ -149,6 +345,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
         crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
         let refused = AgentService::with_mutable_global_instance(|svc| {
             svc.create_new_keys();

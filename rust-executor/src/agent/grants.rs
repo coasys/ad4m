@@ -428,9 +428,19 @@ impl Grants {
     /// ones too: `revoke` ends a grant before its write, so after a failed write the
     /// grant is ended here but active in the database, which a restart loads.
     pub fn revoke_agent(&self, agent: &AgentContext) -> Result<usize, GrantError> {
+        self.revoke_where(|g| g.agent == *agent)
+    }
+
+    /// Revokes every grant of every agent, as [`Grants::revoke_agent`] does for one: the key
+    /// that signed their tokens is gone (`identity.rekey` on the local wallet).
+    pub fn revoke_all(&self) -> Result<usize, GrantError> {
+        self.revoke_where(|_| true)
+    }
+
+    fn revoke_where(&self, matches: impl Fn(&LiveGrant) -> bool) -> Result<usize, GrantError> {
         let grants: Vec<Arc<LiveGrant>> = read(&self.live)
             .values()
-            .filter(|g| g.agent == *agent)
+            .filter(|g| matches(g))
             .cloned()
             .collect();
         if grants.is_empty() {

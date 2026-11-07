@@ -253,7 +253,7 @@ pub struct IdentityFileSettings {
 /// Secret keys someone may paste into the config file, as JSON pointers,
 /// with where the secret belongs instead. Checked before parsing so the
 /// error says why, not just "unknown field".
-const INLINE_SECRETS: &[(&str, &str)] = &[
+pub(crate) const INLINE_SECRETS: &[(&str, &str)] = &[
     (
         "/admin_credential",
         "admin_credential is not allowed in the config file; set \
