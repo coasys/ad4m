@@ -117,6 +117,9 @@ export class LiveQuery {
     #opening?: AbortController
     #retryTimer?: ReturnType<typeof setTimeout>
     #reopening = false
+    // The executor ended the subscription (`subscription-ended`): terminal until the owner
+    // calls `start()`/`resubscribe()`. No reconnect, retry or failed resync reopens it.
+    #terminated = false
     #statusListeners = new Set<(status: LiveQueryStatus) => void>()
 
     /** `open` subscribes on the executor; aborting its signal cancels the call. */
@@ -158,6 +161,13 @@ export class LiveQuery {
         if (ended.perspectiveUuid !== this.#uuid || !this.#id) return
         if (!ended.subscriptionIds.includes(this.#id)) return
         this.#id = undefined
+        // Terminal: a resync or re-open already in flight belongs to a dead generation, a
+        // pending retry is dropped, and a reconnect does not reopen it (see `#reopen`).
+        this.#terminated = true
+        this.#generation++
+        this.#clearRetry()
+        this.#buffer = null
+        this.#reopening = false
         this.#emit({ state: 'ended', reason: ended.reason })
     }
 
@@ -165,6 +175,8 @@ export class LiveQuery {
      *  that a newer one overtakes resolves with the newer one's result. */
     start(): Promise<any> {
         this.#clearRetry()
+        // The owner asks for a subscription again: an ended query lives again, here only.
+        this.#terminated = false
         this.#latest = this.#start(++this.#generation)
         return this.#latest
     }
@@ -216,7 +228,7 @@ export class LiveQuery {
      *  client that reconnects to a restarted executor before the perspective
      *  is loaded gets "Perspective not found" (#1595). */
     #reopen(failures = 0) {
-        if (this.#disposed) return
+        if (this.#disposed || this.#terminated) return
         const reopened = this.start()
         const generation = this.#generation
         reopened.then(
