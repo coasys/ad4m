@@ -559,7 +559,7 @@ jobs:
           name: cli and identity client tests
           command: |
             cargo test --release -p ad4m -p ad4m-identity-client \
-              --features ad4m-identity-client/ws,ad4m-identity-client/test-vault
+              --features ad4m-identity-client/ws,ad4m-identity-client/test-vault,ad4m-identity-client/store
           no_output_timeout: 30m
       - run:
           # The other identity crates: one run per crate, because each tests its own feature set.

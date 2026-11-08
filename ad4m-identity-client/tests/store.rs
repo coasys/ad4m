@@ -14,8 +14,8 @@ use ad4m_identity_client::flows::requests::{answer, ask_for_master, check_poster
 use ad4m_identity_client::flows::revoke::revoke;
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::store::{
-    EncKey, EncOpenError, HttpClient, HttpError, HttpRequest, HttpResponse, SoftEncKey,
-    StoreEndpoint, ViaStore,
+    EncKey, EncOpenError, HttpClient, HttpError, HttpRequest, HttpResponse, MemoryCheckpoints,
+    SoftEncKey, StoreEndpoint, ViaStore,
 };
 use ad4m_identity_client::{
     ClientError, ExecutorRpc, MemoryVault, OsRandom, Secret, SystemClock, Vault, ViaExecutor,
@@ -35,7 +35,7 @@ use http_body_util::BodyExt;
 use identity_store::db::Db;
 use identity_store::{router, system_clock, Settings, Store, StoreKey};
 use serde_json::{json, Value};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -474,10 +474,11 @@ async fn a_phone_posts_send_master_and_the_holder_answers() {
     assert!(inbox(&phone_rpc).await.is_empty());
 }
 
-// The phone reads and writes the private record with its own device key: the write's receipt
-// is the version stored; a version that moved under it merges and writes again.
+// The phone's device reads and writes the private record with its own device key: the
+// write's receipt is the version stored; a version that moved under it merges and writes
+// again, and the read shows both names.
 #[tokio::test]
-async fn a_phone_reads_and_writes_the_record_with_the_receipt_check() {
+async fn a_device_reads_writes_and_merges_the_record() {
     let (router, _dir) = store();
     let holder = phone(&router, 1, None);
     let holder_vault = MemoryVault::new();
@@ -904,6 +905,40 @@ async fn log_page(router: &Router, scid: &str) -> Vec<u8> {
 
 /// A phone on `http` speaking for `identity`.
 fn phone_over(http: LyingHttp, seed: u8, identity: Option<String>) -> ViaExecutor<ViaStore> {
+    phone_with(http, seed, identity)
+}
+
+/// A phone on `http` keeping its accepted heads in `checkpoints`.
+fn phone_over_checkpoints(
+    http: impl HttpClient + 'static,
+    seed: u8,
+    checkpoints: MemoryCheckpoints,
+) -> ViaExecutor<ViaStore> {
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let enc = SoftEncKey::from_ed25519(&key);
+    ViaExecutor::new(
+        ViaStore::new(
+            Box::new(http),
+            Box::new(key),
+            Box::new(enc),
+            Box::new(SystemClock),
+            Box::new(OsRandom),
+            StoreEndpoint {
+                url: STORE_URL.to_string(),
+                keys: store_keys(),
+            },
+            None,
+        )
+        .with_checkpoints(Box::new(checkpoints)),
+    )
+}
+
+/// A phone on any `HttpClient`.
+fn phone_with(
+    http: impl HttpClient + 'static,
+    seed: u8,
+    identity: Option<String>,
+) -> ViaExecutor<ViaStore> {
     let key = SigningKey::from_bytes(&[seed; 32]);
     let enc = SoftEncKey::from_ed25519(&key);
     ViaExecutor::new(ViaStore::new(
@@ -1103,4 +1138,454 @@ async fn identity_log_binds_the_head_to_the_events_and_keeps_the_checkpoint() {
         .unwrap();
     let back = read(0).await.unwrap();
     assert_eq!(back["head"]["seq"], json!(0), "{back}");
+}
+
+/// A `HttpClient` over the router that answers every `GET /v1/keys/{key}` with a chosen
+/// `did` — a key index whose answer does not come from the logs — and that can fail every
+/// log read (`fail_logs`). Review of coasys/ad4m#1673 (Lal P2): the index's answer
+/// installed the binding before any log was read.
+struct LyingIndexHttp {
+    inner: RouterHttp,
+    /// The `did` every key-index answer names.
+    did: Rc<RefCell<Option<String>>>,
+    /// While set, `GET /v1/logs/…` is a transport error.
+    fail_logs: Rc<Cell<bool>>,
+}
+
+#[async_trait(?Send)]
+impl HttpClient for LyingIndexHttp {
+    async fn send(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        if request.method == "GET" {
+            if request.url.starts_with(&format!("{STORE_URL}/v1/keys/")) {
+                if let Some(did) = self.did.borrow().as_ref() {
+                    return Ok(HttpResponse {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: serde_json::to_vec(&json!({
+                            "did": did,
+                            "keyId": "d1",
+                            "added": 0,
+                            "head": {
+                                "scid": "", "seq": 0, "hash": "",
+                                "time": 0, "store": "", "sig": "",
+                            },
+                        }))
+                        .unwrap(),
+                    });
+                }
+            }
+            if self.fail_logs.get() && request.url.starts_with(&format!("{STORE_URL}/v1/logs/")) {
+                return Err(HttpError("the connection was refused".into()));
+            }
+        }
+        self.inner.send(request).await
+    }
+}
+
+/// Review coasys/ad4m#1673 (Lal P2): `scid_of_self` installed the key index's answer as the
+/// binding before fetching — or validating — the log it names, so a lying index bound this
+/// device's key to a foreign identity: `status` reported it and `claim`/`cosignIncept`
+/// refused on it. The index's answer is a candidate now: the binding stands only when the
+/// admitted log lists the key (as the executor's `trusted_listing`). Fails at 1bf063ca7,
+/// where the index's answer was installed at once.
+#[tokio::test]
+async fn an_index_answer_naming_another_identity_binds_nothing() {
+    let (router, _dir) = store();
+    let holder = phone(&router, 1, None);
+    let holder_vault = MemoryVault::new();
+    let did_a = create(&holder, &holder_vault, 81).await;
+
+    // The index answers the other identity for every key.
+    let index_did = Rc::new(RefCell::new(Some(did_a.clone())));
+    let fresh = phone_with(
+        LyingIndexHttp {
+            inner: RouterHttp {
+                router: router.clone(),
+            },
+            did: index_did.clone(),
+            fail_logs: Rc::new(Cell::new(false)),
+        },
+        20,
+        None,
+    );
+    let before = status(&fresh).await;
+    assert!(
+        before["did"].is_null(),
+        "the key index bound this key to a foreign identity: {before}"
+    );
+    assert_eq!(fresh.rpc().identity(), None);
+
+    // A claim is still possible (no false `already-linked`): the holder opens an offer,
+    // the phone claims it.
+    let flow = LinkFlow::open(
+        &holder,
+        &holder_vault,
+        &did_a,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed = claim(&fresh, &flow.offer_string(), None).await;
+    assert_eq!(claimed["did"].as_str().unwrap(), did_a);
+
+    // And a create: `cosignIncept` and `publish` are not refused.
+    let did_new = create(&fresh, &MemoryVault::new(), 82).await;
+
+    // When the index answers truthfully again, the new identity settles.
+    *index_did.borrow_mut() = None;
+    let settled = status(&fresh).await;
+    assert_eq!(settled["did"].as_str().unwrap(), did_new, "{settled}");
+    assert_eq!(fresh.rpc().identity().as_deref(), Some(scid(&did_new)));
+}
+
+/// Same review: a candidate whose log the store will not serve installs nothing — no
+/// binding is cached or exposed.
+#[tokio::test]
+async fn a_candidate_whose_log_fails_to_read_binds_nothing() {
+    let (router, _dir) = store();
+    let holder = phone(&router, 1, None);
+    let did_a = create(&holder, &MemoryVault::new(), 83).await;
+
+    let fresh = phone_with(
+        LyingIndexHttp {
+            inner: RouterHttp {
+                router: router.clone(),
+            },
+            did: Rc::new(RefCell::new(Some(did_a))),
+            fail_logs: Rc::new(Cell::new(true)),
+        },
+        21,
+        None,
+    );
+    let answer = fresh.rpc().call("identity.status", json!({})).await;
+    assert!(
+        answer.is_err(),
+        "the failed candidate was ignored: {answer:?}"
+    );
+    assert_eq!(
+        fresh.rpc().identity(),
+        None,
+        "a failed candidate installed a binding"
+    );
+}
+
+/// A `HttpClient` that answers `GET /v1/logs/{scid}?from=` itself — `make_page` computes
+/// the body for the requested `from` — and passes everything else to the router. A store
+/// whose pages never reach the head it signs, whose head moves mid-read, or whose pages
+/// run past the byte budget. Past 100 pages it refuses, so a client without a page cap
+/// fails here instead of hanging the test.
+struct PagingHttp {
+    inner: RouterHttp,
+    scid: String,
+    /// The page body for a requested `from`, as the store would serve it.
+    make_page: Rc<dyn Fn(u64) -> Vec<u8>>,
+    /// How many log pages were served.
+    served: Rc<Cell<usize>>,
+}
+
+#[async_trait(?Send)]
+impl HttpClient for PagingHttp {
+    async fn send(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let prefix = format!("{STORE_URL}/v1/logs/{}?from=", self.scid);
+        if request.method == "GET" && request.url.starts_with(&prefix) {
+            let cursor: u64 = request.url[prefix.len()..]
+                .parse()
+                .expect("the from query is a seq");
+            self.served.set(self.served.get() + 1);
+            if self.served.get() > 100 {
+                return Err(HttpError("the fake store gave up".into()));
+            }
+            return Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: (self.make_page)(cursor),
+            });
+        }
+        self.inner.send(request).await
+    }
+}
+
+/// `page` (a real log page, as `log_page` serves it) reshaped: the events and the head's
+/// seq replaced; `head_hash` changes the head's hash (and so the head) when given.
+fn fake_page(page: &Value, events: Value, head_seq: u64, head_hash: Option<String>) -> Vec<u8> {
+    let mut page = page.clone();
+    page["appendedAt"] = json!(vec![0; events.as_array().map(Vec::len).unwrap_or_default()]);
+    page["events"] = events;
+    page["head"]["seq"] = json!(head_seq);
+    if let Some(hash) = head_hash {
+        page["head"]["hash"] = json!(hash);
+    }
+    serde_json::to_vec(&page).unwrap()
+}
+
+/// Review coasys/ad4m#1673 (Lal P2): `log_from` pages until the served events pass the
+/// page's head seq — a store that signs a head its pages never reach keeps the client
+/// reading forever. The read is bounded now: a strictly advancing cursor, at most 64
+/// pages (the executor's `MAX_PAGES`), then the read is refused. Fails at 1bf063ca7, which
+/// paged forever (the fake store's own 100-page give-up answers here instead).
+#[tokio::test]
+async fn a_log_whose_pages_never_reach_the_head_is_refused() {
+    let (router, _dir) = store();
+    let holder = phone(&router, 1, None);
+    let did = create(&holder, &MemoryVault::new(), 91).await;
+    let page: Value = serde_json::from_slice(&log_page(&router, scid(&did)).await).unwrap();
+
+    // Every page serves one "event" at the cursor and signs a head at seq 1_000_000: the
+    // read advances strictly and never reaches it.
+    let served = Rc::new(Cell::new(0));
+    let e = phone_with(
+        PagingHttp {
+            inner: RouterHttp {
+                router: router.clone(),
+            },
+            scid: scid(&did).to_string(),
+            served: served.clone(),
+            make_page: Rc::new(move |from| {
+                fake_page(&page, json!([{ "seq": from }]), 1_000_000, None)
+            }),
+        },
+        30,
+        None,
+    );
+    let answer = e.rpc().call("identity.log", json!({ "did": did })).await;
+    let message = answer.expect_err("the read must end").message;
+    assert!(message.contains("pages"), "{message}");
+    assert_eq!(served.get(), 64, "the read stops at the page cap");
+}
+
+/// Same review: the head a read checks at the end is the last page's — a store that moves
+/// it between pages (a different signature over another statement) is never caught. One
+/// read now wants one head across all pages.
+#[tokio::test]
+async fn a_head_that_moves_between_pages_is_refused() {
+    let (router, _dir) = store();
+    let holder = phone(&router, 1, None);
+    let did = create(&holder, &MemoryVault::new(), 92).await;
+    let page: Value = serde_json::from_slice(&log_page(&router, scid(&did)).await).unwrap();
+
+    // The head's seq stays at 5 but its hash changes every page: the read can never hold
+    // one confirmed head.
+    let e = phone_with(
+        PagingHttp {
+            inner: RouterHttp {
+                router: router.clone(),
+            },
+            scid: scid(&did).to_string(),
+            served: Rc::new(Cell::new(0)),
+            make_page: Rc::new(move |from| {
+                fake_page(
+                    &page,
+                    json!([{ "seq": from }]),
+                    5,
+                    Some(format!("hash-{from}")),
+                )
+            }),
+        },
+        30,
+        None,
+    );
+    let answer = e.rpc().call("identity.log", json!({ "did": did })).await;
+    let message = answer
+        .expect_err("a moved head is no confirmed log")
+        .message;
+    assert!(
+        message.contains("changed"),
+        "the failure names the moved head: {message}"
+    );
+}
+
+/// Same review: a store that serves the same old events on every page never advances the
+/// read; the cursor must advance strictly.
+#[tokio::test]
+async fn a_log_page_that_does_not_advance_is_refused() {
+    let (router, _dir) = store();
+    let holder = phone(&router, 1, None);
+    let did = create(&holder, &MemoryVault::new(), 93).await;
+    let page: Value = serde_json::from_slice(&log_page(&router, scid(&did)).await).unwrap();
+
+    // Every page serves the seq-0 "event" again under a head at seq 5.
+    let served = Rc::new(Cell::new(0));
+    let e = phone_with(
+        PagingHttp {
+            inner: RouterHttp {
+                router: router.clone(),
+            },
+            scid: scid(&did).to_string(),
+            served: served.clone(),
+            make_page: Rc::new(move |_| fake_page(&page, json!([{ "seq": 0 }]), 5, None)),
+        },
+        30,
+        None,
+    );
+    let answer = e.rpc().call("identity.log", json!({ "did": did })).await;
+    let message = answer.expect_err("no progress is no read").message;
+    assert!(message.contains("advance"), "{message}");
+    assert_eq!(
+        served.get(),
+        2,
+        "the second page is the first that cannot advance"
+    );
+}
+
+/// Same review: a reply's size is bounded per page, but nothing bounded what a read holds
+/// over all its pages — the executor's 32 MiB (`MAX_STORE_LOG_BYTES`) now does, copies
+/// included.
+#[tokio::test]
+async fn a_log_past_the_byte_budget_is_refused() {
+    let (router, _dir) = store();
+    let holder = phone(&router, 1, None);
+    let did = create(&holder, &MemoryVault::new(), 94).await;
+    let page: Value = serde_json::from_slice(&log_page(&router, scid(&did)).await).unwrap();
+
+    // Each page is padded (trailing whitespace parses) to the per-reply maximum; the
+    // second page passes 32 MiB together with the first.
+    let mut padded = fake_page(&page, json!([{ "seq": 0 }]), 5, None);
+    padded.resize(ad4m_ldk::identity::MAX_LOG_PAGE_BYTES, b' ');
+    let served = Rc::new(Cell::new(0));
+    let e = phone_with(
+        PagingHttp {
+            inner: RouterHttp {
+                router: router.clone(),
+            },
+            scid: scid(&did).to_string(),
+            served: served.clone(),
+            make_page: Rc::new(move |_| padded.clone()),
+        },
+        30,
+        None,
+    );
+    let answer = e.rpc().call("identity.log", json!({ "did": did })).await;
+    let message = answer
+        .expect_err("a read past the budget is refused")
+        .message;
+    assert!(message.contains("bytes"), "{message}");
+    assert_eq!(served.get(), 2);
+}
+
+/// Review coasys/ad4m#1673 (Lal P3): a `HttpRequest` derives `Debug`, printing the signed
+/// `X-Coasys-*` headers and the body (claim secrets, sealed messages) into any log a
+/// transport writes.
+#[test]
+fn a_request_debug_never_prints_headers_or_body() {
+    let request = HttpRequest {
+        method: "POST".into(),
+        url: format!("{STORE_URL}/v1/offers/scid/offer/claim"),
+        headers: vec![
+            ("x-coasys-request".into(), "the-signed-request".into()),
+            ("content-type".into(), "application/json".into()),
+        ],
+        body: b"{\"s\":\"the-claim-secret\"}".to_vec(),
+    };
+    let debug = format!("{request:?}");
+    assert!(!debug.contains("the-signed-request"), "{debug}");
+    assert!(!debug.contains("the-claim-secret"), "{debug}");
+}
+
+/// Review coasys/ad4m#1673: `identity.keyOwner` maps a store `404` — a key in no log — to
+/// the error path instead of `null` (its documented contract), so a restore from words
+/// whose `m0` no identity has answers an RPC failure instead of `NotTheseWords`. Fails at
+/// 1bf063ca7.
+#[tokio::test]
+async fn a_key_in_no_log_answers_null_and_the_restore_not_these_words() {
+    use ad4m_identity_client::flows::restore::RestoreFlow;
+
+    let (router, _dir) = store();
+    let e = phone(&router, 22, None);
+
+    // A device key in no log: `keyOwner` answers `null`.
+    let key = ad4m_hash_chain::encode_ed25519_multikey(
+        SigningKey::from_bytes(&[99; 32]).verifying_key().as_bytes(),
+    );
+    let owner = e.key_owner(&key).await.unwrap();
+    assert!(owner.is_none(), "a key in no log answers null: {owner:?}");
+
+    // Words whose master #0 sits in no log: the restore names them, not an RPC error.
+    let vault = MemoryVault::new();
+    let refusal = RestoreFlow::start(
+        &e,
+        &vault,
+        words::from_entropy(&[230; 16]).phrase(),
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    let Err(refusal) = refusal else {
+        panic!("words of no identity are refused")
+    };
+    assert!(
+        matches!(refusal, ClientError::NotTheseWords(_)),
+        "{refusal}"
+    );
+}
+
+/// Review coasys/ad4m#1673: the accepted-head checkpoint lived in the `ViaStore`
+/// instance, so a restart (a new `ViaStore` over the same surface state) forgot it and a
+/// store could replay the older page again. The checkpoint is a caller-supplied port now:
+/// a persisting one keeps the refusal across `ViaStore`s.
+#[tokio::test]
+async fn a_checkpoint_kept_by_the_port_survives_a_new_via_store() {
+    let (router, _dir) = store();
+    let lied_about = Rc::new(RefCell::new(String::new()));
+    let replay = Rc::new(RefCell::new(None));
+    let http = || LyingHttp {
+        inner: RouterHttp {
+            router: router.clone(),
+        },
+        scid: lied_about.clone(),
+        foreign_head: Rc::new(RefCell::new(None)),
+        replay: replay.clone(),
+    };
+    let port = MemoryCheckpoints::default();
+    let holder_vault = MemoryVault::new();
+    let holder = phone_over_checkpoints(http(), 1, port.clone());
+    let did = create(&holder, &holder_vault, 95).await;
+    let old_page = log_page(&router, scid(&did)).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&old_page).unwrap()["head"]["seq"],
+        json!(0)
+    );
+
+    // The log grows to seq 1 (a device joins), and the holder reads it there.
+    let other = phone(&router, 8, None);
+    let flow = LinkFlow::open(
+        &holder,
+        &holder_vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed = claim(&other, &flow.offer_string(), None).await;
+    let seen = flow.wait_for_claim().await.unwrap();
+    flow.confirm(&seen, entry("Other", DeviceKind::PhoneApp), false)
+        .await
+        .unwrap();
+    join_status(&other, &claimed["offerId"]).await;
+    let at_one = status(&holder).await;
+    assert_eq!(at_one["head"]["seq"], json!(1), "{at_one}");
+
+    // A restart: a new `ViaStore` over the same port. The store replays the seq-0 page —
+    // the port's checkpoint still refuses it.
+    *lied_about.borrow_mut() = scid(&did).to_string();
+    *replay.borrow_mut() = Some(old_page);
+    let restarted = phone_over_checkpoints(http(), 1, port);
+    let answer = restarted.rpc().call("identity.status", json!({})).await;
+    let message = answer
+        .expect_err("the replayed seq-0 page stays refused across a restart")
+        .message;
+    assert!(message.contains("store-behind"), "{message}");
+
+    // A port that kept nothing (the in-memory default after a real restart without
+    // persistence) accepts the same page: the refusal lived in the port.
+    let fresh = phone_over_checkpoints(http(), 1, MemoryCheckpoints::default());
+    let forgotten = status(&fresh).await;
+    assert_eq!(forgotten["head"]["seq"], json!(0), "{forgotten}");
 }

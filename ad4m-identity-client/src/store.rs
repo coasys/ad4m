@@ -22,6 +22,11 @@
 //!   store keys (Ed25519 multikeys) a signed head must be signed by — the executor's
 //!   `identity.storeKeys`. With no key, the calls that sign or commit refuse
 //!   `no-store-keys`, as `identity.publish` does on an executor.
+//! - [`LogCheckpoints`] (`with_checkpoints`): where the `(seq, hash)` head each identity's
+//!   log was last admitted lives — under it `409 store-behind`, beside it `409 fork`,
+//!   `identity.resetLog` forgets it. The default keeps it in memory; a phone that wants
+//!   the refusal to survive a restart passes a persisting port. Without one, a restart
+//!   starts with no checkpoint.
 //!
 //! `identity` is the SCID this device's key speaks for. A caller reloads it from its own
 //! storage; when it is `None`, the store's key index (`GET /v1/keys/{key}`) discovers it.
@@ -52,7 +57,7 @@
 //! | `requests` | `GET /v1/requests/{scid}?since=` signed by `device` |
 //! | `postRequest` | `POST /v1/requests/{scid}` signed by `device` |
 //! | `deleteRequest` | `DELETE` to the caller request's signed `path` |
-//! | `cosignIncept`, `resetLog` | local / a no-op (the phone keeps no cache to drop) |
+//! | `cosignIncept`, `resetLog` | local: the co-signature, forgetting one identity's checkpoint |
 //! | `custodyStatus` | the keys this device holds (`{sign, enc}`) |
 //! | `resolve`, `rekey`, others | `501 not-served` |
 //!
@@ -63,6 +68,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes, Multikey};
 use ad4m_identity_core::build::{cosign, Signer};
@@ -81,7 +87,7 @@ use ad4m_ldk::identity::{
     SignedHead, SignedRequest, LOG_PAGE_EVENTS,
 };
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zeroize::Zeroize;
 
@@ -97,6 +103,15 @@ const PRE_INBOX_HEADER: &str = "x-coasys-inbox";
 /// A reply body over one log page is refused (`invalid: too-large`), as the agent language
 /// bounds `httpFetch`.
 const MAX_REPLY_BYTES: usize = ad4m_ldk::identity::MAX_LOG_PAGE_BYTES;
+/// The most pages one log read takes: 64 × [`LOG_PAGE_EVENTS`] events, far past any
+/// person's log — the executor's `MAX_PAGES`.
+const MAX_PAGES: usize = 64;
+/// The most bytes one log read holds over all its pages, copies included — the executor's
+/// `MAX_STORE_LOG_BYTES`. A person's key log is an incept and a few events of about a
+/// kilobyte each, so this is far past any log and far below the page cap (64 ×
+/// [`MAX_REPLY_BYTES`], about 1 GiB): a store cannot make a phone hold a gigabyte for one
+/// answer.
+const MAX_STORE_LOG_BYTES: usize = 32 << 20;
 /// `identity.prepareDevice`'s device string lives this long, as on the executor.
 const DEVICE_STRING_TTL_S: u64 = 300;
 /// The request box's default time to live, as the executor's `post_request`.
@@ -299,8 +314,10 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
-/// One request the store client sends.
-#[derive(Clone, Debug)]
+/// One request the store client sends. `Debug` never prints the headers or the body:
+/// `x-coasys-request` and `x-coasys-inbox` carry signed statements, and a claim's body
+/// carries the offer's secret — none of it belongs in a log or a crash report.
+#[derive(Clone)]
 pub struct HttpRequest {
     /// `GET`, `POST`, `PUT` or `DELETE`.
     pub method: String,
@@ -313,6 +330,17 @@ pub struct HttpRequest {
     pub body: Vec<u8>,
 }
 
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &format_args!("[{}]", self.headers.len()))
+            .field("body", &format_args!("[{} bytes]", self.body.len()))
+            .finish()
+    }
+}
+
 /// Why `HttpClient::send` gave no reply: a network failure or the caller's own timeout. A
 /// status the store answered is a `HttpResponse`, never an `Err`.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -321,6 +349,20 @@ pub struct HttpError(pub String);
 
 /// The phone's transport, supplied by the surface: an HTTP client, or the store's router in
 /// tests. An `Err` is one `unavailable`.
+///
+/// What an implementation must hold to — the requests carry signed statements and claim
+/// secrets:
+///
+/// - **Authenticated HTTPS only.** The URL is the store's origin; requests go nowhere
+///   else. A redirect is refused, or followed only when it keeps the origin.
+/// - **A streaming reply-size limit.** The reply body is read with a cap and the read
+///   fails past it; the adapter never allocates past the limit to find out. (This client
+///   refuses a body over [`MAX_REPLY_BYTES`]; the limit the surface picks must be at
+///   least that.)
+/// - **Timeouts**: a connect timeout, a read timeout and a deadline on the whole call —
+///   a stalled store must not hang a flow.
+/// - **Nothing is logged.** No request or reply headers or bodies — a claim's body
+///   carries the offer's secret `s`, the `x-coasys-*` headers carry signed statements.
 #[async_trait(?Send)]
 pub trait HttpClient {
     async fn send(&self, request: HttpRequest) -> Result<HttpResponse, HttpError>;
@@ -418,6 +460,48 @@ pub struct StoreEndpoint {
     pub keys: Vec<String>,
 }
 
+/// The head of one identity's log this phone last accepted ([`ViaStore::admitted`]): the
+/// checkpoint a later read is measured against — under it `409 store-behind`, beside it
+/// `409 fork`; `identity.resetLog` forgets it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub seq: u64,
+    pub hash: String,
+}
+
+/// Where the per-identity [`Checkpoint`]s live — a port the caller supplies with
+/// [`ViaStore::with_checkpoints`] so a phone can persist them. The default keeps them in
+/// memory only: without a persisting port, a phone restart starts with no checkpoint (a
+/// store may then serve an older head once, as before the checkpoint existed).
+pub trait LogCheckpoints {
+    /// The checkpoint kept for `scid`, if any.
+    fn get(&self, scid: &str) -> Option<Checkpoint>;
+    /// The head `scid`'s log was last admitted at.
+    fn set(&self, scid: &str, checkpoint: Checkpoint);
+    /// `identity.resetLog`: forget `scid`'s checkpoint.
+    fn forget(&self, scid: &str);
+}
+
+/// The in-memory [`LogCheckpoints`]: what a `ViaStore` uses without `with_checkpoints`.
+/// `Clone` shares one store, so a surface can hand clones of one instance to the
+/// `ViaStore`s that must agree (a restart is a new `ViaStore` over the same port).
+#[derive(Clone, Default)]
+pub struct MemoryCheckpoints(Rc<RefCell<BTreeMap<String, Checkpoint>>>);
+
+impl LogCheckpoints for MemoryCheckpoints {
+    fn get(&self, scid: &str) -> Option<Checkpoint> {
+        self.0.borrow().get(scid).cloned()
+    }
+
+    fn set(&self, scid: &str, checkpoint: Checkpoint) {
+        self.0.borrow_mut().insert(scid.to_string(), checkpoint);
+    }
+
+    fn forget(&self, scid: &str) {
+        self.0.borrow_mut().remove(scid);
+    }
+}
+
 /// A pre-join inbox `identity.prepareDevice` opened and `identity.inbox` reads until
 /// `expires`.
 #[derive(Clone)]
@@ -463,10 +547,11 @@ pub struct ViaStore {
     joins: RefCell<BTreeMap<String, String>>,
     /// The pre-join inbox `identity.prepareDevice` opened, until its device string expires.
     prepared: RefCell<Option<Prepared>>,
-    /// Per identity, the head this phone last accepted (`seq`, `hash`): a store that serves a
-    /// lower seq, or a log that does not pass through that head, is refused
-    /// (`identity.resetLog` forgets it, as the executor's does its cache).
-    accepted: RefCell<BTreeMap<String, (u64, String)>>,
+    /// Per identity, the head this phone last accepted: a store that serves a lower seq,
+    /// or a log that does not pass through that head, is refused (`identity.resetLog`
+    /// forgets it, as the executor's does its cache). A port — [`MemoryCheckpoints`]
+    /// unless `with_checkpoints` supplies a persisting one.
+    checkpoints: Box<dyn LogCheckpoints>,
 }
 
 impl ViaStore {
@@ -492,7 +577,7 @@ impl ViaStore {
             identity: RefCell::new(identity),
             joins: RefCell::new(BTreeMap::new()),
             prepared: RefCell::new(None),
-            accepted: RefCell::new(BTreeMap::new()),
+            checkpoints: Box::new(MemoryCheckpoints::default()),
         }
     }
 
@@ -500,6 +585,14 @@ impl ViaStore {
     /// phone keeps master keys, as an executor's custody channel says for it.
     pub fn with_can_keep_master(mut self, can_keep_master: bool) -> Self {
         self.can_keep_master = can_keep_master;
+        self
+    }
+
+    /// Where the per-identity accepted heads live (the checkpoint — [`LogCheckpoints`]).
+    /// A phone that persists them passes its own port so a restart still refuses a store
+    /// serving an older or a beside log; the in-memory default forgets them on restart.
+    pub fn with_checkpoints(mut self, checkpoints: Box<dyn LogCheckpoints>) -> Self {
+        self.checkpoints = checkpoints;
         self
     }
 
@@ -593,13 +686,38 @@ impl ViaStore {
         serde_json::from_slice(text).map_err(|e| bad_reply(format!("the store served {e}")))
     }
 
+    /// The checks every read's head passes once the pages agree on it: the signature is a
+    /// trusted store key's, and the statement names the log read — a signature alone binds
+    /// the head to nothing the read asked for.
+    fn check_head(&self, scid: &str, head: &SignedHead) -> Result<(), RpcError> {
+        if self.trusted() && !self.verifies(head) {
+            return Err(error(
+                502,
+                "bad-head-signature: the store's head is not signed by a trusted store key",
+            ));
+        }
+        if head.scid != scid {
+            return Err(error(
+                502,
+                "bad-head: the store's head names another log than the one read",
+            ));
+        }
+        Ok(())
+    }
+
     /// The log's events and head from `from` (paged: a page holds at most `LOG_PAGE_EVENTS`).
-    /// With `store_keys`, the head is verified (`502 bad-head-signature` otherwise); without
-    /// them it is whatever the store says — `trusted: false` on `status`.
+    /// A read is bounded and only ever ends on the head its pages agreed on: at most
+    /// [`MAX_PAGES`] pages and [`MAX_STORE_LOG_BYTES`] served bytes, each page advancing the
+    /// cursor strictly past the last one, one head across all of them. A store that cannot
+    /// end a read so — pages that never reach the head it signs, a head that moves mid-read,
+    /// a page that re-serves what was read — is refused, never served as a log.
     async fn log_from(&self, scid: &str, from: u64) -> Result<(Vec<Value>, SignedHead), RpcError> {
         let mut events = Vec::new();
         let mut cursor = from;
-        let head = loop {
+        let mut head: Option<SignedHead> = None;
+        let mut budget = MAX_STORE_LOG_BYTES;
+        let mut done = false;
+        for _ in 0..MAX_PAGES {
             let (status, body) = self
                 .send(
                     "GET",
@@ -611,31 +729,60 @@ impl ViaStore {
             if status != 200 {
                 return Err(refused(status, &body));
             }
+            // The budget covers what the read holds, copies included.
+            budget = budget.checked_sub(body.len()).ok_or_else(|| {
+                unavailable(format!(
+                    "the store's log of {scid} passes {MAX_STORE_LOG_BYTES} bytes"
+                ))
+            })?;
             let page: LogPage = serde_json::from_slice(&body)
                 .map_err(|e| bad_reply(format!("the store's log page does not parse: {e}")))?;
             if page.events.len() > LOG_PAGE_EVENTS as usize {
                 return Err(bad_request("too-large"));
             }
-            cursor += page.events.len() as u64;
-            let done = page.events.is_empty() || cursor > page.head.seq;
-            events.extend(page.events);
-            if done {
-                break page.head;
+            // One read, one head: a head that moves under it confirmed nothing.
+            match &head {
+                None => head = Some(page.head.clone()),
+                Some(first) if *first == page.head => {}
+                Some(_) => {
+                    return Err(bad_reply(
+                        "the store's head changed between the log's pages",
+                    ))
+                }
             }
-        };
-        if self.trusted() && !self.verifies(&head) {
-            return Err(error(
-                502,
-                "bad-head-signature: the store's head is not signed by a trusted store key",
-            ));
+            if page.events.is_empty() {
+                // The log ends here: reached only when the cursor is already past the head
+                // (a `from` beyond it); an end before it is no complete log.
+                if cursor > page.head.seq {
+                    done = true;
+                    break;
+                }
+                return Err(bad_reply("the store's log ends before the head it signs"));
+            }
+            let Some(last) = page.events.iter().filter_map(|e| e["seq"].as_u64()).max() else {
+                return Err(bad_reply(
+                    "the store's log page carries an event with no seq",
+                ));
+            };
+            if last < cursor {
+                return Err(bad_reply(format!(
+                    "the store's log page does not advance past seq {cursor}"
+                )));
+            }
+            cursor = last + 1;
+            events.extend(page.events);
+            if last >= page.head.seq {
+                done = true;
+                break;
+            }
         }
-        // A signature alone binds the head to nothing this read asked for.
-        if head.scid != scid {
-            return Err(error(
-                502,
-                "bad-head: the store's head names another log than the one read",
-            ));
+        if !done {
+            return Err(unavailable(format!(
+                "the store's log of {scid} runs past {MAX_PAGES} pages"
+            )));
         }
+        let head = head.expect("every page keeps its head");
+        self.check_head(scid, &head)?;
         Ok((events, head))
     }
 
@@ -662,28 +809,33 @@ impl ViaStore {
             ));
         }
         // Never behind, and never beside, the head this phone accepted before.
-        let mut accepted = self.accepted.borrow_mut();
-        if let Some((seq, hash)) = accepted.get(scid) {
-            if head.seq < *seq {
+        if let Some(checkpoint) = self.checkpoints.get(scid) {
+            if head.seq < checkpoint.seq {
                 return Err(error(
                     409,
                     format!(
-                        "store-behind: the store served the log at seq {}, under seq {seq} read before",
-                        head.seq
+                        "store-behind: the store served the log at seq {}, under seq {} read before",
+                        head.seq, checkpoint.seq
                     ),
                 ));
             }
-            if chain.hash_at(*seq) != Some(hash) {
+            if chain.hash_at(checkpoint.seq) != Some(&checkpoint.hash) {
                 return Err(error(
                     409,
                     format!(
-                        "fork: the log served does not pass through the head accepted at seq {seq}"
+                        "fork: the log served does not pass through the head accepted at seq {}",
+                        checkpoint.seq
                     ),
                 ));
             }
         }
-        accepted.insert(scid.to_string(), (head.seq, head.hash.clone()));
-        drop(accepted);
+        self.checkpoints.set(
+            scid,
+            Checkpoint {
+                seq: head.seq,
+                hash: head.hash.clone(),
+            },
+        );
         Ok((values, chain, head))
     }
 
@@ -694,8 +846,11 @@ impl ViaStore {
     }
 
     /// The SCID this device's key speaks for: `identity`, else the key index's entry for the
-    /// device key (`None` when it sits in no log). The entry goes into `identity`, as the
-    /// executor records a key's binding from the log.
+    /// device key (`None` when it sits in no log). The index's answer is a candidate, never
+    /// the binding: its log is admitted here first, and `identity` installs only when that
+    /// log lists this key — the executor's `trusted_listing`. A candidate that fails to
+    /// read, or names a log the key is not in, installs nothing and is never exposed (a
+    /// confirmed-but-revoked binding stays a binding: `position` judges validity).
     async fn scid_of_self(&self) -> Result<Option<String>, RpcError> {
         if let Some(scid) = self.identity.borrow().as_ref() {
             return Ok(Some(scid.clone()));
@@ -716,6 +871,11 @@ impl ViaStore {
                         entry.did
                     )));
                 };
+                let (chain, _head) = self.chain(&scid).await?;
+                if chain.state().device_key_id_of(&self.device.key()).is_none() {
+                    // The index names a log this key is not in: nothing binds.
+                    return Ok(None);
+                }
                 *self.identity.borrow_mut() = Some(scid.clone());
                 Ok(Some(scid))
             }
@@ -1276,12 +1436,13 @@ impl ViaStore {
                     .enc
                     .open(&sealed_at, message["sealed"].as_str().unwrap_or_default())
                 {
-                    Ok(mut payload) => {
+                    Ok(payload) => {
+                        // `Opened` wipes the payload's secret on drop.
+                        let payload = Opened(payload);
                         let kind = match &payload.body {
                             InboxBody::Master { .. } => "master",
                             InboxBody::OfferTicket { .. } => "offer-ticket",
                         };
-                        wipe_body(&mut payload);
                         entries.push(json!({
                             "id": id,
                             "kind": kind,
@@ -1323,7 +1484,9 @@ impl ViaStore {
 
     /// One pre-join message: a valid ticket is claimed for this device (as the executor's
     /// `take_ticket`); everything else is acknowledged and dropped. Answers the entry for the
-    /// caller, with the claim's `did`, `offerId` and `matchCode`.
+    /// caller, with the claim's `did`, `offerId` and `matchCode`. The payload and the offer
+    /// it names live in drop guards (`Opened`, `HeldOffer`), so a call dropped at an `await`
+    /// — `chain`, `claim` — wipes them.
     async fn take_ticket(
         &self,
         pre: &Prepared,
@@ -1331,11 +1494,11 @@ impl ViaStore {
     ) -> Result<Option<Value>, RpcError> {
         let id = message["id"].as_str().unwrap_or_default().to_string();
         let sealed_at = InboxAddress::Pre(pre.address.clone());
-        let mut payload = match self
+        let payload = match self
             .enc
             .open(&sealed_at, message["sealed"].as_str().unwrap_or_default())
         {
-            Ok(payload) => payload,
+            Ok(payload) => Opened(payload),
             Err(EncOpenError::Sealed(_)) => {
                 self.ack_pre(pre, &id).await;
                 return Ok(None);
@@ -1345,42 +1508,34 @@ impl ViaStore {
         let scid = match &payload.body {
             InboxBody::OfferTicket(ticket) => ticket.scid.clone(),
             InboxBody::Master { .. } => {
-                wipe_body(&mut payload);
                 self.ack_pre(pre, &id).await;
                 return Ok(None);
             }
         };
         let chain = match self.chain(&scid).await {
             Ok((chain, _)) => chain,
-            Err(_) => {
-                wipe_body(&mut payload);
-                return Ok(None);
-            }
+            Err(_) => return Ok(None),
         };
         let mut ticket = match check_payload(&payload, &self.device.key(), &chain, self.clock.now())
         {
             Ok(Accept::ClaimOffer(ticket)) => ticket,
-            Ok(_) => {
-                wipe_body(&mut payload);
-                return Ok(None);
-            }
+            Ok(_) => return Ok(None),
             Err(_) => {
-                wipe_body(&mut payload);
                 self.ack_pre(pre, &id).await;
                 return Ok(None);
             }
         };
-        wipe_body(&mut payload);
-        let mut offer = ticket.offer_string();
+        drop(payload);
+        let offer = HeldOffer(ticket.offer_string());
         ticket.s.zeroize();
         let claimed = self
             .claim(
-                &offer,
+                &offer.0,
                 None,
                 &json!({ "canKeepMaster": self.can_keep_master }),
             )
             .await;
-        offer.s.zeroize();
+        drop(offer);
         self.ack_pre(pre, &id).await;
         match claimed {
             Ok(claim) => {
@@ -1421,11 +1576,11 @@ impl ViaStore {
         };
         for message in listed {
             let id = message["id"].as_str().unwrap_or_default().to_string();
-            let mut payload = match self
+            let payload = match self
                 .enc
                 .open(&sealed_at, message["sealed"].as_str().unwrap_or_default())
             {
-                Ok(payload) => payload,
+                Ok(payload) => Opened(payload),
                 Err(EncOpenError::Sealed(_)) => {
                     self.drop_joined(&position, &id).await;
                     continue;
@@ -1433,13 +1588,11 @@ impl ViaStore {
                 Err(EncOpenError::Unavailable(_)) => return Err(unavailable(ENC_UNAVAILABLE)),
             };
             if !matches!(payload.body, InboxBody::Master { .. }) {
-                wipe_body(&mut payload);
                 continue;
             }
             match check_payload(&payload, &self.device.key(), &chain, self.clock.now()) {
                 Ok(Accept::KeepMaster { .. }) => {
                     let InboxBody::Master { did, index, .. } = &payload.body else {
-                        wipe_body(&mut payload);
                         continue;
                     };
                     let out = json!({
@@ -1451,16 +1604,12 @@ impl ViaStore {
                             _ => String::new(),
                         },
                     });
-                    wipe_body(&mut payload);
                     return Ok(out);
                 }
                 Ok(Accept::Stale) | Err(_) => {
-                    wipe_body(&mut payload);
                     self.drop_joined(&position, &id).await;
                 }
-                Ok(Accept::ClaimOffer(_)) => {
-                    wipe_body(&mut payload);
-                }
+                Ok(Accept::ClaimOffer(_)) => {}
             }
         }
         Ok(Value::Null)
@@ -1658,17 +1807,43 @@ impl ViaStore {
                     "revoked": entry.revoked,
                 }))
             }
+            // A key in no log is the documented `null` (the restore's words derive an `m0`
+            // of nothing yet), never a refusal.
+            404 => Ok(Value::Null),
             _ => Err(refused(status, &body)),
         }
     }
 }
 
-/// Wipes a payload's secrets after its contents were used — a master key's `secret` and a
-/// ticket's `s` — as the executor's `Opened` guard does on drop.
-fn wipe_body(payload: &mut InboxPayload) {
-    match &mut payload.body {
-        InboxBody::Master { secret, .. } => secret.zeroize(),
-        InboxBody::OfferTicket(ticket) => ticket.s.zeroize(),
+/// An opened inbox payload: a secret it carries (a master key's `secret`, a ticket's `s`)
+/// is wiped when it drops — the executor's `Opened` guard. A call dropped while it holds
+/// one across an `await` leaks nothing.
+struct Opened(InboxPayload);
+
+impl Drop for Opened {
+    fn drop(&mut self) {
+        match &mut self.0.body {
+            InboxBody::Master { secret, .. } => secret.zeroize(),
+            InboxBody::OfferTicket(ticket) => ticket.s.zeroize(),
+        }
+    }
+}
+
+impl std::ops::Deref for Opened {
+    type Target = InboxPayload;
+
+    fn deref(&self) -> &InboxPayload {
+        &self.0
+    }
+}
+
+/// The offer a ticket names: its secret `s` is wiped when it drops, so a `claim` dropped
+/// while the offer is held across its `await` leaks none.
+struct HeldOffer(OfferString);
+
+impl Drop for HeldOffer {
+    fn drop(&mut self) {
+        self.0.s.zeroize();
     }
 }
 
@@ -1703,7 +1878,7 @@ impl ExecutorRpc for ViaStore {
                 let did = params["did"].as_str().unwrap_or_default();
                 let scid = scid_of(did)
                     .ok_or_else(|| bad_request(format!("{did} is not a did:scid:coasys:1")))?;
-                self.accepted.borrow_mut().remove(scid);
+                self.checkpoints.forget(scid);
                 Ok(json!(true))
             }
             // The phone holds its own keys: the custody channel's answer is their multikeys.

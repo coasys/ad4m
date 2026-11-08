@@ -23,6 +23,10 @@ store = []
 name = "holder"
 required-features = ["ws", "test-vault"]
 
+[[test]]
+name = "store"
+required-features = ["store"]
+
 [dependencies]
 # The words make master keys here, never on a node (the executor enables `build` only).
 ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build", "words"] }
