@@ -32,10 +32,17 @@ pub mod flows;
 pub mod record;
 mod request;
 pub mod secret;
+#[cfg(feature = "store")]
+pub mod store;
 pub mod vault;
 
 pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
+#[cfg(feature = "store")]
+pub use store::{
+    EncKey, EncOpenError, HttpClient, HttpError, HttpRequest, HttpResponse, SoftEncKey,
+    StoreEndpoint, ViaStore,
+};
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
 pub use vault::{MasterSigner, MasterUse, PendingPush, StageToken, Unlocked, Vault, VaultError};
