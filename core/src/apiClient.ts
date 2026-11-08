@@ -168,7 +168,7 @@ export class ApiClient {
     private _reconnectCallbacks = new Set<() => void>()
     private _authFailedCallbacks = new Set<(reason: string) => void>()
     /** Set once the executor refused the token: the reason. The client then
-     *  never connects again; a new token needs a new client. */
+     *  does not connect again until `setToken` gives it another token. */
     private _authFailed: string | null = null
     private _hasConnectedOnce = false
     private _pendingCalls = new Map<string, PendingCall>()
@@ -630,8 +630,8 @@ export class ApiClient {
 
     /** Register a callback that fires once when the executor refuses this
      *  client's token: a 401 reply, or a socket closed with code 1008. Every
-     *  call then fails with a 401 `RpcError` and the client does not reconnect;
-     *  build a new client to use another token. Returns an unsubscribe function. */
+     *  call then fails with a 401 `RpcError` and the client does not reconnect
+     *  until `setToken` gives it another token. Returns an unsubscribe function. */
     onAuthFailed(callback: (reason: string) => void): () => void {
         this._authFailedCallbacks.add(callback)
         return () => { this._authFailedCallbacks.delete(callback) }
