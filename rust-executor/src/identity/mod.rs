@@ -242,7 +242,9 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
     }
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
-            handle.spawn(run_recheck(service));
+            // Subscribed here, so no change the cache fires before the task runs is lost.
+            let changes = service.cache.subscribe();
+            handle.spawn(run_recheck(service, changes));
         }
         Err(_) => log::error!("identity: no runtime for the re-check of links"),
     }
@@ -257,12 +259,26 @@ pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
 /// that could not be checked and those of each bot key whose scope expired since the last
 /// tick (since start on the first). Each re-check judges a link again from the key map and
 /// rewrites it only when its verdict or person changed, so it is idempotent.
-async fn run_recheck(service: Arc<IdentityService>) {
+async fn run_recheck(
+    service: Arc<IdentityService>,
+    mut changes: tokio::sync::broadcast::Receiver<verdict::VerdictChange>,
+) {
     use tokio::sync::broadcast::error::{RecvError, TryRecvError};
-    let mut changes = service.cache.subscribe();
+    // The stored links are there to re-judge once the perspectives are open. Every log the
+    // cache holds is read into the key map then: each key that no longer counts fires a change
+    // (a log the map did not hold), so a link stored `valid` by a bot whose scope expired, or
+    // a device revoked, while this executor was down is re-judged though its log may never be
+    // read again otherwise.
+    crate::perspectives::opened().await;
+    match service.cache.load_held().await {
+        Ok(read) => log::debug!("identity: read {read} key logs for the re-check"),
+        Err(e) => log::warn!("identity: could not list the cached key logs: {e}"),
+    }
     let mut tick = tokio::time::interval(RECHECK_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut expired_until = 0;
+    // Signers whose re-check failed in some perspective: asked again on the next tick.
+    let mut failed: BTreeSet<String> = BTreeSet::new();
     loop {
         tokio::select! {
             change = changes.recv() => {
@@ -286,18 +302,25 @@ async fn run_recheck(service: Arc<IdentityService>) {
                     Err(RecvError::Lagged(_)) => signers.extend(listed_signers(&service)),
                     Err(RecvError::Closed) => return,
                 }
-                crate::perspectives::recheck_links(&crate::perspectives::Recheck::Signers(signers))
-                    .await;
+                let scope = crate::perspectives::Recheck::Signers(signers);
+                if !crate::perspectives::recheck_links(&scope).await {
+                    if let crate::perspectives::Recheck::Signers(signers) = scope {
+                        failed.extend(signers);
+                    }
+                }
             }
             _ = tick.tick() => {
                 let now = service::now();
-                let expired = expired_signers(service.cache.key_map(), expired_until, now);
+                let mut signers = expired_signers(service.cache.key_map(), expired_until, now);
                 expired_until = now;
-                if !expired.is_empty() {
-                    crate::perspectives::recheck_links(
-                        &crate::perspectives::Recheck::Signers(expired),
-                    )
-                    .await;
+                signers.append(&mut failed);
+                if !signers.is_empty() {
+                    let scope = crate::perspectives::Recheck::Signers(signers);
+                    if !crate::perspectives::recheck_links(&scope).await {
+                        if let crate::perspectives::Recheck::Signers(signers) = scope {
+                            failed = signers;
+                        }
+                    }
                 }
                 crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
             }

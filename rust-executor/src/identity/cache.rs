@@ -152,9 +152,43 @@ impl KeyMap {
     /// Puts `log` in place of what the map held for `scid`, with every key it lists at or below
     /// its trusted seq; those keys lose their "no log" answers.
     pub fn publish(&self, scid: &str, log: TrustedLog) {
-        let Ok(mut inner) = self.inner.lock() else {
-            return;
-        };
+        if let Ok(mut inner) = self.inner.lock() {
+            Self::put(&mut inner, scid, log);
+        }
+    }
+
+    /// [`KeyMap::publish`] in one step with the store's confirmation of the head at
+    /// `confirmed` (unix seconds), unless the map holds `scid` at a later trusted seq (an older
+    /// read that finished late) or at the same one (then only the confirmation is noted). One
+    /// step, so no check pairs a fresh confirmation with the log this one replaces, and an older
+    /// read never puts back a key a newer head revoked. `Some(held)`: the log was put in place
+    /// of `held`.
+    pub fn publish_newer(
+        &self,
+        scid: &str,
+        log: TrustedLog,
+        confirmed: Option<u64>,
+    ) -> Option<Option<Arc<TrustedLog>>> {
+        let mut inner = self.inner.lock().ok()?;
+        let held = inner.logs.get(scid).cloned();
+        if let Some(h) = &held {
+            if h.trusted >= log.trusted {
+                if h.trusted == log.trusted {
+                    if let Some(at) = confirmed {
+                        inner.confirmed.insert(scid.to_string(), at);
+                    }
+                }
+                return None;
+            }
+        }
+        Self::put(&mut inner, scid, log);
+        if let Some(at) = confirmed {
+            inner.confirmed.insert(scid.to_string(), at);
+        }
+        Some(held)
+    }
+
+    fn put(inner: &mut KeyMapInner, scid: &str, log: TrustedLog) {
         if inner.logs.len() >= KEY_MAP_BOUND && !inner.logs.contains_key(scid) {
             let KeyMapInner {
                 keys,
@@ -162,7 +196,7 @@ impl KeyMap {
                 pinned,
                 confirmed,
                 ..
-            } = &mut *inner;
+            } = inner;
             logs.retain(|held, _| pinned.contains(held));
             keys.retain(|_, held| pinned.contains(held));
             confirmed.retain(|held, _| pinned.contains(held));
@@ -218,7 +252,7 @@ impl KeyMap {
     }
 
     /// The keys of `state` (listed at or below `trusted`) that hold a "no log" answer, fresh or
-    /// not.
+    /// not, or a pending lookup: their links were judged without this log.
     fn no_log_keys(&self, state: &KeyState, trusted: u64) -> Vec<String> {
         let Ok(inner) = self.inner.lock() else {
             return vec![];
@@ -227,7 +261,10 @@ impl KeyMap {
             .masters
             .iter()
             .chain(state.keys.values())
-            .filter(|r| r.added <= trusted && inner.no_log.contains_key(&r.sign))
+            .filter(|r| {
+                r.added <= trusted
+                    && (inner.no_log.contains_key(&r.sign) || inner.pending.contains(&r.sign))
+            })
             .map(|r| r.sign.clone())
             .collect()
     }
@@ -595,6 +632,18 @@ impl KelCache {
         Self::with(store, meta, store_keys, global_key_map())
     }
 
+    /// [`KelCache::open`] feeding `key_map` (tests: a restart with a fresh key map).
+    #[cfg(test)]
+    pub(crate) fn open_with_map(
+        path: impl AsRef<Path>,
+        store_keys: Vec<String>,
+        key_map: Arc<KeyMap>,
+    ) -> Result<Self, CacheError> {
+        let store = SqliteChainStore::open(path.as_ref()).map_err(storage)?;
+        let meta = Connection::open(path.as_ref()).map_err(storage)?;
+        Self::with(store, meta, store_keys, key_map)
+    }
+
     fn with(
         store: SqliteChainStore,
         meta: Connection,
@@ -629,23 +678,24 @@ impl KelCache {
         self.changes.subscribe()
     }
 
-    /// Puts the trusted part of `state` (up to `trusted`) into the key map and fires a
-    /// [`VerdictChange`] for each key whose verdict differs from what the map held (for a log
-    /// the map did not hold: each key it had answered "no log" for).
-    fn publish_trusted(&self, scid: &str, state: &KeyState, trusted: u64) {
-        let held = self.key_map.log(scid);
-        if held.as_ref().is_some_and(|h| h.trusted == trusted) {
-            return;
-        }
+    /// Puts the trusted part of `state` (up to `trusted`) into the key map, with the store's
+    /// confirmation at `confirmed` in the same step ([`KeyMap::publish_newer`]: never in place
+    /// of a later trusted seq), and fires a [`VerdictChange`] for each key whose verdict differs
+    /// from what the map held. For a log the map did not hold: each key it had answered "no
+    /// log" for or was still asking about, and each device key that no longer counts.
+    fn publish_trusted(&self, scid: &str, state: &KeyState, trusted: u64, confirmed: Option<u64>) {
         let now = now();
         let had_no_log = self.key_map.no_log_keys(state, trusted);
-        self.key_map.publish(
+        let Some(held) = self.key_map.publish_newer(
             scid,
             TrustedLog {
                 state: state.clone(),
                 trusted,
             },
-        );
+            confirmed,
+        ) else {
+            return;
+        };
         let keys = state
             .masters
             .iter()
@@ -745,6 +795,32 @@ impl KelCache {
             .transpose()
     }
 
+    /// Reads the trusted part of every log the cache holds a head for into the key map, so the
+    /// map fires a [`VerdictChange`] for each key that no longer counts (a bot scope expired
+    /// while the executor was down, a revocation) and the signer re-check re-judges the links
+    /// stored `valid` by it ([`KelCache::publish_trusted`] on a log the map did not hold).
+    /// Called once, at start, once the perspectives are open. A log that fails to read is
+    /// logged and skipped: its next read fires the same changes. The number of logs read.
+    pub async fn load_held(&self) -> Result<usize, CacheError> {
+        let scids: Vec<String> = {
+            let meta = self.meta.lock().map_err(storage)?;
+            let mut statement = meta
+                .prepare("SELECT scid FROM identity_heads")
+                .map_err(storage)?;
+            let rows = statement.query_map([], |row| row.get(0)).map_err(storage)?;
+            rows.collect::<Result<_, _>>().map_err(storage)?
+        };
+        let mut read = 0;
+        for scid in scids {
+            match self.trusted(&scid).await {
+                Ok(Some(_)) => read += 1,
+                Ok(None) => {}
+                Err(e) => log::warn!("identity: could not read the log of {scid} at start: {e}"),
+            }
+        }
+        Ok(read)
+    }
+
     /// The cached log of `scid` with its trusted seq: the seq of the accepted head, while that
     /// head still verifies under `identity.storeKeys` (heads persist across a change of the
     /// keys) and the cached log reaches it with the same hash. `None` when the cache holds no
@@ -773,7 +849,7 @@ impl KelCache {
             .first()
             .is_some_and(|entry| entry.seq == head.seq && entry.hash == head.hash);
         if matches {
-            self.publish_trusted(scid, chain.state(), head.seq);
+            self.publish_trusted(scid, chain.state(), head.seq, None);
         }
         Ok(matches.then_some((chain, head.seq)))
     }
@@ -1063,9 +1139,9 @@ impl KelCache {
         }
         if ours.seq == head.seq {
             self.accept_head(head)?;
-            // First, so a re-check the new head starts admits on it.
-            self.key_map.note_confirmed(scid, now());
-            self.publish_trusted(scid, chain.state(), head.seq);
+            // The confirmation with the log, in one step: a re-check the new head starts
+            // admits on it, and no check pairs it with the log this head replaces.
+            self.publish_trusted(scid, chain.state(), head.seq, Some(now()));
         }
         Ok(Some(ours))
     }
@@ -2507,6 +2583,35 @@ pub(crate) mod tests {
         ));
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
         assert!(cache.trusted(&log.scid()).await.unwrap().is_some());
+    }
+
+    /// A trusted read that finishes after a newer head was published does not put its older
+    /// log back (that log may still list a key the newer head revoked), and it brings no
+    /// confirmation; the head the map holds, read again, brings one. The log and its
+    /// confirmation land in one step.
+    #[test]
+    fn an_older_trusted_read_does_not_replace_a_newer_one() {
+        let log = TestLog::new(9);
+        let scid = log.scid();
+        let map = KeyMap::new();
+        let at = |trusted| TrustedLog {
+            state: log.chain().state().clone(),
+            trusted,
+        };
+        assert!(map.publish_newer(&scid, at(2), None).is_some());
+        assert!(!map.admits(&scid, 100, 30), "no confirmation yet");
+        assert!(map.publish_newer(&scid, at(1), Some(100)).is_none());
+        assert_eq!(map.log(&scid).unwrap().trusted, 2, "the newer log stays");
+        assert!(
+            !map.admits(&scid, 100, 30),
+            "an older read confirms nothing"
+        );
+        assert!(map.publish_newer(&scid, at(2), Some(100)).is_none());
+        assert!(map.admits(&scid, 100, 30), "the held head is confirmed");
+        let replaced = map.publish_newer(&scid, at(3), Some(200)).unwrap();
+        assert_eq!(replaced.unwrap().trusted, 2);
+        assert_eq!(map.log(&scid).unwrap().trusted, 3);
+        assert!(map.admits(&scid, 200, 30));
     }
 
     /// A log the map did not hold yet (loaded after a restart, or evicted and read again)

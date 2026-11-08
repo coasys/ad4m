@@ -1757,7 +1757,7 @@ fn failure(e: ResolveError, mut meta: DidResolutionMetadata) -> DidResolutionRes
 mod tests {
     use super::*;
     use crate::identity::cache::tests::{
-        accept_signed, add_device, in_memory, trusting, FakeStore, TestLog,
+        accept_signed, add_device, in_memory, store_key, trusting, FakeStore, TestLog,
     };
     use crate::identity::src_fetch::test_host::{from_of, response, TestHost};
     use crate::identity::types::DidDocument;
@@ -2571,6 +2571,35 @@ mod tests {
         cosign(&mut event, "m0", &log.master).unwrap();
         log.events.push(event);
         bot
+    }
+
+    /// At start the re-check reads every log the cache holds ([`KelCache::load_held`]), so a
+    /// bot scope that ended while the executor was down is reported, and the links stored
+    /// `valid` by it are judged again, though no link or lookup asks for its log again.
+    #[tokio::test]
+    async fn the_start_load_reports_bot_keys_that_expired_while_down() {
+        use super::super::cache::KeyMap;
+        use super::super::verdict::KeyVerdict;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let mut log = TestLog::new(86);
+        let bot = add_bot_until(&mut log, 87, super::super::service::now() - 10);
+        let keys = vec![store_key().multikey()];
+        {
+            let cache =
+                KelCache::open_with_map(&path, keys.clone(), Arc::new(KeyMap::new())).unwrap();
+            accept_signed(&cache, &log.events).await;
+        }
+        // The restart: a key map that holds nothing.
+        let cache = KelCache::open_with_map(&path, keys, Arc::new(KeyMap::new())).unwrap();
+        let mut changes = cache.subscribe();
+        assert_eq!(cache.load_held().await.unwrap(), 1);
+        let change = changes
+            .try_recv()
+            .expect("a change for the expired bot key");
+        assert_eq!(change.key, bot.key());
+        assert_eq!(change.verdict, KeyVerdict::Expired);
+        assert!(cache.key_map().log(&log.scid()).is_some());
     }
 
     #[tokio::test]
