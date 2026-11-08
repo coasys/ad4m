@@ -575,6 +575,17 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
         // Before any agent signs: a link's anchor is read from the key map with no I/O.
         crate::identity::load_local_identities().await;
+        // Before the API serves a session: a key the persisted log already shows revoked
+        // ends its loaded grants here — the write that ended them may never have landed,
+        // and the watcher's first pass has not run. The cached logs alone decide: the
+        // store may be down.
+        if let Ok(service) = crate::identity::service() {
+            crate::identity::key_login::end_key_grants_revoked_in_cache(
+                &service,
+                crate::agent::grants::Grants::global(),
+            )
+            .await;
+        }
     }
 
     // Set multi-user mode before starting services to avoid race condition

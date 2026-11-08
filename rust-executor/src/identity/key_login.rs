@@ -958,13 +958,46 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
     }
 }
 
+/// When each key's store read in a re-check last began, by `(scid, key)`: each pass reads
+/// the least-recently-attempted first, so a read that stalls until the deadline moves its
+/// key to the back and every key is attempted within ⌈keys /
+/// [`KEY_RECHECK_READS_AT_ONCE`]⌉ passes. In memory only — it is the watcher's, and a
+/// restart asks every key again in its own order.
+#[derive(Default)]
+pub struct RecheckAttempts(Mutex<HashMap<(String, String), std::time::Instant>>);
+
+impl RecheckAttempts {
+    /// `key`'s last attempt; `None` — first in the pass's order — when no pass began a
+    /// read for it yet.
+    fn last(&self, scid: &str, key: &str) -> Option<std::time::Instant> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|last| last.get(&(scid.to_string(), key.to_string())).copied())
+    }
+
+    /// Marks `key`'s read as begun: an attempt, whatever it answers or however it stalls.
+    fn mark(&self, scid: &str, key: &str) {
+        if let Ok(mut last) = self.0.lock() {
+            last.insert(
+                (scid.to_string(), key.to_string()),
+                std::time::Instant::now(),
+            );
+        }
+    }
+}
+
 /// Reads the key of every live key-bound grant again from the store, whatever the cache's age
 /// (a cached read up to an interval old would let a revocation the cache missed stand for two
 /// intervals): a key no longer valid, or a bot's, ends its grants; a valid one records the
 /// check. While the store cannot be read, grants whose last valid check is
 /// [`STORE_OUTAGE_GRACE`] old end.
 /// Returns how many active grants ended.
-pub async fn recheck_key_grants(service: &IdentityService, now: u64) -> usize {
+pub async fn recheck_key_grants(
+    service: &IdentityService,
+    now: u64,
+    attempts: &RecheckAttempts,
+) -> usize {
     let mut by_key: BTreeMap<(String, String), Vec<Arc<LiveGrant>>> = BTreeMap::new();
     for grant in Grants::global().key_bound() {
         if let Some(binding) = &grant.key {
@@ -975,16 +1008,18 @@ pub async fn recheck_key_grants(service: &IdentityService, now: u64) -> usize {
         }
     }
     // The reads run together, at most [`KEY_RECHECK_READS_AT_ONCE`] at a time and under
-    // one deadline for the pass: a stalled read holds back no other key's, and a key the
-    // pass does not reach counts as unread, as a timed-out read does.
+    // one deadline for the pass, least-recently-attempted first: a read that stalls until
+    // the deadline moves its key to the back, so it holds back no other key past one
+    // pass; a key the pass does not reach counts as unread, as a timed-out read does.
     use futures::StreamExt;
+    let mut keys: Vec<(String, String)> = by_key.keys().cloned().collect();
+    keys.sort_by_key(|(scid, key)| attempts.last(scid, key));
     let reads = futures::stream::iter(
-        by_key
-            .keys()
-            .cloned()
+        keys.into_iter()
             .map(|(scid, key)| {
                 let resolver = service.resolver.clone();
                 async move {
+                    attempts.mark(&scid, &key);
                     let read = match tokio::time::timeout(
                         KEY_READ_TIMEOUT,
                         resolver.session_key(&scid, &key, 0),
@@ -1060,6 +1095,50 @@ pub async fn recheck_key_grants(service: &IdentityService, now: u64) -> usize {
     ended
 }
 
+/// The one pass of live key-bound grants against the log the cache last trusted, run at
+/// start after the grants load and before the API serves: `cached_session_key` reads no
+/// store — it may be down. A key the cached log shows revoked, or does not list at its
+/// trusted seq, ends its grants here — the revocation the cache persisted ends its
+/// sessions even when the write that ended them never landed (a failed pending note and
+/// a failed revocation), and before the watcher's first pass could run.
+/// Returns how many active grants ended.
+pub async fn end_key_grants_revoked_in_cache(service: &IdentityService, grants: &Grants) -> usize {
+    let mut checked: HashMap<(String, String), bool> = HashMap::new();
+    let mut to_end: Vec<Arc<LiveGrant>> = Vec::new();
+    for grant in grants.key_bound() {
+        let Some(binding) = &grant.key else {
+            continue;
+        };
+        let admits = match checked.entry((binding.scid.clone(), binding.key.clone())) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => *entry.insert(
+                service
+                    .resolver
+                    .cached_session_key(&binding.scid, &binding.key)
+                    .await
+                    .is_ok_and(|found| found.admits()),
+            ),
+        };
+        if !admits {
+            to_end.push(grant);
+        }
+    }
+    if to_end.is_empty() {
+        return 0;
+    }
+    let active = to_end.iter().filter(|g| !g.is_ended()).count();
+    match grants.revoke(&to_end) {
+        Ok(()) => {
+            log::info!("identity: ended {active} key session(s) on the cached verdicts at start");
+            active
+        }
+        Err(e) => {
+            log::error!("identity: ending key sessions on the cached verdicts at start: {e}");
+            0
+        }
+    }
+}
+
 /// Ends key sessions whose key stops being valid: on each verdict change the cache publishes,
 /// and every [`KEY_RECHECK_INTERVAL`] for what a change cannot carry (a store that was down, a
 /// key that gained the bot mark). Started by `identity::init`, which makes `changes` before it
@@ -1077,6 +1156,7 @@ pub async fn run_key_session_watch(
     // grants loaded at start are checked then.
     let mut rechecking: Option<tokio::task::JoinHandle<()>> = None;
     let mut due = true;
+    let attempts = Arc::new(RecheckAttempts::default());
     loop {
         tokio::select! {
             change = changes.recv() => match change {
@@ -1091,9 +1171,9 @@ pub async fn run_key_session_watch(
         }
         if due && rechecking.as_ref().is_none_or(|r| r.is_finished()) {
             due = false;
-            let service = service.clone();
+            let (service, attempts) = (service.clone(), attempts.clone());
             rechecking = Some(tokio::spawn(async move {
-                recheck_key_grants(&service, super::service::now()).await;
+                recheck_key_grants(&service, super::service::now(), &attempts).await;
             }));
         }
     }
@@ -1104,7 +1184,9 @@ mod tests {
     use super::*;
     use crate::agent::session::{AuthError, OperatorSource};
     use crate::identity::backend::IdentityBackend;
-    use crate::identity::cache::tests::{accept_signed, trusting, FakeStore, TestLog};
+    use crate::identity::cache::tests::{
+        accept_signed, on_file, store_key, trusting, FakeStore, TestLog,
+    };
     use crate::identity::device::{enc_key_of, multikey_of as device_multikey};
     use crate::identity::resolver::Resolver;
     use crate::types::{AuthInfoInput, CapabilityInput, ResourceInput};
@@ -1254,6 +1336,56 @@ mod tests {
         fn operate(&self) {
             test_db(|db| db.set_operator_record_for_test(Some(&self.did))).unwrap();
         }
+    }
+
+    /// The world whose key-log cache is the file at `path`: a restart re-opens the same
+    /// logs and heads, as the executor's `ad4m_db.sqlite` does.
+    async fn world_on_file(seed: u8, path: &std::path::Path) -> World {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_test_db();
+        let mut log = TestLog::new(seed);
+        let phone = signing_key(seed.wrapping_add(1));
+        let bot = signing_key(seed.wrapping_add(2));
+        let enc = |s: u8| ad4m_identity_core::encode_x25519_multikey(&[s; 32]);
+        add_key(
+            &mut log,
+            phone.key(),
+            enc(seed.wrapping_add(1)),
+            KeyLife::Standing,
+        );
+        add_key(
+            &mut log,
+            bot.key(),
+            enc(seed.wrapping_add(2)),
+            KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 4_000_000_000,
+            }),
+        );
+        let did = did_of(&log.scid());
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let backend: Arc<dyn IdentityBackend> = store.clone();
+        let cache = Arc::new(on_file(path, vec![store_key().multikey()]));
+        let service = IdentityService {
+            resolver: Arc::new(Resolver::new(cache.clone(), backend.clone(), None, false)),
+            backend,
+            cache,
+            store_url: None,
+            challenges: Default::default(),
+            audiences: Audiences::loopback(LOCAL_PORT),
+            store_keys_source: crate::identity::StoreSource::Config,
+        };
+        let world = World {
+            service,
+            store,
+            log,
+            phone,
+            bot,
+            did,
+        };
+        accept_signed(&world.service.cache, &world.log.events).await;
+        world
     }
 
     fn now() -> u64 {
@@ -1834,6 +1966,78 @@ mod tests {
         no_operator();
     }
 
+    // A revocation the persisted key log holds ends the grant at start even when no
+    // grant-table write ever landed: the pending note and the revocation write both
+    // failed, so the row reads active again — the cached verdict refuses the token
+    // before the API serves it (the watcher's first pass may still be waiting, and the
+    // store may be down).
+    #[tokio::test]
+    async fn a_revoked_keys_grant_is_refused_at_start_when_its_end_never_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let mut world = world_on_file(133, &path).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        assert!(open(&result.token).is_ok());
+        let grant_id = crate::agent::session::TokenId(result.grant_id.clone());
+
+        // The key's revocation is accepted into the cache: persisted on the file a
+        // restart re-opens.
+        let mut changes = world.service.cache.subscribe();
+        let revoke_phone =
+            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(revoke_phone);
+        accept_signed(&world.service.cache, &world.log.events).await;
+        let mut change = None;
+        while let Ok(c) = changes.try_recv() {
+            if c.key == world.phone.key() {
+                change = Some(c);
+            }
+        }
+        let change = change.expect("the revocation's verdict change");
+
+        // Both writes of the end fail: no pending note lands and the row stays active,
+        // so a restart forgets the in-memory end too.
+        Grants::global().retry_pending();
+        crate::db::FAIL_NEXT_GRANT_NOTE.store(true, Ordering::SeqCst);
+        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, Ordering::SeqCst);
+        on_verdict_change(&change);
+        assert_eq!(open(&result.token).unwrap_err(), AuthError::Revoked);
+
+        // The restart: grants load from the table (the row still active), the cache
+        // re-opens on the same file, the store is down and the watcher has not run.
+        let reloaded = Grants::default();
+        reloaded.load(crate::db_backend::db_backend()).unwrap();
+        let restarted = Arc::new(on_file(&path, vec![store_key().multikey()]));
+        let down = Arc::new(FakeStore::new(vec![]));
+        down.store_down.store(true, Ordering::SeqCst);
+        let backend: Arc<dyn IdentityBackend> = down;
+        let service = IdentityService {
+            resolver: Arc::new(Resolver::new(
+                restarted.clone(),
+                backend.clone(),
+                None,
+                false,
+            )),
+            backend,
+            cache: restarted,
+            store_url: None,
+            challenges: Default::default(),
+            audiences: Audiences::loopback(LOCAL_PORT),
+            store_keys_source: crate::identity::StoreSource::Config,
+        };
+        assert!(
+            reloaded.get(&grant_id).is_some(),
+            "the row still reads active: no write ever landed"
+        );
+        end_key_grants_revoked_in_cache(&service, &reloaded).await;
+        assert!(
+            reloaded.get(&grant_id).is_none(),
+            "the cached verdict ends it before the API serves"
+        );
+        no_operator();
+    }
+
     // The re-check reads each key again from the store: a revocation the subscription missed
     // ends the session, however fresh the cache; a valid key records the check; a store outage ends only grants whose last
     // valid check is an hour old.
@@ -1847,15 +2051,16 @@ mod tests {
 
         // Valid: the check is recorded.
         let t = now();
-        recheck_key_grants(&world.service, t + 10).await;
+        let attempts = RecheckAttempts::default();
+        recheck_key_grants(&world.service, t + 10, &attempts).await;
         assert!(session.check().is_ok());
         assert_eq!(binding.checked_at(), t + 10);
 
         // The store is down: kept within the hour, ended after it.
         world.store.store_down.store(true, Ordering::SeqCst);
-        recheck_key_grants(&world.service, t + 20).await;
+        recheck_key_grants(&world.service, t + 20, &attempts).await;
         assert!(session.check().is_ok(), "kept on the last valid verdict");
-        recheck_key_grants(&world.service, t + 10 + STORE_OUTAGE_GRACE).await;
+        recheck_key_grants(&world.service, t + 10 + STORE_OUTAGE_GRACE, &attempts).await;
         assert_eq!(session.check(), Err(AuthError::Revoked), "fail closed");
 
         // A login takes a read up to LOGIN_MAX_AGE old: with an older one, the outage fails it.
@@ -1871,7 +2076,10 @@ mod tests {
             revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
-        assert_eq!(recheck_key_grants(&world.service, now()).await, 1);
+        assert_eq!(
+            recheck_key_grants(&world.service, now(), &attempts).await,
+            1
+        );
         assert_eq!(fresh_session.check(), Err(AuthError::Revoked));
         no_operator();
     }
@@ -2633,7 +2841,7 @@ mod tests {
         *world.store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
         let service = Arc::new(world.service);
         let recheck = tokio::spawn(async move {
-            recheck_key_grants(&service, now()).await;
+            recheck_key_grants(&service, now(), &RecheckAttempts::default()).await;
         });
         entered.notified().await;
         tokio::time::advance(KEY_READ_TIMEOUT + Duration::from_secs(1)).await;
@@ -2755,7 +2963,9 @@ mod tests {
 
         let service = Arc::new(world.service);
         let started = tokio::time::Instant::now();
-        let recheck = tokio::spawn(async move { recheck_key_grants(&service, now()).await });
+        let recheck = tokio::spawn(async move {
+            recheck_key_grants(&service, now(), &RecheckAttempts::default()).await
+        });
         for notify in &entered {
             notify.notified().await;
         }
@@ -2781,6 +2991,85 @@ mod tests {
         no_operator();
     }
 
+    // The reads that stall until a pass's deadline move to the back of the order: each
+    // pass reads least-recently-attempted first, so a key starved behind them is reached
+    // on the next pass — every key is attempted within ⌈keys /
+    // KEY_RECHECK_READS_AT_ONCE⌉ passes.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_reads_move_to_the_back_of_the_rechecks_order() {
+        use tokio::sync::Notify;
+        let mut world = world(64).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // Two full batches of key-bound grants whose store reads stall, all sorted ahead
+        // of the session's key: the first batch holds the slots until the read timeout,
+        // the second fills them only to die at the pass's deadline — the session's key is
+        // never reached on a pass that orders the keys the same way.
+        let entered: Vec<Arc<Notify>> = (0..2 * KEY_RECHECK_READS_AT_ONCE)
+            .map(|i| {
+                let scid = format!("0-stall-{i}");
+                let notify = Arc::new(Notify::new());
+                world
+                    .store
+                    .stall_for
+                    .lock()
+                    .unwrap()
+                    .insert(format!("did:scid:coasys:1:{scid}"), notify.clone());
+                Grants::global()
+                    .insert(
+                        LiveGrant::for_test(
+                            &format!("starved-stall-{i}"),
+                            AgentContext::main_agent(),
+                            now() + 3600,
+                        )
+                        .bound_to(KeyBinding::new(
+                            scid.clone(),
+                            format!("z6Mk{scid}"),
+                            "d1".into(),
+                            0,
+                            now(),
+                        )),
+                    )
+                    .unwrap();
+                notify
+            })
+            .collect();
+        // The session's key is revoked on the store; no verdict change reached this
+        // executor.
+        let revoke_phone =
+            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(revoke_phone);
+        *world.store.events.lock().unwrap() = world.log.events.clone();
+
+        let service = Arc::new(world.service);
+        let attempts = Arc::new(RecheckAttempts::default());
+        // The first pass is consumed by the stalled reads: the session's key is never
+        // reached, and the grant keeps its fresh check.
+        {
+            let (service, attempts) = (service.clone(), attempts.clone());
+            let recheck =
+                tokio::spawn(async move { recheck_key_grants(&service, now(), &attempts).await });
+            for notify in &entered[..KEY_RECHECK_READS_AT_ONCE] {
+                notify.notified().await;
+            }
+            tokio::time::advance(KEY_READ_TIMEOUT + Duration::from_secs(1)).await;
+            assert_eq!(recheck.await.unwrap(), 0);
+            assert!(session.check().is_ok(), "the starved key is never reached");
+        }
+        // The next pass reads the starved key first — the stalled reads moved to the
+        // back — and its revocation ends the session.
+        {
+            let recheck =
+                tokio::spawn(async move { recheck_key_grants(&service, now(), &attempts).await });
+            tokio::time::advance(KEY_READ_TIMEOUT + Duration::from_secs(1)).await;
+            recheck.await.unwrap();
+            assert_eq!(session.check(), Err(AuthError::Revoked));
+        }
+        world.store.stall_for.lock().unwrap().clear();
+        no_operator();
+    }
+
     // A successful periodic check is persisted: the row's `checked_at` moves to the check's
     // time, and the grant's expiry does not.
     #[tokio::test]
@@ -2789,7 +3078,7 @@ mod tests {
         world.operate();
         let result = world.login_as(&world.phone).await.unwrap();
         let t = now() + 60;
-        recheck_key_grants(&world.service, t).await;
+        recheck_key_grants(&world.service, t, &RecheckAttempts::default()).await;
         let row = crate::db::Ad4mDb::with_global_instance(|db| db.grants())
             .unwrap()
             .into_iter()

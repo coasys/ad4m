@@ -264,6 +264,10 @@ impl Ad4mDb {
     /// caller writes before the change itself, so a restart between them finds the
     /// grants ended. A pending `delete` covers a `revoke` of the same grant.
     pub fn note_pending_grant_writes(&self, ids: &[String], op: &str) -> Ad4mDbResult<()> {
+        #[cfg(test)]
+        if super::FAIL_NEXT_GRANT_NOTE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(rusqlite::Error::InvalidQuery.into());
+        }
         for id in ids {
             self.conn.execute(
                 "INSERT INTO pending_grant_writes (grant_id, op) VALUES (?1, ?2)
