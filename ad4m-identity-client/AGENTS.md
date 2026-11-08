@@ -59,6 +59,13 @@ master key for the person.
 - **Custody before the push.** A push is on the vault's retry list before the inbox write and
   forgotten once the store takes it, or refuses it for good (any 4xx but 429), or its device
   key leaves the log; `retry_pushes` runs at each start and unlock.
+- **At least once.** A push whose answer was lost is put again, and a request whose delete
+  failed stays in the box and may be answered again: `take_master` and `answer` act
+  idempotently (the same key kept again, each message acknowledged; a `confirm-revoke` of a
+  key no longer valid refused before anything is signed).
+- The match code (30 bits) is for the person to compare two screens, not an authentication:
+  a claimer could grind device keys to a code. The offer secret, the single claim and a bound
+  offer keep strangers out; never treat a matching code as proof of the key.
 - The app reads the record as its executor's device (`identity.unwrapRecordKey` opens the
   record key of the executor's entry, local only; `decrypt_record` verifies the envelope's
   signature and recovery attestation against the log first) and writes it as that device:

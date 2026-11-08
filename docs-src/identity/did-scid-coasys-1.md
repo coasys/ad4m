@@ -441,6 +441,13 @@ DID URL from the identity, the anchor and the key id that the log lists for the 
   not, so a revoked key can never return to this identity. A host that requires one key per
   identity (section 14) also refuses it in every other log, so it can never speak for another
   identity there either.
+- The match code (6 base32 characters, 30 bits) is for a person comparing two screens, not an
+  authentication against grinding: someone who could claim an offer could try device keys
+  offline until one shows the code the person expects. What keeps a stranger's key out of a
+  link is the offer secret, which only the offer string or the sealed ticket carries, the
+  single claim an offer takes, and, for a scanned device string, the offer bound to that
+  device's key; the match code catches a claim by another device than the one in front of
+  the person.
 - The core reads no clock. Expiries are compared with the caller's trusted time. The window a
   host accepts for a new `expires` is host policy (section 14).
 - A generic DID Core verifier ignores `coasys:bot`. Bot keys sit outside `authentication` and
@@ -807,6 +814,12 @@ a new string ends the read of the last one.
   key before the holder's write landed stays `true`. At a first link the device's entry
   (`false`) is written before the push, so a device that takes the key at once finds its
   entry to mark.
+- *Delivers at least once.* A push whose answer was lost stays on the retry list and is put
+  again, so a device may find the same master key in two messages; a request answered whose
+  delete failed stays in the box and may be answered again. Both sides act idempotently: a
+  device keeps a master key it already keeps without change and acknowledges each message,
+  and the holder refuses a `confirm-revoke` naming a key no longer valid at the head before
+  it signs anything.
 - *Writes the record* by reading the newest version, applying its own changes (a device's
   entry, a name, `holdsMaster`, a pending revocation) and dropping the entries of keys no
   longer valid at the head, sealing the result as the next version to every reader of the
