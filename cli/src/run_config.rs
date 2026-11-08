@@ -274,8 +274,9 @@ pub struct RunArgs {
     /// `https://ad4m.example.org`; repeat it or separate with commas. A key login or a session
     /// renewal is accepted only when its signed statement's audience names one of them — the
     /// check restricts the signed audience, not the caller's location. Default: only this
-    /// executor's own loopback origins as the audience (a remote caller may sign one too, so
-    /// on a network listener set this to pin key logins to named origins).
+    /// executor's own loopback origins as the audience — and only on a loopback listener:
+    /// a remote caller may sign one too, so on a listener the network reaches (TLS, or
+    /// `localhost` off) key login is refused without this.
     #[arg(
         long = "public-origin",
         env = "AD4M_PUBLIC_ORIGINS",

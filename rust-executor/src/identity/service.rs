@@ -170,7 +170,8 @@ pub struct IdentityService {
     /// The open challenges of key logins (`user.sessionChallenge`).
     pub challenges: super::key_login::Challenges,
     /// The origins a key statement's `audience` may name: `public_origins`, else this
-    /// executor's own loopback origins.
+    /// executor's own loopback origins — and none on a network listener without
+    /// `public_origins` (`Audiences::None`).
     pub audiences: super::key_login::Audiences,
 }
 

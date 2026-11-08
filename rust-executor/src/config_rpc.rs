@@ -337,6 +337,7 @@ fn next_start_accepts(values: &Map<String, Value>, start: &Ad4mConfig) -> Result
     crate::identity::key_login::Audiences::new(
         next.public_origins.as_deref().unwrap_or_default(),
         next.port,
+        next.listens_on_network(),
     )?;
     crate::config::refuse_custody_channel_with_multi_user(
         start.custody_channel == Some(true),

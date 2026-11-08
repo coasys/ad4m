@@ -42,9 +42,13 @@ the offer's state).
   (`normalise_origin`: `ws`/`wss` read as `http`/`https`, host lowercase, default port
   dropped), it is one of `Audiences`: the configured `public_origins` (`--public-origin`),
   else this executor's own loopback origins (`http://127.0.0.1:<port>`,
-  `http://localhost:<port>`, `http://[::1]:<port>`). Without `public_origins` a non-loopback
-  audience is refused as `no-public-origin`, a reason that names the setting; any other
-  mismatch is `audience`. Nothing from the connection (`Host`, `Origin`, the listener) is
+  `http://localhost:<port>`, `http://[::1]:<port>`) on a loopback-only listener. Without
+  `public_origins` a non-loopback audience is refused as `no-public-origin`, a reason that
+  names the setting; any other mismatch is `audience`. On a listener the network reaches
+  (`Ad4mConfig::listens_on_network`: TLS, or `localhost` off) without `public_origins` no
+  origin is accepted at all (`Audiences::None`): a remote caller signs a loopback audience
+  just as easily, so `user.sessionChallenge`, `user.loginWithKey` and `user.renewSession`
+  refuse `no-audience`. Nothing from the connection (`Host`, `Origin`, the listener) is
   read: the caller controls those. This is what stops a relay: a server the person added
   hands the app this executor's challenge and DID, but the app signs the server's own
   origin, and this executor refuses that. The executor-DID check stays as well. The
