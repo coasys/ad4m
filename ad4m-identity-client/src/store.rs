@@ -117,7 +117,7 @@ const MAX_STORE_LOG_BYTES: usize = 32 << 20;
 /// `identity.prepareDevice`'s device string lives this long, as on the executor.
 const DEVICE_STRING_TTL_S: u64 = 300;
 /// The request box's default time to live, as the executor's `post_request`.
-const REQUEST_BOX_TTL_S: u64 = ad4m_identity_core::requests::REQUEST_TTL_S;
+const REQUEST_BOX_TTL_S: u64 = ad4m_identity_core::requests::REQUEST_POST_TTL_S;
 /// `503`'s reason when `enc` cannot open right now — the executor's `Unopened::NoKey`
 /// answer.
 const ENC_UNAVAILABLE: &str = "the wallet is locked, so the inbox does not open";
