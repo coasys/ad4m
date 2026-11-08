@@ -4,7 +4,7 @@
 use serde_json::json;
 
 use super::*;
-use crate::api::ws_handler::build_handler_map;
+use crate::api::ws_handler::{build_handler_map, HandlerMap, NoParams, WsFn};
 use crate::db::BotGrantRow;
 
 const BOT: &str = "did:key:bot";
@@ -379,6 +379,152 @@ async fn a_bot_watches_only_the_perspectives_of_its_grant() {
     conn.handle_text(&json!({"id": "5", "type": "events.unwatch", "params": {}}).to_string())
         .await;
     assert_eq!(answer(&mut out)["result"], json!(true), "unwatch");
+}
+
+/// A session ctx for the bot `row` (its managed agent, a user's default capabilities).
+fn bot_ctx(row: BotRow) -> std::sync::Arc<crate::types::RequestContext> {
+    use crate::agent::capabilities::get_user_default_capabilities;
+    use crate::agent::session::{Principal, Session};
+    use crate::agent::AgentContext;
+    use crate::types::RequestContext;
+    let did = row.did.clone();
+    remember(row);
+    set_loaded(true);
+    let session = Session::for_test(Principal::Agent(AgentContext::managed(did.clone())))
+        .with_caps(get_user_default_capabilities())
+        .with_did(&did);
+    let mut ctx = RequestContext::for_session(session);
+    ctx.reason = Some("meet".to_string());
+    std::sync::Arc::new(ctx)
+}
+
+/// A handler map with `neighbourhood.join` (a join is a logged bot action) answered by
+/// `handler`, guarded as the real method is. The activity the tests then read back is
+/// written at dispatch.
+fn join_map(handler: impl WsFn) -> HandlerMap {
+    let mut map = HandlerMap::new();
+    map.method::<NoParams, Value>("neighbourhood.join", handler)
+        .guard(Guard::Cap(
+            crate::agent::capabilities::NEIGHBOURHOOD_READ_CAPABILITY.clone(),
+        ));
+    map
+}
+
+/// A bot whose grant and key allow `join` of `neighbourhood://n1`.
+fn join_bot() -> BotRow {
+    let row = bot("active", &["join"], &["neighbourhood://n1"], None);
+    set_test_key(
+        &row.did,
+        Ok(BotKey {
+            key_id: "d2".to_string(),
+            verdict: KeyVerdict::Valid,
+            scope: Some(BotScope {
+                can: vec!["join".to_string()],
+                expires: u64::MAX,
+            }),
+        }),
+    );
+    row
+}
+
+/// The bot's activity rows, newest first.
+fn activity(did: &str) -> Vec<crate::db::BotActivityRow> {
+    crate::db::Ad4mDb::with_global_instance(|db| db.bot_activity(did, None, 10).unwrap())
+}
+
+/// An admitted call the dispatcher then answers `allowed` settles its attempt entry: one
+/// row (`started`, then `allowed`), not two.
+#[tokio::test]
+async fn an_answered_call_settles_its_attempt_entry() {
+    crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+    let row = join_bot();
+    let ctx = bot_ctx(row.clone());
+    let map = join_map(|_, _| async { Ok(Value::Null) });
+    let params = json!({"url": "neighbourhood://n1", "meta": {"reason": "meet"}});
+    map.dispatch("neighbourhood.join", params, ctx)
+        .await
+        .unwrap();
+
+    let entries = activity(BOT);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let entry = &entries[0];
+    assert_eq!(entry.outcome, log::ALLOWED);
+    assert_eq!(entry.method, "neighbourhood.join");
+    assert_eq!(entry.action.as_deref(), Some("join"));
+    assert_eq!(entry.space.as_deref(), Some("neighbourhood://n1"));
+    assert_eq!(entry.reason.as_deref(), Some("meet"));
+}
+
+/// A dispatch dropped after admission (a cancelled call) settles the entry `interrupted`:
+/// the call never answered, and part of its work may have applied.
+#[tokio::test]
+async fn a_cancelled_call_leaves_an_interrupted_entry() {
+    crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+    let row = join_bot();
+    let ctx = bot_ctx(row.clone());
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ran2 = ran.clone();
+    let map = join_map(move |_, _| {
+        ran2.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::future::pending()
+    });
+    let params = json!({"url": "neighbourhood://n1", "meta": {"reason": "go"}});
+    let mut call = Box::pin(map.dispatch("neighbourhood.join", params, ctx));
+    // One poll admits the call and starts its handler; the handler then pends.
+    let waker = futures::task::noop_waker();
+    let mut task_cx = std::task::Context::from_waker(&waker);
+    assert!(std::future::Future::poll(call.as_mut(), &mut task_cx).is_pending());
+    assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    drop(call);
+
+    let entries = activity(BOT);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].outcome, log::INTERRUPTED);
+}
+
+/// A handler that panics unwinds through the dispatch; the dropped `Pending` settles the
+/// entry `interrupted` (indeterminate), never `allowed`.
+#[tokio::test]
+async fn a_panicking_handler_leaves_an_interrupted_entry() {
+    crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+    let row = join_bot();
+    let ctx = bot_ctx(row.clone());
+    let map = join_map(|_, _| async { panic!("the handler panicked") });
+    let params = json!({"url": "neighbourhood://n1", "meta": {"reason": "go"}});
+    let joined =
+        tokio::spawn(async move { map.dispatch("neighbourhood.join", params, ctx).await }).await;
+    assert!(joined.unwrap_err().is_panic());
+
+    let entries = activity(BOT);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].outcome, log::INTERRUPTED);
+}
+
+/// When the attempt entry cannot be written the call is refused and does not run: a bot's
+/// write or join never runs unlogged (fail closed).
+#[tokio::test]
+async fn an_unloggable_call_is_refused() {
+    crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+    let row = join_bot();
+    let ctx = bot_ctx(row.clone());
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ran2 = ran.clone();
+    let map = join_map(move |_, _| {
+        ran2.store(true, std::sync::atomic::Ordering::SeqCst);
+        async { Ok(Value::Null) }
+    });
+    let params = json!({"url": "neighbourhood://n1", "meta": {"reason": "go"}});
+    log::set_fail_writes(true);
+    let refused = map.dispatch("neighbourhood.join", params, ctx).await;
+    log::set_fail_writes(false);
+    let error = refused.unwrap_err();
+    assert_eq!(error.code, 503);
+    assert!(error.message.starts_with("log-unavailable: "), "{error:?}");
+    assert!(
+        !ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the handler did not run"
+    );
+    assert!(activity(BOT).is_empty());
 }
 
 /// Until the registry has loaded, a managed agent cannot be told a bot from a user, so its

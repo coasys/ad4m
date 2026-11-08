@@ -1259,6 +1259,18 @@ pub struct QuerySubscriptionUpdate {
     pub result: Option<serde_json::Value>,
 }
 
+/// `subscription-ended`: the executor ended these live query subscriptions on the
+/// connection that opened them (its grant no longer admits the read — e.g.
+/// `not-authorized`, `bot-paused`, `bot-expired`). Never a content event: the withheld
+/// update is not sent. The client resubscribes for a fresh baseline.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionEndedEvent {
+    pub subscription_ids: Vec<String>,
+    pub perspective_uuid: String,
+    pub reason: String,
+}
+
 /// The socket dropped updates, maybe for any of its live queries: every
 /// live query on it must resync.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]

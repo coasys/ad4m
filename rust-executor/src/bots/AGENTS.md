@@ -26,22 +26,33 @@ Rules:
   method a bot should call means adding it to `reach` and to the matrix walk's lists.
 - **An event is a read.** `events.watch` passes the grant (`admit_watch`), and each event of
   a perspective a bot's socket gets passes `delivery` again, as the grant and the owner's log
-  are then: paused, expired, narrowed or a key scope without `read` drops it (and disposes
-  the bot's live queries on that perspective when the event is one of their updates);
-  revoking the bot or its key ends the stream. Revoking the key in the owner's log also ends
-  the bot's sessions (`identity::key_login::end_revoked_bot`, on the verdict change and on
-  the re-check): a bot's token is not key-bound, so `Grants::revoke_key` does not reach it.
+  are then: paused, expired, narrowed or a key scope without `read` withholds it — and ends
+  the bot's live queries on that perspective with a `subscription-ended` control event to
+  the connection (`{subscriptionIds, perspectiveUuid, reason}`; the withheld result is
+  never sent); revoking the bot or its key ends the stream. A grant change (`bot.setGrant`,
+  pause, narrowing) and a key-scope expiry end the bot's live queries on the affected
+  perspectives promptly through the same event, so no query work keeps running for it
+  (`end_agent_subscriptions`; the key-expiry path is the key session re-check). The SDK's
+  `LiveQuery` stops on `subscription-ended`, reports `{state: 'ended', reason}` and
+  resubscribes only when its owner calls `resubscribe` — no automatic polling. Revoking the
+  key in the owner's log also ends the bot's sessions
+  (`identity::key_login::end_revoked_bot`, on the verdict change and on the re-check): a
+  bot's token is not key-bound, so `Grants::revoke_key` does not reach it.
 - **A bot's links anchor in its owner's log** (`identity::signer_identity` falls back to the
   bot row's `owner`); the owners' logs are pinned at startup and on `bot.createAgent`. A
   valid link by a bot key carries the owner as `person` and the bot mark `byBot: true`
   (`CheckedLink::by_bot`, stored as the reifier's `ad4m://ontology/byBot`), so a reader can
   tell the person's own links from their bot's.
 - **Only dispatch records** (`record: true`); `HandlerMap::admit` (MCP's pre-check) does not.
-  A refusal by the bot check is logged at once; an admitted write or join is logged after it
-  ran (`log::Pending`), `allowed` or `failed:<status>` when the method's guard or handler
-  answered an error. Every entry names its space by the neighbourhood URL when the
-  perspective has one (`as_logged`), the name a join of it is logged under; a perspective's
-  UUID only for one without a neighbourhood.
+  A refusal by the bot check is logged at once; an admitted write or join gets one entry
+  (`log::Pending`): the attempt writes `started` before the call runs — a call that cannot
+  write its attempt is refused `503 log-unavailable` and never runs — and the same row
+  settles with the answer: `allowed`, `failed:<status>` when the method's guard or handler
+  answered an error, or `interrupted` when the dispatch was dropped or unwound before it
+  answered (`Pending`'s `Drop`; indeterminate — part of the work may have applied, not
+  rolled back). Every entry names its space by the neighbourhood URL when the perspective
+  has one (`as_logged`), the name a join of it is logged under; a perspective's UUID only
+  for one without a neighbourhood.
 - **Who enforces what.** The grant (spaces, `can`, expiry, pause, revocation) is the hosting
   executor's: it is not signed by the owner's master key, and only the executor that runs the
   bot enforces it (a trusted-host restriction). What every other reader verifies is what the

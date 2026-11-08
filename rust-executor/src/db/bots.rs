@@ -247,6 +247,15 @@ impl Ad4mDb {
         Ok(id)
     }
 
+    /// Updates the outcome of the activity entry `id` (the attempt entry of a call settles
+    /// with its answer). `false` when there is no such entry.
+    pub fn set_bot_activity_outcome(&self, id: i64, outcome: &str) -> Ad4mDbResult<bool> {
+        Ok(self.conn.execute(
+            "UPDATE bot_activity SET outcome = ?2 WHERE id = ?1",
+            params![id, outcome],
+        )? == 1)
+    }
+
     /// The activity of the bot `did`, newest first: at most `limit` entries, older than the
     /// entry `before` when given.
     pub fn bot_activity(

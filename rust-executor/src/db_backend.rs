@@ -397,6 +397,7 @@ macro_rules! ad4m_db_methods {
             fn bots(&self) -> Ad4mDbResult<Vec<BotRow>>;
             fn set_bot_grant(&self, did: &str, grant: &BotGrantRow, read_version: u64) -> Ad4mDbResult<bool>;
             fn add_bot_activity(&self, entry: &BotActivityRow, keep: usize) -> Ad4mDbResult<i64>;
+            fn set_bot_activity_outcome(&self, id: i64, outcome: &str) -> Ad4mDbResult<bool>;
             fn bot_activity(&self, did: &str, before: Option<i64>, limit: usize) -> Ad4mDbResult<Vec<BotActivityRow>>;
             fn sweep_bot_activity(&self, cutoff: u64) -> Ad4mDbResult<usize>;
 

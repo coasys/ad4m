@@ -770,6 +770,8 @@ fn end_revoked_bot(key: &str, verdict: KeyVerdict) -> usize {
 /// Reads the key of every live bot of this executor in its owner's log again (at most
 /// [`KEY_RECHECK_INTERVAL`] old) and ends the sessions of each whose key was revoked: what a
 /// verdict change the subscription missed cannot end. A revoked bot holds no session already.
+/// An expired key scope ends the bot's live queries too: its reads are refused while the
+/// scope is out, so no query work keeps running for it.
 async fn recheck_bot_keys(service: &IdentityService) -> usize {
     let mut ended = 0;
     for bot in crate::bots::all() {
@@ -778,6 +780,13 @@ async fn recheck_bot_keys(service: &IdentityService) -> usize {
         }
         let key = bot.did.strip_prefix("did:key:").unwrap_or(&bot.did);
         if let Ok(found) = service.bot_key(&bot.owner, key).await {
+            if found.verdict == KeyVerdict::Expired {
+                for perspective in crate::perspectives::all_perspectives() {
+                    perspective
+                        .end_agent_subscriptions(&bot.did, crate::bots::BOT_EXPIRED)
+                        .await;
+                }
+            }
             ended += end_revoked_bot(key, found.verdict);
         }
     }

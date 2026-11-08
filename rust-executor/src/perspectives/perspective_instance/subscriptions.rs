@@ -148,6 +148,79 @@ impl PerspectiveInstance {
             .await
     }
 
+    /// End every subscription `connection_id` opened on this perspective, telling the
+    /// connection with one `subscription-ended` event (`reason`): the executor withheld a
+    /// result its grant no longer admits, so a dead subscription id never stays live in a
+    /// client that resumes. The withheld result is never sent.
+    pub(crate) async fn end_connection_subscriptions(
+        &self,
+        connection_id: &str,
+        reason: &str,
+    ) -> usize {
+        self.end_subscriptions_where(|_, q| q.connection == connection_id, reason)
+            .await
+    }
+
+    /// End every subscription `subscriber` (a managed agent's DID) opened on this
+    /// perspective, telling each connection that held one with `subscription-ended`
+    /// (`reason`): its grant paused, narrowed or expired, so no query work keeps running
+    /// for it. Returns how many ended.
+    pub(crate) async fn end_agent_subscriptions(&self, subscriber: &str, reason: &str) -> usize {
+        self.end_subscriptions_where(|_, q| q.subscriber.as_deref() == Some(subscriber), reason)
+            .await
+    }
+
+    /// End the subscriptions `matches` selects, then publish one `subscription-ended`
+    /// event per connection that held any (`{subscriptionIds, perspectiveUuid, reason}`),
+    /// to that connection only ([`Event::for_connection`]). Answers how many ended.
+    async fn end_subscriptions_where(
+        &self,
+        matches: impl Fn(&str, &SubscribedQuery) -> bool,
+        reason: &str,
+    ) -> usize {
+        // The ids and the subscriber of each removed subscription, per connection.
+        let mut by_connection: HashMap<String, (Vec<String>, Option<String>)> = HashMap::new();
+        {
+            let mut queries = self.subscribed_queries.lock().await;
+            let ids: Vec<String> = queries
+                .iter()
+                .filter(|(id, q)| matches(id, q))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in ids {
+                if let Some(q) = queries.remove(&id) {
+                    let (ended, subscriber) =
+                        by_connection.entry(q.connection.clone()).or_default();
+                    ended.push(id);
+                    *subscriber = q.subscriber.clone();
+                }
+            }
+        }
+        if by_connection.is_empty() {
+            return 0;
+        }
+        let ended: usize = by_connection.values().map(|(ids, _)| ids.len()).sum();
+        log::info!(
+            "🔗 {ended} subscription(s) ended ({reason}) [{}]",
+            self.uuid
+        );
+        for (connection, (subscription_ids, subscriber)) in by_connection {
+            let payload = crate::types::SubscriptionEndedEvent {
+                subscription_ids,
+                perspective_uuid: self.uuid.clone(),
+                reason: reason.to_string(),
+            };
+            let event = Event::new(
+                Topic::SubscriptionEnded,
+                Audience::Dids(subscriber.into_iter().collect()),
+                payload,
+            )
+            .for_connection(connection);
+            get_global_pubsub().await.publish_event(event);
+        }
+        ended
+    }
+
     async fn dispose_where(&self, matches: impl Fn(&str, &SubscribedQuery) -> bool) -> usize {
         let removed = {
             let mut queries = self.subscribed_queries.lock().await;

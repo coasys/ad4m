@@ -7,7 +7,7 @@ use ad4m_identity_core::did_of;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{now, remember, BotAction, GrantState, NOT_IN_CAN};
+use super::{now, remember, BotAction, GrantState, NOT_AUTHORIZED, NOT_IN_CAN};
 use crate::agent::capabilities::{
     get_user_default_capabilities, AuthInfo, DEFAULT_TOKEN_VALID_PERIOD,
 };
@@ -162,9 +162,12 @@ pub struct BotActivity {
     /// neighbourhood), a perspective's UUID only for one without a neighbourhood.
     pub space: Option<String>,
     pub reason: Option<String>,
-    /// Written once the call answered: `allowed` (it ran and succeeded), `failed:<status>`
-    /// (the grant let it through, then the method's guard or handler answered that error
-    /// status), or the bot check's refusal code (`bot-grant`, `bot-paused`, `not-in-can`, …).
+    /// One entry per call. `allowed` (it ran and answered Ok), `failed:<status>` (the grant
+    /// let it through, then the method's guard or handler answered that error status), the
+    /// bot check's refusal code (`bot-grant`, `bot-paused`, `not-in-can`, …), `started`
+    /// (admitted and still running), or `interrupted` (admitted, then its dispatch was
+    /// cancelled or panicked: its work may be partly applied — indeterminate, not rolled
+    /// back).
     pub outcome: String,
 }
 
@@ -420,12 +423,34 @@ pub async fn set_grant(
             .unwrap_or(0);
         return Err(version_conflict(current));
     }
+    let previous_spaces = bot.grant.spaces.clone();
     let bot = BotRow { grant, ..bot };
     remember(bot.clone());
     if params.state == GrantState::Revoked {
         // Its sessions end too: a revoked bot holds no token.
         if let Err(e) = Grants::global().revoke_agent(&AgentContext::managed(bot.did.clone())) {
             ::log::warn!("bots: ending the sessions of {}: {e}", bot.did);
+        }
+    }
+    // The grant changed: pause, narrowing or a new `can`/`expires` changes what its live
+    // queries may read, and the next withheld result would end them anyway. End them now,
+    // on the perspectives the old or the new spaces name, so each connection hears
+    // `subscription-ended` rather than holding a dead id.
+    let affected: std::collections::HashSet<String> = previous_spaces
+        .iter()
+        .chain(bot.grant.spaces.iter())
+        .cloned()
+        .collect();
+    for perspective in crate::perspectives::all_perspectives() {
+        let shared_url = perspective.persisted.lock().await.shared_url.clone();
+        if affected.contains(&perspective.uuid)
+            || shared_url
+                .as_deref()
+                .is_some_and(|url| affected.contains(url))
+        {
+            perspective
+                .end_agent_subscriptions(&bot.did, NOT_AUTHORIZED)
+                .await;
         }
     }
     Ok(view(&bot).await)

@@ -16,11 +16,17 @@ pub const KEEP_PER_BOT: usize = 10_000;
 pub const MAX_AGE: u64 = 30 * 24 * 3600;
 /// How often the sweep runs.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
+/// What the attempt entry of an admitted call says while it runs.
+pub const STARTED: &str = "started";
 /// What the entry of a call that ran and answered says.
 pub const ALLOWED: &str = "allowed";
 /// The prefix of the entry of a call the bot check let through but that then failed (its
 /// guard or its handler answered an error): `failed:<status>`.
 pub const FAILED: &str = "failed";
+/// What the entry of a call that never answered says: its dispatch was cancelled or
+/// panicked, so its work may be partly applied. `interrupted` is indeterminate, not
+/// rolled back.
+pub const INTERRUPTED: &str = "interrupted";
 
 /// The outcome of a call the bot check let through, by what it answered.
 pub fn answered(answer: Result<(), &WsRpcError>) -> String {
@@ -31,39 +37,73 @@ pub fn answered(answer: Result<(), &WsRpcError>) -> String {
 }
 
 /// The outcome of the bot check alone: a refusal's code. An admitted call's outcome is known
-/// only once it ran ([`Pending::finish`]).
+/// only once it ran ([`Pending::finish`]) or was dropped ([`Pending`]'s `Drop`).
 pub fn refused(refusal: &Refusal) -> String {
     refusal.code.to_string()
 }
 
-/// A call the bot check let through, logged once the dispatcher knows its answer.
+/// A call the bot check let through. [`Pending::new`] writes its attempt entry (`started`,
+/// its id the call's operation id) before the call runs; [`Pending::finish`] settles the
+/// same entry with the call's answer. Dropped without `finish` — a cancelled dispatch, or
+/// a panicking handler unwinding through it — the entry settles as [`INTERRUPTED`]: part of
+/// the call's work may have applied.
 pub struct Pending {
-    bot: BotRow,
-    method: String,
-    reach: Reach,
-    reason: Option<String>,
+    id: i64,
+    finished: bool,
 }
 
 impl Pending {
-    pub fn new(bot: &BotRow, method: &str, reach: Reach, reason: Option<&str>) -> Self {
-        Pending {
-            bot: bot.clone(),
-            method: method.to_string(),
-            reach,
-            reason: reason.map(str::to_string),
-        }
+    /// Writes the attempt entry and returns the call's guard. Fails when the log cannot be
+    /// written: the call must then not run at all — a bot's write or join never runs
+    /// unlogged (fail closed, `503` [`super::LOG_UNAVAILABLE`]).
+    pub fn new(
+        bot: &BotRow,
+        method: &str,
+        reach: Reach,
+        reason: Option<&str>,
+    ) -> Result<Self, WsRpcError> {
+        let entry = entry(bot, method, &reach, reason, STARTED, now());
+        let id = write(&entry).map_err(|e| {
+            ::log::warn!("bots: logging the start of {method} of {}: {e}", bot.did);
+            WsRpcError {
+                code: 503,
+                message: format!(
+                    "{}: the activity log could not be written, so the call does not run",
+                    super::LOG_UNAVAILABLE
+                ),
+            }
+        })?;
+        Ok(Pending {
+            id,
+            finished: false,
+        })
     }
 
-    /// Logs the call with its answer: [`ALLOWED`], or `failed:<status>`.
-    pub fn finish(self, answer: Result<(), &WsRpcError>) {
-        let outcome = answered(answer);
-        record(
-            &self.bot,
-            &self.method,
-            &self.reach,
-            self.reason.as_deref(),
-            &outcome,
-        );
+    /// Settles the entry with the call's answer: [`ALLOWED`], or `failed:<status>`.
+    pub fn finish(mut self, answer: Result<(), &WsRpcError>) {
+        self.finished = true;
+        self.settle(&answered(answer));
+    }
+
+    /// The outcome on the call's entry. A log that cannot be written does not change the
+    /// call's answer; the failure goes to the executor's log.
+    fn settle(&self, outcome: &str) {
+        if let Err(e) = db_backend().set_bot_activity_outcome(self.id, outcome) {
+            ::log::warn!(
+                "bots: settling activity entry {} to {outcome}: {e}",
+                self.id
+            );
+        }
+    }
+}
+
+impl Drop for Pending {
+    /// A `Pending` dropped without [`Pending::finish`] settles its entry [`INTERRUPTED`]:
+    /// the dispatch future holding it was dropped (cancelled) or unwound (a panic).
+    fn drop(&mut self) {
+        if !self.finished {
+            self.settle(INTERRUPTED);
+        }
     }
 }
 
@@ -99,9 +139,32 @@ pub fn entry(
 /// the failure goes to the executor's log.
 pub fn record(bot: &BotRow, method: &str, reach: &Reach, reason: Option<&str>, outcome: &str) {
     let entry = entry(bot, method, reach, reason, outcome, now());
-    if let Err(e) = db_backend().add_bot_activity(&entry, KEEP_PER_BOT) {
+    if let Err(e) = write(&entry) {
         ::log::warn!("bots: logging {method} of {}: {e}", bot.did);
     }
+}
+
+/// Writes `entry`; the entry's id. A refused call still logs its refusal entry ([`record`]);
+/// an admitted call's attempt entry must succeed or the call does not run ([`Pending::new`]).
+fn write(entry: &BotActivityRow) -> crate::db::Ad4mDbResult<i64> {
+    #[cfg(test)]
+    if FAIL_WRITES.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some("writes fail by test hook".to_string()),
+        )
+        .into());
+    }
+    db_backend().add_bot_activity(entry, KEEP_PER_BOT)
+}
+
+#[cfg(test)]
+static FAIL_WRITES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes every activity write fail, for the fail-closed test ([`Pending::new`]).
+#[cfg(test)]
+pub(crate) fn set_fail_writes(fail: bool) {
+    FAIL_WRITES.store(fail, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Removes the entries older than [`MAX_AGE`]. Returns how many.

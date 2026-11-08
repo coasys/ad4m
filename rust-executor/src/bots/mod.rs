@@ -51,6 +51,11 @@ pub const BOT_REVOKED: &str = "bot-revoked";
 pub const BOT_UNBOUND: &str = "bot-unbound";
 /// A write or a join without `meta.reason`.
 pub const REASON_REQUIRED: &str = "reason-required";
+/// The activity log could not be written, so the call does not run (fail closed).
+pub const LOG_UNAVAILABLE: &str = "log-unavailable";
+/// Why a live query ends when its grant no longer admits the read it answers with
+/// (setGrant, pause, narrowing): the `reason` of its `subscription-ended`.
+pub const NOT_AUTHORIZED: &str = "not-authorized";
 /// The longest reason kept, in characters.
 pub const REASON_MAX: usize = 280;
 
@@ -486,8 +491,9 @@ pub fn cut_reason(reason: &str) -> String {
 
 /// The check of every call from a bot's session (`ctx` acts as the bot `bot`): `Ok` or the
 /// refusal. With `record`, a refusal goes to the activity log now, and an admitted write or
-/// join comes back as a [`log::Pending`] the dispatcher logs once the call answered (a check
-/// without the call records nothing).
+/// join comes back as a [`log::Pending`]: its attempt entry is already written (`started`),
+/// settled by the dispatcher once the call answered or dropped with it (a check without the
+/// call records nothing).
 pub async fn admit(
     bot: &BotRow,
     method: &str,
@@ -509,13 +515,18 @@ pub async fn admit(
             Err(refusal.error())
         }
         // Allowed reads and calls on its own session are not logged; writes and joins are.
+        // `Pending::new` writes the attempt entry: when the log cannot be written the call
+        // does not run (fail closed).
         Ok(()) => Ok(match reach {
             Reach::Own
             | Reach::Action {
                 action: BotAction::Read,
                 ..
             } => None,
-            reach => record.then(|| log::Pending::new(bot, method, reach, reason)),
+            reach => match record {
+                true => Some(log::Pending::new(bot, method, reach, reason)?),
+                false => None,
+            },
         }),
     }
 }
@@ -628,9 +639,9 @@ pub fn as_logged(reach: Reach, space_url: Option<&str>) -> Reach {
 pub enum Delivery {
     /// Send it: the agent is not a bot, or the bot may read where the event happened.
     Send,
-    /// Drop it: the bot may not read there now (paused, expired, narrowed, a key scope
-    /// without `read`), but the grant and key may come back.
-    Drop,
+    /// Drop it, with the refusal's code: the bot may not read there now (paused, expired,
+    /// narrowed, a key scope without `read`), but the grant and key may come back.
+    Drop(&'static str),
     /// End the stream: the bot is revoked, its key is revoked, or the registry is not loaded.
     End,
 }
@@ -665,7 +676,7 @@ pub async fn delivery(did: &str, perspective: Option<&str>) -> Delivery {
     match decide(&bot, &reach, None).await {
         Ok(()) => Delivery::Send,
         Err(refusal) if refusal.code == BOT_REVOKED => Delivery::End,
-        Err(_) => Delivery::Drop,
+        Err(refusal) => Delivery::Drop(refusal.code),
     }
 }
 

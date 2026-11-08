@@ -29,6 +29,20 @@ const ONT_PERSON: &str = "ad4m://ontology/person";
 /// `"true"` when a valid link's signer is a bot key of [`ONT_PERSON`]'s log (the person is
 /// the bot's owner); absent otherwise. This executor's index only, like the person.
 const ONT_BY_BOT: &str = "ad4m://ontology/byBot";
+/// The version of the rules a row's judgement (verdict, person, byBot) was computed with:
+/// [`JUDGEMENT_VERSION`]. A row without one, or with a lower one, was judged by earlier
+/// rules — links a bot key signed before the bot mark and the scope check — and the
+/// periodic re-check judges it again.
+const ONT_JUDGEMENT_VERSION: &str = "ad4m://ontology/judgementVersion";
+/// The judgement rules now in force: `1` is the first versioned judgement. A store written
+/// before it has rows with no version at all.
+pub(crate) const JUDGEMENT_VERSION: u64 = 1;
+/// Whether a stored judgement is older than the rules now in force (the version annotation
+/// missing or lower): it is judged again, and until then a read presents its signer
+/// unclassified.
+fn judgement_stale(version: &str, signature: &str) -> bool {
+    !signature.is_empty() && version.parse::<u64>().unwrap_or(0) < JUDGEMENT_VERSION
+}
 const ONT_STATUS: &str = "ad4m://ontology/status";
 /// The target exactly as the link was signed, kept only when it differs from
 /// what [`storage_term_to_target_string`] renders for the stored term. See
@@ -301,6 +315,10 @@ fn decode_verdict(verdict: &str, proof_valid: &str) -> LinkVerdict {
 
 /// A stored link's decorated parts: the proof (with `valid` from the verdict), the verdict, the
 /// person (kept only for a valid link) and the bot mark (kept only with the person).
+/// A signed link judged before the current rules ([`judgement_stale`]) may carry a person
+/// without the bot mark the rules now give its signer: a read presents it unclassified — no
+/// person, no byBot — until the re-check rejudges it. An unsigned or legacy row keeps what
+/// it stored.
 fn decode_proof(
     key: String,
     signature: String,
@@ -309,6 +327,7 @@ fn decode_proof(
     proof_valid: &str,
     person: &str,
     by_bot: &str,
+    judgement_version: &str,
 ) -> (
     DecoratedExpressionProof,
     LinkVerdict,
@@ -317,7 +336,8 @@ fn decode_proof(
 ) {
     let verdict = decode_verdict(verdict, proof_valid);
     let valid = verdict.counts();
-    let person = (valid && !person.is_empty()).then(|| person.to_string());
+    let stale = judgement_stale(judgement_version, &signature);
+    let person = (valid && !stale && !person.is_empty()).then(|| person.to_string());
     let by_bot = (person.is_some() && by_bot == "true").then_some(true);
     let proof = DecoratedExpressionProof {
         key,
@@ -743,11 +763,13 @@ fn write_link_quads_proof(
             wire_target.as_deref(),
         )?
     };
+    let judgement_version_str = JUDGEMENT_VERSION.to_string();
     let judgement = [
         (ONT_PROOF_VALID, Some(valid_str.as_str())),
         (ONT_LINK_VERDICT, Some(verdict_str.as_str())),
         (ONT_PERSON, checked.person.as_deref()),
         (ONT_BY_BOT, checked.by_bot.then_some("true")),
+        (ONT_JUDGEMENT_VERSION, Some(judgement_version_str.as_str())),
     ];
     match write {
         ProofWrite::Whole => {
@@ -980,7 +1002,7 @@ pub struct SparqlStore {
 pub(crate) fn decorated_links_query(source_constraint: &str, filter: &str) -> String {
     format!(
         r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?proofAnchor ?linkVerdict ?person ?byBot ?status WHERE {{
+SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?proofAnchor ?linkVerdict ?person ?byBot ?judgementVersion ?status WHERE {{
     {source_constraint}
     ?source ?predicate ?target .
     ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
@@ -994,6 +1016,7 @@ SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proo
     OPTIONAL {{ ?reifier <ad4m://ontology/linkVerdict> ?linkVerdict . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/person> ?person . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/byBot> ?byBot . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/judgementVersion> ?judgementVersion . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/status> ?status . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
 }}"#
@@ -1131,6 +1154,17 @@ impl SparqlStore {
     #[cfg(test)]
     pub(crate) fn remove_wire_target_annotation(&self, link: &LinkExpression) -> Result<(), Error> {
         self.remove_reifier_annotation(link, ONT_WIRE_TARGET)
+    }
+
+    /// Drop the `byBot` and `judgementVersion` quads from a link's reifier, so
+    /// the store looks like one an earlier revision wrote: a bot's valid link
+    /// without the bot mark or a judgement version.
+    #[cfg(test)]
+    pub(crate) fn remove_bot_mark_and_version(&self, link: &LinkExpression) -> Result<(), Error> {
+        // A link whose judgement wrote no mark (a `cantCheck`, a `notInScope`) loses only
+        // what it has.
+        let _ = self.remove_reifier_annotation(link, ONT_BY_BOT);
+        self.remove_reifier_annotation(link, ONT_JUDGEMENT_VERSION)
     }
 
     #[cfg(test)]
@@ -1301,6 +1335,54 @@ impl SparqlStore {
             &format!("?linkVerdict = {}", sparql_string(&verdict.stored())),
         );
         self.query_decorated_links(&format!("{query} LIMIT {limit}"))
+    }
+
+    /// The links a re-check judges again: stored `cantCheck`, or judged before the rules
+    /// now in force (a `judgementVersion` older than [`JUDGEMENT_VERSION`], or none), at
+    /// most `limit`. Only a signed row can be stale ([`judgement_stale`]): an unsigned row
+    /// without a version would never be rewritten, and would hold a place in every batch.
+    /// Each link carries whether it is stale: a stale row is rewritten even when its verdict
+    /// and person come out the same, so its judgement gains the version.
+    pub fn links_to_rejudge(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(DecoratedLinkExpression, bool)>, Error> {
+        let query = decorated_links_query(
+            "",
+            &format!(
+                "?linkVerdict = {} || (BOUND(?proofSig) && STRLEN(?proofSig) > 0 && \
+                 (!BOUND(?judgementVersion) || \
+                 <http://www.w3.org/2001/XMLSchema#integer>(?judgementVersion) < {}))",
+                sparql_string(&LinkVerdict::CantCheck.stored()),
+                JUDGEMENT_VERSION,
+            ),
+        );
+        let results = self
+            .sparql_evaluator()
+            .parse_query(&format!("{query} LIMIT {limit}"))
+            .map_err(|e| anyhow!("Failed to parse link query: {}", e))?
+            .on_store(&self.store)
+            .execute()
+            .map_err(|e| anyhow!("link query failed: {}", e))?;
+        let mut links = Vec::new();
+        let QueryResults::Solutions(solutions) = results else {
+            return Ok(links);
+        };
+        for solution in solutions {
+            let solution = solution?;
+            let version = match solution.get("judgementVersion") {
+                Some(Term::Literal(l)) => l.value().to_string(),
+                _ => String::new(),
+            };
+            let signature = match solution.get("proofSig") {
+                Some(Term::Literal(l)) => l.value().to_string(),
+                _ => String::new(),
+            };
+            if let Some(link) = self.link_from_solution(&solution) {
+                links.push((link, judgement_stale(&version, &signature)));
+            }
+        }
+        Ok(links)
     }
 
     /// Gives every link stored before verdicts (a `proofValid` annotation and no
@@ -1607,6 +1689,7 @@ impl SparqlStore {
                 let mut verdict_str = String::new();
                 let mut person = String::new();
                 let mut by_bot = String::new();
+                let mut judgement_version = String::new();
                 let mut status_val = String::new();
                 let mut wire_target = None;
                 for ann_quad in self.store.quads_for_pattern(
@@ -1631,6 +1714,7 @@ impl SparqlStore {
                         ONT_LINK_VERDICT => verdict_str = value,
                         ONT_PERSON => person = value,
                         ONT_BY_BOT => by_bot = value,
+                        ONT_JUDGEMENT_VERSION => judgement_version = value,
                         ONT_STATUS => status_val = value,
                         ONT_WIRE_TARGET => wire_target = Some(value),
                         _ => {}
@@ -1689,6 +1773,7 @@ impl SparqlStore {
                     &proof_valid_str,
                     &person,
                     &by_bot,
+                    &judgement_version,
                 );
                 let status = status_from_str(&status_val);
 
@@ -1906,6 +1991,7 @@ impl SparqlStore {
             &get_str("proofValid"),
             &get_str("person"),
             &get_str("byBot"),
+            &get_str("judgementVersion"),
         );
         let status = status_from_str(&get_str("status"));
 
@@ -2695,9 +2781,10 @@ mod tests {
             );
         }
 
-        // Should have: 1 direct triple + 1 reifier + 7 metadata (no anchor, no person for
-        // a link without an anchor whose key no log lists) = 9 quads
-        assert_eq!(all_quads.len(), 9, "Expected 9 quads total");
+        // Should have: 1 direct triple + 1 reifier + 8 metadata (no anchor, no person for
+        // a link without an anchor whose key no log lists; the judgement version always
+        // writes) = 10 quads
+        assert_eq!(all_quads.len(), 10, "Expected 10 quads total");
     }
 
     /// The canonical storage model needs no migration: a `literal:*` wire target
@@ -3123,6 +3210,30 @@ mod tests {
             "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
         );
         assert_eq!(results[0].author, signer.did);
+    }
+
+    /// Only a signed row can carry a stale judgement: an unsigned row stored before the
+    /// judgement version is never rejudged into anything else, so it must not take a place in
+    /// the re-check's batch (it would come back on every tick and keep the stale signed rows
+    /// behind it out).
+    #[test]
+    fn an_unsigned_row_without_a_judgement_version_is_not_rejudged() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let signed = make_link(&signer, "s://a", "p://x", "t://signed");
+        let mut unsigned = make_link(&signer, "s://a", "p://x", "t://unsigned");
+        unsigned.proof.signature = String::new();
+        for link in [&signed, &unsigned] {
+            svc.add_link(link).unwrap();
+            svc.remove_bot_mark_and_version(link).unwrap();
+        }
+        let targets: Vec<String> = svc
+            .links_to_rejudge(10)
+            .unwrap()
+            .into_iter()
+            .map(|(link, _)| link.data.target)
+            .collect();
+        assert_eq!(targets, vec!["t://signed".to_string()]);
     }
 
     // ── Validate readonly ──

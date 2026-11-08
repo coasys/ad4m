@@ -15,8 +15,11 @@ action: BotAction | null,
  */
 space: string | null, reason: string | null, 
 /**
- * Written once the call answered: `allowed` (it ran and succeeded), `failed:<status>`
- * (the grant let it through, then the method's guard or handler answered that error
- * status), or the bot check's refusal code (`bot-grant`, `bot-paused`, `not-in-can`, …).
+ * One entry per call. `allowed` (it ran and answered Ok), `failed:<status>` (the grant
+ * let it through, then the method's guard or handler answered that error status), the
+ * bot check's refusal code (`bot-grant`, `bot-paused`, `not-in-can`, …), `started`
+ * (admitted and still running), or `interrupted` (admitted, then its dispatch was
+ * cancelled or panicked: its work may be partly applied — indeterminate, not rolled
+ * back).
  */
 outcome: string, };

@@ -26,6 +26,7 @@ import type { SfuCallRenegotiationOffer } from "./SfuCallRenegotiationOffer";
 import type { SfuDataMessage } from "./SfuDataMessage";
 import type { SfuMigrateEvent } from "./SfuMigrateEvent";
 import type { SfuRoomRoster } from "./SfuRoomRoster";
+import type { SubscriptionEndedEvent } from "./SubscriptionEndedEvent";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -47,6 +48,7 @@ export interface EventMap {
   "transcription-text": TranscriptionTextFilter;
   "model-loading-status": AIModelLoadingStatus;
   "query-subscription-update": QuerySubscriptionUpdateEvent;
+  "subscription-ended": SubscriptionEndedEvent;
   "auto-processor-event": AutoProcessorEvent;
   "auto-processor-neighbourhood-state": AutoProcessorNeighbourhoodState;
   "sfu-call-renegotiation-offer": SfuCallRenegotiationOffer;
@@ -63,7 +65,7 @@ export interface EventMap {
 export type EventName = keyof EventMap;
 
 /** Events about one perspective: they carry `perspectiveUuid`. */
-export type ScopedEventName = "perspective-added" | "perspective-removed" | "perspective-updated" | "sync-state-change" | "link-added" | "link-removed" | "link-updated" | "signal" | "notification-triggered" | "query-subscription-update" | "auto-processor-event" | "auto-processor-neighbourhood-state" | "flow-state-changed";
+export type ScopedEventName = "perspective-added" | "perspective-removed" | "perspective-updated" | "sync-state-change" | "link-added" | "link-removed" | "link-updated" | "signal" | "notification-triggered" | "query-subscription-update" | "subscription-ended" | "auto-processor-event" | "auto-processor-neighbourhood-state" | "flow-state-changed";
 
 /** {@link ScopedEventName} as a set. */
 export const SCOPED_EVENTS: ReadonlySet<EventName> = new Set<EventName>([
@@ -77,6 +79,7 @@ export const SCOPED_EVENTS: ReadonlySet<EventName> = new Set<EventName>([
   "signal",
   "notification-triggered",
   "query-subscription-update",
+  "subscription-ended",
   "auto-processor-event",
   "auto-processor-neighbourhood-state",
   "flow-state-changed",

@@ -64,7 +64,7 @@ use crate::types::{
     AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
     NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveEvent, PerspectiveLinkEvent,
     PerspectiveLinkUpdatedEvent, PerspectiveRemovedEvent, PerspectiveStateFilter,
-    QuerySubscriptionUpdateEvent, TranscriptionTextFilter,
+    QuerySubscriptionUpdateEvent, SubscriptionEndedEvent, TranscriptionTextFilter,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -131,6 +131,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<TranscriptionTextFilter>(AiTranscriptionText, false),
         EventSpec::of::<AIModelLoadingStatus>(AiModelLoadingStatus, false),
         EventSpec::of::<QuerySubscriptionUpdateEvent>(PerspectiveQuerySubscription, true),
+        EventSpec::of::<SubscriptionEndedEvent>(SubscriptionEnded, true),
         EventSpec::of::<AutoProcessorEvent>(AutoProcessorEvent, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AutoProcessorNeighbourhoodState, true),
         EventSpec::of::<crate::sfu::SfuCallRenegotiationOffer>(SfuCallRenegotiationOffer, false),
@@ -255,18 +256,23 @@ async fn step(
         return Step::Quiet;
     }
     if let Some(did) = session.managed_did() {
-        match crate::bots::delivery(did, event.perspective.as_deref()).await {
-            crate::bots::Delivery::Send => {}
-            crate::bots::Delivery::End => return Step::End,
-            crate::bots::Delivery::Drop => {
-                if let (Some(connection), Some(uuid)) = (&event.connection, &event.perspective) {
-                    if let Some(perspective) = crate::perspectives::get_perspective(uuid) {
-                        perspective
-                            .dispose_connection_subscriptions(connection)
-                            .await;
+        // `subscription-ended` is a control event of the socket's own queries, not a read
+        // of the perspective: it is sent even when the bot may not read there now.
+        if event.topic != Topic::SubscriptionEnded {
+            match crate::bots::delivery(did, event.perspective.as_deref()).await {
+                crate::bots::Delivery::Send => {}
+                crate::bots::Delivery::End => return Step::End,
+                crate::bots::Delivery::Drop(reason) => {
+                    if let (Some(connection), Some(uuid)) = (&event.connection, &event.perspective)
+                    {
+                        if let Some(perspective) = crate::perspectives::get_perspective(uuid) {
+                            perspective
+                                .end_connection_subscriptions(connection, reason)
+                                .await;
+                        }
                     }
+                    return Step::Quiet;
                 }
-                return Step::Quiet;
             }
         }
     }
@@ -323,6 +329,7 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::AiTranscriptionText
         | Topic::AiModelLoadingStatus
         | Topic::PerspectiveQuerySubscription
+        | Topic::SubscriptionEnded
         | Topic::AutoProcessorEvent
         | Topic::AutoProcessorNeighbourhoodState
         | Topic::SfuCallRenegotiationOffer

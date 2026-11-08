@@ -33,15 +33,19 @@ describe('applyUpdate', () => {
 function fakeClient() {
     let listener: ((u: QueryUpdate | QueryLagged) => void) | undefined;
     let reconnect: (() => void) | undefined;
+    let endedListener: ((e: { subscriptionIds: string[], perspectiveUuid: string, reason: string }) => void) | undefined;
     const client = {
         onQueryUpdate: (cb: (u: QueryUpdate | QueryLagged) => void) => { listener = cb; return () => { listener = undefined; }; },
         onReconnect: (cb: () => void) => { reconnect = cb; return () => { reconnect = undefined; }; },
+        onSubscriptionEnded: (cb: (e: { subscriptionIds: string[], perspectiveUuid: string, reason: string }) => void) => { endedListener = cb; return () => { endedListener = undefined; }; },
         resyncSubscription: jest.fn(),
         disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const update = (subscriptionId: string, revision: number, added: any[] = [], removed: any[] = []) =>
         listener?.({ subscriptionId, revision, added, removed });
-    return { client, update, send: (u: QueryUpdate | QueryLagged) => listener?.(u), reconnect: () => reconnect?.() };
+    const end = (subscriptionIds: string[], reason = 'not-authorized', perspectiveUuid = 'p') =>
+        endedListener?.({ subscriptionIds, perspectiveUuid, reason });
+    return { client, update, end, send: (u: QueryUpdate | QueryLagged) => listener?.(u), reconnect: () => reconnect?.() };
 }
 
 function deferred<T>() {
@@ -357,6 +361,49 @@ describe('LiveQuery', () => {
         expect(signal?.aborted).toBe(false);
         reply.resolve({ subscriptionId: 's1', result: [1], revision: 0 });
         expect(await started).toEqual([1]);
+    });
+
+    it('subscription-ended stops the query and reports the reason; resubscribe gets a fresh baseline', async () => {
+        const { client, update, end } = fakeClient();
+        const onResult = jest.fn();
+        const statuses: any[] = [];
+        let opens = 0;
+        const live = new LiveQuery(client as any, 'p', async () => {
+            opens++;
+            return { subscriptionId: `s${opens}`, result: [opens], revision: 0 };
+        }, onResult);
+        live.onStatus(s => statuses.push(s));
+        expect(await live.start()).toEqual([1]);
+        update('s1', 1, [2]);
+        expect(onResult).toHaveBeenLastCalledWith([1, 2]);
+
+        end(['s1']);
+        expect(live.id).toBeUndefined();
+        expect(statuses).toEqual([{ state: 'ended', reason: 'not-authorized' }]);
+        // Updates to the dead id change nothing.
+        update('s1', 2, [9]);
+        expect(onResult).toHaveBeenCalledTimes(1);
+        // It does not re-open on its own.
+        await tick();
+        expect(opens).toBe(1);
+
+        // An explicit resubscribe opens a fresh subscription with a fresh baseline.
+        expect(await live.resubscribe()).toEqual([2]);
+        expect(live.id).toBe('s2');
+        update('s2', 1, [3]);
+        expect(onResult).toHaveBeenLastCalledWith([2, 3]);
+    });
+
+    it('ignores a subscription-ended for another id or perspective', async () => {
+        const { client, end } = fakeClient();
+        const statuses: any[] = [];
+        const live = new LiveQuery(client as any, 'p', async () => ({ subscriptionId: 's1', result: [1], revision: 0 }), jest.fn());
+        live.onStatus(s => statuses.push(s));
+        await live.start();
+        end(['other']);
+        end(['s1'], 'not-authorized', 'other-perspective');
+        expect(live.id).toBe('s1');
+        expect(statuses).toEqual([]);
     });
 });
 

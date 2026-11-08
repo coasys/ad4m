@@ -21,6 +21,6 @@ pub use domain::{
     PerspectiveState, PerspectiveStateFilter, PerspectiveUnsignedInput, PromptOutput,
     QuerySubscription, QuerySubscriptionUpdate, QuerySubscriptionUpdateEvent, QueryUpdatesLagged,
     ReadinessStatus, RequestContext, Resource, ResourceInput, RuntimeInfo, SentMessage,
-    TokenizerSourceInput, TranscriptionTextFilter, UserCreationResult, UserStatistics,
-    VerificationRequestResult, VoiceActivityParamsInput,
+    SubscriptionEndedEvent, TokenizerSourceInput, TranscriptionTextFilter, UserCreationResult,
+    UserStatistics, VerificationRequestResult, VoiceActivityParamsInput,
 };
