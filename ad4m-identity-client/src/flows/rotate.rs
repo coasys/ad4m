@@ -345,20 +345,29 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         .unwrap_or_default();
     let mut pushes = Vec::new();
     let mut changes = Vec::new();
+    let index = signer.index();
     for key_id in holders {
         let sent = master::push(
             executor, vault, &events, &chain, did, signer, &key_id, clock, random,
         )
         .await;
-        let holds = match &sent {
-            Ok(_) => HoldsMaster::Offered,
-            // On the retry list: it goes when the store takes it.
-            Err(e) if transient(e) => HoldsMaster::Offered,
-            Err(_) => HoldsMaster::No,
-        };
-        changes.push(Change::HoldsMaster {
-            key_id: key_id.clone(),
-            holds,
+        // Offered, unless the device took it and wrote so before this write lands: the record
+        // write below builds on the newest version, and `Change::Offered` keeps a take of
+        // `index` (or a later master) as it is. A push the store refused for good: not held.
+        changes.push(match &sent {
+            // On the retry list when transient: it goes when the store takes it.
+            Ok(_) => Change::Offered {
+                key_id: key_id.clone(),
+                index,
+            },
+            Err(e) if transient(e) => Change::Offered {
+                key_id: key_id.clone(),
+                index,
+            },
+            Err(_) => Change::HoldsMaster {
+                key_id: key_id.clone(),
+                holds: HoldsMaster::No,
+            },
         });
         pushes.push((key_id, sent));
     }

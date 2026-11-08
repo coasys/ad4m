@@ -231,8 +231,9 @@ pub(crate) async fn send_with<R: ExecutorRpc>(
 /// record does not list is left out the same way ([`ClientError::NotListed`]), so one cannot
 /// block the rest.
 ///
-/// The record has one master generation here (no rotation yet), so `true` is always the
-/// current master key.
+/// `true` counts only for the master pushed (the log's current one) or a later one: a device
+/// whose entry says `true` with the index of a replaced master holds a stale key and is
+/// offered the current one like any other ([`Change::Offered`]).
 pub(crate) async fn mark_offered<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -240,19 +241,32 @@ pub(crate) async fn mark_offered<R: ExecutorRpc>(
     mut key_ids: Vec<KeyId>,
     random: &dyn Random,
 ) -> Result<u64, ClientError> {
+    // The master pushed is the log's current one; a rotation landing between this read and the
+    // write leaves a take of the newer master standing all the same (`Change::Offered`).
+    let current = chain_of(executor, did)
+        .await?
+        .state()
+        .masters
+        .len()
+        .saturating_sub(1);
+    let current = u32::try_from(current)
+        .map_err(|_| ClientError::Protocol("the log lists too many masters".into()))?;
     loop {
         let changes: Vec<Change> = key_ids
             .iter()
-            .map(|key_id| Change::HoldsMaster {
+            .map(|key_id| Change::Offered {
                 key_id: key_id.clone(),
-                holds: HoldsMaster::Offered,
+                index: current,
             })
             .collect();
         let not_held = |record: Option<&PrivateRecord>, _: &KelChain| {
             let held = key_ids.iter().find(|key_id| {
                 record
                     .and_then(|r| r.devices.get(*key_id))
-                    .is_some_and(|entry| entry.holds_master == HoldsMaster::Yes)
+                    .is_some_and(|entry| {
+                        entry.holds_master == HoldsMaster::Yes
+                            && entry.master_index.is_none_or(|held| held >= current)
+                    })
             });
             match held {
                 Some(key_id) => Err(ClientError::HoldsMaster(key_id.clone())),
