@@ -639,9 +639,11 @@ impl ViaStore {
         Ok((events, head))
     }
 
-    /// `scid`'s log folded here (the client re-checks every log it reads) with its verified
-    /// head.
-    async fn chain(&self, scid: &str) -> Result<(KelChain, SignedHead), RpcError> {
+    /// `scid`'s log as every read of this phone admits it: the events from the store, folded
+    /// here (the client re-checks every log it reads), the verified head bound to the folded
+    /// log, and the checkpoint kept. `identity.log`, which the flows read the log through,
+    /// goes through here as well as every signed call.
+    async fn admitted(&self, scid: &str) -> Result<(Vec<Value>, KelChain, SignedHead), RpcError> {
         let (values, head) = self.log_from(scid, 0).await?;
         let events: Vec<Event> = values
             .iter()
@@ -682,6 +684,12 @@ impl ViaStore {
         }
         accepted.insert(scid.to_string(), (head.seq, head.hash.clone()));
         drop(accepted);
+        Ok((values, chain, head))
+    }
+
+    /// [`Self::admitted`]'s chain and head.
+    async fn chain(&self, scid: &str) -> Result<(KelChain, SignedHead), RpcError> {
+        let (_, chain, head) = self.admitted(scid).await?;
         Ok((chain, head))
     }
 
@@ -854,7 +862,12 @@ impl ViaStore {
         let scid =
             scid_of(did).ok_or_else(|| bad_request(format!("{did} is not a did:scid:coasys:1")))?;
         let from = params["from"].as_u64().unwrap_or(0);
-        let (events, head) = self.log_from(scid, from).await?;
+        // The same admission as every other read (`admitted`): `from` only trims the answer.
+        let (values, _chain, head) = self.admitted(scid).await?;
+        let events: Vec<Value> = values
+            .into_iter()
+            .filter(|value| value["seq"].as_u64().is_some_and(|seq| seq >= from))
+            .collect();
         Ok(json!({
             "did": did_of(scid),
             "events": events,
@@ -983,6 +996,18 @@ impl ViaStore {
             return Err(error(
                 502,
                 "bad-head: the store's head does not confirm the events published",
+            ));
+        }
+        // And the confirmed log holds the very events sent, at their seqs: the admitted chain
+        // (bound to its head, checkpoint kept) has their hashes there.
+        let (_, chain, _) = self.admitted(&scid).await?;
+        if events
+            .iter()
+            .any(|e| ad4m_identity_core::event_hash(e).ok().as_ref() != chain.hash_at(e.seq))
+        {
+            return Err(error(
+                502,
+                "bad-head: the confirmed log does not hold the events published",
             ));
         }
         // The publish bound this key to `scid` when the log lists it; the index settles it on
@@ -1672,9 +1697,13 @@ impl ExecutorRpc for ViaStore {
             "identity.postRequest" => self.post_request(&params).await,
             "identity.deleteRequest" => self.delete_request(&params).await,
             "identity.keyOwner" => self.key_owner(&params).await,
-            // The phone keeps no cache to drop: every read is fresh from the store.
+            // The phone keeps no log cache to drop; it forgets the head it accepted for the
+            // one identity named, as the executor drops that identity's accepted head.
             "identity.resetLog" => {
-                self.accepted.borrow_mut().clear();
+                let did = params["did"].as_str().unwrap_or_default();
+                let scid = scid_of(did)
+                    .ok_or_else(|| bad_request(format!("{did} is not a did:scid:coasys:1")))?;
+                self.accepted.borrow_mut().remove(scid);
                 Ok(json!(true))
             }
             // The phone holds its own keys: the custody channel's answer is their multikeys.

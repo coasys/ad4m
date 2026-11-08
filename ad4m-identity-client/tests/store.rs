@@ -1013,3 +1013,94 @@ async fn a_lower_signed_head_after_a_newer_one_is_refused() {
         "the phone went back to seq 0 after reading seq 1: {answer:?}"
     );
 }
+
+/// Review coasys/ad4m#1673 at 4c1de3a66 (Lal): `identity.log`, the path the flows read the log
+/// through (`request::log_of`), went through `log_from` alone: the head's signature and its
+/// SCID, but no binding to the folded log and no checkpoint. Here the store serves the seq-0
+/// events under the log's own (validly signed) seq-1 head: the read must fail, and at
+/// 4c1de3a66 it answered the events as confirmed. Then the checkpoint: after the holder read
+/// seq 1, the seq-0 page replayed is refused, until `identity.resetLog` names this identity
+/// (a reset of another identity changes nothing). Fails at 4c1de3a66.
+#[tokio::test]
+async fn identity_log_binds_the_head_to_the_events_and_keeps_the_checkpoint() {
+    let (router, _dir) = store();
+    let lied_about = Rc::new(RefCell::new(String::new()));
+    let replay = Rc::new(RefCell::new(None));
+    let lying = LyingHttp {
+        inner: RouterHttp {
+            router: router.clone(),
+        },
+        scid: lied_about.clone(),
+        foreign_head: Rc::new(RefCell::new(None)),
+        replay: replay.clone(),
+    };
+    let holder_vault = MemoryVault::new();
+    let holder = phone_over(lying, 1, None);
+    let did = create(&holder, &holder_vault, 73).await;
+    let other_did = create(&phone(&router, 2, None), &MemoryVault::new(), 74).await;
+    let old_page = log_page(&router, scid(&did)).await;
+
+    // The log grows to seq 1, and the holder reads it there.
+    let other = phone(&router, 8, None);
+    let flow = LinkFlow::open(
+        &holder,
+        &holder_vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed = claim(&other, &flow.offer_string(), None).await;
+    let seen = flow.wait_for_claim().await.unwrap();
+    flow.confirm(&seen, entry("Other", DeviceKind::PhoneApp), false)
+        .await
+        .unwrap();
+    join_status(&other, &claimed["offerId"]).await;
+    let read = |from: u64| {
+        holder
+            .rpc()
+            .call("identity.log", json!({ "did": did, "from": from }))
+    };
+    let at_one = read(0).await.unwrap();
+    assert_eq!(at_one["head"]["seq"], json!(1), "{at_one}");
+    let new_page: Value = serde_json::from_slice(&log_page(&router, scid(&did)).await).unwrap();
+
+    // The seq-0 events under the seq-1 head: a valid head of this log, not of these events.
+    let mut mismatched: Value = serde_json::from_slice(&old_page).unwrap();
+    mismatched["head"] = new_page["head"].clone();
+    *lied_about.borrow_mut() = scid(&did).to_string();
+    *replay.borrow_mut() = Some(serde_json::to_vec(&mismatched).unwrap());
+    let answer = read(0).await;
+    assert!(
+        answer.is_err(),
+        "identity.log confirmed seq-0 events under the seq-1 head: {answer:?}"
+    );
+
+    // The seq-0 page as the store once served it: under the seq 1 read before.
+    *replay.borrow_mut() = Some(old_page);
+    let answer = read(0).await;
+    assert!(
+        answer.is_err(),
+        "identity.log went back to seq 0 after reading seq 1: {answer:?}"
+    );
+    holder
+        .rpc()
+        .call("identity.resetLog", json!({ "did": other_did }))
+        .await
+        .unwrap();
+    assert!(
+        read(0).await.is_err(),
+        "a reset of another identity let it through"
+    );
+    holder
+        .rpc()
+        .call("identity.resetLog", json!({ "did": did }))
+        .await
+        .unwrap();
+    let back = read(0).await.unwrap();
+    assert_eq!(back["head"]["seq"], json!(0), "{back}");
+}
