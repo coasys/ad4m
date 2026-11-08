@@ -130,6 +130,40 @@ pub(crate) fn set_operator_record_if_empty_in(
         .ok_or_else(|| anyhow::anyhow!("operator_record is empty right after the insert"))
 }
 
+/// The SCID the local agent `agent_did` speaks for in `conn`, if any.
+fn agent_identity_in(conn: &Connection, agent_did: &str) -> Ad4mDbResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT scid FROM identity_agents WHERE agent_did = ?1",
+            params![agent_did],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Records in `conn` that the local agent `agent_did` speaks for `scid`; refuses a second
+/// identity.
+fn set_agent_identity_in(
+    conn: &Connection,
+    agent_did: &str,
+    scid: &str,
+    set_at: u64,
+) -> Ad4mDbResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO identity_agents (agent_did, scid, set_at) VALUES (?1, ?2, ?3)",
+        params![agent_did, scid, to_sql(set_at)],
+    )?;
+    match agent_identity_in(conn, agent_did)? {
+        Some(held) if held == scid => Ok(()),
+        Some(held) => Err(anyhow::anyhow!(
+            "the agent already speaks for {held}, not {scid}"
+        )),
+        None => Err(anyhow::anyhow!(
+            "identity_agents is empty right after the insert"
+        )),
+    }
+}
+
 impl Ad4mDb {
     pub(super) fn create_identity_tables(conn: &Connection) -> rusqlite::Result<()> {
         create_identity_tables(conn)
@@ -163,32 +197,47 @@ impl Ad4mDb {
 
     /// The SCID the local agent `agent_did` (its `did:key`) speaks for, if any.
     pub fn agent_identity(&self, agent_did: &str) -> Ad4mDbResult<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT scid FROM identity_agents WHERE agent_did = ?1",
-                params![agent_did],
-                |row| row.get(0),
-            )
-            .optional()?)
+        agent_identity_in(&self.conn, agent_did)
     }
 
     /// Records that the local agent `agent_did` speaks for `scid`. An agent keeps the first
     /// identity it joined: a second one is refused.
     pub fn set_agent_identity(&self, agent_did: &str, scid: &str, set_at: u64) -> Ad4mDbResult<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO identity_agents (agent_did, scid, set_at) VALUES (?1, ?2, ?3)",
-            params![agent_did, scid, to_sql(set_at)],
-        )?;
-        match self.agent_identity(agent_did)? {
-            Some(held) if held == scid => Ok(()),
-            Some(held) => Err(anyhow::anyhow!(
-                "the agent already speaks for {held}, not {scid}"
-            )),
-            None => Err(anyhow::anyhow!(
-                "identity_agents is empty right after the insert"
-            )),
-        }
+        set_agent_identity_in(&self.conn, agent_did, scid, set_at)
+    }
+
+    /// The end of a desktop app's first link, in one transaction: records that the local agent
+    /// `agent_did` speaks for `scid` (as [`Ad4mDb::set_agent_identity`]) and, while the operator
+    /// record is empty, that `operator_did` (the identity's DID) is the operator
+    /// (`OperatorSetBy::FirstRun`). Both or neither: a process that stops between them leaves
+    /// no binding without its operator. Answers the operator record as it stands afterwards.
+    pub fn set_agent_identity_and_first_run_operator(
+        &self,
+        agent_did: &str,
+        scid: &str,
+        operator_did: &str,
+        set_at: u64,
+    ) -> Ad4mDbResult<OperatorRecordRow> {
+        let tx = self.conn.unchecked_transaction()?;
+        set_agent_identity_in(&tx, agent_did, scid, set_at)?;
+        let record =
+            set_operator_record_if_empty_in(&tx, operator_did, set_at, OperatorSetBy::FirstRun)?;
+        tx.commit()?;
+        Ok(record)
+    }
+
+    /// Tests on the shared database: makes every write of the operator record fail (`true`), as
+    /// a process that stops before it would, or lets them through again (`false`).
+    #[cfg(test)]
+    pub(crate) fn fail_operator_record_writes_for_test(&self, fail: bool) -> Ad4mDbResult<()> {
+        create_identity_tables(&self.conn)?;
+        self.conn.execute_batch(if fail {
+            "CREATE TRIGGER IF NOT EXISTS operator_record_fails BEFORE INSERT ON operator_record
+             BEGIN SELECT RAISE(ABORT, 'the operator record write failed'); END;"
+        } else {
+            "DROP TRIGGER IF EXISTS operator_record_fails;"
+        })?;
+        Ok(())
     }
 
     /// Tests on the shared database: drops the binding of `agent_did`.
@@ -310,6 +359,46 @@ mod tests {
         assert_eq!(
             db.agents_of_identity("QmA").unwrap(),
             vec!["did:key:z6MkA".to_string()]
+        );
+    }
+
+    /// The binding and the first-run operator land together or not at all: a write of the
+    /// record that fails takes the binding back, and a refused binding records no operator.
+    #[test]
+    fn the_first_run_binding_and_operator_are_one_write() {
+        let (_dir, db) = db();
+        db.fail_operator_record_writes_for_test(true).unwrap();
+        assert!(db
+            .set_agent_identity_and_first_run_operator("did:key:z6MkA", "QmA", "did:scid:A", 1)
+            .is_err());
+        assert_eq!(db.agent_identity("did:key:z6MkA").unwrap(), None);
+        db.fail_operator_record_writes_for_test(false).unwrap();
+
+        db.set_agent_identity("did:key:z6MkB", "QmB", 1).unwrap();
+        assert!(db
+            .set_agent_identity_and_first_run_operator("did:key:z6MkB", "QmA", "did:scid:A", 2)
+            .is_err());
+        assert_eq!(db.operator_record().unwrap(), None);
+
+        let set = db
+            .set_agent_identity_and_first_run_operator("did:key:z6MkA", "QmA", "did:scid:A", 3)
+            .unwrap();
+        assert_eq!(
+            (set.scid.as_str(), set.set_by),
+            ("did:scid:A", OperatorSetBy::FirstRun)
+        );
+        assert_eq!(
+            db.agent_identity("did:key:z6MkA").unwrap().as_deref(),
+            Some("QmA")
+        );
+        // A record that stands is kept: the binding lands, the record does not change.
+        let again = db
+            .set_agent_identity_and_first_run_operator("did:key:z6MkC", "QmC", "did:scid:C", 4)
+            .unwrap();
+        assert_eq!(again, set);
+        assert_eq!(
+            db.agent_identity("did:key:z6MkC").unwrap().as_deref(),
+            Some("QmC")
         );
     }
 

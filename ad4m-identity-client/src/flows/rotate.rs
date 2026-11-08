@@ -323,7 +323,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         Ok(log) => log,
         Err(e) => return (Vec::new(), Err(e)),
     };
-    let opened = match record::read_as(executor, did, &chain, reader, random).await {
+    let opened = match record::read_as(executor, vault, did, &chain, reader, random).await {
         Ok(opened) => opened,
         Err(e) => return (Vec::new(), Err(e)),
     };
@@ -383,8 +383,16 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         }),
         None => {}
     }
-    let record =
-        record::write_as(executor, did, reader, &changes, Some(recovery_key), random).await;
+    let record = record::write_as(
+        executor,
+        vault,
+        did,
+        reader,
+        &changes,
+        Some(recovery_key),
+        random,
+    )
+    .await;
     (pushes, record)
 }
 
@@ -445,12 +453,20 @@ pub async fn rotate<R: ExecutorRpc>(
         },
         promoted => promoted.map_err(ClientError::from),
     };
+    // The record's rewrite is the new master's: it re-attests the recovery key, which a
+    // device-signed write cannot install.
+    let secret = words::recovery_secret(&seed);
+    let reader = Reader::Recovery {
+        secret: &secret,
+        master: &published.signer,
+        clock,
+    };
     let (pushes, record) = hand_over(
         executor,
         vault,
         did,
         &published.signer,
-        &Reader::Executor,
+        &reader,
         Some(ThisDevice {
             key_id: own,
             entry: None,

@@ -16,7 +16,8 @@ use ad4m_hash_chain::{decode_ed25519_multikey, encode_ed25519_multikey, sha256};
 use ad4m_ldk::identity::{
     AgentRecord, AgentRecordProof, AppendRequest, DeviceRequestBody, ForbiddenReason,
     IdentityErrorCode, InboxAddress, InboxAuth, InboxBind, InboxWrite, InboxWriter, PostedRequest,
-    PreInboxAuth, SealedRecord, SignedOffer, SignedRequest, LOG_PAGE_EVENTS, MAX_LOG_PAGE_BYTES,
+    PreInboxAuth, SealedRecord, SignedOffer, SignedRequest, StoredRecord, LOG_PAGE_EVENTS,
+    MAX_LOG_PAGE_BYTES,
 };
 use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
 use centralized_agent_language::agents::{self, AgentKey};
@@ -1830,17 +1831,29 @@ fn the_record_calls_keep_the_record_byte_for_byte_and_refuse_a_stale_version() {
             .unwrap();
     let body = serde_json::to_value(&record).unwrap();
     let req = apps.signed(&server, name, "d1", Some("d1"), "PUT", &path, Some(&body));
+    let stored = block_on(store.put_record(did, &record, &req)).unwrap();
+    assert_eq!(stored.version, 1);
+    // The store's receipt for the write, by its head key.
     assert_eq!(
-        block_on(store.put_record(did, &record, &req))
-            .unwrap()
-            .version,
-        1
+        (stored.receipt.scid.as_str(), stored.receipt.version),
+        (scid, 1)
+    );
+    assert_eq!(
+        stored.receipt.envelope,
+        ad4m_identity_core::record::envelope_hash(
+            scid,
+            &serde_json::from_value(body.clone()).unwrap()
+        )
+        .unwrap()
     );
     assert_body_is(&host, &record);
     let req = apps.signed(&server, name, "master", None, "GET", &path, None);
     assert_eq!(
         block_on(store.get_record(did, &req)).unwrap(),
-        Some(record.clone())
+        Some(StoredRecord {
+            record: record.clone(),
+            receipt: stored.receipt.clone(),
+        })
     );
 
     let req = apps.signed(&server, name, "d1", Some("d1"), "PUT", &path, Some(&body));
@@ -1850,7 +1863,7 @@ fn the_record_calls_keep_the_record_byte_for_byte_and_refuse_a_stale_version() {
             reason: "version".into()
         }
     );
-    // A record wrapped for another key set.
+    // A record changed after its writer signed it (another key set): the signature fails.
     let mut wrong = record.clone();
     wrong.version = 2;
     wrong.wrapped.insert("d9".into(), "AAAA".into());
@@ -1859,7 +1872,7 @@ fn the_record_calls_keep_the_record_byte_for_byte_and_refuse_a_stale_version() {
     assert_eq!(
         refusal(block_on(store.put_record(did, &wrong, &req))),
         IdentityErrorCode::Invalid {
-            reason: "wrapped".into()
+            reason: "signature".into()
         }
     );
 }

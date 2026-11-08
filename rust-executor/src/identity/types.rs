@@ -519,7 +519,8 @@ impl std::fmt::Debug for TakenMaster {
 }
 
 /// The private details record as the store keeps it: the executor passes it and never
-/// opens it.
+/// opens it. Its writer signs the envelope (`signer`, `sig`), and a recovery key counts only
+/// with the current master's attestation (`ad4m_identity_core::record`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SealedRecord {
@@ -530,8 +531,26 @@ pub struct SealedRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub recovery_key: Option<String>,
+    /// The current master's attestation of `recovery_key`; present exactly when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recovery_attestation: Option<RecoveryAttestation>,
     pub nonce: String,
     pub ciphertext: String,
+    /// The writer's key id: a device key (`"d3"`) or the current master (`"m0"`).
+    pub signer: String,
+    /// That key's signature over the envelope, base58btc (`z…`).
+    pub sig: String,
+}
+
+/// A master key's attestation that a record's `recoveryKey` is the identity's recovery key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryAttestation {
+    /// The master key's id (`"m0"`).
+    pub key_id: String,
+    /// base58btc (`z…`).
+    pub sig: String,
 }
 
 /// `identity.record` params: a request signed by a key of the identity, or none for one
@@ -554,12 +573,42 @@ pub struct RecordPutParams {
     pub request: Option<SignedRequest>,
 }
 
-/// `identity.recordPut`.
+/// The store's word that it accepted a record write: its head key (`store`, a did:key) over
+/// `{scid, version, envelope, seq, store}` (domain `coasys:record-receipt`). `envelope` is the
+/// sha2-256 multihash of the signed envelope (with `sig`), `seq` the log's head the write was
+/// checked against: a reader checks the record's writer at `seq`
+/// (`ad4m_identity_core::record::open_record`). The executor passes it unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordReceipt {
+    pub scid: String,
+    #[ts(type = "number")]
+    pub version: u64,
+    /// sha2-256 multihash of the signed envelope, base58btc.
+    pub envelope: String,
+    #[ts(type = "number")]
+    pub seq: u64,
+    /// did:key of the store.
+    pub store: String,
+    /// The store's signature, base58btc (`z…`).
+    pub sig: String,
+}
+
+/// `identity.record`: the sealed record with the store's receipt for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredRecord {
+    pub record: SealedRecord,
+    pub receipt: RecordReceipt,
+}
+
+/// `identity.recordPut`: the version written and the store's receipt for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordStored {
     #[ts(type = "number")]
     pub version: u64,
+    pub receipt: RecordReceipt,
 }
 
 /// `identity.unwrapRecordKey` params: this executor's entry of a record's `wrapped`.
@@ -998,6 +1047,8 @@ pub enum SessionRole {
     Tenant,
     /// A grant on the main agent.
     App,
+    /// The custody service: the custody credential on a loopback listener.
+    Custody,
     Anonymous,
 }
 

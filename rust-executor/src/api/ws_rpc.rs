@@ -12,7 +12,7 @@
 use axum::{
     extract::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        ConnectInfo, Query, State,
     },
     response::IntoResponse,
 };
@@ -20,6 +20,7 @@ use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
@@ -60,9 +61,11 @@ pub async fn ws_rpc(
     Query(query): Query<WsAuthQuery>,
     axum::extract::Extension(handler_map): axum::extract::Extension<Arc<HandlerMap>>,
     reach: ListenerReach,
+    connect_info: Option<axum::extract::Extension<ConnectInfo<SocketAddr>>>,
 ) -> impl IntoResponse {
     let token = query.token.unwrap_or_default();
-    match connection_context(&token, &state.admin_credential, reach) {
+    let peer = connect_info.map(|info| info.0 .0.ip());
+    match connection_context(&token, &state.admin_credential, reach, peer) {
         Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx)),
         Err(e) => {
             let code = e.close_code();
@@ -81,10 +84,12 @@ fn connection_context(
     token: &str,
     admin_credential: &Option<Secret>,
     reach: ListenerReach,
+    peer: Option<IpAddr>,
 ) -> Result<Arc<RequestContext>, AuthError> {
     let mut ctx = RequestContext::open(token, admin_credential, reach)?;
     // Live queries opened on this connection belong to it and end when it closes.
     ctx.connection_id = Some(uuid::Uuid::new_v4().to_string());
+    ctx.peer = peer;
     Ok(Arc::new(ctx))
 }
 
@@ -756,7 +761,7 @@ mod connection_context_tests {
         for token in &refused {
             for reach in [ListenerReach::Loopback, ListenerReach::Network] {
                 assert!(
-                    connection_context(token, &Some(ADMIN.into()), reach).is_err(),
+                    connection_context(token, &Some(ADMIN.into()), reach, None).is_err(),
                     "token {token:.20}…, {reach:?}"
                 );
             }
@@ -770,10 +775,13 @@ mod connection_context_tests {
         setup_wallet();
         setup_agent();
         let admin = Some(crate::secret::Secret::from(ADMIN.to_string()));
-        let a = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
-        let b = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
+        let peer: IpAddr = "203.0.113.7".parse().unwrap();
+        let a = connection_context(ADMIN, &admin, ListenerReach::Network, Some(peer)).unwrap();
+        let b = connection_context(ADMIN, &admin, ListenerReach::Network, None).unwrap();
         assert!(a.connection_id.is_some());
         assert_ne!(a.connection_id, b.connection_id);
+        // The address it comes from, which `user.sessionChallenge` budgets by.
+        assert_eq!(a.peer, Some(peer));
         let http = RequestContext::open(ADMIN, &admin, ListenerReach::Network).unwrap();
         assert_eq!(http.connection_id, None);
     }
@@ -784,7 +792,8 @@ mod connection_context_tests {
         setup_agent();
         let token = jwt(Some(vec![AGENT_READ_CAPABILITY.clone()]));
 
-        let ctx = connection_context(&token, &Some(ADMIN.into()), ListenerReach::Network).unwrap();
+        let ctx =
+            connection_context(&token, &Some(ADMIN.into()), ListenerReach::Network, None).unwrap();
         assert!(ctx.session.check().is_ok());
         revoke(&token);
         assert_eq!(
@@ -811,7 +820,7 @@ mod connection_context_tests {
             crate::agent::AgentContext::managed(user_did),
         ];
         for (token, expected) in tokens.iter().zip(expected) {
-            let ctx = connection_context(token, &Some(ADMIN.into()), ListenerReach::Network)
+            let ctx = connection_context(token, &Some(ADMIN.into()), ListenerReach::Network, None)
                 .unwrap_or_else(|e| panic!("token {token:.20}… opens a session: {e}"));
             assert_eq!(ctx.acts_as(), expected, "token {token:.20}…");
         }

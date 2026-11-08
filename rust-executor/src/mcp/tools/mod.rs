@@ -310,6 +310,7 @@ pub(crate) fn request_context(session: Arc<Session>) -> crate::types::RequestCon
             .try_with(Clone::clone)
             .ok()
             .flatten(),
+        peer: None,
     }
 }
 

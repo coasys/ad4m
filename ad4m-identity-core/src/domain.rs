@@ -7,10 +7,11 @@
 //! scheme of [`signing_bytes`]. A label of the second table enters a hash or a key derivation
 //! and is never a signing domain: every signing API of the core refuses it.
 
-use ad4m_hash_chain::{canonical_json, decode_ed25519_multikey, CanonError};
+use ad4m_hash_chain::{canonical_json, canonical_json_exact, decode_ed25519_multikey, CanonError};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Serialize;
 use serde_json::Value;
+use zeroize::{Zeroize, Zeroizing};
 
 /// How a domain's signatures are made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +92,24 @@ pub const SIGNING_DOMAINS: &[Domain] = &[
     Domain {
         name: "coasys:inbox",
         signs: "device inbox messages",
+        owner: "device linking",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
+        name: "coasys:private-record",
+        signs: "private record envelopes, by a device key or the current master",
+        owner: "device linking",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
+        name: "coasys:recovery-key",
+        signs: "the private record's recovery key, by the current master",
+        owner: "device linking",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
+        name: "coasys:record-receipt",
+        signs: "the store's receipt for a private record write it accepted, by its head key",
         owner: "device linking",
         scheme: Scheme::DomainField,
     },
@@ -176,20 +195,81 @@ pub fn check_domain(name: &str, scheme: Scheme) -> Result<(), DomainError> {
 pub fn signing_bytes<T: Serialize>(domain: &str, value: &T) -> Result<Vec<u8>, DomainError> {
     check_domain(domain, Scheme::DomainField)?;
     let mut value = serde_json::to_value(value).map_err(|e| CanonError::Serde(e.to_string()))?;
+    add_domain(domain, &mut value)?;
+    Ok(canonical_json(&value)?.into_bytes())
+}
+
+/// `value` with the member `domain`; refused for a value that is no object or holds one.
+fn add_domain(domain: &str, value: &mut Value) -> Result<(), DomainError> {
     let map = value.as_object_mut().ok_or(DomainError::NotObject)?;
     if map.contains_key("domain") {
         return Err(DomainError::DomainMember);
     }
     map.insert("domain".into(), Value::String(domain.to_string()));
-    Ok(canonical_json(&value)?.into_bytes())
+    Ok(())
+}
+
+/// A JSON value that holds a secret (an inbox `master` body): every string in it is wiped when
+/// it drops. Build the value inside it (`WipedJson(json!({..}))`) or with [`WipedJson::of`], so
+/// that no unwiped JSON copy of the secret is left.
+pub(crate) struct WipedJson(pub(crate) Value);
+
+impl WipedJson {
+    /// `value` as JSON.
+    pub(crate) fn of<T: Serialize>(value: &T) -> Result<WipedJson, CanonError> {
+        Ok(WipedJson(
+            serde_json::to_value(value).map_err(|e| CanonError::Serde(e.to_string()))?,
+        ))
+    }
+}
+
+impl Drop for WipedJson {
+    fn drop(&mut self) {
+        wipe_strings(&mut self.0);
+    }
+}
+
+/// Zeroes every string of `value`, whole capacity, in place.
+pub(crate) fn wipe_strings(value: &mut Value) {
+    match value {
+        Value::String(s) => s.zeroize(),
+        Value::Array(items) => items.iter_mut().for_each(wipe_strings),
+        Value::Object(map) => map.values_mut().for_each(wipe_strings),
+        _ => {}
+    }
+}
+
+/// [`signing_bytes`] of a value that holds a secret. The JSON copy is wiped (it is a
+/// [`WipedJson`]), and the text is written once at its exact length, so no shorter copy of it
+/// is left in freed memory, and wiped when the bytes drop.
+pub(crate) fn secret_signing_bytes(
+    domain: &str,
+    mut value: WipedJson,
+) -> Result<Zeroizing<Vec<u8>>, DomainError> {
+    check_domain(domain, Scheme::DomainField)?;
+    add_domain(domain, &mut value.0)?;
+    Ok(Zeroizing::new(canonical_json_exact(&value.0)?.into_bytes()))
 }
 
 /// True when `signature` is `key`'s Ed25519 signature (strict) of [`signing_bytes`]`(domain, value)`.
 /// False for every domain [`signing_bytes`] refuses.
 pub fn verify_signed<T: Serialize>(domain: &str, value: &T, key: &str, signature: &[u8]) -> bool {
-    let Ok(bytes) = signing_bytes(domain, value) else {
-        return false;
-    };
+    signing_bytes(domain, value).is_ok_and(|bytes| verify_bytes(&bytes, key, signature))
+}
+
+/// [`verify_signed`] of a value that holds a secret, its copies wiped as
+/// [`secret_signing_bytes`] wipes them.
+pub(crate) fn verify_secret_signed(
+    domain: &str,
+    value: WipedJson,
+    key: &str,
+    signature: &[u8],
+) -> bool {
+    secret_signing_bytes(domain, value).is_ok_and(|bytes| verify_bytes(&bytes, key, signature))
+}
+
+/// True when `signature` is `key`'s Ed25519 signature (strict) of `bytes`.
+fn verify_bytes(bytes: &[u8], key: &str, signature: &[u8]) -> bool {
     let Some(key) = decode_ed25519_multikey(key) else {
         return false;
     };
@@ -199,7 +279,7 @@ pub fn verify_signed<T: Serialize>(domain: &str, value: &T, key: &str, signature
     let Ok(signature) = Signature::from_slice(signature) else {
         return false;
     };
-    key.verify_strict(&bytes, &signature).is_ok()
+    key.verify_strict(bytes, &signature).is_ok()
 }
 
 /// The signing domain of links whose author key sits in a log.
@@ -246,5 +326,27 @@ impl HeadStatement<'_> {
             return false;
         };
         verify_signed(HEAD_DOMAIN, self, key, &sig)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_secret_value_signs_as_signing_bytes_and_its_strings_are_wiped() {
+        let value = json!({ "body": { "secret": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi" }, "n": [1, "x"] });
+        let bytes = secret_signing_bytes("coasys:inbox", WipedJson(value.clone())).unwrap();
+        assert_eq!(*bytes, signing_bytes("coasys:inbox", &value).unwrap());
+        assert!(matches!(
+            secret_signing_bytes("coasys:kel", WipedJson(value.clone())),
+            Err(DomainError::Scheme(_))
+        ));
+
+        let mut wiped = value;
+        wipe_strings(&mut wiped);
+        assert_eq!(wiped, json!({ "body": { "secret": "" }, "n": [1, ""] }));
     }
 }

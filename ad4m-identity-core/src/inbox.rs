@@ -16,13 +16,16 @@
 
 use std::fmt;
 
-use ad4m_hash_chain::{canonical_json, decode_proof_value, sha256, Multikey};
+use ad4m_hash_chain::{canonical_json_exact, decode_proof_value, sha256, Multikey};
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
-use crate::domain::{signing_bytes, verify_signed, DomainError};
+use crate::domain::{
+    secret_signing_bytes, signing_bytes, verify_secret_signed, verify_signed, DomainError,
+    WipedJson,
+};
 use crate::keys::{is_ed25519_multikey, X25519Secret};
 use crate::link::{
     decode_secret, offer_commit, verify_offer, LinkError, OfferString, SignedBy, SignedOffer,
@@ -172,6 +175,15 @@ pub enum InboxBody {
     },
 }
 
+impl InboxBody {
+    /// Zeroes a `master` body's secret in place (whole capacity); no change to another body.
+    pub fn wipe(&mut self) {
+        if let InboxBody::Master { secret, .. } = self {
+            zeroize::Zeroize::zeroize(secret);
+        }
+    }
+}
+
 impl fmt::Debug for InboxBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -201,16 +213,18 @@ pub struct InboxPayload {
 }
 
 /// The bytes a master key signs for a payload:
-/// `signing_bytes("coasys:inbox", {to, body, sentAt, by})`.
+/// `signing_bytes("coasys:inbox", {to, body, sentAt, by})`. A `master` body holds a secret, so
+/// the JSON copy made for the text is wiped and the bytes are wiped when they drop
+/// ([`crate::domain::secret_signing_bytes`]).
 pub fn payload_signing_bytes(
     to: &str,
     body: &InboxBody,
     sent_at: u64,
     by: &SignedBy,
-) -> Result<Vec<u8>, InboxError> {
-    Ok(signing_bytes(
+) -> Result<Zeroizing<Vec<u8>>, InboxError> {
+    Ok(secret_signing_bytes(
         INBOX_DOMAIN,
-        &json!({ "to": to, "body": body, "sentAt": sent_at, "by": by }),
+        WipedJson(json!({ "to": to, "body": body, "sentAt": sent_at, "by": by })),
     )?)
 }
 
@@ -224,7 +238,14 @@ pub fn sign_payload(
     master: &dyn crate::build::Signer,
 ) -> Result<InboxPayload, InboxError> {
     // The bytes hold the body, a master key's secret too: wiped once signed.
-    let bytes = Zeroizing::new(payload_signing_bytes(&to, &body, sent_at, &by)?);
+    let bytes = match payload_signing_bytes(&to, &body, sent_at, &by) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let mut body = body;
+            body.wipe();
+            return Err(e);
+        }
+    };
     let sig = ad4m_hash_chain::encode_proof_value(&master.sign(&bytes));
     Ok(InboxPayload {
         to,
@@ -247,8 +268,11 @@ pub fn seal<R: CryptoRng + RngCore>(
     payload: &InboxPayload,
     rng: &mut R,
 ) -> Result<String, InboxError> {
-    let value = serde_json::to_value(payload).map_err(|e| malformed(e.to_string()))?;
-    let text = Zeroizing::new(canonical_json(&value).map_err(|e| malformed(e.to_string()))?);
+    // A `master` body holds a secret: the JSON copy and the text are wiped, and the text is
+    // written once at its length, so no shorter copy of it is left in freed memory.
+    let value = WipedJson::of(payload).map_err(|e| malformed(e.to_string()))?;
+    let text =
+        Zeroizing::new(canonical_json_exact(&value.0).map_err(|e| malformed(e.to_string()))?);
     let sealed = seal::seal(to_enc, &seal_info(address), text.as_bytes(), rng)
         .map_err(|_| malformed("the recipient is an X25519 multikey"))?;
     if sealed.len() > MAX_SEALED_BYTES {
@@ -290,6 +314,11 @@ pub enum Accept {
 /// (`link::verify_offer`), names the ticket's offer, is signed by the same master key, is
 /// bound to `me`, and its commit is the ticket's `s`. A `Master` secret must be
 /// `masters[index]` of the log; `index` must be the current master, or the answer is `Stale`.
+///
+/// A payload carries no single-use mark: a store can deliver an exact copy of a message again,
+/// and while its master is still current the copy passes as the first did. A consumer acts
+/// idempotently: keeping a master key it already keeps changes nothing, and a ticket whose
+/// offer it already claimed fails at the store's claim.
 pub fn check_payload(
     p: &InboxPayload,
     me: &str,
@@ -311,8 +340,9 @@ pub fn check_payload(
         return Err(InboxError::Signer);
     }
     let sig = decode_proof_value(&p.sig).ok_or(InboxError::Signature)?;
-    let signed = json!({ "to": p.to, "body": p.body, "sentAt": p.sent_at, "by": p.by });
-    if !verify_signed(INBOX_DOMAIN, &signed, &master.sign, &sig) {
+    // A `master` body holds a secret: the copies made to check the signature are wiped.
+    let signed = WipedJson(json!({ "to": p.to, "body": p.body, "sentAt": p.sent_at, "by": p.by }));
+    if !verify_secret_signed(INBOX_DOMAIN, signed, &master.sign, &sig) {
         return Err(InboxError::Signature);
     }
     match &p.body {

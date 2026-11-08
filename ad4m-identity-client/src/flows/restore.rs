@@ -173,7 +173,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             clock,
         };
         let (record, record_error) =
-            match record::read_as(executor, &owner.did, &chain, &reader, random).await {
+            match record::read_as(executor, vault, &owner.did, &chain, &reader, random).await {
                 Ok(opened) => (opened.map(|o| o.record), None),
                 Err(e) => (None, Some(e)),
             };

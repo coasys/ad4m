@@ -26,11 +26,11 @@ use ad4m_identity_core::{DeviceKey, Event, KeyLife, Op};
 use ad4m_ldk::identity::SignedHead;
 
 use crate::executor::{ExecutorRpc, IdentityStatus, ViaExecutor};
-use crate::flows::rotate::recovery_key_of;
+use crate::flows::rotate::{master_of, recovery_key_of};
 use crate::record::{self, Change, Reader};
 use crate::secret::Secret;
 use crate::vault::Vault;
-use crate::{fold, ClientError, Random};
+use crate::{fold, ClientError, Clock, Random};
 
 /// What the surface shows at each step.
 pub enum CreateScreen {
@@ -155,12 +155,13 @@ impl CreateFlow {
         executor: &ViaExecutor<R>,
         vault: &dyn Vault,
         this_device: DeviceEntry,
+        clock: &dyn Clock,
         random: &dyn Random,
     ) -> Result<Created, ClientError> {
         let Some(Step::Confirmed(seed)) = self.step else {
             return Err(ClientError::Step("finish follows confirm"));
         };
-        create_from_seed(&seed, executor, vault, this_device, random).await
+        create_from_seed(&seed, executor, vault, this_device, clock, random).await
     }
 }
 
@@ -173,6 +174,7 @@ pub async fn create_from_seed<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
     this_device: DeviceEntry,
+    clock: &dyn Clock,
     random: &dyn Random,
 ) -> Result<Created, ClientError> {
     let mut created = publish_from_seed(seed, executor, vault).await?;
@@ -184,11 +186,21 @@ pub async fn create_from_seed<R: ExecutorRpc>(
             ..this_device
         },
     };
+    // The first version installs the recovery key: a master-signed write (only the master
+    // attests a recovery key), which master #0 signs.
+    let master = master_of(seed, 0)?;
+    let secret = words::recovery_secret(seed);
+    let reader = Reader::Recovery {
+        secret: &secret,
+        master: &master,
+        clock,
+    };
     created.record = Some(
         record::write_as(
             executor,
+            vault,
             &created.did,
-            &Reader::Executor,
+            &reader,
             &[this],
             Some(&recovery_key_of(seed)),
             random,

@@ -35,6 +35,10 @@ pub struct RequestContext {
     /// `bots::REASON_MAX` characters). A bot gives one with every write; its activity log
     /// keeps it (`crate::bots`).
     pub reason: Option<String>,
+    /// The address the WS RPC connection comes from, as the listener saw it (a proxy's own
+    /// address behind a reverse proxy). `None` outside the WS RPC socket, or on a server that
+    /// keeps no connect info.
+    pub peer: Option<std::net::IpAddr>,
 }
 
 impl RequestContext {
@@ -55,6 +59,7 @@ impl RequestContext {
             session: std::sync::Arc::new(session),
             connection_id: None,
             reason: None,
+            peer: None,
         })
     }
 
@@ -92,6 +97,7 @@ impl RequestContext {
             session: std::sync::Arc::new(session),
             connection_id: None,
             reason: None,
+            peer: None,
         }
     }
 

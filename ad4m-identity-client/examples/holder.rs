@@ -172,7 +172,7 @@ async fn create(
     flow.confirm([&words[positions[0] - 1], &words[positions[1] - 1]])
         .map_err(|e| e.to_string())?;
     let created = flow
-        .finish(executor, vault, this, &OsRandom)
+        .finish(executor, vault, this, &SystemClock, &OsRandom)
         .await
         .map_err(|e| e.to_string())?;
     masters.insert(
@@ -527,7 +527,7 @@ async fn main() {
             Some("record") => {
                 async {
                     let did = field(&command, "did")?;
-                    let opened = record::read(&executor, did)
+                    let opened = record::read(&executor, &vault, did)
                         .await
                         .map_err(|e| e.to_string())?;
                     Ok(opened.map_or(
@@ -546,7 +546,7 @@ async fn main() {
                         key_id: key_id.to_string(),
                         entry,
                     };
-                    let version = record::write(&executor, did, &[change], &RANDOM)
+                    let version = record::write(&executor, &vault, did, &[change], &RANDOM)
                         .await
                         .map_err(|e| e.to_string())?;
                     Ok(json!({ "record": version }))

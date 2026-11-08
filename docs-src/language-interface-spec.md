@@ -432,7 +432,7 @@ path makes these calls.
 | `identityInboxPut(address, write, req)` | `InboxAddress`, `InboxWrite`, `SignedRequest` | `Promise<InboxStored>` | `PUT /v1/inbox/pre/{pre}` or `PUT /v1/inbox/{scid}/{keyId}` |
 | `identityInboxList(address, auth, waitSec?)` | `InboxAddress`, `SignedRequest \| PreInboxAuth`, `number` (0–8) | `Promise<InboxMessage[]>` | `GET` of the inbox `?wait=` |
 | `identityInboxAck(address, id, auth)` | `InboxAddress`, `string`, `SignedRequest \| PreInboxAuth` | `Promise<void>` | `DELETE` of the inbox's `/{id}` |
-| `identityGetRecord(did, req)` | `string`, `SignedRequest` | `Promise<SealedRecord \| null>` | `GET /v1/private/{scid}` |
+| `identityGetRecord(did, req)` | `string`, `SignedRequest` | `Promise<StoredRecord \| null>` (`{record, receipt}`) | `GET /v1/private/{scid}` |
 | `identityPutRecord(did, record, req)` | `string`, `SealedRecord`, `SignedRequest` | `Promise<RecordStored>` | `PUT /v1/private/{scid}` |
 | `identityPostRequest(did, post, req)` | `string`, `PostedRequest`, `SignedRequest` | `Promise<RequestPosted>` | `POST /v1/requests/{scid}` |
 | `identityListRequests(did, since, req)` | `string`, `number`, `SignedRequest` | `Promise<DeviceRequest[]>` | `GET /v1/requests/{scid}?since=` |
@@ -444,7 +444,9 @@ a `PreInboxAuth`, which names the store it is for (`store`, as a `SignedRequest`
 travels in the `X-Coasys-Inbox` header (base64url of its JCS), and a
 joined read with the device key's `SignedRequest`. The language opens nothing: messages and
 records are sealed (`docs-src/identity/did-scid-coasys-1.md`, section 17), and it passes
-`sealed`, `wrapped` and `ciphertext` through as they are.
+`sealed`, `wrapped` and `ciphertext` through as they are. A record read and a record write
+carry the store's `RecordReceipt` (`{scid, version, envelope, seq, store, sig}`, section 17),
+which the language passes through unchecked; the reader checks it.
 
 Every call goes to the language's own store. A did:scid `src` hint (a DID URL's `?src=`,
 another host of the log) is not part of this interface: the executor fetches such a host

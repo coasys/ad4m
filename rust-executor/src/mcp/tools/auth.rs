@@ -487,6 +487,7 @@ fn auth_status_json(
             // a managed agent.
             let principal = match &session.principal {
                 Principal::Operator => "operator",
+                Principal::Custody => "custody",
                 Principal::Agent(agent) if agent.is_main_agent() => "app",
                 Principal::Agent(_) => "user",
                 Principal::Anonymous => unreachable!("an authenticated session"),
