@@ -46,6 +46,11 @@ pub enum IdentityError {
     },
     #[error("the identity store is unavailable: {0}")]
     Unavailable(String),
+    /// The loaded agent language does not serve the call (a language without the identity
+    /// interface, such as a local test language): no store answers through it, now or after a
+    /// retry. Not [`IdentityError::Unavailable`], which a later call may get past.
+    #[error("the agent language does not serve {0}")]
+    NotServed(String),
     /// A head that no key of `identity.storeKeys` signed.
     #[error("the store's head is not signed by a key of identity.storeKeys")]
     BadHeadSignature,
@@ -240,10 +245,17 @@ impl AgentLanguageBackend {
             .await
             .map_err(|e| IdentityError::Unavailable(e.to_string()))?;
         if !language.has(cap) {
-            return Err(IdentityError::Unavailable(format!(
-                "the agent language does not serve {}",
-                cap.wire_name()
-            )));
+            // A language whose capabilities are not registered yet may still load them.
+            return Err(
+                if crate::languages::capability::capabilities_registered(language.address()) {
+                    IdentityError::NotServed(cap.wire_name().to_string())
+                } else {
+                    IdentityError::Unavailable(format!(
+                        "the agent language has not loaded {}",
+                        cap.wire_name()
+                    ))
+                },
+            );
         }
         let script = call_script(export, args);
         let run = controller.execute_on_language(language.address(), &script);

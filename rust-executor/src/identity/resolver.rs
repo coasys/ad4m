@@ -875,7 +875,11 @@ impl Resolver {
             map.note_pending(key);
             return KeyLookup::Unknown;
         }
-        let scid = match self.backend.key_owner(key, 0).await {
+        let answer = self.backend.key_owner(key, 0).await;
+        if matches!(answer, Ok(_) | Err(IdentityError::NotFound)) {
+            self.key_index_absent.store(false, Ordering::Relaxed);
+        }
+        let scid = match answer {
             Ok(Some(entry)) => match scid_of(&entry.did) {
                 Some(scid) => scid.to_string(),
                 None => {
@@ -888,6 +892,14 @@ impl Resolver {
                 }
             },
             Ok(None) | Err(IdentityError::NotFound) => {
+                map.note_no_log(key);
+                return KeyLookup::NoLog;
+            }
+            Err(IdentityError::NotServed(call)) => {
+                // No key index behind the agent language (one without the identity interface):
+                // as with no store, no log speaks for anyone, so nothing waits for an answer.
+                log::debug!("identity: the agent language does not serve {call}");
+                self.key_index_absent.store(true, Ordering::Relaxed);
                 map.note_no_log(key);
                 return KeyLookup::NoLog;
             }
@@ -3880,5 +3892,45 @@ mod link_check_tests {
         // The next batch asks about it: no log, so it counts as before key logs.
         resolver.prepare(&signers).await;
         assert_eq!(judge(), valid_for(None));
+    }
+
+    /// An agent language without the key index (a local test language, the server-link suite's
+    /// executors): no store answers through it, so a plain did:key signer is a key no log lists,
+    /// as with no store. Its links count with no person, past the discovery cap too; nothing
+    /// waits for an answer that cannot come. The same signer while the index is merely down
+    /// does wait (`CantCheck`).
+    #[tokio::test]
+    async fn without_a_key_index_a_did_key_signer_counts_as_one_no_log_lists() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        store.key_index_not_served.store(true, Ordering::SeqCst);
+        let resolver = resolver_on(store.clone());
+        let mut signers: Vec<(String, Option<u64>)> = (0..DISCOVERY_PER_BATCH)
+            .map(|_| (TestSigner::generate().did, None))
+            .collect();
+        let past_cap: Expression<Link> = TestSigner::generate().sign(link());
+        signers.push((past_cap.author.clone(), None));
+        resolver.prepare(&signers).await;
+        assert_eq!(
+            check_signed_with(&past_cap, resolver.cache.key_map(), None, NOW),
+            valid_for(None),
+            "past the cap, with no index to ask"
+        );
+        let first: Expression<Link> = TestSigner::generate().sign(link());
+        resolver.prepare(&[(first.author.clone(), None)]).await;
+        assert_eq!(
+            check_signed_with(&first, resolver.cache.key_map(), None, NOW),
+            valid_for(None),
+            "asked: the language does not serve the index"
+        );
+
+        // An index that is there but does not answer: the signer waits.
+        store.key_index_not_served.store(false, Ordering::SeqCst);
+        store.key_index_down.store(true, Ordering::SeqCst);
+        let waiting: Expression<Link> = TestSigner::generate().sign(link());
+        resolver.prepare(&[(waiting.author.clone(), None)]).await;
+        assert_eq!(
+            check_signed_with(&waiting, resolver.cache.key_map(), None, NOW).verdict,
+            LinkVerdict::CantCheck
+        );
     }
 }

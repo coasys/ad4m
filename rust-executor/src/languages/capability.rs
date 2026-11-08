@@ -247,6 +247,16 @@ pub fn get_capabilities(address: &str) -> Arc<HashSet<Capability>> {
     }
 }
 
+/// Whether the capability set of the language at `address` is known (its `register_callbacks`
+/// ran): an empty [`get_capabilities`] then means the language serves none of them, not that
+/// it has not loaded yet.
+pub fn capabilities_registered(address: &str) -> bool {
+    LANGUAGE_CAPABILITIES
+        .read()
+        .map(|map| map.contains_key(address))
+        .unwrap_or(false)
+}
+
 pub fn remove_capabilities(address: &str) {
     let mut map = LANGUAGE_CAPABILITIES.write().unwrap();
     map.remove(address);
