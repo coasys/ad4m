@@ -77,6 +77,8 @@ mod local_agents;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
+// The judgement the store holds for a link a write path just persisted.
+mod stored_judgements;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -2193,6 +2195,17 @@ impl PerspectiveInstance {
             .await?
             .fold_into(&mut decorated_perspective_diff);
 
+        // The reply and the link-added event carry the judgement the store
+        // wrote; `persist_link_diff` discovered the signer, so a verdict
+        // computed before it can be stale.
+        decorated_perspective_diff.additions =
+            self.stored_judgements(decorated_perspective_diff.additions);
+        let decorated_link_expression = decorated_perspective_diff
+            .additions
+            .first()
+            .cloned()
+            .unwrap_or(decorated_link_expression);
+
         // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_perspective_diff.clone())
             .await;
@@ -2268,6 +2281,11 @@ impl PerspectiveInstance {
             self.persist_link_diff(&perspective_diff)
                 .await?
                 .fold_into(&mut decorated_perspective_diff);
+
+            // The reply and the link-added event carry the judgement the store wrote.
+            decorated_perspective_diff.additions =
+                self.stored_judgements(decorated_perspective_diff.additions);
+            let decorated_link_expressions = self.stored_judgements(decorated_link_expressions);
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(&decorated_perspective_diff).await;
@@ -2384,6 +2402,9 @@ impl PerspectiveInstance {
         self.persist_link_diff(&store_diff)
             .await?
             .fold_into(&mut decorated_diff);
+
+        // The reply and the link-added event carry the judgement the store wrote.
+        decorated_diff.additions = self.stored_judgements(decorated_diff.additions);
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(&decorated_diff).await;
@@ -5536,6 +5557,12 @@ impl PerspectiveInstance {
                     let mut existing_targets: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
                     for link in &existing {
+                        // Membership is what a model read counts: a link whose
+                        // stored verdict does not count cannot keep a member
+                        // from being set.
+                        if link.proof.valid != Some(true) {
+                            continue;
+                        }
                         if existing_targets.insert(link.data.target.clone()) {
                             current_members
                                 .push((link.data.target.clone(), link.timestamp.clone()));
@@ -8514,6 +8541,132 @@ mod tests {
         );
         map.forget(&foreign.scid());
         map.forget(&own.scid());
+    }
+
+    /// The reply and the link-added event carry the judgement the store
+    /// wrote, not a verdict computed before signer discovery: a link one of
+    /// this executor's agents signs is checked as its own when stored
+    /// (`valid` + person on a stale head), while a plain `check_signed` —
+    /// what the decoration ran before `persist_link_diff` filled the key
+    /// map — still reports `cantCheck` with no person.
+    #[tokio::test]
+    async fn add_link_expression_returns_the_stored_judgement() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+        use ad4m_identity_core::build::Signer;
+
+        let mut perspective = setup().await;
+        let log = TestLog::new(103);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+        let device = log.device.clone();
+        let key = device.key();
+        // The signing key is a managed user's agent on this executor, so the
+        // store checks the link as this executor's own write.
+        Ad4mDb::with_global_instance(|db| {
+            db.add_user("judgement@test", &format!("did:key:{key}"), "pw")
+        })
+        .unwrap();
+
+        let data = create_link().normalize();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(device.sign(&bytes)),
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Local),
+        };
+
+        let reply = perspective
+            .add_link_expression(link.clone(), LinkStatus::Local, None)
+            .await
+            .unwrap();
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].verdict,
+            Some(LinkVerdict::Valid),
+            "the local write counts on the stale head"
+        );
+        assert_eq!(
+            reply.verdict, stored[0].verdict,
+            "the reply reports the stored judgement"
+        );
+        assert_eq!(reply.person, stored[0].person);
+        assert_eq!(reply.proof.valid, stored[0].proof.valid);
+        map.forget(&log.scid());
+    }
+
+    /// Membership is reconciled the way a model query reads it: a member
+    /// whose only stored link does not count is set anew, not kept. Here the
+    /// member's one link is forged, so the store judges it `invalid`.
+    #[tokio::test]
+    async fn test_collection_setter_readds_a_member_whose_only_link_does_not_count() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/invalid-member";
+        let predicate = "we://children";
+        let member = "we://m";
+
+        let signer = TestSigner::generate();
+        let mut forged: LinkExpression = signer
+            .sign(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: member.to_string(),
+                }
+                .normalize(),
+            )
+            .into();
+        forged.proof.signature = "ab".repeat(64);
+        forged.status = Some(LinkStatus::Shared);
+        perspective.sparql_store.add_link(&forged).unwrap();
+        assert!(perspective
+            .sparql_store
+            .get_all_links()
+            .unwrap()
+            .iter()
+            .all(|l| l.proof.valid != Some(true)));
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+        let params: Vec<Parameter> = serde_json::from_value(serde_json::json!([
+            { "name": "value", "value": member }
+        ]))
+        .unwrap();
+        perspective
+            .execute_commands(commands, source.to_string(), params, None, &context)
+            .await
+            .unwrap();
+
+        let links = perspective.get_links(&LinkQuery::default()).await.unwrap();
+        assert!(
+            links
+                .iter()
+                .any(|l| l.data.target == member && l.proof.valid == Some(true)),
+            "the member must be set by a link that counts"
+        );
     }
 
     /// A bot's link counts while its scope lasts. When the scope expires, the next tick

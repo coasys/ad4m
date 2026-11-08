@@ -538,7 +538,9 @@ export async function assertStaysFalse(
 }
 
 /**
- * Clears all links in a perspective, invalid ones included, in a single removeLinks() batch call.
+ * Clears all links in a perspective, invalid ones included. Removes each link
+ * independently so one failing remove (an already-gone link, or an invalid
+ * Shared monotonic link the executor refuses) cannot reject the whole wipe.
  * Import from here or from helpers/assertions to get a clean slate before each test.
  */
 export async function wipePerspective(
@@ -549,7 +551,7 @@ export async function wipePerspective(
   // which would then survive the wipe.
   const links = await perspective.get(new LinkQuery({ includeUnverified: true }));
   if (links.length > 0) {
-    await perspective.removeLinks(links);
+    await Promise.allSettled(links.map((link) => perspective.remove(link)));
   }
   // Clear the per-instance SHACL registration cache so that
   // subsequent register() calls re-add SHACL definitions.
