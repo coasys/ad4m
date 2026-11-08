@@ -763,8 +763,17 @@ impl LanguageController {
         language_language_only: bool,
     ) -> Result<(), LanguageError> {
         let loaded = self.load_system_languages(language_language_only).await;
-        self.system_addresses.lock().await.settled = true;
+        self.note_settled(&loaded).await;
         loaded
+    }
+
+    /// Records whether the system languages have settled: only a load that succeeded. A failed
+    /// load (the bundle unsaved, the language language not loading) leaves them unsettled, so a
+    /// missing agent language stays `Unavailable` (try later) rather than `NotServed` (no key
+    /// index), which would let an unknown `did:key`'s unanchored links count; a retry that
+    /// succeeds settles them then.
+    async fn note_settled(&self, loaded: &Result<(), LanguageError>) {
+        self.system_addresses.lock().await.settled = loaded.is_ok();
     }
 
     async fn load_system_languages(
@@ -3396,6 +3405,23 @@ mod agent_language_profile_tests {
         let signed: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
         prepare(&signed).await;
         assert_eq!(store.key_owner_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A failed load of the system languages does not settle them: the identity backend then
+    /// answers `Unavailable` for a missing agent language, not `NotServed`, so no unknown
+    /// `did:key` gets a "no log" answer from an executor whose bootstrap failed. A retry that
+    /// succeeds settles them.
+    #[tokio::test]
+    async fn a_failed_system_language_load_does_not_settle() {
+        let controller = LanguageController::new();
+        controller
+            .note_settled(&Err(LanguageError::NotFound {
+                address: "language_language".into(),
+            }))
+            .await;
+        assert!(!controller.system_addresses.lock().await.settled);
+        controller.note_settled(&Ok(())).await;
+        assert!(controller.system_addresses.lock().await.settled);
     }
 
     /// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
