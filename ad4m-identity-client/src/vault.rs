@@ -244,10 +244,14 @@ pub trait Vault: Send + Sync {
     /// on a `master_index` of `None`. A staged key stays: it may belong to a rotation in
     /// flight in another app sharing the vault, and only [`Vault::discard_staged`] removes it.
     fn forget_master(&self, scid: &str, index: u32) -> Result<Forgot, VaultError>;
-    /// The custody epoch of `scid`: a value that changes with every change of the kept key of
-    /// `scid` (a store, a promote, a forget), never otherwise, and never repeats within the
-    /// store's life (a counter; a persistent store may use the identifier of the kept item's
-    /// current state, such as a digest of its sealed bytes with its version). Needs no unlock.
+    /// The custody epoch of `scid`: a value that moves on every successful [`Vault::store_master`],
+    /// [`Vault::promote_master`] and forget of `scid`'s kept key, a store or promote of the SAME
+    /// index with the same bytes included (a duplicate delivery re-stores the same key, and a
+    /// removal that read the epoch before it must not then forget it), never otherwise
+    /// ([`Stored::AlreadyNewer`], a refused promote and [`Forgot::Kept`] leave it), and never
+    /// repeats within the store's life. Use a monotonic write counter kept with the item under
+    /// the same lock as the writes; never a digest of the key or its sealed bytes, which repeats
+    /// for the same key. Needs no unlock.
     fn custody_epoch(&self, scid: &str) -> Result<u64, VaultError>;
     /// Forgets the kept master key of `scid` only while its custody epoch is still `epoch`
     /// ([`Vault::custody_epoch`], read before the caller's checks), as one atomic step: a key
