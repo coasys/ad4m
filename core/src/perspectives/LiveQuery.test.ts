@@ -394,6 +394,37 @@ describe('LiveQuery', () => {
         expect(onResult).toHaveBeenLastCalledWith([2, 3]);
     });
 
+    it('an ended query stays ended through a reconnect and a failed resync; only resubscribe reopens it', async () => {
+        const { client, send, end, reconnect } = fakeClient();
+        let failResync!: (e: unknown) => void;
+        client.resyncSubscription = jest.fn(() => new Promise((_, reject) => { failResync = reject; }));
+        let opens = 0;
+        const live = new LiveQuery(client as any, 'p', async () => {
+            opens++;
+            return { subscriptionId: `s${opens}`, result: [opens], revision: 0 };
+        }, jest.fn());
+        expect(await live.start()).toEqual([1]);
+        // A resync is in flight when the executor ends the subscription.
+        send({ lagged: true } as any);
+        expect(client.resyncSubscription).toHaveBeenCalledTimes(1);
+        end(['s1']);
+        expect(live.id).toBeUndefined();
+
+        // Neither a transport reconnect nor the failing resync reopens an ended query.
+        reconnect();
+        await tick();
+        failResync(new Error('gone'));
+        await tick();
+        await tick();
+        expect(opens).toBe(1);
+        expect(live.id).toBeUndefined();
+        expect(live.reopening).toBe(false);
+
+        // Only the owner's resubscribe does.
+        expect(await live.resubscribe()).toEqual([2]);
+        expect(live.id).toBe('s2');
+    });
+
     it('ignores a subscription-ended for another id or perspective', async () => {
         const { client, end } = fakeClient();
         const statuses: any[] = [];

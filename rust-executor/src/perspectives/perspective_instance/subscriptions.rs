@@ -5,6 +5,11 @@
 //! subscription registry without widening its visibility.
 
 use deno_core::error::AnyError;
+
+/// The error a subscribe answers when its subscription was ended while the first result was
+/// still computing: the client got `subscription-ended` for it, so no content under that id.
+pub const SUBSCRIPTION_ENDED_WHILE_OPENING: &str =
+    "subscription-ended: the subscription ended before its first result";
 use futures::future::BoxFuture;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -87,7 +92,9 @@ impl PerspectiveInstance {
                 q.last_result = result.clone();
                 (id, 0, result)
             }
-            None => (id, 0, result),
+            // Ended while the first result computed (the grant paused, the connection closed):
+            // the client was told so, and content under a dead id would read as live.
+            None => return Err(anyhow::anyhow!("{SUBSCRIPTION_ENDED_WHILE_OPENING} ({id})")),
         })
     }
 
@@ -692,6 +699,37 @@ mod tests {
         drop(opening);
         drop(held);
         tokio::time::sleep(short).await;
+        assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    /// The subscription is ended (a pause of the bot's grant, the connection closing) while
+    /// its first result is still computing: the entry is gone and the client was told it
+    /// ended, so the subscribe must not answer with content and a dead id. A terminal error
+    /// makes the client's `start()` reject instead of holding a live query nobody serves.
+    #[tokio::test]
+    async fn a_subscription_ended_while_its_first_result_computes_answers_an_error() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let query = super::SubscribedQuery::new(
+            "SELECT ?s ?o WHERE { ?s <test://p> ?o }".into(),
+            "c".into(),
+            None,
+        );
+        let (computed, first_result) = tokio::sync::oneshot::channel();
+        let mut opening =
+            Box::pin(p.open_subscription(query, async move { first_result.await.unwrap() }));
+        let short = std::time::Duration::from_millis(20);
+        assert!(tokio::time::timeout(short, opening.as_mut()).await.is_err());
+        assert_eq!(
+            p.dispose_connection_subscriptions("c").await,
+            1,
+            "ended while opening"
+        );
+        computed.send(Ok("[]".to_string())).unwrap();
+        let answer = opening.await;
+        assert!(
+            answer.is_err(),
+            "no content and no dead id for an ended subscription: {answer:?}"
+        );
         assert!(p.subscribed_queries.lock().await.is_empty());
     }
 
