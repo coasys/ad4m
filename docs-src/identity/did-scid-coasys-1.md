@@ -772,7 +772,11 @@ a new string ends the read of the last one.
   (always for a post). For the app on its machine whose device it is (the desktop's custody
   service, which has no `enc` key of its own), the operator there may have it open the record
   key of its own entry of `wrapped` (`identity.unwrapRecordKey`, local only); the app
-  decrypts the record with that key.
+  decrypts the record with that key after it verified the envelope's signature and the
+  recovery key's attestation against the log. That app's writes are its device's: it seals
+  the envelope naming the device key as `signer` with an empty `sig`, and the executor signs
+  it with the device key before the put (it refuses an unsigned envelope naming any other
+  key). A device write copies the recovery key and its attestation that still count, unchanged.
 
 **The holder's side.** An app that holds the current master key:
 

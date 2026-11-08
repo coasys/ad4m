@@ -687,9 +687,26 @@ impl ExecutorRpc for TestExecutor {
                     return Err(Self::refused(409, &json!({ "error": "version" })));
                 }
                 self.record_puts.set(self.record_puts.get() + 1);
-                let (scid, ..) = self.position().await?;
+                let (scid, key_id, chain, _) = self.position().await?;
+                // As `DevicePosition::sign_envelope`: an unsigned envelope naming this device's
+                // key is signed by it.
+                let mut sealed: record_core::SealedRecord =
+                    serde_json::from_value(p["record"].clone()).map_err(|e| RpcError {
+                        code: 400,
+                        message: e.to_string(),
+                    })?;
+                if sealed.sig.is_empty() {
+                    if sealed.signer != key_id {
+                        return Err(RpcError {
+                            code: 400,
+                            message: format!("signer: not this device's key {key_id}"),
+                        });
+                    }
+                    record_core::sign_envelope(&chain, &mut sealed, &self.device).unwrap();
+                }
+                let record = serde_json::to_value(&sealed).unwrap();
                 let (_, body) = self
-                    .as_device("PUT", &format!("/v1/private/{scid}"), Some(&p["record"]))
+                    .as_device("PUT", &format!("/v1/private/{scid}"), Some(&record))
                     .await?;
                 Ok(body)
             }

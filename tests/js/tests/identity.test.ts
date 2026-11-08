@@ -699,12 +699,12 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         // It waits until the custody service acknowledges it: handed out again until then, and
         // the admin credential (the renderer's) cannot delete it before custody stored it.
         expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
-        expect(await custody.identity.takeMaster()).to.deep.equal(taken);
+        expect(await service.identity.takeMaster()).to.deep.equal(taken);
         expect(await refused(desk.client.identity.inboxAck(sealed.id))).to.contain("no-custody-channel");
         expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
         // The custody credential reaches the custody calls only.
-        expect(await refused(custody.agent.status())).to.contain("not-a-custody-call");
-        expect(await custody.identity.inboxAck(sealed.id)).to.be.true;
+        expect(await refused(service.agent.status())).to.contain("not-a-custody-call");
+        expect(await service.identity.inboxAck(sealed.id)).to.be.true;
         expect(await desk.client.identity.inbox()).to.deep.equal([]);
         expect(await service.identity.takeMaster()).to.be.null;
     });

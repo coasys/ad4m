@@ -82,22 +82,72 @@ fn the_record_is_wrapped_to_every_device_key_and_the_recovery_key_and_not_to_a_b
 }
 
 /// A reader that holds its `enc` secret elsewhere (an executor's wallet) unwraps the record key
-/// there and decrypts with the key alone; the key of one version opens no other.
+/// there and decrypts with the key alone; the key of one version opens no other, and the
+/// envelope is still verified against the log first: a key does not make an unsigned or
+/// re-signed-by-no-one envelope count.
 #[test]
 fn the_record_key_unwrapped_alone_decrypts_its_version_only() {
     let log = devices_log();
     let v1 = sealed(&log, 1, false);
     let key = unwrap_key(&v1.wrapped["d2"], &scid(&log), &enc_secret(2)).unwrap();
-    assert_eq!(decrypt_record(&v1, &scid(&log), &key), Ok(record_fixture()));
+    assert_eq!(decrypt_record(&v1, &log.chain, &key), Ok(record_fixture()));
     assert_eq!(
         unwrap_key(&v1.wrapped["d2"], &scid(&log), &enc_secret(1)).map(|k| *k),
         Err(RecordError::Open)
     );
     let v2 = sealed(&log, 2, false);
     assert_eq!(
-        decrypt_record(&v2, &scid(&log), &key),
+        decrypt_record(&v2, &log.chain, &key),
         Err(RecordError::Open)
     );
+    let mut unsigned = v1.clone();
+    unsigned.sig = String::new();
+    assert!(decrypt_record(&unsigned, &log.chain, &key).is_err());
+    let mut renamed = v1.clone();
+    renamed.signer = "d2".into();
+    assert!(decrypt_record(&renamed, &log.chain, &key).is_err());
+}
+
+/// A writer whose key signs elsewhere (an app whose device key is in its executor's wallet)
+/// seals without the signature, naming its key; the signature added later makes the same
+/// envelope a device's write. Only the named key may sign it, and only a writer of the log
+/// may be named.
+#[test]
+fn an_envelope_sealed_unsigned_counts_once_its_named_key_signs_it() {
+    let log = devices_log();
+    let mut s = seal_unsigned(
+        &log.chain,
+        1,
+        &record_fixture(),
+        None,
+        "d1".into(),
+        &mut TestRng::new("unsigned"),
+    )
+    .unwrap();
+    assert!(s.sig.is_empty());
+    assert!(check_sealed(&s, &log.chain).is_err());
+    assert!(matches!(
+        sign_envelope(&log.chain, &mut s.clone(), &dev(2)),
+        Err(RecordError::Signer(_))
+    ));
+    sign_envelope(&log.chain, &mut s, &dev(1)).unwrap();
+    assert_eq!(
+        check_sealed(&s, &log.chain),
+        Ok(Writer::Device("d1".into()))
+    );
+    assert_eq!(
+        open_record(&s, &log.chain, "d2", &enc_secret(2)),
+        Ok(record_fixture())
+    );
+    assert!(seal_unsigned(
+        &log.chain,
+        1,
+        &record_fixture(),
+        None,
+        "d9".into(),
+        &mut TestRng::new("unsigned"),
+    )
+    .is_err());
 }
 
 #[test]

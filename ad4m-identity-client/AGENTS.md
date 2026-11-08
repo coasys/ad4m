@@ -55,7 +55,13 @@ master key for the person.
   forgotten once the store takes it, or refuses it for good (any 4xx but 429), or its device
   key leaves the log; `retry_pushes` runs at each start and unlock.
 - The app reads the record as its executor's device (`identity.unwrapRecordKey` opens the
-  record key of the executor's entry, local only); a surface with an `enc` key of its own (the
+  record key of the executor's entry, local only; `decrypt_record` verifies the envelope's
+  signature and recovery attestation against the log first) and writes it as that device:
+  `seal_unsigned` names the executor's device key id as `signer`, and `identity.recordPut`
+  signs the envelope with the device key in the wallet. A write carries
+  `Opened::recovery` (`recovery_of` of the version read: the recovery key that the current
+  master attested) unchanged; only a master-signed write installs, replaces or drops it, and
+  none lives here yet. A surface with an `enc` key of its own (the
   phone) reads the store directly once that client lands.
 - Not here yet: rotation (master *n*+1, its pushes to kept holders, the record rewrite on
   `rotate`), restore with the recovery key, and setting the recovery key at `create`.

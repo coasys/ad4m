@@ -507,8 +507,33 @@ pub fn seal_record<R: CryptoRng + RngCore>(
     signer: &dyn crate::build::Signer,
     rng: &mut R,
 ) -> Result<SealedRecord, RecordError> {
+    let signer_key = signer.key();
+    let signer_id = chain
+        .state()
+        .key_id_of(&signer_key)
+        .cloned()
+        .ok_or_else(|| RecordError::Signer(signer_key.to_string()))?;
+    let mut sealed = seal_unsigned(chain, version, record, recovery, signer_id, rng)?;
+    sign_envelope(chain, &mut sealed, signer)?;
+    Ok(sealed)
+}
+
+/// [`seal_record`] without the signature: the envelope names `signer` (a device key without
+/// the bot mark valid at the head, or the current master) and leaves `sig` empty, for a writer
+/// whose key signs elsewhere: an app whose device key is in its executor's wallet passes the
+/// envelope to `identity.recordPut`, which signs it there ([`sign_envelope`]).
+#[cfg(feature = "build")]
+pub fn seal_unsigned<R: CryptoRng + RngCore>(
+    chain: &KelChain,
+    version: u64,
+    record: &PrivateRecord,
+    recovery: Option<Recovery>,
+    signer: KeyId,
+    rng: &mut R,
+) -> Result<SealedRecord, RecordError> {
     use base64::Engine;
     let scid = chain.id();
+    writer_of(&signer, chain)?;
     if let Some(r) = &recovery {
         if !is_x25519_multikey(&r.key) {
             return Err(malformed("recoveryKey is an X25519 multikey"));
@@ -521,11 +546,6 @@ pub fn seal_record<R: CryptoRng + RngCore>(
     };
     let aad = record_aad(scid, version, recovery_key.as_deref())?;
     let state = chain.state();
-    let signer_key = signer.key();
-    let signer_id = state
-        .key_id_of(&signer_key)
-        .cloned()
-        .ok_or_else(|| RecordError::Signer(signer_key.to_string()))?;
     let value = serde_json::to_value(record).map_err(|e| malformed(e.to_string()))?;
     let text = canonical_json(&value).map_err(|e| malformed(e.to_string()))?;
     let mut key = Zeroizing::new([0u8; RECORD_KEY_LEN]);
@@ -549,20 +569,32 @@ pub fn seal_record<R: CryptoRng + RngCore>(
             .map_err(|_| malformed(format!("the enc key of {entry} is not X25519")))?;
         wrapped.insert(entry, sealed);
     }
-    let mut sealed = SealedRecord {
+    Ok(SealedRecord {
         version,
         wrapped,
         recovery_key,
         recovery_attestation,
         nonce: bs58::encode(nonce).into_string(),
         ciphertext: b64().encode(ciphertext),
-        signer: signer_id,
+        signer,
         sig: String::new(),
-    };
-    writer_of(&sealed.signer, chain)?;
-    let bytes = envelope_signing_bytes(scid, &sealed)?;
+    })
+}
+
+/// Signs the envelope of `sealed` with `signer`, the key `sealed.signer` names in `chain`.
+#[cfg(feature = "build")]
+pub fn sign_envelope(
+    chain: &KelChain,
+    sealed: &mut SealedRecord,
+    signer: &dyn crate::build::Signer,
+) -> Result<(), RecordError> {
+    let (_, key) = writer_of(&sealed.signer, chain)?;
+    if *key != signer.key() {
+        return Err(RecordError::Signer(signer.key().to_string()));
+    }
+    let bytes = envelope_signing_bytes(chain.id(), sealed)?;
     sealed.sig = ad4m_hash_chain::encode_proof_value(&signer.sign(&bytes));
-    Ok(sealed)
+    Ok(())
 }
 
 /// Opens `sealed` of the identity whose log is `chain` through its `wrapped[entry]` (a key id,

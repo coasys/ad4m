@@ -448,7 +448,13 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   service) has no `enc` key of its own: **`identity.unwrapRecordKey`** (operator, local only)
   opens the record key of the main agent's entry in the wallet (`WalletBackend::unwrap_record_key`,
   the secret stays in that call) and answers it (`RecordKey`, wiped on drop); the app decrypts
-  the record with it.
+  the record with it (`record::decrypt_record`, which verifies the envelope against the log
+  first). The custody credential reaches it (`CUSTODY_METHODS`): the custody service reads and
+  writes the record. For the same reason the device key signs a record envelope here: an
+  **`identity.recordPut`** whose envelope has an empty `sig` must name the agent's device key
+  as `signer` (400 `signer` otherwise), and `DevicePosition::sign_envelope` signs it in the
+  wallet (`coasys:private-record`) before the put; a signed envelope (a master-signed write)
+  passes unchanged.
 
 ## Do not
 

@@ -49,6 +49,8 @@ pub const CUSTODY_METHODS: &[&str] = &[
     "identity.custodyStatus",
     "identity.record",
     "identity.recordPut",
+    // The custody service decrypts the record it reads and writes with this device's entry.
+    "identity.unwrapRecordKey",
     "identity.requests",
     "identity.postRequest",
     "identity.deleteRequest",

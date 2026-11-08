@@ -5,18 +5,24 @@
 //! (`identity.record`) and unwraps its own entry's record key in its wallet
 //! (`identity.unwrapRecordKey`); the record is decrypted here. A write ([`write`]) reads the
 //! newest version, applies its [`Change`]s ([`merge`]), seals the result as the next version to
-//! every reader of the log at its head, and writes it (`identity.recordPut`). When another
-//! writer got there first (the store answers a stale version) or the log's readers changed
-//! under the write, it reads and merges again.
+//! every reader of the log at its head, and writes it (`identity.recordPut`), where the
+//! executor's device key signs the envelope. When another writer got there first (the store
+//! answers a stale version) or the log's readers changed under the write, it reads and merges
+//! again.
+//!
+//! A read verifies the envelope's signature and the recovery key's attestation against the log
+//! before it trusts any field ([`decrypt_record`]); the recovery key that counts is
+//! [`recovery_of`]. A device write copies that recovery key and its attestation unchanged: only
+//! a master-signed write installs, replaces or drops it.
 
 use ad4m_identity_core::record::{
-    decrypt_record, seal_record, DeviceEntry, HoldsMaster, PendingRevocation, PrivateRecord,
-    RecordError,
+    decrypt_record, recovery_of, seal_unsigned, DeviceEntry, HoldsMaster, PendingRevocation,
+    PrivateRecord, RecordError, Recovery,
 };
-use ad4m_identity_core::{KelChain, KeyId, Multikey};
+use ad4m_identity_core::{KelChain, KeyId};
 
 use crate::executor::{ExecutorRpc, RpcError, ViaExecutor};
-use crate::request::{chain_of, scid_of};
+use crate::request::chain_of;
 use crate::{ClientError, Random, RandomRng};
 
 /// Writes tried before [`ClientError::RecordBusy`].
@@ -41,8 +47,9 @@ pub enum Change {
 pub struct Opened {
     pub version: u64,
     pub record: PrivateRecord,
-    /// Copied unchanged into every later version.
-    pub recovery_key: Option<Multikey>,
+    /// The recovery key that counts ([`recovery_of`]): attested by the log's current master.
+    /// A device write copies it unchanged into the next version.
+    pub recovery: Option<Recovery>,
 }
 
 /// Applies `changes` to `record`, then keeps only what the log at `chain`'s head still holds:
@@ -92,7 +99,18 @@ pub async fn read<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     did: &str,
 ) -> Result<Option<Opened>, ClientError> {
-    let scid = scid_of(did)?;
+    let chain = chain_of(executor, did).await?;
+    Ok(read_at(executor, did, &chain)
+        .await?
+        .map(|(opened, _)| opened))
+}
+
+/// [`read`] against the log `chain` of `did`, with the executor's device key id.
+async fn read_at<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    chain: &KelChain,
+) -> Result<Option<(Opened, KeyId)>, ClientError> {
     let status = executor.status().await?;
     if status.did.as_deref() != Some(did) {
         return Err(ClientError::Protocol(format!(
@@ -110,12 +128,13 @@ pub async fn read<R: ExecutorRpc>(
         .get(&key_id)
         .ok_or_else(|| RecordError::NoEntry(key_id.clone()))?;
     let key = executor.unwrap_record_key(wrapped).await?;
-    let record = decrypt_record(&sealed, &scid, key.expose())?;
-    Ok(Some(Opened {
+    let record = decrypt_record(&sealed, chain, key.expose())?;
+    let opened = Opened {
         version: sealed.version,
         record,
-        recovery_key: sealed.recovery_key,
-    }))
+        recovery: recovery_of(&sealed, chain),
+    };
+    Ok(Some((opened, key_id)))
 }
 
 /// The store refused the write because the record or the log moved under it: a stale version
@@ -139,16 +158,23 @@ pub async fn write<R: ExecutorRpc>(
 ) -> Result<u64, ClientError> {
     for _ in 0..MAX_WRITES {
         let chain = chain_of(executor, did).await?;
-        let (version, mut record, recovery_key) = match read(executor, did).await? {
-            Some(opened) => (opened.version + 1, opened.record, opened.recovery_key),
-            None => (1, PrivateRecord::default(), None),
+        let (version, mut record, recovery, key_id) = match read_at(executor, did, &chain).await? {
+            Some((opened, key_id)) => (opened.version + 1, opened.record, opened.recovery, key_id),
+            None => {
+                let key_id = executor.status().await?.key_id.ok_or_else(|| {
+                    ClientError::Protocol("the executor's device key is in no log".into())
+                })?;
+                (1, PrivateRecord::default(), None, key_id)
+            }
         };
         merge(&mut record, &chain, changes);
-        let sealed = seal_record(
+        // The executor's device key signs it (`identity.recordPut` with an empty `sig`).
+        let sealed = seal_unsigned(
             &chain,
             version,
             &record,
-            recovery_key,
+            recovery,
+            key_id,
             &mut RandomRng(random),
         )?;
         match executor.record_put(&sealed).await {
