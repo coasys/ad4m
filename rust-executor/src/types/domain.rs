@@ -31,6 +31,10 @@ pub struct RequestContext {
     /// per socket. Live queries belong to it and end when it closes. `None`
     /// outside the WS RPC socket (REST, `/api/v1/ws/events`, internal code).
     pub connection_id: Option<String>,
+    /// The address the WS RPC connection comes from, as the listener saw it (a proxy's own
+    /// address behind a reverse proxy). `None` outside the WS RPC socket, or on a server that
+    /// keeps no connect info.
+    pub peer: Option<std::net::IpAddr>,
 }
 
 impl RequestContext {
@@ -50,6 +54,7 @@ impl RequestContext {
             cancel_token: None,
             session: std::sync::Arc::new(session),
             connection_id: None,
+            peer: None,
         })
     }
 
@@ -86,6 +91,7 @@ impl RequestContext {
             cancel_token: None,
             session: std::sync::Arc::new(session),
             connection_id: None,
+            peer: None,
         }
     }
 

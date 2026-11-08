@@ -21,6 +21,7 @@ import {
     type PostedRequest,
     type PreInboxAuth,
     type SealedRecord,
+    type RecordReceipt,
     type JsonObject,
     type LogPage,
     type SignedHead,
@@ -40,6 +41,16 @@ const head: SignedHead = {
     time: 1_700_000_000,
     store: "did:key:zStore",
     sig: "zSig",
+};
+
+// The store's receipt for a record write: it crosses untouched in both directions.
+const receipt: RecordReceipt = {
+    scid: "zScid",
+    version: 1,
+    envelope: "QmEnvelope",
+    seq: 1,
+    store: "did:key:zStore",
+    sig: "zReceipt",
 };
 
 // Events are opaque: odd keys, nesting and numbers must cross untouched.
@@ -143,7 +154,7 @@ function testLanguage() {
         async getRecord(did, req) { this.calls.push(["getRecord", [did, req]]); return null; },
         async putRecord(did, record, req) {
             this.calls.push(["putRecord", [did, record, req]]);
-            return { version: record.version };
+            return { version: record.version, receipt: { ...receipt, version: record.version } };
         },
         async postRequest(did, post, req) {
             this.calls.push(["postRequest", [did, post, req]]);
@@ -274,7 +285,7 @@ test("identity: inbox, record and request-box calls pass their arguments through
     assert.deepEqual(calls.at(-1), ["inboxAck", [joined, "zMsg", request]]);
     assert.equal(await identityGetRecord!("did:scid:zScid", request), null);
     const record: SealedRecord = { version: 2, wrapped: { d1: "AAAA", recovery: "BBBB" }, recoveryKey: "z6LSRec", recoveryAttestation: { keyId: "m0", sig: "zAtt" }, nonce: "zN", ciphertext: "CCCC", signer: "d1", sig: "zSig" };
-    assert.deepEqual(await identityPutRecord!("did:scid:zScid", record, request), { version: 2 });
+    assert.deepEqual(await identityPutRecord!("did:scid:zScid", record, request), { version: 2, receipt: { ...receipt, version: 2 } });
     assert.equal(calls.at(-1)![1][1], record);
     const post: PostedRequest = { body: { kind: "confirm-revoke", keyIds: ["d2"], rotate: false }, expires: 5 };
     assert.deepEqual(await identityPostRequest!("did:scid:zScid", post, request), { id: "zReq" });

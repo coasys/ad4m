@@ -8,10 +8,36 @@ mod common;
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
 use ad4m_identity_core::record::*;
-use ad4m_identity_core::{x25519_multikey_of, KeyLife, X25519Secret};
+use ad4m_identity_core::{x25519_multikey_of, KelChain, KeyLife, X25519Secret};
 use common::*;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
+
+/// The store's head key in these tests.
+fn store_key() -> SigningKey {
+    sk("the identity store")
+}
+
+/// The store keys a reader trusts for signed heads.
+fn stores() -> Vec<String> {
+    vec![mk(&store_key())]
+}
+
+/// The store's receipt for `s`, accepted when the log was `chain` (at its head).
+fn receipt(s: &SealedRecord, chain: &KelChain) -> RecordReceipt {
+    sign_receipt(chain.id(), s, chain.head().seq, &store_key()).unwrap()
+}
+
+/// [`open_record`] of `s` as a reader fetches it right after the store accepted it: with the
+/// store's receipt at `chain`'s head.
+fn open(
+    s: &SealedRecord,
+    chain: &KelChain,
+    entry: &str,
+    secret: &X25519Secret,
+) -> Result<PrivateRecord, RecordError> {
+    open_record(s, &receipt(s, chain), chain, &stores(), entry, secret)
+}
 
 /// A record of `version` signed by d1.
 fn sealed(log: &Log, version: u64, recovery: bool) -> SealedRecord {
@@ -61,18 +87,18 @@ fn the_record_is_wrapped_to_every_device_key_and_the_recovery_key_and_not_to_a_b
         ("recovery", recovery_secret_fixture()),
     ] {
         assert_eq!(
-            open_record(&s, &log.chain, entry, &secret),
+            open(&s, &log.chain, entry, &secret),
             Ok(record_fixture()),
             "{entry}"
         );
     }
     // The bot key d3 has no entry, and its secret opens no other entry.
     assert_eq!(
-        open_record(&s, &log.chain, "d3", &enc_secret(3)),
+        open(&s, &log.chain, "d3", &enc_secret(3)),
         Err(RecordError::NoEntry("d3".into()))
     );
     assert_eq!(
-        open_record(&s, &log.chain, "d1", &enc_secret(3)),
+        open(&s, &log.chain, "d1", &enc_secret(3)),
         Err(RecordError::Open)
     );
     assert_eq!(
@@ -136,7 +162,7 @@ fn an_envelope_sealed_unsigned_counts_once_its_named_key_signs_it() {
         Ok(Writer::Device("d1".into()))
     );
     assert_eq!(
-        open_record(&s, &log.chain, "d2", &enc_secret(2)),
+        open(&s, &log.chain, "d2", &enc_secret(2)),
         Ok(record_fixture())
     );
     assert!(seal_unsigned(
@@ -165,11 +191,11 @@ fn a_revoked_device_cannot_open_the_next_version() {
         .insert("d2".into(), v1.wrapped["d2"].clone());
     resign(&mut spliced, &log, &dev(1));
     assert_eq!(
-        open_record(&spliced, &log.chain, "d2", &enc_secret(2)),
+        open(&spliced, &log.chain, "d2", &enc_secret(2)),
         Err(RecordError::Open)
     );
     assert_eq!(
-        open_record(&v2, &log.chain, "d1", &enc_secret(1)),
+        open(&v2, &log.chain, "d1", &enc_secret(1)),
         Ok(record_fixture())
     );
 }
@@ -190,7 +216,7 @@ fn a_ciphertext_moved_to_another_version_identity_or_recovery_key_does_not_open(
     s.version = 2;
     resign(&mut s, &log, &dev(1));
     assert_eq!(
-        open_record(&s, &log.chain, "d1", &enc_secret(1)),
+        open(&s, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Open)
     );
     let mut s = sealed(&log, 1, true);
@@ -199,14 +225,14 @@ fn a_ciphertext_moved_to_another_version_identity_or_recovery_key_does_not_open(
     s.recovery_attestation = Some(other.attestation);
     resign(&mut s, &log, &dev(1));
     assert_eq!(
-        open_record(&s, &log.chain, "d1", &enc_secret(1)),
+        open(&s, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Open)
     );
     // Another identity whose d1 is the same key: the signature names the scid.
     let s = sealed(&log, 1, false);
     let other = Log::new();
     assert_eq!(
-        open_record(&s, &other.chain, "d1", &enc_secret(1)),
+        open(&s, &other.chain, "d1", &enc_secret(1)),
         Err(RecordError::Signature)
     );
 }
@@ -215,9 +241,14 @@ fn a_ciphertext_moved_to_another_version_identity_or_recovery_key_does_not_open(
 fn a_version_past_the_safe_integers_is_refused_not_a_panic() {
     let log = devices_log();
     let mut s = sealed(&log, 1, false);
+    let accepted = receipt(&s, &log.chain);
     s.version = 1 << 53;
     assert!(matches!(
-        open_record(&s, &log.chain, "d1", &enc_secret(1)),
+        open_record(&s, &accepted, &log.chain, &stores(), "d1", &enc_secret(1)),
+        Err(RecordError::Malformed(_))
+    ));
+    assert!(matches!(
+        RecordReceipt::unsigned(&scid(&log), &s, 1, "did:key:z"),
         Err(RecordError::Malformed(_))
     ));
     assert!(matches!(
@@ -241,12 +272,12 @@ fn a_tampered_ciphertext_does_not_open() {
     bytes[3] = if bytes[3] == b'A' { b'B' } else { b'A' };
     s.ciphertext = String::from_utf8(bytes).unwrap();
     assert_eq!(
-        open_record(&s, &log.chain, "d1", &enc_secret(1)),
+        open(&s, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Signature)
     );
     resign(&mut s, &log, &dev(1));
     assert_eq!(
-        open_record(&s, &log.chain, "d1", &enc_secret(1)),
+        open(&s, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Open)
     );
 }
@@ -351,7 +382,7 @@ fn a_forged_envelope_is_refused_by_the_reader_and_the_store() {
     let mut forged = good.clone();
     forged.sig = String::new();
     assert_eq!(
-        open_record(&forged, &log.chain, "d1", &enc_secret(1)),
+        open(&forged, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Signature)
     );
     assert_eq!(
@@ -362,7 +393,7 @@ fn a_forged_envelope_is_refused_by_the_reader_and_the_store() {
     let mut forged = good.clone();
     resign(&mut forged, &log, &sk("a hostile store"));
     assert_eq!(
-        open_record(&forged, &log.chain, "d1", &enc_secret(1)),
+        open(&forged, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Signature)
     );
     assert_eq!(
@@ -373,7 +404,7 @@ fn a_forged_envelope_is_refused_by_the_reader_and_the_store() {
     let mut forged = good.clone();
     forged.signer = "d9".into();
     assert_eq!(
-        open_record(&forged, &log.chain, "d1", &enc_secret(1)),
+        open(&forged, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Signer("d9".into()))
     );
     assert_eq!(
@@ -415,7 +446,7 @@ fn every_field_of_the_envelope_is_signed() {
         let mut s = good.clone();
         change(&mut s);
         assert_eq!(
-            open_record(&s, &log.chain, "d2", &enc_secret(2)),
+            open(&s, &log.chain, "d2", &enc_secret(2)),
             Err(RecordError::Signature),
             "{field}"
         );
@@ -435,7 +466,7 @@ fn a_swapped_recovery_key_is_refused() {
     let store_key = X25519Secret::from([7u8; 32]);
     s.recovery_key = Some(x25519_multikey_of(&store_key));
     assert_eq!(
-        open_record(&s, &log.chain, "d1", &enc_secret(1)),
+        open(&s, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Signature)
     );
     assert_eq!(check_sealed(&s, &log.chain), Err(RecordError::Signature));
@@ -445,16 +476,30 @@ fn a_swapped_recovery_key_is_refused() {
 fn a_revoked_or_bot_device_cannot_sign_a_record() {
     let mut log = devices_log();
     let by_d2 = sealed_by(&log, 1, false, &dev(2));
+    let accepted = receipt(&by_d2, &log.chain);
     assert_eq!(
-        open_record(&by_d2, &log.chain, "d1", &enc_secret(1)),
+        open(&by_d2, &log.chain, "d1", &enc_secret(1)),
         Ok(record_fixture())
     );
     log.revoke(&["d2"]);
-    // d2's envelope, still wrapped to d1, no longer counts once d2 is revoked.
+    // The envelope d2 wrote before its revocation still opens for d1 with the store's receipt
+    // from before the revocation; a receipt naming a seq at or after it does not.
     assert_eq!(
-        open_record(&by_d2, &log.chain, "d1", &enc_secret(1)),
+        open_record(
+            &by_d2,
+            &accepted,
+            &log.chain,
+            &stores(),
+            "d1",
+            &enc_secret(1)
+        ),
+        Ok(record_fixture())
+    );
+    assert_eq!(
+        open(&by_d2, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Signer("d2".into()))
     );
+    // The store refuses it as a new write.
     assert_eq!(
         check_sealed(&by_d2, &log.chain),
         Err(RecordError::Signer("d2".into()))
@@ -487,7 +532,7 @@ fn a_revoked_or_bot_device_cannot_sign_a_record() {
     by_bot.signer = "d3".into();
     resign(&mut by_bot, &log, &dev(3));
     assert_eq!(
-        open_record(&by_bot, &log.chain, "d1", &enc_secret(1)),
+        open(&by_bot, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Signer("d3".into()))
     );
     // A key the log does not hold cannot seal.
@@ -513,13 +558,31 @@ fn the_current_master_signs_a_record_and_a_replaced_one_does_not() {
         check_sealed(&by_master, &log.chain),
         Ok(Writer::Master("m0".into()))
     );
+    let accepted = receipt(&by_master, &log.chain);
     assert_eq!(
-        open_record(&by_master, &log.chain, "d2", &enc_secret(2)),
+        open(&by_master, &log.chain, "d2", &enc_secret(2)),
         Ok(record_fixture())
     );
     log.rotate(&[], false);
+    // The record m0 wrote before the rotation still opens with the receipt from then; m0 can
+    // neither write a new one nor pass a receipt from after the rotation.
     assert_eq!(
-        open_record(&by_master, &log.chain, "d2", &enc_secret(2)),
+        open_record(
+            &by_master,
+            &accepted,
+            &log.chain,
+            &stores(),
+            "d2",
+            &enc_secret(2)
+        ),
+        Ok(record_fixture())
+    );
+    assert_eq!(
+        open(&by_master, &log.chain, "d2", &enc_secret(2)),
+        Err(RecordError::Signer("m0".into()))
+    );
+    assert_eq!(
+        check_sealed(&by_master, &log.chain),
         Err(RecordError::Signer("m0".into()))
     );
     assert_eq!(
@@ -593,7 +656,7 @@ fn a_recovery_key_counts_only_with_the_current_masters_attestation() {
             Err(RecordError::Malformed(_))
         ));
         assert!(matches!(
-            open_record(s, &log.chain, "d1", &enc_secret(1)),
+            open(s, &log.chain, "d1", &enc_secret(1)),
             Err(RecordError::Malformed(_))
         ));
         assert_eq!(recovery_of(s, &log.chain), None);
@@ -617,7 +680,7 @@ fn a_recovery_key_counts_only_with_the_current_masters_attestation() {
         );
         assert!(
             matches!(
-                open_record(&forged, &log.chain, "d1", &enc_secret(1)),
+                open(&forged, &log.chain, "d1", &enc_secret(1)),
                 Err(RecordError::Attestation(_))
             ),
             "{key_id}"
@@ -632,7 +695,7 @@ fn a_recovery_key_counts_only_with_the_current_masters_attestation() {
         Err(RecordError::Attestation(_))
     ));
     assert!(matches!(
-        open_record(&moved, &log.chain, "d1", &enc_secret(1)),
+        open(&moved, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Attestation(_))
     ));
     // The attestation names the identity: another identity's master does not attest this one.
@@ -704,7 +767,7 @@ fn the_master_replaces_the_recovery_key_and_a_device_copies_it() {
     );
     assert_eq!(recovery_of(&v3, &log.chain), Some(replaced));
     assert_eq!(
-        open_record(&v3, &log.chain, RECOVERY_ENTRY, &enc_secret(9)),
+        open(&v3, &log.chain, RECOVERY_ENTRY, &enc_secret(9)),
         Ok(record_fixture())
     );
 }
@@ -718,7 +781,7 @@ fn after_a_rotation_the_old_masters_attestation_no_longer_counts() {
     // The record d1 wrote still opens, but its recovery key no longer counts, the store
     // refuses it, and a writer cannot seal it again.
     assert_eq!(
-        open_record(&v1, &log.chain, "d1", &enc_secret(1)),
+        open(&v1, &log.chain, "d1", &enc_secret(1)),
         Ok(record_fixture())
     );
     assert_eq!(recovery_of(&v1, &log.chain), None);
@@ -828,7 +891,7 @@ fn the_words_open_the_record_through_the_recovery_key() {
     )
     .unwrap();
     assert_eq!(
-        open_record(&s, &log.chain, RECOVERY_ENTRY, &secret),
+        open(&s, &log.chain, RECOVERY_ENTRY, &secret),
         Ok(record_fixture())
     );
 }
@@ -845,7 +908,7 @@ fn a_record_whose_recovery_key_the_store_swapped_is_refused_by_readers_and_the_s
     // The store's own X25519 key, in the recovery key's place.
     s.recovery_key = Some(x25519_multikey_of(&enc_secret(3)));
     assert_eq!(
-        open_record(&s, &log.chain, "d1", &enc_secret(1)),
+        open(&s, &log.chain, "d1", &enc_secret(1)),
         Err(RecordError::Signature),
         "a device opened a record whose recovery key was swapped"
     );
@@ -856,4 +919,203 @@ fn a_record_whose_recovery_key_the_store_swapped_is_refused_by_readers_and_the_s
     );
     // Nor does a copying writer carry it on: it no longer counts.
     assert_eq!(recovery_of(&s, &log.chain), None);
+}
+
+/// Review coasys/ad4m#1632 at d30f21318: the spec (`did-scid-coasys-1.md`, "A reader still
+/// opens a record written before the rotation") and `open_record`'s own doc say a stored record
+/// stays readable for its surviving recipients once its writer is rotated or revoked. At
+/// d30f21318 `verify_envelope` checked the signer against the *current* head, so the last record
+/// a device wrote before its revocation, and the record the old master wrote before a rotation,
+/// opened for nobody (`Err(Signer("m0"))`). A reader now checks the writer at the seq of the
+/// store's receipt.
+#[test]
+fn a_record_written_before_a_rotation_or_a_revocation_still_opens_for_its_readers() {
+    // The master installs the recovery key and writes, then rotates: the devices and the words
+    // still read it.
+    let mut log = devices_log();
+    let by_master = sealed_by(&log, 1, true, &master(log.n));
+    let accepted = receipt(&by_master, &log.chain);
+    assert_eq!(accepted.seq, log.chain.head().seq);
+    log.rotate(&[], false);
+    for (entry, secret) in [
+        ("d1", enc_secret(1)),
+        ("d2", enc_secret(2)),
+        (RECOVERY_ENTRY, recovery_secret_fixture()),
+    ] {
+        assert_eq!(
+            open_record(&by_master, &accepted, &log.chain, &stores(), entry, &secret),
+            Ok(record_fixture()),
+            "the record the old master wrote no longer opens for {entry} after the rotation"
+        );
+    }
+    // The record opens, but its recovery key needs the new master's attestation to count.
+    assert_eq!(recovery_of(&by_master, &log.chain), None);
+
+    // d2 writes the latest metadata and is then revoked: d1 still reads it, and rewrites it
+    // signed by itself at the head, wrapped to the readers left.
+    let mut log = devices_log();
+    let by_d2 = sealed_by(&log, 1, false, &dev(2));
+    let accepted = receipt(&by_d2, &log.chain);
+    log.revoke(&["d2"]);
+    let read = open_record(
+        &by_d2,
+        &accepted,
+        &log.chain,
+        &stores(),
+        "d1",
+        &enc_secret(1),
+    );
+    assert_eq!(
+        read,
+        Ok(record_fixture()),
+        "the record d2 wrote no longer opens after d2's revocation"
+    );
+    let rewritten = seal_record(
+        &log.chain,
+        2,
+        &read.unwrap(),
+        None,
+        &dev(1),
+        &mut TestRng::new("rewrite"),
+    )
+    .unwrap();
+    assert_eq!(
+        check_sealed(&rewritten, &log.chain),
+        Ok(Writer::Device("d1".into()))
+    );
+    let entries: Vec<&str> = rewritten.wrapped.keys().map(String::as_str).collect();
+    assert_eq!(entries, ["d1"]);
+    assert_eq!(
+        open(&rewritten, &log.chain, "d1", &enc_secret(1)),
+        Ok(record_fixture())
+    );
+}
+
+#[test]
+fn a_receipt_that_does_not_hold_is_refused() {
+    let mut log = devices_log();
+    let by_d2 = sealed_by(&log, 1, false, &dev(2));
+    let good = receipt(&by_d2, &log.chain);
+    let read = |r: &RecordReceipt, chain: &KelChain| {
+        open_record(&by_d2, r, chain, &stores(), "d1", &enc_secret(1))
+    };
+    assert_eq!(read(&good, &log.chain), Ok(record_fixture()));
+
+    // A bad signature: by another key under the store's name, or with any field changed after
+    // the store signed.
+    let mut forged = good.clone();
+    let bytes = forged.signing_bytes().unwrap();
+    forged.sig = ad4m_hash_chain::encode_proof_value(&ad4m_identity_core::build::Signer::sign(
+        &sk("a hostile store"),
+        &bytes,
+    ));
+    assert!(matches!(
+        read(&forged, &log.chain),
+        Err(RecordError::Receipt(_))
+    ));
+    let mut later = good.clone();
+    later.seq += 1;
+    assert!(matches!(
+        read(&later, &log.chain),
+        Err(RecordError::Receipt(_))
+    ));
+    let mut garbled = good.clone();
+    garbled.sig = "not a signature".into();
+    assert!(matches!(
+        read(&garbled, &log.chain),
+        Err(RecordError::Receipt(_))
+    ));
+    // A store the reader does not trust for heads, though its signature holds.
+    let other = sign_receipt(&scid(&log), &by_d2, good.seq, &sk("another store")).unwrap();
+    assert!(matches!(
+        read(&other, &log.chain),
+        Err(RecordError::Receipt(_))
+    ));
+    // A receipt for another envelope (a wrong hash), another version or another identity, each
+    // signed by the trusted store.
+    let other_envelope = sealed_by(&log, 1, false, &dev(1));
+    let wrong_hash = receipt(&other_envelope, &log.chain);
+    assert_ne!(wrong_hash.envelope, good.envelope);
+    assert!(matches!(
+        read(&wrong_hash, &log.chain),
+        Err(RecordError::Receipt(_))
+    ));
+    let mut wrong_version = good.clone();
+    wrong_version.version = 2;
+    let bytes = wrong_version.signing_bytes().unwrap();
+    wrong_version.sig = ad4m_hash_chain::encode_proof_value(
+        &ad4m_identity_core::build::Signer::sign(&store_key(), &bytes),
+    );
+    assert!(matches!(
+        read(&wrong_version, &log.chain),
+        Err(RecordError::Receipt(_))
+    ));
+    let stranger = Log::new();
+    let mut wrong_scid = good.clone();
+    wrong_scid.scid = scid(&stranger);
+    let bytes = wrong_scid.signing_bytes().unwrap();
+    wrong_scid.sig = ad4m_hash_chain::encode_proof_value(&ad4m_identity_core::build::Signer::sign(
+        &store_key(),
+        &bytes,
+    ));
+    assert!(matches!(
+        read(&wrong_scid, &log.chain),
+        Err(RecordError::Receipt(_))
+    ));
+    // A seq past the reader's log: it reads the log first.
+    let ahead = sign_receipt(&scid(&log), &by_d2, log.chain.head().seq + 1, &store_key()).unwrap();
+    assert!(matches!(
+        read(&ahead, &log.chain),
+        Err(RecordError::Receipt(_))
+    ));
+
+    // A receipt at a seq at which the signer was already revoked: the store would have refused
+    // that write, so a receipt naming it does not count, even signed by the trusted store.
+    log.revoke(&["d2"]);
+    let revoked_at = log.chain.head().seq;
+    assert_eq!(read(&good, &log.chain), Ok(record_fixture()));
+    let backdated = sign_receipt(&scid(&log), &by_d2, revoked_at, &store_key()).unwrap();
+    assert_eq!(
+        read(&backdated, &log.chain),
+        Err(RecordError::Signer("d2".into()))
+    );
+    // Nor does a receipt make a bot key a writer.
+    let mut by_bot = sealed(&log, 2, false);
+    by_bot.signer = "d3".into();
+    resign(&mut by_bot, &log, &dev(3));
+    assert_eq!(
+        open(&by_bot, &log.chain, "d1", &enc_secret(1)),
+        Err(RecordError::Signer("d3".into()))
+    );
+}
+
+#[test]
+fn the_receipt_round_trips_as_json_and_names_the_signed_envelope() {
+    let log = devices_log();
+    let s = sealed(&log, 1, true);
+    let r = receipt(&s, &log.chain);
+    let value = serde_json::to_value(&r).unwrap();
+    assert_eq!(
+        value.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["envelope", "scid", "seq", "sig", "store", "version"]
+    );
+    assert_eq!(
+        serde_json::from_value::<RecordReceipt>(value.clone()).unwrap(),
+        r
+    );
+    let mut extra = value;
+    extra["time"] = json!(1);
+    assert!(serde_json::from_value::<RecordReceipt>(extra).is_err());
+    assert_eq!(r.store, format!("did:key:{}", mk(&store_key())));
+    // The hash covers the writer's signature too: the same fields with another sig differ,
+    // and so does the envelope signed again by another writer.
+    let mut other_sig = s.clone();
+    other_sig.sig = "zAnotherSignature".into();
+    assert_ne!(envelope_hash(&scid(&log), &other_sig).unwrap(), r.envelope);
+    let mut resigned = s.clone();
+    resign(&mut resigned, &log, &dev(2));
+    assert_ne!(envelope_hash(&scid(&log), &resigned).unwrap(), r.envelope);
+    assert!(String::from_utf8(r.signing_bytes().unwrap())
+        .unwrap()
+        .contains("\"domain\":\"coasys:record-receipt\""));
 }

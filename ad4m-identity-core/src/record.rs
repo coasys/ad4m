@@ -10,11 +10,21 @@
 //!
 //! The writer signs the whole envelope ([`envelope_signing_bytes`], domain
 //! `coasys:private-record`) with its device key, or with the current master key for a
-//! master-signed write; the envelope names the signer's key id. A reader ([`open_record`]) and
-//! the store ([`check_sealed`]) verify that signature against the identity's log before they
-//! trust any metadata or recipient key: anyone can seal to the log's public keys, only the
-//! identity's keys can sign. The store keeps only the [`SealedRecord`] and checks its shape, its
-//! signature and that it is wrapped to exactly the log's readers.
+//! master-signed write; the envelope names the signer's key id. The store ([`check_sealed`])
+//! verifies that signature against the identity's log at its head before it keeps a write:
+//! anyone can seal to the log's public keys, only the identity's keys can sign. The store keeps
+//! only the [`SealedRecord`] and checks its shape, its signature and that it is wrapped to
+//! exactly the log's readers.
+//!
+//! When it accepts a write the store signs a [`RecordReceipt`] with its head key (domain
+//! `coasys:record-receipt`): `{scid, version, envelope, seq, store}`, where `envelope` is the
+//! hash of the signed envelope ([`envelope_hash`]) and `seq` the log's head when it accepted it.
+//! It keeps the receipt beside the record and returns it with every read. A reader
+//! ([`open_record`]) checks the receipt against the store keys it trusts for heads, then the
+//! envelope's signature against the log at the receipt's `seq`, not at its head: a record a
+//! device wrote before its revocation, or the old master before a rotation, still opens for its
+//! readers. A new write still needs a writer valid at the head, so a revoked key cannot
+//! backdate one: the store names the seq and refuses its write.
 //!
 //! A recovery key counts only with an attestation by the log's current master
 //! ([`RecoveryAttestation`], domain `coasys:recovery-key`): only the master key's holder installs
@@ -22,7 +32,12 @@
 //! store refuses a write whose recovery key the current master has not attested.
 //!
 //! Every version is a whole envelope, so a store can serve back an older one: a reader keeps the
-//! highest version it has read per identity and refuses a lower one.
+//! highest version it has read per identity and refuses a lower one. That high-water mark is the
+//! client's job; this module keeps no state.
+//!
+//! After a rotation the master's holder attests the recovery key again with the new master and
+//! rewrites the record promptly: until then the stored record still opens, but its recovery
+//! key no longer counts ([`recovery_of`]).
 //!
 //! Pure functions: no I/O, no clock, and the caller's RNG for the record key and the nonce.
 
@@ -48,6 +63,8 @@ pub const RECORD_LABEL: &str = "coasys:record";
 pub const RECORD_DOMAIN: &str = "coasys:private-record";
 /// The signing domain of a recovery key's attestation by the current master.
 pub const RECOVERY_DOMAIN: &str = "coasys:recovery-key";
+/// The signing domain of the store's receipt for a record write it accepted.
+pub const RECEIPT_DOMAIN: &str = "coasys:record-receipt";
 /// The entry of `wrapped` for the recovery key.
 pub const RECOVERY_ENTRY: &str = "recovery";
 /// Bytes of the record key.
@@ -76,8 +93,8 @@ pub struct SealedRecord {
     pub nonce: String,
     /// base64url of XChaCha20-Poly1305(recordKey, nonce, JCS(PrivateRecord), aad = [`record_aad`]).
     pub ciphertext: String,
-    /// The writer's key id: a device key without the bot mark valid at the head (`"d3"`), or
-    /// the current master (`"m0"`).
+    /// The writer's key id: a device key without the bot mark valid at the head when the store
+    /// accepted the write (`"d3"`), or the master key current then (`"m0"`).
     pub signer: KeyId,
     /// That key over [`envelope_signing_bytes`], base58btc (`z…`).
     pub sig: String,
@@ -96,6 +113,62 @@ pub struct RecoveryAttestation {
     pub key_id: KeyId,
     /// base58btc (`z…`).
     pub sig: String,
+}
+
+/// The store's word that it accepted the envelope whose hash is `envelope` as `version` of the
+/// record of `scid` when the log's head was `seq`: `sig` is the store's head key (`store`, its
+/// `did:key`) over `signing_bytes("coasys:record-receipt", {scid, version, envelope, seq,
+/// store})`. A reader trusts the store key as it trusts it for signed heads, and checks the
+/// writer against the log at `seq` ([`verify_receipt`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecordReceipt {
+    pub scid: String,
+    pub version: u64,
+    /// [`envelope_hash`] of the record: a sha2-256 multihash, base58btc (`Qm…`).
+    pub envelope: ad4m_hash_chain::Hash,
+    /// The log's head seq when the store accepted the write.
+    pub seq: u64,
+    /// The store key's `did:key`.
+    pub store: String,
+    /// base58btc (`z…`).
+    pub sig: String,
+}
+
+impl RecordReceipt {
+    /// The receipt for `sealed` of identity `scid` at head `seq` by the store `store` (a
+    /// `did:key`), not yet signed: `sig` is empty. The store signs [`RecordReceipt::signing_bytes`].
+    pub fn unsigned(
+        scid: &str,
+        sealed: &SealedRecord,
+        seq: u64,
+        store: &str,
+    ) -> Result<Self, RecordError> {
+        Ok(RecordReceipt {
+            scid: scid.to_string(),
+            version: sealed.version,
+            envelope: envelope_hash(scid, sealed)?,
+            seq,
+            store: store.to_string(),
+            sig: String::new(),
+        })
+    }
+
+    fn statement(&self) -> Value {
+        json!({
+            "scid": self.scid,
+            "version": self.version,
+            "envelope": self.envelope,
+            "seq": self.seq,
+            "store": self.store,
+        })
+    }
+
+    /// The bytes the store key signs: `signing_bytes("coasys:record-receipt", {scid, version,
+    /// envelope, seq, store})`.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, RecordError> {
+        signing_bytes(RECEIPT_DOMAIN, &self.statement()).map_err(|e| malformed(e.to_string()))
+    }
 }
 
 /// A recovery key with its attestation, as a writer passes it to [`seal_record`].
@@ -241,9 +314,11 @@ pub enum RecordError {
     #[error("the record is not wrapped to exactly the log's device keys: {0}")]
     Wrapped(String),
     #[error(
-        "{0} is neither a device key without the bot mark valid at the head nor the current master"
+        "{0} is neither a device key without the bot mark nor the master key, valid at the seq that counts (the head for a write, the receipt's seq for a read)"
     )]
     Signer(String),
+    #[error("the store's receipt does not hold: {0}")]
+    Receipt(String),
     #[error("the record's signature does not verify")]
     Signature,
     #[error("the recovery key is not attested by the current master: {0}")]
@@ -261,6 +336,7 @@ impl RecordError {
             RecordError::Signer(_) => "signer",
             RecordError::Signature => "signature",
             RecordError::Attestation(_) => "attestation",
+            RecordError::Receipt(_) => "receipt",
         }
     }
 }
@@ -311,17 +387,20 @@ pub fn envelope_signing_bytes(scid: &str, sealed: &SealedRecord) -> Result<Vec<u
 /// The writer of `sealed` when its signature verifies against `chain` at its head: `signer`
 /// must name a device key without the bot mark valid at the head, or the current master, and
 /// `sig` must be that key over [`envelope_signing_bytes`]. A key revoked, removed or replaced
-/// before the head no longer counts, nor does a bot key.
+/// before the head no longer counts, nor does a bot key. This is the check of a new write; a
+/// reader of a stored record checks the writer at the receipt's seq ([`verify_receipt`]).
 pub fn verify_envelope(sealed: &SealedRecord, chain: &KelChain) -> Result<Writer, RecordError> {
-    if sealed.version > ad4m_hash_chain::MAX_SAFE_INTEGER {
-        return Err(malformed("version is not a safe integer"));
-    }
-    if sealed.recovery_key.is_some() != sealed.recovery_attestation.is_some() {
-        return Err(malformed(
-            "recoveryAttestation is present exactly when recoveryKey is",
-        ));
-    }
-    let (writer, key) = writer_of(&sealed.signer, chain)?;
+    verify_envelope_at(sealed, chain, chain.head().seq)
+}
+
+/// [`verify_envelope`] against the log at `seq`: the writer must have been valid there.
+fn verify_envelope_at(
+    sealed: &SealedRecord,
+    chain: &KelChain,
+    seq: u64,
+) -> Result<Writer, RecordError> {
+    check_envelope_shape(sealed)?;
+    let (writer, key) = writer_at(&sealed.signer, chain, seq)?;
     let sig = decode_proof_value(&sealed.sig).ok_or(RecordError::Signature)?;
     if !verify_signed(
         RECORD_DOMAIN,
@@ -334,15 +413,100 @@ pub fn verify_envelope(sealed: &SealedRecord, chain: &KelChain) -> Result<Writer
     Ok(writer)
 }
 
-/// The writer `signer` names and its signing key, when the log at its head lets it write: the
-/// current master, or a device key without the bot mark valid at the head.
-fn writer_of<'a>(signer: &str, chain: &'a KelChain) -> Result<(Writer, &'a Multikey), RecordError> {
+fn check_envelope_shape(sealed: &SealedRecord) -> Result<(), RecordError> {
+    if sealed.version > ad4m_hash_chain::MAX_SAFE_INTEGER {
+        return Err(malformed("version is not a safe integer"));
+    }
+    if sealed.recovery_key.is_some() != sealed.recovery_attestation.is_some() {
+        return Err(malformed(
+            "recoveryAttestation is present exactly when recoveryKey is",
+        ));
+    }
+    Ok(())
+}
+
+/// The hash a [`RecordReceipt`] names: the sha2-256 multihash of `JCS({scid, version, wrapped,
+/// recoveryKey, recoveryAttestation, nonce, ciphertext, signer, sig})`, the signed envelope
+/// with its signature.
+pub fn envelope_hash(
+    scid: &str,
+    sealed: &SealedRecord,
+) -> Result<ad4m_hash_chain::Hash, RecordError> {
+    let mut value = envelope_value(scid, sealed);
+    value["sig"] = Value::String(sealed.sig.clone());
+    let text = canonical_json(&value).map_err(|e| malformed(e.to_string()))?;
+    Ok(ad4m_hash_chain::hash_bytes(text.as_bytes()))
+}
+
+/// The writer of a stored `sealed` that the store's `receipt` vouches for: `receipt` names this
+/// identity, this version and this envelope ([`envelope_hash`]), is signed by a store key of
+/// `stores` (the multikeys the reader trusts for signed heads), and names a seq the reader's
+/// log has reached; and the envelope's `signer` was a device key without the bot mark or the
+/// master key valid at that seq, and signed it. A key revoked or replaced after the seq still
+/// counts for this record; one revoked at or before it does not.
+pub fn verify_receipt(
+    sealed: &SealedRecord,
+    receipt: &RecordReceipt,
+    chain: &KelChain,
+    stores: &[Multikey],
+) -> Result<Writer, RecordError> {
+    check_envelope_shape(sealed)?;
+    let scid = chain.id();
+    if receipt.scid != *scid {
+        return Err(RecordError::Receipt(format!(
+            "it names {}, not {scid}",
+            receipt.scid
+        )));
+    }
+    if receipt.version != sealed.version {
+        return Err(RecordError::Receipt(format!(
+            "it names version {}, the record is version {}",
+            receipt.version, sealed.version
+        )));
+    }
+    if receipt.envelope != envelope_hash(scid, sealed)? {
+        return Err(RecordError::Receipt("it names another envelope".into()));
+    }
+    let key = receipt
+        .store
+        .strip_prefix("did:key:")
+        .filter(|k| stores.iter().any(|t| t == k))
+        .ok_or_else(|| RecordError::Receipt(format!("{} is not a trusted store", receipt.store)))?;
+    let sig = decode_proof_value(&receipt.sig)
+        .ok_or_else(|| RecordError::Receipt("sig is not base58btc".into()))?;
+    if !verify_signed(RECEIPT_DOMAIN, &receipt.statement(), key, &sig) {
+        return Err(RecordError::Receipt(
+            "the store's signature does not verify".into(),
+        ));
+    }
+    let head = chain.head().seq;
+    if receipt.seq > head {
+        return Err(RecordError::Receipt(format!(
+            "it names seq {}, past this log's head {head}: read the log first",
+            receipt.seq
+        )));
+    }
+    verify_envelope_at(sealed, chain, receipt.seq)
+}
+
+/// The writer `signer` names and its signing key, when the log at `seq` lets it write: the
+/// master key in force at `seq`, or a device key without the bot mark valid at `seq`. At the
+/// head that is the current master or a device key valid at the head.
+fn writer_at<'a>(
+    signer: &str,
+    chain: &'a KelChain,
+    seq: u64,
+) -> Result<(Writer, &'a Multikey), RecordError> {
     let state = chain.state();
-    if let Some(m) = state.current_master().filter(|m| m.id == signer) {
+    if let Some(m) = state
+        .masters
+        .iter()
+        .find(|m| m.id == signer && state.key_valid_at(&m.id, seq))
+    {
         return Ok((Writer::Master(m.id.clone()), &m.sign));
     }
     match state.keys.get(signer) {
-        Some(r) if r.scopes.is_empty() && state.key_valid_at(&r.id, chain.head().seq) => {
+        Some(r) if r.scopes.is_empty() && state.key_valid_at(&r.id, seq) => {
             Ok((Writer::Device(r.id.clone()), &r.sign))
         }
         _ => Err(RecordError::Signer(signer.to_string())),
@@ -467,6 +631,23 @@ pub fn attest_recovery_key(
     Ok(Recovery { key, attestation })
 }
 
+/// The store's receipt for `sealed` of identity `scid`, accepted at head `seq`, signed by the
+/// store's head key `store`. The store calls it only for a write that passed [`check_sealed`]
+/// at that head.
+#[cfg(feature = "build")]
+pub fn sign_receipt(
+    scid: &str,
+    sealed: &SealedRecord,
+    seq: u64,
+    store: &dyn crate::build::Signer,
+) -> Result<RecordReceipt, RecordError> {
+    let did = format!("did:key:{}", store.key());
+    let mut receipt = RecordReceipt::unsigned(scid, sealed, seq, &did)?;
+    let bytes = receipt.signing_bytes()?;
+    receipt.sig = ad4m_hash_chain::encode_proof_value(&store.sign(&bytes));
+    Ok(receipt)
+}
+
 /// The `info` of a wrapped record key: `"coasys:record" ‖ 0x00 ‖ scid`.
 pub fn wrap_info(scid: &str) -> Vec<u8> {
     seal::info(RECORD_LABEL, scid)
@@ -532,7 +713,7 @@ pub fn seal_unsigned<R: CryptoRng + RngCore>(
 ) -> Result<SealedRecord, RecordError> {
     use base64::Engine;
     let scid = chain.id();
-    writer_of(&signer, chain)?;
+    writer_at(&signer, chain, chain.head().seq)?;
     if let Some(r) = &recovery {
         if !is_x25519_multikey(&r.key) {
             return Err(malformed("recoveryKey is an X25519 multikey"));
@@ -587,7 +768,7 @@ pub fn sign_envelope(
     sealed: &mut SealedRecord,
     signer: &dyn crate::build::Signer,
 ) -> Result<(), RecordError> {
-    let (_, key) = writer_of(&sealed.signer, chain)?;
+    let (_, key) = writer_at(&sealed.signer, chain, chain.head().seq)?;
     if *key != signer.key() {
         return Err(RecordError::Signer(signer.key().to_string()));
     }
@@ -597,22 +778,26 @@ pub fn sign_envelope(
 }
 
 /// Opens `sealed` of the identity whose log is `chain` through its `wrapped[entry]` (a key id,
-/// or `"recovery"`) with that reader's X25519 `secret`. The envelope's signature is checked
-/// against the log first ([`verify_envelope`]): a record no key of the identity signed is
-/// refused before any of its fields is used, and so is a recovery key no master of the log
-/// attested. A record written before a rotation still opens; whether its recovery key still
-/// counts is [`recovery_of`].
+/// or `"recovery"`) with that reader's X25519 `secret`. The store's `receipt` and the envelope's
+/// signature are checked first ([`verify_receipt`], against the store keys `stores` the reader
+/// trusts for signed heads and the log at the receipt's seq): a record no key of the identity
+/// signed, or no trusted store accepted, is refused before any of its fields is used, and so is
+/// a recovery key no master of the log attested. A record written before a rotation or before
+/// its writer's revocation still opens for the readers it was wrapped to; whether its recovery
+/// key still counts is [`recovery_of`].
 ///
 /// It does not know which versions the caller read before: a store can serve back an older
-/// envelope whole, so a reader keeps the highest version it has read per identity and refuses
-/// a lower one.
+/// envelope whole, with its receipt, so a reader keeps the highest version it has read per
+/// identity and refuses a lower one.
 pub fn open_record(
     sealed: &SealedRecord,
+    receipt: &RecordReceipt,
     chain: &KelChain,
+    stores: &[Multikey],
     entry: &str,
     secret: &X25519Secret,
 ) -> Result<PrivateRecord, RecordError> {
-    verify_envelope(sealed, chain)?;
+    verify_receipt(sealed, receipt, chain, stores)?;
     check_attested_by_some_master(sealed, chain)?;
     let wrapped = sealed
         .wrapped

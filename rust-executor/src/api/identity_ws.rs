@@ -21,7 +21,7 @@ use crate::identity::types::{
     InboxEntry, InboxPutParams, InboxStored, JoinStatus, JoinStatusParams, LogParams, OfferListing,
     OfferOpened, OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice, PublishParams,
     RecordKey, RecordParams, RecordPutParams, RecordStored, RequestPosted, RequestsParams,
-    ResetLogParams, ResolveParams, SealedRecord, SignedHead, TakenMaster, UnwrapRecordKeyParams,
+    ResetLogParams, ResolveParams, SignedHead, StoredRecord, TakenMaster, UnwrapRecordKeyParams,
 };
 use crate::types::RequestContext;
 
@@ -364,7 +364,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     // The private record and the request box of the agent's identity: reads and writes
     // signed by a key of the identity, or by the agent's own device key.
-    map.method::<RecordParams, Option<SealedRecord>>("identity.record", record)
+    map.method::<RecordParams, Option<StoredRecord>>("identity.record", record)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<RecordPutParams, RecordStored>("identity.recordPut", record_put)

@@ -17,9 +17,10 @@ use ad4m_identity_core::link::{
     OFFER_TTL_S,
 };
 use ad4m_identity_core::record::{
-    attest_recovery_key, attestation_signing_bytes, check_sealed, envelope_signing_bytes,
-    open_record, record_aad, recovery_of, seal_record, wrap_info, DeviceEntry, DeviceKind,
-    HoldsMaster, PendingRevocation, PrivateRecord, RevocationReason, SealedRecord, Writer,
+    attest_recovery_key, attestation_signing_bytes, check_sealed, envelope_hash,
+    envelope_signing_bytes, open_record, record_aad, recovery_of, seal_record, sign_receipt,
+    verify_receipt, wrap_info, DeviceEntry, DeviceKind, HoldsMaster, PendingRevocation,
+    PrivateRecord, RecordReceipt, RevocationReason, SealedRecord, Writer,
 };
 use ad4m_identity_core::requests::{check_post, DeviceRequestBody, PostedRequest, REQUEST_TTL_S};
 use ad4m_identity_core::{
@@ -1594,6 +1595,15 @@ fn build_devices() -> Value {
         &mut TestRng::new("record seal"),
     )
     .unwrap();
+    let receipt = sign_receipt(
+        &state.scid,
+        &sealed_record,
+        log.chain.head().seq,
+        &sk("vector store"),
+    )
+    .unwrap();
+    let mut hashed = serde_json::to_value(&sealed_record).unwrap();
+    hashed["scid"] = json!(state.scid);
     let post = PostedRequest {
         body: DeviceRequestBody::ConfirmRevoke {
             key_ids: vec!["d2".into()],
@@ -1602,7 +1612,7 @@ fn build_devices() -> Value {
         expires: LINK_NOW + REQUEST_TTL_S,
     };
     json!({
-        "description": "The device inbox, the private record and the request box. HPKE base mode (RFC 9180): DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, empty AAD; sealed = base64url(enc || ciphertext). An inbox seal's info is \"coasys:inbox\" || 0x00 || address (\"pre:<a>\" or \"<scid>/<keyId>\"); a record key's is \"coasys:record\" || 0x00 || scid. The record's aad is JCS({scid, version, recoveryKey}); its recoveryKey carries recoveryAttestation {keyId, sig}, the current master m0 over signing_bytes(\"coasys:recovery-key\", {scid, recoveryKey, keyId}); its envelope is signed by d1 over signing_bytes(\"coasys:private-record\", {scid, version, wrapped, recoveryKey, recoveryAttestation, nonce, ciphertext, signer}). The ephemeral keys and the record key come from the RNG stream sha256(seed || u64be(i)), 32 bytes per block, with the named seed. The X25519 secrets are sha256(\"enc secret d<n>\") and sha256(\"recovery secret\").",
+        "description": "The device inbox, the private record and the request box. HPKE base mode (RFC 9180): DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, empty AAD; sealed = base64url(enc || ciphertext). An inbox seal's info is \"coasys:inbox\" || 0x00 || address (\"pre:<a>\" or \"<scid>/<keyId>\"); a record key's is \"coasys:record\" || 0x00 || scid. The record's aad is JCS({scid, version, recoveryKey}); its recoveryKey carries recoveryAttestation {keyId, sig}, the current master m0 over signing_bytes(\"coasys:recovery-key\", {scid, recoveryKey, keyId}); its envelope is signed by d1 over signing_bytes(\"coasys:private-record\", {scid, version, wrapped, recoveryKey, recoveryAttestation, nonce, ciphertext, signer}); the store's receipt for it is its head key over signing_bytes(\"coasys:record-receipt\", {scid, version, envelope, seq, store}), envelope the sha2-256 multihash of JCS(the signed envelope with scid and sig), seq the head when it accepted the write. The ephemeral keys and the record key come from the RNG stream sha256(seed || u64be(i)), 32 bytes per block, with the named seed. The X25519 secrets are sha256(\"enc secret d<n>\") and sha256(\"recovery secret\").",
         "log": log.json(),
         "now": LINK_NOW,
         "preAddress": {
@@ -1637,6 +1647,12 @@ fn build_devices() -> Value {
             "recoverySecret": hex(&recovery_secret_fixture().to_bytes()),
             "rngSeed": "record seal",
             "sealed": sealed_record,
+            "receipt": {
+                "storeKey": mk(&sk("vector store")),
+                "envelopeHashInput": ad4m_hash_chain::canonical_json(&hashed).unwrap(),
+                "signingBytes": String::from_utf8(receipt.signing_bytes().unwrap()).unwrap(),
+                "value": receipt,
+            },
         },
         "request": {
             "value": post,
@@ -1734,12 +1750,29 @@ fn check_devices(file: &Value) {
         .try_into()
         .unwrap();
     let recovery = X25519Secret::from(recovery);
+    let r = &rec["receipt"];
+    let receipt: RecordReceipt = serde_json::from_value(r["value"].clone()).unwrap();
+    let stores = vec![r["storeKey"].as_str().unwrap().to_string()];
+    assert_eq!(receipt.store, format!("did:key:{}", stores[0]));
     assert_eq!(
-        open_record(&sealed, &chain, "d1", &enc_secret(1)).unwrap(),
+        receipt.envelope,
+        ad4m_hash_chain::hash_bytes(r["envelopeHashInput"].as_str().unwrap().as_bytes())
+    );
+    assert_eq!(envelope_hash(scid, &sealed).unwrap(), receipt.envelope);
+    assert_eq!(
+        receipt.signing_bytes().unwrap(),
+        r["signingBytes"].as_str().unwrap().as_bytes()
+    );
+    assert_eq!(
+        verify_receipt(&sealed, &receipt, &chain, &stores).unwrap(),
+        Writer::Device("d1".into())
+    );
+    assert_eq!(
+        open_record(&sealed, &receipt, &chain, &stores, "d1", &enc_secret(1)).unwrap(),
         record
     );
     assert_eq!(
-        open_record(&sealed, &chain, "recovery", &recovery).unwrap(),
+        open_record(&sealed, &receipt, &chain, &stores, "recovery", &recovery).unwrap(),
         record
     );
     let mut rng = TestRng::new(rec["rngSeed"].as_str().unwrap());

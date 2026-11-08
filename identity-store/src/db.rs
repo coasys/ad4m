@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS records (
     scid      TEXT PRIMARY KEY,
     sealed    TEXT NOT NULL,
     version   INTEGER NOT NULL,
+    receipt   TEXT NOT NULL,
     stored_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS requests (

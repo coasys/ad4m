@@ -188,6 +188,23 @@
       }
     },
     {
+      "domain": "coasys:record-receipt",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "0c387fc85ee519a843e5074f6c23b8ba380b7dbd87c67bacf8bdd1f9412bc679a39e9f61ee641f1edd22cc2456f8f9a6c1c2cf749009b32bed44de5e7d03b608",
+      "signingBytes": "{\"domain\":\"coasys:record-receipt\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:record-receipt\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:record-receipt"
+      }
+    },
+    {
       "domain": "coasys:session",
       "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
       "signature": "a36cce78dcadc5590745741c2f9a15a3cfc14ffc7d4231a57cdeb56c42184e01ec528c822ec9dbb410553e8644912c7fe6034b9d0f08ebb24211bbfa8e365600",
@@ -315,6 +332,11 @@
     },
     {
       "name": "coasys:recovery-key",
+      "owner": "device linking",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:record-receipt",
       "owner": "device linking",
       "scheme": "domain-field"
     },

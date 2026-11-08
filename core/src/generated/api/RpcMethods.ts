@@ -185,7 +185,6 @@ import type { RuntimeSetFreeHostingEnabledParams } from "./RuntimeSetFreeHosting
 import type { RuntimeUnytSendHotParams } from "./RuntimeUnytSendHotParams";
 import type { RuntimeUnytWalletHistoryParams } from "./RuntimeUnytWalletHistoryParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
-import type { SealedRecord } from "./SealedRecord";
 import type { SentMessage } from "./SentMessage";
 import type { SessionChallenge } from "./SessionChallenge";
 import type { SessionInfo } from "./SessionInfo";
@@ -216,6 +215,7 @@ import type { SignMessageRequest } from "./SignMessageRequest";
 import type { SignSessionStatementParams } from "./SignSessionStatementParams";
 import type { SignedHead } from "./SignedHead";
 import type { SignedKeyStatement } from "./SignedKeyStatement";
+import type { StoredRecord } from "./StoredRecord";
 import type { TakenMaster } from "./TakenMaster";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
@@ -307,7 +307,7 @@ export interface RpcMethods {
   "identity.postRequest": { params: PostRequestParams; result: RequestPosted };
   "identity.prepareDevice": { params: Record<string, never>; result: PreparedDevice };
   "identity.publish": { params: PublishParams; result: SignedHead };
-  "identity.record": { params: RecordParams; result: SealedRecord | null };
+  "identity.record": { params: RecordParams; result: StoredRecord | null };
   "identity.recordPut": { params: RecordPutParams; result: RecordStored };
   "identity.rekey": { params: Record<string, never>; result: DeviceKeys };
   "identity.requests": { params: RequestsParams; result: Array<DeviceRequest> };

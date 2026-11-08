@@ -98,6 +98,11 @@ struct KeyMapInner {
     no_log: HashMap<String, Instant>,
     /// The SCIDs of local identities (a row in `identity_agents`): the bound never drops them.
     pinned: HashSet<String>,
+    /// SCID → when (unix seconds, this run) the configured store last confirmed its trusted
+    /// head ([`KelCache::accept`]): what a new link is admitted against.
+    confirmed: HashMap<String, u64>,
+    /// The signing keys this executor signs links with (its agents bound to an identity).
+    own: HashSet<String>,
 }
 
 /// The key map: what every trusted log in the cache says, readable without `await`, so the
@@ -149,10 +154,15 @@ impl KeyMap {
         };
         if inner.logs.len() >= KEY_MAP_BOUND && !inner.logs.contains_key(scid) {
             let KeyMapInner {
-                keys, logs, pinned, ..
+                keys,
+                logs,
+                pinned,
+                confirmed,
+                ..
             } = &mut *inner;
             logs.retain(|held, _| pinned.contains(held));
             keys.retain(|_, held| pinned.contains(held));
+            confirmed.retain(|held, _| pinned.contains(held));
         }
         let trusted = log.trusted;
         for record in log.state.masters.iter().chain(log.state.keys.values()) {
@@ -204,6 +214,27 @@ impl KeyMap {
             .unwrap_or_default()
     }
 
+    /// The listed bot keys with a scope whose `expires` falls in `(after, upto]` (unix
+    /// seconds): the keys whose links the clock, not a new head, may have turned invalid.
+    pub fn expiring(&self, after: u64, upto: u64) -> Vec<String> {
+        let Ok(inner) = self.inner.lock() else {
+            return Vec::new();
+        };
+        inner
+            .logs
+            .values()
+            .flat_map(|log| log.state.keys.values())
+            .filter(|record| {
+                record
+                    .scopes
+                    .iter()
+                    .any(|(_, scope)| after < scope.expires && scope.expires <= upto)
+            })
+            .filter(|record| inner.keys.contains_key(&record.sign))
+            .map(|record| record.sign.clone())
+            .collect()
+    }
+
     /// Keeps the log of the local identity `scid` through the bound, from now on (an agent of
     /// this executor speaks for it). The pin outlives [`KeyMap::forget`].
     pub fn pin(&self, scid: &str) {
@@ -217,8 +248,41 @@ impl KeyMap {
     pub fn forget(&self, scid: &str) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.logs.remove(scid);
+            inner.confirmed.remove(scid);
             inner.keys.retain(|_, held| held != scid);
         }
+    }
+
+    /// Notes that the configured store confirmed the trusted head of `scid` at `at` (unix
+    /// seconds): it signed that head in an answer this executor just read.
+    pub fn note_confirmed(&self, scid: &str, at: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.confirmed.insert(scid.to_string(), at);
+        }
+    }
+
+    /// Notes that this executor signs links with the signing multikey `key` (a local agent's).
+    pub fn note_own(&self, key: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if !inner.own.contains(key) {
+                inner.own.insert(key.to_string());
+            }
+        }
+    }
+
+    /// Whether a new link by `key`, listed in the log of `scid`, may be admitted on the map's
+    /// answer at `now`: the store confirmed that log's trusted head less than `window` seconds
+    /// before, or `key` is this executor's own (it signed the link itself, so no revocation
+    /// it has not seen can be at stake).
+    pub fn admits(&self, scid: &str, key: &str, now: u64, window: u64) -> bool {
+        let Ok(inner) = self.inner.lock() else {
+            return false;
+        };
+        inner.own.contains(key)
+            || inner
+                .confirmed
+                .get(scid)
+                .is_some_and(|at| now.saturating_sub(*at) < window)
     }
 }
 
@@ -982,6 +1046,8 @@ impl KelCache {
         }
         if ours.seq == head.seq {
             self.accept_head(head)?;
+            // First, so a re-check the new head starts admits on it.
+            self.key_map.note_confirmed(scid, now());
             self.publish_trusted(scid, chain.state(), head.seq);
         }
         Ok(Some(ours))
@@ -1203,8 +1269,8 @@ pub(crate) mod tests {
     use ad4m_ldk::identity::{
         AgentRecord, AppendRequest, Claim, ClaimReceipt, DeviceRequest, InboxAddress, InboxAuth,
         InboxMessage, InboxStored, InboxWrite, KeyIndexEntry, LogPage, OfferListing, OfferOpened,
-        OfferProgress, PostedRequest, RecordStored, RequestPosted, SealedRecord, SignedOffer,
-        SignedRequest,
+        OfferProgress, PostedRequest, RecordReceipt, RecordStored, RequestPosted, SealedRecord,
+        SignedOffer, SignedRequest, StoredRecord,
     };
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
@@ -1391,8 +1457,8 @@ pub(crate) mod tests {
         pub inbox_auths: StdMutex<Vec<InboxAuth>>,
         /// The claims made, with their offer id.
         pub claims: StdMutex<Vec<(String, Claim)>>,
-        /// The private record it holds.
-        pub record: StdMutex<Option<SealedRecord>>,
+        /// The private record it holds, with the receipt it signed for it.
+        pub record: StdMutex<Option<StoredRecord>>,
         /// The signed requests of the record and request-box calls, by call name.
         pub requests: StdMutex<Vec<(&'static str, SignedRequest)>>,
         /// The most events a page holds, when set (the head stays the log's).
@@ -1666,7 +1732,7 @@ pub(crate) mod tests {
             &self,
             _: &str,
             req: &SignedRequest,
-        ) -> Result<Option<SealedRecord>, IdentityError> {
+        ) -> Result<Option<StoredRecord>, IdentityError> {
             self.requests
                 .lock()
                 .unwrap()
@@ -1683,9 +1749,27 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .push(("put_record", req.clone()));
-            *self.record.lock().unwrap() = Some(record.clone());
+            // The receipt the identity store signs: over the envelope, at the log's head.
+            let events = self.events.lock().unwrap().clone();
+            let chain = ad4m_identity_core::fold(&events).unwrap();
+            let sealed: ad4m_identity_core::record::SealedRecord =
+                serde_json::from_value(serde_json::to_value(record).unwrap()).unwrap();
+            let receipt = ad4m_identity_core::record::sign_receipt(
+                chain.id(),
+                &sealed,
+                chain.head().seq,
+                &self.key.0,
+            )
+            .unwrap();
+            let receipt: RecordReceipt =
+                serde_json::from_value(serde_json::to_value(&receipt).unwrap()).unwrap();
+            *self.record.lock().unwrap() = Some(StoredRecord {
+                record: record.clone(),
+                receipt: receipt.clone(),
+            });
             Ok(RecordStored {
                 version: record.version,
+                receipt,
             })
         }
         async fn post_request(

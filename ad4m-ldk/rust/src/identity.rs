@@ -470,11 +470,37 @@ pub struct RecoveryAttestation {
     pub sig: String,
 }
 
-/// The answer of a record write.
+/// The store's word that it accepted a record write: its head key (`store`, a `did:key`) over
+/// `{scid, version, envelope, seq, store}` (`coasys:record-receipt`), where `envelope` is the
+/// hash of the signed envelope and `seq` the log's head the write was checked against. A reader
+/// checks the record's writer at `seq`, so a record outlives its writer's revocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordReceipt {
+    pub scid: String,
+    pub version: u64,
+    /// sha2-256 multihash of the signed envelope, base58btc.
+    pub envelope: String,
+    pub seq: u64,
+    /// did:key of the store.
+    pub store: String,
+    pub sig: String,
+}
+
+/// `GET /v1/private/{scid}`: the stored record with the store's receipt for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredRecord {
+    pub record: SealedRecord,
+    pub receipt: RecordReceipt,
+}
+
+/// The answer of a record write: the version and the store's receipt for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordStored {
     pub version: u64,
+    pub receipt: RecordReceipt,
 }
 
 /// What a device asks in the request box.

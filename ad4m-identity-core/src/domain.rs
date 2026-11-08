@@ -108,6 +108,12 @@ pub const SIGNING_DOMAINS: &[Domain] = &[
         scheme: Scheme::DomainField,
     },
     Domain {
+        name: "coasys:record-receipt",
+        signs: "the store's receipt for a private record write it accepted, by its head key",
+        owner: "device linking",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
         name: "coasys:session",
         signs: "key statements for a login on an executor, and the executor's sign-in to the hosting index",
         owner: "executor hosting",

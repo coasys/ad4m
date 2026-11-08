@@ -421,8 +421,33 @@ export interface RecoveryAttestation {
     sig: string;
 }
 
+/**
+ * The store's word that it accepted a record write: its head key (`store`, a did:key) over
+ * `{scid, version, envelope, seq, store}` (`coasys:record-receipt`). `envelope` is the hash of
+ * the signed envelope, `seq` the log's head the write was checked against; a reader checks the
+ * record's writer at `seq`, so a record outlives its writer's revocation.
+ */
+export interface RecordReceipt {
+    scid: string;
+    version: number;
+    /** sha2-256 multihash of the signed envelope, base58btc. */
+    envelope: string;
+    seq: number;
+    /** did:key of the store. */
+    store: string;
+    sig: string;
+}
+
+/** `GET /v1/private/{scid}`: the stored record with the store's receipt for it. */
+export interface StoredRecord {
+    record: SealedRecord;
+    receipt: RecordReceipt;
+}
+
+/** The answer of a record write: the version and the store's receipt for it. */
 export interface RecordStored {
     version: number;
+    receipt: RecordReceipt;
 }
 
 export type DeviceRequestBody =
@@ -493,8 +518,8 @@ export interface IdentitySpec {
     inboxList(address: InboxAddress, auth: SignedRequest | PreInboxAuth, waitSec?: number): Promise<InboxMessage[]>;
     /** DELETE of message `id` of an inbox */
     inboxAck(address: InboxAddress, id: string, auth: SignedRequest | PreInboxAuth): Promise<void>;
-    /** GET /v1/private/{scid}: null before the first write */
-    getRecord(did: string, req: SignedRequest): Promise<SealedRecord | null>;
+    /** GET /v1/private/{scid}: the record with the store's receipt; null before the first write */
+    getRecord(did: string, req: SignedRequest): Promise<StoredRecord | null>;
     /** PUT /v1/private/{scid} */
     putRecord(did: string, record: SealedRecord, req: SignedRequest): Promise<RecordStored>;
     /** POST /v1/requests/{scid} */

@@ -132,11 +132,13 @@ export type { PreparedDevice } from "./PreparedDevice";
 export type { RecordKey } from "./RecordKey";
 export type { RecordParams } from "./RecordParams";
 export type { RecordPutParams } from "./RecordPutParams";
+export type { RecordReceipt } from "./RecordReceipt";
 export type { RecordStored } from "./RecordStored";
 export type { RecoveryAttestation } from "./RecoveryAttestation";
 export type { RequestPosted } from "./RequestPosted";
 export type { RequestsParams } from "./RequestsParams";
 export type { SealedRecord } from "./SealedRecord";
+export type { StoredRecord } from "./StoredRecord";
 export type { TakenMaster } from "./TakenMaster";
 export type { UnwrapRecordKeyParams } from "./UnwrapRecordKeyParams";
 // Key sessions: login with a device key (user.sessionChallenge, user.loginWithKey, ...).
