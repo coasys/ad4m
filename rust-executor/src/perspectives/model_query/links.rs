@@ -232,7 +232,7 @@ pub(super) async fn attach_links(
         // Required patterns before the first OPTIONAL: oxigraph does not reorder joins inside
         // an OPTIONAL chain that a required pattern follows, so they run as cartesian products.
         let sparql = format!(
-            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofAnchor ?proofValid ?rowStatus WHERE {{
+            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofAnchor ?proofValid ?person ?rowStatus WHERE {{
     {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
@@ -244,6 +244,7 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofAnchor> ?proofAnchor . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/person> ?person . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
 {local_status}}}"#
         );
@@ -328,6 +329,13 @@ pub(super) fn decorated_link(row: &Value) -> Value {
     // has none, as the typed expression serialises it.
     if let Some(anchor) = s("proofAnchor").parse::<u64>().ok() {
         row["proof"]["anchor"] = json!(anchor);
+    }
+    // The person the store derived for the signing device key, on a valid row only (as
+    // `perspective.get` returns it): a flow reader counts a device-signed vote or proposer
+    // link that names the person by it.
+    let person = s("person");
+    if valid && !person.is_empty() {
+        row["person"] = json!(person);
     }
     row
 }
@@ -574,6 +582,65 @@ mod tests {
             status: None,
         };
         assert!(link.compute_proof_valid(), "the row verifies as returned");
+    }
+
+    /// A `__links` row of a link a person's device signed carries the person the store
+    /// derived, as `perspective.get` does: a flow reader counts a vote or proposer link that
+    /// names the person by it.
+    #[tokio::test]
+    async fn a_links_row_carries_the_stored_person() {
+        use super::super::test_helpers::{prop, shape};
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::types::{ExpressionProof, Link, LinkExpression};
+        use ad4m_identity_core::build::Signer;
+
+        let log = TestLog::new(67);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+        let key = log.device.key();
+        let data = Link {
+            source: "we://proposal".into(),
+            predicate: Some("we://acceptedBy".into()),
+            target: "we://someone".into(),
+        };
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        let store = SparqlStore::new(None).unwrap();
+        store.add_link(&link).unwrap();
+        let person = store.get_all_links().unwrap()[0].person.clone();
+        assert!(person.is_some(), "the store derived the person");
+
+        let shape = shape("Proposal", vec![prop("name", "we://name")]);
+        let keys = vec![("votes".to_string(), "we://acceptedBy".to_string())];
+        let mut instances = vec![json!({ "id": "we://proposal" })];
+        attach_links(&store, &shape, &keys, None, None, &mut instances)
+            .await
+            .unwrap();
+        let row = &instances[0][LINKS_KEY]["votes"][0];
+        assert_eq!(row["person"].as_str(), person.as_deref(), "{row}");
+        let decorated: crate::types::DecoratedLinkExpression =
+            serde_json::from_value(row.clone()).unwrap();
+        assert_eq!(decorated.person, person);
+        map.forget(&log.scid());
     }
 
     /// The `__links` read for one instance stays an indexed lookup on a large
