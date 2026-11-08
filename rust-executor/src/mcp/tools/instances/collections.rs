@@ -175,7 +175,9 @@ impl Ad4mMcpHandler {
         // link expression gets its own reifier, so adding the same item
         // twice would show up as a duplicate member. Look for an existing
         // membership link first and leave the collection untouched if the
-        // item is already in it.
+        // item is already in it — but only a link that counts makes the
+        // item a member: a forged or uncheckable membership must not
+        // suppress a legitimate add.
         let wanted = p.item_uri.trim();
         let encoded = link_target(wanted);
         let existing = match perspective
@@ -195,10 +197,9 @@ impl Ad4mMcpHandler {
                 ))
             }
         };
-        if existing
-            .iter()
-            .any(|link| target_matches(&link.data.target, wanted, &encoded))
-        {
+        if existing.iter().any(|link| {
+            link.proof.valid == Some(true) && target_matches(&link.data.target, wanted, &encoded)
+        }) {
             return pretty(&json!({
                 "success": true,
                 "class_name": class_name,

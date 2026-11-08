@@ -401,8 +401,9 @@ fn settle_edge(
 }
 
 /// The pooling half of [`settle_edge`], over one already-chosen set of
-/// atoms: sort every eligible vote by parsed instant, count distinct DIDs,
-/// and settle at the n-th — floored by `after`.
+/// atoms: sort every eligible vote by parsed instant, count distinct voters
+/// ([`Vote::voter`]: the person, else the DID), and settle at the n-th —
+/// floored by `after`.
 fn settle_pool(
     from: &str,
     to: &str,
@@ -436,17 +437,20 @@ fn settle_pool(
         })
         .collect();
     pooled.sort_by(|(a_at, a, a_uri), (b_at, b, b_uri)| {
-        (a_at, &a.did, a_uri, &a.at).cmp(&(b_at, &b.did, b_uri, &b.at))
+        (a_at, a.voter(), &a.did, a_uri, &a.at).cmp(&(b_at, b.voter(), &b.did, b_uri, &b.at))
     });
 
+    // One voter per participant (`Vote::voter`): the person the reader resolved the signer
+    // to, else the DID. Two devices of one person across two atoms are one voter here, as
+    // they are inside one atom; role eligibility was decided per DID before this.
     let mut voters: Vec<String> = Vec::new();
     let mut atom_uris: Vec<String> = Vec::new();
     let mut nth = None;
     for (instant, vote, uri) in pooled {
-        if voters.contains(&vote.did) {
+        if voters.iter().any(|v| v == vote.voter()) {
             continue;
         }
-        voters.push(vote.did.clone());
+        voters.push(vote.voter().to_string());
         if !atom_uris.iter().any(|u| u == uri) {
             atom_uris.push(uri.to_string());
         }
@@ -524,6 +528,46 @@ mod tests {
             );
             assert_eq!(derived.settled[0].voters, vec![ALICE, BOB]);
         }
+    }
+
+    /// One person, two devices, two proposals on the same edge under `{n: 2}`: each atom's
+    /// vote is by a different DID, but both count as the same person, so the pool has one
+    /// voter and the edge does not settle. A third voter settles it, and the receipt names
+    /// the participants, the person once.
+    #[test]
+    fn one_person_on_two_devices_is_one_voter_across_atoms() {
+        const PERSON: &str = "did:scid:coasys:1:zPerson";
+        let flow = review_flow(Some(2));
+        let two_devices = [
+            vouched_as(
+                "p-laptop",
+                "review",
+                "approved",
+                &[("did:key:laptop", PERSON, T1)],
+            ),
+            vouched_as(
+                "p-desktop",
+                "review",
+                "approved",
+                &[("did:key:desktop", PERSON, T2)],
+            ),
+        ];
+        let derived = fold("review", &flow, &two_devices);
+        assert_eq!(
+            derived.state, "review",
+            "two devices of one person are one voter: no quorum of two"
+        );
+
+        let with_bob = [
+            two_devices[0].clone(),
+            two_devices[1].clone(),
+            vouched_as("p-bob", "review", "approved", &[(BOB, BOB, T3)]),
+        ];
+        let derived = fold("review", &flow, &with_bob);
+        assert_eq!(derived.state, "approved");
+        assert_eq!(derived.settled[0].settled_at, T3, "Bob is the second voter");
+        // The receipt lists voters sorted, the person once.
+        assert_eq!(derived.settled[0].voters, vec![BOB, PERSON]);
     }
 
     #[test]

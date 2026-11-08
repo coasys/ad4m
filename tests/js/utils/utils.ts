@@ -1,5 +1,5 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "path";
@@ -220,6 +220,29 @@ export function executorDataPath(dataPath: string): string {
     );
 }
 
+/** The local language-language bundle `prepare-test-local` injects. */
+const LOCAL_LANGUAGE_LANGUAGE = path.resolve(__dirname, "..", "..", "..", "bootstrap-languages", "local", "language-language.js");
+
+/** Whether the seed at `seedPath` carries a language-language bundle. The
+ *  committed seed has an empty one; `prepare-test` injects it. */
+export function seedHasLanguageLanguage(seedPath: string): boolean {
+    if (!seedPath) return false;
+    return Boolean(JSON.parse(readFileSync(seedPath, "utf8")).languageLanguageBundle);
+}
+
+/** `seedPath`, or, when its language-language bundle is empty (a suite run
+ *  without prepare-test, on the committed seed), a copy at `copyPath` with the
+ *  local bundle in. An empty bundle fails the executor's system-language load,
+ *  and an executor whose load failed has no key index to answer, so its own
+ *  links would stay unchecked. */
+function withLanguageLanguage(seedPath: string, copyPath: string): string {
+    if (!seedPath || seedHasLanguageLanguage(seedPath)) return seedPath;
+    const seed = JSON.parse(readFileSync(seedPath, "utf8"));
+    seed.languageLanguageBundle = readFileSync(LOCAL_LANGUAGE_LANGUAGE, "utf8");
+    writeFileSync(copyPath, JSON.stringify(seed));
+    return copyPath;
+}
+
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
     apiPort: number,
@@ -270,6 +293,7 @@ export async function startExecutor(dataPath: string,
     }
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
+    bootstrapSeedPath = withLanguageLanguage(bootstrapSeedPath, `${effectiveDataPath}.seed.json`);
     execSync(`"${command}" init --data-path "${effectiveDataPath}" --network-bootstrap-seed "${bootstrapSeedPath}" ${initArgs.join(' ')}`, {cwd: process.cwd()})
 
     // Shared mode for the local language-language and neighbourhood store,
@@ -549,7 +573,9 @@ export async function assertStaysFalse(
 }
 
 /**
- * Clears all links in a perspective, invalid ones included, in a single removeLinks() batch call.
+ * Clears all links in a perspective, invalid ones included. Removes each link
+ * independently so one failing remove (an already-gone link, or an invalid
+ * Shared monotonic link the executor refuses) cannot reject the whole wipe.
  * Import from here or from helpers/assertions to get a clean slate before each test.
  */
 export async function wipePerspective(
@@ -560,7 +586,7 @@ export async function wipePerspective(
   // which would then survive the wipe.
   const links = await perspective.get(new LinkQuery({ includeUnverified: true }));
   if (links.length > 0) {
-    await perspective.removeLinks(links);
+    await Promise.allSettled(links.map((link) => perspective.remove(link)));
   }
   // Clear the per-instance SHACL registration cache so that
   // subsequent register() calls re-add SHACL definitions.

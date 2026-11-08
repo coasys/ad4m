@@ -265,7 +265,9 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
     }
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
-            handle.spawn(run_recheck(service.clone()));
+            // Subscribed here, so no change the cache fires before the task runs is lost.
+            let changes = service.cache.subscribe();
+            handle.spawn(run_recheck(service.clone(), changes));
             handle.spawn(inbox::run_pull(service.clone()));
             handle.spawn(key_login::run_key_session_watch(service));
         }
@@ -284,12 +286,26 @@ pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
 /// that could not be checked and those of each bot key whose scope expired since the last
 /// tick (since start on the first). Each re-check judges a link again from the key map and
 /// rewrites it only when its verdict or person changed, so it is idempotent.
-async fn run_recheck(service: Arc<IdentityService>) {
+async fn run_recheck(
+    service: Arc<IdentityService>,
+    mut changes: tokio::sync::broadcast::Receiver<verdict::VerdictChange>,
+) {
     use tokio::sync::broadcast::error::{RecvError, TryRecvError};
-    let mut changes = service.cache.subscribe();
+    // The stored links are there to re-judge once the perspectives are open. Every log the
+    // cache holds is read into the key map then: each key that no longer counts fires a change
+    // (a log the map did not hold), so a link stored `valid` by a bot whose scope expired, or
+    // a device revoked, while this executor was down is re-judged though its log may never be
+    // read again otherwise.
+    crate::perspectives::opened().await;
+    match service.cache.load_held().await {
+        Ok(read) => log::debug!("identity: read {read} key logs for the re-check"),
+        Err(e) => log::warn!("identity: could not list the cached key logs: {e}"),
+    }
     let mut tick = tokio::time::interval(RECHECK_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut expired_until = 0;
+    // Signers whose re-check failed in some perspective: asked again on the next tick.
+    let mut failed: BTreeSet<String> = BTreeSet::new();
     loop {
         tokio::select! {
             change = changes.recv() => {
@@ -313,18 +329,25 @@ async fn run_recheck(service: Arc<IdentityService>) {
                     Err(RecvError::Lagged(_)) => signers.extend(listed_signers(&service)),
                     Err(RecvError::Closed) => return,
                 }
-                crate::perspectives::recheck_links(&crate::perspectives::Recheck::Signers(signers))
-                    .await;
+                let scope = crate::perspectives::Recheck::Signers(signers);
+                if !crate::perspectives::recheck_links(&scope).await {
+                    if let crate::perspectives::Recheck::Signers(signers) = scope {
+                        failed.extend(signers);
+                    }
+                }
             }
             _ = tick.tick() => {
                 let now = service::now();
-                let expired = expired_signers(service.cache.key_map(), expired_until, now);
+                let mut signers = expired_signers(service.cache.key_map(), expired_until, now);
                 expired_until = now;
-                if !expired.is_empty() {
-                    crate::perspectives::recheck_links(
-                        &crate::perspectives::Recheck::Signers(expired),
-                    )
-                    .await;
+                signers.append(&mut failed);
+                if !signers.is_empty() {
+                    let scope = crate::perspectives::Recheck::Signers(signers);
+                    if !crate::perspectives::recheck_links(&scope).await {
+                        if let crate::perspectives::Recheck::Signers(signers) = scope {
+                            failed = signers;
+                        }
+                    }
                 }
                 crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
             }
@@ -371,6 +394,41 @@ pub fn check_signed_entered<T: serde::Serialize>(
         entered_after_revoke,
         service::now(),
     )
+}
+
+/// [`check_signed_entered`] for a link written on this executor's local write path
+/// (`perspective.addLink` and the other local writes): a link one of this executor's own
+/// agents signed ([`is_local_agent`]) needs no head the store confirmed within the window,
+/// since no revocation this executor has not seen can be at stake for a link it signs now. A
+/// link a local caller hands in signed by anyone else (`addLinkExpression`, an import) is
+/// checked as one from a peer, as is every link that arrives from a peer, whichever key
+/// signed it.
+pub fn check_signed_own<T: serde::Serialize>(
+    expr: &Expression<T>,
+    entered_after_revoke: Option<bool>,
+) -> CheckedLink {
+    resolver::check_signed_with_provenance(
+        expr,
+        &cache::global_key_map(),
+        entered_after_revoke,
+        service::now(),
+        is_local_agent,
+    )
+}
+
+/// Whether `did` is one of this executor's agents: the main agent, or a managed user's. Reads
+/// no lock that panics: before the agent service or the database opens, `false`.
+pub(crate) fn is_local_agent(did: &str) -> bool {
+    let main = crate::agent::AgentService::global_instance()
+        .lock()
+        .ok()
+        .and_then(|agent| agent.as_ref().and_then(|agent| agent.did.clone()));
+    main.as_deref() == Some(did)
+        || crate::db_backend::db_backend()
+            .get_username_by_did(did)
+            .ok()
+            .flatten()
+            .is_some()
 }
 
 /// Fills the key map for the signers of `links` before they are checked and stored: the key
@@ -441,15 +499,10 @@ mod prepare_tests {
 /// log there, so a link signed after a newer head is accepted carries the new anchor.
 pub fn anchor_for(agent_did: &str) -> Option<u64> {
     let service = SERVICE.get()?;
-    let scid = {
-        let db = crate::db::Ad4mDb::global_instance();
-        let db = db.lock().ok()?;
-        db.as_ref()?.agent_identity(agent_did).ok().flatten()?
-    };
-    // This executor signs with the key: its links need no fresh head to count here.
-    if let Some(key) = resolver::multikey_of(agent_did) {
-        service.cache.key_map().note_own(key);
-    }
+    let scid = crate::db_backend::db_backend()
+        .agent_identity(agent_did)
+        .ok()
+        .flatten()?;
     anchor_in(service.cache.key_map(), agent_did, &scid)
 }
 

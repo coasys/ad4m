@@ -126,6 +126,16 @@ export class Ad4mClient {
         this.#apiClient.reconnectNow()
     }
 
+    /**
+     * Use `token` from now on, for every call and the next connection: the
+     * token `agent.renewSession` answers, so a socket that reconnects after the
+     * old token expired still opens. A socket already open goes on.
+     */
+    setToken(token: string): void {
+        this.#token = token
+        this.#apiClient.setToken(token)
+    }
+
     /** Close all event connections and clear in-memory caches */
     close(): void {
         this.#agentClient.clearByDidCache()
