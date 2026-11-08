@@ -346,11 +346,13 @@ pub fn check_signed_entered<T: serde::Serialize>(
     )
 }
 
-/// [`check_signed_entered`] for a link this executor writes itself (`perspective.addLink`
-/// and the other local writes): it needs no head the store confirmed within the window, since
-/// no revocation this executor has not seen can be at stake for a link it signs now. Only the
-/// local write path may say so; a link that arrives from a peer is checked as any other,
-/// whichever key signed it.
+/// [`check_signed_entered`] for a link written on this executor's local write path
+/// (`perspective.addLink` and the other local writes): a link one of this executor's own
+/// agents signed ([`is_local_agent`]) needs no head the store confirmed within the window,
+/// since no revocation this executor has not seen can be at stake for a link it signs now. A
+/// link a local caller hands in signed by anyone else (`addLinkExpression`, an import) is
+/// checked as one from a peer, as is every link that arrives from a peer, whichever key
+/// signed it.
 pub fn check_signed_own<T: serde::Serialize>(
     expr: &Expression<T>,
     entered_after_revoke: Option<bool>,
@@ -360,8 +362,23 @@ pub fn check_signed_own<T: serde::Serialize>(
         &cache::global_key_map(),
         entered_after_revoke,
         service::now(),
-        true,
+        is_local_agent,
     )
+}
+
+/// Whether `did` is one of this executor's agents: the main agent, or a managed user's. Reads
+/// no lock that panics: before the agent service or the database opens, `false`.
+pub(crate) fn is_local_agent(did: &str) -> bool {
+    let main = crate::agent::AgentService::global_instance()
+        .lock()
+        .ok()
+        .and_then(|agent| agent.as_ref().and_then(|agent| agent.did.clone()));
+    main.as_deref() == Some(did)
+        || crate::db_backend::db_backend()
+            .get_username_by_did(did)
+            .ok()
+            .flatten()
+            .is_some()
 }
 
 /// Fills the key map for the signers of `links` before they are checked and stored: the key

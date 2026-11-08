@@ -317,18 +317,19 @@ pub fn check_signed_with<T: serde::Serialize>(
     entered_after_revoke: Option<bool>,
     now: u64,
 ) -> CheckedLink {
-    check_signed_with_provenance(expr, map, entered_after_revoke, now, false)
+    check_signed_with_provenance(expr, map, entered_after_revoke, now, |_| false)
 }
 
-/// [`check_signed_with`]; `own`: this executor signs `expr` itself, now (the local write
-/// path), so no head the store confirmed within the window is asked of it. Never for a link
-/// that arrived from a peer, whichever key signed it.
+/// [`check_signed_with`]; `own(author)`: this executor signs `expr` itself, now (the local
+/// write path, by one of its own agents), so no head the store confirmed within the window is
+/// asked of it. Never for a link that arrived from a peer, whichever key signed it. Asked only
+/// when the head is stale, so the local write pays for it only then.
 pub fn check_signed_with_provenance<T: serde::Serialize>(
     expr: &crate::types::Expression<T>,
     map: &KeyMap,
     entered_after_revoke: Option<bool>,
     now: u64,
-    own: bool,
+    own: impl Fn(&str) -> bool,
 ) -> CheckedLink {
     let signature_holds = crate::agent::signatures::signature_holds(expr);
     let signer = multikey_of(&expr.author);
@@ -355,9 +356,9 @@ pub fn check_signed_with_provenance<T: serde::Serialize>(
     // links again). A link already counted keeps its order (`Some(false)`).
     let verdict = match (&verdict, &lookup) {
         (LinkVerdict::Valid, KeyLookup::Listed { scid, .. })
-            if !own
-                && entered_after_revoke != Some(false)
-                && !map.admits(scid, now, ADMIT_FRESHNESS) =>
+            if entered_after_revoke != Some(false)
+                && !map.admits(scid, now, ADMIT_FRESHNESS)
+                && !own(&expr.author) =>
         {
             LinkVerdict::CantCheck
         }

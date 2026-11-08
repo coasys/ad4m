@@ -8331,6 +8331,9 @@ mod tests {
                 status: Some(LinkStatus::Shared),
             }
         };
+        // The key is a managed user's agent on this executor.
+        Ad4mDb::with_global_instance(|db| db.add_user("own@test", &format!("did:key:{key}"), "pw"))
+            .unwrap();
         let mine = signed("mine");
         let theirs = signed("theirs");
         perspective.sparql_store.add_link(&mine).unwrap();
@@ -8359,6 +8362,94 @@ mod tests {
             "from a peer: waits for a fresh head, own key or not"
         );
         map.forget(&log.scid());
+    }
+
+    /// The local write path is exempt from the fresh head only for links this executor's own
+    /// agents sign. A local caller with write access hands `addLinkExpression` a link signed
+    /// by a foreign key (revoked in the store, the cache on the head before): it waits for a
+    /// fresh head (`cantCheck`), as it would from a peer. A link a managed user's agent signs,
+    /// written the same way on a stale head, still counts.
+    #[tokio::test]
+    async fn a_foreign_link_written_locally_waits_for_a_fresh_head() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+        use ad4m_identity_core::build::Signer;
+
+        let mut perspective = setup().await;
+        let map = global_key_map();
+        let now = chrono::Utc::now().timestamp() as u64;
+        let stale = |log: &TestLog| {
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted: 0,
+                },
+            );
+            map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+        };
+        let signed = |log: &TestLog, target: &str| {
+            let key = log.device.key();
+            let mut data = create_link().normalize();
+            data.target = target.to_string();
+            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes =
+                crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+            LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(log.device.sign(&bytes)),
+                    anchor: Some(0),
+                },
+                status: Some(LinkStatus::Local),
+            }
+        };
+        let foreign = TestLog::new(95);
+        let own = TestLog::new(96);
+        stale(&foreign);
+        stale(&own);
+        Ad4mDb::with_global_instance(|db| {
+            db.add_user("own96@test", &format!("did:key:{}", own.device.key()), "pw")
+        })
+        .unwrap();
+
+        let theirs = perspective
+            .add_link_expression(signed(&foreign, "theirs"), LinkStatus::Local, None)
+            .await
+            .unwrap();
+        let mine = perspective
+            .add_link_expression(signed(&own, "mine"), LinkStatus::Local, None)
+            .await
+            .unwrap();
+        let stored = |target: &str| {
+            perspective
+                .sparql_store
+                .get_all_links()
+                .unwrap()
+                .into_iter()
+                .find(|l| l.data.target == target)
+                .map(|l| (l.verdict, l.person))
+                .unwrap()
+        };
+        assert_eq!(
+            stored("theirs"),
+            (Some(LinkVerdict::CantCheck), None),
+            "a foreign key's link, written locally: {theirs:?}"
+        );
+        assert_eq!(
+            stored("mine"),
+            (
+                Some(LinkVerdict::Valid),
+                Some(ad4m_identity_core::did_of(&own.scid()))
+            ),
+            "this executor's agent's link: {mine:?}"
+        );
+        map.forget(&foreign.scid());
+        map.forget(&own.scid());
     }
 
     /// A bot's link counts while its scope lasts. When the scope expires, the next tick
