@@ -369,6 +369,19 @@ impl IdentityService {
         agent: &AgentContext,
         scid: &str,
     ) -> Result<Option<String>, WsRpcError> {
+        self.bind_agent_if_listed(agent, scid, false).await
+    }
+
+    /// [`IdentityService::record_agent_if_listed`], and with `first_run_operator` the end of a
+    /// desktop app's first link (`identity.joinStatus` on `spent`): a still-empty operator
+    /// record takes the identity (`OperatorSetBy::FirstRun`) in the same database write as the
+    /// binding, so no stop between the two leaves a bound desktop without its operator.
+    pub(super) async fn bind_agent_if_listed(
+        &self,
+        agent: &AgentContext,
+        scid: &str,
+        first_run_operator: bool,
+    ) -> Result<Option<String>, WsRpcError> {
         let (agent_did, key) = device_key(agent).map_err(WsRpcError::internal)?;
         // Only up to the store-signed head: a log lists any key its master adds, so events a
         // foreign `src` served never bind this agent to a person.
@@ -389,8 +402,21 @@ impl IdentityService {
             && state.key_valid_at_time(&id, trusted, now())
         {
             let bound_before = db(|db| db.agent_identity(&agent_did))?.is_some();
-            db(|db| db.set_agent_identity(&agent_did, scid, now()))
-                .map_err(|e| error(409, format!("identity-exists: {}", e.message)))?;
+            let exists = |e: WsRpcError| error(409, format!("identity-exists: {}", e.message));
+            if first_run_operator {
+                let did = did_of(scid);
+                let recorded = db(|db| {
+                    db.set_agent_identity_and_first_run_operator(&agent_did, scid, &did, now())
+                })
+                .map_err(exists)?;
+                if recorded.scid == did && recorded.set_by == crate::db::OperatorSetBy::FirstRun {
+                    log::info!(
+                        "identity: this desktop executor joined {did}, its operator from now on"
+                    );
+                }
+            } else {
+                db(|db| db.set_agent_identity(&agent_did, scid, now())).map_err(exists)?;
+            }
             // A local identity now: its log stays in the key map, so the agent's links carry
             // their anchor ([`super::anchor_for`]).
             self.cache.keep_local(scid).await.map_err(cache_error)?;
@@ -1402,7 +1428,7 @@ mod tests {
             &self,
             did: &str,
             req: &ad4m_ldk::identity::SignedRequest,
-        ) -> Result<Option<ad4m_ldk::identity::SealedRecord>, IdentityError> {
+        ) -> Result<Option<ad4m_ldk::identity::StoredRecord>, IdentityError> {
             self.inner.get_record(did, req).await
         }
         async fn put_record(
@@ -1786,6 +1812,140 @@ mod tests {
         assert_eq!(refused.code, 403);
         assert_eq!(claims(), 2);
         assert_eq!(record().unwrap().scid, did_of(&incept.scid));
+
+        drop(channel);
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+    }
+
+    /// A desktop at its first run (`--custody-channel`, no operator record, no identity) with
+    /// claims on `offers` of one identity the store took, each offer now spent: the service, its
+    /// store, the identity's SCID and the main agent's `did:key`, with the custody channel on
+    /// until the first is dropped.
+    async fn a_first_run_desktop_with_spent_claims(
+        seed: u8,
+        offers: &[u8],
+    ) -> (
+        crate::config::CustodyChannelForTest,
+        IdentityService,
+        String,
+        String,
+    ) {
+        use ad4m_identity_core::link::OfferString;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = AgentContext::main_agent();
+        let (main_did, _) = device_key(&main).unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+        let incept = test_service()
+            .cosign_incept(&main, &incept_listing(&main, seed))
+            .await
+            .unwrap();
+        let incept = Event::from_json(&incept).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![incept.clone()], false));
+        let service = service_on(backend.clone());
+        let channel = crate::config::CustodyChannelForTest::on();
+        for id in offers {
+            let offer = OfferString {
+                store: "https://store.example".into(),
+                scid: incept.scid.clone(),
+                offer_id: bs58::encode([*id; 16]).into_string(),
+                s: bs58::encode([1u8; 32]).into_string(),
+            };
+            service
+                .claims()
+                .claim_for_main(&offer, true, None)
+                .await
+                .expect("a desktop's claim before the join goes ahead");
+        }
+        *backend.offer.lock().unwrap() = "spent".into();
+        (channel, service, incept.scid, main_did)
+    }
+
+    fn offer_id(id: u8) -> String {
+        bs58::encode([id; 16]).into_string()
+    }
+
+    /// The binding and the first-run operator are one write: when the operator record's write
+    /// fails (as a process that stops between them), the main agent is not bound either, so
+    /// the next `joinStatus` finds the first link still open and completes both.
+    #[tokio::test]
+    async fn a_first_join_that_stops_before_the_operator_record_binds_nothing() {
+        use crate::db::OperatorSetBy;
+        let (channel, service, scid, main_did) =
+            a_first_run_desktop_with_spent_claims(61, &[11]).await;
+        let main = AgentContext::main_agent();
+
+        Ad4mDb::with_global_instance(|db| db.fail_operator_record_writes_for_test(true)).unwrap();
+        let stopped = service.claims().join_status(&main, &offer_id(11)).await;
+        Ad4mDb::with_global_instance(|db| db.fail_operator_record_writes_for_test(false)).unwrap();
+        assert!(stopped.is_err(), "{stopped:?}");
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
+            None,
+            "bound without its operator record"
+        );
+        assert_eq!(db(|db| db.operator_record()).unwrap(), None);
+
+        let status = service
+            .claims()
+            .join_status(&main, &offer_id(11))
+            .await
+            .unwrap();
+        assert_eq!(status.key_id.as_deref(), Some("d1"));
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
+            Some(scid.clone())
+        );
+        let recorded = db(|db| db.operator_record())
+            .unwrap()
+            .expect("the operator");
+        assert_eq!(
+            (recorded.scid, recorded.set_by),
+            (did_of(&scid), OperatorSetBy::FirstRun)
+        );
+
+        drop(channel);
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+    }
+
+    /// Two `joinStatus` calls at once for two spent claims of the identity (the app polls both
+    /// after a reconnect): both answer, the main agent binds once, and the identity is the
+    /// operator, set once at the first run.
+    #[tokio::test]
+    async fn concurrent_first_joins_bind_once_and_record_one_operator() {
+        use crate::db::OperatorSetBy;
+        let (channel, service, scid, main_did) =
+            a_first_run_desktop_with_spent_claims(62, &[12, 13]).await;
+        let main = AgentContext::main_agent();
+
+        let (claims, ids) = (service.claims(), [offer_id(12), offer_id(13)]);
+        let (first, second) = tokio::join!(
+            claims.join_status(&main, &ids[0]),
+            claims.join_status(&main, &ids[1]),
+        );
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(
+            (first.key_id.as_deref(), second.key_id.as_deref()),
+            (Some("d1"), Some("d1"))
+        );
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
+            Some(scid.clone())
+        );
+        assert_eq!(
+            db(|db| db.agents_of_identity(&scid)).unwrap(),
+            vec![main_did.clone()]
+        );
+        let recorded = db(|db| db.operator_record())
+            .unwrap()
+            .expect("the operator");
+        assert_eq!(
+            (recorded.scid, recorded.set_by),
+            (did_of(&scid), OperatorSetBy::FirstRun)
+        );
 
         drop(channel);
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();

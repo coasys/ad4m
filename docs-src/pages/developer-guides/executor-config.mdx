@@ -229,9 +229,14 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
   the run before), and a file stops at 50 MiB. `runtime.logTail { lines }`
   (operator, at most 2000) returns its newest lines.
 - **`--custody-channel`**: this executor serves the custody channel
-  (`identity.custodyStatus`, `identity.takeMaster`) to the custody credential
-  on a loopback listener only. The custody credential is a second secret,
-  given only to the custody service. The supervisor writes it as the
+  (`identity.custodyStatus`, `identity.takeMaster`, and `identity.inboxAck`,
+  which with the channel on only the custody service may call) to the custody
+  credential on a loopback listener only. The custody credential is a second
+  secret, given only to the custody service. It is not an operator: on a
+  network listener it opens no session at all, and on a loopback listener it
+  reaches only the identity calls the custody service makes (no
+  `runtime.setConfig`, `agent.lock` or `identity.rekey`: 403
+  `not-a-custody-call`). The supervisor writes it as the
   **first line of the executor's stdin** (the value, then `\n`; a trailing
   `\r` is dropped), right after it starts the executor; the executor reads
   that line before anything else, keeps the value in memory only, and wipes

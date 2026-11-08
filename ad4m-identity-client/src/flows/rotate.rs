@@ -14,7 +14,9 @@
 //!    landed while its answer was lost is found in the log by its hash and not published again.
 //! 3. The vault promotes the staged master *n*+1 in place of master *n*
 //!    ([`Vault::promote_master`]); a promote another app sharing the vault made first (its
-//!    `refresh_master` saw the publish land) counts as kept. A publish refused for good
+//!    `refresh_master` saw the publish land) counts as kept, as does a newer key another app
+//!    kept first — the kept key never goes back a generation, and [`Rotated::kept`] names
+//!    the index the vault actually keeps. A publish refused for good
 //!    discards the key this flow staged (by its [`StageToken`]: a key another app sharing the
 //!    vault staged since is left); one whose answer was lost, or a flow cut off before the
 //!    promote, leaves it staged, and [`super::master::refresh_master`] promotes it when the
@@ -43,7 +45,7 @@ use crate::flows::revoke::check_keys;
 use crate::record::{self, Change, Reader};
 use crate::request::{self, chain_of, scid_of};
 use crate::secret::Secret;
-use crate::vault::{KeySigner, MasterSigner, StageToken, Vault, VaultError};
+use crate::vault::{KeySigner, MasterSigner, StageToken, Stored, Vault, VaultError};
 use crate::{fold, ClientError, Clock, Random};
 
 /// Rotations built and published before [`ClientError::LogBusy`]: the first, and a rebuild on
@@ -66,10 +68,12 @@ pub struct Rotated {
     pub pushes: Vec<(KeyId, Result<String, ClientError>)>,
     /// The record write after the pushes. The rotation stands either way.
     pub record: Result<u64, ClientError>,
-    /// The vault promoted the staged master *n*+1 to its kept key ([`Vault::promote_master`]).
-    /// An error here leaves *n*+1 staged and this device listed as not holding the master key:
-    /// the rotation stands, and `master::refresh_master` promotes the staged key later.
-    pub kept: Result<(), ClientError>,
+    /// The index of the master key the vault keeps after this rotation ([`Vault::promote_master`]
+    /// or the vault rule of [`Vault::store_master`]): this rotation's *n*+1, or a later one
+    /// another app sharing the vault kept first ([`Stored::AlreadyNewer`]). An error leaves
+    /// *n*+1 staged and this device listed as not holding the master key: the rotation
+    /// stands, and `master::refresh_master` promotes the staged key later.
+    pub kept: Result<u32, ClientError>,
 }
 
 /// Master `index` of `seed`, as a signer.
@@ -117,11 +121,18 @@ pub(crate) fn stage(
 
 /// The vault promotes staged master `index` of `scid` ([`Vault::promote_master`]). Every app on
 /// the computer shares the vault, so another one's `refresh_master` may have promoted it
-/// already: a `NotFound` while the vault keeps master `index` is the key kept, `Ok`.
-pub(crate) fn promote(vault: &dyn Vault, scid: &str, index: u32) -> Result<(), VaultError> {
+/// already (a `NotFound` while the vault keeps master `index` or a later one), or kept a later
+/// rotation's key before this one's promotion ran ([`Stored::AlreadyNewer`]). Answers the
+/// index the vault keeps, `Err` when it keeps no master at `index` or later.
+pub(crate) fn promote(vault: &dyn Vault, scid: &str, index: u32) -> Result<u32, VaultError> {
     match vault.promote_master(scid, index) {
-        Err(VaultError::NotFound) if vault.master_index(scid)? == Some(index) => Ok(()),
-        promoted => promoted,
+        Ok(Stored::Stored) => Ok(index),
+        Ok(Stored::AlreadyNewer { kept }) => Ok(kept),
+        Err(VaultError::NotFound) => match vault.master_index(scid)? {
+            Some(kept) if kept >= index => Ok(kept),
+            _ => Err(VaultError::NotFound),
+        },
+        Err(e) => Err(e),
     }
 }
 
@@ -293,12 +304,13 @@ pub(crate) fn kept_holders(
 }
 
 /// This device after a rotation: the key id it has in the log, its whole entry when the
-/// record should list it anew (a restore), else only its `holdsMaster`, and whether its vault
-/// keeps the new master (`holdsMaster: true` with its index; else `false`).
+/// record should list it anew (a restore), else only its `holdsMaster`, and the master index
+/// its vault keeps (`holdsMaster: true` with that index — the rotation's, or a later one the
+/// vault kept first; `None` keeps none, `holdsMaster: false`).
 pub(crate) struct ThisDevice {
     pub key_id: KeyId,
     pub entry: Option<DeviceEntry>,
-    pub kept: bool,
+    pub kept: Option<u32>,
 }
 
 /// Steps 4 and 5: master `signer` (now current) to every kept holder, then the record written
@@ -323,7 +335,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         Ok(log) => log,
         Err(e) => return (Vec::new(), Err(e)),
     };
-    let opened = match record::read_as(executor, did, &chain, reader, random).await {
+    let opened = match record::read_as(executor, vault, did, &chain, reader, random).await {
         Ok(opened) => opened,
         Err(e) => return (Vec::new(), Err(e)),
     };
@@ -333,24 +345,32 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         .unwrap_or_default();
     let mut pushes = Vec::new();
     let mut changes = Vec::new();
+    let index = signer.index();
     for key_id in holders {
         let sent = master::push(
             executor, vault, &events, &chain, did, signer, &key_id, clock, random,
         )
         .await;
-        let holds = match &sent {
-            Ok(_) => HoldsMaster::Offered,
-            // On the retry list: it goes when the store takes it.
-            Err(e) if transient(e) => HoldsMaster::Offered,
-            Err(_) => HoldsMaster::No,
-        };
-        changes.push(Change::HoldsMaster {
-            key_id: key_id.clone(),
-            holds,
+        // Offered, unless the device took it and wrote so before this write lands: the record
+        // write below builds on the newest version, and `Change::Offered` keeps a take of
+        // `index` (or a later master) as it is. A push the store refused for good: not held.
+        changes.push(match &sent {
+            // On the retry list when transient: it goes when the store takes it.
+            Ok(_) => Change::Offered {
+                key_id: key_id.clone(),
+                index,
+            },
+            Err(e) if transient(e) => Change::Offered {
+                key_id: key_id.clone(),
+                index,
+            },
+            Err(_) => Change::HoldsMaster {
+                key_id: key_id.clone(),
+                holds: HoldsMaster::No,
+            },
         });
         pushes.push((key_id, sent));
     }
-    let index = signer.index();
     match this {
         Some(ThisDevice {
             key_id,
@@ -359,32 +379,40 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         }) => changes.push(Change::Device {
             key_id,
             entry: DeviceEntry {
-                holds_master: if kept {
+                holds_master: if kept.is_some() {
                     HoldsMaster::Yes
                 } else {
                     HoldsMaster::No
                 },
-                master_index: kept.then_some(index),
+                master_index: kept,
                 ..entry
             },
         }),
         Some(ThisDevice {
             key_id,
             entry: None,
-            kept: true,
+            kept: Some(index),
         }) => changes.push(Change::Holds { key_id, index }),
         Some(ThisDevice {
             key_id,
             entry: None,
-            kept: false,
+            kept: None,
         }) => changes.push(Change::HoldsMaster {
             key_id,
             holds: HoldsMaster::No,
         }),
         None => {}
     }
-    let record =
-        record::write_as(executor, did, reader, &changes, Some(recovery_key), random).await;
+    let record = record::write_as(
+        executor,
+        vault,
+        did,
+        reader,
+        &changes,
+        Some(recovery_key),
+        random,
+    )
+    .await;
     (pushes, record)
 }
 
@@ -426,35 +454,43 @@ pub async fn rotate<R: ExecutorRpc>(
     let index = published.signer.index();
     // The rotation is public from here: what fails after it is reported, not returned.
     // Promoted here or by another app's refresh first ([`promote`]). Nothing staged at `index`
-    // and not kept (another app's rotation re-staged the slot): the words make the same key, so
-    // it is stored as the restore stores it. `store_master` leaves a staged key in place. A
-    // vault that already keeps this master, or a later one (this answer came back after
-    // another app's rotation past it landed and was kept), is left as it is: the kept key never
-    // goes back a generation.
+    // and the vault keeping no master at or past it (another app's rotation re-staged the
+    // slot): the words make the same key, so it is stored under the vault's never-go-back
+    // rule ([`Vault::store_master`]; a key another app kept meanwhile wins, and `kept` names
+    // the index the vault keeps — this rotation's, or a later one's).
     let kept = match promote(vault, &scid, index) {
-        Err(VaultError::NotFound) => match vault.master_index(&scid) {
-            Ok(Some(kept)) if kept >= index => Ok(()),
-            Ok(_) => words::master_key(&seed, index)
-                .map_err(ClientError::from)
-                .and_then(|key| {
-                    vault
-                        .store_master(&scid, index, Secret::new(key.to_bytes()))
-                        .map_err(ClientError::from)
-                }),
-            Err(e) => Err(e.into()),
-        },
-        promoted => promoted.map_err(ClientError::from),
+        Ok(kept) => Ok(kept),
+        Err(VaultError::NotFound) => words::master_key(&seed, index)
+            .map_err(ClientError::from)
+            .and_then(|key| {
+                vault
+                    .store_master(&scid, index, Secret::new(key.to_bytes()))
+                    .map_err(ClientError::from)
+            })
+            .map(|stored| match stored {
+                Stored::Stored => index,
+                Stored::AlreadyNewer { kept } => kept,
+            }),
+        Err(e) => Err(e.into()),
+    };
+    // The record's rewrite is the new master's: it re-attests the recovery key, which a
+    // device-signed write cannot install.
+    let secret = words::recovery_secret(&seed);
+    let reader = Reader::Recovery {
+        secret: &secret,
+        master: &published.signer,
+        clock,
     };
     let (pushes, record) = hand_over(
         executor,
         vault,
         did,
         &published.signer,
-        &Reader::Executor,
+        &reader,
         Some(ThisDevice {
             key_id: own,
             entry: None,
-            kept: kept.is_ok(),
+            kept: kept.as_ref().ok().copied(),
         }),
         &recovery_key_of(&seed),
         clock,

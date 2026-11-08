@@ -11,7 +11,7 @@ use ad4m_identity_core::inbox::{seal, sign_payload, InboxAddress, InboxBody, Inb
 use ad4m_identity_core::link::SignedBy;
 use ad4m_identity_core::{Event, KeyId, Multikey};
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::secret::Secret;
 use crate::{Random, RandomRng};
@@ -62,13 +62,43 @@ pub enum VaultError {
     Tampered,
 }
 
+/// What [`Vault::store_master`] and [`Vault::promote_master`] did with the kept key.
+///
+/// The vault is shared by every app on the computer, so any of them may have kept a newer
+/// master since the caller read [`Vault::master_index`]: the writes are generation-aware,
+/// and a kept key never goes back a generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stored {
+    /// The key is kept now: none was kept, or the kept one was at this or a lower index.
+    Stored,
+    /// Nothing changed: the vault keeps a key at a higher index, installed by another app
+    /// since the caller checked. Its authenticated index.
+    AlreadyNewer { kept: u32 },
+}
+
+/// What [`Vault::forget_master`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Forgot {
+    /// The kept key was at the index named and is forgotten, or none was kept.
+    Forgot,
+    /// Nothing changed: the vault keeps a key at another index, installed by another app
+    /// sharing the vault since the caller checked. Its authenticated index.
+    Kept(u32),
+}
+
 /// Signs with a master key; never gives its bytes out.
 pub trait MasterSigner: Signer {
     /// The master key's index *n*.
     fn index(&self) -> u32;
     /// This master key as `InboxBody::Master { did, index, secret }` in a payload to the device
     /// key `to`, signed by this key at `by`, sealed to the device's `enc` key `to_enc` for
-    /// `address`. The secret leaves only sealed, and every copy made for the seal is wiped.
+    /// `address`. The secret leaves only sealed. The copies this crate and the core make on the
+    /// way are wiped, whether the seal succeeds or fails: the encoded secret in the body, the
+    /// JSON values built to sign and seal the payload, the signed bytes and the payload's text
+    /// before the seal (both written once at their length, so no shorter copy is left behind
+    /// as they grow). What the libraries underneath keep is not
+    /// covered: the hash state of the Ed25519 signature over the payload, the cipher's working
+    /// buffers, and copies on the stack.
     #[allow(clippy::too_many_arguments)]
     fn seal_self(
         &self,
@@ -126,15 +156,47 @@ impl Unlocked {
 /// flow whose promote answers `NotFound` while the vault keeps its index was promoted by
 /// another app first: the key is kept. Promotion goes by index alone: the words derive one key
 /// per index, so a key staged at the log's current index by any app is the current master.
+///
+/// **The kept key never goes back a generation.** Since every app on the computer shares the
+/// vault, any of them may keep a newer master between a flow's read of [`Vault::master_index`]
+/// and its write. The writes are atomic and generation-aware, so a caller never has to
+/// re-check after them: [`Vault::store_master`] and [`Vault::promote_master`] report
+/// [`Stored::AlreadyNewer`] with the index kept rather than replace a newer key, and
+/// [`Vault::forget_master`] is a compare-and-delete on the index the caller checked.
+/// Everything that names the master index this device holds (the `Taken`/`Promoted`/`kept`
+/// answers, the record's `masterIndex`) names the index the vault keeps, not the one the
+/// flow set out to install.
+///
+/// **A forget is bound to the custody state a flow checked, not to a generation.** The index
+/// names the key's generation; a duplicate delivery of the same master, taken by another app
+/// between a flow's check and its forget, keeps the index and changes custody. So a flow
+/// reads [`Vault::custody_epoch`] before the checks it makes about who holds the key, and
+/// forgets with [`Vault::forget_master_at`], which deletes only while that epoch is unchanged.
+///
+/// **What a persistent vault owes.** Every app on the computer shares one store, so each
+/// operation here is linearizable across every handle and process on that store: the
+/// authenticated comparison and the mutation it decides are one step, under a cross-process
+/// lock or a transaction of the store, never a read in one process and a write in another.
+/// `Ok` from a write ([`Vault::store_master`], [`Vault::stage_master`],
+/// [`Vault::promote_master`]) means the key is durable: a crash after it leaves the key where
+/// the answer said, and a take acknowledges its inbox message only after such an `Ok`. A
+/// promote is crash-safe: after a crash in it, the key is staged or kept, never neither. An
+/// index or epoch the store cannot vouch for is an error or `None`, never a guess. The
+/// in-memory [`MemoryVault`] (tests) is exempt from durability and from the cross-process
+/// lock, since one process holds it.
 pub trait Vault: Send + Sync {
-    /// Stores master `index` for `scid`, replacing the kept one. Used where the key is already
-    /// current in the log (`create`'s #0 before its incept, a key taken from the inbox).
+    /// Stores master `index` for `scid` as the kept key, under the never-go-back rule: a key
+    /// kept at a *higher* index is never replaced by a lower one — the call answers
+    /// [`Stored::AlreadyNewer`] with the index kept, changing nothing (storing the kept
+    /// index again is `Stored`: the words derive the same key). Used where the key is
+    /// already current in the log (`create`'s #0 before its incept, a key taken from the
+    /// inbox, a rotation's key stored from the words).
     fn store_master(
         &self,
         scid: &str,
         index: u32,
         secret: Secret<[u8; 32]>,
-    ) -> Result<(), VaultError>;
+    ) -> Result<Stored, VaultError>;
     /// The index of the master key kept for `scid`. **Authenticated, from the item**: the index
     /// sealed with the key itself (not a cache beside it), so it names the key that
     /// [`Vault::unlock`] would give. `None` when the vault keeps no key for `scid`, *or* when
@@ -157,9 +219,12 @@ pub trait Vault: Send + Sync {
     /// `None` when none is staged. Needs no unlock.
     fn staged_index(&self, scid: &str) -> Result<Option<u32>, VaultError>;
     /// The rotation to staged master `index` landed: the staged key becomes the kept master key
-    /// of `scid`, replacing the old one, and is no longer staged. `NotFound` when no key is
-    /// staged at `index`. Needs no unlock (no secret leaves the vault).
-    fn promote_master(&self, scid: &str, index: u32) -> Result<(), VaultError>;
+    /// of `scid`, replacing the old one, and is no longer staged — under the never-go-back
+    /// rule of [`Vault::store_master`]: a key kept at a *higher* index wins
+    /// ([`Stored::AlreadyNewer`]), and the staged key is discarded, since it can never become
+    /// the kept one. `NotFound` when no key is staged at `index`. Needs no unlock (no secret
+    /// leaves the vault).
+    fn promote_master(&self, scid: &str, index: u32) -> Result<Stored, VaultError>;
     /// The rotation to staged master `index` did not land: the staged key is forgotten when it
     /// is staged at `index` and, with `owner` given, was staged with that token (a flow
     /// discarding its own key); `None` discards it whoever staged it (a refresh discarding a
@@ -171,11 +236,28 @@ pub trait Vault: Send + Sync {
         index: u32,
         owner: Option<&StageToken>,
     ) -> Result<(), VaultError>;
-    /// Forgets the kept master key of `scid` (no error when it keeps none): the person removed it
-    /// from this device, or it was replaced by a rotation. A staged key stays: it may belong to a
-    /// rotation in flight in another app sharing the vault, and only [`Vault::discard_staged`]
-    /// removes it.
-    fn forget_master(&self, scid: &str) -> Result<(), VaultError>;
+    /// Forgets the kept master key of `scid`, only when it is still the key at `index`: a
+    /// compare-and-delete, so a key another app sharing the vault installed at another index
+    /// since the caller read [`Vault::master_index`] is never removed ([`Forgot::Kept`] names
+    /// its index, authenticated; [`Forgot::Forgot`] covers none kept as well). The person
+    /// removed it from this device, or it was replaced by a rotation. A caller never forgets
+    /// on a `master_index` of `None`. A staged key stays: it may belong to a rotation in
+    /// flight in another app sharing the vault, and only [`Vault::discard_staged`] removes it.
+    fn forget_master(&self, scid: &str, index: u32) -> Result<Forgot, VaultError>;
+    /// The custody epoch of `scid`: a value that moves on every successful [`Vault::store_master`],
+    /// [`Vault::promote_master`] and forget of `scid`'s kept key, a store or promote of the SAME
+    /// index with the same bytes included (a duplicate delivery re-stores the same key, and a
+    /// removal that read the epoch before it must not then forget it), never otherwise
+    /// ([`Stored::AlreadyNewer`], a refused promote and [`Forgot::Kept`] leave it), and never
+    /// repeats within the store's life. Use a monotonic write counter kept with the item under
+    /// the same lock as the writes; never a digest of the key or its sealed bytes, which repeats
+    /// for the same key. Needs no unlock.
+    fn custody_epoch(&self, scid: &str) -> Result<u64, VaultError>;
+    /// Forgets the kept master key of `scid` only while its custody epoch is still `epoch`
+    /// ([`Vault::custody_epoch`], read before the caller's checks), as one atomic step: a key
+    /// installed since, at any index, the same one included, is never the one forgotten
+    /// ([`Forgot::Kept`] names the index kept then). None kept is [`Forgot::Forgot`].
+    fn forget_master_at(&self, scid: &str, epoch: u64) -> Result<Forgot, VaultError>;
     /// One unlock (one prompt where the OS needs it) for a flow that uses the master key `why`.
     /// `now` starts the unlock's [`MasterUse::ttl_s`] (pass `why` to [`Unlocked::new`]).
     fn unlock(&self, scid: &str, why: MasterUse, now: u64) -> Result<Unlocked, VaultError>;
@@ -195,6 +277,14 @@ pub trait Vault: Send + Sync {
     /// The push is done (the store took it) or no longer wanted: the vault forgets it (no error
     /// when it holds none).
     fn push_done(&self, push: &PendingPush) -> Result<(), VaultError>;
+    /// Notes `version` of `scid`'s private record as read and answers the highest version read
+    /// before it (the high-water mark, `None` before the first read). A store can serve back
+    /// an older record with a receipt that still verifies, so the reader refuses a version
+    /// under the answer (`crate::record`).
+    fn record_seen(&self, scid: &str, version: u64) -> Result<Option<u64>, VaultError>;
+    /// Forgets the versions of `scid`'s record seen so far: a caller that means to read an
+    /// older version on purpose resets the mark first.
+    fn record_seen_reset(&self, scid: &str) -> Result<(), VaultError>;
 }
 
 /// Who staged a master key ([`Vault::stage_master`]): an opaque token a rotating flow draws at
@@ -268,9 +358,7 @@ impl MasterSigner for KeySigner {
         };
         let mut payload = sign_payload(to.to_string(), body, sent_at, by, self)?;
         let sealed = seal(to_enc, address, &payload, &mut RandomRng(random));
-        if let InboxBody::Master { secret, .. } = &mut payload.body {
-            secret.zeroize();
-        }
+        payload.body.wipe();
         sealed
     }
 }
@@ -294,10 +382,14 @@ mod memory {
     #[derive(Default)]
     pub struct MemoryVault {
         keys: Mutex<Keys>,
+        /// Each identity's custody epoch: bumped on every change of its kept key, under the
+        /// `keys` lock.
+        epochs: Mutex<HashMap<String, u64>>,
         staged: Mutex<Staged>,
         pending: Mutex<Vec<Event>>,
         pushes: Mutex<Vec<PendingPush>>,
         unlocks: Mutex<Vec<MasterUse>>,
+        record_seen: Mutex<HashMap<String, u64>>,
     }
 
     impl MemoryVault {
@@ -308,6 +400,18 @@ mod memory {
         /// Every unlock so far, in order.
         pub fn unlocks(&self) -> Vec<MasterUse> {
             self.unlocks.lock().map(|u| u.clone()).unwrap_or_default()
+        }
+
+        /// The kept key of `scid` changed: its custody epoch moves on. Called with the `keys`
+        /// lock held, so the change and the epoch are one step.
+        fn bump(&self, scid: &str) -> Result<(), VaultError> {
+            *self
+                .epochs
+                .lock()
+                .map_err(poisoned)?
+                .entry(scid.to_string())
+                .or_default() += 1;
+            Ok(())
         }
     }
 
@@ -321,10 +425,16 @@ mod memory {
             scid: &str,
             index: u32,
             secret: Secret<[u8; 32]>,
-        ) -> Result<(), VaultError> {
+        ) -> Result<Stored, VaultError> {
             let mut keys = self.keys.lock().map_err(poisoned)?;
+            if let Some((kept, _)) = keys.get(scid) {
+                if *kept > index {
+                    return Ok(Stored::AlreadyNewer { kept: *kept });
+                }
+            }
             keys.insert(scid.to_string(), (index, secret));
-            Ok(())
+            self.bump(scid)?;
+            Ok(Stored::Stored)
         }
 
         fn master_index(&self, scid: &str) -> Result<Option<u32>, VaultError> {
@@ -336,9 +446,48 @@ mod memory {
                 .map(|(index, _)| *index))
         }
 
-        fn forget_master(&self, scid: &str) -> Result<(), VaultError> {
-            self.keys.lock().map_err(poisoned)?.remove(scid);
-            Ok(())
+        fn forget_master(&self, scid: &str, index: u32) -> Result<Forgot, VaultError> {
+            let mut keys = self.keys.lock().map_err(poisoned)?;
+            match keys.get(scid).map(|(kept, _)| *kept) {
+                Some(kept) if kept != index => Ok(Forgot::Kept(kept)),
+                _ => {
+                    if keys.remove(scid).is_some() {
+                        self.bump(scid)?;
+                    }
+                    Ok(Forgot::Forgot)
+                }
+            }
+        }
+
+        fn custody_epoch(&self, scid: &str) -> Result<u64, VaultError> {
+            let _keys = self.keys.lock().map_err(poisoned)?;
+            Ok(self
+                .epochs
+                .lock()
+                .map_err(poisoned)?
+                .get(scid)
+                .copied()
+                .unwrap_or(0))
+        }
+
+        fn forget_master_at(&self, scid: &str, epoch: u64) -> Result<Forgot, VaultError> {
+            let mut keys = self.keys.lock().map_err(poisoned)?;
+            let now = self
+                .epochs
+                .lock()
+                .map_err(poisoned)?
+                .get(scid)
+                .copied()
+                .unwrap_or(0);
+            match keys.get(scid).map(|(kept, _)| *kept) {
+                Some(kept) if now != epoch => Ok(Forgot::Kept(kept)),
+                Some(_) => {
+                    keys.remove(scid);
+                    self.bump(scid)?;
+                    Ok(Forgot::Forgot)
+                }
+                None => Ok(Forgot::Forgot),
+            }
         }
 
         fn stage_master(
@@ -362,17 +511,23 @@ mod memory {
                 .map(|(index, _, _)| *index))
         }
 
-        fn promote_master(&self, scid: &str, index: u32) -> Result<(), VaultError> {
+        fn promote_master(&self, scid: &str, index: u32) -> Result<Stored, VaultError> {
             let mut staged = self.staged.lock().map_err(poisoned)?;
             if staged.get(scid).map(|(i, _, _)| *i) != Some(index) {
                 return Err(VaultError::NotFound);
             }
+            let mut keys = self.keys.lock().map_err(poisoned)?;
+            if let Some((kept, _)) = keys.get(scid) {
+                if *kept > index {
+                    // A newer key is kept already: the staged one can never become it.
+                    staged.remove(scid);
+                    return Ok(Stored::AlreadyNewer { kept: *kept });
+                }
+            }
             let (index, secret, _) = staged.remove(scid).ok_or(VaultError::NotFound)?;
-            self.keys
-                .lock()
-                .map_err(poisoned)?
-                .insert(scid.to_string(), (index, secret));
-            Ok(())
+            keys.insert(scid.to_string(), (index, secret));
+            self.bump(scid)?;
+            Ok(Stored::Stored)
         }
 
         fn discard_staged(
@@ -437,6 +592,19 @@ mod memory {
             self.pushes.lock().map_err(poisoned)?.retain(|p| p != push);
             Ok(())
         }
+
+        fn record_seen(&self, scid: &str, version: u64) -> Result<Option<u64>, VaultError> {
+            let mut seen = self.record_seen.lock().map_err(poisoned)?;
+            let before = seen.get(scid).copied();
+            let high = before.map_or(version, |h| h.max(version));
+            seen.insert(scid.to_string(), high);
+            Ok(before)
+        }
+
+        fn record_seen_reset(&self, scid: &str) -> Result<(), VaultError> {
+            self.record_seen.lock().map_err(poisoned)?.remove(scid);
+            Ok(())
+        }
     }
 
     #[cfg(test)]
@@ -493,8 +661,65 @@ mod memory {
             vault
                 .stage_master("Qm", 1, Secret::new([1; 32]), &b)
                 .unwrap();
-            vault.promote_master("Qm", 1).unwrap();
+            assert_eq!(vault.promote_master("Qm", 1).unwrap(), Stored::Stored);
             assert_eq!(vault.master_index("Qm").unwrap(), Some(1));
+        }
+
+        /// The kept key never goes back a generation: a store of an older index answers
+        /// `AlreadyNewer` with the index kept and changes nothing, and a promote whose staged
+        /// key meets a newer kept one discards the staged key, which can never become it.
+        #[test]
+        fn an_older_key_never_replaces_a_newer_kept_one() {
+            let vault = MemoryVault::new();
+            vault.store_master("Qm", 2, Secret::new([3; 32])).unwrap();
+            assert_eq!(
+                vault.store_master("Qm", 2, Secret::new([3; 32])).unwrap(),
+                Stored::Stored,
+                "the kept index again"
+            );
+            assert_eq!(
+                vault.store_master("Qm", 1, Secret::new([5; 32])).unwrap(),
+                Stored::AlreadyNewer { kept: 2 }
+            );
+            assert_eq!(vault.master_index("Qm").unwrap(), Some(2));
+            let unlocked = vault.unlock("Qm", MasterUse::Link, 0).unwrap();
+            assert_eq!(
+                unlocked.signer(0).unwrap().key(),
+                Signer::key(&ed25519_dalek::SigningKey::from_bytes(&[3; 32])),
+                "still the newer key"
+            );
+            vault
+                .stage_master("Qm", 1, Secret::new([6; 32]), &StageToken([7; 16]))
+                .unwrap();
+            assert_eq!(
+                vault.promote_master("Qm", 1).unwrap(),
+                Stored::AlreadyNewer { kept: 2 }
+            );
+            assert_eq!(vault.master_index("Qm").unwrap(), Some(2));
+            assert_eq!(
+                vault.staged_index("Qm").unwrap(),
+                None,
+                "the staged key is discarded"
+            );
+        }
+
+        /// The forget is a compare-and-delete on the index the caller checked: a key another
+        /// app installed through a second handle on the same vault, between the read and the
+        /// forget, is never removed.
+        #[test]
+        fn a_forget_removes_only_the_index_checked() {
+            let shared = std::sync::Arc::new(MemoryVault::new());
+            let (mine, theirs) = (shared.clone(), shared.clone());
+            mine.store_master("Qm", 0, Secret::new([3; 32])).unwrap();
+            // Mine reads #0; theirs installs #1; mine's forget of #0 leaves #1.
+            assert_eq!(mine.master_index("Qm").unwrap(), Some(0));
+            theirs.store_master("Qm", 1, Secret::new([4; 32])).unwrap();
+            assert_eq!(mine.forget_master("Qm", 0).unwrap(), Forgot::Kept(1));
+            assert_eq!(mine.master_index("Qm").unwrap(), Some(1));
+            // At the kept index it forgets, and over nothing kept it is still Forgot.
+            assert_eq!(mine.forget_master("Qm", 1).unwrap(), Forgot::Forgot);
+            assert_eq!(mine.forget_master("Qm", 1).unwrap(), Forgot::Forgot);
+            assert_eq!(mine.master_index("Qm").unwrap(), None);
         }
 
         /// The index is read without an unlock, and a forgotten key is gone.
@@ -505,8 +730,8 @@ mod memory {
             vault.store_master("Qm", 2, Secret::new([3; 32])).unwrap();
             assert_eq!(vault.master_index("Qm").unwrap(), Some(2));
             assert!(vault.unlocks().is_empty());
-            vault.forget_master("Qm").unwrap();
-            vault.forget_master("Qm").unwrap();
+            vault.forget_master("Qm", 2).unwrap();
+            vault.forget_master("Qm", 2).unwrap();
             assert_eq!(vault.master_index("Qm").unwrap(), None);
             assert!(matches!(
                 vault.unlock("Qm", MasterUse::Revoke, 0),
@@ -524,7 +749,7 @@ mod memory {
             vault
                 .stage_master("Qm", 1, Secret::new([5; 32]), &owner)
                 .unwrap();
-            vault.forget_master("Qm").unwrap();
+            vault.forget_master("Qm", 0).unwrap();
             assert_eq!(vault.master_index("Qm").unwrap(), None);
             assert_eq!(vault.staged_index("Qm").unwrap(), Some(1));
             vault.promote_master("Qm", 1).unwrap();
@@ -562,6 +787,22 @@ mod memory {
                 unlocked.signer(100 + UNLOCK_TTL_S),
                 Err(VaultError::Expired)
             ));
+        }
+
+        /// `record_seen` keeps each identity's highest record version and answers the one
+        /// before, so the reader refuses a version served back under it; `record_seen_reset`
+        /// clears the mark.
+        #[test]
+        fn the_record_high_water_rises_only() {
+            let vault = MemoryVault::new();
+            assert_eq!(vault.record_seen("Qm", 1).unwrap(), None);
+            assert_eq!(vault.record_seen("Qm", 3).unwrap(), Some(1));
+            // A version under the mark answers the mark it trips on; the mark does not fall.
+            assert_eq!(vault.record_seen("Qm", 2).unwrap(), Some(3));
+            assert_eq!(vault.record_seen("Qm", 3).unwrap(), Some(3));
+            assert_eq!(vault.record_seen("Qm2", 1).unwrap(), None);
+            vault.record_seen_reset("Qm").unwrap();
+            assert_eq!(vault.record_seen("Qm", 2).unwrap(), None);
         }
     }
 }

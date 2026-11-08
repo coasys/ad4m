@@ -48,6 +48,9 @@ const PAGE_EVENTS: usize = 256;
 /// How long (seconds) a log refreshed from the configured store may admit a key before the
 /// next admission refreshes it again ([`verify_expression`]).
 pub const ADMIT_FRESHNESS: u64 = 60;
+/// The most signers the key map does not know that one [`Resolver::prepare`] asks the key
+/// index about; the rest wait for a later batch or the re-check.
+pub const DISCOVERY_PER_BATCH: usize = 64;
 /// Bounds of the in-memory maps (failed fetches, confirmed keys).
 const MAP_BOUND: usize = 4096;
 /// How long the resolver stops asking the key index after it failed to answer, so an outage
@@ -336,6 +339,19 @@ pub fn check_signed_with<T: serde::Serialize>(
         entered_after_revoke,
         now,
     });
+    // A link not counted yet is admitted only on a head the store confirmed within
+    // `ADMIT_FRESHNESS`, whatever its anchor: an older head may miss a revocation of its key.
+    // A stale head says `CantCheck` until a refresh lands (the periodic re-check reads those
+    // links again). A link already counted keeps its order (`Some(false)`).
+    let verdict = match (&verdict, &lookup, signer) {
+        (LinkVerdict::Valid, KeyLookup::Listed { scid, .. }, Some(key))
+            if entered_after_revoke != Some(false)
+                && !map.admits(scid, key, now, ADMIT_FRESHNESS) =>
+        {
+            LinkVerdict::CantCheck
+        }
+        _ => verdict,
+    };
     let (person, by_bot) = match (&verdict, &lookup, signer) {
         (LinkVerdict::Valid, KeyLookup::Listed { scid, log }, Some(key)) => {
             match author_in(scid, log, key) {
@@ -956,11 +972,25 @@ impl Resolver {
     }
 
     /// Fills the key map for the signers of links about to be checked: each `(did:key,
-    /// anchor)` once. A link anchored past the trusted seq of its signer's log refreshes that
-    /// log from the store, at most once per [`ADMIT_FRESHNESS`].
+    /// anchor)` once. A listed signer's log is refreshed from the store when it last was more
+    /// than [`ADMIT_FRESHNESS`] ago, whatever the link's anchor: a cached head admits a key
+    /// for that long at most, so a revocation the store holds reaches a link anchored before
+    /// it (or unanchored) by the next admission, as [`verify_expression`] does for records.
+    /// Offline, a failed refresh confirms nothing: past the window a new link on the cached
+    /// head is `CantCheck` ([`KeyMap::admits`] in [`check_signed_with`]) until a read
+    /// succeeds. The failed attempt still counts as the window's read, so an unreachable
+    /// store is tried once per window per log, not on every batch; the periodic re-check
+    /// of `cantCheck` links retries it. At most [`DISCOVERY_PER_BATCH`] signers the key map
+    /// does not know are looked up per call; the others stay unknown until a later one.
     pub async fn prepare(&self, signers: &[(String, Option<u64>)]) {
-        let now = super::service::now();
+        self.prepare_at(signers, super::service::now()).await
+    }
+
+    /// [`Resolver::prepare`] at the unix time `now` (tests move the clock).
+    pub(crate) async fn prepare_at(&self, signers: &[(String, Option<u64>)], now: u64) {
         let mut seen = std::collections::HashSet::new();
+        // Signers the key map does not know: each may cost the key index a call.
+        let mut discovered = std::collections::HashSet::new();
         for (did, anchor) in signers {
             if !seen.insert((did.as_str(), *anchor)) {
                 continue;
@@ -968,12 +998,18 @@ impl Resolver {
             let Some(key) = multikey_of(did) else {
                 continue;
             };
-            let KeyLookup::Listed { scid, log } = self.lookup_signer(key).await else {
+            if matches!(self.cache.key_map().lookup(key), KeyLookup::Unknown)
+                && !discovered.contains(key)
+            {
+                if discovered.len() >= DISCOVERY_PER_BATCH {
+                    continue;
+                }
+                discovered.insert(key);
+            }
+            let KeyLookup::Listed { scid, .. } = self.lookup_signer(key).await else {
                 continue;
             };
-            if anchor.is_some_and(|a| a > log.trusted)
-                && !self.cache.refreshed_within(&scid, now, ADMIT_FRESHNESS)
-            {
+            if !self.cache.refreshed_within(&scid, now, ADMIT_FRESHNESS) {
                 if let Err(e) = self
                     .cache
                     .refresh(self.backend.as_ref(), &did_of(&scid))
@@ -3767,6 +3803,105 @@ mod link_check_tests {
         }
     }
 
+    /// One batch asks the key index about at most `DISCOVERY_PER_BATCH` signers the key map
+    /// does not know; the rest stay unknown (their links `CantCheck`) for the next batch or the
+    /// re-check. Signers the map already knows do not count.
+    #[tokio::test]
+    async fn a_batch_asks_the_key_index_about_a_bounded_number_of_new_signers() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        let resolver = resolver_on(store.clone());
+        let signers: Vec<(String, Option<u64>)> = (0..DISCOVERY_PER_BATCH + 36)
+            .map(|_| (TestSigner::generate().did, Some(0)))
+            .collect();
+        resolver.prepare(&signers).await;
+        assert_eq!(
+            store.key_owner_calls.load(Ordering::SeqCst),
+            DISCOVERY_PER_BATCH
+        );
+        let unknown = signers
+            .iter()
+            .filter(|(did, _)| {
+                matches!(
+                    resolver.cache.key_map().lookup(multikey_of(did).unwrap()),
+                    KeyLookup::Unknown
+                )
+            })
+            .count();
+        assert_eq!(unknown, 36);
+
+        resolver.prepare(&signers).await;
+        assert_eq!(
+            store.key_owner_calls.load(Ordering::SeqCst),
+            DISCOVERY_PER_BATCH + 36
+        );
+    }
+
+    /// A cached head the store has not confirmed within `ADMIT_FRESHNESS` admits no new link,
+    /// whatever its anchor: the store may hold a revocation the cache has not seen. With the
+    /// store down the refresh fails and the link stays `CantCheck`, not `Valid`; once the
+    /// store answers, the read brings the revocation and the link is flagged.
+    #[tokio::test]
+    async fn a_failed_refresh_past_the_window_admits_no_new_link() {
+        let mut log = TestLog::new(72);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let resolver = resolver_on(store.clone());
+        let now = super::super::service::now();
+        let signers = |links: &[Expression<Link>]| -> Vec<(String, Option<u64>)> {
+            links
+                .iter()
+                .map(|l| (l.author.clone(), l.proof.anchor))
+                .collect()
+        };
+        let fresh = signed_with(&log.device, Some(0));
+        resolver
+            .prepare_at(&signers(std::slice::from_ref(&fresh)), now)
+            .await;
+        assert_eq!(
+            check_signed_with(&fresh, resolver.cache.key_map(), None, now),
+            valid_for(Some(did_of(&log.scid())))
+        );
+
+        // The store takes the revocation; the cached head does not know it.
+        log.revoke_d1();
+        *store.events.lock().unwrap() = log.events.clone();
+        let later = now + ADMIT_FRESHNESS + 5;
+        let links = [
+            signed_with(&log.device, Some(0)),
+            signed_with(&log.device, None),
+        ];
+        let verdicts = |at: u64| {
+            links
+                .iter()
+                .map(|l| check_signed_with(l, resolver.cache.key_map(), None, at).verdict)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            verdicts(later),
+            [LinkVerdict::CantCheck, LinkVerdict::CantCheck]
+        );
+
+        store.store_down.store(true, Ordering::SeqCst);
+        resolver.prepare_at(&signers(&links), later).await;
+        assert_eq!(
+            verdicts(later),
+            [LinkVerdict::CantCheck, LinkVerdict::CantCheck],
+            "the store is unreachable: nothing confirms the head"
+        );
+
+        store.store_down.store(false, Ordering::SeqCst);
+        let after = later + ADMIT_FRESHNESS + 5;
+        resolver.prepare_at(&signers(&links), after).await;
+        assert_eq!(
+            verdicts(after),
+            [LinkVerdict::Flagged, LinkVerdict::Flagged]
+        );
+        // A link a counted row stands for keeps its verdict: no fresh head is asked of it.
+        assert_eq!(
+            check_signed_with(&fresh, resolver.cache.key_map(), Some(false), after),
+            valid_for(Some(did_of(&log.scid())))
+        );
+    }
+
     /// Whoever holds a revoked device key (a thief, say) signs a link today, after the
     /// revocation is accepted, and names an anchor before it, or no anchor at all. The
     /// executor knows no space order, so the link is flagged and speaks for nobody.
@@ -3785,6 +3920,54 @@ mod link_check_tests {
                     by_bot: false,
                 },
                 "signed after the revocation, anchor {anchor:?}"
+            );
+        }
+    }
+
+    /// This executor accepted a person's head at seq 0 and cached it. The owner then revokes
+    /// the device at seq 1, which only the store knows. Whoever holds the revoked key keeps
+    /// signing links anchored at 0, or with no anchor: the cached head may answer for them
+    /// only for [`ADMIT_FRESHNESS`], after which the next admission reads the log again.
+    #[tokio::test]
+    async fn a_stale_cached_head_does_not_keep_admitting_a_revoked_key() {
+        let mut log = TestLog::new(72);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let resolver = resolver_on(store.clone());
+        let device = format!("did:key:{}", log.device.key());
+        let person = Some(did_of(&log.scid()));
+        let now = crate::identity::service::now();
+        let judge =
+            |expr: &Expression<Link>| check_signed_with(expr, resolver.cache.key_map(), None, NOW);
+
+        resolver.prepare_at(&[(device.clone(), Some(0))], now).await;
+        assert_eq!(judge(&signed_with(&log.device, Some(0))), valid_for(person));
+
+        // Revoked in the store only; the cached head still lists the key.
+        log.revoke_d1();
+        *store.events.lock().unwrap() = log.events.clone();
+
+        // Within the window the cached head answers, without another read of the store.
+        let reads = store.log_calls.load(Ordering::SeqCst);
+        resolver
+            .prepare_at(&[(device.clone(), Some(0))], now + 5)
+            .await;
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), reads);
+
+        // Past it, the next link by that key refreshes the log, whatever its anchor.
+        let later = now + ADMIT_FRESHNESS + 5;
+        for anchor in [Some(0), None] {
+            let expr = signed_with(&log.device, anchor);
+            resolver
+                .prepare_at(&[(device.clone(), anchor)], later)
+                .await;
+            assert_eq!(
+                judge(&expr),
+                CheckedLink {
+                    verdict: LinkVerdict::Flagged,
+                    person: None,
+                    by_bot: false,
+                },
+                "stale head, anchor {anchor:?}"
             );
         }
     }

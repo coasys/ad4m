@@ -45,7 +45,9 @@ pub use store::{
 };
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
-pub use vault::{MasterSigner, MasterUse, PendingPush, StageToken, Unlocked, Vault, VaultError};
+pub use vault::{
+    Forgot, MasterSigner, MasterUse, PendingPush, StageToken, Stored, Unlocked, Vault, VaultError,
+};
 
 /// Unix seconds, from the surface.
 pub trait Clock {
@@ -148,6 +150,22 @@ pub enum ClientError {
     /// A request of the box that its poster did not sign as the log lists it.
     #[error("the request is not signed by its poster: {0}")]
     Poster(String),
+    /// Not written: the record says this device took the master key already
+    /// (`holdsMaster: true`), and an `"offered"` never replaces that.
+    #[error("{0} holds the master key already")]
+    HoldsMaster(ad4m_identity_core::KeyId),
+    /// Not written: the record lists no device `key_id`, so a `holdsMaster` for it would be a
+    /// silent no-op its caller reports as done.
+    #[error("the record lists no device {0}, so its master key cannot be marked")]
+    NotListed(ad4m_identity_core::KeyId),
+    /// Not written: the record already lists device `key_id`, and the write was to insert its
+    /// entry only while it was missing (a retry whose device got its entry in between).
+    #[error("the record already lists device {0}")]
+    Listed(ad4m_identity_core::KeyId),
+    /// The store served the record's version `served`, under the highest version `seen` this
+    /// client already opened for the identity: a replayed older version, refused.
+    #[error("the store served version {served} of the record, under version {seen} read before")]
+    ServedRecordVersion { served: u64, seen: u64 },
     /// The record's version moved under every write tried.
     #[error("the private record kept changing; try again")]
     RecordBusy,

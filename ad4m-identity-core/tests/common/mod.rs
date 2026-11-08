@@ -17,8 +17,10 @@ use ad4m_identity_core::link::{
     OFFER_TTL_S,
 };
 use ad4m_identity_core::record::{
-    check_sealed, open_record, record_aad, seal_record, wrap_info, DeviceEntry, DeviceKind,
-    HoldsMaster, PendingRevocation, PrivateRecord, RevocationReason, SealedRecord,
+    attest_recovery_key, attestation_signing_bytes, check_sealed, envelope_hash,
+    envelope_signing_bytes, open_record, record_aad, recovery_of, seal_record, sign_receipt,
+    verify_receipt, wrap_info, DeviceEntry, DeviceKind, HoldsMaster, PendingRevocation,
+    PrivateRecord, RecordReceipt, RevocationReason, SealedRecord, Writer,
 };
 use ad4m_identity_core::requests::{check_post, DeviceRequestBody, PostedRequest, REQUEST_TTL_S};
 use ad4m_identity_core::{
@@ -1584,14 +1586,25 @@ fn build_devices() -> Value {
     .unwrap();
     let recovery = x25519_multikey_of(&recovery_secret_fixture());
     let record = record_fixture();
+    let attested = attest_recovery_key(&log.chain, recovery.clone(), &master(log.n)).unwrap();
     let sealed_record = seal_record(
         &log.chain,
         1,
         &record,
-        Some(recovery.clone()),
+        Some(attested),
+        &dev(1),
         &mut TestRng::new("record seal"),
     )
     .unwrap();
+    let receipt = sign_receipt(
+        &state.scid,
+        &sealed_record,
+        log.chain.head().seq,
+        &sk("vector store"),
+    )
+    .unwrap();
+    let mut hashed = serde_json::to_value(&sealed_record).unwrap();
+    hashed["scid"] = json!(state.scid);
     let post = PostedRequest {
         body: DeviceRequestBody::ConfirmRevoke {
             key_ids: vec!["d2".into()],
@@ -1600,7 +1613,7 @@ fn build_devices() -> Value {
         expires: LINK_NOW + REQUEST_TTL_S,
     };
     json!({
-        "description": "The device inbox, the private record and the request box. HPKE base mode (RFC 9180): DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, empty AAD; sealed = base64url(enc || ciphertext). An inbox seal's info is \"coasys:inbox\" || 0x00 || address (\"pre:<a>\" or \"<scid>/<keyId>\"); a record key's is \"coasys:record\" || 0x00 || scid. The ephemeral keys and the record key come from the RNG stream sha256(seed || u64be(i)), 32 bytes per block, with the named seed. The X25519 secrets are sha256(\"enc secret d<n>\") and sha256(\"recovery secret\").",
+        "description": "The device inbox, the private record and the request box. HPKE base mode (RFC 9180): DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, empty AAD; sealed = base64url(enc || ciphertext). An inbox seal's info is \"coasys:inbox\" || 0x00 || address (\"pre:<a>\" or \"<scid>/<keyId>\"); a record key's is \"coasys:record\" || 0x00 || scid. The record's aad is JCS({scid, version, recoveryKey}); its recoveryKey carries recoveryAttestation {keyId, sig}, the current master m0 over signing_bytes(\"coasys:recovery-key\", {scid, recoveryKey, keyId}); its envelope is signed by d1 over signing_bytes(\"coasys:private-record\", {scid, version, wrapped, recoveryKey, recoveryAttestation, nonce, ciphertext, signer}); the store's receipt for it is its head key over signing_bytes(\"coasys:record-receipt\", {scid, version, envelope, seq, store}), envelope the sha2-256 multihash of JCS(the signed envelope with scid and sig), seq the head when it accepted the write. The ephemeral keys and the record key come from the RNG stream sha256(seed || u64be(i)), 32 bytes per block, with the named seed. The X25519 secrets are sha256(\"enc secret d<n>\") and sha256(\"recovery secret\").",
         "log": log.json(),
         "now": LINK_NOW,
         "preAddress": {
@@ -1611,7 +1624,7 @@ fn build_devices() -> Value {
         },
         "payload": {
             "value": payload,
-            "signingBytes": String::from_utf8(payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by).unwrap()).unwrap(),
+            "signingBytes": String::from_utf8(payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by).unwrap().to_vec()).unwrap(),
         },
         "seal": {
             "recipientSecret": hex(&enc_secret(1).to_bytes()),
@@ -1628,11 +1641,19 @@ fn build_devices() -> Value {
         "record": {
             "value": record,
             "plaintext": ad4m_hash_chain::canonical_json(&serde_json::to_value(&record).unwrap()).unwrap(),
-            "aad": String::from_utf8(record_aad(&state.scid, 1).unwrap()).unwrap(),
+            "aad": String::from_utf8(record_aad(&state.scid, 1, Some(&recovery)).unwrap()).unwrap(),
+            "signingBytes": String::from_utf8(envelope_signing_bytes(&state.scid, &sealed_record).unwrap()).unwrap(),
+            "attestationSigningBytes": String::from_utf8(attestation_signing_bytes(&state.scid, &recovery, "m0").unwrap()).unwrap(),
             "wrapInfo": hex(&wrap_info(&state.scid)),
             "recoverySecret": hex(&recovery_secret_fixture().to_bytes()),
             "rngSeed": "record seal",
             "sealed": sealed_record,
+            "receipt": {
+                "storeKey": mk(&sk("vector store")),
+                "envelopeHashInput": ad4m_hash_chain::canonical_json(&hashed).unwrap(),
+                "signingBytes": String::from_utf8(receipt.signing_bytes().unwrap()).unwrap(),
+                "value": receipt,
+            },
         },
         "request": {
             "value": post,
@@ -1656,7 +1677,9 @@ fn check_devices(file: &Value) {
 
     let payload: InboxPayload = serde_json::from_value(file["payload"]["value"].clone()).unwrap();
     assert_eq!(
-        payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by).unwrap(),
+        payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by)
+            .unwrap()
+            .to_vec(),
         file["payload"]["signingBytes"].as_str().unwrap().as_bytes()
     );
     assert_eq!(
@@ -1699,22 +1722,58 @@ fn check_devices(file: &Value) {
     let record: PrivateRecord = serde_json::from_value(rec["value"].clone()).unwrap();
     let scid = &chain.state().scid;
     assert_eq!(
-        record_aad(scid, 1).unwrap(),
+        record_aad(
+            scid,
+            1,
+            Some(&x25519_multikey_of(&recovery_secret_fixture()))
+        )
+        .unwrap(),
         rec["aad"].as_str().unwrap().as_bytes()
     );
     assert_eq!(hex(&wrap_info(scid)), rec["wrapInfo"]);
     let sealed: SealedRecord = serde_json::from_value(rec["sealed"].clone()).unwrap();
-    check_sealed(&sealed, &chain).unwrap();
+    assert_eq!(
+        envelope_signing_bytes(scid, &sealed).unwrap(),
+        rec["signingBytes"].as_str().unwrap().as_bytes()
+    );
+    let attestation = sealed.recovery_attestation.clone().unwrap();
+    assert_eq!(attestation.key_id, "m0");
+    assert_eq!(
+        attestation_signing_bytes(scid, sealed.recovery_key.as_deref().unwrap(), "m0").unwrap(),
+        rec["attestationSigningBytes"].as_str().unwrap().as_bytes()
+    );
+    assert!(recovery_of(&sealed, &chain).is_some());
+    assert_eq!(
+        check_sealed(&sealed, &chain).unwrap(),
+        Writer::Device("d1".into())
+    );
     let recovery: [u8; 32] = unhex(rec["recoverySecret"].as_str().unwrap())
         .try_into()
         .unwrap();
     let recovery = X25519Secret::from(recovery);
+    let r = &rec["receipt"];
+    let receipt: RecordReceipt = serde_json::from_value(r["value"].clone()).unwrap();
+    let stores = vec![r["storeKey"].as_str().unwrap().to_string()];
+    assert_eq!(receipt.store, format!("did:key:{}", stores[0]));
     assert_eq!(
-        open_record(&sealed, scid, "d1", &enc_secret(1)).unwrap(),
+        receipt.envelope,
+        ad4m_hash_chain::hash_bytes(r["envelopeHashInput"].as_str().unwrap().as_bytes())
+    );
+    assert_eq!(envelope_hash(scid, &sealed).unwrap(), receipt.envelope);
+    assert_eq!(
+        receipt.signing_bytes().unwrap(),
+        r["signingBytes"].as_str().unwrap().as_bytes()
+    );
+    assert_eq!(
+        verify_receipt(&sealed, &receipt, &chain, &stores).unwrap(),
+        Writer::Device("d1".into())
+    );
+    assert_eq!(
+        open_record(&sealed, &receipt, &chain, &stores, "d1", &enc_secret(1)).unwrap(),
         record
     );
     assert_eq!(
-        open_record(&sealed, scid, "recovery", &recovery).unwrap(),
+        open_record(&sealed, &receipt, &chain, &stores, "recovery", &recovery).unwrap(),
         record
     );
     let mut rng = TestRng::new(rec["rngSeed"].as_str().unwrap());
@@ -1723,7 +1782,8 @@ fn check_devices(file: &Value) {
             &chain,
             sealed.version,
             &record,
-            sealed.recovery_key.clone(),
+            recovery_of(&sealed, &chain),
+            &dev(1),
             &mut rng
         )
         .unwrap(),

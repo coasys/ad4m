@@ -25,7 +25,7 @@ use ad4m_identity_core::inbox::{
 use ad4m_identity_core::link::{
     self, ClaimView, DeviceString, Offer, OfferKind, OfferString, SignedOffer,
 };
-use ad4m_identity_core::record::{DeviceEntry, HoldsMaster};
+use ad4m_identity_core::record::{DeviceEntry, HoldsMaster, PrivateRecord};
 use ad4m_identity_core::{BotScope, Event, KelChain, KeyId, Op};
 use ad4m_ldk::identity::{InboxBind, InboxWrite, OfferState, SignedHead, SignedRequest};
 use serde_json::json;
@@ -39,6 +39,10 @@ use crate::request::{
 use crate::secret::Secret;
 use crate::vault::{MasterUse, Unlocked, Vault};
 use crate::{fold, ClientError, Clock, Random, RandomRng};
+
+/// Why a confirm pushed no master key: the device's record entry was not written.
+const ENTRY_NOT_WRITTEN: &str =
+    "the device's record entry was not written, so the master key waits on the retry list";
 
 /// The seconds each list request waits for a change (the store's longest wait).
 const LIST_WAIT_S: u8 = 8;
@@ -65,7 +69,9 @@ pub struct Linked {
     /// The master key put into the device's inbox, when the person chose to: its message id,
     /// or why the push failed (a push that may pass later stays on the vault's retry list).
     pub master: Option<Result<String, ClientError>>,
-    /// The record write that lists the device. The `add` stands either way.
+    /// The record: the version that lists the device, and once the master key went, marks it
+    /// `holdsMaster: "offered"`; [`ClientError::HoldsMaster`] when the device took the key
+    /// first and its entry already says `true`. The `add` stands either way.
     pub record: Result<u64, ClientError>,
 }
 
@@ -397,9 +403,12 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
     }
 
     /// The person confirmed the same match code: appends the `add` that spends `claimed`;
+    /// then writes `device` (its name, kind, …) into the record with `holdsMaster: false`;
     /// then, with `keep_master` (only where [`LinkFlow::may_keep`]), puts the master key into
-    /// the device's inbox; then writes `device` (its name, kind, …) into the record, with
-    /// `holdsMaster: "offered"` when the master key went and `false` otherwise.
+    /// the device's inbox and marks the device `holdsMaster: "offered"`
+    /// ([`super::master::mark_offered`]: never over `true`). The entry goes in before the key,
+    /// so a device that takes the key at once finds its entry and ends `true`; when the entry
+    /// write failed, the entry goes in after the push, whole, under the same rule.
     ///
     /// The flow stays: after a failed publish it can confirm again while the claim is
     /// `claimed`. The push and the record write run only after the publish succeeded, so a
@@ -466,8 +475,27 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         // From here on the steps after the add run (the push is on the retry list before its
         // put): a later confirm goes to the store again, which refuses the spent offer.
         self.followed_up.set(true);
-        let master = if let Some(signer) = signer {
-            Some(
+        // The entry goes in before the master key goes: a device that takes the key at once
+        // finds its entry to mark `holdsMaster: true`.
+        let listed = record::write(
+            self.executor,
+            self.vault,
+            &self.did,
+            &[Change::Device {
+                key_id: key_id.clone(),
+                entry: DeviceEntry {
+                    holds_master: HoldsMaster::No,
+                    ..device.clone()
+                },
+            }],
+            self.random,
+        )
+        .await;
+        // The key goes only once the entry is in: a device that takes it at once marks an entry
+        // that exists. A failed entry write leaves the push on the retry list (`retry_pushes`)
+        // instead of sending a key no record lists.
+        let master = match (&listed, signer) {
+            (Ok(_), Some(signer)) => Some(
                 super::master::push(
                     self.executor,
                     self.vault,
@@ -480,27 +508,62 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                     self.random,
                 )
                 .await,
-            )
-        } else {
-            None
+            ),
+            (Err(_), Some(_)) => {
+                self.vault.keep_push(&crate::vault::PendingPush {
+                    scid: chain.id().to_string(),
+                    key_id: key_id.clone(),
+                })?;
+                Some(Err(ClientError::Step(ENTRY_NOT_WRITTEN)))
+            }
+            (_, None) => None,
         };
-        let holds_master = match master {
-            Some(Ok(_)) => HoldsMaster::Offered,
-            _ => HoldsMaster::No,
+        let pushed = matches!(master, Some(Ok(_)));
+        let record = match listed {
+            Ok(_) if pushed => {
+                super::master::mark_offered(
+                    self.executor,
+                    self.vault,
+                    &self.did,
+                    vec![key_id.clone()],
+                    self.random,
+                )
+                .await
+            }
+            Ok(version) => Ok(version),
+            // The entry is not in yet: it goes in now, whole, as `"offered"` once the key went,
+            // never over an entry that says `true` (the device took the key in between).
+            Err(_) => {
+                let holds_master = if pushed {
+                    HoldsMaster::Offered
+                } else {
+                    HoldsMaster::No
+                };
+                let not_held = |record: Option<&PrivateRecord>, _: &KelChain| match record
+                    .and_then(|r| r.devices.get(&key_id))
+                {
+                    Some(entry) if entry.holds_master == HoldsMaster::Yes => {
+                        Err(ClientError::HoldsMaster(key_id.clone()))
+                    }
+                    _ => Ok(()),
+                };
+                record::write_if(
+                    self.executor,
+                    self.vault,
+                    &self.did,
+                    &[Change::Device {
+                        key_id: key_id.clone(),
+                        entry: DeviceEntry {
+                            holds_master,
+                            ..device
+                        },
+                    }],
+                    &not_held,
+                    self.random,
+                )
+                .await
+            }
         };
-        let record = record::write(
-            self.executor,
-            &self.did,
-            &[Change::Device {
-                key_id: key_id.clone(),
-                entry: DeviceEntry {
-                    holds_master,
-                    ..device
-                },
-            }],
-            self.random,
-        )
-        .await;
         Ok(Linked {
             head,
             key_id,

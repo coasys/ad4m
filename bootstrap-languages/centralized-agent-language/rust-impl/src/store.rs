@@ -20,7 +20,7 @@ use ad4m_ldk::identity::{
     IdentityErrorCode, InboxAddress, InboxAuth, InboxMessage, InboxStored, InboxWrite,
     KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, PostedRequest, PowParams,
     PreInboxAuth, RateLimitScope, RecordStored, RequestPosted, SealedRecord, SignedHead,
-    SignedOffer, SignedRequest, VouchNote, LOG_PAGE_EVENTS, MAX_LOG_PAGE_BYTES,
+    SignedOffer, SignedRequest, StoredRecord, VouchNote, LOG_PAGE_EVENTS, MAX_LOG_PAGE_BYTES,
 };
 use ad4m_ldk::prelude::LanguageResult;
 use serde::de::DeserializeOwned;
@@ -632,12 +632,13 @@ impl<H: Http> Store<H> {
         Ok(())
     }
 
-    /// `GET /v1/private/{scid}`: `None` when the identity has no record yet.
+    /// `GET /v1/private/{scid}`: the record with the store's receipt; `None` when the identity
+    /// has no record yet.
     pub async fn get_record(
         &self,
         did: &str,
         req: &SignedRequest,
-    ) -> LanguageResult<Option<SealedRecord>> {
+    ) -> LanguageResult<Option<StoredRecord>> {
         let path = format!("/v1/private/{}", segment(scid_of(did)?));
         let options = Send {
             req: Some(req),

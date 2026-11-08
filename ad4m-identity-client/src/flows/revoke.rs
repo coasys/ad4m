@@ -45,6 +45,7 @@ pub async fn revoke<R: ExecutorRpc>(
     let unlocked = vault.unlock(&scid, MasterUse::Revoke, clock.now())?;
     revoke_with(
         executor,
+        vault,
         did,
         &chain,
         unlocked.signer(clock.now())?,
@@ -91,9 +92,12 @@ pub(crate) fn check_keys(
 }
 
 /// [`revoke`] under an unlock the caller holds, once the caller checked `key_ids` against the
-/// log.
+/// log. The record write after the publish reads the newest version with its receipt: a
+/// version a revoked key wrote before the revocation still opens (the writer is checked at
+/// the seq the store accepted it), so the write builds on it and keeps what it says.
 pub(crate) async fn revoke_with<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
     did: &str,
     chain: &KelChain,
     signer: &dyn MasterSigner,
@@ -102,7 +106,7 @@ pub(crate) async fn revoke_with<R: ExecutorRpc>(
 ) -> Result<Revoked, ClientError> {
     let event = revoke_event(chain, signer, key_ids)?;
     let head = executor.publish(std::slice::from_ref(&event)).await?;
-    let record = record::write(executor, did, &[], random).await;
+    let record = record::write(executor, vault, did, &[], random).await;
     Ok(Revoked { head, record })
 }
 

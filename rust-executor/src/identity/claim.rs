@@ -27,7 +27,7 @@ use super::service::{
 use super::types::{convert, ClaimOfferResult, JoinStatus};
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
-use crate::db::{JoinRow, OperatorSetBy};
+use crate::db::JoinRow;
 
 /// The claims of one executor.
 pub struct ClaimService<'a> {
@@ -198,38 +198,16 @@ impl ClaimService<'_> {
                 .refresh(self.identity.backend.as_ref(), &join.scid)
                 .await
                 .map_err(cache_error)?;
+            // The binding, and on a desktop's first link the operator record, in one write.
+            // With no record the join row can only come from a first-run claim
+            // (`first_link_check` refuses every other claim without one), and a claim alone
+            // records nothing, so a claim that never completes (the wrong code scanned, the
+            // holder said No) leaves the desktop free to claim again.
             status.key_id = self
                 .identity
-                .record_agent_if_listed(agent, &join.scid)
+                .bind_agent_if_listed(agent, &join.scid, true)
                 .await?;
-            self.record_first_run_operator(agent, &join.scid)?;
         }
         Ok(status)
-    }
-
-    /// The end of a desktop app's first link: once the main agent speaks for `scid` (the holder
-    /// confirmed the match code and the add listing the main key landed), a still-empty
-    /// operator record takes that identity (`OperatorSetBy::FirstRun`). A claim alone records
-    /// nothing, so a claim that never completes (the wrong code scanned, the holder said No)
-    /// leaves the desktop free to claim again. With no record, the join row can only come from
-    /// a first-run claim (`first_link_check` refuses every other claim without one).
-    fn record_first_run_operator(
-        &self,
-        agent: &AgentContext,
-        scid: &str,
-    ) -> Result<(), WsRpcError> {
-        let (agent_did, _) = device_key(agent).map_err(WsRpcError::internal)?;
-        if db(|db| db.agent_identity(&agent_did))?.as_deref() != Some(scid)
-            || db(|db| db.operator_record())?.is_some()
-        {
-            return Ok(());
-        }
-        let did = did_of(scid);
-        let recorded =
-            db(|db| db.set_operator_record_if_empty(&did, now(), OperatorSetBy::FirstRun))?;
-        if recorded.scid == did {
-            log::info!("identity: this desktop executor joined {did}, its operator from now on");
-        }
-        Ok(())
     }
 }

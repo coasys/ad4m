@@ -14,7 +14,7 @@ use ad4m_ldk::identity::{
     IdentityErrorCode, InboxAddress, InboxAuth, InboxMessage, InboxStored, InboxWrite,
     KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, PostedRequest,
     RateLimitScope, RecordStored, RequestPosted, SealedRecord, SignedHead, SignedOffer,
-    SignedRequest,
+    SignedRequest, StoredRecord,
 };
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -148,12 +148,13 @@ pub trait IdentityBackend: Send + Sync {
         id: &str,
         auth: &InboxAuth,
     ) -> Result<(), IdentityError>;
-    /// The identity's sealed private record; `None` before the first write.
+    /// The identity's sealed private record with the store's receipt for it; `None` before
+    /// the first write.
     async fn get_record(
         &self,
         did: &str,
         req: &SignedRequest,
-    ) -> Result<Option<SealedRecord>, IdentityError>;
+    ) -> Result<Option<StoredRecord>, IdentityError>;
     async fn put_record(
         &self,
         did: &str,
@@ -447,7 +448,7 @@ impl IdentityBackend for AgentLanguageBackend {
         &self,
         did: &str,
         req: &SignedRequest,
-    ) -> Result<Option<SealedRecord>, IdentityError> {
+    ) -> Result<Option<StoredRecord>, IdentityError> {
         self.call(Capability::IdentityGetRecord, &[did.into(), json(req)?])
             .await
     }

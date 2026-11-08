@@ -40,7 +40,7 @@ use crate::flows::rotate::{
 use crate::record::{self, Reader};
 use crate::request::{chain_of, scid_of};
 use crate::secret::Secret;
-use crate::vault::{MasterSigner, Vault, VaultError};
+use crate::vault::{MasterSigner, Stored, Vault, VaultError};
 use crate::{ClientError, Clock, Random};
 
 /// A device key of the log, as the lock-out screen shows it.
@@ -173,7 +173,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             clock,
         };
         let (record, record_error) =
-            match record::read_as(executor, &owner.did, &chain, &reader, random).await {
+            match record::read_as(executor, vault, &owner.did, &chain, &reader, random).await {
                 Ok(opened) => (opened.map(|o| o.record), None),
                 Err(e) => (None, Some(e)),
             };
@@ -276,16 +276,23 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             )));
         }
         // Promoted here or by another app's refresh first ([`promote`]); nothing staged at
-        // `index` and not kept: current in the log, stored as a key taken from the inbox would be.
-        match promote(self.vault, &scid, index) {
-            Ok(()) => {}
+        // `index` and the vault keeping no master at or past it: current in the log, stored
+        // under the vault's never-go-back rule as a key taken from the inbox would be. `kept`
+        // names the index the vault keeps.
+        let kept = match promote(self.vault, &scid, index) {
+            Ok(kept) => kept,
             Err(VaultError::NotFound) => {
                 let key = words::master_key(&self.seed, index)?;
-                self.vault
-                    .store_master(&scid, index, Secret::new(key.to_bytes()))?;
+                match self
+                    .vault
+                    .store_master(&scid, index, Secret::new(key.to_bytes()))?
+                {
+                    Stored::Stored => index,
+                    Stored::AlreadyNewer { kept } => kept,
+                }
             }
             Err(e) => return Err(e.into()),
-        }
+        };
         let key_id = self.link_this(&this_device).await?;
         let signer = master_of(&self.seed, index)?;
         let secret = words::recovery_secret(&self.seed);
@@ -303,7 +310,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             Some(ThisDevice {
                 key_id: key_id.clone(),
                 entry: Some(this_device),
-                kept: true,
+                kept: Some(kept),
             }),
             &recovery_key_of(&self.seed),
             self.clock,
