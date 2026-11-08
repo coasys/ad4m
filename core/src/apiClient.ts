@@ -141,6 +141,17 @@ export class ApiClient {
     getBaseUrl(): string { return this.baseUrl }
     getToken(): string | undefined { return this.token }
 
+    /** Use `token` from now on: a renewed key session's, say. A socket already
+     *  open goes on (the executor checks its live grant); the next one dials
+     *  with `token`. A client whose old token the executor refused connects
+     *  again for its event handlers. */
+    setToken(token: string): void {
+        this.token = token
+        if (this._authFailed === null) return
+        this._authFailed = null
+        if (this._handlers.size > 0) this._ensureWs()
+    }
+
     /** Perform an HTTP request, using an injected fetch implementation if provided. */
     doFetch(url: string, init: RequestInit): Promise<Response> {
         return this._fetchImpl ? this._fetchImpl(url, init) : fetch(url, init)

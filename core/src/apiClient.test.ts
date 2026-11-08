@@ -806,6 +806,54 @@ describe('ApiClient.reconnectNow', () => {
     })
 })
 
+describe('ApiClient.setToken', () => {
+    const tokenOf = (ws: TestSocket) => new URL(ws.url).searchParams.get('token')
+
+    it('dials the next connection with the new token and leaves the open one alone', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        open()
+        await flush()
+        expect(tokenOf(socket(0))).toBe('old')
+        client.setToken('new')
+        expect(TestSocket.instances).toHaveLength(1) // the open socket goes on
+        expect(client.getToken()).toBe('new')
+        socket(0).drop()
+        await sleep(600) // the first reconnect waits 500 ms
+        expect(tokenOf(socket(TestSocket.instances.length - 1))).toBe('new')
+    })
+
+    it('connects again with a new token after the executor refused the old one', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        open()
+        await flush()
+        socket(0).drop(1008, 'token expired')
+        expect(failed).toHaveBeenCalledTimes(1)
+        await expect(call('agent.status')).rejects.toMatchObject({ status: 401 })
+        client.setToken('renewed')
+        await flush()
+        const next = socket(TestSocket.instances.length - 1)
+        expect(TestSocket.instances.length).toBeGreaterThan(1)
+        expect(tokenOf(next)).toBe('renewed')
+    })
+
+    it('reaches the transport through Ad4mClient.setToken', async () => {
+        const { Ad4mClient } = require('./Ad4mClient')
+        const facade = new Ad4mClient(url, 'old', {
+            webSocketImpl: TestSocket as unknown as new (url: string) => WebSocket,
+        })
+        try {
+            facade.setToken('new')
+            facade.on('agent-updated', () => {})
+            await flush()
+            expect(tokenOf(socket(TestSocket.instances.length - 1))).toBe('new')
+        } finally {
+            facade.close()
+        }
+    })
+})
+
 describe('ApiClient when the executor refuses the token', () => {
     const REASON = 'Unauthorized access: the token expired or was revoked'
     let authFailed: jest.Mock
