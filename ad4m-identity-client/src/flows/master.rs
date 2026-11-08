@@ -17,9 +17,10 @@
 //! a device of the log.
 //!
 //! The device's side ([`take_master`]): its custody service takes the key its executor opened
-//! (`identity.takeMaster`), checks it against its own fold of the log, keeps it in the vault,
-//! acknowledges the message, and marks itself `holdsMaster: true` with the key's
-//! `masterIndex` in the record.
+//! (`identity.takeMaster`), checks it against its own fold of the log, keeps it in the vault
+//! — under the vault's never-go-back rule, so an older key taken late never replaces a newer
+//! one already kept — acknowledges the message, and marks itself `holdsMaster: true` with
+//! the `masterIndex` the vault keeps in the record.
 //!
 //! **After a rotation** ([`refresh_master`]): a device whose own rotation was cut off after
 //! its publish promotes the key its vault staged once the log's current master index is the
@@ -52,7 +53,7 @@ use crate::record::{self, Change};
 use crate::request::{
     body_bytes, chain_of, log_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
 };
-use crate::vault::{KeySigner, MasterSigner, MasterUse, PendingPush, Vault};
+use crate::vault::{Forgot, KeySigner, MasterSigner, MasterUse, PendingPush, Stored, Vault};
 use crate::{ClientError, Clock, Random};
 
 /// A master key put into a device's inbox.
@@ -80,9 +81,11 @@ pub struct Retried {
 #[derive(Debug)]
 pub struct Taken {
     pub did: String,
+    /// The index of the master key the vault keeps now: the key taken, or a newer one the
+    /// vault already kept ([`Vault::store_master`] never replaces a newer kept key).
     pub index: u32,
-    /// The record write that marks this device `holdsMaster: true`. The vault keeps the key
-    /// either way.
+    /// The record write that marks this device `holdsMaster: true` with `index`. The vault
+    /// keeps the key either way.
     pub record: Result<u64, ClientError>,
 }
 
@@ -402,22 +405,25 @@ pub async fn take_master<R: ExecutorRpc>(
         executor.status().await?.key_id.ok_or_else(|| {
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
-    vault.store_master(&scid, taken.index, taken.secret)?;
+    // Another app sharing the vault may keep a newer master already (its own take or promote
+    // landed while this take was in flight): the older key never replaces it, and the answer
+    // and the record name the index the vault keeps.
+    let index = match vault.store_master(&scid, taken.index, taken.secret)? {
+        Stored::Stored => taken.index,
+        Stored::AlreadyNewer { kept } => kept,
+    };
     executor.inbox_ack(&taken.message_id).await?;
     let record = record::write(
         executor,
         vault,
         &taken.did,
-        &[Change::Holds {
-            key_id,
-            index: taken.index,
-        }],
+        &[Change::Holds { key_id, index }],
         random,
     )
     .await;
     Ok(Some(Taken {
         did: taken.did,
-        index: taken.index,
+        index,
         record,
     }))
 }
@@ -428,8 +434,11 @@ pub enum Refreshed {
     /// The vault keeps the current master key.
     Current,
     /// A rotation of this device had staged the current master key and was cut off before it
-    /// promoted it: the vault keeps it now, and the record marks this device holding it.
+    /// promoted it: the vault keeps a master key now, and the record marks this device
+    /// holding it.
     Promoted {
+        /// The index the vault keeps: the staged key's, or a newer one another app sharing
+        /// the vault kept first.
         index: u32,
         /// The record write (`holdsMaster: true` with `index`). The key is kept either way.
         record: Result<u64, ClientError>,
@@ -439,9 +448,11 @@ pub enum Refreshed {
     /// None waited: the vault forgot the replaced key, and a `send-master` request (its id)
     /// asks a holder for the current one.
     Asked(String),
-    /// None waited, and the vault keeps no master key of the identity or cannot tell which
-    /// one it keeps ([`Vault::master_index`] is `None`): nothing was forgotten and nothing
-    /// asked. A device that never held it asks with [`super::requests::ask_for_master`].
+    /// None waited, and the vault keeps no master key of the identity, cannot tell which one
+    /// it keeps ([`Vault::master_index`] is `None`), or keeps a still-replaced key at another
+    /// index than the one read (installed by another app in between: [`Forgot::Kept`]).
+    /// Nothing was forgotten and nothing asked. A device that never held it asks with
+    /// [`super::requests::ask_for_master`].
     Unknown,
 }
 
@@ -460,8 +471,9 @@ pub enum Refreshed {
 /// 3. The current master waits in the inbox: taken ([`take_master`], [`Refreshed::Taken`]).
 /// 4. The vault's key is **known** to be replaced ([`Vault::master_index`], authenticated,
 ///    names an index behind the log's current master, or the identity has ended): the vault
-///    forgets it and a `send-master` request asks a holder for the current one
-///    ([`Refreshed::Asked`]). An unknown index (`None`) never forgets a key:
+///    forgets it — a compare-and-delete on the index read, so a key another app sharing the
+///    vault installed since is never removed — and a `send-master` request asks a holder for
+///    the current one ([`Refreshed::Asked`]). An unknown index (`None`) never forgets a key:
 ///    [`Refreshed::Unknown`].
 pub async fn refresh_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
@@ -478,7 +490,7 @@ pub async fn refresh_master<R: ExecutorRpc>(
     match vault.staged_index(&scid)? {
         // The rotation to it landed: promote (or another app on this computer did first).
         Some(staged) if live && staged == current => {
-            super::rotate::promote(vault, &scid, staged)?;
+            let index = super::rotate::promote(vault, &scid, staged)?;
             let record = async {
                 let key_id = executor.status().await?.key_id.ok_or_else(|| {
                     ClientError::Protocol("the executor's device key is in no log".into())
@@ -487,19 +499,13 @@ pub async fn refresh_master<R: ExecutorRpc>(
                     executor,
                     vault,
                     did,
-                    &[Change::Holds {
-                        key_id,
-                        index: staged,
-                    }],
+                    &[Change::Holds { key_id, index }],
                     random,
                 )
                 .await
             }
             .await;
-            return Ok(Refreshed::Promoted {
-                index: staged,
-                record,
-            });
+            return Ok(Refreshed::Promoted { index, record });
         }
         // Behind the log (a later rotation superseded it, or its publish was refused long
         // ago), or the identity ended: it can never become current.
@@ -520,22 +526,22 @@ pub async fn refresh_master<R: ExecutorRpc>(
     }
     match kept {
         Some(index) if index < current || !live => {
-            // `kept` was read before the take. Another app sharing the vault may have installed
-            // the current key since (its take, or its promote): the forget is for the key read,
-            // never for one installed after it.
-            let now = vault.master_index(&scid)?;
-            if now != kept {
-                return Ok(if live && now == Some(current) {
+            // `kept` was read before the take. Another app sharing the vault may have
+            // installed the current key since (its take, or its promote): the forget is a
+            // compare-and-delete on the index read, never for a key installed after it.
+            match vault.forget_master(&scid, index)? {
+                Forgot::Forgot => {
+                    let id = executor
+                        .post_request(&ad4m_ldk::identity::DeviceRequestBody::SendMaster {}, None)
+                        .await?;
+                    Ok(Refreshed::Asked(id))
+                }
+                Forgot::Kept(kept) => Ok(if live && kept == current {
                     Refreshed::Current
                 } else {
                     Refreshed::Unknown
-                });
+                }),
             }
-            vault.forget_master(&scid)?;
-            let id = executor
-                .post_request(&ad4m_ldk::identity::DeviceRequestBody::SendMaster {}, None)
-                .await?;
-            Ok(Refreshed::Asked(id))
         }
         _ => Ok(Refreshed::Unknown),
     }
@@ -549,7 +555,9 @@ pub async fn refresh_master<R: ExecutorRpc>(
 /// record version the write builds on, again after each stale version ([`record::write_if`]),
 /// so of two holders removing it at once at most one does. Writes the record (this device
 /// `holdsMaster: false`) before the vault forgets the key, so a failed write leaves the key
-/// where it was. Answers the record version written.
+/// where it was; the forget is a compare-and-delete on the index the vault reports then, so
+/// a key another app sharing the vault installed in between is never removed. Answers the
+/// record version written.
 pub async fn remove_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -582,7 +590,12 @@ pub async fn remove_master<R: ExecutorRpc>(
         random,
     )
     .await?;
-    vault.forget_master(&scid)?;
+    // Compare-and-delete on the index the vault reports: a key another app sharing the vault
+    // installed since (its take, or a promote) is never removed, and an unknown index (`None`)
+    // forgets nothing.
+    if let Some(index) = vault.master_index(&scid)? {
+        vault.forget_master(&scid, index)?;
+    }
     // A stage at or behind the log would be promoted or kept by the next refresh, bringing back
     // the key the person just removed. One ahead is a rotation in flight: its owner decides.
     let current = log_chain.state().masters.len().saturating_sub(1);
