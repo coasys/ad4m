@@ -93,7 +93,13 @@ impl Ad4mDb {
                 expires_at INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
              );
-             DROP TABLE IF EXISTS revoked_tokens;",
+             DROP TABLE IF EXISTS revoked_tokens;
+             -- Writes a failed call left pending, so a restart finds the grant ended:
+             -- noted before the change itself and cleared when the change lands.
+             CREATE TABLE IF NOT EXISTS pending_grant_writes (
+                 grant_id TEXT PRIMARY KEY,
+                 op TEXT NOT NULL CHECK (op IN ('revoke', 'delete'))
+             );",
         )?;
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_grants_agent_did ON grants(agent_did);",
@@ -188,6 +194,10 @@ impl Ad4mDb {
 
     /// Marks the grants `ids` revoked.
     pub fn revoke_grants(&self, ids: &[String]) -> Ad4mDbResult<()> {
+        #[cfg(test)]
+        if super::FAIL_NEXT_GRANT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(rusqlite::Error::InvalidQuery.into());
+        }
         for id in ids {
             self.conn.execute(
                 "UPDATE grants SET state = 'revoked' WHERE id = ?1",
@@ -230,6 +240,10 @@ impl Ad4mDb {
 
     /// Deletes the grants `ids`.
     pub fn delete_grants(&self, ids: &[String]) -> Ad4mDbResult<()> {
+        #[cfg(test)]
+        if super::FAIL_NEXT_GRANT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(rusqlite::Error::InvalidQuery.into());
+        }
         for id in ids {
             self.conn
                 .execute("DELETE FROM grants WHERE id = ?1", params![id])?;
@@ -243,6 +257,41 @@ impl Ad4mDb {
             "DELETE FROM grants WHERE expires_at < ?1",
             params![to_sql(cutoff)],
         )?;
+        Ok(())
+    }
+
+    /// Notes the writes `ids` still have to land (`op` is `revoke` or `delete`): what a
+    /// caller writes before the change itself, so a restart between them finds the
+    /// grants ended. A pending `delete` covers a `revoke` of the same grant.
+    pub fn note_pending_grant_writes(&self, ids: &[String], op: &str) -> Ad4mDbResult<()> {
+        for id in ids {
+            self.conn.execute(
+                "INSERT INTO pending_grant_writes (grant_id, op) VALUES (?1, ?2)
+                 ON CONFLICT(grant_id) DO UPDATE SET op = ?2
+                 WHERE pending_grant_writes.op != 'delete'",
+                params![id, op],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The writes a failed call left pending, `(grant id, op)`.
+    pub fn pending_grant_writes(&self) -> Ad4mDbResult<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT grant_id, op FROM pending_grant_writes")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Drops the pending notes of `ids`: their writes landed.
+    pub fn clear_pending_grant_writes(&self, ids: &[String]) -> Ad4mDbResult<()> {
+        for id in ids {
+            self.conn.execute(
+                "DELETE FROM pending_grant_writes WHERE grant_id = ?1",
+                params![id],
+            )?;
+        }
         Ok(())
     }
 }

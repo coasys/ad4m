@@ -1576,6 +1576,9 @@ pub(crate) mod tests {
         pub key_owner_override: StdMutex<Option<String>>,
         /// When set, the first `log` call notifies `.0`, then waits for `.1`.
         pub pause_store: StdMutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+        /// A `log` call for one of these DIDs notifies the paired `Notify` once and never
+        /// answers: a store that stalls for that log only.
+        pub stall_for: StdMutex<HashMap<String, Arc<Notify>>>,
         /// A `log` call fails as unavailable.
         pub store_down: AtomicBool,
         /// A `key_owner` call fails as unavailable.
@@ -1604,6 +1607,7 @@ pub(crate) mod tests {
                 log_calls: AtomicUsize::new(0),
                 key_owner_override: StdMutex::new(None),
                 pause_store: StdMutex::new(None),
+                stall_for: StdMutex::new(HashMap::new()),
                 store_down: AtomicBool::new(false),
                 key_index_down: AtomicBool::new(false),
                 key_index_down_for: StdMutex::new(HashSet::new()),
@@ -1651,6 +1655,11 @@ pub(crate) mod tests {
     impl IdentityBackend for FakeStore {
         async fn log(&self, _did: &str, from: u64) -> Result<Option<LogPage>, IdentityError> {
             self.log_calls.fetch_add(1, Ordering::SeqCst);
+            let stalled = self.stall_for.lock().unwrap().get(_did).cloned();
+            if let Some(entered) = stalled {
+                entered.notify_one();
+                std::future::pending::<()>().await;
+            }
             let pause = self.pause_store.lock().unwrap().take();
             if let Some((entered, release)) = pause {
                 entered.notify_one();

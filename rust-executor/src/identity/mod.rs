@@ -264,7 +264,10 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
             // Subscribed here, so no change the cache fires before the task runs is lost.
             let changes = service.cache.subscribe();
             handle.spawn(run_recheck(service.clone(), changes));
-            handle.spawn(key_login::run_key_session_watch(service));
+            // The key sessions' watcher too: `load_local_identities` replays the held
+            // verdicts before the spawned task may first run.
+            let changes = service.cache.subscribe();
+            handle.spawn(key_login::run_key_session_watch(service, changes));
         }
         Err(_) => log::error!("identity: no runtime for the re-check of links and key sessions"),
     }

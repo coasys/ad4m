@@ -169,6 +169,12 @@ pub struct Ad4mDb {
     conn: Connection,
 }
 
+/// Test seam: the next end-of-grant write (`revoke_grants`, `delete_grants`) fails, so
+/// `agent::grants` sees a write the table did not take.
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_GRANT_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 impl Ad4mDb {
     pub fn init_global_instance(db_path: &str) -> Ad4mDbResult<()> {
         let mut db_instance = AD4M_DB_INSTANCE.lock().unwrap();
