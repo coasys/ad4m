@@ -707,6 +707,17 @@ pub struct PerspectiveInstance {
     force_shape_sync_wait: Arc<AtomicBool>,
 }
 
+/// The diff a re-check's rewrites (`(old, new)`) make: each old link removed, each new one
+/// added, as [`PerspectiveInstance::update_link`] passes an update on.
+fn rewrite_diff(
+    rewrites: &[(DecoratedLinkExpression, DecoratedLinkExpression)],
+) -> DecoratedPerspectiveDiff {
+    DecoratedPerspectiveDiff {
+        additions: rewrites.iter().map(|(_, new)| new.clone()).collect(),
+        removals: rewrites.iter().map(|(old, _)| old.clone()).collect(),
+    }
+}
+
 /// The local Shared links the remote render lacks, without the links of the diffs the
 /// queue still holds (queued or parked). Links compare by author, timestamp, source,
 /// predicate and target; one set of those identities for remote and unsent keeps the
@@ -4437,13 +4448,15 @@ impl PerspectiveInstance {
         self.recheck_links_paged(scope, RECHECK_BATCH).await
     }
 
-    /// [`PerspectiveInstance::recheck_links`] with pages of `page` links.
+    /// [`PerspectiveInstance::recheck_links`] with pages of `page` links. Each page's rewrites
+    /// go out before the next page is read ([`Self::publish_rewrites`]), so a sweep over a
+    /// signer with many links holds one page at a time.
     pub(crate) async fn recheck_links_paged(
         &self,
         scope: &super::Recheck,
         page: usize,
     ) -> Result<usize, AnyError> {
-        let mut rewritten = Vec::new();
+        let mut changed = 0;
         match scope {
             super::Recheck::Signers(signers) => {
                 let signers: Vec<String> = signers.iter().cloned().collect();
@@ -4454,7 +4467,9 @@ impl PerspectiveInstance {
                             .links_by_authors(&signers, after.as_deref(), page)?;
                     let full = stored.len() == page;
                     after = stored.last().map(super::sparql_store::reifier_of);
-                    rewritten.extend(self.rejudge(stored).await?);
+                    let rewrites = self.rejudge(stored).await?;
+                    changed += rewrites.len();
+                    self.publish_rewrites(rewrites).await;
                     if !full {
                         break;
                     }
@@ -4474,36 +4489,63 @@ impl PerspectiveInstance {
                     _ => None,
                 };
                 drop(cursor);
-                rewritten.extend(self.rejudge(stored).await?);
+                let rewrites = self.rejudge(stored).await?;
+                changed += rewrites.len();
+                self.publish_rewrites(rewrites).await;
             }
-        }
-        let changed = rewritten.len();
-        if changed > 0 {
-            self.clear_shape_cache();
-            // As for a remote diff: Prolog, notifications and subscriptions see the new
-            // verdicts.
-            self.update_prolog_engines(DecoratedPerspectiveDiff {
-                additions: rewritten,
-                removals: vec![],
-            })
-            .await;
         }
         Ok(changed)
     }
 
+    /// Sends out links a re-check rewrote, each as `(old, new)`, as an update is: Prolog gets
+    /// the old link as a removal and the new one as an addition (a pooled engine that only
+    /// asserted the new one would hold both verdicts), each owner a `link-updated` event, and
+    /// the flow vocabulary a consensus pass (a vote that now counts can complete a quorum).
+    async fn publish_rewrites(
+        &self,
+        rewrites: Vec<(DecoratedLinkExpression, DecoratedLinkExpression)>,
+    ) {
+        if rewrites.is_empty() {
+            return;
+        }
+        self.clear_shape_cache();
+        let diff = rewrite_diff(&rewrites);
+        self.update_prolog_engines(diff.clone()).await;
+        self.schedule_flow_consensus_pass(&diff);
+        let handle = self.persisted.lock().await.clone();
+        let recipients = super::event_recipients(&handle);
+        for (old_link, new_link) in rewrites {
+            super::publish_to_owners(
+                Topic::LinkUpdated,
+                recipients.clone(),
+                PerspectiveLinkUpdatedEvent {
+                    perspective_uuid: handle.uuid.clone(),
+                    old_link,
+                    new_link,
+                },
+            );
+        }
+    }
+
     /// Judges `stored` links again and rewrites each whose verdict or person changed;
-    /// answers the rewritten links as now stored.
+    /// answers each rewritten link as `(as it was, as now stored)`. The rewrite holds
+    /// `persist_lock` and first reads the link back: one a write removed (or rewrote) since
+    /// the page was read is left as that write left it, not put back.
     async fn rejudge(
         &self,
         stored: Vec<DecoratedLinkExpression>,
-    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+    ) -> Result<Vec<(DecoratedLinkExpression, DecoratedLinkExpression)>, AnyError> {
         if stored.is_empty() {
             return Ok(vec![]);
         }
         let links: Vec<LinkExpression> = stored.iter().cloned().map(LinkExpression::from).collect();
         crate::identity::prepare_link_signers(&links).await;
+        let _persisting = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut rewritten = Vec::new();
-        for (mut before, link) in stored.into_iter().zip(&links) {
+        for (before, link) in stored.into_iter().zip(&links) {
             // A link this store already counted was here before the revocation reached the
             // key map: the one order the executor knows. The store judges the same way.
             let entered = (before.verdict == Some(LinkVerdict::Valid)).then_some(false);
@@ -4511,13 +4553,35 @@ impl PerspectiveInstance {
             if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
                 continue;
             }
+            let held = self
+                .sparql_store
+                .query_links(
+                    Some(&link.data.source),
+                    link.data.predicate.as_deref(),
+                    Some(&link.data.target),
+                    None,
+                    None,
+                    None,
+                )?
+                .into_iter()
+                .any(|held| {
+                    held.author == before.author
+                        && held.timestamp == before.timestamp
+                        && held.proof.signature == before.proof.signature
+                        && held.verdict == before.verdict
+                        && held.person == before.person
+                });
+            if !held {
+                continue;
+            }
             self.sparql_store.rejudge_link(link)?;
             let counts = now.verdict.counts();
-            before.proof.valid = Some(counts);
-            before.proof.invalid = Some(!counts);
-            before.verdict = Some(now.verdict);
-            before.person = now.person;
-            rewritten.push(before);
+            let mut after = before.clone();
+            after.proof.valid = Some(counts);
+            after.proof.invalid = Some(!counts);
+            after.verdict = Some(now.verdict);
+            after.person = now.person;
+            rewritten.push((before, after));
         }
         Ok(rewritten)
     }
@@ -8503,6 +8567,7 @@ mod tests {
             expired,
             std::collections::BTreeSet::from([link.author.clone()])
         );
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
         assert_eq!(
             perspective
                 .recheck_links(&crate::perspectives::Recheck::Signers(expired))
@@ -8516,7 +8581,75 @@ mod tests {
             Some(LinkVerdict::Invalid(InvalidReason::Expired))
         );
         assert_eq!(stored[0].person, None);
+        // Clients see the rewrite as an update from the old verdict to the new.
+        let updated = loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .expect("a link-updated event")
+                .unwrap();
+            if event.topic == Topic::LinkUpdated
+                && event.payload.to_string().contains(&perspective.uuid)
+            {
+                break event;
+            }
+        };
+        let payload = updated.payload.to_string();
+        assert!(
+            payload.contains(r#""kind":"valid""#),
+            "the old verdict: {payload}"
+        );
+        assert!(
+            payload.contains(r#""reason":"expired""#),
+            "the new verdict: {payload}"
+        );
         map.forget(&log.scid());
+    }
+
+    /// A rewrite goes to Prolog as an update does: the old link removed and the new added, so
+    /// an engine that applies diffs (pooled mode, not reachable from these tests: the mode is
+    /// a constant, `Disabled`) holds one verdict per link, not both.
+    #[test]
+    fn a_rewrite_passes_on_as_the_old_link_removed_and_the_new_added() {
+        let old = DecoratedLinkExpression::from((
+            LinkExpression {
+                author: "did:key:z6Mk".into(),
+                timestamp: "2026-01-01T00:00:00.000Z".into(),
+                data: create_link(),
+                proof: ExpressionProof {
+                    key: "did:key:z6Mk#z6Mk".into(),
+                    signature: "00".into(),
+                    anchor: None,
+                },
+                status: Some(LinkStatus::Shared),
+            },
+            LinkStatus::Shared,
+        ));
+        let mut new = old.clone();
+        new.verdict = Some(LinkVerdict::CantCheck);
+        let diff = rewrite_diff(&[(old.clone(), new.clone())]);
+        assert_eq!(diff.removals, vec![old]);
+        assert_eq!(diff.additions, vec![new]);
+    }
+
+    /// A link removed after a re-check read its page is not put back by the rewrite.
+    #[tokio::test]
+    async fn a_recheck_does_not_put_back_a_link_removed_since_its_page_was_read() {
+        use crate::identity::cache::tests::TestLog;
+        let perspective = setup().await;
+        let log = TestLog::new(97);
+        five_unchecked_links(&perspective, &log).await;
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let gone = LinkExpression::from(stored[0].clone());
+        perspective.sparql_store.remove_link(&gone).unwrap();
+        reach_seq_one(&log);
+        let rewrites = perspective.rejudge(stored).await.unwrap();
+        assert_eq!(rewrites.len(), 4, "the four links still stored");
+        let held = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(held.len(), 4);
+        assert!(held
+            .iter()
+            .all(|l| l.proof.signature != gone.proof.signature));
+        crate::identity::cache::global_key_map().forget(&log.scid());
     }
 
     /// Five links the cached log cannot check yet (anchored at seq 1, trusted 0), by one
