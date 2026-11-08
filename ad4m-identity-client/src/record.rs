@@ -133,6 +133,16 @@ async fn read_at<R: ExecutorRpc>(
         .key_id
         .ok_or_else(|| ClientError::Protocol("the executor's device key is in no log".into()))?;
     let Some(stored) = executor.record().await? else {
+        // No record is version 0. A store that answers "missing" after this client read a
+        // version has rolled the record back: refused like any lower version.
+        if let Some(high) = vault.record_seen(chain.id(), 0)? {
+            if high > 0 {
+                return Err(ClientError::ServedRecordVersion {
+                    served: 0,
+                    seen: high,
+                });
+            }
+        }
         return Ok(None);
     };
     let sealed = &stored.record;

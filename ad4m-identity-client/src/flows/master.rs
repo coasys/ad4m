@@ -296,7 +296,16 @@ pub async fn retry_pushes<R: ExecutorRpc>(
     let mut offered: Vec<KeyId> = Vec::new();
     for key_id in live {
         if !listed.contains(&key_id) {
-            let entry = record::write(
+            // Insert the entry only while the record still lacks it, checked on every attempt
+            // of the write: a device whose entry landed in between (holding the key, say)
+            // keeps it, and the push goes on.
+            let absent = |record: Option<&PrivateRecord>, _: &KelChain| match record
+                .and_then(|r| r.devices.get(key_id.as_str()))
+            {
+                Some(_) => Err(ClientError::Listed(key_id.clone())),
+                None => Ok(()),
+            };
+            let entry = record::write_if(
                 executor,
                 vault,
                 did,
@@ -304,12 +313,16 @@ pub async fn retry_pushes<R: ExecutorRpc>(
                     key_id: key_id.clone(),
                     entry: retry_entry(&key_id),
                 }],
+                &absent,
                 random,
             )
             .await;
-            if let Err(e) = entry {
-                retried.pushes.push((key_id, Err(e)));
-                continue;
+            match entry {
+                Ok(_) | Err(ClientError::Listed(_)) => {}
+                Err(e) => {
+                    retried.pushes.push((key_id, Err(e)));
+                    continue;
+                }
             }
         }
         let sent = push(

@@ -3240,3 +3240,156 @@ async fn what_the_revoked_device_wrote_last_survives_the_revokes_record_write() 
     );
     assert!(!opened.record.devices.contains_key(&d2));
 }
+
+/// Review coasys/ad4m#1649 at 25aecbb57 (Lal's P2): `retry_pushes` reads the listed devices
+/// once, then writes a missing device's entry with a plain `record::write`, which replaces the
+/// entry whole on the newest version. A device whose entry landed in between, holding the key
+/// (`holdsMaster: true`), is overwritten with the generic `"no"` entry, and the push that
+/// follows marks it `"offered"`. The entry write must be insert-if-absent, checked on every
+/// attempt. Fails at 25aecbb57.
+#[tokio::test]
+async fn a_retry_does_not_overwrite_an_entry_that_landed_holding_the_master_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 24).await;
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_desk = desk
+        .rpc()
+        .call(
+            "identity.claimOffer",
+            json!({ "offer": flow.offer_string(), "canKeepMaster": true }),
+        )
+        .await
+        .unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+    // The entry write and its fallback both fail: no entry, the push waits on the retry list.
+    a.rpc().refuse_record_puts.set(2);
+    let linked = flow
+        .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
+        .await
+        .unwrap();
+    assert!(linked.record.is_err(), "{:?}", linked.record);
+    assert_eq!(vault.pending_pushes().unwrap().len(), 1);
+    join(&desk, &claimed_desk["offerId"]).await;
+
+    // Between the retry's look at the record (empty) and its entry write, the desk's entry
+    // lands, holding the master key (as after another retry's push and the desk's take).
+    let lands = EntryLandsBetween {
+        inner: a.rpc(),
+        desk: &desk,
+        did: &did,
+        key_id: &linked.key_id,
+        reads: Cell::new(0),
+    };
+    let racing = ViaExecutor::new(lands);
+    let retried = retry_pushes(&racing, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(retried.pushes.len(), 1, "{:?}", retried.pushes);
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    let listed = &opened.record.devices[&linked.key_id];
+    assert_eq!(
+        (listed.name.as_str(), listed.holds_master),
+        ("Desk", HoldsMaster::Yes),
+        "the retry overwrote the entry that landed holding the master key"
+    );
+}
+
+/// Forwards to `inner`; on the second `identity.record` read (the entry write's own read
+/// inside the retry) it first writes the desk's entry as holding the master key.
+struct EntryLandsBetween<'a> {
+    inner: &'a TestExecutor,
+    desk: &'a ViaExecutor<TestExecutor>,
+    did: &'a str,
+    key_id: &'a str,
+    reads: Cell<usize>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for EntryLandsBetween<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.record" {
+            let n = self.reads.get() + 1;
+            self.reads.set(n);
+            if n == 2 {
+                record::write(
+                    self.desk,
+                    &MemoryVault::new(),
+                    self.did,
+                    &[Change::Device {
+                        key_id: self.key_id.to_string(),
+                        entry: DeviceEntry {
+                            holds_master: HoldsMaster::Yes,
+                            ..entry("Desk", DeviceKind::DesktopApp)
+                        },
+                    }],
+                    &OsRandom,
+                )
+                .await
+                .unwrap();
+            }
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Review coasys/ad4m#1649 at 25aecbb57 (Lal's P2): `read_at` answers `Ok(None)` for a
+/// missing record before it looks at the high-water mark, so a store that answers "missing"
+/// after this client read version 2 hides what it read (holders, pending revocations) instead
+/// of failing as a rollback. Absence is version 0, under any version seen. Fails at 25aecbb57.
+#[tokio::test]
+async fn a_store_answering_no_record_after_a_version_was_read_is_refused() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 27).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    record::write(
+        &a,
+        &vault,
+        &did,
+        &[Change::Rename {
+            key_id: d2,
+            name: "Studio".into(),
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+
+    *a.rpc().serve_record.borrow_mut() = Some(Value::Null);
+    let refused = record::read(&a, &vault, &did).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ClientError::ServedRecordVersion { served: 0, seen: 2 })
+        ),
+        "a missing record after version 2 was read: {refused:?}"
+    );
+    // A reset says the caller means it: then "no record" is an answer again.
+    vault.record_seen_reset(&scid).unwrap();
+    assert!(record::read(&a, &vault, &did).await.unwrap().is_none());
+}
