@@ -474,12 +474,34 @@ pub struct Checkpoint {
 /// memory only: without a persisting port, a phone restart starts with no checkpoint (a
 /// store may then serve an older head once, as before the checkpoint existed).
 pub trait LogCheckpoints {
-    /// The checkpoint kept for `scid`, if any.
-    fn get(&self, scid: &str) -> Option<Checkpoint>;
-    /// The head `scid`'s log was last admitted at.
-    fn set(&self, scid: &str, checkpoint: Checkpoint);
+    /// The checkpoint kept for `scid`, if any. An `Err` fails the read closed: a log is not
+    /// admitted while the phone cannot tell what it accepted before.
+    fn get(&self, scid: &str) -> Result<Option<Checkpoint>, CheckpointError>;
+    /// The head `scid`'s log was last admitted at. An `Err` fails the read closed too: a head
+    /// the phone could not keep is not one it can hold the store to next time.
+    fn set(&self, scid: &str, checkpoint: Checkpoint) -> Result<(), CheckpointError>;
     /// `identity.resetLog`: forget `scid`'s checkpoint.
-    fn forget(&self, scid: &str);
+    fn forget(&self, scid: &str) -> Result<(), CheckpointError>;
+}
+
+/// Why a [`LogCheckpoints`] port could not answer: a persistent adapter's storage error, in
+/// words a log can show (never the checkpoint itself, which is public anyway).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckpointError(pub String);
+
+impl std::fmt::Display for CheckpointError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CheckpointError {}
+
+/// A checkpoint port that failed: the read fails closed as `503 unavailable`.
+fn checkpoints_failed(e: CheckpointError) -> RpcError {
+    unavailable(format!(
+        "the phone's log checkpoints cannot be read or kept: {e}"
+    ))
 }
 
 /// The in-memory [`LogCheckpoints`]: what a `ViaStore` uses without `with_checkpoints`.
@@ -489,16 +511,18 @@ pub trait LogCheckpoints {
 pub struct MemoryCheckpoints(Rc<RefCell<BTreeMap<String, Checkpoint>>>);
 
 impl LogCheckpoints for MemoryCheckpoints {
-    fn get(&self, scid: &str) -> Option<Checkpoint> {
-        self.0.borrow().get(scid).cloned()
+    fn get(&self, scid: &str) -> Result<Option<Checkpoint>, CheckpointError> {
+        Ok(self.0.borrow().get(scid).cloned())
     }
 
-    fn set(&self, scid: &str, checkpoint: Checkpoint) {
+    fn set(&self, scid: &str, checkpoint: Checkpoint) -> Result<(), CheckpointError> {
         self.0.borrow_mut().insert(scid.to_string(), checkpoint);
+        Ok(())
     }
 
-    fn forget(&self, scid: &str) {
+    fn forget(&self, scid: &str) -> Result<(), CheckpointError> {
         self.0.borrow_mut().remove(scid);
+        Ok(())
     }
 }
 
@@ -809,7 +833,7 @@ impl ViaStore {
             ));
         }
         // Never behind, and never beside, the head this phone accepted before.
-        if let Some(checkpoint) = self.checkpoints.get(scid) {
+        if let Some(checkpoint) = self.checkpoints.get(scid).map_err(checkpoints_failed)? {
             if head.seq < checkpoint.seq {
                 return Err(error(
                     409,
@@ -829,13 +853,15 @@ impl ViaStore {
                 ));
             }
         }
-        self.checkpoints.set(
-            scid,
-            Checkpoint {
-                seq: head.seq,
-                hash: head.hash.clone(),
-            },
-        );
+        self.checkpoints
+            .set(
+                scid,
+                Checkpoint {
+                    seq: head.seq,
+                    hash: head.hash.clone(),
+                },
+            )
+            .map_err(checkpoints_failed)?;
         Ok((values, chain, head))
     }
 
@@ -1878,7 +1904,7 @@ impl ExecutorRpc for ViaStore {
                 let did = params["did"].as_str().unwrap_or_default();
                 let scid = scid_of(did)
                     .ok_or_else(|| bad_request(format!("{did} is not a did:scid:coasys:1")))?;
-                self.checkpoints.forget(scid);
+                self.checkpoints.forget(scid).map_err(checkpoints_failed)?;
                 Ok(json!(true))
             }
             // The phone holds its own keys: the custody channel's answer is their multikeys.

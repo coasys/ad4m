@@ -14,8 +14,8 @@ use ad4m_identity_client::flows::requests::{answer, ask_for_master, check_poster
 use ad4m_identity_client::flows::revoke::revoke;
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::store::{
-    EncKey, EncOpenError, HttpClient, HttpError, HttpRequest, HttpResponse, MemoryCheckpoints,
-    SoftEncKey, StoreEndpoint, ViaStore,
+    Checkpoint, CheckpointError, EncKey, EncOpenError, HttpClient, HttpError, HttpRequest,
+    HttpResponse, LogCheckpoints, MemoryCheckpoints, SoftEncKey, StoreEndpoint, ViaStore,
 };
 use ad4m_identity_client::{
     ClientError, ExecutorRpc, MemoryVault, OsRandom, Secret, SystemClock, Vault, ViaExecutor,
@@ -912,7 +912,7 @@ fn phone_over(http: LyingHttp, seed: u8, identity: Option<String>) -> ViaExecuto
 fn phone_over_checkpoints(
     http: impl HttpClient + 'static,
     seed: u8,
-    checkpoints: MemoryCheckpoints,
+    checkpoints: impl LogCheckpoints + 'static,
 ) -> ViaExecutor<ViaStore> {
     let key = SigningKey::from_bytes(&[seed; 32]);
     let enc = SoftEncKey::from_ed25519(&key);
@@ -1588,4 +1588,57 @@ async fn a_checkpoint_kept_by_the_port_survives_a_new_via_store() {
     let fresh = phone_over_checkpoints(http(), 1, MemoryCheckpoints::default());
     let forgotten = status(&fresh).await;
     assert_eq!(forgotten["head"]["seq"], json!(0), "{forgotten}");
+}
+
+/// A checkpoint port whose storage fails (a persistent adapter's disk error): the phone fails
+/// closed, it admits no log it cannot hold to its checkpoint, and `identity.resetLog` reports
+/// the failure rather than pretending to forget. Lal's P3 on coasys/ad4m#1673, so WE's
+/// persistent adapter has an error channel before it is written.
+struct BrokenCheckpoints;
+
+impl LogCheckpoints for BrokenCheckpoints {
+    fn get(&self, _scid: &str) -> Result<Option<Checkpoint>, CheckpointError> {
+        Err(CheckpointError("the disk is full".into()))
+    }
+
+    fn set(&self, _scid: &str, _checkpoint: Checkpoint) -> Result<(), CheckpointError> {
+        Err(CheckpointError("the disk is full".into()))
+    }
+
+    fn forget(&self, _scid: &str) -> Result<(), CheckpointError> {
+        Err(CheckpointError("the disk is full".into()))
+    }
+}
+
+#[tokio::test]
+async fn a_checkpoint_port_that_fails_closes_the_read() {
+    let (router, _dir) = store();
+    let did = create(&phone(&router, 1, None), &MemoryVault::new(), 81).await;
+    let http = || RouterHttp {
+        router: router.clone(),
+    };
+    let broken = phone_over_checkpoints(http(), 1, BrokenCheckpoints);
+    let read = broken
+        .rpc()
+        .call("identity.log", json!({ "did": did, "from": 0 }))
+        .await;
+    assert!(
+        matches!(&read, Err(e) if e.code == 503 && e.message.contains("checkpoints")),
+        "{read:?}"
+    );
+    let reset = broken
+        .rpc()
+        .call("identity.resetLog", json!({ "did": did }))
+        .await;
+    assert!(
+        matches!(&reset, Err(e) if e.code == 503 && e.message.contains("checkpoints")),
+        "{reset:?}"
+    );
+    // The same phone over a working port reads fine: the failure was the port's.
+    let working = phone_over_checkpoints(http(), 1, MemoryCheckpoints::default());
+    assert!(working
+        .rpc()
+        .call("identity.log", json!({ "did": did, "from": 0 }))
+        .await
+        .is_ok());
 }

@@ -40,8 +40,8 @@ pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
 #[cfg(feature = "store")]
 pub use store::{
-    Checkpoint, EncKey, EncOpenError, HttpClient, HttpError, HttpRequest, HttpResponse,
-    LogCheckpoints, MemoryCheckpoints, SoftEncKey, StoreEndpoint, ViaStore,
+    Checkpoint, CheckpointError, EncKey, EncOpenError, HttpClient, HttpError, HttpRequest,
+    HttpResponse, LogCheckpoints, MemoryCheckpoints, SoftEncKey, StoreEndpoint, ViaStore,
 };
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
