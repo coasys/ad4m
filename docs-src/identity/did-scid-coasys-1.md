@@ -717,7 +717,12 @@ the log first); then that the envelope's `signer` was a device key without the b
 master key valid at `seq`, and signed it. So a record a device wrote before its revocation, or
 the old master before a rotation, still opens for every reader the record is wrapped to; a key
 revoked at or before `seq` does not count. A new write is always checked at the head, so a
-revoked key cannot write again by naming an old seq: the host names the seq.
+revoked key cannot write again by naming an old seq: the host names the seq. The receipt is a
+statement by the store about when it admitted a record that is not in the log, so it extends
+the trust a reader already gives the store for heads: a dishonest trusted store could sign an
+older `seq` for a fresh envelope signed by a key revoked since. It carries a `seq` and no head
+hash, so a reader relies on its own fork policy for the log at `seq`, and it does not replace
+the reader's high-water version for the record.
 
 The recovery key needs the master's authority, since a device key can sign an envelope:
 `recoveryAttestation = {keyId, sig}` is present exactly when `recoveryKey` is, and `sig` is master
