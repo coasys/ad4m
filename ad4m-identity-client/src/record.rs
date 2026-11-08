@@ -74,6 +74,11 @@ pub enum Change {
     /// A listed device's vault keeps master `index`: `holdsMaster: true`, `masterIndex: index`.
     /// Only the device itself (or the flow that put the key in its vault) writes it.
     Holds { key_id: KeyId, index: u32 },
+    /// Master `index` was put into a listed device's inbox: `holdsMaster: "offered"`, unless the
+    /// entry already says the device holds `index` or a later master ([`Change::Holds`], written
+    /// by the device when it took it), which stands. So a hand-over's write, built on whatever
+    /// version is newest, never puts `"offered"` over a take that landed first.
+    Offered { key_id: KeyId, index: u32 },
     /// A revocation no reachable master key could sign yet; one per key.
     PendingRevocation(PendingRevocation),
 }
@@ -113,6 +118,16 @@ fn merge(record: &mut PrivateRecord, chain: &KelChain, changes: &[Change]) {
                 if let Some(entry) = record.devices.get_mut(key_id) {
                     entry.holds_master = HoldsMaster::Yes;
                     entry.master_index = Some(*index);
+                }
+            }
+            Change::Offered { key_id, index } => {
+                if let Some(entry) = record.devices.get_mut(key_id) {
+                    let took_it = entry.holds_master == HoldsMaster::Yes
+                        && entry.master_index.is_some_and(|held| held >= *index);
+                    if !took_it {
+                        entry.holds_master = HoldsMaster::Offered;
+                        entry.master_index = None;
+                    }
                 }
             }
             Change::PendingRevocation(pending) => {
@@ -452,10 +467,14 @@ async fn write_checked<R: ExecutorRpc>(
             None => (1, PrivateRecord::default(), None),
         };
         merge(&mut record, &chain, changes);
-        // A `holdsMaster` for a device the record does not list would be a silent no-op that
-        // its caller reports as done: refuse it instead.
+        // A `holdsMaster` (or a master held or offered) for a device the record does not list
+        // would be a silent no-op that its caller reports as done: refuse it instead.
         if let Some(missing) = changes.iter().find_map(|change| match change {
-            Change::HoldsMaster { key_id, .. } if !record.devices.contains_key(key_id) => {
+            Change::HoldsMaster { key_id, .. }
+            | Change::Holds { key_id, .. }
+            | Change::Offered { key_id, .. }
+                if !record.devices.contains_key(key_id) =>
+            {
                 Some(key_id.clone())
             }
             _ => None,

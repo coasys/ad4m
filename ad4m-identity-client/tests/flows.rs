@@ -12,7 +12,7 @@ use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
 use ad4m_identity_client::flows::create::{resume, CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::{Claimed, LinkFlow};
 use ad4m_identity_client::flows::master::{
-    refresh_master, remove_master, retry_pushes, send_master, take_master, Refreshed,
+    refresh_master, remove_master, retry_pushes, send_master, take_master, Refreshed, Taken,
 };
 use ad4m_identity_client::flows::requests::{
     answer, answer_with_words, ask_confirm_revoke, ask_for_master, check_poster, Answered,
@@ -6337,4 +6337,151 @@ async fn a_retry_batch_with_an_entry_less_device_still_marks_the_others() {
         HoldsMaster::Offered
     );
     assert!(!opened.record.devices.contains_key(&d3));
+}
+
+/// Lal's P2-1 at 8f8a46e56, end to end. A rotation lands and its flow is cut off before the
+/// master-signed rewrite of the record (the record still carries master #0's attestation of the
+/// recovery key). The next custody read promotes the staged key and writes `holdsMaster` as the
+/// device: that write carries no recovery key, since the old attestation no longer counts, and
+/// the store takes it. From then on the words cannot open the record: a restore on a fresh
+/// executor finds a record no recovery key wraps.
+#[tokio::test]
+#[ignore = "known gap (review of #1667 at 8f8a46e56): a device write after a rotation drops the recovery key the words need; the fix is a design call (see the PR). Run with --ignored."]
+async fn a_device_write_after_a_rotation_keeps_the_words_access_to_the_record() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 57).await;
+    let words = words::from_entropy(&[57; 16]);
+
+    let cut = ViaExecutor::new(CutOffAfterPublish {
+        inner: a.rpc(),
+        published: Cell::new(false),
+    });
+    tokio::select! {
+        rotated = rotate(&cut, &vault, &did, &words, &[], &SystemClock, &OsRandom) => {
+            panic!("the rotation was not cut off: {rotated:?}")
+        }
+        _ = async {
+            while !cut.rpc().published.get() {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().masters.len(), 2, "the rotation landed");
+
+    // The next custody read finishes the rotation on this device: an ordinary device write.
+    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert!(
+        matches!(refreshed, Refreshed::Promoted { .. }),
+        "{refreshed:?}"
+    );
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    let recovery_after_refresh = opened.recovery.is_some();
+
+    // The computer is lost; the words on a fresh executor.
+    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let new_vault = MemoryVault::new();
+    let flow = RestoreFlow::start(&new, &new_vault, words.phrase(), &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(
+        flow.record_error().is_none(),
+        "the words cannot open the record after the device write: {:?} (the record carried a \
+         recovery key that counts after the refresh: {recovery_after_refresh})",
+        flow.record_error()
+    );
+    assert!(
+        !flow.devices().is_empty() && flow.devices().iter().any(|d| d.name.is_some()),
+        "the restore lists the devices by their recorded names: {:?}",
+        flow.devices()
+    );
+}
+
+/// An executor whose first `identity.record` read after `armed` is preceded by another device
+/// taking the master key from its inbox and recording that it holds it.
+struct TakeBeforeRecordRead<'a> {
+    inner: &'a TestExecutor,
+    taker: &'a ViaExecutor<TestExecutor>,
+    taker_vault: &'a MemoryVault,
+    armed: Cell<bool>,
+    taken: RefCell<Option<Taken>>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for TakeBeforeRecordRead<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.inboxPut" {
+            self.armed.set(true);
+        }
+        if method == "identity.record" && self.armed.get() && self.taken.borrow().is_none() {
+            let taken = take_master(self.taker, self.taker_vault, &OsRandom)
+                .await
+                .unwrap()
+                .expect("the pushed master key waits in the inbox");
+            taken.record.as_ref().unwrap();
+            *self.taken.borrow_mut() = Some(taken);
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Lal's P2-3 at 8f8a46e56. A rotates to #1 and pushes it to B, a holder. B takes it from its
+/// inbox and records `holdsMaster: true, masterIndex: 1` before A's hand-over writes the record.
+/// A's write builds on that newest version and must not put `"offered"` (and no index) over
+/// B's confirmation: afterwards A could not count B as another copy, and B's next refresh,
+/// finding the current key kept, would never repair it.
+#[tokio::test]
+async fn a_hand_over_never_overwrites_a_holder_that_already_took_the_new_master() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 58).await;
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        &b_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[58; 16]);
+
+    let racing = ViaExecutor::new(TakeBeforeRecordRead {
+        inner: a.rpc(),
+        taker: &b,
+        taker_vault: &b_vault,
+        armed: Cell::new(false),
+        taken: RefCell::new(None),
+    });
+    let rotated = rotate(&racing, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(rotated.index, 1);
+    assert!(
+        rotated.pushes.iter().any(|(k, r)| *k == d2 && r.is_ok()),
+        "{:?}",
+        rotated.pushes
+    );
+    let taken = racing.rpc().taken.borrow().as_ref().map(|t| t.index);
+    assert_eq!(taken, Some(1), "B took #1 before A's record write");
+    rotated.record.as_ref().unwrap();
+    assert_eq!(
+        b_vault
+            .master_index(ad4m_identity_core::scid_of(&did).unwrap())
+            .unwrap(),
+        Some(1)
+    );
+
+    let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
+    let entry_b = &opened.record.devices[&d2];
+    assert_eq!(
+        (entry_b.holds_master, entry_b.master_index),
+        (HoldsMaster::Yes, Some(1)),
+        "A's hand-over overwrote B's confirmation"
+    );
 }

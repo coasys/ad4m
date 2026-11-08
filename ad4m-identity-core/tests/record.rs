@@ -789,11 +789,19 @@ fn after_a_rotation_the_old_masters_attestation_no_longer_counts() {
     let mut log = devices_log();
     let v1 = sealed(&log, 1, true);
     let old = recovery_of(&v1, &log.chain).unwrap();
+    let before = log.chain.clone();
     log.rotate(&[], false);
-    // The record d1 wrote still opens, but its recovery key no longer counts, the store
-    // refuses it, and a writer cannot seal it again.
+    // The record d1 wrote still opens (with the receipt the store gave it then), but its
+    // recovery key no longer counts, the store refuses it, and a writer cannot seal it again.
     assert_eq!(
-        open(&v1, &log.chain, "d1", &enc_secret(1)),
+        open_record(
+            &v1,
+            &receipt(&v1, &before),
+            &log.chain,
+            &stores(),
+            "d1",
+            &enc_secret(1)
+        ),
         Ok(record_fixture())
     );
     assert_eq!(recovery_of(&v1, &log.chain), None);
@@ -1156,4 +1164,76 @@ fn the_receipt_round_trips_as_json_and_names_the_signed_envelope() {
     assert!(String::from_utf8(r.signing_bytes().unwrap())
         .unwrap()
         .contains("\"domain\":\"coasys:record-receipt\""));
+}
+
+/// Lal's P2-2 at 8f8a46e56: a stored record's attestation is checked against the master that
+/// was current when the store receipted it, as the envelope's writer is. A record receipted
+/// after a rotation whose recovery key is attested by the replaced master is refused, and so is
+/// one receipted before the rotation attested by the master that only came in with it. The
+/// honest store refuses both at the write; a reader that trusts the receipt alone must too.
+#[test]
+fn a_stored_attestation_is_by_the_master_valid_at_the_receipt() {
+    let mut log = devices_log();
+    let v1 = sealed(&log, 1, true);
+    let before = log.chain.clone();
+    let old = recovery_of(&v1, &log.chain).unwrap();
+    assert_eq!(old.attestation.key_id, "m0");
+    log.rotate(&[], false);
+
+    // Sealed as if before the rotation (m0's attestation), receipted after it: no honest store
+    // takes this write after the rotation, and before it the version was not free.
+    let stale = seal_record(
+        &before,
+        2,
+        &record_fixture(),
+        Some(old.clone()),
+        &dev(1),
+        &mut TestRng::new("stale"),
+    )
+    .unwrap();
+    let read = open_record(
+        &stale,
+        &receipt(&stale, &log.chain),
+        &log.chain,
+        &stores(),
+        "d1",
+        &enc_secret(1),
+    );
+    assert!(
+        matches!(read, Err(RecordError::Attestation(_))),
+        "an attestation by the replaced master, receipted after the rotation, opened: {read:?}"
+    );
+
+    // Attested by m1 (sealed after the rotation), receipted before it, when m1 was not a
+    // master yet.
+    let early = sealed(&log, 2, true);
+    assert_eq!(
+        recovery_of(&early, &log.chain).unwrap().attestation.key_id,
+        "m1"
+    );
+    let read = open_record(
+        &early,
+        &receipt(&early, &before),
+        &log.chain,
+        &stores(),
+        "d1",
+        &enc_secret(1),
+    );
+    assert!(
+        matches!(read, Err(RecordError::Attestation(_))),
+        "an attestation by a master not yet in force at the receipt opened: {read:?}"
+    );
+
+    // The record written before the rotation, receipted then, still opens after it.
+    assert_eq!(
+        open_record(
+            &v1,
+            &receipt(&v1, &before),
+            &log.chain,
+            &stores(),
+            "d1",
+            &enc_secret(1)
+        ),
+        Ok(record_fixture())
+    );
 }
