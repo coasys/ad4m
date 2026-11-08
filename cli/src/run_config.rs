@@ -272,8 +272,10 @@ pub struct RunArgs {
     pub log_dir: Option<String>,
     /// An origin clients reach this executor at (`public_origins`), e.g.
     /// `https://ad4m.example.org`; repeat it or separate with commas. A key login or a session
-    /// renewal is accepted only when its signed statement names one of them. Default: only this
-    /// executor's own loopback origins, so key logins come only from this machine.
+    /// renewal is accepted only when its signed statement's audience names one of them — the
+    /// check restricts the signed audience, not the caller's location. Default: only this
+    /// executor's own loopback origins as the audience (a remote caller may sign one too, so
+    /// on a network listener set this to pin key logins to named origins).
     #[arg(
         long = "public-origin",
         env = "AD4M_PUBLIC_ORIGINS",
