@@ -156,6 +156,8 @@ struct TestExecutor {
     refuse_publish: Cell<bool>,
     /// The next `identity.inboxPut` fails before it reaches the store.
     refuse_inbox_put: Cell<bool>,
+    /// The next `identity.recordPut` fails before it reaches the store.
+    refuse_record_put: Cell<bool>,
     /// The next `identity.recordPut` answers a stale version, as when another writer was first.
     stale_record_put: Cell<bool>,
     /// `identity.recordPut` calls that reached the store.
@@ -179,6 +181,7 @@ impl TestExecutor {
             lose_publish_answer: Cell::new(false),
             refuse_publish: Cell::new(false),
             refuse_inbox_put: Cell::new(false),
+            refuse_record_put: Cell::new(false),
             stale_record_put: Cell::new(false),
             record_puts: Cell::new(0),
             tamper_claim: Cell::new(None),
@@ -683,6 +686,12 @@ impl ExecutorRpc for TestExecutor {
                 Ok(if code == 404 { Value::Null } else { body })
             }
             "identity.recordPut" => {
+                if self.refuse_record_put.replace(false) {
+                    return Err(RpcError {
+                        code: 503,
+                        message: "unavailable: the store is down".into(),
+                    });
+                }
                 if self.stale_record_put.replace(false) {
                     return Err(Self::refused(409, &json!({ "error": "version" })));
                 }
@@ -2819,4 +2828,71 @@ fn a_create_screen_never_shows_the_words_in_debug_output() {
     let (_flow, screen) = CreateFlow::start(&OsRandom);
     assert!(matches!(&screen, CreateScreen::ShowWords(words) if words.expose().len() == 12));
     assert_eq!(format!("{screen:?}"), "ShowWords(<12 words>)");
+}
+
+/// Review coasys/ad4m#1649 at d9b5f4a28: the entry write before the push fails (a transient
+/// store error). The master key must not go: a device that took it would mark an entry that
+/// does not exist (a silent no-op), and the fallback would then write the entry as
+/// `"offered"`, so the holder reads "offered" with an empty inbox. The push waits on the retry
+/// list instead. Fails at d9b5f4a28: the key is pushed although the entry write failed.
+#[tokio::test]
+async fn a_failed_entry_write_holds_the_master_key_back() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 24).await;
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_desk = desk
+        .rpc()
+        .call(
+            "identity.claimOffer",
+            json!({ "offer": flow.offer_string(), "canKeepMaster": true }),
+        )
+        .await
+        .unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+    // The entry write, the first `recordPut` of this confirm, fails before the store.
+    a.rpc().refuse_record_put.set(true);
+    let linked = flow
+        .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
+        .await
+        .unwrap();
+    assert!(
+        !matches!(&linked.master, Some(Ok(_))),
+        "the master key was pushed although the entry write failed: {:?}",
+        linked.master
+    );
+    join(&desk, &claimed_desk["offerId"]).await;
+    let waiting = take_master(&desk, &MemoryVault::new(), &OsRandom)
+        .await
+        .unwrap();
+    assert!(
+        waiting.is_none(),
+        "a master key waits in the device's inbox although the entry write failed"
+    );
+    if let Some(opened) = record::read(&a, &did).await.unwrap() {
+        assert_ne!(
+            opened
+                .record
+                .devices
+                .get(&linked.key_id)
+                .map(|e| e.holds_master),
+            Some(HoldsMaster::Offered),
+            "the entry says offered for a key that was never sent"
+        );
+    }
+    // The push waits for `retry_pushes`.
+    assert_eq!(vault.pending_pushes().unwrap().len(), 1);
 }

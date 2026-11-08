@@ -231,6 +231,18 @@ async fn write_from<R: ExecutorRpc>(
             }
         };
         merge(&mut record, &chain, changes);
+        // A `holdsMaster` for a device the record does not list would be a silent no-op that
+        // its caller reports as done: refuse it instead.
+        if let Some(missing) = changes.iter().find_map(|change| match change {
+            Change::HoldsMaster { key_id, .. } if !record.devices.contains_key(key_id) => {
+                Some(key_id.clone())
+            }
+            _ => None,
+        }) {
+            return Err(ClientError::Protocol(format!(
+                "the record lists no device {missing}, so its master key cannot be marked"
+            )));
+        }
         // The executor's device key signs it (`identity.recordPut` with an empty `sig`).
         let sealed = seal_unsigned(
             &chain,

@@ -40,6 +40,10 @@ use crate::secret::Secret;
 use crate::vault::{MasterUse, Unlocked, Vault};
 use crate::{fold, ClientError, Clock, Random, RandomRng};
 
+/// Why a confirm pushed no master key: the device's record entry was not written.
+const ENTRY_NOT_WRITTEN: &str =
+    "the device's record entry was not written, so the master key waits on the retry list";
+
 /// The seconds each list request waits for a change (the store's longest wait).
 const LIST_WAIT_S: u8 = 8;
 
@@ -434,8 +438,11 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             self.random,
         )
         .await;
-        let master = if let Some(signer) = signer {
-            Some(
+        // The key goes only once the entry is in: a device that takes it at once marks an entry
+        // that exists. A failed entry write leaves the push on the retry list (`retry_pushes`)
+        // instead of sending a key no record lists.
+        let master = match (&listed, signer) {
+            (Ok(_), Some(signer)) => Some(
                 super::master::push(
                     self.executor,
                     self.vault,
@@ -448,9 +455,15 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                     self.random,
                 )
                 .await,
-            )
-        } else {
-            None
+            ),
+            (Err(_), Some(_)) => {
+                self.vault.keep_push(&crate::vault::PendingPush {
+                    scid: chain.id().to_string(),
+                    key_id: key_id.clone(),
+                })?;
+                Some(Err(ClientError::Step(ENTRY_NOT_WRITTEN)))
+            }
+            (_, None) => None,
         };
         let pushed = matches!(master, Some(Ok(_)));
         let record = match listed {
