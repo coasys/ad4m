@@ -100,16 +100,29 @@ pub async fn read<R: ExecutorRpc>(
     did: &str,
 ) -> Result<Option<Opened>, ClientError> {
     let chain = chain_of(executor, did).await?;
-    Ok(read_at(executor, did, &chain)
+    Ok(read_at(executor, did, &chain, None)
         .await?
         .map(|(opened, _)| opened))
 }
 
-/// [`read`] against the log `chain` of `did`, with the executor's device key id.
+/// What a write after a revocation builds on when the newest version is signed by a key that
+/// revocation ended: a reader refuses that version from the revocation on (spec section 17),
+/// so the write builds on the version read `before` the revocation was published instead.
+/// Whatever the revoked key wrote after that is dropped with it.
+pub(crate) struct AfterRevoke<'a> {
+    pub revoked: &'a [KeyId],
+    pub before: Option<&'a PrivateRecord>,
+}
+
+/// [`read`] against the log `chain` of `did`, with the executor's device key id. With `after`,
+/// a newest version signed by a key it revoked opens as `after.before` at the stored version,
+/// with the stored envelope's recovery key that counts (the host takes only that one from a
+/// device writer, and only the current master's attestation makes it count).
 async fn read_at<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     did: &str,
     chain: &KelChain,
+    after: Option<&AfterRevoke<'_>>,
 ) -> Result<Option<(Opened, KeyId)>, ClientError> {
     let status = executor.status().await?;
     if status.did.as_deref() != Some(did) {
@@ -128,7 +141,13 @@ async fn read_at<R: ExecutorRpc>(
         .get(&key_id)
         .ok_or_else(|| RecordError::NoEntry(key_id.clone()))?;
     let key = executor.unwrap_record_key(wrapped).await?;
-    let record = decrypt_record(&sealed, chain, key.expose())?;
+    let record = match (decrypt_record(&sealed, chain, key.expose()), after) {
+        (Ok(record), _) => record,
+        (Err(RecordError::Signer(signer)), Some(after)) if after.revoked.contains(&signer) => {
+            after.before.cloned().unwrap_or_default()
+        }
+        (Err(e), _) => return Err(e.into()),
+    };
     let opened = Opened {
         version: sealed.version,
         record,
@@ -176,9 +195,31 @@ pub async fn write_if<R: ExecutorRpc>(
     check: Precondition<'_>,
     random: &dyn Random,
 ) -> Result<u64, ClientError> {
+    write_from(executor, did, changes, check, None, random).await
+}
+
+/// [`write`] after the revocation `after.revoked` was published: a newest version signed by a
+/// revoked key is built over as [`AfterRevoke`] says.
+pub(crate) async fn write_after_revoke<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    after: &AfterRevoke<'_>,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    write_from(executor, did, &[], &|_, _| Ok(()), Some(after), random).await
+}
+
+async fn write_from<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    changes: &[Change],
+    check: Precondition<'_>,
+    after: Option<&AfterRevoke<'_>>,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
     for _ in 0..MAX_WRITES {
         let chain = chain_of(executor, did).await?;
-        let opened = read_at(executor, did, &chain).await?;
+        let opened = read_at(executor, did, &chain, after).await?;
         check(opened.as_ref().map(|(o, _)| &o.record), &chain)?;
         let (version, mut record, recovery, key_id) = match opened {
             Some((opened, key_id)) => (opened.version + 1, opened.record, opened.recovery, key_id),
