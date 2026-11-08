@@ -37,6 +37,7 @@ import type {
     InboxMessage,
     PreInboxAuth,
     SealedRecord,
+    StoredRecord,
     RecordStored,
     PostedRequest,
     RequestPosted,
@@ -187,7 +188,7 @@ export interface FlatLanguageExports {
     identityInboxPut?(address: InboxAddress, write: InboxWrite, req: SignedRequest): Promise<InboxStored>;
     identityInboxList?(address: InboxAddress, auth: SignedRequest | PreInboxAuth, waitSec?: number): Promise<InboxMessage[]>;
     identityInboxAck?(address: InboxAddress, id: string, auth: SignedRequest | PreInboxAuth): Promise<void>;
-    identityGetRecord?(did: string, req: SignedRequest): Promise<SealedRecord | null>;
+    identityGetRecord?(did: string, req: SignedRequest): Promise<StoredRecord | null>;
     identityPutRecord?(did: string, record: SealedRecord, req: SignedRequest): Promise<RecordStored>;
     identityPostRequest?(did: string, post: PostedRequest, req: SignedRequest): Promise<RequestPosted>;
     identityListRequests?(did: string, since: number, req: SignedRequest): Promise<DeviceRequest[]>;

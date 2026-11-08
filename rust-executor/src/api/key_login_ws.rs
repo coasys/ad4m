@@ -29,9 +29,10 @@ fn now() -> u64 {
     crate::agent::grants::now()
 }
 
-async fn session_challenge(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn session_challenge(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let service = crate::identity::service()?;
-    answer(key_login::challenge(&service, now())?)
+    let source = key_login::ChallengeSource::of(&ctx.session, ctx.peer);
+    answer(key_login::challenge(&service, &source, now())?)
 }
 
 async fn login_with_key(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -72,6 +73,8 @@ async fn sign_session_statement(
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     // A challenge for a key login. AGENT_AUTH, which every caller holds (the anonymous set
     // included, in single-user and multi-user mode alike): every executor answers a key login.
+    // Each address holds at most `CHALLENGES_PER_SOURCE` open; a key session gets its grant's
+    // one renewal challenge, outside that pool.
     map.method::<NoParams, SessionChallenge>("user.sessionChallenge", session_challenge)
         .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
     // A login signed by a device key: the handler checks the statement, the key and the role

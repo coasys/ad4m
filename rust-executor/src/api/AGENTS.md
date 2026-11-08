@@ -126,10 +126,15 @@ that create, import or lock the executor's agent and move its data folder: `agen
 only, so a remote operator (a key login, or the admin credential on a network listener) may
 move the whole data folder. The guard table marks the local-only methods "local only".
 `runtime.setConfig` is not local only as a whole: it refuses each `machine` key to a caller
-off this machine (`config_rpc`). `identity.custodyStatus` and `identity.takeMaster` (the one
-call whose answer carries a master key) add the custody channel's own check
-(`identity::custody::admit`: only the custody credential, `OperatorSource::Custody`, on a
-loopback listener of an executor started with `--custody-channel`; not the admin credential); every other caller gets 403 `no-custody-channel`. The events only
+off this machine (`config_rpc`). `identity.custodyStatus`, `identity.takeMaster` (the one
+call whose answer carries a master key) and, with the channel on, `identity.inboxAck` add the
+custody channel's own check (`identity::custody::admit`: the custody credential on a loopback
+listener of an executor started with `--custody-channel`); every other caller, the admin
+credential included, gets 403 `no-custody-channel`. The custody credential is its own
+principal (`Principal::Custody`), not an operator: `Session::open` refuses it off a loopback
+listener, it holds no capability, and dispatch (`admit_entry`) lets it reach only the methods
+in `identity::custody::CUSTODY_METHODS` (403 `not-a-custody-call` otherwise), acting as the
+main agent. Its sessions get only `Audience::LocalOperator` events. The events only
 local-only methods read (`link-ticket`, `inbox-message`) go to `Audience::LocalOperator`, the
 operator's sessions on this machine.
 

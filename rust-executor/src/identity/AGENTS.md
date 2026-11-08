@@ -8,7 +8,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 |---|---|
 | `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`, else the network seed's `identityStore`; `identity.allowPrivateSrc`), `write_agent_language_settings`, the `identity-fork` publisher; re-exports `verify_expression` |
 | `resolver.rs` | The one place that decides what a log says. `key_valid_at_anchor` and `verify_expression` (both up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author with its `proof.record`, for `LanguageController::verify_expression_proof`; the record anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Links: `check_signed_with` (the verdict and person of a signed link from the key map, no I/O), `Resolver::author_of` / `lookup_signer` (key map, then the key index confirmed against the log), `Resolver::prepare` (fills the key map before links are stored). Sessions: `Resolver::session_key` / `cached_session_key` (`SessionKey`: a device key's verdict and bot mark in a named log at its trusted seq, the log read from the store when older than the caller allows; `SessionKeyError::StoreUnavailable` fails closed) |
-| `key_login.rs` | Login with a device key: `Challenges` (one use, 60 s, at most 10 000 open), `login` (challenge, executor DID, `audience` origin against `Audiences`, signature over `signing_bytes("coasys:session", statement)`, key, role: the operator record's identity gets the operator role, else the local agent that speaks for it, else `not-known`), `renew`, `session_info`, `end_all_sessions`, `sign_statement` (`agent.signSessionStatement`, `.local_only()`: a key-login operator is never "on this machine", on a loopback listener too, so it and every other local-only method refuse it; every other method admits it as the operator, `agent.generate`, `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` included), `run_key_session_watch` (ends a key's grants on its `VerdictChange`, and the 5-minute re-check) |
+| `key_login.rs` | Login with a device key: `Challenges` (one use, 60 s; by `ChallengeSource`: at most 100 open per address, loopback one address, IPv6 by /64, 10 000 in all; a key session's renewal challenge from its grant's own slot, outside that pool, replaced on reissue; expired ones go on every issue), `login` (challenge, executor DID, `audience` origin against `Audiences`, signature over `signing_bytes("coasys:session", statement)`, key, role: the operator record's identity gets the operator role, else the local agent that speaks for it, else `not-known`), `renew`, `session_info`, `end_all_sessions`, `sign_statement` (`agent.signSessionStatement`, `.local_only()`: a key-login operator is never "on this machine", on a loopback listener too, so it and every other local-only method refuse it; every other method admits it as the operator, `agent.generate`, `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` included), `run_key_session_watch` (ends a key's grants on its `VerdictChange`, and the 5-minute re-check, a store read whatever the cache's age) |
 | `verdict.rs` | `LinkVerdict` (`Valid`, `Invalid(reason)`, `CantCheck`, `Flagged`) and `judge`, a pure function of the signature, the anchor, the signer's log and the space order; `KeyVerdict`, `VerdictChange`, `key_verdict` |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
@@ -16,7 +16,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner`, `store_request` (a store request signed by a device key at a store-signed head) and `body_bytes` (the JCS bytes its `bodyHash` covers) |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
-| `custody.rs` | The custody channel's guard `admit` (the custody credential = `OperatorSource::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`). The credential is the first line of stdin at start (`config::read_custody_credential`), held in memory only and wiped on drop: never the environment or a flag, which `/proc/<pid>/environ` and `/proc/<pid>/cmdline` show to other processes and to the admin credential's host file reads. `run` exits 78 without the line, with an empty line, with the admin credential's value, or with `AD4M_CUSTODY_CREDENTIAL`/`_FILE` set, and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
+| `custody.rs` | The custody channel's guard `admit` (the custody credential = `Principal::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`) and `CUSTODY_METHODS` with `admit_call`: the custody credential is no operator and holds no capability; dispatch lets it reach only the calls on that list (403 `not-a-custody-call` for any other), and `Session::open` refuses it off a loopback listener. The credential is the first line of stdin at start (`config::read_custody_credential`), held in memory only and wiped on drop: never the environment or a flag, which `/proc/<pid>/environ` and `/proc/<pid>/cmdline` show to other processes and to the admin credential's host file reads. `run` exits 78 without the line, with an empty line, with the admin credential's value, or with `AD4M_CUSTODY_CREDENTIAL`/`_FILE` set, and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
 | `inbox.rs` | The device inbox: `Inbox` (the joined messages opened here, by id and type, never a body; one read of the joined inbox at a time; the open pre-join read; the pull's wake-up), `pull_inbox` (`identity.inbox`), `take_master` (`identity.takeMaster`), `inbox_ack`, `inbox_put`, `prepare_device` (`identity.prepareDevice`: the device string and the pre-join read; `take_ticket` claims and, once claimed, sends `link-ticket`), `run_pull` / `run_schedule` / `wake` (at start, at unlock and binding, every 15 minutes) |
 | `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `unwrapRecordKey`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only. A caller's record request names its identity, so `record`/`recordPut` with one serve an agent bound to no identity yet (a restore from the words); it must be for `/v1/private/{scid}` with the call's method, else 400 before the store |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
@@ -178,9 +178,12 @@ the offer's state).
   the trusted seq, `no-operator` without a record, `first-link` for another identity. One
   exception (`FirstLink::FirstRun`): a `--custody-channel` executor (a desktop app, which never
   runs `init --operator`) with no record and no identity for its main agent may claim any
-  offer. The claim records nothing: only when the main agent joins (`join_status` on `spent`
-  binds it, then `record_first_run_operator`) is that identity recorded as operator
-  (`OperatorSetBy::FirstRun`, `set_operator_record_if_empty`). So a claim that never completes
+  offer. The claim records nothing: only when the main agent joins (`join_status` on `spent`,
+  `bind_agent_if_listed` with `first_run_operator`) is that identity recorded as operator
+  (`OperatorSetBy::FirstRun`). The binding and the record are one transaction
+  (`set_agent_identity_and_first_run_operator`): a process that stops between them leaves
+  neither, and the next `joinStatus` writes both. That is why `identity.joinStatus` is a
+  write, not a `.read()`. So a claim that never completes
   (the wrong code scanned, the holder said No) leaves the desktop free to claim again, for the
   same or another identity. From then on the rule applies as above: a claim for any other
   identity is `first-link`. Both the ticket path and `identity.claimOffer` (a pasted link) go
@@ -192,7 +195,8 @@ the offer's state).
   not bound by the record.
 - `cosignIncept` and `publish` bind the caller's agent for good, and every app holds
   `agent:SIGN` and `agent:UPDATE` by default, so their guard is `Guard::UserOrOperator`: for
-  the main agent only the operator (the admin or the custody credential), never an
+  the main agent only the operator (the admin credential; the custody credential reaches them
+  through `CUSTODY_METHODS`, acting as the main agent), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
   managed agent.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through
@@ -307,20 +311,47 @@ the offer's state).
   the seq that added the key. With an anchor: no log lists the key, `invalid`; nothing known
   or the anchor past the trusted seq, `cantCheck`; a master key, `invalid`; the key added
   after the anchor or revoked at or before it, `invalid`; a bot key whose scope is past its
-  `expires` by the clock now, `invalid`. A key revoked after the anchor: `flagged` when the
-  link entered the space's ordered history after the `revoke`, else `valid`. No link language
-  gives that order today, so `check_signed` passes none.
+  `expires` by the clock now, `invalid`. A key revoked after the anchor: `valid` only when the
+  link is known to have entered before the `revoke`, else `flagged`. No link language gives a
+  space order today; the one order the executor knows is its own store's: a link it already
+  counted (stored `valid`) before the revocation was accepted (`check_entered(Some(false))`).
+- **Admission needs a confirmed head** (`check_signed_with`, `KeyMap::admits`). A new link
+  counts (`valid`) only when the store confirmed the signer's trusted head (`accept`,
+  `KeyMap::note_confirmed`) less than `ADMIT_FRESHNESS` ago, whatever its anchor: an older
+  head may miss a revocation of the key. Otherwise the link is `cantCheck`, and `prepare`
+  re-reads the log (at most once per window); with the store unreachable it stays
+  `cantCheck` and the 60 s re-check tries again. Exempt: this executor's own keys
+  (`KeyMap::note_own`, from `anchor_for`), so local links count offline, and a link already
+  counted. A restart confirms nothing until each log is read again. `ADMIT_FRESHNESS` is
+  the exposure after a revocation: for up to 60 s after the store holds a `revoke`, this
+  executor may still count new links by the revoked key. A link admitted in that window
+  stays counted (stored `valid`, so the re-check keeps it): without the store's append
+  order the executor cannot tell it from one signed before. A new link after the read
+  that shows the revocation is `flagged`.
 - **Unknown is not "no log".** A failed key-index call answers `Unavailable` and is never
   kept; the index is not asked again for 30 s (`BREAKER`). An unanchored link by an unknown
-  key stays `valid` with no person; an anchored one is `cantCheck`.
+  key stays `valid` with no person; an anchored one is `cantCheck`. One `prepare` asks the
+  index about at most `DISCOVERY_PER_BATCH` (64) signers the key map does not know; the
+  others stay unknown for that batch and are found by a later batch or the re-check.
 - **The person** is derived, never on the wire: the `did:scid` of the signer's log (a bot
   key: its owner), only for a `valid` link. The link store keeps it beside the verdict
   (`ad4m://ontology/person`, `ad4m://ontology/linkVerdict`) for SPARQL; `proofValid` is `true`
   exactly for `valid`. A found person stays for good; "no log" holds for 15 minutes.
 - **The re-check** (`run_recheck`, started by `init`): on each `VerdictChange` the links of
-  that key, and every 60 s the `cantCheck` links, are judged again and rewritten when the
-  verdict or person changed (`PerspectiveInstance::recheck_links`, at most 10 000 links per
-  perspective per pass).
+  that key; every 60 s the links of bot keys whose scope `expires` fell since the last tick
+  (`KeyMap::expiring`), then the `cantCheck` links. Each is judged again and rewritten when
+  the verdict or person changed (`PerspectiveInstance::recheck_links`). Reads page by
+  reifier IRI (`RECHECK_BATCH` rows): a key's links are read to the last page; the
+  `cantCheck` pass reads one page per tick from `recheck_cursor` and wraps at the end, so
+  links that stay unresolvable do not hide the ones after them. Rewritten links go through
+  `update_prolog_engines` like a remote diff: Prolog, notifications and live queries and
+  model subscriptions hear the new verdicts.
+- **Rollout.** The anchor is in the link's proof on the wire. A neighbourhood whose link
+  language predates it (the old p-diff-sync DNA) drops `proof.anchor`, so an anchored link
+  arrives with a signature over bytes the receiver cannot rebuild and is `invalid`. Moving a
+  neighbourhood whose members bind identities to this release is a migration (published
+  again on a link language from the new DNA, its links copied), not a mixed-version
+  rollout. See `bootstrap-languages/p-diff-sync/README.md`, "Link proofs".
 - **Reads.** Logic reads (model queries, flows, SHACL, SDNA facts) count only links with
   `proofValid` `true`. The display reads `perspective.queryLinks` and `perspective.snapshot`
   (`get_links_shown`) leave out `invalid` links and return `cantCheck` and `flagged` ones with
@@ -418,7 +449,9 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
 - **`identity.takeMaster`** (custody channel, `custody::admit`) refreshes the log, opens the
   joined messages oldest first and runs `check_payload` against the cached log: `KeepMaster`
   answers `TakenMaster {messageId, did, index, secret}` (wiped when dropped, never cloned,
-  `Debug` without the secret) and leaves the message for `identity.inboxAck`; `Stale` and a
+  `Debug` without the secret) and leaves the message for `identity.inboxAck`, which with the
+  custody channel on also passes `custody::admit` (only the custody service, which stored the
+  key, says it may go; the admin credential gets 403 `no-custody-channel`); `Stale` and a
   failed check are deleted and the next one is tried; none answers `null`; a locked wallet is
   503 `unavailable`. The secret goes into the RPC answer only: no store, log line, event or
   language sees it.
@@ -442,7 +475,13 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   service) has no `enc` key of its own: **`identity.unwrapRecordKey`** (operator, local only)
   opens the record key of the main agent's entry in the wallet (`WalletBackend::unwrap_record_key`,
   the secret stays in that call) and answers it (`RecordKey`, wiped on drop); the app decrypts
-  the record with it.
+  the record with it (`record::decrypt_record`, which verifies the envelope against the log
+  first). The custody credential reaches it (`CUSTODY_METHODS`): the custody service reads and
+  writes the record. For the same reason the device key signs a record envelope here: an
+  **`identity.recordPut`** whose envelope has an empty `sig` must name the agent's device key
+  as `signer` (400 `signer` otherwise), and `DevicePosition::sign_envelope` signs it in the
+  wallet (`coasys:private-record`) before the put; a signed envelope (a master-signed write)
+  passes unchanged.
 
 ## Do not
 

@@ -20,6 +20,7 @@
 //! [`STORE_OUTAGE_GRACE`] (fail closed).
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,7 +37,9 @@ use super::types::{
     UnsignedKeyStatement,
 };
 use super::verdict::{KeyVerdict, VerdictChange};
-use crate::agent::capabilities::{get_user_default_capabilities, grant_caps_for, AuthInfo};
+use crate::agent::capabilities::{
+    get_user_default_capabilities, grant_caps_for, AuthInfo, AGENT_UPDATE_CAPABILITY,
+};
 use crate::agent::grants::{self, Grants, KeyBinding, KeyGrant, LiveGrant};
 use crate::agent::session::{Principal, Session};
 use crate::agent::{did_for_context, AgentContext};
@@ -46,13 +49,18 @@ use crate::api::ws_handler::WsRpcError;
 pub const KEY_SESSION_TTL: u64 = 60 * 60;
 /// How long a challenge stays open.
 pub const CHALLENGE_TTL: u64 = 60;
-/// The most challenges open at once.
+/// The most challenges open at once for callers other than key sessions renewing (each of
+/// those has its own slot).
 pub const MAX_OPEN_CHALLENGES: usize = 10_000;
+/// The most challenges one address holds open at once.
+pub const CHALLENGES_PER_SOURCE: usize = 100;
 /// How far a statement's `issuedAt` may be from the executor's clock.
 pub const CLOCK_SKEW: u64 = 120;
-/// The oldest read of a key's log a login or a renewal takes; an older one goes to the store.
+/// The oldest read of a key's log a login takes; an older one goes to the store. A renewal
+/// always reads the store.
 pub const LOGIN_MAX_AGE: u64 = 5 * 60;
-/// How often the keys of live key-bound grants are read again.
+/// How often the keys of live key-bound grants are read again from the store: the longest a
+/// revocation the store holds leaves a session open when the cache's change missed it.
 pub const KEY_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How long a key-bound grant lasts on its last valid verdict while the store cannot be read:
 /// a renewal proceeds, and the re-check keeps it, until then.
@@ -81,6 +89,8 @@ pub enum KeyLoginError {
     Grant,
     /// Too many challenges are open.
     TooManyChallenges,
+    /// The session may not do this: the message says what it lacks.
+    Forbidden(String),
     /// The call does not fit the session (no key-bound grant, no identity to sign for) or the
     /// statement's shape: the message says which.
     BadRequest(String),
@@ -100,6 +110,7 @@ impl KeyLoginError {
             KeyLoginError::StoreUnavailable => "store-unavailable",
             KeyLoginError::Grant => "grant",
             KeyLoginError::TooManyChallenges => "too-many-challenges",
+            KeyLoginError::Forbidden(_) => "forbidden",
             KeyLoginError::BadRequest(_) => "bad-request",
             KeyLoginError::Internal(_) => "internal",
         }
@@ -125,37 +136,154 @@ impl From<KeyLoginError> for WsRpcError {
                 message: code.into(),
             },
             KeyLoginError::TooManyChallenges => WsRpcError::too_many_requests(code),
+            KeyLoginError::Forbidden(m) => WsRpcError::forbidden(m),
             KeyLoginError::BadRequest(m) => WsRpcError::bad_request(m),
             KeyLoginError::Internal(m) => WsRpcError::internal(m),
         }
     }
 }
 
-/// The open challenges, each with its expiry (Unix seconds). In memory only: a restart drops
-/// them, and a challenge never outlives [`CHALLENGE_TTL`] anyway.
+/// Who a challenge is for, which decides the budget it draws from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ChallengeSource {
+    /// A key session renewing: its grant's one slot, outside the shared pool. A new challenge
+    /// for the grant replaces the one still open.
+    Grant(String),
+    /// Any other caller, by the address it connects from ([`ChallengeSource::peer`]): at most
+    /// [`CHALLENGES_PER_SOURCE`] open, all of them together at most [`MAX_OPEN_CHALLENGES`].
+    /// `None` when the address is unknown (a server without connect info, in-process calls).
+    Peer(Option<IpAddr>),
+}
+
+impl ChallengeSource {
+    /// The source of a `user.sessionChallenge` call: the grant of a key session, else the
+    /// address the caller connects from.
+    pub fn of(session: &Session, peer: Option<IpAddr>) -> ChallengeSource {
+        match session.grant() {
+            Some(grant) if grant.key.is_some() => ChallengeSource::Grant(grant.id.0.clone()),
+            _ => ChallengeSource::peer(peer),
+        }
+    }
+
+    /// The budget of the address `peer`: every loopback address is one source (127.0.0.1), an
+    /// IPv4-mapped IPv6 address is its IPv4 address, and an IPv6 address counts by its /64,
+    /// the block one host gets.
+    pub fn peer(peer: Option<IpAddr>) -> ChallengeSource {
+        ChallengeSource::Peer(peer.map(|ip| {
+            let ip = match ip {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+                v4 => v4,
+            };
+            match ip {
+                ip if ip.is_loopback() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(v6) => {
+                    let s = v6.segments();
+                    IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+                }
+                v4 => v4,
+            }
+        }))
+    }
+}
+
+struct OpenChallenge {
+    expires: u64,
+    source: ChallengeSource,
+}
+
+#[derive(Default)]
+struct Open {
+    challenges: HashMap<String, OpenChallenge>,
+    /// How many challenges each address holds; their sum is the shared pool's use.
+    per_peer: HashMap<Option<IpAddr>, usize>,
+    /// The open challenge of each grant.
+    slots: HashMap<String, String>,
+}
+
+impl Open {
+    fn pool(&self) -> usize {
+        self.challenges.len() - self.slots.len()
+    }
+
+    fn take(&mut self, challenge: &str) -> Option<u64> {
+        let open = self.challenges.remove(challenge)?;
+        match &open.source {
+            ChallengeSource::Grant(grant) => {
+                self.slots.remove(grant);
+            }
+            ChallengeSource::Peer(peer) => {
+                if let Some(held) = self.per_peer.get_mut(peer) {
+                    *held -= 1;
+                    if *held == 0 {
+                        self.per_peer.remove(peer);
+                    }
+                }
+            }
+        }
+        Some(open.expires)
+    }
+}
+
+/// The open challenges, each with its expiry (Unix seconds) and source. In memory only: a
+/// restart drops them, and a challenge never outlives [`CHALLENGE_TTL`] anyway.
 #[derive(Default)]
 pub struct Challenges {
-    open: Mutex<HashMap<String, u64>>,
+    open: Mutex<Open>,
 }
 
 impl Challenges {
-    /// A new challenge, open until the expiry it answers with.
-    pub fn issue(&self, now: u64) -> Result<(String, u64), KeyLoginError> {
+    /// A new challenge for `source`, open until the expiry it answers with. Expired challenges
+    /// go first. An address at its [`CHALLENGES_PER_SOURCE`], or a full pool, gets
+    /// `TooManyChallenges`; a grant always gets one, and its previous one closes.
+    pub fn issue(
+        &self,
+        source: &ChallengeSource,
+        now: u64,
+    ) -> Result<(String, u64), KeyLoginError> {
         let mut open = self
             .open
             .lock()
             .map_err(|_| KeyLoginError::Internal("the challenge store is poisoned".into()))?;
-        if open.len() >= MAX_OPEN_CHALLENGES {
-            open.retain(|_, expires| *expires >= now);
+        let expired: Vec<String> = open
+            .challenges
+            .iter()
+            .filter(|(_, c)| c.expires < now)
+            .map(|(challenge, _)| challenge.clone())
+            .collect();
+        for challenge in expired {
+            open.take(&challenge);
         }
-        if open.len() >= MAX_OPEN_CHALLENGES {
-            return Err(KeyLoginError::TooManyChallenges);
+        match source {
+            ChallengeSource::Grant(grant) => {
+                if let Some(previous) = open.slots.get(grant).cloned() {
+                    open.take(&previous);
+                }
+            }
+            ChallengeSource::Peer(peer) => {
+                if open.pool() >= MAX_OPEN_CHALLENGES
+                    || open.per_peer.get(peer).copied().unwrap_or(0) >= CHALLENGES_PER_SOURCE
+                {
+                    return Err(KeyLoginError::TooManyChallenges);
+                }
+            }
         }
         let mut bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
         let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let expires = now + CHALLENGE_TTL;
-        open.insert(challenge.clone(), expires);
+        match source {
+            ChallengeSource::Grant(grant) => {
+                open.slots.insert(grant.clone(), challenge.clone());
+            }
+            ChallengeSource::Peer(peer) => *open.per_peer.entry(*peer).or_default() += 1,
+        }
+        open.challenges.insert(
+            challenge.clone(),
+            OpenChallenge {
+                expires,
+                source: source.clone(),
+            },
+        );
         Ok((challenge, expires))
     }
 
@@ -165,13 +293,13 @@ impl Challenges {
         self.open
             .lock()
             .ok()
-            .and_then(|mut open| open.remove(challenge))
+            .and_then(|mut open| open.take(challenge))
             .is_some_and(|expires| now <= expires)
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.open.lock().unwrap().len()
+        self.open.lock().unwrap().challenges.len()
     }
 }
 
@@ -181,10 +309,14 @@ pub fn executor_did() -> Result<String, KeyLoginError> {
         .map_err(|e| KeyLoginError::Internal(e.to_string()))
 }
 
-/// `user.sessionChallenge`.
-pub fn challenge(service: &IdentityService, now: u64) -> Result<SessionChallenge, KeyLoginError> {
+/// `user.sessionChallenge`, for `source` ([`ChallengeSource::of`]).
+pub fn challenge(
+    service: &IdentityService,
+    source: &ChallengeSource,
+    now: u64,
+) -> Result<SessionChallenge, KeyLoginError> {
     let executor = executor_did()?;
-    let (challenge, expires_at) = service.challenges.issue(now)?;
+    let (challenge, expires_at) = service.challenges.issue(source, now)?;
     Ok(SessionChallenge {
         challenge,
         executor,
@@ -536,20 +668,27 @@ pub async fn renew(
     if !signature_holds(&proof) {
         return Err(KeyLoginError::Signature);
     }
-    let read = match service
+    // The store is read whatever the cache's age: a failed refresh also marks the log as read
+    // (backoff), and a renewal on that cached log would count as a check. On the cached log, the
+    // key was not checked: the grace keeps running from the last real check, so a device
+    // revoked on the store during the outage cannot renew past it.
+    let (read, checked_at) = match service
         .resolver
-        .session_key(&binding.scid, &binding.key, LOGIN_MAX_AGE)
+        .session_key(&binding.scid, &binding.key, 0)
         .await
     {
         Err(SessionKeyError::StoreUnavailable)
             if now.saturating_sub(binding.checked_at()) < STORE_OUTAGE_GRACE =>
         {
-            service
-                .resolver
-                .cached_session_key(&binding.scid, &binding.key)
-                .await
+            (
+                service
+                    .resolver
+                    .cached_session_key(&binding.scid, &binding.key)
+                    .await,
+                binding.checked_at(),
+            )
         }
-        other => other,
+        other => (other, now),
     };
     let key = match read {
         Ok(key) if key.admits() => key,
@@ -561,7 +700,7 @@ pub async fn renew(
     };
     let until = now + KEY_SESSION_TTL;
     let grant = Grants::global()
-        .renew(&grant.id, until, key.head_seq, now)
+        .renew(&grant.id, until, key.head_seq, checked_at)
         .map_err(|e| match e {
             grants::GrantError::NotFound => KeyLoginError::Grant,
             grants::GrantError::Store(e) => KeyLoginError::Internal(e),
@@ -604,6 +743,7 @@ fn end(grant: &Arc<LiveGrant>) {
 pub fn session_info(session: &Session) -> SessionInfo {
     let role = match &session.principal {
         Principal::Operator => SessionRole::Operator,
+        Principal::Custody => SessionRole::Custody,
         Principal::Agent(AgentContext::Managed { .. }) => SessionRole::Tenant,
         Principal::Agent(AgentContext::Main) => SessionRole::App,
         Principal::Anonymous => SessionRole::Anonymous,
@@ -638,6 +778,15 @@ pub fn end_all_sessions(
         return Err(KeyLoginError::BadRequest(
             "user.endAllSessions needs a session that a key login opened, or a session on a managed agent"
                 .into(),
+        ));
+    }
+    // Ending the agent's other grants (its logins, its approved apps) takes AGENT_UPDATE, as
+    // `user.revokeAllSessions` does: an app the user approved with read capabilities only must
+    // not log the user out everywhere. A key-bound session ends its identity's grants whatever
+    // its capabilities: the device key is the proof.
+    if managed.is_some() && !session.may(&AGENT_UPDATE_CAPABILITY) {
+        return Err(KeyLoginError::Forbidden(
+            "user.endAllSessions on a managed agent needs the AGENT UPDATE capability".into(),
         ));
     }
     let keep = keep_current.then(|| session.grant_id()).flatten();
@@ -736,9 +885,11 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
     }
 }
 
-/// Reads the key of every live key-bound grant again (at most [`KEY_RECHECK_INTERVAL`] old):
-/// a key no longer valid, or a bot's, ends its grants; a valid one records the check. While the
-/// store cannot be read, grants whose last valid check is [`STORE_OUTAGE_GRACE`] old end.
+/// Reads the key of every live key-bound grant again from the store, whatever the cache's age
+/// (a cached read up to an interval old would let a revocation the cache missed stand for two
+/// intervals): a key no longer valid, or a bot's, ends its grants; a valid one records the
+/// check. While the store cannot be read, grants whose last valid check is
+/// [`STORE_OUTAGE_GRACE`] old end.
 /// Returns how many active grants ended.
 pub async fn recheck_key_grants(service: &IdentityService, now: u64) -> usize {
     let mut by_key: BTreeMap<(String, String), Vec<Arc<LiveGrant>>> = BTreeMap::new();
@@ -752,10 +903,7 @@ pub async fn recheck_key_grants(service: &IdentityService, now: u64) -> usize {
     }
     let mut ended = 0;
     for ((scid, key), grants) in by_key {
-        let read = service
-            .resolver
-            .session_key(&scid, &key, KEY_RECHECK_INTERVAL.as_secs())
-            .await;
+        let read = service.resolver.session_key(&scid, &key, 0).await;
         let to_end: Vec<Arc<LiveGrant>> = match read {
             Ok(found) if found.admits() => {
                 for grant in &grants {
@@ -947,7 +1095,7 @@ mod tests {
         }
 
         fn challenge(&self) -> SessionChallenge {
-            challenge(&self.service, now()).unwrap()
+            challenge(&self.service, &ChallengeSource::peer(None), now()).unwrap()
         }
 
         /// A login statement of `key` for this executor on a fresh challenge.
@@ -1058,12 +1206,13 @@ mod tests {
     #[test]
     fn a_challenge_works_once_and_not_after_a_minute() {
         let challenges = Challenges::default();
-        let (c, expires) = challenges.issue(1_000).unwrap();
+        let here = ChallengeSource::peer(None);
+        let (c, expires) = challenges.issue(&here, 1_000).unwrap();
         assert_eq!(expires, 1_000 + CHALLENGE_TTL);
         assert!(challenges.consume(&c, 1_010));
         assert!(!challenges.consume(&c, 1_010), "a second use");
 
-        let (late, _) = challenges.issue(1_000).unwrap();
+        let (late, _) = challenges.issue(&here, 1_000).unwrap();
         assert!(
             !challenges.consume(&late, 1_000 + CHALLENGE_TTL + 1),
             "after 60 s"
@@ -1071,8 +1220,8 @@ mod tests {
         assert!(!challenges.consume(&late, 1_000), "gone after the late use");
         assert!(!challenges.consume("never-issued", 1_000));
 
-        let (a, _) = challenges.issue(1_000).unwrap();
-        let (b, _) = challenges.issue(1_000).unwrap();
+        let (a, _) = challenges.issue(&here, 1_000).unwrap();
+        let (b, _) = challenges.issue(&here, 1_000).unwrap();
         assert_ne!(a, b);
         assert_eq!(
             base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1086,15 +1235,160 @@ mod tests {
     #[test]
     fn at_most_ten_thousand_challenges_are_open_and_expired_ones_make_room() {
         let challenges = Challenges::default();
-        for _ in 0..MAX_OPEN_CHALLENGES {
-            challenges.issue(1_000).unwrap();
+        for i in 0..MAX_OPEN_CHALLENGES {
+            challenges
+                .issue(&address(i / CHALLENGES_PER_SOURCE), 1_000)
+                .unwrap();
         }
         assert_eq!(
-            challenges.issue(1_000).unwrap_err(),
+            challenges
+                .issue(&address(MAX_OPEN_CHALLENGES), 1_000)
+                .unwrap_err(),
             KeyLoginError::TooManyChallenges
         );
-        assert!(challenges.issue(1_000 + CHALLENGE_TTL + 1).is_ok());
+        // A grant's slot is outside the pool.
+        assert!(challenges
+            .issue(&ChallengeSource::Grant("g".into()), 1_000)
+            .is_ok());
+        assert!(challenges
+            .issue(&address(0), 1_000 + CHALLENGE_TTL + 1)
+            .is_ok());
         assert_eq!(challenges.len(), 1);
+    }
+
+    /// A distinct public IPv4 address for each `n`.
+    fn address(n: usize) -> ChallengeSource {
+        ChallengeSource::peer(Some(IpAddr::V4(Ipv4Addr::from(0xc633_6400 + n as u32))))
+    }
+
+    // Expired challenges go on every issue, not only at the cap: an address's budget frees as
+    // its challenges expire.
+    #[test]
+    fn expired_challenges_go_on_every_issue() {
+        let challenges = Challenges::default();
+        challenges.issue(&address(1), 1_000).unwrap();
+        challenges.issue(&address(2), 1_000).unwrap();
+        challenges
+            .issue(&ChallengeSource::Grant("g".into()), 1_000)
+            .unwrap();
+        challenges
+            .issue(&address(3), 1_000 + CHALLENGE_TTL + 1)
+            .unwrap();
+        assert_eq!(challenges.len(), 1);
+
+        for _ in 0..CHALLENGES_PER_SOURCE {
+            challenges.issue(&address(4), 2_000).unwrap();
+        }
+        assert_eq!(
+            challenges.issue(&address(4), 2_000).unwrap_err(),
+            KeyLoginError::TooManyChallenges
+        );
+        assert!(challenges
+            .issue(&address(4), 2_000 + CHALLENGE_TTL + 1)
+            .is_ok());
+    }
+
+    // Every loopback address is one source, an IPv4-mapped address is its IPv4 address, and an
+    // IPv6 address counts by its /64. A key session's challenge comes from its grant's slot,
+    // and a new one for the grant closes the one before.
+    #[test]
+    fn challenges_are_budgeted_by_address_and_by_grant() {
+        let peer = |s: &str| ChallengeSource::peer(Some(s.parse().unwrap()));
+        for local in ["127.0.0.2", "::1", "::ffff:127.0.0.1"] {
+            assert_eq!(peer(local), peer("127.0.0.1"), "{local}");
+        }
+        assert_eq!(peer("::ffff:198.51.100.7"), peer("198.51.100.7"));
+        assert_eq!(peer("2001:db8:1:2::1"), peer("2001:db8:1:2:ffff::9"));
+        assert_ne!(peer("2001:db8:1:2::1"), peer("2001:db8:1:3::1"));
+        assert_ne!(peer("198.51.100.7"), peer("198.51.100.8"));
+        assert_ne!(peer("127.0.0.1"), ChallengeSource::peer(None));
+
+        let challenges = Challenges::default();
+        for _ in 0..CHALLENGES_PER_SOURCE {
+            challenges.issue(&peer("127.0.0.1"), 1_000).unwrap();
+        }
+        assert_eq!(
+            challenges.issue(&peer("::1"), 1_000).unwrap_err(),
+            KeyLoginError::TooManyChallenges,
+            "loopback is one source"
+        );
+
+        let grant = ChallengeSource::Grant("g".into());
+        let (first, _) = challenges.issue(&grant, 1_000).unwrap();
+        let (second, _) = challenges.issue(&grant, 1_000).unwrap();
+        assert!(!challenges.consume(&first, 1_000), "replaced on reissue");
+        assert!(challenges.consume(&second, 1_000));
+        assert_eq!(challenges.len(), CHALLENGES_PER_SOURCE);
+
+        let anonymous = Session::for_test(Principal::Anonymous);
+        assert_eq!(
+            ChallengeSource::of(&anonymous, Some("::1".parse().unwrap())),
+            peer("127.0.0.1")
+        );
+    }
+
+    // One address that asks for challenges and never uses them runs out of its own budget
+    // only: a caller from another address still gets a challenge and logs in.
+    #[tokio::test]
+    async fn one_address_exhausting_its_budget_does_not_block_another_login() {
+        let world = world(205).await;
+        world.operate();
+        let greedy = ChallengeSource::peer(Some("203.0.113.9".parse().unwrap()));
+        for _ in 0..CHALLENGES_PER_SOURCE {
+            challenge(&world.service, &greedy, now()).unwrap();
+        }
+        assert_eq!(
+            challenge(&world.service, &greedy, now()).unwrap_err(),
+            KeyLoginError::TooManyChallenges
+        );
+
+        let other = ChallengeSource::peer(Some("198.51.100.20".parse().unwrap()));
+        let mut statement = world.statement(&world.phone);
+        statement.challenge = challenge(&world.service, &other, now()).unwrap().challenge;
+        let result = login(
+            &world.service,
+            params(signed(statement, &world.phone)),
+            now(),
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        no_operator();
+    }
+
+    // A key session's renewal challenge comes from its grant's slot: a pool that anonymous
+    // callers filled does not stop the renewal.
+    #[tokio::test]
+    async fn a_full_pool_does_not_stop_a_renewal() {
+        let world = world(215).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // The statement's own challenge (from the pool) is replaced below.
+        let mut statement = world.statement(&world.phone);
+        statement.purpose = KeyPurpose::Renew;
+        statement.grant = Some(result.grant_id.clone());
+        for i in 0..MAX_OPEN_CHALLENGES - 1 {
+            challenge(&world.service, &address(i / CHALLENGES_PER_SOURCE), now()).unwrap();
+        }
+        let from = Some("198.51.100.30".parse().unwrap());
+        assert_eq!(
+            challenge(&world.service, &ChallengeSource::peer(from), now()).unwrap_err(),
+            KeyLoginError::TooManyChallenges,
+            "the pool is full"
+        );
+
+        let source = ChallengeSource::of(&session, from);
+        assert_eq!(source, ChallengeSource::Grant(result.grant_id.clone()));
+        statement.challenge = challenge(&world.service, &source, now()).unwrap().challenge;
+        let renewed = renew(
+            &world.service,
+            &session,
+            signed(statement, &world.phone),
+            now(),
+        )
+        .await;
+        assert!(renewed.is_ok(), "{renewed:?}");
+        no_operator();
     }
 
     // A device key of the operator record's identity gets the operator role: the token opens an
@@ -1411,8 +1705,8 @@ mod tests {
         no_operator();
     }
 
-    // The re-check reads each key again: a revocation the subscription missed ends the
-    // session; a valid key records the check; a store outage ends only grants whose last
+    // The re-check reads each key again from the store: a revocation the subscription missed
+    // ends the session, however fresh the cache; a valid key records the check; a store outage ends only grants whose last
     // valid check is an hour old.
     #[tokio::test]
     async fn the_recheck_ends_the_sessions_of_keys_no_longer_valid() {
@@ -1424,31 +1718,30 @@ mod tests {
 
         // Valid: the check is recorded.
         let t = now();
-        world.service.cache.note_refreshed(&world.log.scid(), 0);
         recheck_key_grants(&world.service, t + 10).await;
         assert!(session.check().is_ok());
         assert_eq!(binding.checked_at(), t + 10);
 
         // The store is down: kept within the hour, ended after it.
         world.store.store_down.store(true, Ordering::SeqCst);
-        world.service.cache.note_refreshed(&world.log.scid(), 0);
         recheck_key_grants(&world.service, t + 20).await;
         assert!(session.check().is_ok(), "kept on the last valid verdict");
-        world.service.cache.note_refreshed(&world.log.scid(), 0);
         recheck_key_grants(&world.service, t + 10 + STORE_OUTAGE_GRACE).await;
         assert_eq!(session.check(), Err(AuthError::Revoked), "fail closed");
 
-        // A revocation on the store, never published to this executor's subscribers.
+        // A login takes a read up to LOGIN_MAX_AGE old: with an older one, the outage fails it.
+        world.service.cache.note_refreshed(&world.log.scid(), 0);
         let again = world.login_as(&world.phone).await;
         assert_eq!(again.unwrap_err(), KeyLoginError::StoreUnavailable);
         world.store.store_down.store(false, Ordering::SeqCst);
         let fresh = world.login_as(&world.phone).await.unwrap();
         let fresh_session = open(&fresh.token).unwrap();
+        // A revocation on the store, never published to this executor's subscribers, right
+        // after that login read the log: the re-check reads the store all the same.
         let revoke_phone =
             revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
-        world.service.cache.note_refreshed(&world.log.scid(), 0);
         assert_eq!(recheck_key_grants(&world.service, now()).await, 1);
         assert_eq!(fresh_session.check(), Err(AuthError::Revoked));
         no_operator();
@@ -1507,7 +1800,12 @@ mod tests {
         // Renewed half an hour on: the expiry moves by the session's life from then.
         let later = now() + 30 * 60;
         let mut statement = renew_statement(&world, &world.phone, &result.grant_id);
-        statement.challenge = world.service.challenges.issue(later).unwrap().0;
+        statement.challenge = world
+            .service
+            .challenges
+            .issue(&ChallengeSource::Grant(result.grant_id.clone()), later)
+            .unwrap()
+            .0;
         statement.issued_at = later;
         let renewed = renew(
             &world.service,
@@ -1927,5 +2225,172 @@ mod tests {
         .unwrap();
         assert!(open(&renewed.token).is_ok());
         no_operator();
+    }
+
+    // While the store is down, a renewal proceeds on the cached log only for STORE_OUTAGE_GRACE
+    // after the last REAL check. The fallback renewal is no check: it must not move
+    // `checked_at`, or a device revoked on the store during the outage renews for ever.
+    #[tokio::test]
+    async fn an_outage_renewal_does_not_extend_the_outage_grace() {
+        let mut world = world(230).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        let binding = session.key_binding().unwrap();
+        let checked = binding.checked_at();
+        let renewal = |world: &World, at: u64| {
+            let mut statement = world.statement(&world.phone);
+            statement.purpose = KeyPurpose::Renew;
+            statement.grant = Some(result.grant_id.clone());
+            statement.challenge = world
+                .service
+                .challenges
+                .issue(&ChallengeSource::Grant(result.grant_id.clone()), at)
+                .unwrap()
+                .0;
+            statement.issued_at = at;
+            signed(statement, &world.phone)
+        };
+
+        // The store goes down right after the login; the cached log is what there is.
+        world.store.store_down.store(true, Ordering::SeqCst);
+
+        // Fifty minutes on: renewed on the cached log, within the grace of the login's check.
+        let first = checked + 50 * 60;
+        world.service.cache.note_refreshed(&world.log.scid(), 0);
+        renew(&world.service, &session, renewal(&world, first), first)
+            .await
+            .unwrap();
+        assert_eq!(
+            binding.checked_at(),
+            checked,
+            "a renewal on the cached log is no check of the key"
+        );
+
+        // A hundred minutes on: the last real check is past the grace, so a renewal fails closed.
+        let second = checked + 100 * 60;
+        world.service.cache.note_refreshed(&world.log.scid(), 0);
+        assert_eq!(
+            renew(&world.service, &session, renewal(&world, second), second)
+                .await
+                .unwrap_err(),
+            KeyLoginError::StoreUnavailable,
+            "the outage grace is measured from the last real check, not the last renewal"
+        );
+        assert_eq!(binding.checked_at(), checked);
+        world.store.store_down.store(false, Ordering::SeqCst);
+        no_operator();
+    }
+
+    // A failed refresh marks the log as read (backoff), so a renewal that took a recent read
+    // from the cache would renew on the stale log as if the store had answered, and move
+    // `checked_at` on through the outage. A renewal reads the store whatever the cache's age.
+    #[tokio::test]
+    async fn a_renewal_after_a_failed_refresh_is_no_check_of_the_key() {
+        let mut world = world(250).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        let binding = session.key_binding().unwrap();
+        let checked = binding.checked_at();
+        let renewal = |world: &World, at: u64| {
+            let mut statement = world.statement(&world.phone);
+            statement.purpose = KeyPurpose::Renew;
+            statement.grant = Some(result.grant_id.clone());
+            statement.challenge = world
+                .service
+                .challenges
+                .issue(&ChallengeSource::Grant(result.grant_id.clone()), at)
+                .unwrap()
+                .0;
+            statement.issued_at = at;
+            signed(statement, &world.phone)
+        };
+
+        world.store.store_down.store(true, Ordering::SeqCst);
+        for minutes in [20, 40, 59] {
+            let at = checked + minutes * 60;
+            // A read that just failed (a link check, say) noted the log as refreshed.
+            world.service.cache.note_refreshed(&world.log.scid(), now());
+            renew(&world.service, &session, renewal(&world, at), at)
+                .await
+                .unwrap();
+            assert_eq!(
+                binding.checked_at(),
+                checked,
+                "a renewal while the store is down is no check, after {minutes} minutes"
+            );
+        }
+        let past = checked + STORE_OUTAGE_GRACE + 60;
+        world.service.cache.note_refreshed(&world.log.scid(), now());
+        assert_eq!(
+            renew(&world.service, &session, renewal(&world, past), past)
+                .await
+                .unwrap_err(),
+            KeyLoginError::StoreUnavailable
+        );
+        world.store.store_down.store(false, Ordering::SeqCst);
+        no_operator();
+    }
+
+    // A session on a managed agent ends the agent's other grants only with AGENT_UPDATE, as
+    // `user.revokeAllSessions` requires: an app the user approved with read capabilities only
+    // must not log the user out everywhere.
+    #[tokio::test]
+    async fn a_read_only_app_cannot_end_its_owners_sessions() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_test_db();
+        let user = AgentContext::managed("did:key:z6MkReadOnlyOwner".into());
+        let auth = |name: &str, caps: Vec<crate::agent::capabilities::Capability>| AuthInfo {
+            app_name: name.into(),
+            capabilities: Some(caps),
+            ..AuthInfo::default()
+        };
+        // The sessions as `Session::open` builds them from a managed agent's grant: its agent,
+        // its grant and its capabilities (the wallet holds no key for this test agent).
+        let session_on = |grant: Arc<LiveGrant>| {
+            Session::for_test(Principal::Agent(user.clone()))
+                .with_caps(grant.caps.clone())
+                .with_grant(grant)
+        };
+        let (_, login_grant) = grants::mint(
+            user.clone(),
+            auth("login", get_user_default_capabilities()),
+            None,
+            3600,
+        )
+        .unwrap();
+        let (_, app_grant) = grants::mint(
+            user.clone(),
+            auth(
+                "reader",
+                vec![crate::agent::capabilities::AGENT_READ_CAPABILITY.clone()],
+            ),
+            None,
+            3600,
+        )
+        .unwrap();
+        let login_session = session_on(login_grant);
+        let app = session_on(app_grant);
+        assert!(!app.may(&crate::agent::capabilities::AGENT_UPDATE_CAPABILITY));
+
+        // The read-only app: refused, and the owner's login stands.
+        assert!(
+            matches!(
+                end_all_sessions(&app, true, None),
+                Err(KeyLoginError::Forbidden(_))
+            ),
+            "a read-only app must not end the owner's sessions"
+        );
+        assert!(login_session.check().is_ok(), "the owner's login stands");
+
+        // The owner's login (AGENT_UPDATE) ends the app's grant.
+        assert_eq!(
+            end_all_sessions(&login_session, true, None).unwrap().ended,
+            1
+        );
+        assert_eq!(app.check(), Err(AuthError::Revoked));
+        assert!(login_session.check().is_ok());
     }
 }

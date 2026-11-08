@@ -8,7 +8,8 @@
 //! current master key seals itself ([`crate::MasterSigner::seal_self`]) into
 //! `InboxBody::Master`, signed by itself, to the `enc` key the log lists for the device key, and
 //! goes into that device's joined inbox (`identity.inboxPut`, a store request the master key
-//! signs). The record then marks the device `holdsMaster: "offered"`.
+//! signs). The record then marks the device `holdsMaster: "offered"` ([`mark_offered`]), never
+//! over `true`: a device that took the key before that write landed stays `true`.
 //!
 //! **The retry list.** Each push is kept on the vault's retry list before the put and forgotten
 //! once the store takes it, or when the store refuses it for good. [`retry_pushes`], at each
@@ -42,7 +43,7 @@
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{InboxAddress, InboxError};
 use ad4m_identity_core::link::may_keep_master;
-use ad4m_identity_core::record::{HoldsMaster, PrivateRecord};
+use ad4m_identity_core::record::{DeviceEntry, DeviceKind, HoldsMaster, PrivateRecord};
 use ad4m_identity_core::{Event, KelChain, KeyId};
 use ad4m_ldk::identity::InboxWrite;
 
@@ -59,8 +60,9 @@ use crate::{ClientError, Clock, Random};
 pub struct Sent {
     /// The inbox message's id.
     pub message_id: String,
-    /// The record write that marks the device `holdsMaster: "offered"`, after the push. The
-    /// push stands either way.
+    /// The record write that marks the device `holdsMaster: "offered"`, after the push;
+    /// [`ClientError::HoldsMaster`] when the device took the key first. The push stands
+    /// either way.
     pub record: Result<u64, ClientError>,
 }
 
@@ -70,7 +72,7 @@ pub struct Retried {
     /// Each push tried, by device key id: the message id, or why it failed (a failure that may
     /// pass later stays on the retry list).
     pub pushes: Vec<(KeyId, Result<String, ClientError>)>,
-    /// The record write after the pushes that passed, if any did.
+    /// The record write after the pushes that passed, if any did ([`mark_offered`]).
     pub record: Option<Result<u64, ClientError>>,
 }
 
@@ -213,23 +215,66 @@ pub(crate) async fn send_with<R: ExecutorRpc>(
         executor, vault, events, chain, did, signer, key_id, clock, random,
     )
     .await?;
-    let record = record::write(
-        executor,
-        did,
-        &[Change::HoldsMaster {
-            key_id: key_id.to_string(),
-            holds: HoldsMaster::Offered,
-        }],
-        random,
-    )
-    .await;
+    let record = mark_offered(executor, vault, did, vec![key_id.to_string()], random).await;
     Ok(Sent { message_id, record })
+}
+
+/// Marks the devices `key_ids`, just pushed the master key, `holdsMaster: "offered"` in one
+/// record write; answers the version written. An `"offered"` never replaces `true`: the write
+/// holds only on a version where none of their entries says `true` ([`record::write_if`], so
+/// also on every newer version it reads after a stale one). A device whose entry says `true`
+/// took the key before this write landed: it is left out and the rest are written; when none
+/// is left, the answer is [`ClientError::HoldsMaster`] of the last one left out. A device the
+/// record does not list is left out the same way ([`ClientError::NotListed`]), so one cannot
+/// block the rest.
+///
+/// The record has one master generation here (no rotation yet), so `true` is always the
+/// current master key.
+pub(crate) async fn mark_offered<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    mut key_ids: Vec<KeyId>,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    loop {
+        let changes: Vec<Change> = key_ids
+            .iter()
+            .map(|key_id| Change::HoldsMaster {
+                key_id: key_id.clone(),
+                holds: HoldsMaster::Offered,
+            })
+            .collect();
+        let not_held = |record: Option<&PrivateRecord>, _: &KelChain| {
+            let held = key_ids.iter().find(|key_id| {
+                record
+                    .and_then(|r| r.devices.get(*key_id))
+                    .is_some_and(|entry| entry.holds_master == HoldsMaster::Yes)
+            });
+            match held {
+                Some(key_id) => Err(ClientError::HoldsMaster(key_id.clone())),
+                None => Ok(()),
+            }
+        };
+        let written = record::write_if(executor, vault, did, &changes, &not_held, random).await;
+        match written {
+            Err(ClientError::HoldsMaster(held)) | Err(ClientError::NotListed(held))
+                if key_ids.len() > 1 =>
+            {
+                key_ids.retain(|key_id| *key_id != held);
+            }
+            answer => return answer,
+        }
+    }
 }
 
 /// Pushes again what the retry list keeps for `did`, the executor's identity, with one unlock
 /// when anything is left: a push whose device key is no longer a device of the log is
 /// forgotten; each push that passes marks its device `holdsMaster: "offered"` in one record
-/// write.
+/// write. A push whose device the record does not list (its entry write and its fallback both
+/// failed when it first ran) writes the entry first, `holdsMaster: false`: a device that took
+/// the key could not mark an entry that is not there, and would hold it with no record of it.
+/// When that entry write fails the push is skipped and stays on the retry list.
 pub async fn retry_pushes<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -262,26 +307,73 @@ pub async fn retry_pushes<R: ExecutorRpc>(
     if live.is_empty() {
         return Ok(retried);
     }
+    let listed: Vec<KeyId> = record::read(executor, vault, did)
+        .await?
+        .map(|opened| opened.record.devices.into_keys().collect())
+        .unwrap_or_default();
     let unlocked = vault.unlock(&scid, MasterUse::SendMaster, clock.now())?;
     let signer = unlocked.signer(clock.now())?;
-    let mut offered = Vec::new();
+    let mut offered: Vec<KeyId> = Vec::new();
     for key_id in live {
+        if !listed.contains(&key_id) {
+            // Insert the entry only while the record still lacks it, checked on every attempt
+            // of the write: a device whose entry landed in between (holding the key, say)
+            // keeps it, and the push goes on.
+            let absent = |record: Option<&PrivateRecord>, _: &KelChain| match record
+                .and_then(|r| r.devices.get(key_id.as_str()))
+            {
+                Some(_) => Err(ClientError::Listed(key_id.clone())),
+                None => Ok(()),
+            };
+            let entry = record::write_if(
+                executor,
+                vault,
+                did,
+                &[Change::Device {
+                    key_id: key_id.clone(),
+                    entry: retry_entry(&key_id),
+                }],
+                &absent,
+                random,
+            )
+            .await;
+            match entry {
+                Ok(_) | Err(ClientError::Listed(_)) => {}
+                Err(e) => {
+                    retried.pushes.push((key_id, Err(e)));
+                    continue;
+                }
+            }
+        }
         let sent = push(
             executor, vault, &events, &chain, did, signer, &key_id, clock, random,
         )
         .await;
         if sent.is_ok() {
-            offered.push(Change::HoldsMaster {
-                key_id: key_id.clone(),
-                holds: HoldsMaster::Offered,
-            });
+            offered.push(key_id.clone());
         }
         retried.pushes.push((key_id, sent));
     }
     if !offered.is_empty() {
-        retried.record = Some(record::write(executor, did, &offered, random).await);
+        retried.record = Some(mark_offered(executor, vault, did, offered, random).await);
     }
     Ok(retried)
+}
+
+/// The entry a retried push writes for a device the record does not list (`retry_pushes`):
+/// the confirm's name and kind were lost with its failed write, so the entry is generic; a
+/// surface can rename it.
+fn retry_entry(key_id: &str) -> DeviceEntry {
+    DeviceEntry {
+        name: key_id.to_string(),
+        kind: DeviceKind::DesktopApp,
+        place: None,
+        address: None,
+        runs_executor: true,
+        holds_master: HoldsMaster::No,
+        master_index: None,
+        operator: None,
+    }
 }
 
 /// The device's side, after its own unlock: takes the master key its executor opened
@@ -314,6 +406,7 @@ pub async fn take_master<R: ExecutorRpc>(
     executor.inbox_ack(&taken.message_id).await?;
     let record = record::write(
         executor,
+        vault,
         &taken.did,
         &[Change::Holds {
             key_id,
@@ -392,6 +485,7 @@ pub async fn refresh_master<R: ExecutorRpc>(
                 })?;
                 record::write(
                     executor,
+                    vault,
                     did,
                     &[Change::Holds {
                         key_id,
@@ -478,6 +572,7 @@ pub async fn remove_master<R: ExecutorRpc>(
     };
     let version = record::write_if(
         executor,
+        vault,
         did,
         &[Change::HoldsMaster {
             key_id: own.clone(),
