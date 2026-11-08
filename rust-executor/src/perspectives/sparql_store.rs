@@ -880,7 +880,10 @@ fn signed_link_of(
         anchors.push(None);
     }
     // A signature verifies against the author's DID whatever key it names,
-    // so the key the link was stored with is the one naming the author.
+    // so the key the link was stored with is the one naming the author. The
+    // candidate is chosen by its signature alone: the verdict (revocation
+    // order, freshness, expiry) is judged afterwards from the restored proof,
+    // and a genuine proof whose verdict does not count is still the one.
     keys.sort_by_key(|key| !key.starts_with(author.as_str()));
     let verified = targets.iter().find_map(|target| {
         keys.iter().find_map(|key| {
@@ -890,7 +893,7 @@ fn signed_link_of(
                         .iter()
                         .map(move |anchor| link_with(author, timestamp, target, key, sig, *anchor))
                 })
-                .find(|link| link.compute_proof_valid())
+                .find(|link| link.signature_holds())
         })
     });
     let link = verified.unwrap_or_else(|| {
@@ -3541,6 +3544,61 @@ mod tests {
         check(&svc);
         assert_eq!(svc.purge_link_metadata_links().unwrap(), 0, "idempotent");
         check(&svc);
+    }
+
+    /// The sweep picks a link's proof by its signature, not its verdict: a
+    /// genuine anchored link the key map cannot check yet (`cantCheck`) gets
+    /// its own signature back, not a forged one a metadata link stated beside
+    /// it.
+    #[test]
+    fn the_sweep_restores_a_genuine_signature_whose_verdict_does_not_count() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+        let member = TestSigner::generate();
+        let log = TestLog::new(68);
+        // The cached log is at seq 0; the link is anchored at 1: it cannot be checked yet.
+        global_key_map().publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let key = log.device.key();
+        let data = Link {
+            source: "ad4m://post".into(),
+            predicate: Some("we://mention".into()),
+            target: "ad4m://someone".into(),
+        };
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, T1, 1).unwrap();
+        let genuine = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp: T1.into(),
+            data,
+            proof: crate::types::ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(1),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        assert!(genuine.signature_holds());
+        assert!(!genuine.compute_proof_valid());
+        let svc = new_service();
+        svc.add_link(&genuine).unwrap();
+        let g = make_reifier_iri(&genuine).as_str().to_string();
+        // "0" sorts before any hex signature: the first stated one.
+        let forged = make_link(&member, &g, &ontology("proofSignature"), "literal:string:0");
+        svc.add_link_unguarded(&forged).unwrap();
+
+        assert_eq!(svc.purge_link_metadata_links().unwrap(), 1);
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].proof.signature, genuine.proof.signature);
+        assert_eq!(links[0].proof.anchor, Some(1));
+        assert_eq!(links[0].verdict, Some(LinkVerdict::CantCheck));
+        global_key_map().forget(&log.scid());
     }
 
     /// A link stating, in the store's bookkeeping vocabulary, that the store

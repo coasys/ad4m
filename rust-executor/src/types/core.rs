@@ -228,6 +228,19 @@ impl LinkExpression {
         self.check().verdict.counts()
     }
 
+    /// Whether this link's signature holds under its author's `did:key`, over its normalized
+    /// form and the bytes its proof names ([`crate::agent::signatures::signature_holds`]).
+    /// Reads no log: unlike [`Self::compute_proof_valid`], no revocation, freshness or expiry
+    /// enters it.
+    pub fn signature_holds(&self) -> bool {
+        crate::agent::signatures::signature_holds(&Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        })
+    }
+
     /// The verdict of this link and its person ([`crate::identity::check_signed`]).
     /// Normalizing `data` first is not optional: the signature was produced over the
     /// normalized link.
