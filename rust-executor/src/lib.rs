@@ -546,6 +546,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .into_owned(),
     );
 
+    // Grants are the allowlist of tokens: load them before the identity module starts its
+    // watchers, so a verdict change they answer acts on the loaded grants (a revoked row is
+    // cancelled here before any replay reaches it).
+    if let Err(e) = agent::grants::load_at_start() {
+        // Without its grants the API would refuse every token: it does not start.
+        return failed_start(format!("Could not load the grants: {e}"));
+    }
+
     // The key-log cache lives in the same database file.
     {
         let db_path = std::path::Path::new(
@@ -633,12 +641,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
         }
     });
-
-    // Grants are the allowlist of tokens: load them before the API serves.
-    if let Err(e) = agent::grants::load_at_start() {
-        // Without its grants the API would refuse every token: it does not start.
-        return failed_start(format!("Could not load the grants: {e}"));
-    }
 
     if config.admin_credential.is_none() {
         // Only reachable with insecure_no_admin_credential (checked above).
