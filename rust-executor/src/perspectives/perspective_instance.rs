@@ -634,6 +634,9 @@ pub struct PerspectiveInstance {
     trigger_subscription_check: Arc<AtomicBool>,
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
+    /// Where the next re-check of `cantCheck` links continues (the reifier of the last link
+    /// of the previous page); `None` starts from the first.
+    recheck_cursor: Arc<Mutex<Option<String>>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     /// Held by `commit` from its pending-queue check until the diff is sent or
@@ -781,6 +784,7 @@ impl PerspectiveInstance {
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_subscription_check: Arc::new(AtomicBool::new(false)),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
+            recheck_cursor: Arc::new(Mutex::new(None)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             commit_order: Arc::new(Mutex::new(())),
@@ -4423,26 +4427,83 @@ impl PerspectiveInstance {
     }
 
     /// Judges the stored links of `scope` again from the key map (after filling it for their
-    /// signers) and rewrites each link whose verdict or person changed. At most
-    /// [`RECHECK_BATCH`] links per call; answers how many changed.
+    /// signers) and rewrites each link whose verdict or person changed; answers how many
+    /// changed. `Signers` runs once per verdict change, so it pages through every link of
+    /// those signers, [`RECHECK_BATCH`] at a time. `CantCheck` runs every tick: one page per
+    /// call, continuing after the last one, so links that stay unresolvable rotate to the
+    /// back and every one is reached. The rewritten links go out as a remote diff does
+    /// (`update_prolog_engines`): Prolog, notifications and subscriptions see the new verdict.
     pub async fn recheck_links(&self, scope: &super::Recheck) -> Result<usize, AnyError> {
-        let stored = match scope {
+        self.recheck_links_paged(scope, RECHECK_BATCH).await
+    }
+
+    /// [`PerspectiveInstance::recheck_links`] with pages of `page` links.
+    pub(crate) async fn recheck_links_paged(
+        &self,
+        scope: &super::Recheck,
+        page: usize,
+    ) -> Result<usize, AnyError> {
+        let mut rewritten = Vec::new();
+        match scope {
             super::Recheck::Signers(signers) => {
                 let signers: Vec<String> = signers.iter().cloned().collect();
-                self.sparql_store
-                    .links_by_authors(&signers, RECHECK_BATCH)?
+                let mut after: Option<String> = None;
+                loop {
+                    let stored =
+                        self.sparql_store
+                            .links_by_authors(&signers, after.as_deref(), page)?;
+                    let full = stored.len() == page;
+                    after = stored.last().map(super::sparql_store::reifier_of);
+                    rewritten.extend(self.rejudge(stored).await?);
+                    if !full {
+                        break;
+                    }
+                }
             }
-            super::Recheck::CantCheck => self
-                .sparql_store
-                .links_with_verdict(&LinkVerdict::CantCheck, RECHECK_BATCH)?,
-        };
+            super::Recheck::CantCheck => {
+                let mut cursor = self.recheck_cursor.lock().await;
+                let stored = self.sparql_store.links_with_verdict(
+                    &LinkVerdict::CantCheck,
+                    cursor.as_deref(),
+                    page,
+                )?;
+                *cursor = match stored.last() {
+                    Some(last) if stored.len() == page => {
+                        Some(super::sparql_store::reifier_of(last))
+                    }
+                    _ => None,
+                };
+                drop(cursor);
+                rewritten.extend(self.rejudge(stored).await?);
+            }
+        }
+        let changed = rewritten.len();
+        if changed > 0 {
+            self.clear_shape_cache();
+            // As for a remote diff: Prolog, notifications and subscriptions see the new
+            // verdicts.
+            self.update_prolog_engines(DecoratedPerspectiveDiff {
+                additions: rewritten,
+                removals: vec![],
+            })
+            .await;
+        }
+        Ok(changed)
+    }
+
+    /// Judges `stored` links again and rewrites each whose verdict or person changed;
+    /// answers the rewritten links as now stored.
+    async fn rejudge(
+        &self,
+        stored: Vec<DecoratedLinkExpression>,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         if stored.is_empty() {
-            return Ok(0);
+            return Ok(vec![]);
         }
         let links: Vec<LinkExpression> = stored.iter().cloned().map(LinkExpression::from).collect();
         crate::identity::prepare_link_signers(&links).await;
-        let mut changed = 0;
-        for (before, link) in stored.iter().zip(&links) {
+        let mut rewritten = Vec::new();
+        for (mut before, link) in stored.into_iter().zip(&links) {
             // A link this store already counted was here before the revocation reached the
             // key map: the one order the executor knows. The store judges the same way.
             let entered = (before.verdict == Some(LinkVerdict::Valid)).then_some(false);
@@ -4451,12 +4512,14 @@ impl PerspectiveInstance {
                 continue;
             }
             self.sparql_store.add_link(link)?;
-            changed += 1;
+            let counts = now.verdict.counts();
+            before.proof.valid = Some(counts);
+            before.proof.invalid = Some(!counts);
+            before.verdict = Some(now.verdict);
+            before.person = now.person;
+            rewritten.push(before);
         }
-        if changed > 0 {
-            self.clear_shape_cache();
-        }
-        Ok(changed)
+        Ok(rewritten)
     }
 
     /// Record the links of a diff into `changed_predicates`. A link without a
@@ -8021,6 +8084,8 @@ mod tests {
                 trusted: 0,
             },
         );
+        // The store confirmed that head just now.
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
         let person = ad4m_identity_core::did_of(&log.scid());
         let device = log.device.clone();
         let key = device.key();
@@ -8128,6 +8193,360 @@ mod tests {
             "a re-check is idempotent"
         );
         map.forget(&log.scid());
+    }
+
+    /// A link that arrives while the signer's cached head is older than `ADMIT_FRESHNESS` is
+    /// not counted, whatever its anchor: the store may hold a revocation the cache missed. Once
+    /// a refresh brings that revocation, the re-check for the key flags the stored links.
+    #[tokio::test]
+    async fn a_link_on_a_stale_head_is_not_counted_and_the_revocation_flags_it() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+        use ad4m_identity_core::build::Signer;
+
+        let perspective = setup().await;
+        let mut log = TestLog::new(97);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+        let device = log.device.clone();
+        let key = device.key();
+        let signed = |anchor: Option<u64>| {
+            let data = create_link().normalize();
+            let now = chrono::Utc::now();
+            let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes = match anchor {
+                Some(anchor) => {
+                    crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, anchor)
+                        .unwrap()
+                }
+                None => crate::agent::signatures::hash_data_and_timestamp(&data, &now),
+            };
+            LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(device.sign(&bytes)),
+                    anchor,
+                },
+                status: Some(LinkStatus::Shared),
+            }
+        };
+
+        // The key is revoked in the store, but the cache still holds the head before it.
+        let links = [signed(Some(0)), signed(None)];
+        for link in &links {
+            perspective.sparql_store.add_link(link).unwrap();
+        }
+        for stored in perspective.sparql_store.get_all_links().unwrap() {
+            assert_eq!(stored.verdict, Some(LinkVerdict::CantCheck));
+            assert_eq!(stored.person, None);
+        }
+        assert!(perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .iter()
+            .all(|l| l.proof.valid != Some(true)));
+
+        // A refresh brings the revocation; the re-check for the key flags both links.
+        log.revoke_d1();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 1,
+            },
+        );
+        map.note_confirmed(&log.scid(), now);
+        let signers = std::collections::BTreeSet::from([links[0].author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap(),
+            2
+        );
+        for stored in perspective.sparql_store.get_all_links().unwrap() {
+            assert_eq!(stored.verdict, Some(LinkVerdict::Flagged));
+            assert_eq!(stored.person, None);
+            assert_ne!(stored.proof.valid, Some(true));
+        }
+        map.forget(&log.scid());
+    }
+
+    /// A bot's link counts while its scope lasts. When the scope expires, the next tick
+    /// re-checks that key's links and the stored verdict turns `invalid`, though no new head
+    /// came in.
+    #[tokio::test]
+    async fn a_bot_link_turns_invalid_when_its_scope_expires() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::verdict::InvalidReason;
+        use ad4m_identity_core::build::Signer;
+        use ad4m_identity_core::BotScope;
+
+        let perspective = setup().await;
+        let log = TestLog::new(98);
+        let map = global_key_map();
+        let start = chrono::Utc::now().timestamp() as u64;
+        let mut state = log.chain().state().clone();
+        state.keys.get_mut("d1").unwrap().scopes = vec![(
+            0,
+            BotScope {
+                can: vec!["read".into()],
+                expires: start + 2,
+            },
+        )];
+        map.publish(&log.scid(), TrustedLog { state, trusted: 0 });
+        map.note_confirmed(&log.scid(), start);
+        let key = log.device.key();
+        let data = create_link().normalize();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        perspective.sparql_store.add_link(&link).unwrap();
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let now = chrono::Utc::now().timestamp() as u64;
+        let expired = crate::identity::expired_signers(&map, start, now);
+        assert_eq!(
+            expired,
+            std::collections::BTreeSet::from([link.author.clone()])
+        );
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(expired))
+                .await
+                .unwrap(),
+            1
+        );
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(
+            stored[0].verdict,
+            Some(LinkVerdict::Invalid(InvalidReason::Expired))
+        );
+        assert_eq!(stored[0].person, None);
+        map.forget(&log.scid());
+    }
+
+    /// Five links the cached log cannot check yet (anchored at seq 1, trusted 0), by one
+    /// signer.
+    async fn five_unchecked_links(
+        perspective: &PerspectiveInstance,
+        log: &crate::identity::cache::tests::TestLog,
+    ) {
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+        global_key_map().publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let key = log.device.key();
+        for _ in 0..5 {
+            let data = create_link().normalize();
+            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes =
+                crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 1).unwrap();
+            let link = LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(log.device.sign(&bytes)),
+                    anchor: Some(1),
+                },
+                status: Some(LinkStatus::Shared),
+            };
+            perspective.sparql_store.add_link(&link).unwrap();
+        }
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored.len(), 5);
+        assert!(stored
+            .iter()
+            .all(|l| l.verdict == Some(LinkVerdict::CantCheck)));
+    }
+
+    /// The map's trusted seq of `log` reaches 1, confirmed by the store just now: the links
+    /// anchored at 1 check `valid`.
+    fn reach_seq_one(log: &crate::identity::cache::tests::TestLog) {
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        global_key_map().publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 1,
+            },
+        );
+        global_key_map().note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+    }
+
+    /// A key's verdict changes once, so its re-check pages through all of its links, more
+    /// than one page holds.
+    #[tokio::test]
+    async fn a_signers_recheck_reaches_every_link_past_one_page() {
+        use crate::identity::cache::tests::TestLog;
+        let perspective = setup().await;
+        let log = TestLog::new(99);
+        five_unchecked_links(&perspective, &log).await;
+        reach_seq_one(&log);
+        let signers = std::collections::BTreeSet::from([format!(
+            "did:key:{}",
+            ad4m_identity_core::build::Signer::key(&log.device)
+        )]);
+        assert_eq!(
+            perspective
+                .recheck_links_paged(&crate::perspectives::Recheck::Signers(signers), 2)
+                .await
+                .unwrap(),
+            5
+        );
+        assert!(perspective
+            .sparql_store
+            .get_all_links()
+            .unwrap()
+            .iter()
+            .all(|l| l.verdict == Some(LinkVerdict::Valid)));
+        crate::identity::cache::global_key_map().forget(&log.scid());
+    }
+
+    /// The tick's re-check of `cantCheck` links takes one page per call and continues after
+    /// it: links that stay unresolvable rotate to the back instead of filling every page.
+    #[tokio::test]
+    async fn the_cant_check_recheck_continues_after_the_last_page() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::perspectives::sparql_store::reifier_of;
+        let perspective = setup().await;
+        let log = TestLog::new(100);
+        five_unchecked_links(&perspective, &log).await;
+        let mut order: Vec<String> = perspective
+            .sparql_store
+            .get_all_links()
+            .unwrap()
+            .iter()
+            .map(reifier_of)
+            .collect();
+        order.sort();
+        let recheck = || async {
+            perspective
+                .recheck_links_paged(&crate::perspectives::Recheck::CantCheck, 2)
+                .await
+                .unwrap()
+        };
+        let valid = || {
+            let mut valid: Vec<String> = perspective
+                .sparql_store
+                .get_all_links()
+                .unwrap()
+                .iter()
+                .filter(|l| l.verdict == Some(LinkVerdict::Valid))
+                .map(reifier_of)
+                .collect();
+            valid.sort();
+            valid
+        };
+
+        // The first page stays unresolvable.
+        assert_eq!(recheck().await, 0);
+        reach_seq_one(&log);
+        assert_eq!(recheck().await, 2, "the next page, not the first again");
+        assert_eq!(valid(), order[2..4].to_vec());
+        assert_eq!(recheck().await, 1);
+        assert_eq!(valid(), order[2..5].to_vec());
+        assert_eq!(recheck().await, 2, "back to the start");
+        assert_eq!(valid(), order);
+        assert_eq!(recheck().await, 0);
+        crate::identity::cache::global_key_map().forget(&log.scid());
+    }
+
+    /// A verdict the re-check rewrites wakes the subscriptions as a link change does: a live
+    /// query over counted links sees a `cantCheck` link turn `valid`.
+    #[tokio::test]
+    async fn a_verdict_the_recheck_rewrites_reaches_the_subscriptions() {
+        use crate::identity::cache::tests::TestLog;
+        let perspective = setup().await;
+        let log = TestLog::new(101);
+        five_unchecked_links(&perspective, &log).await;
+        let watched = perspective.sparql_store.get_all_links().unwrap()[0].clone();
+        let query = format!(
+            r#"SELECT ?t WHERE {{
+            ?s <{predicate}> ?t .
+            ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?s <{predicate}> ?t )>> .
+            ?r <ad4m://ontology/linkVerdict> ?verdict .
+            FILTER(?verdict = "valid")
+        }}"#,
+            predicate = watched.data.predicate.clone().unwrap()
+        );
+        let (id, _, first) = perspective
+            .subscribe_and_query(query, "c".into(), None)
+            .await
+            .unwrap();
+        let target = watched.data.target.clone();
+        assert!(!first.contains(target.as_str()), "not counted yet: {first}");
+
+        reach_seq_one(&log);
+        let signers = std::collections::BTreeSet::from([watched.author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap(),
+            5
+        );
+
+        // The subscription loop runs the check when woken; run it here too, so the test
+        // does not wait on its debounce.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if perspective
+                .trigger_subscription_check
+                .swap(false, Ordering::SeqCst)
+            {
+                let changed = std::mem::replace(
+                    &mut *perspective.changed_predicates.lock().await,
+                    ChangedPredicates::NoneRecorded,
+                );
+                perspective.check_subscribed_queries(changed).await;
+            }
+            if perspective.subscribed_queries.lock().await[&id]
+                .last_result
+                .contains(target.as_str())
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the subscription never saw the link turn valid"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        crate::identity::cache::global_key_map().forget(&log.scid());
     }
 
     /// A display read leaves out an invalid link; with `include_unverified` it returns it,

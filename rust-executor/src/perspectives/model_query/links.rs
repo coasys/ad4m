@@ -232,7 +232,7 @@ pub(super) async fn attach_links(
         // Required patterns before the first OPTIONAL: oxigraph does not reorder joins inside
         // an OPTIONAL chain that a required pattern follows, so they run as cartesian products.
         let sparql = format!(
-            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?rowStatus WHERE {{
+            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofAnchor ?proofValid ?rowStatus WHERE {{
     {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
@@ -241,6 +241,7 @@ pub(super) async fn attach_links(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 {link_status}{proof_valid}    OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/proofAnchor> ?proofAnchor . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
@@ -292,8 +293,8 @@ pub(super) async fn attach_links(
 }
 
 /// One `__links` row from a result row binding `source`, `predicate`,
-/// `target`, `wireTarget`, `author`, `timestamp`, `proofKey`, `proofSig` and
-/// `proofValid`, shaped as a `DecoratedLinkExpression`.
+/// `target`, `wireTarget`, `author`, `timestamp`, `proofKey`, `proofSig`,
+/// `proofAnchor` and `proofValid`, shaped as a `DecoratedLinkExpression`.
 pub(super) fn decorated_link(row: &Value) -> Value {
     let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
     // Same decoding as `sparql_store::decode_proof_valid`: only a
@@ -302,7 +303,7 @@ pub(super) fn decorated_link(row: &Value) -> Value {
     // a failed signature, a missing verdict and a missing proof alike;
     // an empty `signature` is what tells an unsigned link apart.
     let valid = s("proofValid") == "true";
-    json!({
+    let mut row = json!({
         "author": s("author"),
         "timestamp": s("timestamp"),
         "data": {
@@ -321,7 +322,14 @@ pub(super) fn decorated_link(row: &Value) -> Value {
             "valid": valid,
             "invalid": !valid,
         },
-    })
+    });
+    // The anchor is part of the signed bytes when present (`ExpressionProof::anchor`): a row
+    // read here and signed again, or forwarded, verifies only with it. Absent when the proof
+    // has none, as the typed expression serialises it.
+    if let Some(anchor) = s("proofAnchor").parse::<u64>().ok() {
+        row["proof"]["anchor"] = json!(anchor);
+    }
+    row
 }
 
 /// Order one predicate's rows by timestamp, then target, author and
