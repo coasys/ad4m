@@ -15,4 +15,9 @@ verdict?: LinkVerdict,
  * signer and the anchor; only on a `valid` link whose signer a log lists. The link itself
  * never carries it.
  */
-person?: string, };
+person?: string, 
+/**
+ * `true` when the signer's key is a bot key of `person`'s log (the bot mark): the link
+ * counts for the person, and their bot wrote it. Only beside `person`; derived like it.
+ */
+byBot?: boolean, };

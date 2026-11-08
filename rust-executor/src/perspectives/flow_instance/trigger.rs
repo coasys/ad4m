@@ -596,6 +596,7 @@ mod tests {
             status: Some(LinkStatus::Shared),
             verdict: None,
             person: None,
+            by_bot: None,
         }
     }
 

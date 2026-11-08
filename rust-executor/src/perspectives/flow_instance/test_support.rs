@@ -50,6 +50,7 @@ pub fn link(
         status: None,
         verdict: None,
         person: None,
+        by_bot: None,
     }
 }
 

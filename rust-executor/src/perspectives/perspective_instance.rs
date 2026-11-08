@@ -211,6 +211,7 @@ mod inbound_touches_shacl_tests {
             status: Some(LinkStatus::Shared),
             verdict: None,
             person: None,
+            by_bot: None,
         }
     }
 
@@ -4447,7 +4448,10 @@ impl PerspectiveInstance {
             // key map: the one order the executor knows. The store judges the same way.
             let entered = (before.verdict == Some(LinkVerdict::Valid)).then_some(false);
             let now = link.check_entered(entered);
-            if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
+            if before.verdict.as_ref() == Some(&now.verdict)
+                && before.person == now.person
+                && before.by_bot == now.by_bot.then_some(true)
+            {
                 continue;
             }
             self.sparql_store.add_link(link)?;
@@ -8126,6 +8130,131 @@ mod tests {
                 .unwrap(),
             0,
             "a re-check is idempotent"
+        );
+        map.forget(&log.scid());
+    }
+
+    /// A valid link by a bot key of a person's log is stored with the person (the owner) and
+    /// the bot mark, and both read paths (the SPARQL query and the reifier scan) return
+    /// `by_bot`; a device's link of the same person carries none.
+    #[tokio::test]
+    async fn a_bots_link_is_stored_and_read_with_the_bot_mark() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+
+        let perspective = setup().await;
+        let mut log = TestLog::new(93);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[94; 32]);
+        let chain = log.chain();
+        let bot_key = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[94; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["write".into()],
+                expires: 4_000_000_000,
+            }),
+        };
+        let mut event = add_unsigned(&chain, bot_key, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 1,
+            },
+        );
+        let person = ad4m_identity_core::did_of(&log.scid());
+        let signed = |signer: &ed25519_dalek::SigningKey, target: &str, anchor: u64| {
+            let key = signer.key();
+            let data = Link {
+                source: "ad4m://bot-mark".into(),
+                predicate: Some("ad4m://says".into()),
+                target: target.into(),
+            }
+            .normalize();
+            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, anchor)
+                .unwrap();
+            LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(signer.sign(&bytes)),
+                    anchor: Some(anchor),
+                },
+                status: Some(LinkStatus::Shared),
+            }
+        };
+        let by_bot = signed(&bot, "ad4m://by-bot", 1);
+        let by_device = signed(&log.device.clone(), "ad4m://by-device", 0);
+        perspective.sparql_store.add_link(&by_bot).unwrap();
+        perspective.sparql_store.add_link(&by_device).unwrap();
+
+        let marks = |links: Vec<DecoratedLinkExpression>| {
+            let mut marks: Vec<_> = links
+                .into_iter()
+                .map(|l| (l.data.target, l.verdict, l.person, l.by_bot))
+                .collect();
+            marks.sort_by(|a, b| a.0.cmp(&b.0));
+            marks
+        };
+        let expected = vec![
+            (
+                "ad4m://by-bot".to_string(),
+                Some(LinkVerdict::Valid),
+                Some(person.clone()),
+                Some(true),
+            ),
+            (
+                "ad4m://by-device".to_string(),
+                Some(LinkVerdict::Valid),
+                Some(person.clone()),
+                None,
+            ),
+        ];
+        let queried = marks(perspective.sparql_store.get_all_links().unwrap());
+        assert_eq!(queried, expected, "the SPARQL read");
+        let scanned = marks(
+            perspective
+                .sparql_store
+                .query_shown_links_top_n_by_timestamp(
+                    Some("ad4m://bot-mark"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    10,
+                    false,
+                )
+                .unwrap(),
+        );
+        assert_eq!(scanned, expected, "the reifier scan");
+        let json =
+            serde_json::to_value(&perspective.sparql_store.get_all_links().unwrap()).unwrap();
+        let wire: Vec<_> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.get("byBot").cloned())
+            .collect();
+        assert!(wire.contains(&Some(serde_json::Value::Bool(true))));
+        assert!(wire.contains(&None), "a device's link has no byBot field");
+
+        let signers = std::collections::BTreeSet::from([by_bot.author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap(),
+            0,
+            "a re-check of an unchanged bot link changes nothing"
         );
         map.forget(&log.scid());
     }

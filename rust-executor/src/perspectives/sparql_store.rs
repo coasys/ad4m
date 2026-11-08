@@ -26,6 +26,9 @@ const ONT_LINK_VERDICT: &str = "ad4m://ontology/linkVerdict";
 /// The derived person of a valid link: the `did:scid` its signer's key speaks for. This
 /// executor's index only; the link never carries it.
 const ONT_PERSON: &str = "ad4m://ontology/person";
+/// `"true"` when a valid link's signer is a bot key of [`ONT_PERSON`]'s log (the person is
+/// the bot's owner); absent otherwise. This executor's index only, like the person.
+const ONT_BY_BOT: &str = "ad4m://ontology/byBot";
 const ONT_STATUS: &str = "ad4m://ontology/status";
 /// The target exactly as the link was signed, kept only when it differs from
 /// what [`storage_term_to_target_string`] renders for the stored term. See
@@ -296,8 +299,8 @@ fn decode_verdict(verdict: &str, proof_valid: &str) -> LinkVerdict {
     })
 }
 
-/// A stored link's decorated parts: the proof (with `valid` from the verdict), the verdict and
-/// the person (kept only for a valid link).
+/// A stored link's decorated parts: the proof (with `valid` from the verdict), the verdict, the
+/// person (kept only for a valid link) and the bot mark (kept only with the person).
 fn decode_proof(
     key: String,
     signature: String,
@@ -305,10 +308,17 @@ fn decode_proof(
     verdict: &str,
     proof_valid: &str,
     person: &str,
-) -> (DecoratedExpressionProof, LinkVerdict, Option<String>) {
+    by_bot: &str,
+) -> (
+    DecoratedExpressionProof,
+    LinkVerdict,
+    Option<String>,
+    Option<bool>,
+) {
     let verdict = decode_verdict(verdict, proof_valid);
     let valid = verdict.counts();
     let person = (valid && !person.is_empty()).then(|| person.to_string());
+    let by_bot = (person.is_some() && by_bot == "true").then_some(true);
     let proof = DecoratedExpressionProof {
         key,
         signature,
@@ -316,7 +326,7 @@ fn decode_proof(
         invalid: Some(!valid),
         anchor: anchor.parse().ok(),
     };
-    (proof, verdict, person)
+    (proof, verdict, person, by_bot)
 }
 
 /// Back-compat SPARQL function for legacy notification triggers and SDNA
@@ -737,6 +747,7 @@ fn write_link_quads_proof(
         (ONT_PROOF_VALID, Some(valid_str.as_str())),
         (ONT_LINK_VERDICT, Some(verdict_str.as_str())),
         (ONT_PERSON, checked.person.as_deref()),
+        (ONT_BY_BOT, checked.by_bot.then_some("true")),
     ];
     match write {
         ProofWrite::Whole => {
@@ -969,7 +980,7 @@ pub struct SparqlStore {
 pub(crate) fn decorated_links_query(source_constraint: &str, filter: &str) -> String {
     format!(
         r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?proofAnchor ?linkVerdict ?person ?status WHERE {{
+SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?proofAnchor ?linkVerdict ?person ?byBot ?status WHERE {{
     {source_constraint}
     ?source ?predicate ?target .
     ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
@@ -982,6 +993,7 @@ SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proo
     OPTIONAL {{ ?reifier <ad4m://ontology/proofAnchor> ?proofAnchor . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/linkVerdict> ?linkVerdict . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/person> ?person . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/byBot> ?byBot . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/status> ?status . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
 }}"#
@@ -1594,6 +1606,7 @@ impl SparqlStore {
                 let mut proof_anchor = String::new();
                 let mut verdict_str = String::new();
                 let mut person = String::new();
+                let mut by_bot = String::new();
                 let mut status_val = String::new();
                 let mut wire_target = None;
                 for ann_quad in self.store.quads_for_pattern(
@@ -1617,6 +1630,7 @@ impl SparqlStore {
                         ONT_PROOF_ANCHOR => proof_anchor = value,
                         ONT_LINK_VERDICT => verdict_str = value,
                         ONT_PERSON => person = value,
+                        ONT_BY_BOT => by_bot = value,
                         ONT_STATUS => status_val = value,
                         ONT_WIRE_TARGET => wire_target = Some(value),
                         _ => {}
@@ -1667,13 +1681,14 @@ impl SparqlStore {
                     }
                 }
 
-                let (proof, verdict, person) = decode_proof(
+                let (proof, verdict, person, by_bot) = decode_proof(
                     proof_key,
                     proof_sig,
                     &proof_anchor,
                     &verdict_str,
                     &proof_valid_str,
                     &person,
+                    &by_bot,
                 );
                 let status = status_from_str(&status_val);
 
@@ -1693,6 +1708,7 @@ impl SparqlStore {
                     status,
                     verdict: Some(verdict),
                     person,
+                    by_bot,
                 };
 
                 if let ControlFlow::Break(_) = callback(link) {
@@ -1882,13 +1898,14 @@ impl SparqlStore {
         let timestamp = get_str("timestamp");
         let proof_key = get_str("proofKey");
         let proof_sig = get_str("proofSig");
-        let (proof, verdict, person) = decode_proof(
+        let (proof, verdict, person, by_bot) = decode_proof(
             proof_key,
             proof_sig,
             &get_str("proofAnchor"),
             &get_str("linkVerdict"),
             &get_str("proofValid"),
             &get_str("person"),
+            &get_str("byBot"),
         );
         let status = status_from_str(&get_str("status"));
 
@@ -1904,6 +1921,7 @@ impl SparqlStore {
             status,
             verdict: Some(verdict),
             person,
+            by_bot,
         })
     }
 

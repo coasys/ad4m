@@ -582,6 +582,7 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
             status: input.status,
             verdict: None,
             person: None,
+            by_bot: None,
         })
     }
 }

@@ -303,6 +303,9 @@ pub struct CheckedLink {
     /// The `did:scid` of the signer's person (a bot's owner), only for a `Valid` link whose
     /// signer a log lists.
     pub person: Option<String>,
+    /// The signer's key is a bot key of `person`'s log (the bot mark): the link counts for
+    /// the person, authored by their bot. Only with `person`.
+    pub by_bot: bool,
 }
 
 /// Checks `expr` by what `map` holds, with no I/O: the signature (the bytes its proof names),
@@ -333,17 +336,21 @@ pub fn check_signed_with<T: serde::Serialize>(
         entered_after_revoke,
         now,
     });
-    let person = match (&verdict, &lookup, signer) {
+    let (person, by_bot) = match (&verdict, &lookup, signer) {
         (LinkVerdict::Valid, KeyLookup::Listed { scid, log }, Some(key)) => {
             match author_in(scid, log, key) {
-                Author::Person { did, .. } => Some(did),
-                Author::Bot { owner, .. } => Some(owner),
-                Author::NoLog | Author::Unavailable => None,
+                Author::Person { did, .. } => (Some(did), false),
+                Author::Bot { owner, .. } => (Some(owner), true),
+                Author::NoLog | Author::Unavailable => (None, false),
             }
         }
-        _ => None,
+        _ => (None, false),
     };
-    CheckedLink { verdict, person }
+    CheckedLink {
+        verdict,
+        person,
+        by_bot,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3387,6 +3394,16 @@ mod link_check_tests {
         CheckedLink {
             verdict: LinkVerdict::Valid,
             person: did,
+            by_bot: false,
+        }
+    }
+
+    /// Valid, counted for `did`, authored by one of its bots.
+    fn valid_for_bot(did: String) -> CheckedLink {
+        CheckedLink {
+            verdict: LinkVerdict::Valid,
+            person: Some(did),
+            by_bot: true,
         }
     }
 
@@ -3682,7 +3699,8 @@ mod link_check_tests {
         let anchored = signed_with(&bot, anchor);
         assert_eq!(
             check_signed_with(&anchored, cache.key_map(), None, after_first_expiry),
-            valid_for(Some(did_of(&log.scid())))
+            valid_for_bot(did_of(&log.scid())),
+            "counted for the owner, marked as their bot's"
         );
         let unanchored = signed_with(&bot, None);
         assert_eq!(
@@ -3734,6 +3752,7 @@ mod link_check_tests {
                     CheckedLink {
                         verdict: LinkVerdict::Invalid(InvalidReason::NotInScope),
                         person: None,
+                        by_bot: false,
                     },
                     "anchor {anchor:?}"
                 );
@@ -3742,7 +3761,7 @@ mod link_check_tests {
         for anchor in [Some(3), None] {
             assert_eq!(
                 check(&cache, &signed_with(&writer, anchor)),
-                valid_for(Some(did_of(&log.scid()))),
+                valid_for_bot(did_of(&log.scid())),
                 "anchor {anchor:?}"
             );
         }
@@ -3763,6 +3782,7 @@ mod link_check_tests {
                 CheckedLink {
                     verdict: LinkVerdict::Flagged,
                     person: None,
+                    by_bot: false,
                 },
                 "signed after the revocation, anchor {anchor:?}"
             );
