@@ -326,6 +326,16 @@ pub struct DecoratedLinkExpression {
 }
 
 impl DecoratedLinkExpression {
+    /// Whether this link counts: its stored verdict is `valid`
+    /// (`proof.valid == Some(true)` — the same `proofValid` a model query
+    /// requires on the reifier). `invalid`, `cantCheck` and `flagged` do not
+    /// count. This is the one cut every logic read of stored links makes —
+    /// schema discovery, property metadata, action lookup — so no reader
+    /// invents a second notion of "counts".
+    pub fn counts(&self) -> bool {
+        self.proof.valid == Some(true)
+    }
+
     /// Derive the verdict for this link, without touching `self.proof.valid`: `true` only
     /// when it counts ([`DecoratedLinkExpression::check`]).
     ///

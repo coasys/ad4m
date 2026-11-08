@@ -2712,8 +2712,10 @@ impl PerspectiveInstance {
             "🔶 get_subject_classes_from_shacl: uuid={}, Querying for SHACL class links",
             uuid
         );
-        // Query for SHACL class definition links
-        let shacl_class_links = self.get_links_local(&LinkQuery {
+        // Query for SHACL class definition links. Only a link that counts
+        // registers a class — the same cut the shape loader makes on the
+        // same triple.
+        let shacl_class_links = self.get_links_local_decorated(&LinkQuery {
             predicate: Some("rdf://type".to_string()),
             target: Some("ad4m://SubjectClass".to_string()),
             ..Default::default()
@@ -2722,7 +2724,7 @@ impl PerspectiveInstance {
             "🔶 get_subject_classes_from_shacl: Found {} links",
             shacl_class_links.len()
         );
-        for (link, _status) in &shacl_class_links {
+        for link in &shacl_class_links {
             log::debug!(
                 "🔶 get_subject_classes_from_shacl: Link: {} -> {:?} -> {}",
                 link.data.source,
@@ -2734,7 +2736,8 @@ impl PerspectiveInstance {
         // Extract class names from source URIs
         let mut class_names: Vec<String> = shacl_class_links
             .iter()
-            .filter_map(|(link, _status)| {
+            .filter(|link| link.counts())
+            .filter_map(|link| {
                 let source = &link.data.source;
                 // Class URI format: "namespace://ClassName" (e.g., "recipe://Recipe")
                 // We want to extract "ClassName"
@@ -5662,6 +5665,12 @@ impl PerspectiveInstance {
             .sparql_store
             .get_links_by_predicate_and_source_suffix(predicate, &shape_suffix)?;
 
+        // Only a link that counts defines an action — the same
+        // `proof.valid == Some(true)` cut every schema reader makes. A
+        // definition link a peer sent whose verdict does not count must not
+        // decide what an authorised write runs.
+        let links: Vec<_> = links.into_iter().filter(|l| l.counts()).collect();
+
         // Return the first match
         if let Some(link) = links.first() {
             return Self::parse_actions_from_literal(&link.data.target).map(Some);
@@ -5684,6 +5693,12 @@ impl PerspectiveInstance {
         let links = self
             .sparql_store
             .get_links_by_predicate_and_source_suffix(predicate, &prop_suffix)?;
+
+        // Only a link that counts defines an action — same cut as
+        // `get_shape_actions_from_shacl`. A property whose only
+        // `ad4m://setter`/`ad4m://adder`/`ad4m://remover` does not count is
+        // read as having none.
+        let links: Vec<_> = links.into_iter().filter(|l| l.counts()).collect();
 
         // Return the first match
         if let Some(link) = links.first() {
@@ -5715,7 +5730,9 @@ impl PerspectiveInstance {
             .sparql_store
             .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
 
-        if let Some(link) = links.first() {
+        // Property metadata counts only when its link does — same cut as the
+        // action readers above.
+        if let Some(link) = links.iter().find(|l| l.counts()) {
             // Extract value from literal:string:{value} or legacy literal://string:{value}
             let encoded_value =
                 if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
@@ -8772,6 +8789,315 @@ mod tests {
             1,
             "the member gets exactly one counting link however many saves the batch runs"
         );
+    }
+
+    /// A minimal class for the verdict tests: a constructor and one scalar
+    /// property (`title`) declared `local: true` with a setter — so every
+    /// kind of definition link exists to corrupt: `rdf://type`, `ad4m://shape`,
+    /// `sh://path`, `ad4m://setter`, `ad4m://constructor`, `ad4m://local`.
+    const VERDICT_SDNA: &str = r#"{
+      "target_class": "ns://Verdicted",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Verdicted"}
+      ],
+      "properties": [
+        {"path":"ns://title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,"local":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+      ]
+    }"#;
+
+    /// Write `class`'s SHACL into the perspective's store link by link, as
+    /// `add_sdna` emits them, signed by `signer` — except the
+    /// (source-suffix, predicate) pairs named in `not_counting`, whose
+    /// signatures are corrupted after signing: the store keeps them and
+    /// judges them `invalid`, so nothing may let them decide the schema.
+    /// Peers send schema this way; `signer` is a second identity so the
+    /// links are not this executor's own writes.
+    fn store_shacl_links(
+        perspective: &PerspectiveInstance,
+        class: &str,
+        sdna: &str,
+        not_counting: &[(&str, &str)],
+        signer: &TestSigner,
+    ) {
+        let sdna = sdna.replace("Verdicted", class);
+        for l in crate::perspectives::shacl_parser::parse_shacl_to_links(&sdna, class).unwrap() {
+            let mut le = LinkExpression::from(signer.sign(l.normalize()));
+            if not_counting.iter().any(|(suffix, predicate)| {
+                le.data.source.ends_with(suffix) && le.data.predicate.as_deref() == Some(predicate)
+            }) {
+                le.proof.signature = "ab".repeat(64);
+            }
+            le.status = Some(LinkStatus::Shared);
+            perspective.sparql_store.add_link(&le).unwrap();
+        }
+    }
+
+    /// A class's schema reads only the links that count — the same
+    /// `proof.valid == Some(true)` cut a model query makes on the reifier.
+    /// A `rdf://type` or `ad4m://shape` link that does not count registers
+    /// nothing: `get_shape` answers `MissingShape` and the class listing
+    /// does not name it, exactly as if the definition had never arrived.
+    #[tokio::test]
+    async fn a_class_whose_type_or_shape_link_does_not_count_has_no_shape() {
+        let perspective = setup().await;
+        let signer = TestSigner::generate();
+        store_shacl_links(
+            &perspective,
+            "Typed",
+            VERDICT_SDNA,
+            &[("ns://Typed", "rdf://type")],
+            &signer,
+        );
+        store_shacl_links(
+            &perspective,
+            "Shaped",
+            VERDICT_SDNA,
+            &[("ns://Shaped", "ad4m://shape")],
+            &signer,
+        );
+        store_shacl_links(&perspective, "Counted", VERDICT_SDNA, &[], &signer);
+
+        for class in ["Typed", "Shaped"] {
+            assert!(
+                perspective.get_shape(class).is_err(),
+                "{class}: a definition link that does not count must leave the class unloaded"
+            );
+        }
+        assert!(
+            perspective.get_shape("Counted").is_ok(),
+            "the counting control loads"
+        );
+
+        let names = perspective.get_subject_classes_from_shacl().await.unwrap();
+        assert!(
+            !names.iter().any(|n| n == "Typed"),
+            "a type link that does not count registers no class: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "Counted"),
+            "the counting control is listed: {names:?}"
+        );
+    }
+
+    /// `sh://path` is a required join in the shape read: the property drops
+    /// out of the shape when the only link asserting it does not count. The
+    /// OPTIONAL fields are cut the same way — an `ad4m://local` that does
+    /// not count leaves the property Shared.
+    #[tokio::test]
+    async fn a_property_whose_path_or_local_link_does_not_count_drops_from_the_shape() {
+        let perspective = setup().await;
+        let signer = TestSigner::generate();
+        store_shacl_links(
+            &perspective,
+            "Pathed",
+            VERDICT_SDNA,
+            &[("Pathed.title", "sh://path")],
+            &signer,
+        );
+        store_shacl_links(
+            &perspective,
+            "Localled",
+            VERDICT_SDNA,
+            &[("Localled.title", "ad4m://local")],
+            &signer,
+        );
+        store_shacl_links(&perspective, "Counted", VERDICT_SDNA, &[], &signer);
+
+        let pathed = perspective
+            .get_shape("Pathed")
+            .expect("the rest of the shape counts, so it loads");
+        assert!(
+            !pathed.properties.iter().any(|p| p.name == "title"),
+            "a property whose only sh://path does not count is no property: {:?}",
+            pathed
+                .properties
+                .iter()
+                .map(|p| &p.name)
+                .collect::<Vec<_>>()
+        );
+
+        let localled = perspective.get_shape("Localled").expect("shape");
+        let title = localled
+            .properties
+            .iter()
+            .find(|p| p.name == "title")
+            .expect("the property itself still counts");
+        assert!(
+            !title.local,
+            "an ad4m://local that does not count must not make the property local"
+        );
+
+        let counted = perspective.get_shape("Counted").expect("shape");
+        let title = counted
+            .properties
+            .iter()
+            .find(|p| p.name == "title")
+            .expect("control property");
+        assert!(title.local, "the counting control reads local: {title:?}");
+    }
+
+    /// A property whose only `ad4m://setter` does not count is read as
+    /// having no setter — a write skips it exactly as it skips an
+    /// undeclared property; a definition link that does not count must not
+    /// run an action.
+    #[tokio::test]
+    async fn a_property_whose_only_setter_does_not_count_has_no_setter() {
+        let perspective = setup().await;
+        let signer = TestSigner::generate();
+        store_shacl_links(
+            &perspective,
+            "Setterless",
+            VERDICT_SDNA,
+            &[("Setterless.title", "ad4m://setter")],
+            &signer,
+        );
+        store_shacl_links(&perspective, "Counted", VERDICT_SDNA, &[], &signer);
+
+        assert!(
+            perspective
+                .get_property_setter_actions("Setterless", "title")
+                .await
+                .unwrap()
+                .is_none(),
+            "a setter whose only link does not count is no setter"
+        );
+        assert!(
+            perspective
+                .get_property_setter_actions("Counted", "title")
+                .await
+                .unwrap()
+                .is_some(),
+            "the counting control has its setter"
+        );
+    }
+
+    /// The class-level partner of the setter test: an `ad4m://constructor`
+    /// that does not count reads as absent, so `create_subject` fails with
+    /// the same "No SHACL constructor" error an unregistered class gets.
+    #[tokio::test]
+    async fn a_constructor_that_does_not_count_is_no_constructor() {
+        let mut perspective = setup().await;
+        let signer = TestSigner::generate();
+        store_shacl_links(
+            &perspective,
+            "Ctorless",
+            VERDICT_SDNA,
+            &[("CtorlessShape", "ad4m://constructor")],
+            &signer,
+        );
+        store_shacl_links(&perspective, "Counted", VERDICT_SDNA, &[], &signer);
+
+        let err = perspective
+            .get_constructor_actions("Ctorless")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No SHACL constructor"), "{err}");
+        let err = perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Ctorless".to_string()),
+                    query: None,
+                },
+                "ns://i/ctorless".to_string(),
+                None,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No SHACL constructor"), "{err}");
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Counted".to_string()),
+                    query: None,
+                },
+                "ns://i/counted".to_string(),
+                None,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("the counting control's constructor runs");
+    }
+
+    /// A definition link that comes to count is picked up: SHACL that
+    /// arrived `cantCheck` registers nothing, the re-check that finds the
+    /// signer's log rewrites the verdicts and publishes them — and the
+    /// shape cache must not shadow the rewrite (a class a peer registered
+    /// loads the moment its links count, a later property appears with
+    /// them).
+    #[tokio::test]
+    async fn a_definition_link_that_comes_to_count_is_picked_up_after_a_recheck() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+
+        let perspective = setup().await;
+        let map = global_key_map();
+        // Nothing of this log is known yet, so its anchored links land
+        // `cantCheck`: signed and well-formed, but unverifiable here.
+        let log = TestLog::new(94);
+        let key = log.device.key();
+        let sign = |l: Link| {
+            let data = l.normalize();
+            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes =
+                crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+            LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(log.device.sign(&bytes)),
+                    anchor: Some(0),
+                },
+                status: Some(LinkStatus::Shared),
+            }
+        };
+        let sdna = VERDICT_SDNA.replace("Verdicted", "Delayed");
+        for l in crate::perspectives::shacl_parser::parse_shacl_to_links(&sdna, "Delayed").unwrap()
+        {
+            perspective.sparql_store.add_link(&sign(l)).unwrap();
+        }
+        assert!(
+            perspective.get_shape("Delayed").is_err(),
+            "SHACL that cannot be checked yet must not register the class"
+        );
+
+        // The signer's log arrives; the re-check turns every definition
+        // link `valid` and publishes the rewrites, which flush the shape
+        // cache. `note_confirmed` marks the head fresh — without it the
+        // re-judgement answers `cantCheck` again (a stale head may miss a
+        // revocation).
+        let chain = log.chain();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: chain.state().clone(),
+                trusted: chain.head().seq,
+            },
+        );
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+        let signers = std::collections::BTreeSet::from([format!("did:key:{key}")]);
+        assert!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap()
+                > 0,
+            "the re-check rewrites the cantCheck links"
+        );
+        let shape = perspective
+            .get_shape("Delayed")
+            .expect("the definition counts now, so the class loads");
+        assert!(
+            shape.properties.iter().any(|p| p.name == "title"),
+            "the freshly valid shape carries its property"
+        );
+        map.forget(&log.scid());
     }
 
     /// A bot's link counts while its scope lasts. When the scope expires, the next tick
