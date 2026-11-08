@@ -11,7 +11,9 @@ use crate::perspectives::model_query::{execute_union_query_with_views, ModelQuer
 use crate::perspectives::shacl_parser::{
     parse_shacl_to_links, ABSTRACT_PREDICATE, ALIAS_PREDICATE,
 };
-use crate::perspectives::subject_classes_of::subject_classes_of;
+use crate::perspectives::subject_classes_of::{
+    all_subject_class_names, concrete_subject_class_names, subject_classes_of,
+};
 use crate::types::{Link, LinkExpression, LinkStatus};
 
 /// The abstract class: anything with `text`. Its path is never compared.
@@ -220,6 +222,83 @@ fn the_index_ignores_markers_and_aliases_that_do_not_count() {
     );
     let index = AbstractIndex::load(&store).unwrap();
     assert!(index.is_abstract("Post"));
+}
+
+/// The classifier's own reads make the same cut as the index's: a marker that
+/// does not count keeps a class concrete, a shape link that does not count
+/// marries it to no marked shape, a registration that does not count registers
+/// nothing, and a record reached only through links that do not count conforms
+/// to nothing. Same rule on the negative pattern too: the enumeration's `FILTER
+/// NOT EXISTS` tests for a *counting* marker.
+#[test]
+fn the_classifier_ignores_triples_that_do_not_count() {
+    let store = all_classes();
+    let one = |q: &str, var: &str| -> String {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&store.query(q).unwrap()).unwrap();
+        rows[0][var].as_str().unwrap().to_string()
+    };
+    let post_shape = one(
+        "SELECT ?shape WHERE { <app://Post> <ad4m://shape> ?shape }",
+        "shape",
+    );
+    // Readable's shape carries a counting marker; marrying Post to it takes a
+    // non-counting shape link.
+    let readable_shape = one(
+        "SELECT ?shape WHERE { <app://Readable> <ad4m://shape> ?shape }",
+        "shape",
+    );
+    let forged = |source: &str, predicate: &str, target: &str| {
+        let mut le = link_expression(Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        });
+        le.proof.signature = "ab".repeat(64);
+        store.add_link(&le).unwrap();
+    };
+    forged(&post_shape, ABSTRACT_PREDICATE, "literal://string:true");
+    forged("app://Post", "ad4m://shape", &readable_shape);
+    forged("app://Ghost", "rdf://type", "ad4m://SubjectClass");
+    forged("app://r2", "app://kind", "app://post");
+
+    let names = concrete_subject_class_names(&store).unwrap();
+    assert!(names.contains(&"Post".to_string()), "{names:?}");
+    assert!(
+        !names.contains(&"Readable".to_string()),
+        "a counting marker still marks: {names:?}"
+    );
+    assert!(
+        !all_subject_class_names(&store)
+            .unwrap()
+            .contains(&"Ghost".to_string()),
+        "a registration that does not count registers nothing"
+    );
+    assert!(
+        resolved(&store, "TextContent")
+            .classes
+            .contains(&"Post".to_string()),
+        "Post is still a concrete class TextContent reads"
+    );
+    let classes =
+        subject_classes_of(&store, &StoreResolver(&store), &["app://r2".to_string()]).unwrap();
+    assert!(!classes.contains_key("app://r2"), "{classes:?}");
+
+    // The same links, counting, do all of it.
+    add(&store, &[("app://r2", "app://kind", "app://post")]);
+    let classes =
+        subject_classes_of(&store, &StoreResolver(&store), &["app://r2".to_string()]).unwrap();
+    assert_eq!(classes["app://r2"], vec!["Post".to_string()]);
+
+    add(
+        &store,
+        &[(&post_shape, ABSTRACT_PREDICATE, "literal://string:true")],
+    );
+    assert!(
+        !concrete_subject_class_names(&store)
+            .unwrap()
+            .contains(&"Post".to_string()),
+        "a counting marker makes Post abstract"
+    );
 }
 
 /// By name: Post has `text`; Message answers to `text` through its alias.
