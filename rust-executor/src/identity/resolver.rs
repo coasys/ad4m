@@ -317,6 +317,19 @@ pub fn check_signed_with<T: serde::Serialize>(
     entered_after_revoke: Option<bool>,
     now: u64,
 ) -> CheckedLink {
+    check_signed_with_provenance(expr, map, entered_after_revoke, now, false)
+}
+
+/// [`check_signed_with`]; `own`: this executor signs `expr` itself, now (the local write
+/// path), so no head the store confirmed within the window is asked of it. Never for a link
+/// that arrived from a peer, whichever key signed it.
+pub fn check_signed_with_provenance<T: serde::Serialize>(
+    expr: &crate::types::Expression<T>,
+    map: &KeyMap,
+    entered_after_revoke: Option<bool>,
+    now: u64,
+    own: bool,
+) -> CheckedLink {
     let signature_holds = crate::agent::signatures::signature_holds(expr);
     let signer = multikey_of(&expr.author);
     let lookup = signer.map_or(KeyLookup::NoLog, |key| map.lookup(key));
@@ -340,11 +353,17 @@ pub fn check_signed_with<T: serde::Serialize>(
     // `ADMIT_FRESHNESS`, whatever its anchor: an older head may miss a revocation of its key.
     // A stale head says `CantCheck` until a refresh lands (the periodic re-check reads those
     // links again). A link already counted keeps its order (`Some(false)`).
-    let verdict = match (&verdict, &lookup, signer) {
-        (LinkVerdict::Valid, KeyLookup::Listed { scid, .. }, Some(key))
-            if entered_after_revoke != Some(false)
-                && !map.admits(scid, key, now, ADMIT_FRESHNESS) =>
+    let verdict = match (&verdict, &lookup) {
+        (LinkVerdict::Valid, KeyLookup::Listed { scid, .. })
+            if !own
+                && entered_after_revoke != Some(false)
+                && !map.admits(scid, now, ADMIT_FRESHNESS) =>
         {
+            LinkVerdict::CantCheck
+        }
+        // Asked about and unanswered (the discovery cap, an index not answering): not a key
+        // no log lists, so its unanchored link waits too.
+        (LinkVerdict::Valid, KeyLookup::Unknown) if signer.is_some_and(|k| map.is_pending(k)) => {
             LinkVerdict::CantCheck
         }
         _ => verdict,
@@ -839,6 +858,7 @@ impl Resolver {
             return KeyLookup::NoLog;
         }
         if self.index_down() {
+            map.note_pending(key);
             return KeyLookup::Unknown;
         }
         let scid = match self.backend.key_owner(key, 0).await {
@@ -860,6 +880,7 @@ impl Resolver {
             Err(e) => {
                 log::info!("identity: the key index did not answer for did:key:{key} ({e})");
                 self.index_failed();
+                map.note_pending(key);
                 return KeyLookup::Unknown;
             }
         };
@@ -876,6 +897,7 @@ impl Resolver {
             Err(CacheError::Unavailable(e)) => {
                 log::info!("identity: refresh of {} failed ({e})", did_of(&scid));
                 self.index_failed();
+                map.note_pending(key);
                 return KeyLookup::Unknown;
             }
             Err(e) => log::info!("identity: refresh of {} failed ({e})", did_of(&scid)),
@@ -889,6 +911,7 @@ impl Resolver {
         };
         if listed_at_all {
             // Listed past its store-signed head: it may count once the head reaches it.
+            map.note_pending(key);
             return KeyLookup::Unknown;
         }
         log::warn!(
@@ -942,6 +965,9 @@ impl Resolver {
                 && !discovered.contains(key)
             {
                 if discovered.len() >= DISCOVERY_PER_BATCH {
+                    // Not asked about in this batch: its links wait (`CantCheck`) rather than
+                    // count as a key no log lists.
+                    self.cache.key_map().note_pending(key);
                     continue;
                 }
                 discovered.insert(key);
@@ -3729,5 +3755,29 @@ mod link_check_tests {
                 "stale head, anchor {anchor:?}"
             );
         }
+    }
+
+    /// A signer past the discovery cap stays unknown until a later batch. Its unanchored
+    /// link must not count meanwhile: "unknown" is not "no log", and a revoked device's
+    /// unanchored link would otherwise be stored `valid` and never looked at again.
+    #[tokio::test]
+    async fn an_unanchored_link_by_a_signer_past_the_discovery_cap_is_not_counted() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        let resolver = resolver_on(store);
+        let mut signers: Vec<(String, Option<u64>)> = (0..DISCOVERY_PER_BATCH)
+            .map(|_| (TestSigner::generate().did, Some(0)))
+            .collect();
+        let link: Expression<Link> = TestSigner::generate().sign(link());
+        signers.push((link.author.clone(), None));
+        resolver.prepare(&signers).await;
+        let judge = || check_signed_with(&link, resolver.cache.key_map(), None, NOW);
+        assert_eq!(
+            judge().verdict,
+            LinkVerdict::CantCheck,
+            "not asked about yet"
+        );
+        // The next batch asks about it: no log, so it counts as before key logs.
+        resolver.prepare(&signers).await;
+        assert_eq!(judge(), valid_for(None));
     }
 }

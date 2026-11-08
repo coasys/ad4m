@@ -346,6 +346,24 @@ pub fn check_signed_entered<T: serde::Serialize>(
     )
 }
 
+/// [`check_signed_entered`] for a link this executor writes itself (`perspective.addLink`
+/// and the other local writes): it needs no head the store confirmed within the window, since
+/// no revocation this executor has not seen can be at stake for a link it signs now. Only the
+/// local write path may say so; a link that arrives from a peer is checked as any other,
+/// whichever key signed it.
+pub fn check_signed_own<T: serde::Serialize>(
+    expr: &Expression<T>,
+    entered_after_revoke: Option<bool>,
+) -> CheckedLink {
+    resolver::check_signed_with_provenance(
+        expr,
+        &cache::global_key_map(),
+        entered_after_revoke,
+        service::now(),
+        true,
+    )
+}
+
 /// Fills the key map for the signers of `links` before they are checked and stored: the key
 /// index and the logs it names, through the agent language. Does nothing before [`init`].
 pub async fn prepare_link_signers(links: &[LinkExpression]) {
@@ -419,10 +437,6 @@ pub fn anchor_for(agent_did: &str) -> Option<u64> {
         let db = db.lock().ok()?;
         db.as_ref()?.agent_identity(agent_did).ok().flatten()?
     };
-    // This executor signs with the key: its links need no fresh head to count here.
-    if let Some(key) = resolver::multikey_of(agent_did) {
-        service.cache.key_map().note_own(key);
-    }
     anchor_in(service.cache.key_map(), agent_did, &scid)
 }
 

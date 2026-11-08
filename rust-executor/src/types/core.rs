@@ -249,6 +249,21 @@ impl LinkExpression {
         };
         crate::identity::check_signed_entered(&link_expr, entered_after_revoke)
     }
+
+    /// [`LinkExpression::check_entered`] for a link this executor writes itself
+    /// ([`crate::identity::check_signed_own`]): the local write path only.
+    pub fn check_own_entered(
+        &self,
+        entered_after_revoke: Option<bool>,
+    ) -> crate::identity::resolver::CheckedLink {
+        let link_expr = Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        };
+        crate::identity::check_signed_own(&link_expr, entered_after_revoke)
+    }
 }
 
 impl From<LinkExpression> for Expression<Link> {

@@ -35,7 +35,7 @@ use tokio::sync::{broadcast, Mutex};
 use super::backend::{IdentityBackend, IdentityError};
 use super::head::verify_head;
 use super::types::StoreBehind;
-use super::verdict::{key_verdict, VerdictChange};
+use super::verdict::{key_verdict, KeyVerdict, VerdictChange};
 
 /// The chain type of key logs in the hash-chain tables.
 pub const KEL_TYPE: ChainType = "coasys:kel";
@@ -96,13 +96,16 @@ struct KeyMapInner {
     logs: HashMap<String, Arc<TrustedLog>>,
     /// Keys no log lists, with when the store said so.
     no_log: HashMap<String, Instant>,
+    /// Signing keys asked about and not answered yet: the key index not asked (a batch's
+    /// discovery cap) or not answering, or a log that lists the key only past its
+    /// store-signed head. An unanchored link by such a key is `CantCheck`, not `Valid` as
+    /// one by a key no log lists: the re-check asks again.
+    pending: HashSet<String>,
     /// The SCIDs of local identities (a row in `identity_agents`): the bound never drops them.
     pinned: HashSet<String>,
     /// SCID → when (unix seconds, this run) the configured store last confirmed its trusted
     /// head ([`KelCache::accept`]): what a new link is admitted against.
     confirmed: HashMap<String, u64>,
-    /// The signing keys this executor signs links with (its agents bound to an identity).
-    own: HashSet<String>,
 }
 
 /// The key map: what every trusted log in the cache says, readable without `await`, so the
@@ -168,6 +171,7 @@ impl KeyMap {
         for record in log.state.masters.iter().chain(log.state.keys.values()) {
             if record.added <= trusted {
                 inner.no_log.remove(&record.sign);
+                inner.pending.remove(&record.sign);
                 inner.keys.insert(record.sign.clone(), scid.to_string());
             }
         }
@@ -188,7 +192,29 @@ impl KeyMap {
                 inner.no_log.clear();
             }
         }
+        inner.pending.remove(key);
         inner.no_log.insert(key.to_string(), Instant::now());
+    }
+
+    /// Notes that `key` was asked about and has no answer yet ([`KeyMapInner::pending`]);
+    /// cleared by the log that lists it or the store's "no log".
+    pub fn note_pending(&self, key: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if !inner.keys.contains_key(key) && !inner.no_log.contains_key(key) {
+                if inner.pending.len() >= KEY_MAP_BOUND {
+                    inner.pending.clear();
+                }
+                inner.pending.insert(key.to_string());
+            }
+        }
+    }
+
+    /// Whether `key` is asked about and unanswered ([`KeyMap::note_pending`]).
+    pub fn is_pending(&self, key: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.pending.contains(key))
+            .unwrap_or(false)
     }
 
     /// The keys of `state` (listed at or below `trusted`) that hold a "no log" answer, fresh or
@@ -261,28 +287,19 @@ impl KeyMap {
         }
     }
 
-    /// Notes that this executor signs links with the signing multikey `key` (a local agent's).
-    pub fn note_own(&self, key: &str) {
-        if let Ok(mut inner) = self.inner.lock() {
-            if !inner.own.contains(key) {
-                inner.own.insert(key.to_string());
-            }
-        }
-    }
-
-    /// Whether a new link by `key`, listed in the log of `scid`, may be admitted on the map's
-    /// answer at `now`: the store confirmed that log's trusted head less than `window` seconds
-    /// before, or `key` is this executor's own (it signed the link itself, so no revocation
-    /// it has not seen can be at stake).
-    pub fn admits(&self, scid: &str, key: &str, now: u64, window: u64) -> bool {
+    /// Whether a new link listed in the log of `scid` may be admitted on the map's answer at
+    /// `now`: the store confirmed that log's trusted head less than `window` seconds before.
+    /// Which key signed it does not enter: a link this executor signs itself is exempt by
+    /// where it is written, not by its key ([`crate::identity::check_signed_own`]), since the
+    /// same key, copied and revoked, may sign a link that arrives from a peer.
+    pub fn admits(&self, scid: &str, now: u64, window: u64) -> bool {
         let Ok(inner) = self.inner.lock() else {
             return false;
         };
-        inner.own.contains(key)
-            || inner
-                .confirmed
-                .get(scid)
-                .is_some_and(|at| now.saturating_sub(*at) < window)
+        inner
+            .confirmed
+            .get(scid)
+            .is_some_and(|at| now.saturating_sub(*at) < window)
     }
 }
 
@@ -638,7 +655,13 @@ impl KelCache {
             let verdict = key_verdict(state, trusted, &key, now);
             let changed = match &held {
                 Some(h) => key_verdict(&h.state, h.trusted, &key, now) != verdict,
-                None => had_no_log.contains(&key),
+                // A log the map did not hold (loaded after a restart, or evicted and read
+                // again): its device keys that no longer count may have stored links judged
+                // while the log was away, an expired bot scope or a revocation among them.
+                None => {
+                    had_no_log.contains(&key)
+                        || (verdict != KeyVerdict::Valid && state.device_key_id_of(&key).is_some())
+                }
             };
             if changed {
                 // No receiver is not an error: nothing re-checks then.
@@ -2473,5 +2496,49 @@ pub(crate) mod tests {
         ));
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
         assert!(cache.trusted(&log.scid()).await.unwrap().is_some());
+    }
+
+    /// A log the map did not hold yet (loaded after a restart, or evicted and read again)
+    /// may list a bot key whose scope already expired, or a device revoked meanwhile. The
+    /// stored links of such a key were judged before, so the publish must fire a verdict
+    /// change for it, as it does for a head that newly revokes a key.
+    #[tokio::test]
+    async fn a_log_first_published_fires_for_its_keys_that_no_longer_count() {
+        use crate::identity::verdict::KeyVerdict;
+        use ad4m_identity_core::build::add_unsigned;
+        use ad4m_identity_core::BotScope;
+        let mut log = TestLog::new(76);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[77; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[77; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 1,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        log.revoke_d1();
+
+        let cache = trusting();
+        let mut changes = cache.subscribe();
+        accept_signed(&cache, &log.events).await;
+        let fired: Vec<VerdictChange> = std::iter::from_fn(|| changes.try_recv().ok()).collect();
+        assert!(
+            fired
+                .iter()
+                .any(|c| c.key == bot.key() && c.verdict == KeyVerdict::Expired),
+            "the expired bot key: {fired:?}"
+        );
+        assert!(
+            fired
+                .iter()
+                .any(|c| c.key == log.device.key() && c.verdict == KeyVerdict::Revoked),
+            "the revoked device: {fired:?}"
+        );
     }
 }

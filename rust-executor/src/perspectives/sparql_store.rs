@@ -632,12 +632,16 @@ fn is_stored_local(tx: &Transaction<'_>, link: &LinkExpression) -> Result<bool, 
 /// Write all quads of `link` with `status` in `tx`: the direct triple, its
 /// reifier, and the reifier's annotations, each replacing what the reifier
 /// held for it. The proof annotations are written as [`proof_write`] allows.
+/// `own`: this executor writes the link itself (the local write path), so its verdict needs
+/// no head the store confirmed within the window ([`crate::identity::check_signed_own`]).
+/// A link from a peer and a stored link judged again are not `own`, whichever key signed them.
 fn write_link_quads(
     tx: &mut Transaction<'_>,
     link: &LinkExpression,
     status: &LinkStatus,
+    own: bool,
 ) -> Result<(), Error> {
-    write_link_quads_proof(tx, link, status, false)
+    write_link_quads_proof(tx, link, status, false, own)
 }
 
 /// [`write_link_quads`], but with `repair` the whole proof is rewritten
@@ -651,6 +655,7 @@ fn write_link_quads_proof(
     link: &LinkExpression,
     status: &LinkStatus,
     repair: bool,
+    own: bool,
 ) -> Result<(), Error> {
     let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
     let reifier_iri = make_reifier_iri(link);
@@ -706,7 +711,12 @@ fn write_link_quads_proof(
     let counted_before = annotation_values(tx, &reifier_iri, ONT_LINK_VERDICT)?
         .iter()
         .any(|v| v == "valid");
-    let checked = link.check_entered(counted_before.then_some(false));
+    let entered = counted_before.then_some(false);
+    let checked = if own {
+        link.check_own_entered(entered)
+    } else {
+        link.check_entered(entered)
+    };
     let incoming_valid = checked.verdict.counts();
     let valid_str = incoming_valid.to_string();
     let verdict_str = checked.verdict.stored();
@@ -1072,14 +1082,19 @@ impl SparqlStore {
     /// store holds comes through here, so this is where a link in the store's
     /// own metadata vocabulary is refused ([`is_link_metadata`]).
     fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
-        self.write_link(link, false).map(|_| ())
+        self.write_link(link, false, true).map(|_| ())
     }
 
     /// [`Self::insert_link_triples`]; with `skip_local`, a link this store
     /// holds as `Local` is left alone and `false` returned (#1146). The
     /// check and the write are one transaction under the writer lock, so no
     /// other write lands between them.
-    fn write_link(&self, link: &LinkExpression, skip_local: bool) -> Result<bool, Error> {
+    fn write_link(
+        &self,
+        link: &LinkExpression,
+        skip_local: bool,
+        own: bool,
+    ) -> Result<bool, Error> {
         // Status must be decided by the caller, not defaulted here. A silent
         // `None => Shared` fallback would let any write path that forgot to
         // set it mislabel a local link as shared — the kind of quiet
@@ -1104,7 +1119,7 @@ impl SparqlStore {
         if skip_local && is_stored_local(&tx, link)? {
             return Ok(false);
         }
-        write_link_quads(&mut tx, link, status)?;
+        write_link_quads(&mut tx, link, status, own)?;
         tx.commit()?;
         Ok(true)
     }
@@ -1117,7 +1132,14 @@ impl SparqlStore {
     /// A link language's addition: insert `link` unless this store holds it
     /// as `Local` (#1146). Returns whether it was inserted.
     pub(crate) fn add_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
-        self.write_link(link, true)
+        self.write_link(link, true, false)
+    }
+
+    /// A stored link judged again (the re-check): written as [`Self::add_link`] writes it,
+    /// but not as this executor's own, since the key that signed it says nothing about where
+    /// it came from.
+    pub(crate) fn rejudge_link(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.write_link(link, false, false).map(|_| ())
     }
 
     /// A link language's removal: remove `link` unless this store holds it
@@ -2256,7 +2278,7 @@ impl SparqlStore {
             ));
         }
         for (link, status) in &restored {
-            write_link_quads_proof(&mut tx, link, status, true)?;
+            write_link_quads_proof(&mut tx, link, status, true, false)?;
         }
         tx.commit()?;
         Ok(metadata_links.len())
@@ -2280,7 +2302,7 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
-        write_link_quads(&mut tx, link, link.status.as_ref().unwrap())?;
+        write_link_quads(&mut tx, link, link.status.as_ref().unwrap(), true)?;
         tx.commit()?;
         Ok(())
     }

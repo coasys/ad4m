@@ -4511,7 +4511,7 @@ impl PerspectiveInstance {
             if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
                 continue;
             }
-            self.sparql_store.add_link(link)?;
+            self.sparql_store.rejudge_link(link)?;
             let counts = now.verdict.counts();
             before.proof.valid = Some(counts);
             before.proof.invalid = Some(!counts);
@@ -8243,10 +8243,11 @@ mod tests {
             }
         };
 
-        // The key is revoked in the store, but the cache still holds the head before it.
+        // The key is revoked in the store, but the cache still holds the head before it. The
+        // links come from a peer: a link this executor writes itself is exempt (see below).
         let links = [signed(Some(0)), signed(None)];
         for link in &links {
-            perspective.sparql_store.add_link(link).unwrap();
+            assert!(perspective.sparql_store.add_remote_link(link).unwrap());
         }
         for stored in perspective.sparql_store.get_all_links().unwrap() {
             assert_eq!(stored.verdict, Some(LinkVerdict::CantCheck));
@@ -8282,6 +8283,81 @@ mod tests {
             assert_eq!(stored.person, None);
             assert_ne!(stored.proof.valid, Some(true));
         }
+        map.forget(&log.scid());
+    }
+
+    /// This executor's own device key, copied off the machine and revoked in the store while
+    /// the cache still holds the head before it: a link that key signs and that a peer sends
+    /// is checked as any other and waits for a fresh head (`cantCheck`); a link this executor
+    /// writes itself on the same stale head counts, since it signs it now. The exemption is
+    /// the write path's, not the key's.
+    #[tokio::test]
+    async fn a_remote_link_by_this_executors_own_key_waits_for_a_fresh_head_too() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+        use ad4m_identity_core::build::Signer;
+
+        let perspective = setup().await;
+        let log = TestLog::new(98);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+        let device = log.device.clone();
+        let key = device.key();
+        let signed = |target: &str| {
+            let mut data = create_link().normalize();
+            data.target = target.to_string();
+            let now = chrono::Utc::now();
+            let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes =
+                crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+            LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(device.sign(&bytes)),
+                    anchor: Some(0),
+                },
+                status: Some(LinkStatus::Shared),
+            }
+        };
+        let mine = signed("mine");
+        let theirs = signed("theirs");
+        perspective.sparql_store.add_link(&mine).unwrap();
+        assert!(perspective.sparql_store.add_remote_link(&theirs).unwrap());
+        let verdict_of = |target: &str| {
+            perspective
+                .sparql_store
+                .get_all_links()
+                .unwrap()
+                .into_iter()
+                .find(|l| l.data.target == target)
+                .map(|l| (l.verdict, l.person))
+                .unwrap()
+        };
+        assert_eq!(
+            verdict_of("mine"),
+            (
+                Some(LinkVerdict::Valid),
+                Some(ad4m_identity_core::did_of(&log.scid()))
+            ),
+            "written here: counts on the stale head"
+        );
+        assert_eq!(
+            verdict_of("theirs"),
+            (Some(LinkVerdict::CantCheck), None),
+            "from a peer: waits for a fresh head, own key or not"
+        );
         map.forget(&log.scid());
     }
 
