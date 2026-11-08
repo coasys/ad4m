@@ -468,7 +468,14 @@ impl HandlerMap {
     ) -> Result<Value, WsRpcError> {
         let entry = self.entry(msg_type)?;
         let answer = match Self::admit_entry(entry, msg_type, &params, &ctx, true).await {
-            Ok(()) => (entry.handler)(params, ctx).await,
+            Ok(pending) => {
+                let answer = (entry.handler)(params, ctx).await;
+                // A bot's write or join goes to its activity log with what it answered.
+                if let Some(pending) = pending {
+                    pending.finish(answer.as_ref().map(|_| ()));
+                }
+                answer
+            }
             Err(e) => Err(e),
         };
         let result = match answer {
@@ -491,7 +498,9 @@ impl HandlerMap {
         params: &Value,
         ctx: &RequestContext,
     ) -> Result<(), WsRpcError> {
-        Self::admit_entry(self.entry(msg_type)?, msg_type, params, ctx, false).await
+        Self::admit_entry(self.entry(msg_type)?, msg_type, params, ctx, false)
+            .await
+            .map(|_| ())
     }
 
     fn entry(&self, msg_type: &str) -> Result<&Entry, WsRpcError> {
@@ -501,14 +510,16 @@ impl HandlerMap {
     }
 
     /// `record`: the call runs if admitted, so a bot's call goes to its activity log
-    /// (`crate::bots::admit`); a check alone (`admit`) records nothing.
+    /// (`crate::bots::admit`): a refusal now, an admitted write or join as the returned
+    /// [`crate::bots::log::Pending`] once it answered (a refusal by the method's own guard
+    /// here). A check alone (`admit`) records nothing.
     async fn admit_entry(
         entry: &Entry,
         msg_type: &str,
         params: &Value,
         ctx: &RequestContext,
         record: bool,
-    ) -> Result<(), WsRpcError> {
+    ) -> Result<Option<crate::bots::log::Pending>, WsRpcError> {
         (entry.params)(params).map_err(|e| {
             WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
         })?;
@@ -518,16 +529,28 @@ impl HandlerMap {
                 // capabilities: a bot's token holds a user's default ones. A managed agent
                 // is refused while the registry has not loaded (`classify`): one that
                 // cannot be told a bot must not pass as a user.
+                let mut pending = None;
                 if let Some(did) = ctx.session.managed_did() {
                     if let Some(bot) = crate::bots::classify(did)? {
-                        crate::bots::admit(&bot, msg_type, guard, params, ctx, record).await?;
+                        pending =
+                            crate::bots::admit(&bot, msg_type, guard, params, ctx, record).await?;
                     }
                 }
-                guard.admit(msg_type, params, ctx).await?;
-                if entry.local_only && !ctx.session.is_operator_on_this_machine() {
-                    return Err(WsRpcError::forbidden(super::guards::LOCAL_ONLY));
+                let checked = match guard.admit(msg_type, params, ctx).await {
+                    Ok(()) if entry.local_only && !ctx.session.is_operator_on_this_machine() => {
+                        Err(WsRpcError::forbidden(super::guards::LOCAL_ONLY))
+                    }
+                    checked => checked,
+                };
+                match checked {
+                    Ok(()) => Ok(pending),
+                    Err(e) => {
+                        if let Some(pending) = pending {
+                            pending.finish(Err(&e));
+                        }
+                        Err(e)
+                    }
                 }
-                Ok(())
             }
             // `require_guards` stops a map with such a method at start-up; a map built
             // without it still refuses the call.

@@ -235,7 +235,14 @@ fn the_reason_is_read_from_the_frames_meta_and_cut() {
 fn an_activity_entry_names_the_action_the_space_the_reason_and_the_outcome() {
     let row = bot("active", &["write"], &["p1"], None);
     let write = action(BotAction::Write, in_space("p1"));
-    let allowed = log::entry(&row, "perspective.addLink", &write, Some("why"), &Ok(()), 5);
+    let allowed = log::entry(
+        &row,
+        "perspective.addLink",
+        &write,
+        Some("why"),
+        &log::answered(Ok(())),
+        5,
+    );
     assert_eq!(allowed.bot_did, BOT);
     assert_eq!(allowed.action.as_deref(), Some("write"));
     assert_eq!(allowed.space.as_deref(), Some("p1"));
@@ -243,9 +250,21 @@ fn an_activity_entry_names_the_action_the_space_the_reason_and_the_outcome() {
     assert_eq!(allowed.outcome, log::ALLOWED);
     assert_eq!(allowed.at, 5);
     let refusal = decide_grant(&row, &Reach::Outside, None, 5).unwrap_err();
-    let refused = log::entry(&row, "user.create", &Reach::Outside, None, &Err(refusal), 5);
+    let refused = log::entry(
+        &row,
+        "user.create",
+        &Reach::Outside,
+        None,
+        &log::refused(&refusal),
+        5,
+    );
     assert_eq!(refused.action, None);
     assert_eq!(refused.outcome, BOT_GRANT);
+    let failed = WsRpcError {
+        code: 404,
+        message: "not found".into(),
+    };
+    assert_eq!(log::answered(Err(&failed)), "failed:404");
 }
 
 /// A bot's session on a connection, with a user's default capabilities: the grant, not the

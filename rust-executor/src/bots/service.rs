@@ -160,7 +160,9 @@ pub struct BotActivity {
     pub action: Option<BotAction>,
     pub space: Option<String>,
     pub reason: Option<String>,
-    /// `allowed`, or the refusal's code (`bot-grant`, `bot-paused`, `not-in-can`, …).
+    /// Written once the call answered: `allowed` (it ran and succeeded), `failed:<status>`
+    /// (the grant let it through, then the method's guard or handler answered that error
+    /// status), or the bot check's refusal code (`bot-grant`, `bot-paused`, `not-in-can`, …).
     pub outcome: String,
 }
 

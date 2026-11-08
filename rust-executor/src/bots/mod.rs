@@ -485,8 +485,9 @@ pub fn cut_reason(reason: &str) -> String {
 }
 
 /// The check of every call from a bot's session (`ctx` acts as the bot `bot`): `Ok` or the
-/// refusal. With `record`, a write, a join and a refusal go to the activity log (the
-/// dispatcher records; a check without the call does not).
+/// refusal. With `record`, a refusal goes to the activity log now, and an admitted write or
+/// join comes back as a [`log::Pending`] the dispatcher logs once the call answered (a check
+/// without the call records nothing).
 pub async fn admit(
     bot: &BotRow,
     method: &str,
@@ -494,28 +495,27 @@ pub async fn admit(
     params: &Value,
     ctx: &RequestContext,
     record: bool,
-) -> Result<(), WsRpcError> {
+) -> Result<Option<log::Pending>, WsRpcError> {
     let reach = reach(method, guard, params);
     let decided = decide(bot, &reach, ctx.reason.as_deref()).await;
-    if record {
-        // Allowed reads and calls on its own session are not logged; writes, joins and
-        // refusals are.
-        let logged = !matches!(
-            (&reach, &decided),
-            (Reach::Own, Ok(()))
-                | (
-                    Reach::Action {
-                        action: BotAction::Read,
-                        ..
-                    },
-                    Ok(()),
-                )
-        );
-        if logged {
-            log::record(bot, method, &reach, ctx.reason.as_deref(), &decided);
+    let reason = ctx.reason.as_deref();
+    match decided {
+        Err(refusal) => {
+            if record {
+                log::record(bot, method, &reach, reason, &log::refused(&refusal));
+            }
+            Err(refusal.error())
         }
+        // Allowed reads and calls on its own session are not logged; writes and joins are.
+        Ok(()) => Ok(match reach {
+            Reach::Own
+            | Reach::Action {
+                action: BotAction::Read,
+                ..
+            } => None,
+            reach => record.then(|| log::Pending::new(bot, method, reach, reason)),
+        }),
     }
-    decided.map_err(|refusal| refusal.error())
 }
 
 /// The check of `events.watch` / `events.unwatch` from a bot's session, which the connection
@@ -557,7 +557,7 @@ pub async fn admit_watch(
                 Some(_) => decide(bot, &reach, reason).await,
             };
             if let Err(refusal) = decided {
-                log::record(bot, method, &reach, reason, &Err(refusal.clone()));
+                log::record(bot, method, &reach, reason, &log::refused(&refusal));
                 return Err(refusal.error());
             }
         }

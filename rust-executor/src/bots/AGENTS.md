@@ -34,6 +34,9 @@ Rules:
 - **A bot's links anchor in its owner's log** (`identity::signer_identity` falls back to the
   bot row's `owner`); the owners' logs are pinned at startup and on `bot.createAgent`.
 - **Only dispatch records** (`record: true`); `HandlerMap::admit` (MCP's pre-check) does not.
+  A refusal by the bot check is logged at once; an admitted write or join is logged after it
+  ran (`log::Pending`), `allowed` or `failed:<status>` when the method's guard or handler
+  answered an error.
 - **Who enforces what.** The grant (spaces, `can`, expiry, pause, revocation) is the hosting
   executor's: it is not signed by the owner's master key, and only the executor that runs the
   bot enforces it (a trusted-host restriction). What every other reader verifies is what the

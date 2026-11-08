@@ -2066,3 +2066,58 @@ async fn dispatch_logs_a_bots_refused_call_and_admit_does_not() {
     assert_eq!(entry.reason.as_deref(), Some("tidy the board"));
     assert_eq!(entry.outcome, crate::bots::BOT_GRANT);
 }
+
+/// Lal #1671: the log records what the call did, not what the bot check let through. A write
+/// the grant and the owner's log allow but the method's guard or handler then refuses is
+/// logged `failed:<status>`, after it ran.
+#[tokio::test]
+async fn dispatch_logs_a_bots_call_with_its_answer() {
+    use crate::identity::bot_key::BotKey;
+    use crate::identity::verdict::KeyVerdict;
+    let world = World::new().await;
+    register_bot(&world, "active", &["read", "write"]);
+    crate::bots::set_test_key(
+        BOT_DID,
+        Ok(BotKey {
+            key_id: "d2".into(),
+            verdict: KeyVerdict::Valid,
+            scope: Some(ad4m_identity_core::BotScope {
+                can: vec!["read".into(), "write".into()],
+                expires: u64::MAX,
+            }),
+        }),
+    );
+    let map = build_handler_map();
+    let logged = || {
+        crate::db_backend::db_backend()
+            .bot_activity(BOT_DID, None, 1000)
+            .unwrap()
+    };
+    let before = logged().len();
+    // The grant names the user's perspective, but the bot does not own it: the guard refuses.
+    let ctx = RequestContext::user_for_test(
+        BOT_DID,
+        vec![crate::agent::capabilities::ALL_CAPABILITY.clone()],
+    )
+    .with_reason("tidy the board");
+    let params = json!({ "uuid": world.users_own, "link": link() });
+    let dispatched = map
+        .dispatch("perspective.addLink", params, Arc::new(ctx))
+        .await
+        .unwrap_err();
+    crate::bots::set_test_key(
+        BOT_DID,
+        Err(crate::identity::bot_key::BotKeyError::StoreUnavailable),
+    );
+    world.remove().await;
+    assert!(
+        !dispatched.message.starts_with("bot-") && !dispatched.message.starts_with("not-in-can"),
+        "the bot check let it through: {dispatched:?}"
+    );
+    let entries = logged();
+    assert_eq!(entries.len(), before + 1);
+    let entry = &entries[0];
+    assert_eq!(entry.method, "perspective.addLink");
+    assert_eq!(entry.action.as_deref(), Some("write"));
+    assert_eq!(entry.outcome, format!("failed:{}", dispatched.code));
+}
