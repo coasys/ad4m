@@ -47,6 +47,11 @@ master key for the person.
   push (link, `send_master`, a `send-master` request, the retry list); at a link, only on a
   `device` offer (`LinkFlow::may_keep`). **The record's device kind never decides it**: any
   linked device can write the record, so its kind is for people to read and grants nothing.
+  The offer's kind counts only at the link: `keeper` does not read it, so a key that claimed a
+  `node` offer with `canKeepMaster` (an executor with the custody channel) gets the master key
+  on a later yes of the person (`send_master`, or answering its `send-master` request). That
+  is accepted by design: the claim's co-signature says its custody service may keep the key,
+  and each send is the holder's decision.
 - **One place merges the record** (`record::write`). Every flow that changes it passes
   `Change`s; nothing else seals or writes a record. A step after a publish or a push (the
   record write, the push after a link) reports its own outcome in the answer (`Linked`,

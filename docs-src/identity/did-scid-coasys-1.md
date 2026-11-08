@@ -789,7 +789,12 @@ a new string ends the read of the last one.
   that the log lets keep it: a standing key of the `incept`, or a standing key whose `add`
   carries a co-signature over a claim that said `canKeepMaster: true` (the co-signature covers
   the flag, so the log proves it; at a link, only on a `device` offer). A key the log does not
-  list, or a revoked one, gets nothing. The record's device kind decides nothing here: any
+  list, or a revoked one, gets nothing. The offer's kind counts only at the link: an `add`
+  that spent a `node` offer, whose claim said `canKeepMaster` (an executor with the custody
+  channel claimed it), lets the key keep the master key, so a later yes of the person (sending
+  it, or answering its `send-master` request) gives the master key to that node device. That
+  is by design: the device's co-signature said its custody service may keep it, and each send
+  is the holder's own decision. The record's device kind decides nothing here: any
   linked device can write the record, so its kind is shown to people and grants nothing. After
   the `add`, the master key seals itself into a `master` body, signed by itself, to the `enc` key the log
   lists for the device key, and writes it to the device's joined inbox. Before the write the
