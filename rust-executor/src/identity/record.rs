@@ -22,8 +22,10 @@ use super::types::{
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
 
-/// The longest a request of the box lives (`ad4m_identity_core::requests::REQUEST_TTL_S`).
-const REQUEST_BOX_TTL_S: u64 = ad4m_identity_core::requests::REQUEST_TTL_S;
+/// The lifetime this executor gives a request it posts to the box
+/// (`ad4m_identity_core::requests::REQUEST_POST_TTL_S`): the store's limit less the clock skew a
+/// store behind this executor's clock still accepts.
+const REQUEST_BOX_TTL_S: u64 = ad4m_identity_core::requests::REQUEST_POST_TTL_S;
 
 /// Where an agent's device key stands in its identity's log: what a store request it signs
 /// names.
