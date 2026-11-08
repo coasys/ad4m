@@ -12,7 +12,7 @@ use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
 use ad4m_identity_client::flows::create::{resume, CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::{Claimed, LinkFlow};
 use ad4m_identity_client::flows::master::{
-    refresh_master, remove_master, retry_pushes, send_master, take_master, Refreshed,
+    refresh_master, remove_master, retry_pushes, send_master, take_master, Refreshed, Taken,
 };
 use ad4m_identity_client::flows::requests::{
     answer, answer_with_words, ask_confirm_revoke, ask_for_master, check_poster, Answered,
@@ -1026,12 +1026,22 @@ async fn create_makes_an_identity_that_lists_the_executor_as_d1() {
 struct RefusingVault(MemoryVault);
 
 impl Vault for RefusingVault {
+    fn custody_epoch(&self, scid: &str) -> Result<u64, ad4m_identity_client::VaultError> {
+        self.0.custody_epoch(scid)
+    }
+    fn forget_master_at(
+        &self,
+        scid: &str,
+        epoch: u64,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.0.forget_master_at(scid, epoch)
+    }
     fn store_master(
         &self,
         _scid: &str,
         _index: u32,
         _secret: ad4m_identity_client::Secret<[u8; 32]>,
-    ) -> Result<(), ad4m_identity_client::VaultError> {
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
         Err(ad4m_identity_client::VaultError::Cancelled)
     }
 
@@ -1039,8 +1049,12 @@ impl Vault for RefusingVault {
         self.0.master_index(scid)
     }
 
-    fn forget_master(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
-        self.0.forget_master(scid)
+    fn forget_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.0.forget_master(scid, index)
     }
 
     fn stage_master(
@@ -1061,7 +1075,7 @@ impl Vault for RefusingVault {
         &self,
         scid: &str,
         index: u32,
-    ) -> Result<(), ad4m_identity_client::VaultError> {
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
         self.0.promote_master(scid, index)
     }
 
@@ -4616,19 +4630,33 @@ async fn a_key_staged_behind_the_log_is_discarded_by_refresh() {
 struct PromotedFirst(MemoryVault);
 
 impl Vault for PromotedFirst {
+    fn custody_epoch(&self, scid: &str) -> Result<u64, ad4m_identity_client::VaultError> {
+        self.0.custody_epoch(scid)
+    }
+    fn forget_master_at(
+        &self,
+        scid: &str,
+        epoch: u64,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.0.forget_master_at(scid, epoch)
+    }
     fn store_master(
         &self,
         scid: &str,
         index: u32,
         secret: ad4m_identity_client::Secret<[u8; 32]>,
-    ) -> Result<(), ad4m_identity_client::VaultError> {
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
         self.0.store_master(scid, index, secret)
     }
     fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
         self.0.master_index(scid)
     }
-    fn forget_master(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
-        self.0.forget_master(scid)
+    fn forget_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.0.forget_master(scid, index)
     }
     fn stage_master(
         &self,
@@ -4646,7 +4674,7 @@ impl Vault for PromotedFirst {
         &self,
         scid: &str,
         index: u32,
-    ) -> Result<(), ad4m_identity_client::VaultError> {
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
         // The other app's promote, then this flow's.
         self.0.promote_master(scid, index)?;
         self.0.promote_master(scid, index)
@@ -4904,12 +4932,22 @@ struct LaggingIndex {
 }
 
 impl Vault for LaggingIndex {
+    fn custody_epoch(&self, scid: &str) -> Result<u64, ad4m_identity_client::VaultError> {
+        self.inner.custody_epoch(scid)
+    }
+    fn forget_master_at(
+        &self,
+        scid: &str,
+        epoch: u64,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.inner.forget_master_at(scid, epoch)
+    }
     fn store_master(
         &self,
         scid: &str,
         index: u32,
         secret: ad4m_identity_client::Secret<[u8; 32]>,
-    ) -> Result<(), ad4m_identity_client::VaultError> {
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
         self.inner.store_master(scid, index, secret)
     }
     fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
@@ -4918,8 +4956,12 @@ impl Vault for LaggingIndex {
         }
         self.inner.master_index(scid)
     }
-    fn forget_master(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
-        self.inner.forget_master(scid)
+    fn forget_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.inner.forget_master(scid, index)
     }
     fn stage_master(
         &self,
@@ -4937,7 +4979,7 @@ impl Vault for LaggingIndex {
         &self,
         scid: &str,
         index: u32,
-    ) -> Result<(), ad4m_identity_client::VaultError> {
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
         // The item is written; what vouches for its index is not.
         self.inner.promote_master(scid, index)?;
         *self.lost.lock().unwrap() = true;
@@ -5125,19 +5167,33 @@ async fn answering_with_words_reports_a_failed_delete_with_the_rotation() {
 struct SharedVault(Arc<MemoryVault>);
 
 impl Vault for SharedVault {
+    fn custody_epoch(&self, scid: &str) -> Result<u64, ad4m_identity_client::VaultError> {
+        self.0.custody_epoch(scid)
+    }
+    fn forget_master_at(
+        &self,
+        scid: &str,
+        epoch: u64,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.0.forget_master_at(scid, epoch)
+    }
     fn store_master(
         &self,
         scid: &str,
         index: u32,
         secret: ad4m_identity_client::Secret<[u8; 32]>,
-    ) -> Result<(), ad4m_identity_client::VaultError> {
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
         self.0.store_master(scid, index, secret)
     }
     fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
         self.0.master_index(scid)
     }
-    fn forget_master(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
-        self.0.forget_master(scid)
+    fn forget_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.0.forget_master(scid, index)
     }
     fn stage_master(
         &self,
@@ -5155,7 +5211,7 @@ impl Vault for SharedVault {
         &self,
         scid: &str,
         index: u32,
-    ) -> Result<(), ad4m_identity_client::VaultError> {
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
         self.0.promote_master(scid, index)
     }
     fn discard_staged(
@@ -5816,6 +5872,11 @@ async fn a_late_rotation_answer_does_not_overwrite_a_newer_kept_key() {
     );
     let unlocked = shared.unlock(&scid, MasterUse::Link, 0).unwrap();
     assert_eq!(unlocked.signer(0).unwrap().index(), 2);
+    // B's `kept` names the index the vault keeps (#2), not its own rotation's (#1): the
+    // record entry B would write would mark it holding #2 (its own write fails, master #1
+    // no longer current).
+    assert_eq!(by_b.kept.as_ref().ok(), Some(&2));
+    assert!(matches!(&by_b.record, Err(ClientError::Protocol(m)) if m.contains("current master")));
 }
 
 /// An executor whose `identity.takeMaster` is preceded by another app installing master #1 in
@@ -5899,6 +5960,324 @@ async fn a_refresh_forgets_only_the_key_it_decided_on() {
         shared.master_index(&scid).unwrap(),
         Some(1),
         "the current master installed by another app survives this refresh ({refreshed:?})"
+    );
+}
+
+/// An executor whose `identity.status` — the call `take_master` makes between checking the key
+/// taken against its fold and storing it — is preceded by another app installing a newer
+/// master (#2) in the shared vault (its own take or promote landing while the take was in
+/// flight).
+struct InstallNewerInStatus<'a> {
+    inner: &'a TestExecutor,
+    other_vault: SharedVault,
+    scid: String,
+    secret: [u8; 32],
+    installed: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for InstallNewerInStatus<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.status" && !self.installed.replace(true) {
+            self.other_vault
+                .store_master(
+                    &self.scid,
+                    2,
+                    ad4m_identity_client::Secret::new(self.secret),
+                )
+                .unwrap();
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Lal's review at 42de52d10, closed: `take_master` checks the master key it took (#0)
+/// against its fold, then stores it; between the two, another app sharing the vault installs
+/// #2. The older key must never replace the newer kept one, and the record must name the
+/// index the vault keeps, not the taken key's.
+#[tokio::test]
+async fn a_take_of_an_older_master_keeps_the_newer_one() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &vault, 57).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    // The desk asks for the master key and is answered: master #0 waits in its inbox.
+    let asked = ask_for_master(&desk, None).await.unwrap();
+    let listed = a.requests(0).await.unwrap();
+    let request = listed.iter().find(|r| r.id == asked).unwrap();
+    answer(&a, &vault, &did, request, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+
+    let racing = ViaExecutor::new(InstallNewerInStatus {
+        inner: desk.rpc(),
+        other_vault: SharedVault(shared.clone()),
+        scid: scid.clone(),
+        secret: [9; 32],
+        installed: Cell::new(false),
+    });
+    let taken = take_master(&racing, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        racing.rpc().installed.get(),
+        "the other app installed #2 mid-take"
+    );
+    assert_eq!(
+        shared.master_index(&scid).unwrap(),
+        Some(2),
+        "the newer kept key survives an older key's install"
+    );
+    assert_eq!(
+        taken.index, 2,
+        "the take reports the index the vault keeps, not the taken key's"
+    );
+    let opened = record::read(&desk, &SharedVault(shared.clone()), &did)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        opened.record.devices[&d2].master_index,
+        Some(2),
+        "the record names the index the vault keeps"
+    );
+}
+
+/// A vault whose `forget_master` runs just after another app sharing the vault installed a
+/// newer master key (its take or promote landing between the removal's check and the forget):
+/// the install is made first, then the forget the caller asked for is delegated.
+struct InstallBeforeForget {
+    inner: MemoryVault,
+    scid: String,
+    secret: [u8; 32],
+    installed: std::sync::Mutex<bool>,
+}
+
+impl Vault for InstallBeforeForget {
+    fn custody_epoch(&self, scid: &str) -> Result<u64, ad4m_identity_client::VaultError> {
+        self.inner.custody_epoch(scid)
+    }
+    fn forget_master_at(
+        &self,
+        scid: &str,
+        epoch: u64,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        // The other app's install lands right before the delete, as in `forget_master`.
+        let mut installed = self.installed.lock().unwrap();
+        if !*installed {
+            *installed = true;
+            self.inner
+                .store_master(
+                    &self.scid,
+                    1,
+                    ad4m_identity_client::Secret::new(self.secret),
+                )
+                .unwrap();
+        }
+        drop(installed);
+        self.inner.forget_master_at(scid, epoch)
+    }
+    fn store_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
+        self.inner.store_master(scid, index, secret)
+    }
+    fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.inner.master_index(scid)
+    }
+    fn forget_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        let mut installed = self.installed.lock().unwrap();
+        if !*installed {
+            *installed = true;
+            self.inner
+                .store_master(
+                    &self.scid,
+                    1,
+                    ad4m_identity_client::Secret::new(self.secret),
+                )
+                .unwrap();
+        }
+        drop(installed);
+        self.inner.forget_master(scid, index)
+    }
+    fn stage_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+        owner: &StageToken,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.stage_master(scid, index, secret, owner)
+    }
+    fn staged_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.inner.staged_index(scid)
+    }
+    fn promote_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
+        self.inner.promote_master(scid, index)
+    }
+    fn discard_staged(
+        &self,
+        scid: &str,
+        index: u32,
+        owner: Option<&StageToken>,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.discard_staged(scid, index, owner)
+    }
+    fn unlock(
+        &self,
+        scid: &str,
+        why: MasterUse,
+        now: u64,
+    ) -> Result<ad4m_identity_client::Unlocked, ad4m_identity_client::VaultError> {
+        self.inner.unlock(scid, why, now)
+    }
+    fn store_pending_incept(&self, incept: &Event) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.store_pending_incept(incept)
+    }
+    fn pending_incepts(&self) -> Result<Vec<Event>, ad4m_identity_client::VaultError> {
+        self.inner.pending_incepts()
+    }
+    fn incept_published(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.incept_published(scid)
+    }
+    fn keep_push(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.keep_push(push)
+    }
+    fn pending_pushes(&self) -> Result<Vec<PendingPush>, ad4m_identity_client::VaultError> {
+        self.inner.pending_pushes()
+    }
+    fn push_done(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.push_done(push)
+    }
+
+    fn record_seen(
+        &self,
+        scid: &str,
+        version: u64,
+    ) -> Result<Option<u64>, ad4m_identity_client::VaultError> {
+        self.inner.record_seen(scid, version)
+    }
+
+    fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.record_seen_reset(scid)
+    }
+}
+
+/// Lal's review at 42de52d10, closed: `remove_master` decides to forget the kept key, and
+/// another app sharing the vault installs a newer one before the forget runs. The forget is
+/// for the index checked, never for a key installed since.
+#[tokio::test]
+async fn a_remove_never_forgets_a_key_installed_after_the_check() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let inner = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &inner, 58).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    // The desk holds the current master #0, so this computer may remove its copy.
+    holding_app(
+        &a,
+        &inner,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let vault = InstallBeforeForget {
+        inner,
+        scid: scid.clone(),
+        secret: [9; 32],
+        installed: std::sync::Mutex::new(false),
+    };
+
+    remove_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert!(
+        *vault.installed.lock().unwrap(),
+        "the other app installed #1 before the forget"
+    );
+    assert_eq!(
+        vault.inner.master_index(&scid).unwrap(),
+        Some(1),
+        "the key installed after the check survives the removal"
+    );
+}
+
+/// Lal's review at 42de52d10, closed: a refresh promotes a key staged at the log's current
+/// master (#1) while the vault already keeps a newer one (#2, installed by another app's
+/// later rotation while this app's log read was stale). The older staged key must never
+/// replace the newer kept one, and the promoted index reported and written to the record is
+/// the index the vault keeps.
+#[tokio::test]
+async fn a_promote_never_replaces_a_newer_kept_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 59).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let words = words::from_entropy(&[59; 16]);
+    rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
+
+    // Another app sharing the vault keeps a later master's key while this app's log is still
+    // at #1; this app still holds its rotation's key staged at the current index.
+    let key2 = words::master_key(&words::seed(&words), 2).unwrap();
+    vault
+        .store_master(&scid, 2, ad4m_identity_client::Secret::new(key2.to_bytes()))
+        .unwrap();
+    let key1 = words::master_key(&words::seed(&words), 1).unwrap();
+    vault
+        .stage_master(
+            &scid,
+            1,
+            ad4m_identity_client::Secret::new(key1.to_bytes()),
+            &StageToken::new(&OsRandom),
+        )
+        .unwrap();
+
+    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    let Refreshed::Promoted { index, record } = refreshed else {
+        panic!("expected the promotion, got {refreshed:?}")
+    };
+    assert_eq!(index, 2, "the index the vault keeps is reported");
+    record.unwrap();
+    assert_eq!(
+        vault.master_index(&scid).unwrap(),
+        Some(2),
+        "the newer kept key survives the older key's promotion"
+    );
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"].master_index,
+        Some(2),
+        "the record names the index the vault keeps"
     );
 }
 
@@ -6397,4 +6776,341 @@ async fn a_retry_batch_with_an_entry_less_device_still_marks_the_others() {
         HoldsMaster::Offered
     );
     assert!(!opened.record.devices.contains_key(&d3));
+}
+
+/// Lal's P2-1 at 8f8a46e56, end to end. A rotation lands and its flow is cut off before the
+/// master-signed rewrite of the record (the record still carries master #0's attestation of the
+/// recovery key). The next custody read promotes the staged key and writes `holdsMaster` as the
+/// device: that write carries no recovery key, since the old attestation no longer counts, and
+/// the store takes it. From then on the words cannot open the record: a restore on a fresh
+/// executor finds a record no recovery key wraps.
+#[tokio::test]
+#[ignore = "known gap (review of #1667 at 8f8a46e56): a device write after a rotation drops the recovery key the words need; the fix is a design call (see the PR). Run with --ignored."]
+async fn a_device_write_after_a_rotation_keeps_the_words_access_to_the_record() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 57).await;
+    let words = words::from_entropy(&[57; 16]);
+
+    let cut = ViaExecutor::new(CutOffAfterPublish {
+        inner: a.rpc(),
+        published: Cell::new(false),
+    });
+    tokio::select! {
+        rotated = rotate(&cut, &vault, &did, &words, &[], &SystemClock, &OsRandom) => {
+            panic!("the rotation was not cut off: {rotated:?}")
+        }
+        _ = async {
+            while !cut.rpc().published.get() {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().masters.len(), 2, "the rotation landed");
+
+    // The next custody read finishes the rotation on this device: an ordinary device write.
+    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert!(
+        matches!(refreshed, Refreshed::Promoted { .. }),
+        "{refreshed:?}"
+    );
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    let recovery_after_refresh = opened.recovery.is_some();
+
+    // The computer is lost; the words on a fresh executor.
+    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let new_vault = MemoryVault::new();
+    let flow = RestoreFlow::start(&new, &new_vault, words.phrase(), &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(
+        flow.record_error().is_none(),
+        "the words cannot open the record after the device write: {:?} (the record carried a \
+         recovery key that counts after the refresh: {recovery_after_refresh})",
+        flow.record_error()
+    );
+    assert!(
+        !flow.devices().is_empty() && flow.devices().iter().any(|d| d.name.is_some()),
+        "the restore lists the devices by their recorded names: {:?}",
+        flow.devices()
+    );
+}
+
+/// An executor whose first `identity.record` read after `armed` is preceded by another device
+/// taking the master key from its inbox and recording that it holds it.
+struct TakeBeforeRecordRead<'a> {
+    inner: &'a TestExecutor,
+    taker: &'a ViaExecutor<TestExecutor>,
+    taker_vault: &'a MemoryVault,
+    armed: Cell<bool>,
+    taken: RefCell<Option<Taken>>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for TakeBeforeRecordRead<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.inboxPut" {
+            self.armed.set(true);
+        }
+        if method == "identity.record" && self.armed.get() && self.taken.borrow().is_none() {
+            let taken = take_master(self.taker, self.taker_vault, &OsRandom)
+                .await
+                .unwrap()
+                .expect("the pushed master key waits in the inbox");
+            taken.record.as_ref().unwrap();
+            *self.taken.borrow_mut() = Some(taken);
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Lal's P2-3 at 8f8a46e56. A rotates to #1 and pushes it to B, a holder. B takes it from its
+/// inbox and records `holdsMaster: true, masterIndex: 1` before A's hand-over writes the record.
+/// A's write builds on that newest version and must not put `"offered"` (and no index) over
+/// B's confirmation: afterwards A could not count B as another copy, and B's next refresh,
+/// finding the current key kept, would never repair it.
+#[tokio::test]
+async fn a_hand_over_never_overwrites_a_holder_that_already_took_the_new_master() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 58).await;
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        &b_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[58; 16]);
+
+    let racing = ViaExecutor::new(TakeBeforeRecordRead {
+        inner: a.rpc(),
+        taker: &b,
+        taker_vault: &b_vault,
+        armed: Cell::new(false),
+        taken: RefCell::new(None),
+    });
+    let rotated = rotate(&racing, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(rotated.index, 1);
+    assert!(
+        rotated.pushes.iter().any(|(k, r)| *k == d2 && r.is_ok()),
+        "{:?}",
+        rotated.pushes
+    );
+    let taken = racing.rpc().taken.borrow().as_ref().map(|t| t.index);
+    assert_eq!(taken, Some(1), "B took #1 before A's record write");
+    rotated.record.as_ref().unwrap();
+    assert_eq!(
+        b_vault
+            .master_index(ad4m_identity_core::scid_of(&did).unwrap())
+            .unwrap(),
+        Some(1)
+    );
+
+    let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
+    let entry_b = &opened.record.devices[&d2];
+    assert_eq!(
+        (entry_b.holds_master, entry_b.master_index),
+        (HoldsMaster::Yes, Some(1)),
+        "A's hand-over overwrote B's confirmation"
+    );
+}
+
+/// An executor whose first `identity.recordPut` (A's removal writing `holdsMaster: false`) is
+/// followed, before the removal goes on to its vault, by: a duplicate delivery of master #0 to
+/// this device, taken by another app sharing the vault (`holdsMaster: true, masterIndex: 0`
+/// again), and B's own removal, which sees that and forgets B's copy.
+struct DuplicateTakeAndOtherRemoval<'a> {
+    inner: &'a TestExecutor,
+    vault: SharedVault,
+    b: &'a ViaExecutor<TestExecutor>,
+    b_vault: &'a MemoryVault,
+    did: String,
+    own: String,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for DuplicateTakeAndOtherRemoval<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let answer = self.inner.call(method, params).await;
+        if method == "identity.recordPut" && !self.done.replace(true) {
+            // 2. A duplicate #0 reaches this device's inbox (delivery is at least once); the
+            //    other app on this computer takes it.
+            send_master(
+                self.b,
+                self.b_vault,
+                &self.did,
+                &self.own,
+                &SystemClock,
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+            let other_app = ViaExecutor::new(Yielding(self.inner));
+            let taken = take_master(&other_app, &self.vault, &OsRandom)
+                .await
+                .unwrap()
+                .expect("the duplicate waits in the inbox");
+            taken.record.as_ref().unwrap();
+            // 3. B logs out: the record says this device holds #0 again, so B may.
+            remove_master(self.b, self.b_vault, &self.did, &OsRandom)
+                .await
+                .unwrap();
+        }
+        answer
+    }
+}
+
+/// Lal's P2 at 1aa2c1813: the removal's compare-and-delete goes by the master index, which
+/// names the generation, not the custody state the only-copy check saw. Same generation, no
+/// rotation: A's removal passes its check (B holds #0) and writes `false`; a duplicate #0 is
+/// taken by another app on A's computer (A holds #0 again, record says so); B's removal passes
+/// on that and forgets B's copy; A's removal resumes and forgets A's, since the index is still
+/// 0. No device vault holds the current master key.
+#[tokio::test]
+async fn a_removal_never_forgets_a_key_installed_after_its_check_in_the_same_generation() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &shared, 60).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &b_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+
+    let racing = ViaExecutor::new(DuplicateTakeAndOtherRemoval {
+        inner: a.rpc(),
+        vault: SharedVault(shared.clone()),
+        b: &b,
+        b_vault: &b_vault,
+        did: did.clone(),
+        own: "d1".to_string(),
+        done: Cell::new(false),
+    });
+    // 1. and 4.
+    let removed = remove_master(&racing, &SharedVault(shared.clone()), &did, &OsRandom).await;
+    assert!(racing.rpc().done.get(), "the schedule ran");
+    let left = [
+        shared.master_index(&scid).unwrap(),
+        b_vault.master_index(&scid).unwrap(),
+    ];
+    assert!(
+        left.contains(&Some(0)),
+        "no device holds master #0 any more (A: {:?}, B: {:?}; A's removal answered {removed:?})",
+        left[0],
+        left[1]
+    );
+}
+
+/// An executor whose first `identity.inboxAck` (a take, after it stored the key) is preceded
+/// by another app finishing a later generation for this same device: #1 kept in the shared
+/// vault and `holdsMaster: true, masterIndex: 1` written.
+struct NewerGenerationBeforeAck<'a> {
+    inner: &'a TestExecutor,
+    vault: SharedVault,
+    did: String,
+    own: String,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for NewerGenerationBeforeAck<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.inboxAck" && !self.done.replace(true) {
+            let scid = ad4m_identity_core::scid_of(&self.did).unwrap();
+            self.vault
+                .store_master(scid, 1, ad4m_identity_client::Secret::new([1; 32]))
+                .unwrap();
+            let other_app = ViaExecutor::new(Yielding(self.inner));
+            record::write(
+                &other_app,
+                &self.vault,
+                &self.did,
+                &[Change::Holds {
+                    key_id: self.own.clone(),
+                    index: 1,
+                }],
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Lal's P2-3 at 1aa2c1813: a take stores #0 and is answered `Stored`, then another app on
+/// this computer finishes #1 (the vault keeps #1, the record says this device holds #1) before
+/// the take's own record write. That write carries the index the take captured, #0, and puts
+/// it over #1: the record goes back a generation while the vault does not. `Change::Holds`
+/// must be monotonic: it never lowers a `true` entry's `masterIndex`.
+#[tokio::test]
+async fn a_late_holds_never_lowers_a_newer_master_index() {
+    let store = TestStore::new();
+    let holder = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let holder_vault = MemoryVault::new();
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&holder, &holder_vault, 61).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &holder,
+        &holder_vault,
+        &did,
+        &a,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    // #0 waits in this device's inbox, not taken yet.
+    send_master(&holder, &holder_vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+
+    let racing = ViaExecutor::new(NewerGenerationBeforeAck {
+        inner: a.rpc(),
+        vault: SharedVault(shared.clone()),
+        did: did.clone(),
+        own: d2.clone(),
+        done: Cell::new(false),
+    });
+    let taken = take_master(&racing, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        racing.rpc().done.get(),
+        "the other app finished #1 before the ack"
+    );
+    taken.record.as_ref().unwrap();
+    assert_eq!(
+        shared.master_index(&scid).unwrap(),
+        Some(1),
+        "the vault keeps #1"
+    );
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    let mine = &opened.record.devices[&d2];
+    assert_eq!(
+        (mine.holds_master, mine.master_index),
+        (HoldsMaster::Yes, Some(1)),
+        "the late take's record write lowered the index"
+    );
 }

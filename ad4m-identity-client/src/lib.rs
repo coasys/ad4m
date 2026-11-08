@@ -38,7 +38,9 @@ pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
-pub use vault::{MasterSigner, MasterUse, PendingPush, StageToken, Unlocked, Vault, VaultError};
+pub use vault::{
+    Forgot, MasterSigner, MasterUse, PendingPush, StageToken, Stored, Unlocked, Vault, VaultError,
+};
 
 /// Unix seconds, from the surface.
 pub trait Clock {

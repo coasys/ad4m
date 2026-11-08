@@ -269,7 +269,7 @@ async fn main() {
                         "revoked": rotated.revoked,
                         "pushes": pushes(&rotated.pushes),
                         "record": written(&rotated.record),
-                        "kept": done(&rotated.kept),
+                        "kept": written(&rotated.kept.map(u64::from)),
                     }))
                 }
                 .await

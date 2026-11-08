@@ -812,7 +812,11 @@ a new string ends the read of the last one.
   it with the device key before the put (it refuses an unsigned envelope naming any other
   key). A device write copies the recovery key and its attestation that still count, unchanged.
 
-**The holder's side.** An app that holds the current master key:
+**The holder's side.** The 12 words are the root authority of the identity: they derive
+every master key, the salts that open each rotation's commitment, and the recovery secret
+that opens the private record, so their holder rotates, revokes and enrols a device without
+any device of the log — and a rotation revokes no one's copy of them. An app that holds the
+current master key:
 
 - *Links with the holder scanning.* It reads a device string, refuses one past its `exp` or
   naming another host, opens an offer bound to the string's `sign`, and puts the offer ticket,
@@ -876,12 +880,15 @@ a new string ends the read of the last one.
   forgetting its own key and asking a holder with `send-master`. It forgets its key only when
   the vault can tell the key's index (authenticated with the key, not a note beside it) and
   that index is behind the log's current master; a key whose index it cannot tell is kept.
-- *Delivers at least once.* A push whose answer was lost stays on the retry list and is put
-  again, so a device may find the same master key in two messages; a request answered whose
-  delete failed stays in the box and may be answered again. Both sides act idempotently: a
-  device keeps a master key it already keeps without change and acknowledges each message,
-  and the holder refuses a `confirm-revoke` naming a key no longer valid at the head before
-  it signs anything.
+- *Delivers at least once.* Delivery of a master key is at least once: a push whose answer
+  was lost stays on the retry list and is put again, so a device may find the same master
+  key in two messages, or take an older one after a newer one is already kept; a request
+  answered whose delete failed stays in the box and may be answered again. Both sides act
+  idempotently: a device keeps a master key it already keeps without change and never lets
+  an older one replace a newer kept one (its vault forgets or replaces a key only on the
+  index it checked, a shared custody folder is generation-aware), acknowledges each
+  message, and the holder refuses a `confirm-revoke` naming a key no longer valid at the
+  head before it signs anything.
 - *Writes the record* by reading the newest version, applying its own changes (a device's
   entry, a name, `holdsMaster`, a pending revocation) and dropping the entries of keys no
   longer valid at the head, sealing the result as the next version to every reader of the
