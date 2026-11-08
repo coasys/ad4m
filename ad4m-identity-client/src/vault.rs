@@ -166,6 +166,24 @@ impl Unlocked {
 /// Everything that names the master index this device holds (the `Taken`/`Promoted`/`kept`
 /// answers, the record's `masterIndex`) names the index the vault keeps, not the one the
 /// flow set out to install.
+///
+/// **A forget is bound to the custody state a flow checked, not to a generation.** The index
+/// names the key's generation; a duplicate delivery of the same master, taken by another app
+/// between a flow's check and its forget, keeps the index and changes custody. So a flow
+/// reads [`Vault::custody_epoch`] before the checks it makes about who holds the key, and
+/// forgets with [`Vault::forget_master_at`], which deletes only while that epoch is unchanged.
+///
+/// **What a persistent vault owes.** Every app on the computer shares one store, so each
+/// operation here is linearizable across every handle and process on that store: the
+/// authenticated comparison and the mutation it decides are one step, under a cross-process
+/// lock or a transaction of the store, never a read in one process and a write in another.
+/// `Ok` from a write ([`Vault::store_master`], [`Vault::stage_master`],
+/// [`Vault::promote_master`]) means the key is durable: a crash after it leaves the key where
+/// the answer said, and a take acknowledges its inbox message only after such an `Ok`. A
+/// promote is crash-safe: after a crash in it, the key is staged or kept, never neither. An
+/// index or epoch the store cannot vouch for is an error or `None`, never a guess. The
+/// in-memory [`MemoryVault`] (tests) is exempt from durability and from the cross-process
+/// lock, since one process holds it.
 pub trait Vault: Send + Sync {
     /// Stores master `index` for `scid` as the kept key, under the never-go-back rule: a key
     /// kept at a *higher* index is never replaced by a lower one — the call answers
@@ -226,6 +244,16 @@ pub trait Vault: Send + Sync {
     /// on a `master_index` of `None`. A staged key stays: it may belong to a rotation in
     /// flight in another app sharing the vault, and only [`Vault::discard_staged`] removes it.
     fn forget_master(&self, scid: &str, index: u32) -> Result<Forgot, VaultError>;
+    /// The custody epoch of `scid`: a value that changes with every change of the kept key of
+    /// `scid` (a store, a promote, a forget), never otherwise, and never repeats within the
+    /// store's life (a counter; a persistent store may use the identifier of the kept item's
+    /// current state, such as a digest of its sealed bytes with its version). Needs no unlock.
+    fn custody_epoch(&self, scid: &str) -> Result<u64, VaultError>;
+    /// Forgets the kept master key of `scid` only while its custody epoch is still `epoch`
+    /// ([`Vault::custody_epoch`], read before the caller's checks), as one atomic step: a key
+    /// installed since, at any index, the same one included, is never the one forgotten
+    /// ([`Forgot::Kept`] names the index kept then). None kept is [`Forgot::Forgot`].
+    fn forget_master_at(&self, scid: &str, epoch: u64) -> Result<Forgot, VaultError>;
     /// One unlock (one prompt where the OS needs it) for a flow that uses the master key `why`.
     /// `now` starts the unlock's [`MasterUse::ttl_s`] (pass `why` to [`Unlocked::new`]).
     fn unlock(&self, scid: &str, why: MasterUse, now: u64) -> Result<Unlocked, VaultError>;
@@ -350,6 +378,9 @@ mod memory {
     #[derive(Default)]
     pub struct MemoryVault {
         keys: Mutex<Keys>,
+        /// Each identity's custody epoch: bumped on every change of its kept key, under the
+        /// `keys` lock.
+        epochs: Mutex<HashMap<String, u64>>,
         staged: Mutex<Staged>,
         pending: Mutex<Vec<Event>>,
         pushes: Mutex<Vec<PendingPush>>,
@@ -365,6 +396,18 @@ mod memory {
         /// Every unlock so far, in order.
         pub fn unlocks(&self) -> Vec<MasterUse> {
             self.unlocks.lock().map(|u| u.clone()).unwrap_or_default()
+        }
+
+        /// The kept key of `scid` changed: its custody epoch moves on. Called with the `keys`
+        /// lock held, so the change and the epoch are one step.
+        fn bump(&self, scid: &str) -> Result<(), VaultError> {
+            *self
+                .epochs
+                .lock()
+                .map_err(poisoned)?
+                .entry(scid.to_string())
+                .or_default() += 1;
+            Ok(())
         }
     }
 
@@ -386,6 +429,7 @@ mod memory {
                 }
             }
             keys.insert(scid.to_string(), (index, secret));
+            self.bump(scid)?;
             Ok(Stored::Stored)
         }
 
@@ -403,9 +447,42 @@ mod memory {
             match keys.get(scid).map(|(kept, _)| *kept) {
                 Some(kept) if kept != index => Ok(Forgot::Kept(kept)),
                 _ => {
-                    keys.remove(scid);
+                    if keys.remove(scid).is_some() {
+                        self.bump(scid)?;
+                    }
                     Ok(Forgot::Forgot)
                 }
+            }
+        }
+
+        fn custody_epoch(&self, scid: &str) -> Result<u64, VaultError> {
+            let _keys = self.keys.lock().map_err(poisoned)?;
+            Ok(self
+                .epochs
+                .lock()
+                .map_err(poisoned)?
+                .get(scid)
+                .copied()
+                .unwrap_or(0))
+        }
+
+        fn forget_master_at(&self, scid: &str, epoch: u64) -> Result<Forgot, VaultError> {
+            let mut keys = self.keys.lock().map_err(poisoned)?;
+            let now = self
+                .epochs
+                .lock()
+                .map_err(poisoned)?
+                .get(scid)
+                .copied()
+                .unwrap_or(0);
+            match keys.get(scid).map(|(kept, _)| *kept) {
+                Some(kept) if now != epoch => Ok(Forgot::Kept(kept)),
+                Some(_) => {
+                    keys.remove(scid);
+                    self.bump(scid)?;
+                    Ok(Forgot::Forgot)
+                }
+                None => Ok(Forgot::Forgot),
             }
         }
 
@@ -445,6 +522,7 @@ mod memory {
             }
             let (index, secret, _) = staged.remove(scid).ok_or(VaultError::NotFound)?;
             keys.insert(scid.to_string(), (index, secret));
+            self.bump(scid)?;
             Ok(Stored::Stored)
         }
 

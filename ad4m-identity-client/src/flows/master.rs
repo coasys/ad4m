@@ -529,6 +529,8 @@ pub async fn refresh_master<R: ExecutorRpc>(
         // refused, and the next stage replaces it.
         Some(_) | None => {}
     }
+    // Read together, before the take: the forget below is bound to this custody state.
+    let epoch = vault.custody_epoch(&scid)?;
     let kept = vault.master_index(&scid)?;
     if live && kept == Some(current) {
         return Ok(Refreshed::Current);
@@ -541,9 +543,10 @@ pub async fn refresh_master<R: ExecutorRpc>(
     match kept {
         Some(index) if index < current || !live => {
             // `kept` was read before the take. Another app sharing the vault may have
-            // installed the current key since (its take, or its promote): the forget is a
-            // compare-and-delete on the index read, never for a key installed after it.
-            match vault.forget_master(&scid, index)? {
+            // installed a key since (its take, or its promote), the same index included: the
+            // forget holds only while the custody epoch read with `kept` is unchanged, so it
+            // never takes a key installed after the check.
+            match vault.forget_master_at(&scid, epoch)? {
                 Forgot::Forgot => {
                     let id = executor
                         .post_request(&ad4m_ldk::identity::DeviceRequestBody::SendMaster {}, None)
@@ -583,6 +586,8 @@ pub async fn remove_master<R: ExecutorRpc>(
         executor.status().await?.key_id.ok_or_else(|| {
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
+    // Before the only-copy check: the forget below holds only while this custody state lasts.
+    let epoch = vault.custody_epoch(&scid)?;
     let (events, log_chain) = log_of(executor, did).await?;
     let check = |record: Option<&PrivateRecord>, chain: &KelChain| {
         // The events may lag the chain the write read; a key `add`ed since is no copy yet.
@@ -604,11 +609,12 @@ pub async fn remove_master<R: ExecutorRpc>(
         random,
     )
     .await?;
-    // Compare-and-delete on the index the vault reports: a key another app sharing the vault
-    // installed since (its take, or a promote) is never removed, and an unknown index (`None`)
-    // forgets nothing.
-    if let Some(index) = vault.master_index(&scid)? {
-        vault.forget_master(&scid, index)?;
+    // Compare-and-delete on the custody epoch read before the only-copy check: a key another
+    // app sharing the vault installed since (a duplicate delivery of the same master taken, a
+    // promote) is never removed, whatever its index, since the check did not see it; an
+    // unknown index (`None`) forgets nothing.
+    if vault.master_index(&scid)?.is_some() {
+        vault.forget_master_at(&scid, epoch)?;
     }
     // A stage at or behind the log would be promoted or kept by the next refresh, bringing back
     // the key the person just removed. One ahead is a rotation in flight: its owner decides.

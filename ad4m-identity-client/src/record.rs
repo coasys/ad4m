@@ -72,7 +72,9 @@ pub enum Change {
     /// device that keeps a master key says which with [`Change::Holds`].
     HoldsMaster { key_id: KeyId, holds: HoldsMaster },
     /// A listed device's vault keeps master `index`: `holdsMaster: true`, `masterIndex: index`.
-    /// Only the device itself (or the flow that put the key in its vault) writes it.
+    /// Only the device itself (or the flow that put the key in its vault) writes it. Monotonic:
+    /// an entry that already says `true` with a higher index (another app of the device
+    /// finished a later generation first) stands, since the vault never goes back one either.
     Holds { key_id: KeyId, index: u32 },
     /// Master `index` was put into a listed device's inbox: `holdsMaster: "offered"`, unless the
     /// entry already says the device holds `index` or a later master ([`Change::Holds`], written
@@ -116,8 +118,12 @@ fn merge(record: &mut PrivateRecord, chain: &KelChain, changes: &[Change]) {
             }
             Change::Holds { key_id, index } => {
                 if let Some(entry) = record.devices.get_mut(key_id) {
-                    entry.holds_master = HoldsMaster::Yes;
-                    entry.master_index = Some(*index);
+                    let newer = entry.holds_master == HoldsMaster::Yes
+                        && entry.master_index.is_some_and(|held| held > *index);
+                    if !newer {
+                        entry.holds_master = HoldsMaster::Yes;
+                        entry.master_index = Some(*index);
+                    }
                 }
             }
             Change::Offered { key_id, index } => {
