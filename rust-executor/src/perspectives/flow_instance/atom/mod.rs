@@ -319,20 +319,38 @@ pub fn valid_votes(
     proposer: &str,
     proposed_at: &str,
 ) -> Vec<Vote> {
-    let mut votes: Vec<(chrono::DateTime<chrono::Utc>, Vote)> = std::iter::once(Vote {
-        did: proposer.to_string(),
-        at: proposed_at.to_string(),
-    })
+    // Who a vote counts as: the person its signer's verdict names (the
+    // stored `person`), else the DID the vote names. One person's two
+    // devices are one voter — a device key's `acceptedBy` for its own DID
+    // and another's for the person sign for the same participant.
+    let voter_of =
+        |l: &DecoratedLinkExpression| l.person.clone().unwrap_or_else(|| l.data.target.clone());
+    let proposer_key = links_on(links, PROPOSER_PREDICATE)
+        .find(|l| signed_by(l, &l.data.target))
+        .map(voter_of)
+        .unwrap_or_else(|| proposer.to_string());
+    let mut votes: Vec<(chrono::DateTime<chrono::Utc>, String, Vote)> = std::iter::once((
+        proposer_key,
+        Vote {
+            did: proposer.to_string(),
+            at: proposed_at.to_string(),
+        },
+    ))
     .chain(
         links_on(links, ACCEPTED_BY_PREDICATE)
             .filter(|l| signed_by(l, &l.data.target))
-            .map(|l| Vote {
-                did: l.data.target.clone(),
-                at: l.timestamp.clone(),
+            .map(|l| {
+                (
+                    voter_of(l),
+                    Vote {
+                        did: l.data.target.clone(),
+                        at: l.timestamp.clone(),
+                    },
+                )
             }),
     )
-    .filter_map(|v| match parse_link_timestamp(&v.at) {
-        Some(instant) => Some((instant, v)),
+    .filter_map(|(key, v)| match parse_link_timestamp(&v.at) {
+        Some(instant) => Some((instant, key, v)),
         None => {
             log::warn!(
                 "flow: dropping vote by `{}` — timestamp `{}` is not RFC 3339, so it cannot be ordered",
@@ -343,12 +361,14 @@ pub fn valid_votes(
         }
     })
     .collect();
-    // Keep one vote per DID, the earliest — grouping by DID first, because
-    // `dedup_by` only ever drops neighbours.
-    votes.sort_by(|(a_at, a), (b_at, b)| (&a.did, a_at, &a.at).cmp(&(&b.did, b_at, &b.at)));
-    votes.dedup_by(|(_, later), (_, kept)| later.did == kept.did);
-    votes.sort_by(|(a_at, a), (b_at, b)| (a_at, &a.did, &a.at).cmp(&(b_at, &b.did, &b.at)));
-    votes.into_iter().map(|(_, v)| v).collect()
+    // Keep one vote per signer, the earliest — grouping by signer first,
+    // because `dedup_by` only ever drops neighbours.
+    votes.sort_by(|(a_at, a_key, a), (b_at, b_key, b)| {
+        (a_key, a_at, &a.at).cmp(&(b_key, b_at, &b.at))
+    });
+    votes.dedup_by(|(_, later_key, _), (_, kept_key, _)| later_key == kept_key);
+    votes.sort_by(|(a_at, _, a), (b_at, _, b)| (a_at, &a.did, &a.at).cmp(&(b_at, &b.did, &b.at)));
+    votes.into_iter().map(|(_, _, v)| v).collect()
 }
 
 impl TransitionAtom {
@@ -677,6 +697,30 @@ mod tests {
         assert!(
             !signed_by(&not_counted, person),
             "a link that does not count speaks for no one"
+        );
+    }
+
+    /// One person signing `acceptedBy` from two of its devices casts one
+    /// vote, not two: the dedupe key is the stored `person` when the verdict
+    /// names one, else the DID the vote names.
+    #[test]
+    fn two_devices_of_one_person_cast_one_vote() {
+        let person = "did:scid:coasys:1:zPerson";
+        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        // d1 votes for itself; d2 votes naming the person — both are the
+        // same person signing, whichever DID the link names.
+        for (target, author, at) in [("did:key:d1", "did:key:d1", T2), (person, "did:key:d2", T3)] {
+            let mut vote = link(ACCEPTED_BY_PREDICATE, target, author, true, at);
+            vote.person = Some(person.to_string());
+            links.push(vote);
+        }
+        // A voter the key map does not resolve keeps the DID its link names.
+        links.push(link(ACCEPTED_BY_PREDICATE, BOB, BOB, true, T3));
+        let votes = valid_votes(&links, ALICE, T1);
+        assert_eq!(
+            votes.iter().map(|v| v.did.as_str()).collect::<Vec<_>>(),
+            vec![ALICE, "did:key:d1", BOB],
+            "the person's two device signatures are one vote"
         );
     }
 
