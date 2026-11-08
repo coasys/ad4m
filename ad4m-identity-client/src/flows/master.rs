@@ -8,7 +8,8 @@
 //! current master key seals itself ([`crate::MasterSigner::seal_self`]) into
 //! `InboxBody::Master`, signed by itself, to the `enc` key the log lists for the device key, and
 //! goes into that device's joined inbox (`identity.inboxPut`, a store request the master key
-//! signs). The record then marks the device `holdsMaster: "offered"`.
+//! signs). The record then marks the device `holdsMaster: "offered"` ([`mark_offered`]), never
+//! over `true`: a device that took the key before that write landed stays `true`.
 //!
 //! **The retry list.** Each push is kept on the vault's retry list before the put and forgotten
 //! once the store takes it, or when the store refuses it for good. [`retry_pushes`], at each
@@ -22,7 +23,7 @@
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{InboxAddress, InboxError};
 use ad4m_identity_core::link::may_keep_master;
-use ad4m_identity_core::record::HoldsMaster;
+use ad4m_identity_core::record::{HoldsMaster, PrivateRecord};
 use ad4m_identity_core::{Event, KelChain, KeyId};
 use ad4m_ldk::identity::InboxWrite;
 
@@ -39,8 +40,9 @@ use crate::{ClientError, Clock, Random};
 pub struct Sent {
     /// The inbox message's id.
     pub message_id: String,
-    /// The record write that marks the device `holdsMaster: "offered"`, after the push. The
-    /// push stands either way.
+    /// The record write that marks the device `holdsMaster: "offered"`, after the push;
+    /// [`ClientError::HoldsMaster`] when the device took the key first. The push stands
+    /// either way.
     pub record: Result<u64, ClientError>,
 }
 
@@ -50,7 +52,7 @@ pub struct Retried {
     /// Each push tried, by device key id: the message id, or why it failed (a failure that may
     /// pass later stays on the retry list).
     pub pushes: Vec<(KeyId, Result<String, ClientError>)>,
-    /// The record write after the pushes that passed, if any did.
+    /// The record write after the pushes that passed, if any did ([`mark_offered`]).
     pub record: Option<Result<u64, ClientError>>,
 }
 
@@ -193,17 +195,52 @@ pub(crate) async fn send_with<R: ExecutorRpc>(
         executor, vault, events, chain, did, signer, key_id, clock, random,
     )
     .await?;
-    let record = record::write(
-        executor,
-        did,
-        &[Change::HoldsMaster {
-            key_id: key_id.to_string(),
-            holds: HoldsMaster::Offered,
-        }],
-        random,
-    )
-    .await;
+    let record = mark_offered(executor, did, vec![key_id.to_string()], random).await;
     Ok(Sent { message_id, record })
+}
+
+/// Marks the devices `key_ids`, just pushed the master key, `holdsMaster: "offered"` in one
+/// record write; answers the version written. An `"offered"` never replaces `true`: the write
+/// holds only on a version where none of their entries says `true` ([`record::write_if`], so
+/// also on every newer version it reads after a stale one). A device whose entry says `true`
+/// took the key before this write landed: it is left out and the rest are written; when none
+/// is left, the answer is [`ClientError::HoldsMaster`] of the last one left out.
+///
+/// The record has one master generation here (no rotation yet), so `true` is always the
+/// current master key.
+pub(crate) async fn mark_offered<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    mut key_ids: Vec<KeyId>,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    loop {
+        let changes: Vec<Change> = key_ids
+            .iter()
+            .map(|key_id| Change::HoldsMaster {
+                key_id: key_id.clone(),
+                holds: HoldsMaster::Offered,
+            })
+            .collect();
+        let not_held = |record: Option<&PrivateRecord>, _: &KelChain| {
+            let held = key_ids.iter().find(|key_id| {
+                record
+                    .and_then(|r| r.devices.get(*key_id))
+                    .is_some_and(|entry| entry.holds_master == HoldsMaster::Yes)
+            });
+            match held {
+                Some(key_id) => Err(ClientError::HoldsMaster(key_id.clone())),
+                None => Ok(()),
+            }
+        };
+        let written = record::write_if(executor, did, &changes, &not_held, random).await;
+        match written {
+            Err(ClientError::HoldsMaster(held)) if key_ids.len() > 1 => {
+                key_ids.retain(|key_id| *key_id != held);
+            }
+            answer => return answer,
+        }
+    }
 }
 
 /// Pushes again what the retry list keeps for `did`, the executor's identity, with one unlock
@@ -244,22 +281,19 @@ pub async fn retry_pushes<R: ExecutorRpc>(
     }
     let unlocked = vault.unlock(&scid, MasterUse::SendMaster, clock.now())?;
     let signer = unlocked.signer(clock.now())?;
-    let mut offered = Vec::new();
+    let mut offered: Vec<KeyId> = Vec::new();
     for key_id in live {
         let sent = push(
             executor, vault, &events, &chain, did, signer, &key_id, clock, random,
         )
         .await;
         if sent.is_ok() {
-            offered.push(Change::HoldsMaster {
-                key_id: key_id.clone(),
-                holds: HoldsMaster::Offered,
-            });
+            offered.push(key_id.clone());
         }
         retried.pushes.push((key_id, sent));
     }
     if !offered.is_empty() {
-        retried.record = Some(record::write(executor, did, &offered, random).await);
+        retried.record = Some(mark_offered(executor, did, offered, random).await);
     }
     Ok(retried)
 }

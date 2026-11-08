@@ -796,7 +796,12 @@ a new string ends the read of the last one.
   app keeps the push on a retry list of its own; it forgets it once the host takes it, or when
   the host refuses it for good, or when the device key has left the log, and retries what is
   left at each start and unlock. The holder marks the device `holdsMaster: "offered"`; the
-  device marks itself `true` once its vault keeps the key.
+  device marks itself `true` once its vault keeps the key. An `"offered"` never replaces
+  `true`: the holder writes it only on a version where the device's entry is not `true`, and
+  checks again on every newer version it reads after a stale one, so a device that took the
+  key before the holder's write landed stays `true`. At a first link the device's entry
+  (`false`) is written before the push, so a device that takes the key at once finds its
+  entry to mark.
 - *Writes the record* by reading the newest version, applying its own changes (a device's
   entry, a name, `holdsMaster`, a pending revocation) and dropping the entries of keys no
   longer valid at the head, sealing the result as the next version to every reader of the

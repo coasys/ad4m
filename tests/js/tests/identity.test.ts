@@ -737,7 +737,10 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         const answered = await holder.send({ cmd: "answer", did, id: posted.id });
         expect(answered.answered).to.equal("send-master");
         expect(await holder.send({ cmd: "requests" })).to.deep.equal([]);
-        expect((await holder.send({ cmd: "record", did })).record.devices.d2.holdsMaster).to.equal("offered");
+        // The desktop holds the master key already: an "offered" never replaces `true`, so
+        // the record is not written and still says it holds the key.
+        expect(answered.record).to.deep.equal({ error: "d2 holds the master key already" });
+        expect((await holder.send({ cmd: "record", did })).record.devices.d2.holdsMaster).to.equal(true);
         expect((await desk.client.identity.inbox()).map((m) => [m.id, m.kind])).to.deep.equal([[answered.id, "master"]]);
         const taken = await custody.send({ cmd: "takeMaster" });
         expect(taken).to.include({ did, index: 0 });

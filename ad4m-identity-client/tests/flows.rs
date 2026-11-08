@@ -1284,12 +1284,13 @@ async fn a_retried_confirm_pushes_the_master_key_and_writes_the_record_once() {
         .await
         .unwrap();
     assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
-    assert_eq!(linked.record.unwrap(), 1);
+    // Version 1 lists the device, version 2 marks it offered after the push.
+    assert_eq!(linked.record.unwrap(), 2);
 
     flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .expect_err("the offer is spent");
-    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 2);
     assert!(vault.pending_pushes().unwrap().is_empty());
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 
@@ -1353,9 +1354,9 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
     assert_eq!(a.rpc().publishes.get(), publishes + 1, "no second publish");
     assert_eq!((linked.head.seq, linked.key_id.as_str()), (1, "d2"));
     assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
-    assert_eq!(linked.record.unwrap(), 1);
+    assert_eq!(linked.record.unwrap(), 2);
     let opened = record::read(&a, &did).await.unwrap().unwrap();
-    assert_eq!(opened.version, 1);
+    assert_eq!(opened.version, 2);
     assert_eq!(opened.record.devices["d2"].name, "Desk");
     assert_eq!(
         opened.record.devices["d2"].holds_master,
@@ -1367,7 +1368,7 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
     flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .expect_err("the offer is spent");
-    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 1);
+    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 2);
     assert!(vault.pending_pushes().unwrap().is_empty());
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 
@@ -1833,7 +1834,8 @@ async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop(
         .unwrap();
     assert_eq!(linked.key_id, "d2");
     assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
-    assert_eq!(linked.record.unwrap(), 1);
+    // Version 1 lists the desktop before the key goes, version 2 marks it offered.
+    assert_eq!(linked.record.unwrap(), 2);
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
     assert!(vault.pending_pushes().unwrap().is_empty());
     join(&desk, &claimed_desk["offerId"]).await;
@@ -1850,7 +1852,7 @@ async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop(
         .unwrap()
         .expect("a master key waits");
     assert_eq!((taken.did.as_str(), taken.index), (did.as_str(), 0));
-    assert_eq!(taken.record.unwrap(), 2);
+    assert_eq!(taken.record.unwrap(), 3);
     let scid = ad4m_identity_core::scid_of(&did).unwrap();
     let held = vault.unlock(scid, MasterUse::Link, 0).unwrap();
     let kept = desk_vault.unlock(scid, MasterUse::Link, 0).unwrap();
@@ -1866,7 +1868,7 @@ async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop(
     // Both devices read the same record: the desktop holds the master key now.
     for reader in [&a, &desk] {
         let opened = record::read(reader, &did).await.unwrap().unwrap();
-        assert_eq!(opened.version, 2);
+        assert_eq!(opened.version, 3);
         assert_eq!(opened.record.devices["d2"].holds_master, HoldsMaster::Yes);
         assert_eq!(opened.record.devices["d2"].name, "Desk");
     }
@@ -2202,6 +2204,214 @@ async fn a_conditional_write_checks_every_version_it_builds_on() {
     assert_eq!(
         (opened.version, opened.record.devices[&d2].name.as_str()),
         (3, "Den")
+    );
+}
+
+/// The holder's executor, whose first record write after a master-key push the store takes
+/// only once `released` is set: the device took the key and wrote `holdsMaster: true` in
+/// between (the push and its `"offered"` race the device's take). `pushed` is set when the
+/// store took the push.
+struct HeldAfterPush<'a> {
+    inner: &'a TestExecutor,
+    pushed: &'a Cell<bool>,
+    released: &'a Cell<bool>,
+    held: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for HeldAfterPush<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.recordPut" && self.pushed.get() && !self.held.replace(true) {
+            while !self.released.get() {
+                tokio::task::yield_now().await;
+            }
+        }
+        let answer = self.inner.call(method, params).await;
+        if method == "identity.inboxPut" && answer.is_ok() {
+            self.pushed.set(true);
+        }
+        answer
+    }
+}
+
+/// The device's side of the race: once the push landed, it takes the master key (its record
+/// write `holdsMaster: true` lands first), then lets the holder's write go.
+async fn take_when_pushed(
+    device: &ViaExecutor<TestExecutor>,
+    pushed: &Cell<bool>,
+    released: &Cell<bool>,
+    offer_id: Option<&Value>,
+) -> u64 {
+    while !pushed.get() {
+        tokio::task::yield_now().await;
+    }
+    if let Some(offer_id) = offer_id {
+        join(device, offer_id).await;
+    }
+    let taken = take_master(device, &MemoryVault::new(), &OsRandom)
+        .await
+        .unwrap()
+        .expect("a master key waits");
+    released.set(true);
+    taken.record.unwrap()
+}
+
+/// A device that took the master key before the holder's `"offered"` landed keeps
+/// `holdsMaster: true`: the late `"offered"` meets the newer version, reads it again, and
+/// writes nothing over the take.
+#[tokio::test]
+async fn a_late_offered_leaves_a_device_that_took_the_master_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 23).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    let (pushed, released) = (Cell::new(false), Cell::new(false));
+    let holder = ViaExecutor::new(HeldAfterPush {
+        inner: a.rpc(),
+        pushed: &pushed,
+        released: &released,
+        held: Cell::new(false),
+    });
+    let (sent, taken) = tokio::join!(
+        send_master(&holder, &vault, &did, &d2, &SystemClock, &OsRandom),
+        take_when_pushed(&desk, &pushed, &released, None),
+    );
+    let sent = sent.unwrap();
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::Yes);
+    assert_eq!(opened.version, taken);
+    assert!(
+        matches!(&sent.record, Err(ClientError::HoldsMaster(k)) if *k == d2),
+        "{:?}",
+        sent.record
+    );
+}
+
+/// On a first link the device's entry is in the record before the master key goes, so a
+/// device that takes the key at once finds its entry and ends `holdsMaster: true`, and the
+/// holder's `"offered"` after the push writes nothing over it.
+#[tokio::test]
+async fn a_device_that_takes_the_master_key_at_once_at_its_link_ends_holding_it() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 24).await;
+    let (pushed, released) = (Cell::new(false), Cell::new(false));
+    let holder = ViaExecutor::new(HeldAfterPush {
+        inner: a.rpc(),
+        pushed: &pushed,
+        released: &released,
+        held: Cell::new(false),
+    });
+    let flow = LinkFlow::open(
+        &holder,
+        &vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_desk = desk
+        .rpc()
+        .call(
+            "identity.claimOffer",
+            json!({ "offer": flow.offer_string(), "canKeepMaster": true }),
+        )
+        .await
+        .unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+    let (linked, taken) = tokio::join!(
+        flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true),
+        take_when_pushed(&desk, &pushed, &released, Some(&claimed_desk["offerId"])),
+    );
+    let linked = linked.unwrap();
+    assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let listed = &opened.record.devices[&linked.key_id];
+    assert_eq!(
+        (listed.name.as_str(), listed.holds_master),
+        ("Desk", HoldsMaster::Yes)
+    );
+    assert_eq!(opened.version, taken);
+    assert!(
+        matches!(&linked.record, Err(ClientError::HoldsMaster(k)) if *k == linked.key_id),
+        "{:?}",
+        linked.record
+    );
+}
+
+/// The retry list pushes again to a device that took the key since and to one that did not:
+/// one record write marks the second offered and leaves the first `true`.
+#[tokio::test]
+async fn a_retry_marks_offered_only_the_devices_that_do_not_hold_the_master_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let laptop = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 25).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    let d3 = link_app(
+        &a,
+        &vault,
+        &did,
+        &laptop,
+        entry("Laptop", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    take_master(&desk, &MemoryVault::new(), &OsRandom)
+        .await
+        .unwrap()
+        .expect("a master key waits");
+
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    for key_id in [&d2, &d3] {
+        vault
+            .keep_push(&PendingPush {
+                scid: scid.clone(),
+                key_id: key_id.clone(),
+            })
+            .unwrap();
+    }
+    let before = record::read(&a, &did).await.unwrap().unwrap().version;
+    let retried = retry_pushes(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(retried.pushes.len(), 2);
+    assert!(retried.pushes.iter().all(|(_, sent)| sent.is_ok()));
+    assert_eq!(retried.record.unwrap().unwrap(), before + 1);
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::Yes);
+    assert_eq!(
+        opened.record.devices[&d3].holds_master,
+        HoldsMaster::Offered
     );
 }
 

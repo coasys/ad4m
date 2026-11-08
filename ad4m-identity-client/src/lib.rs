@@ -134,6 +134,10 @@ pub enum ClientError {
     /// A request of the box that its poster did not sign as the log lists it.
     #[error("the request is not signed by its poster: {0}")]
     Poster(String),
+    /// Not written: the record says this device took the master key already
+    /// (`holdsMaster: true`), and an `"offered"` never replaces that.
+    #[error("{0} holds the master key already")]
+    HoldsMaster(ad4m_identity_core::KeyId),
     /// The record's version moved under every write tried.
     #[error("the private record kept changing; try again")]
     RecordBusy,
