@@ -35,7 +35,6 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
-#[cfg(feature = "build")]
 use zeroize::Zeroizing;
 
 use crate::domain::{signing_bytes, verify_signed};
