@@ -4038,8 +4038,17 @@ impl PerspectiveInstance {
             .into_iter()
             .filter(|l| !removed.contains(l.data.target.as_str()))
             .collect();
-        let mut seen: std::collections::HashSet<String> =
-            out.iter().map(|l| l.data.target.clone()).collect();
+        // A persisted link hides a staged addition for its target only when it
+        // counts — the same cut the collection diff below applies. A stored
+        // link whose verdict does not count cannot stand in for the member the
+        // batch already set: hiding the staged link would leave the target
+        // looking unset to the next save in this batch, and it would be staged
+        // a second time.
+        let mut seen: std::collections::HashSet<String> = out
+            .iter()
+            .filter(|l| l.proof.valid == Some(true))
+            .map(|l| l.data.target.clone())
+            .collect();
 
         for expr in batch.diff.additions.iter().filter(|e| relevant(&e.data)) {
             if removed.contains(expr.data.target.as_str()) || !seen.insert(expr.data.target.clone())
@@ -8666,6 +8675,102 @@ mod tests {
                 .iter()
                 .any(|l| l.data.target == member && l.proof.valid == Some(true)),
             "the member must be set by a link that counts"
+        );
+    }
+
+    /// The batched partner of
+    /// `test_collection_setter_readds_a_member_whose_only_link_does_not_count`:
+    /// a non-counting persisted link must not hide the counting link the
+    /// first batched save staged. If it did, the second save in the same
+    /// batch would diff against a membership that still looks empty and
+    /// stage the member again — and the commit would write two links.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_stages_one_counting_link_for_a_member_whose_only_link_does_not_count(
+    ) {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/invalid-member-batched";
+        let predicate = "we://children";
+        let member = "we://m";
+
+        let signer = TestSigner::generate();
+        let mut forged: LinkExpression = signer
+            .sign(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: member.to_string(),
+                }
+                .normalize(),
+            )
+            .into();
+        forged.proof.signature = "ab".repeat(64);
+        forged.status = Some(LinkStatus::Shared);
+        perspective.sparql_store.add_link(&forged).unwrap();
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+        let params = || -> Vec<Parameter> {
+            serde_json::from_value(serde_json::json!([
+                { "name": "value", "value": member }
+            ]))
+            .unwrap()
+        };
+
+        let batch_id = perspective.create_batch().await;
+        for _ in 0..2 {
+            perspective
+                .execute_commands(
+                    commands.clone(),
+                    source.to_string(),
+                    params(),
+                    Some(batch_id.clone()),
+                    &context,
+                )
+                .await
+                .unwrap();
+        }
+        {
+            let batches = perspective.batch_store.read().await;
+            let batch = batches.get(&batch_id).expect("batch is still open");
+            let staged = batch
+                .diff
+                .additions
+                .iter()
+                .filter(|l| {
+                    l.data.source == source
+                        && l.data.predicate.as_deref() == Some(predicate)
+                        && l.data.target == member
+                })
+                .count();
+            assert_eq!(
+                staged, 1,
+                "the second save must not stage the member again — its first \
+                 staged link was hidden by the persisted one that does not count"
+            );
+        }
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        let counting: Vec<_> = perspective
+            .get_links(&LinkQuery {
+                source: Some(source.to_string()),
+                predicate: Some(predicate.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|l| l.data.target == member && l.proof.valid == Some(true))
+            .collect();
+        assert_eq!(
+            counting.len(),
+            1,
+            "the member gets exactly one counting link however many saves the batch runs"
         );
     }
 

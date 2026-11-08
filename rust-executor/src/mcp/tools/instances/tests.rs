@@ -1621,6 +1621,157 @@ async fn instance_remove_from_collection_removes_only_the_membership_link() {
     );
 }
 
+/// A membership link that does not count must not pass the idempotency
+/// check: a forged, uncheckable or flagged member link would otherwise
+/// suppress every legitimate add of that item. The counting cut is the
+/// same one model reads apply — `proof.valid == Some(true)` — so Invalid,
+/// CantCheck and Flagged all fail it.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_add_to_collection_writes_when_the_only_membership_does_not_count() {
+    use crate::agent::signatures::{anchored_signing_bytes, TestSigner};
+    use crate::identity::cache::tests::TestLog;
+    use crate::identity::cache::{global_key_map, TrustedLog};
+    use crate::identity::verdict::LinkVerdict;
+    use crate::types::{ExpressionProof, Link as CoreLink, LinkExpression, LinkStatus};
+    use ad4m_identity_core::build::Signer;
+
+    let (handler, uuid, _guard) = setup(false).await;
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("room"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    )["base_uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let data_for = |target: &str| {
+        CoreLink {
+            source: channel.clone(),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: target.to_string(),
+        }
+        .normalize()
+    };
+    let store = |link: &LinkExpression| {
+        let mut link = link.clone();
+        link.status = Some(LinkStatus::Shared);
+        perspective.sparql_store.add_link(&link).unwrap();
+    };
+    let verdict_of = |target: &str| {
+        perspective
+            .sparql_store
+            .get_all_links()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.data.target == target)
+            .and_then(|l| l.verdict)
+    };
+
+    // Invalid: a real signature over the membership, then corrupted.
+    let invalid_item = "flux://item/invalid".to_string();
+    let mut forged: LinkExpression = TestSigner::generate().sign(data_for(&invalid_item)).into();
+    forged.proof.signature = "ab".repeat(64);
+    store(&forged);
+    assert!(
+        matches!(verdict_of(&invalid_item), Some(LinkVerdict::Invalid(_))),
+        "premise: the membership must be invalid, got {:?}",
+        verdict_of(&invalid_item)
+    );
+
+    // CantCheck: genuinely signed and anchored, by a key the key map has
+    // no answer for.
+    let cant_check_item = "flux://item/cantcheck".to_string();
+    let uncheckable: LinkExpression = TestSigner::generate()
+        .sign_anchored(data_for(&cant_check_item), 0)
+        .into();
+    store(&uncheckable);
+    assert_eq!(
+        verdict_of(&cant_check_item),
+        Some(LinkVerdict::CantCheck),
+        "premise: the membership must be uncheckable"
+    );
+
+    // Flagged: the signer's log revoked its key after the link's anchor,
+    // and no stored order says the link arrived first.
+    let mut log = TestLog::new(61);
+    log.revoke_d1();
+    let chain = log.chain();
+    let map = global_key_map();
+    map.publish(
+        &log.scid(),
+        TrustedLog {
+            state: chain.state().clone(),
+            trusted: chain.head().seq,
+        },
+    );
+    let flagged_item = "flux://item/flagged".to_string();
+    let data = data_for(&flagged_item);
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let key = log.device.key();
+    let bytes = anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+    store(&LinkExpression {
+        author: format!("did:key:{key}"),
+        timestamp,
+        data,
+        proof: ExpressionProof {
+            key: format!("did:key:{key}#{key}"),
+            signature: hex::encode(log.device.sign(&bytes)),
+            anchor: Some(0),
+        },
+        status: Some(LinkStatus::Shared),
+    });
+    assert_eq!(
+        verdict_of(&flagged_item),
+        Some(LinkVerdict::Flagged),
+        "premise: the membership must be flagged"
+    );
+
+    for item in [&invalid_item, &cant_check_item, &flagged_item] {
+        let add = parse(
+            &handler
+                .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Channel".into(),
+                    base_uri: channel.clone(),
+                    collection: "messages".into(),
+                    item_uri: item.clone(),
+                }))
+                .await,
+        );
+        assert_eq!(add["success"], true, "{add}");
+        assert_eq!(
+            add["links_added"], 1,
+            "a membership that does not count must not suppress the add: {add}"
+        );
+    }
+
+    // Control: with a counting membership already stored, the add is the
+    // documented no-op.
+    let control_item = "flux://item/control".to_string();
+    for expected in [1, 0] {
+        let add = parse(
+            &handler
+                .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Channel".into(),
+                    base_uri: channel.clone(),
+                    collection: "messages".into(),
+                    item_uri: control_item.clone(),
+                }))
+                .await,
+        );
+        assert_eq!(add["links_added"], expected, "{add}");
+    }
+    map.forget(&log.scid());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn add_child_and_get_children_are_class_agnostic() {
     let (handler, uuid, _guard) = setup(false).await;
