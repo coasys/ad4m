@@ -149,7 +149,12 @@ export class ApiClient {
      *  it is. Calls that went out on it settle there (a reply resolves by id
      *  from any socket, so nothing in flight is dropped or repeated) and it
      *  closes once they do; a call not sent yet goes out on the new socket, and
-     *  subscriptions are watched again there. A client whose old token the
+     *  subscriptions are watched again there — the watch goes out before the
+     *  queued calls on open, so an event a call of this client causes still
+     *  reaches its handlers. Missed are the events emitted between this call
+     *  and the applied watch, the same gap a reconnect has: a superseded
+     *  socket's events are not dispatched, since past the new watch an event
+     *  would reach both sockets and deliver twice. A client whose old token the
      *  executor refused connects again for its event handlers. */
     setToken(token: string): void {
         const changed = token !== this.token
@@ -295,12 +300,19 @@ export class ApiClient {
                     return
                 }
                 const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error')
+                // Read the socket's standing before the settle lets a drained superseded one go.
+                const superseded = this._superseded.has(ws)
                 pending.reject(rpcError)
-                // The executor answers 401 only when the token stopped working, then closes the socket.
-                if (rpcError.status === 401) this._failAuth(rpcError.body)
+                // The executor answers 401 only when the token stopped working, then closes the
+                // socket. On a superseded socket the verdict is the token it dialed with, never
+                // the current one: the new token stands or falls by its own socket.
+                if (rpcError.status === 401 && !superseded) this._failAuth(rpcError.body)
                 return
             }
-            // A dropped socket's events are not this client's any more: its successor watches again.
+            // A dropped socket's events are not this client's any more: its successor watches
+            // again. A superseded one's still arrive while it finishes its calls and go
+            // undelivered on purpose: an event emitted after the successor's `events.watch`
+            // landed reaches both sockets, so taking the old one's too would deliver it twice.
             if (parsed.type === 'pong' || this._ws !== ws) return
             const perspective = parsed.perspectiveUuid
             const regs = this._handlers.get(parsed.type as string)
@@ -327,13 +339,7 @@ export class ApiClient {
         this._watching = '{}'
         this._watchRetries = 0
         this._flushWatch()
-        for (const pending of this._pendingCalls.values()) {
-            if (!pending.sent) {
-                this._send(ws, pending.message)
-                pending.sent = true
-                pending.ws = ws
-            }
-        }
+        this._flushCalls(ws)
         if (this._hasConnectedOnce) {
             for (const cb of this._reconnectCallbacks) {
                 try { cb() } catch (e) {
@@ -378,6 +384,21 @@ export class ApiClient {
                 pending.retry = false
             } else {
                 pending.reject(closedError(reason))
+            }
+        }
+        // A read the closing socket carried goes out on its successor now, while it
+        // is open: `_onOpen` is the only other place unsent calls are flushed, and
+        // this socket's successor opened already.
+        if (this._ws?.readyState === 1 /* OPEN */) this._flushCalls(this._ws)
+    }
+
+    /** Every call not yet sent goes out on `ws` (the open socket). */
+    private _flushCalls(ws: WebSocket): void {
+        for (const pending of this._pendingCalls.values()) {
+            if (!pending.sent) {
+                this._send(ws, pending.message)
+                pending.sent = true
+                pending.ws = ws
             }
         }
     }

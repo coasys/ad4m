@@ -854,6 +854,40 @@ describe('ApiClient.setToken', () => {
         await expect(promise).resolves.toBe('ok')
     })
 
+    it('does not count a 401 reply on the replaced socket against the new token', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        const stale = call('agent.get')
+        await flush()
+        client.setToken('new')
+        await flush()
+        // The call went out on the old token's socket: its 401 is that token's verdict.
+        socket(0).reply({ id: socket(0).sent[0].id, error: { code: 401, message: 'token expired' } })
+        await expect(stale).rejects.toMatchObject({ status: 401 })
+        expect(failed).not.toHaveBeenCalled()
+        // Calls made now go out on the new token's socket.
+        const promise = call<string>('agent.status')
+        await flush()
+        expect(tokenOf(socket(1))).toBe('new')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'agent.status')!.id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+    })
+
+    it('sends a read the replaced socket carried on its successor when the old socket closes', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const read = call<string[]>('perspective.all')
+        await flush()
+        client.setToken('new')
+        await flush()
+        expect(socket(1).readyState).toBe(1)
+        // The old socket closes before answering: the read it carried goes out on the new one.
+        socket(0).drop()
+        expect(socket(1).sent.map(m => m.type)).toContain('perspective.all')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+    })
+
     it('connects again with a new token after the executor refused the old one', async () => {
         client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
         const failed = jest.fn()
