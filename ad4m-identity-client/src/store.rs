@@ -77,7 +77,9 @@ use ad4m_identity_core::inbox::{
     InboxPayload, PreInboxAuth,
 };
 use ad4m_identity_core::link::{decode_secret, make_claim, match_code, DeviceString, OfferString};
-use ad4m_identity_core::record::{RecordError, RECORD_KEY_LEN};
+use ad4m_identity_core::record::{
+    envelope_signing_bytes, RecordError, SealedRecord, RECORD_KEY_LEN,
+};
 use ad4m_identity_core::{
     did_of, is_ed25519_multikey, scid_of, signing_bytes, x25519_multikey_of,
     x25519_secret_of_ed25519, Event, HeadStatement, KelChain, Op, X25519Secret, REQUEST_DOMAIN,
@@ -1720,9 +1722,27 @@ impl ViaStore {
 
     /// `identity.recordPut`: `PUT /v1/private/{scid}` with the sealed record as its body —
     /// the bytes the request's `bodyHash` covers — and the caller's master-signed request or
-    /// `device`'s.
+    /// `device`'s. An envelope with an empty `sig` is this device's write: its `signer` must
+    /// be this device key's id, and `device` signs the envelope here (the executor signs it
+    /// in the wallet). A signed envelope — a master-signed write — passes unchanged.
     async fn record_put(&self, params: &Value) -> Result<Value, RpcError> {
-        let body = body_bytes(&params["record"])?;
+        let mut sealed: SealedRecord = serde_json::from_value(params["record"].clone())
+            .map_err(|e| bad_request(format!("record: {e}")))?;
+        let mut position = None;
+        if sealed.sig.is_empty() {
+            let at = self.position().await?;
+            if sealed.signer != at.key_id {
+                return Err(bad_request(format!(
+                    "signer: an unsigned record must name this device's key {}, not {}",
+                    at.key_id, sealed.signer
+                )));
+            }
+            let bytes = envelope_signing_bytes(&at.scid, &sealed)
+                .map_err(|e| bad_request(e.to_string()))?;
+            sealed.sig = encode_proof_value(&self.device.sign(&bytes));
+            position = Some(at);
+        }
+        let body = body_bytes(&sealed)?;
         if let Some(request) = params.get("request").filter(|r| !r.is_null()) {
             let request = signed_request_of(request)?;
             let scid = record_scid(&request, "PUT")?;
@@ -1734,7 +1754,10 @@ impl ViaStore {
             )
             .await
         } else {
-            let position = self.position().await?;
+            let position = match position {
+                Some(at) => at,
+                None => self.position().await?,
+            };
             let path = format!("/v1/private/{}", position.scid);
             let (status, reply) = self.as_device(&position, "PUT", &path, Some(body)).await?;
             if !(200..300).contains(&status) {

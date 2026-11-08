@@ -263,7 +263,7 @@ fn shown(screen: CreateScreen) -> Vec<String> {
 /// `create` on a `ViaStore` executor; answers the identity.
 async fn create(executor: &ViaExecutor<ViaStore>, vault: &MemoryVault, entropy: u8) -> String {
     confirmed(entropy)
-        .finish(executor, vault, this_phone(), &OsRandom)
+        .finish(executor, vault, this_phone(), &SystemClock, &OsRandom)
         .await
         .unwrap()
         .did
@@ -332,7 +332,10 @@ async fn a_phone_claims_an_offer_and_takes_the_master_key_from_its_inbox() {
     assert_eq!(inbox(&phone_rpc).await, Vec::<Value>::new());
 
     // The record, read by the phone's own entry, says it holds the master key.
-    let opened = record::read(&phone_rpc, &did).await.unwrap().unwrap();
+    let opened = record::read(&phone_rpc, &phone_vault, &did)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(opened.record.devices["d2"].holds_master, HoldsMaster::Yes);
     assert_eq!(opened.record.devices["d2"].master_index, Some(0));
 
@@ -485,6 +488,7 @@ async fn a_device_reads_writes_and_merges_the_record() {
     let did = create(&holder, &holder_vault, 45).await;
 
     let phone_rpc = phone(&router, 5, None);
+    let phone_vault = MemoryVault::new();
     let flow = LinkFlow::open(
         &holder,
         &holder_vault,
@@ -508,6 +512,7 @@ async fn a_device_reads_writes_and_merges_the_record() {
     // stored version.
     let version = record::write(
         &phone_rpc,
+        &phone_vault,
         &did,
         &[Change::Rename {
             key_id: "d2".to_string(),
@@ -521,6 +526,7 @@ async fn a_device_reads_writes_and_merges_the_record() {
     // The holder writes meanwhile; the phone's next write merges onto the newer version.
     let holder_version = record::write(
         &holder,
+        &holder_vault,
         &did,
         &[Change::Rename {
             key_id: "d1".to_string(),
@@ -533,6 +539,7 @@ async fn a_device_reads_writes_and_merges_the_record() {
     assert_eq!(holder_version, version + 1);
     let merged = record::write(
         &phone_rpc,
+        &phone_vault,
         &did,
         &[Change::Rename {
             key_id: "d2".to_string(),
@@ -545,10 +552,100 @@ async fn a_device_reads_writes_and_merges_the_record() {
     assert_eq!(merged, version + 2);
 
     // Both writes landed in the record the phone reads through its own entry.
-    let opened = record::read(&phone_rpc, &did).await.unwrap().unwrap();
+    let opened = record::read(&phone_rpc, &phone_vault, &did)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(opened.version, version + 2);
     assert_eq!(opened.record.devices["d1"].name, "Holder's phone");
     assert_eq!(opened.record.devices["d2"].name, "My other phone");
+}
+
+/// A `HttpClient` over the router that rewrites the `receipt` of every
+/// `GET /v1/private/{scid}` answer through `tamper` — a store that serves the record it
+/// holds under a receipt that is not for it: one naming another envelope, or signed for a
+/// store key the phone does not trust.
+struct LyingReceiptHttp {
+    inner: RouterHttp,
+    tamper: Rc<dyn Fn(&mut Value)>,
+}
+
+#[async_trait(?Send)]
+impl HttpClient for LyingReceiptHttp {
+    async fn send(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let private =
+            request.method == "GET" && request.url.starts_with(&format!("{STORE_URL}/v1/private/"));
+        let mut response = self.inner.send(request).await?;
+        if private && response.status == 200 {
+            let mut body: Value = serde_json::from_slice(&response.body).unwrap();
+            (self.tamper)(&mut body["receipt"]);
+            response.body = serde_json::to_vec(&body).unwrap();
+        }
+        Ok(response)
+    }
+}
+
+// Review of coasys/ad4m#1673 (Lal): `ViaStore` passes the store's `{record, receipt}` of
+// `GET /v1/private/{scid}` through as `identity.record`, and `record::read` checks the
+// receipt before it trusts a field (`decrypt_record` → `verify_stored`): the store key the
+// phone trusts for signed heads vouches for this identity, version and envelope at the seq
+// it accepted it. A record served under a receipt that is not for it — the envelope of
+// another record, or a key that is no trusted store key — is refused; the honest store
+// reads.
+#[tokio::test]
+async fn a_record_served_under_a_receipt_that_is_not_for_it_is_refused() {
+    let (router, _dir) = store();
+    let holder = phone(&router, 1, None);
+    let holder_vault = MemoryVault::new();
+    let did = create(&holder, &holder_vault, 101).await;
+
+    // The honest store reads: the create wrote the record's first version.
+    let opened = record::read(&holder, &holder_vault, &did)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(opened.version, 1);
+    assert_eq!(opened.record.devices["d1"].name, "My phone");
+
+    // A receipt naming another envelope: the store never accepted this record as it.
+    let foreign = ad4m_hash_chain::hash_bytes(b"another record's envelope");
+    let lying = phone_with(
+        LyingReceiptHttp {
+            inner: RouterHttp {
+                router: router.clone(),
+            },
+            tamper: Rc::new(move |receipt: &mut Value| {
+                receipt["envelope"] = json!(foreign);
+            }),
+        },
+        1,
+        Some(scid(&did).to_string()),
+    );
+    let refused = record::read(&lying, &MemoryVault::new(), &did).await;
+    assert!(
+        matches!(refused, Err(ClientError::Record(RecordError::Receipt(_)))),
+        "a receipt of another envelope passed: {refused:?}"
+    );
+
+    // A receipt of a key that is not the store key the phone trusts for signed heads.
+    let not_the_store = StoreKey::from_secret([9; 32]).did();
+    let lying = phone_with(
+        LyingReceiptHttp {
+            inner: RouterHttp {
+                router: router.clone(),
+            },
+            tamper: Rc::new(move |receipt: &mut Value| {
+                receipt["store"] = json!(not_the_store);
+            }),
+        },
+        1,
+        Some(scid(&did).to_string()),
+    );
+    let refused = record::read(&lying, &MemoryVault::new(), &did).await;
+    assert!(
+        matches!(refused, Err(ClientError::Record(RecordError::Receipt(_)))),
+        "a receipt of an untrusted store key passed: {refused:?}"
+    );
 }
 
 // The phone as the holder's side: it opens an offer for another device, confirms the claim,
@@ -633,7 +730,10 @@ async fn a_phone_links_another_device_and_revokes_it() {
         .find(|d| d["keyId"] == "d3")
         .unwrap();
     assert!(d3["revokedSeq"].is_number());
-    let opened = record::read(&phone_rpc, &did).await.unwrap().unwrap();
+    let opened = record::read(&phone_rpc, &phone_vault, &did)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!opened.record.devices.contains_key("d3"));
 
     // The revoked device speaks for the identity no longer: its signed calls refuse.
@@ -668,6 +768,7 @@ async fn a_restore_reads_and_writes_the_record_with_the_recovery_key() {
     let signer = KeySigner::new(&master.to_bytes(), 0);
 
     let fresh = phone(&router, 8, None);
+    let fresh_vault = MemoryVault::new();
     let events = fresh.events(&did).await.unwrap();
     let chain = ad4m_identity_core::fold(&events).unwrap();
 
@@ -677,7 +778,7 @@ async fn a_restore_reads_and_writes_the_record_with_the_recovery_key() {
         master: &signer,
         clock: &SystemClock,
     };
-    let opened = record::read_as(&fresh, &did, &chain, &reader, &OsRandom)
+    let opened = record::read_as(&fresh, &fresh_vault, &did, &chain, &reader, &OsRandom)
         .await
         .unwrap()
         .expect("the record is readable before this device joins");
@@ -706,7 +807,10 @@ async fn a_restore_reads_and_writes_the_record_with_the_recovery_key() {
     assert_eq!(status(&new_phone).await["did"].as_str().unwrap(), did);
 
     // The restored phone reads and writes the record as a device of the identity.
-    let opened = record::read(&new_phone, &did).await.unwrap().unwrap();
+    let opened = record::read(&new_phone, &new_vault, &did)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(opened.record.devices.contains_key(&enrolled.key_id));
 }
 
