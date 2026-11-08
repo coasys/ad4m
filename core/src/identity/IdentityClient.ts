@@ -21,6 +21,7 @@ import type { PreparedDevice } from "../generated/api/PreparedDevice";
 import type { RecordStored } from "../generated/api/RecordStored";
 import type { RequestPosted } from "../generated/api/RequestPosted";
 import type { SealedRecord } from "../generated/api/SealedRecord";
+import type { StoredRecord } from "../generated/api/StoredRecord";
 import type { TakenMaster } from "../generated/api/TakenMaster";
 
 /**
@@ -170,16 +171,18 @@ export class IdentityClient {
     }
 
     /**
-     * The identity's sealed private details record (`null` before the first write). Here and
+     * The identity's sealed private details record with the store's receipt for it
+     * (`{record, receipt}`, `null` before the first write); a reader checks the record's writer
+     * at `receipt.seq` (`open_record` in `ad4m-identity-core`). Here and
      * in `recordPut`, `requests` and `deleteRequest`, `request` is a store request the
      * identity's master key signed (a custody service, a restoring app); without one the
      * executor signs with this agent's device key. A post is signed by the device key only.
      */
-    async record(request?: SignedRequest): Promise<SealedRecord | null> {
+    async record(request?: SignedRequest): Promise<StoredRecord | null> {
         return this.#apiClient.call("identity.record", { request });
     }
 
-    /** Writes the next version of the sealed record. */
+    /** Writes the next version of the sealed record: the version and the store's receipt for it. */
     async recordPut(record: SealedRecord, request?: SignedRequest): Promise<RecordStored> {
         return this.#apiClient.call("identity.recordPut", { record, request });
     }

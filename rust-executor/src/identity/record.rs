@@ -17,7 +17,7 @@ use super::device::{body_bytes, device_key, store_request, WalletSigner, REQUEST
 use super::service::{backend_error, cache_error, db, now, IdentityService};
 use super::types::{
     convert, DeleteRequestParams, DeviceRequest, PostRequestParams, RecordParams, RecordPutParams,
-    RecordStored, RequestPosted, RequestsParams, SealedRecord, SignedRequest,
+    RecordStored, RequestPosted, RequestsParams, SignedRequest, StoredRecord,
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
@@ -127,13 +127,13 @@ impl IdentityService {
         }
     }
 
-    /// `identity.record`: the sealed private record of `agent`'s identity; `null` before the
-    /// first write.
+    /// `identity.record`: the sealed private record of `agent`'s identity with the store's
+    /// receipt for it, both as the store answered; `null` before the first write.
     pub async fn record(
         &self,
         agent: &AgentContext,
         params: &RecordParams,
-    ) -> Result<Option<SealedRecord>, WsRpcError> {
+    ) -> Result<Option<StoredRecord>, WsRpcError> {
         let position = self.bound_position(agent).await?;
         let path = format!("/v1/private/{}", position.scid);
         let request = self.request_for(&position, params.request.as_ref(), "GET", &path, b"")?;
@@ -145,7 +145,8 @@ impl IdentityService {
         wire(&record)
     }
 
-    /// `identity.recordPut`: writes the next version of the sealed record.
+    /// `identity.recordPut`: writes the next version of the sealed record; answers the version
+    /// and the store's receipt for the write.
     pub async fn record_put(
         &self,
         agent: &AgentContext,
@@ -300,8 +301,9 @@ pub(crate) mod tests {
     }
 
     /// The executor relays the signed envelope whole: the writer's key id and signature and the
-    /// recovery key's master attestation reach the store and come back from a read unchanged.
-    /// A field it dropped would break the envelope signature the store and every reader check.
+    /// recovery key's master attestation reach the store and come back from a read unchanged,
+    /// and so does the store's receipt, from the write and from the read. A field it dropped
+    /// would break the envelope signature, or the receipt's, that every reader checks.
     #[tokio::test]
     async fn the_record_passes_the_signed_envelope_and_the_recovery_attestation_unchanged() {
         let world = Bound::new(72).await;
@@ -318,13 +320,36 @@ pub(crate) mod tests {
         });
         let params: RecordPutParams =
             serde_json::from_value(serde_json::json!({ "record": wire_record })).unwrap();
-        service.record_put(&world.agent, &params).await.unwrap();
+        let stored = service.record_put(&world.agent, &params).await.unwrap();
+        let held = world.store.record.lock().unwrap().clone().unwrap();
+        let receipt = serde_json::to_value(&held.receipt).unwrap();
+        assert_eq!(
+            serde_json::to_value(&stored).unwrap(),
+            serde_json::json!({ "version": 1, "receipt": receipt })
+        );
         let read = service
             .record(&world.agent, &RecordParams::default())
             .await
             .unwrap()
             .expect("the stored record");
-        assert_eq!(serde_json::to_value(&read).unwrap(), wire_record);
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            serde_json::json!({ "record": wire_record, "receipt": receipt })
+        );
+        // The store's signature over the envelope as it reached it: still a receipt a reader
+        // takes for this log.
+        let sealed: ad4m_identity_core::record::SealedRecord =
+            serde_json::from_value(wire_record.clone()).unwrap();
+        let core_receipt: ad4m_identity_core::record::RecordReceipt =
+            serde_json::from_value(receipt).unwrap();
+        assert_eq!(
+            core_receipt.envelope,
+            ad4m_identity_core::record::envelope_hash(&world.log.scid(), &sealed).unwrap()
+        );
+        assert_eq!(
+            core_receipt.store,
+            format!("did:key:{}", world.store.key.multikey())
+        );
         let seen = world.store.requests.lock().unwrap().clone();
         let (call, put) = &seen[0];
         assert_eq!(*call, "put_record");
@@ -344,7 +369,7 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .is_none());
-        let sealed = SealedRecord {
+        let sealed = crate::identity::types::SealedRecord {
             version: 1,
             wrapped: [("d1".to_string(), "AAAA".to_string())].into(),
             recovery_key: None,
@@ -370,7 +395,10 @@ pub(crate) mod tests {
                 .record(&world.agent, &RecordParams::default())
                 .await
                 .unwrap(),
-            Some(sealed.clone())
+            Some(StoredRecord {
+                record: sealed.clone(),
+                receipt: stored.receipt.clone(),
+            })
         );
         service
             .post_request(

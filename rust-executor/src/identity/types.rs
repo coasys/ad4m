@@ -548,12 +548,42 @@ pub struct RecordPutParams {
     pub request: Option<SignedRequest>,
 }
 
-/// `identity.recordPut`.
+/// The store's word that it accepted a record write: its head key (`store`, a did:key) over
+/// `{scid, version, envelope, seq, store}` (domain `coasys:record-receipt`). `envelope` is the
+/// sha2-256 multihash of the signed envelope (with `sig`), `seq` the log's head the write was
+/// checked against: a reader checks the record's writer at `seq`
+/// (`ad4m_identity_core::record::open_record`). The executor passes it unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordReceipt {
+    pub scid: String,
+    #[ts(type = "number")]
+    pub version: u64,
+    /// sha2-256 multihash of the signed envelope, base58btc.
+    pub envelope: String,
+    #[ts(type = "number")]
+    pub seq: u64,
+    /// did:key of the store.
+    pub store: String,
+    /// The store's signature, base58btc (`z…`).
+    pub sig: String,
+}
+
+/// `identity.record`: the sealed record with the store's receipt for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredRecord {
+    pub record: SealedRecord,
+    pub receipt: RecordReceipt,
+}
+
+/// `identity.recordPut`: the version written and the store's receipt for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordStored {
     #[ts(type = "number")]
     pub version: u64,
+    pub receipt: RecordReceipt,
 }
 
 /// What a device asks in the request box.

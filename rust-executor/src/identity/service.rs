@@ -1380,7 +1380,7 @@ mod tests {
             &self,
             did: &str,
             req: &ad4m_ldk::identity::SignedRequest,
-        ) -> Result<Option<ad4m_ldk::identity::SealedRecord>, IdentityError> {
+        ) -> Result<Option<ad4m_ldk::identity::StoredRecord>, IdentityError> {
             self.inner.get_record(did, req).await
         }
         async fn put_record(

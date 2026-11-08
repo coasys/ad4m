@@ -1269,8 +1269,8 @@ pub(crate) mod tests {
     use ad4m_ldk::identity::{
         AgentRecord, AppendRequest, Claim, ClaimReceipt, DeviceRequest, InboxAddress, InboxAuth,
         InboxMessage, InboxStored, InboxWrite, KeyIndexEntry, LogPage, OfferListing, OfferOpened,
-        OfferProgress, PostedRequest, RecordStored, RequestPosted, SealedRecord, SignedOffer,
-        SignedRequest,
+        OfferProgress, PostedRequest, RecordReceipt, RecordStored, RequestPosted, SealedRecord,
+        SignedOffer, SignedRequest, StoredRecord,
     };
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
@@ -1457,8 +1457,8 @@ pub(crate) mod tests {
         pub inbox_auths: StdMutex<Vec<InboxAuth>>,
         /// The claims made, with their offer id.
         pub claims: StdMutex<Vec<(String, Claim)>>,
-        /// The private record it holds.
-        pub record: StdMutex<Option<SealedRecord>>,
+        /// The private record it holds, with the receipt it signed for it.
+        pub record: StdMutex<Option<StoredRecord>>,
         /// The signed requests of the record and request-box calls, by call name.
         pub requests: StdMutex<Vec<(&'static str, SignedRequest)>>,
         /// The most events a page holds, when set (the head stays the log's).
@@ -1732,7 +1732,7 @@ pub(crate) mod tests {
             &self,
             _: &str,
             req: &SignedRequest,
-        ) -> Result<Option<SealedRecord>, IdentityError> {
+        ) -> Result<Option<StoredRecord>, IdentityError> {
             self.requests
                 .lock()
                 .unwrap()
@@ -1749,9 +1749,27 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .push(("put_record", req.clone()));
-            *self.record.lock().unwrap() = Some(record.clone());
+            // The receipt the identity store signs: over the envelope, at the log's head.
+            let events = self.events.lock().unwrap().clone();
+            let chain = ad4m_identity_core::fold(&events).unwrap();
+            let sealed: ad4m_identity_core::record::SealedRecord =
+                serde_json::from_value(serde_json::to_value(record).unwrap()).unwrap();
+            let receipt = ad4m_identity_core::record::sign_receipt(
+                chain.id(),
+                &sealed,
+                chain.head().seq,
+                &self.key.0,
+            )
+            .unwrap();
+            let receipt: RecordReceipt =
+                serde_json::from_value(serde_json::to_value(&receipt).unwrap()).unwrap();
+            *self.record.lock().unwrap() = Some(StoredRecord {
+                record: record.clone(),
+                receipt: receipt.clone(),
+            });
             Ok(RecordStored {
                 version: record.version,
+                receipt,
             })
         }
         async fn post_request(
