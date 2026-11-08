@@ -2123,6 +2123,88 @@ async fn record_writes_merge_into_the_newest_version() {
     );
 }
 
+/// `write_if` checks the version it builds on, and again on the version it reads after a
+/// stale one: a check that fails there writes nothing and answers the check's error.
+#[tokio::test]
+async fn a_conditional_write_checks_every_version_it_builds_on() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 19).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    let named = |name: &'static str| {
+        let d2 = d2.clone();
+        move |r: Option<&record_core::PrivateRecord>, _: &KelChain| match r {
+            Some(r) if r.devices[&d2].name == name => Ok(()),
+            _ => Err(ClientError::Step("renamed under the write")),
+        }
+    };
+    let rename = |name: &str| Change::Rename {
+        key_id: d2.clone(),
+        name: name.into(),
+    };
+    let desk_named = named("Desk");
+    assert_eq!(
+        record::write_if(&a, &did, &[rename("Studio")], &desk_named, &OsRandom)
+            .await
+            .unwrap(),
+        2
+    );
+    // The check failed on the version read: nothing is written.
+    let puts = a.rpc().record_puts.get();
+    let refused = record::write_if(&a, &did, &[rename("Den")], &desk_named, &OsRandom).await;
+    assert!(matches!(refused, Err(ClientError::Step(_))), "{refused:?}");
+    assert_eq!(a.rpc().record_puts.get(), puts);
+
+    // It held on the version first read, the put met a newer one, and it fails there.
+    struct RenamedFirst<'a> {
+        inner: &'a TestExecutor,
+        desk: &'a ViaExecutor<TestExecutor>,
+        did: &'a str,
+        d2: &'a str,
+        done: Cell<bool>,
+    }
+    #[async_trait(?Send)]
+    impl ExecutorRpc for RenamedFirst<'_> {
+        async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+            if method == "identity.recordPut" && !self.done.replace(true) {
+                let rename = Change::Rename {
+                    key_id: self.d2.into(),
+                    name: "Den".into(),
+                };
+                record::write(self.desk, self.did, &[rename], &OsRandom)
+                    .await
+                    .unwrap();
+            }
+            self.inner.call(method, params).await
+        }
+    }
+    let raced = ViaExecutor::new(RenamedFirst {
+        inner: a.rpc(),
+        desk: &desk,
+        did: &did,
+        d2: &d2,
+        done: Cell::new(false),
+    });
+    let studio_named = named("Studio");
+    let refused = record::write_if(&raced, &did, &[rename("Loft")], &studio_named, &OsRandom).await;
+    assert!(matches!(refused, Err(ClientError::Step(_))), "{refused:?}");
+    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    assert_eq!(
+        (opened.version, opened.record.devices[&d2].name.as_str()),
+        (3, "Den")
+    );
+}
+
 /// A device asks for the master key; the holder checks the poster, sends the key, marks the
 /// device offered and deletes the request. A request whose body changed after it was signed,
 /// or that names another poster, is refused; one asking for a rotation is left for it.

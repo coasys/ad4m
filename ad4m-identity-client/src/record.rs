@@ -156,9 +156,31 @@ pub async fn write<R: ExecutorRpc>(
     changes: &[Change],
     random: &dyn Random,
 ) -> Result<u64, ClientError> {
+    write_if(executor, did, changes, &|_, _| Ok(()), random).await
+}
+
+/// A condition a write holds to: it sees the version the write builds on (`None` before the
+/// first write) and the log at the head, and refuses with the error the write answers.
+pub type Precondition<'a> =
+    &'a dyn Fn(Option<&PrivateRecord>, &KelChain) -> Result<(), ClientError>;
+
+/// [`write`] only while `check` holds on the version it builds on. The check runs again on
+/// each read after a stale version, and the store takes only the stored version plus one, so a
+/// version written was built on a version that passed: a change that must not land over some
+/// state (an `"offered"` over a device that took the master key) never does, however late it
+/// comes.
+pub async fn write_if<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    changes: &[Change],
+    check: Precondition<'_>,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
     for _ in 0..MAX_WRITES {
         let chain = chain_of(executor, did).await?;
-        let (version, mut record, recovery, key_id) = match read_at(executor, did, &chain).await? {
+        let opened = read_at(executor, did, &chain).await?;
+        check(opened.as_ref().map(|(o, _)| &o.record), &chain)?;
+        let (version, mut record, recovery, key_id) = match opened {
             Some((opened, key_id)) => (opened.version + 1, opened.record, opened.recovery, key_id),
             None => {
                 let key_id = executor.status().await?.key_id.ok_or_else(|| {
