@@ -11,7 +11,7 @@ use ad4m_identity_core::inbox::{seal, sign_payload, InboxAddress, InboxBody, Inb
 use ad4m_identity_core::link::SignedBy;
 use ad4m_identity_core::{Event, KeyId, Multikey};
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::secret::Secret;
 use crate::{Random, RandomRng};
@@ -68,7 +68,13 @@ pub trait MasterSigner: Signer {
     fn index(&self) -> u32;
     /// This master key as `InboxBody::Master { did, index, secret }` in a payload to the device
     /// key `to`, signed by this key at `by`, sealed to the device's `enc` key `to_enc` for
-    /// `address`. The secret leaves only sealed, and every copy made for the seal is wiped.
+    /// `address`. The secret leaves only sealed. The copies this crate and the core make on the
+    /// way are wiped, whether the seal succeeds or fails: the encoded secret in the body, the
+    /// JSON values built to sign and seal the payload, the signed bytes and the payload's text
+    /// before the seal (both written once at their length, so no shorter copy is left behind
+    /// as they grow). What the libraries underneath keep is not
+    /// covered: the hash state of the Ed25519 signature over the payload, the cipher's working
+    /// buffers, and copies on the stack.
     #[allow(clippy::too_many_arguments)]
     fn seal_self(
         &self,
@@ -198,9 +204,7 @@ impl MasterSigner for KeySigner {
         };
         let mut payload = sign_payload(to.to_string(), body, sent_at, by, self)?;
         let sealed = seal(to_enc, address, &payload, &mut RandomRng(random));
-        if let InboxBody::Master { secret, .. } = &mut payload.body {
-            secret.zeroize();
-        }
+        payload.body.wipe();
         sealed
     }
 }
