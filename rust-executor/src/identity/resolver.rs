@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -792,6 +793,15 @@ pub struct Resolver {
     keys: StdMutex<HashMap<String, String>>,
     /// Until when the key index is not asked, after it failed to answer ([`BREAKER`]).
     index_down_until: StdMutex<Option<Instant>>,
+    /// Signers the key map does not know → the discovery pass that last asked about them
+    /// ([`Resolver::discovery_turn`]).
+    discovery_tried: StdMutex<HashMap<String, u64>>,
+    /// The number of the current discovery pass (one per [`Resolver::prepare_at`]).
+    discovery_pass: AtomicU64,
+    /// The last key-index call met an agent language that does not serve the index
+    /// ([`IdentityError::NotServed`]): a lookup costs no store call and answers "no log", so
+    /// the discovery cap defers no signer.
+    key_index_absent: AtomicBool,
 }
 
 impl Resolver {
@@ -817,6 +827,9 @@ impl Resolver {
             misses: StdMutex::new(HashMap::new()),
             keys: StdMutex::new(HashMap::new()),
             index_down_until: StdMutex::new(None),
+            discovery_tried: StdMutex::new(HashMap::new()),
+            discovery_pass: AtomicU64::new(0),
+            key_index_absent: AtomicBool::new(false),
         }
     }
 
@@ -952,9 +965,22 @@ impl Resolver {
 
     /// [`Resolver::prepare`] at the unix time `now` (tests move the clock).
     pub(crate) async fn prepare_at(&self, signers: &[(String, Option<u64>)], now: u64) {
+        let map = self.cache.key_map();
+        // Signers the key map does not know: each may cost the key index a call. Which of them
+        // this pass asks about: those asked about longest ago first.
+        let unknown: Vec<&str> = signers
+            .iter()
+            .filter_map(|(did, _)| multikey_of(did))
+            .filter(|key| matches!(map.lookup(key), KeyLookup::Unknown))
+            .collect();
+        let asked = self.discovery_turn(&unknown);
+        // Asked in turn order, so a signer the index fails on (tripping the breaker) holds back
+        // only those after it in this turn, which the next turn asks first.
+        for key in &asked {
+            self.lookup_signer(key).await;
+        }
+        let asked: std::collections::HashSet<&str> = asked.into_iter().collect();
         let mut seen = std::collections::HashSet::new();
-        // Signers the key map does not know: each may cost the key index a call.
-        let mut discovered = std::collections::HashSet::new();
         for (did, anchor) in signers {
             if !seen.insert((did.as_str(), *anchor)) {
                 continue;
@@ -962,19 +988,26 @@ impl Resolver {
             let Some(key) = multikey_of(did) else {
                 continue;
             };
-            if matches!(self.cache.key_map().lookup(key), KeyLookup::Unknown)
-                && !discovered.contains(key)
-            {
-                if discovered.len() >= DISCOVERY_PER_BATCH {
-                    // Not asked about in this batch: its links wait (`CantCheck`) rather than
-                    // count as a key no log lists.
-                    self.cache.key_map().note_pending(key);
+            let lookup = match map.lookup(key) {
+                // No key index: the lookup costs no store call, so the cap does not apply.
+                KeyLookup::Unknown
+                    if !asked.contains(key) && self.key_index_absent.load(Ordering::Relaxed) =>
+                {
+                    self.lookup_signer(key).await
+                }
+                known => known,
+            };
+            let scid = match lookup {
+                KeyLookup::Listed { scid, .. } => scid,
+                KeyLookup::NoLog => continue,
+                KeyLookup::Unknown => {
+                    if !asked.contains(key) {
+                        // Not asked about in this batch: its links wait (`CantCheck`) rather
+                        // than count as a key no log lists.
+                        map.note_pending(key);
+                    }
                     continue;
                 }
-                discovered.insert(key);
-            }
-            let KeyLookup::Listed { scid, .. } = self.lookup_signer(key).await else {
-                continue;
             };
             if !self.cache.refreshed_within(&scid, now, ADMIT_FRESHNESS) {
                 if let Err(e) = self
@@ -990,6 +1023,35 @@ impl Resolver {
                 }
             }
         }
+    }
+
+    /// Which of the `unknown` signers this pass asks the key index about, at most
+    /// [`DISCOVERY_PER_BATCH`], in the order they are to be asked: those never asked first,
+    /// then those asked about longest ago, in batch order among equals. So signers the index
+    /// keeps failing on (or that keep coming first in a batch) do not hold the others back for
+    /// good: each pass moves on.
+    fn discovery_turn<'a>(&self, unknown: &[&'a str]) -> Vec<&'a str> {
+        let pass = self.discovery_pass.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut keys: Vec<&str> = Vec::with_capacity(unknown.len());
+        let mut distinct = std::collections::HashSet::new();
+        for key in unknown {
+            if distinct.insert(*key) {
+                keys.push(key);
+            }
+        }
+        let Ok(mut tried) = self.discovery_tried.lock() else {
+            return keys.into_iter().take(DISCOVERY_PER_BATCH).collect();
+        };
+        // A stable sort: never asked (0) first, then by the pass that last asked.
+        keys.sort_by_key(|key| tried.get(*key).copied().unwrap_or(0));
+        keys.truncate(DISCOVERY_PER_BATCH);
+        if tried.len() >= MAP_BOUND {
+            tried.clear();
+        }
+        for key in &keys {
+            tried.insert(key.to_string(), pass);
+        }
+        keys
     }
 
     fn index_down(&self) -> bool {
@@ -3756,6 +3818,44 @@ mod link_check_tests {
                 "stale head, anchor {anchor:?}"
             );
         }
+    }
+
+    /// `DISCOVERY_PER_BATCH` signers the key index fails on every time stand before one it
+    /// knows, in every batch. Each pass trips the breaker on a failing one; the signers not
+    /// asked yet go first on the next pass, so the known one is found within a few passes,
+    /// not never.
+    #[tokio::test]
+    async fn discovery_reaches_a_signer_behind_ones_the_index_keeps_failing_on() {
+        let log = TestLog::new(75);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let resolver = resolver_on(store.clone());
+        let failing: Vec<String> = (0..DISCOVERY_PER_BATCH)
+            .map(|_| TestSigner::generate().did)
+            .collect();
+        store.key_index_down_for.lock().unwrap().extend(
+            failing
+                .iter()
+                .map(|did| multikey_of(did).unwrap().to_string()),
+        );
+        let device = format!("did:key:{}", log.device.key());
+        let signers: Vec<(String, Option<u64>)> = failing
+            .iter()
+            .cloned()
+            .chain([device])
+            .map(|did| (did, Some(0)))
+            .collect();
+        for _ in 0..3 {
+            // The breaker's pause is over.
+            *resolver.index_down_until.lock().unwrap() = None;
+            resolver.prepare(&signers).await;
+            if matches!(
+                resolver.cache.key_map().lookup(&log.device.key()),
+                KeyLookup::Listed { .. }
+            ) {
+                return;
+            }
+        }
+        panic!("the signer the index knows was never discovered");
     }
 
     /// A signer past the discovery cap stays unknown until a later batch. Its unanchored

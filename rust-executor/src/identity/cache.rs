@@ -1459,6 +1459,10 @@ pub(crate) mod tests {
         pub store_down: AtomicBool,
         /// A `key_owner` call fails as unavailable.
         pub key_index_down: AtomicBool,
+        /// A `key_owner` call for one of these multikeys fails as unavailable.
+        pub key_index_down_for: StdMutex<HashSet<String>>,
+        /// A `key_owner` call fails as an agent language without the key index does.
+        pub key_index_not_served: AtomicBool,
         pub key_owner_calls: AtomicUsize,
         /// The agent records written, with their signed requests.
         pub puts: StdMutex<Vec<(AgentRecord, Option<SignedRequest>)>>,
@@ -1481,6 +1485,8 @@ pub(crate) mod tests {
                 pause_store: StdMutex::new(None),
                 store_down: AtomicBool::new(false),
                 key_index_down: AtomicBool::new(false),
+                key_index_down_for: StdMutex::new(HashSet::new()),
+                key_index_not_served: AtomicBool::new(false),
                 key_owner_calls: AtomicUsize::new(0),
                 puts: StdMutex::new(vec![]),
                 put_down: AtomicBool::new(false),
@@ -1542,7 +1548,12 @@ pub(crate) mod tests {
             _wait_s: u8,
         ) -> Result<Option<KeyIndexEntry>, IdentityError> {
             self.key_owner_calls.fetch_add(1, Ordering::SeqCst);
-            if self.key_index_down.load(Ordering::SeqCst) {
+            if self.key_index_not_served.load(Ordering::SeqCst) {
+                return Err(IdentityError::NotServed("identity.keyOwner".into()));
+            }
+            if self.key_index_down.load(Ordering::SeqCst)
+                || self.key_index_down_for.lock().unwrap().contains(multikey)
+            {
                 return Err(IdentityError::Unavailable("down".into()));
             }
             let events = self.events.lock().unwrap().clone();
