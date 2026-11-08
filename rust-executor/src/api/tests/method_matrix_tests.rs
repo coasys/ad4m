@@ -2109,6 +2109,7 @@ async fn dispatch_logs_a_bots_call_with_its_answer() {
         BOT_DID,
         Err(crate::identity::bot_key::BotKeyError::StoreUnavailable),
     );
+    let world_users_own = world.users_own.clone();
     world.remove().await;
     assert!(
         !dispatched.message.starts_with("bot-") && !dispatched.message.starts_with("not-in-can"),
@@ -2120,4 +2121,89 @@ async fn dispatch_logs_a_bots_call_with_its_answer() {
     assert_eq!(entry.method, "perspective.addLink");
     assert_eq!(entry.action.as_deref(), Some("write"));
     assert_eq!(entry.outcome, format!("failed:{}", dispatched.code));
+    assert_eq!(
+        entry.space.as_deref(),
+        Some(world_users_own.as_str()),
+        "a perspective without a neighbourhood is named by its UUID"
+    );
+}
+
+/// WE #1671: the log names every entry's space the way the owner's page knows it, by the
+/// neighbourhood URL when the perspective has one: a write in a shared perspective is logged
+/// under the URL a join of it is, not the perspective's local UUID. A refusal names it too.
+#[tokio::test]
+async fn the_log_names_a_shared_perspective_by_its_neighbourhood_url() {
+    use crate::identity::bot_key::BotKey;
+    use crate::identity::verdict::KeyVerdict;
+    let world = World::new().await;
+    let url = format!("neighbourhood://{}", uuid::Uuid::new_v4());
+    crate::perspectives::get_perspective(&world.users_own)
+        .expect("the user's perspective")
+        .persisted
+        .lock()
+        .await
+        .shared_url = Some(url.clone());
+    register_bot(&world, "active", &["read", "write"]);
+    crate::bots::set_test_key(
+        BOT_DID,
+        Ok(BotKey {
+            key_id: "d2".into(),
+            verdict: KeyVerdict::Valid,
+            scope: Some(ad4m_identity_core::BotScope {
+                can: vec!["read".into(), "write".into()],
+                expires: u64::MAX,
+            }),
+        }),
+    );
+    let map = build_handler_map();
+    let logged = || {
+        crate::db_backend::db_backend()
+            .bot_activity(BOT_DID, None, 1000)
+            .unwrap()
+    };
+    let before = logged().len();
+    let ctx = || {
+        Arc::new(
+            RequestContext::user_for_test(
+                BOT_DID,
+                vec![crate::agent::capabilities::ALL_CAPABILITY.clone()],
+            )
+            .with_reason("tidy the board"),
+        )
+    };
+    // Admitted (the guard then answers): logged after it ran.
+    let written = map
+        .dispatch(
+            "perspective.addLink",
+            json!({ "uuid": world.users_own, "link": link() }),
+            ctx(),
+        )
+        .await;
+    // Refused by the bot check (no reason given for a write).
+    let refused = map
+        .dispatch(
+            "perspective.addLink",
+            json!({ "uuid": world.users_own, "link": link() }),
+            Arc::new(RequestContext::user_for_test(
+                BOT_DID,
+                vec![crate::agent::capabilities::ALL_CAPABILITY.clone()],
+            )),
+        )
+        .await;
+    crate::bots::set_test_key(
+        BOT_DID,
+        Err(crate::identity::bot_key::BotKeyError::StoreUnavailable),
+    );
+    world.remove().await;
+    assert!(written.is_err() && refused.is_err());
+    let entries = logged();
+    assert_eq!(entries.len(), before + 2);
+    for entry in &entries[..2] {
+        assert_eq!(
+            entry.space.as_deref(),
+            Some(url.as_str()),
+            "{}",
+            entry.outcome
+        );
+    }
 }

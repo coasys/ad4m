@@ -39,7 +39,9 @@ Rules:
 - **Only dispatch records** (`record: true`); `HandlerMap::admit` (MCP's pre-check) does not.
   A refusal by the bot check is logged at once; an admitted write or join is logged after it
   ran (`log::Pending`), `allowed` or `failed:<status>` when the method's guard or handler
-  answered an error.
+  answered an error. Every entry names its space by the neighbourhood URL when the
+  perspective has one (`as_logged`), the name a join of it is logged under; a perspective's
+  UUID only for one without a neighbourhood.
 - **Who enforces what.** The grant (spaces, `can`, expiry, pause, revocation) is the hosting
   executor's: it is not signed by the owner's master key, and only the executor that runs the
   bot enforces it (a trusted-host restriction). What every other reader verifies is what the

@@ -497,8 +497,10 @@ pub async fn admit(
     record: bool,
 ) -> Result<Option<log::Pending>, WsRpcError> {
     let reach = reach(method, guard, params);
-    let decided = decide(bot, &reach, ctx.reason.as_deref()).await;
     let reason = ctx.reason.as_deref();
+    let space_url = space_url_of(&reach).await;
+    let decided = decide_at(bot, &reach, space_url.as_deref(), reason).await;
+    let reach = as_logged(reach, space_url.as_deref());
     match decided {
         Err(refusal) => {
             if record {
@@ -549,13 +551,15 @@ pub async fn admit_watch(
                 action: BotAction::Read,
                 space: item.map(|uuid| Space::Perspective(uuid.to_string())),
             };
+            let space_url = space_url_of(&reach).await;
             let decided = match item {
                 None => Err(Refusal::forbidden(
                     BOT_GRANT,
                     "a bot watches the perspectives of its grant, not every perspective",
                 )),
-                Some(_) => decide(bot, &reach, reason).await,
+                Some(_) => decide_at(bot, &reach, space_url.as_deref(), reason).await,
             };
+            let reach = as_logged(reach, space_url.as_deref());
             if let Err(refusal) = decided {
                 log::record(bot, method, &reach, reason, &log::refused(&refusal));
                 return Err(refusal.error());
@@ -566,8 +570,29 @@ pub async fn admit_watch(
 }
 
 async fn decide(bot: &BotRow, reach: &Reach, reason: Option<&str>) -> Result<(), Refusal> {
+    let space_url = space_url_of(reach).await;
+    decide_at(bot, reach, space_url.as_deref(), reason).await
+}
+
+/// [`decide`] with the neighbourhood URL of the perspective `reach` names already read.
+async fn decide_at(
+    bot: &BotRow,
+    reach: &Reach,
+    space_url: Option<&str>,
+    reason: Option<&str>,
+) -> Result<(), Refusal> {
     let now = now();
-    let space_url = match reach {
+    decide_grant(bot, reach, space_url, now)?;
+    let Reach::Action { action, .. } = reach else {
+        return Ok(());
+    };
+    decide_key(bot_key_of(bot).await, *action, now)?;
+    decide_reason(*action, reason)
+}
+
+/// The neighbourhood URL of the perspective `reach` names, when it has one.
+async fn space_url_of(reach: &Reach) -> Option<String> {
+    match reach {
         Reach::Action {
             space: Some(Space::Perspective(uuid)),
             ..
@@ -576,13 +601,26 @@ async fn decide(bot: &BotRow, reach: &Reach, reason: Option<&str>) -> Result<(),
             None => None,
         },
         _ => None,
-    };
-    decide_grant(bot, reach, space_url.as_deref(), now)?;
-    let Reach::Action { action, .. } = reach else {
-        return Ok(());
-    };
-    decide_key(bot_key_of(bot).await, *action, now)?;
-    decide_reason(*action, reason)
+    }
+}
+
+/// `reach` as the activity log names it: a perspective by its neighbourhood URL when it has
+/// one (`space_url`), the name a join of it is logged under and the owner's page knows; by its
+/// UUID only when it has none.
+pub fn as_logged(reach: Reach, space_url: Option<&str>) -> Reach {
+    match (reach, space_url) {
+        (
+            Reach::Action {
+                action,
+                space: Some(Space::Perspective(_)),
+            },
+            Some(url),
+        ) => Reach::Action {
+            action,
+            space: Some(Space::Url(url.to_string())),
+        },
+        (reach, _) => reach,
+    }
 }
 
 /// What a managed agent's event stream does with one event.

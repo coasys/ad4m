@@ -8,7 +8,12 @@ export type BotActivity = { id: number, at: number, method: string,
 /**
  * `null` for a call outside every action.
  */
-action: BotAction | null, space: string | null, reason: string | null, 
+action: BotAction | null, 
+/**
+ * The space the call named: a neighbourhood URL (a join, or a perspective that is a
+ * neighbourhood), a perspective's UUID only for one without a neighbourhood.
+ */
+space: string | null, reason: string | null, 
 /**
  * Written once the call answered: `allowed` (it ran and succeeded), `failed:<status>`
  * (the grant let it through, then the method's guard or handler answered that error

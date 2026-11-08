@@ -232,6 +232,28 @@ fn the_reason_is_read_from_the_frames_meta_and_cut() {
 }
 
 #[test]
+fn the_log_names_a_perspective_by_its_neighbourhood_url_when_it_has_one() {
+    let write = action(BotAction::Write, in_space("p1"));
+    assert_eq!(
+        as_logged(write.clone(), Some("neighbourhood://n1")),
+        action(
+            BotAction::Write,
+            Some(Space::Url("neighbourhood://n1".into()))
+        )
+    );
+    assert_eq!(as_logged(write.clone(), None), write);
+    let join = action(
+        BotAction::Join,
+        Some(Space::Url("neighbourhood://n1".into())),
+    );
+    assert_eq!(as_logged(join.clone(), None), join);
+    assert_eq!(
+        as_logged(Reach::Own, Some("neighbourhood://n1")),
+        Reach::Own
+    );
+}
+
+#[test]
 fn an_activity_entry_names_the_action_the_space_the_reason_and_the_outcome() {
     let row = bot("active", &["write"], &["p1"], None);
     let write = action(BotAction::Write, in_space("p1"));

@@ -158,6 +158,8 @@ pub struct BotActivity {
     pub method: String,
     /// `null` for a call outside every action.
     pub action: Option<BotAction>,
+    /// The space the call named: a neighbourhood URL (a join, or a perspective that is a
+    /// neighbourhood), a perspective's UUID only for one without a neighbourhood.
     pub space: Option<String>,
     pub reason: Option<String>,
     /// Written once the call answered: `allowed` (it ran and succeeded), `failed:<status>`
