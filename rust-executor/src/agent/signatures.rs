@@ -35,15 +35,14 @@ pub fn verify_string_signed_by_did(
 pub fn verify<T: Serialize>(expr: &Expression<T>) -> Result<bool, AnyError> {
     // The envelope first: a malformed one is an error, not a verdict.
     hex::decode(&expr.proof.signature)?;
-    if expr.proof.anchor.is_none() {
-        parse_timestamp(&expr.timestamp)?;
-    }
+    parse_timestamp(&expr.timestamp)?;
     Ok(crate::identity::check_signed(expr).verdict.counts())
 }
 
 /// Whether `expr`'s signature holds under its author's `did:key`, over the bytes its proof
 /// names: the old signed bytes without an anchor, `coasys:link` `{data, timestamp, anchor}`
-/// with one. Reads no log.
+/// with one. Reads no log. A timestamp that is not a date never holds, anchored or not: date
+/// filters and ordering read it as one.
 pub fn signature_holds<T: Serialize>(expr: &Expression<T>) -> bool {
     let Ok(sig_bytes) = hex::decode(&expr.proof.signature) else {
         return false;
@@ -51,6 +50,9 @@ pub fn signature_holds<T: Serialize>(expr: &Expression<T>) -> bool {
     match expr.proof.anchor {
         None => verify_by(expr, &expr.author).unwrap_or(false),
         Some(anchor) => {
+            if parse_timestamp(&expr.timestamp).is_err() {
+                return false;
+            }
             let Some(key) = expr.author.strip_prefix("did:key:") else {
                 return false;
             };
