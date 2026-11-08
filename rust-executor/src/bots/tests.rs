@@ -247,3 +247,126 @@ fn an_activity_entry_names_the_action_the_space_the_reason_and_the_outcome() {
     assert_eq!(refused.action, None);
     assert_eq!(refused.outcome, BOT_GRANT);
 }
+
+/// A bot's session on a connection, with a user's default capabilities: the grant, not the
+/// token, bounds it.
+fn bot_connection(
+    row: BotRow,
+) -> (
+    crate::api::ws_rpc::Connection,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
+    use crate::agent::capabilities::get_user_default_capabilities;
+    use crate::agent::session::{Principal, Session};
+    use crate::agent::AgentContext;
+    use crate::types::RequestContext;
+    let did = row.did.clone();
+    remember(row);
+    let session = Session::for_test(Principal::Agent(AgentContext::managed(did.clone())))
+        .with_caps(get_user_default_capabilities())
+        .with_did(&did);
+    let (tx, out) = tokio::sync::mpsc::unbounded_channel();
+    let conn = crate::api::ws_rpc::Connection::new(
+        std::sync::Arc::new(build_handler_map()),
+        std::sync::Arc::new(RequestContext::for_session(session)),
+        tx,
+    );
+    (conn, out)
+}
+
+/// `events.watch` is answered on the connection before the handler map, so `admit` never
+/// sees it: a bot watches only perspectives of its grant, as reads there. A join-only bot
+/// watches nothing; a reader watches its space (the grant passes; this executor has no owner
+/// log to read, so the log's half answers 503), not another space and not every perspective.
+#[tokio::test]
+async fn a_bot_watches_only_the_perspectives_of_its_grant() {
+    let answer = |out: &mut tokio::sync::mpsc::UnboundedReceiver<String>| -> Value {
+        serde_json::from_str(&out.try_recv().expect("an inline reply")).unwrap()
+    };
+    let code = |reply: &Value| {
+        (
+            reply["error"]["code"].as_u64().unwrap_or(0),
+            reply["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .to_string(),
+        )
+    };
+
+    let (conn, mut out) = bot_connection(bot("active", &["join"], &["p1"], None));
+    conn.handle_text(
+        &json!({"id": "1", "type": "events.watch", "params": {"link-added": ["p1"]}}).to_string(),
+    )
+    .await;
+    assert_eq!(
+        code(&answer(&mut out)),
+        (403, NOT_IN_CAN.to_string()),
+        "join only"
+    );
+
+    let (conn, mut out) = bot_connection(bot("active", &["read"], &["p1"], None));
+    conn.handle_text(
+        &json!({"id": "2", "type": "events.watch", "params": {"link-added": ["p2"]}}).to_string(),
+    )
+    .await;
+    assert_eq!(
+        code(&answer(&mut out)),
+        (403, BOT_GRANT.to_string()),
+        "another space"
+    );
+    conn.handle_text(
+        &json!({"id": "3", "type": "events.watch", "params": {"link-added": null}}).to_string(),
+    )
+    .await;
+    assert_eq!(
+        code(&answer(&mut out)),
+        (403, BOT_GRANT.to_string()),
+        "every perspective"
+    );
+    conn.handle_text(
+        &json!({"id": "4", "type": "events.watch", "params": {"link-added": ["p1"]}}).to_string(),
+    )
+    .await;
+    assert_eq!(
+        code(&answer(&mut out)),
+        (503, "store-unavailable".to_string()),
+        "its space: the grant passed, the owner's log is not readable here"
+    );
+    conn.handle_text(&json!({"id": "5", "type": "events.unwatch", "params": {}}).to_string())
+        .await;
+    assert_eq!(answer(&mut out)["result"], json!(true), "unwatch");
+}
+
+/// Until the registry has loaded, a managed agent cannot be told a bot from a user, so its
+/// session is refused rather than served with a user's authority.
+#[tokio::test]
+async fn a_managed_session_is_refused_until_the_registry_has_loaded() {
+    use crate::agent::capabilities::get_user_default_capabilities;
+    use crate::agent::session::{Principal, Session};
+    use crate::agent::AgentContext;
+    use crate::types::RequestContext;
+    let did = "did:key:some-user";
+    let session = Session::for_test(Principal::Agent(AgentContext::managed(did.to_string())))
+        .with_caps(get_user_default_capabilities())
+        .with_did(did);
+    let ctx = RequestContext::for_session(session);
+    let map = build_handler_map();
+
+    set_loaded(false);
+    let unloaded = classify(did);
+    let call = map.admit("agent.get", &json!({}), &ctx).await;
+    set_loaded(true);
+
+    let refused = unloaded.unwrap_err();
+    assert_eq!(refused.code, 503);
+    assert!(
+        refused.message.starts_with("bots-unavailable: "),
+        "{refused:?}"
+    );
+    assert_eq!(call.unwrap_err().code, 503);
+    assert_eq!(classify(did).unwrap(), None);
+    assert!(map.admit("agent.get", &json!({}), &ctx).await.is_ok());
+}

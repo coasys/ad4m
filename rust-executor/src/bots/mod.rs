@@ -405,6 +405,34 @@ pub fn registered(did: &str) -> Option<BotRow> {
     BOTS.read().ok()?.get(did).cloned()
 }
 
+/// Whether [`init`] has loaded the registry. Until it has, a managed agent's session cannot be
+/// told a bot from a user, so [`classify`] refuses it rather than serving a bot with a user's
+/// authority (fail closed). Tests start loaded: they put bots in with [`remember`].
+static LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(cfg!(test));
+
+/// The registry did not load, so no managed agent's session is served.
+pub const BOTS_UNAVAILABLE: &str = "bots-unavailable";
+
+/// What a managed agent `did` is: a bot (its row), or not one. `Err` for every managed agent
+/// while the registry has not loaded: a bot whose row cannot be read must not pass as a user.
+pub fn classify(did: &str) -> Result<Option<BotRow>, WsRpcError> {
+    if !LOADED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(WsRpcError {
+            code: 503,
+            message: format!(
+                "{BOTS_UNAVAILABLE}: the bot registry did not load, so no managed agent's \
+                 session is served until the executor restarts"
+            ),
+        });
+    }
+    Ok(registered(did))
+}
+
+#[cfg(test)]
+pub(crate) fn set_loaded(loaded: bool) {
+    LOADED.store(loaded, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Keeps `bot` (new, or with a changed grant) in the registry.
 pub(crate) fn remember(bot: BotRow) {
     if let Ok(mut bots) = BOTS.write() {
@@ -422,6 +450,7 @@ pub fn init() -> Result<(), String> {
     for row in rows {
         remember(row);
     }
+    LOADED.store(true, std::sync::atomic::Ordering::SeqCst);
     if count > 0 {
         ::log::info!("bots: {count} bot agent(s)");
     }
@@ -480,6 +509,53 @@ pub async fn admit(
         }
     }
     decided.map_err(|refusal| refusal.error())
+}
+
+/// The check of `events.watch` / `events.unwatch` from a bot's session, which the connection
+/// answers before the handler map sees it (`api/ws_rpc.rs`), so [`admit`] never does. Each
+/// perspective a watch names is a read in that space, decided like a call and logged when
+/// refused. A watch of every perspective (`null`) is refused: a grant names its spaces, and
+/// `link-added` of a space outside it is a read there. `events.unwatch` is always allowed.
+/// What this does not do: close a stream already open when the grant later changes.
+pub async fn admit_watch(
+    bot: &BotRow,
+    method: &str,
+    params: &Value,
+    ctx: &RequestContext,
+) -> Result<(), WsRpcError> {
+    if method != crate::api::event_interest::WATCH {
+        return Ok(());
+    }
+    // A frame that is no object gets the handler's 400.
+    let Some(types) = params.as_object() else {
+        return Ok(());
+    };
+    let reason = ctx.reason.as_deref();
+    for wanted in types.values() {
+        let items: Vec<Option<&str>> = match wanted {
+            Value::Null => vec![None],
+            Value::Array(items) => items.iter().map(Value::as_str).collect(),
+            _ => continue,
+        };
+        for item in items {
+            let reach = Reach::Action {
+                action: BotAction::Read,
+                space: item.map(|uuid| Space::Perspective(uuid.to_string())),
+            };
+            let decided = match item {
+                None => Err(Refusal::forbidden(
+                    BOT_GRANT,
+                    "a bot watches the perspectives of its grant, not every perspective",
+                )),
+                Some(_) => decide(bot, &reach, reason).await,
+            };
+            if let Err(refusal) = decided {
+                log::record(bot, method, &reach, reason, &Err(refusal.clone()));
+                return Err(refusal.error());
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn decide(bot: &BotRow, reach: &Reach, reason: Option<&str>) -> Result<(), Refusal> {

@@ -266,19 +266,18 @@ impl Ad4mMcpHandler {
             let refusal = match authenticated(caller) {
                 Err(refusal) => Some(refusal),
                 // A bot calls only the tools that run RPC methods, each of which its grant
-                // checks; the others reach the executor another way.
-                Ok(session)
-                    if session
-                        .managed_did()
-                        .is_some_and(|did| crate::bots::registered(did).is_some())
-                        && !crate::bots::BOT_MCP_TOOLS.contains(&tool_name) =>
-                {
-                    Some(format!(
-                        "{}: a bot may not call the tool {tool_name}",
-                        crate::bots::BOT_GRANT
-                    ))
-                }
-                Ok(_) => None,
+                // checks; the others reach the executor another way. A managed agent the
+                // registry cannot classify (not loaded) calls nothing: `classify`.
+                Ok(session) => match session.managed_did().map(crate::bots::classify) {
+                    Some(Err(e)) => Some(e.message),
+                    Some(Ok(Some(_))) if !crate::bots::BOT_MCP_TOOLS.contains(&tool_name) => {
+                        Some(format!(
+                            "{}: a bot may not call the tool {tool_name}",
+                            crate::bots::BOT_GRANT
+                        ))
+                    }
+                    _ => None,
+                },
             };
             if let Some(refusal) = refusal {
                 return Err(CallToolResult::error(vec![Content::text(

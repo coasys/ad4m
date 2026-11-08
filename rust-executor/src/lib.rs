@@ -541,9 +541,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     )
     .expect("Failed to initialize Ad4mDb");
 
-    // The bots and their grants, which every call of a bot's session reads.
+    // The bots and their grants, which every call of a bot's session reads. Without them no
+    // managed agent's session is served (`bots::classify`): a bot must not pass as a user.
     if let Err(e) = crate::bots::init() {
-        error!("bots: {e}");
+        error!("bots: {e}; no managed agent's session is served until this is fixed and the executor restarts");
     }
 
     // The seed names the network's identity store, which the identity module reads below.

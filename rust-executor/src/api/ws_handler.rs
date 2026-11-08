@@ -515,9 +515,13 @@ impl HandlerMap {
         match &entry.guard {
             Some(guard) => {
                 // A bot's session acts within its owner's grant first, whatever its
-                // capabilities: a bot's token holds a user's default ones.
-                if let Some(bot) = ctx.session.managed_did().and_then(crate::bots::registered) {
-                    crate::bots::admit(&bot, msg_type, guard, params, ctx, record).await?;
+                // capabilities: a bot's token holds a user's default ones. A managed agent
+                // is refused while the registry has not loaded (`classify`): one that
+                // cannot be told a bot must not pass as a user.
+                if let Some(did) = ctx.session.managed_did() {
+                    if let Some(bot) = crate::bots::classify(did)? {
+                        crate::bots::admit(&bot, msg_type, guard, params, ctx, record).await?;
+                    }
                 }
                 guard.admit(msg_type, params, ctx).await?;
                 if entry.local_only && !ctx.session.is_operator_on_this_machine() {

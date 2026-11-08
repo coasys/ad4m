@@ -474,7 +474,27 @@ impl Connection {
         let reason = crate::bots::reason_of(&parsed);
 
         // `events.watch` / `events.unwatch` set this connection's event
-        // filter (see `event_interest`), so they are handled inline too.
+        // filter (see `event_interest`), so they are handled inline too. A bot's watch
+        // passes its grant first (`bots::admit_watch`): the handler map, and so
+        // `bots::admit`, never sees these frames.
+        if msg_type == event_interest::WATCH || msg_type == event_interest::UNWATCH {
+            if let Some(did) = self.ctx.session.managed_did() {
+                let admitted = match crate::bots::classify(did) {
+                    Ok(Some(bot)) => {
+                        crate::bots::admit_watch(&bot, &msg_type, &params, &self.ctx).await
+                    }
+                    Ok(None) => Ok(()),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = admitted {
+                    let _ = tx.send(
+                        json!({"id": id, "error": {"code": e.code, "message": e.message}})
+                            .to_string(),
+                    );
+                    return;
+                }
+            }
+        }
         if let Some(reply) = event_interest::handle_control(
             &msg_type,
             &Value::String(id.clone()),
