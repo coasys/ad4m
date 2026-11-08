@@ -100,6 +100,10 @@ pub struct SystemLanguageAddresses {
     pub neighbourhood_language: Option<String>,
     pub perspective_language: Option<String>,
     pub system_language_set: HashSet<String>,
+    /// Set once [`LanguageController::load_core_system_languages`] has run, whatever it
+    /// loaded: a system language still missing then (language-language only, or a failed
+    /// load) stays missing until the next load, not "not loaded yet".
+    pub settled: bool,
 }
 
 lazy_static! {
@@ -755,6 +759,15 @@ impl LanguageController {
     /// conductor before calling this. The link and installed languages, which always need
     /// it, are `load_link_and_installed_languages` (`conductor_languages.rs`).
     pub async fn load_core_system_languages(
+        &self,
+        language_language_only: bool,
+    ) -> Result<(), LanguageError> {
+        let loaded = self.load_system_languages(language_language_only).await;
+        self.system_addresses.lock().await.settled = true;
+        loaded
+    }
+
+    async fn load_system_languages(
         &self,
         language_language_only: bool,
     ) -> Result<(), LanguageError> {
