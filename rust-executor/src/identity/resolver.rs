@@ -3625,6 +3625,63 @@ mod link_check_tests {
         );
     }
 
+    /// Adds a bot key that may do `can` until `expires` to `log` at the next seq; its secret.
+    fn add_bot_key(
+        log: &mut TestLog,
+        seed: u8,
+        can: &[&str],
+        expires: u64,
+    ) -> ed25519_dalek::SigningKey {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: can.iter().map(|a| a.to_string()).collect(),
+                expires,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        bot
+    }
+
+    /// A reader enforces the scope the owner's log gives a bot key: a link is a write, so a
+    /// key the log lets only read (or join) authors nothing, at its own seq or unanchored;
+    /// with `write` its link counts for the owner.
+    #[tokio::test]
+    async fn a_bot_key_without_write_authors_no_link_for_its_owner() {
+        let mut log = TestLog::new(72);
+        let reader = add_bot_key(&mut log, 73, &["read"], NOW + 1_000);
+        let joiner = add_bot_key(&mut log, 74, &["join"], NOW + 1_000);
+        let writer = add_bot_key(&mut log, 75, &["read", "write"], NOW + 1_000);
+        let cache = cache_with(&log).await;
+        for (bot, seq) in [(&reader, 1), (&joiner, 2)] {
+            for anchor in [Some(seq), Some(3), None] {
+                assert_eq!(
+                    check(&cache, &signed_with(bot, anchor)),
+                    CheckedLink {
+                        verdict: LinkVerdict::Invalid(InvalidReason::NotInScope),
+                        person: None,
+                    },
+                    "anchor {anchor:?}"
+                );
+            }
+        }
+        for anchor in [Some(3), None] {
+            assert_eq!(
+                check(&cache, &signed_with(&writer, anchor)),
+                valid_for(Some(did_of(&log.scid()))),
+                "anchor {anchor:?}"
+            );
+        }
+    }
+
     /// Whoever holds a revoked device key (a thief, say) signs a link today, after the
     /// revocation is accepted, and names an anchor before it, or no anchor at all. The
     /// executor knows no space order, so the link is flagged and speaks for nobody.

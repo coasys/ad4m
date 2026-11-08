@@ -25,8 +25,17 @@ Rules:
 - **A new method** is outside every grant unless its guard is `Owns { Perspective }`. Adding a
   method a bot should call means adding it to `reach` and to the matrix walk's lists.
 - **Only dispatch records** (`record: true`); `HandlerMap::admit` (MCP's pre-check) does not.
-- The grant is the executor's: it is not signed by the owner's master key. The log's scope is
-  the ceiling: `bot.setGrant` refuses a `can` outside it when the log is readable.
+- **Who enforces what.** The grant (spaces, `can`, expiry, pause, revocation) is the hosting
+  executor's: it is not signed by the owner's master key, and only the executor that runs the
+  bot enforces it (a trusted-host restriction). What every other reader verifies is what the
+  owner's key log says about the bot key: the bot mark, its `can` and its `expires`. A reader
+  judges a bot's link `invalid:notInScope` when the scope in force at the link's anchor lacks
+  `write` (`identity::verdict::judge`), `invalid:expired` past `expires`. Per-space, portable
+  delegation (owner-signed, bound to stable space ids, checked by every reader) belongs to
+  `neighbourhood.addBot`/`removeBot` (slice 3). The log's scope is the ceiling of the grant:
+  `bot.setGrant` refuses a `can` outside it when the log is readable.
+- **Known limit:** a grant scopes by space and action only. It names no class, predicate or
+  subject: a bot that may write in a space may write any link there.
 - `bot.createAgent` claims through `ClaimService::claim_for_agent`, the path a hosted
   tenant's claim will reuse. It runs beside `--custody-channel` and without multi-user mode
   (`config::may_add_managed_user`).
