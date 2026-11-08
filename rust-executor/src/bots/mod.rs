@@ -405,6 +405,13 @@ pub fn registered(did: &str) -> Option<BotRow> {
     BOTS.read().ok()?.get(did).cloned()
 }
 
+/// Every bot of this executor.
+pub fn all() -> Vec<BotRow> {
+    BOTS.read()
+        .map(|bots| bots.values().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Whether [`init`] has loaded the registry. Until it has, a managed agent's session cannot be
 /// told a bot from a user, so [`classify`] refuses it rather than serving a bot with a user's
 /// authority (fail closed). Tests start loaded: they put bots in with [`remember`].
@@ -574,15 +581,87 @@ async fn decide(bot: &BotRow, reach: &Reach, reason: Option<&str>) -> Result<(),
     let Reach::Action { action, .. } = reach else {
         return Ok(());
     };
-    let key = match crate::identity::service() {
+    decide_key(bot_key_of(bot).await, *action, now)?;
+    decide_reason(*action, reason)
+}
+
+/// What a managed agent's event stream does with one event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// Send it: the agent is not a bot, or the bot may read where the event happened.
+    Send,
+    /// Drop it: the bot may not read there now (paused, expired, narrowed, a key scope
+    /// without `read`), but the grant and key may come back.
+    Drop,
+    /// End the stream: the bot is revoked, its key is revoked, or the registry is not loaded.
+    End,
+}
+
+/// Whether the managed agent `did` may receive an event of `perspective` (`None`: an event of
+/// no perspective, such as its own agent's). An event is a read: for a bot, the current grant
+/// (state, expiry, `read`, the perspective among its spaces) and the owner's log (the key
+/// valid, `read` in its scope) decide, at every event, so a stream opened under a wider grant
+/// follows the grant as it is now.
+pub async fn delivery(did: &str, perspective: Option<&str>) -> Delivery {
+    let bot = match classify(did) {
+        Err(_) => return Delivery::End,
+        Ok(None) => return Delivery::Send,
+        Ok(Some(bot)) => bot,
+    };
+    let Some(uuid) = perspective else {
+        // Its own agent's events: only revocation, of the grant or the key, stops them.
+        if bot.grant.state == GrantState::Revoked.as_str() {
+            return Delivery::End;
+        }
+        return match bot_key_of(&bot).await {
+            Ok(key) if matches!(key.verdict, KeyVerdict::Revoked | KeyVerdict::NotInLog) => {
+                Delivery::End
+            }
+            _ => Delivery::Send,
+        };
+    };
+    let reach = Reach::Action {
+        action: BotAction::Read,
+        space: Some(Space::Perspective(uuid.to_string())),
+    };
+    match decide(&bot, &reach, None).await {
+        Ok(()) => Delivery::Send,
+        Err(refusal) if refusal.code == BOT_REVOKED => Delivery::End,
+        Err(_) => Delivery::Drop,
+    }
+}
+
+/// What the owner's log says about `bot`'s key.
+async fn bot_key_of(bot: &BotRow) -> Result<BotKey, BotKeyError> {
+    #[cfg(test)]
+    if let Some(key) = TEST_KEYS
+        .read()
+        .ok()
+        .and_then(|keys| keys.get(&bot.did).cloned())
+    {
+        return key;
+    }
+    match crate::identity::service() {
         Ok(identity) => {
             let key = bot.did.strip_prefix("did:key:").unwrap_or(&bot.did);
             identity.bot_key(&bot.owner, key).await
         }
         Err(_) => Err(BotKeyError::StoreUnavailable),
-    };
-    decide_key(key, *action, now)?;
-    decide_reason(*action, reason)
+    }
+}
+
+/// What the owner's log says about a bot's key, by bot DID, for tests that run with no
+/// identity service.
+#[cfg(test)]
+static TEST_KEYS: LazyLock<RwLock<HashMap<String, Result<BotKey, BotKeyError>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Makes the owner's log say `key` about the key of the bot `did` (tests only).
+#[cfg(test)]
+pub(crate) fn set_test_key(did: &str, key: Result<BotKey, BotKeyError>) {
+    if let Ok(mut keys) = TEST_KEYS.write() {
+        keys.insert(did.to_string(), key);
+    }
 }
 
 #[cfg(test)]

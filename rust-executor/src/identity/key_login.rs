@@ -714,7 +714,8 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
     if change.verdict == KeyVerdict::Valid {
         return 0;
     }
-    match Grants::global().revoke_key(&change.key) {
+    let bot = end_revoked_bot(&change.key, change.verdict);
+    bot + match Grants::global().revoke_key(&change.key) {
         Ok(ended) => {
             if ended > 0 {
                 log::info!(
@@ -736,9 +737,57 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
     }
 }
 
+/// Ends the sessions of the local bot whose key is `key` (a multikey) when its owner's log
+/// revoked the key (`verdict` [`KeyVerdict::Revoked`], or [`KeyVerdict::NotInLog`]: the log
+/// no longer lists it). A bot's token is not bound to its key (a bot's key never logs in), so
+/// [`Grants::revoke_key`] does not reach it; the bot's agent does. An expired key ends
+/// nothing here: its owner may extend the scope, and each call and event checks the key
+/// anyway (`crate::bots::decide_key`). Returns how many active grants ended.
+fn end_revoked_bot(key: &str, verdict: KeyVerdict) -> usize {
+    if !matches!(verdict, KeyVerdict::Revoked | KeyVerdict::NotInLog) {
+        return 0;
+    }
+    let did = format!("did:key:{key}");
+    if crate::bots::registered(&did).is_none() {
+        return 0;
+    }
+    match Grants::global().revoke_agent(&AgentContext::managed(did.clone())) {
+        Ok(ended) => {
+            if ended > 0 {
+                log::info!(
+                    "identity: ended {ended} session(s) of the bot {did}: its key is {verdict:?}"
+                );
+            }
+            ended
+        }
+        Err(e) => {
+            log::error!("identity: ending the sessions of the bot {did}: {e}");
+            0
+        }
+    }
+}
+
+/// Reads the key of every live bot of this executor in its owner's log again (at most
+/// [`KEY_RECHECK_INTERVAL`] old) and ends the sessions of each whose key was revoked: what a
+/// verdict change the subscription missed cannot end. A revoked bot holds no session already.
+async fn recheck_bot_keys(service: &IdentityService) -> usize {
+    let mut ended = 0;
+    for bot in crate::bots::all() {
+        if bot.grant.state == crate::bots::GrantState::Revoked.as_str() {
+            continue;
+        }
+        let key = bot.did.strip_prefix("did:key:").unwrap_or(&bot.did);
+        if let Ok(found) = service.bot_key(&bot.owner, key).await {
+            ended += end_revoked_bot(key, found.verdict);
+        }
+    }
+    ended
+}
+
 /// Reads the key of every live key-bound grant again (at most [`KEY_RECHECK_INTERVAL`] old):
 /// a key no longer valid, or a bot's, ends its grants; a valid one records the check. While the
-/// store cannot be read, grants whose last valid check is [`STORE_OUTAGE_GRACE`] old end.
+/// store cannot be read, grants whose last valid check is [`STORE_OUTAGE_GRACE`] old end. The
+/// sessions of a local bot whose key was revoked end too ([`recheck_bot_keys`]).
 /// Returns how many active grants ended.
 pub async fn recheck_key_grants(service: &IdentityService, now: u64) -> usize {
     let mut by_key: BTreeMap<(String, String), Vec<Arc<LiveGrant>>> = BTreeMap::new();
@@ -750,7 +799,7 @@ pub async fn recheck_key_grants(service: &IdentityService, now: u64) -> usize {
                 .push(grant.clone());
         }
     }
-    let mut ended = 0;
+    let mut ended = recheck_bot_keys(service).await;
     for ((scid, key), grants) in by_key {
         let read = service
             .resolver
@@ -1408,6 +1457,67 @@ mod tests {
         assert!(reloaded
             .get(&crate::agent::session::TokenId(result.grant_id))
             .is_none());
+        no_operator();
+    }
+
+    // Lal #1671 P1: a bot's token is not bound to its key, so revoking the key in the owner's
+    // log ends the bot's sessions through its agent: when the cache publishes the change, and
+    // on the re-check when the subscription missed it.
+    #[tokio::test]
+    async fn revoking_a_bots_key_ends_the_bots_sessions() {
+        for (seed, via_recheck) in [(190u8, false), (195u8, true)] {
+            let mut world = world(seed).await;
+            let did = format!("did:key:{}", world.bot.key());
+            crate::bots::remember(crate::db::BotRow {
+                did: did.clone(),
+                username: format!("bot-{seed}@bots.ad4m"),
+                name: "revoked".into(),
+                owner: world.log.scid(),
+                offer_id: "offer".into(),
+                created_at: 1,
+                grant: crate::db::BotGrantRow {
+                    spaces: vec![],
+                    can: vec!["read".into()],
+                    expires: None,
+                    state: "active".into(),
+                    version: 1,
+                    updated_at: 1,
+                },
+            });
+            let (_, grant) = grants::mint(
+                AgentContext::managed(did.clone()),
+                crate::agent::capabilities::AuthInfo::default(),
+                None,
+                3600,
+            )
+            .unwrap();
+
+            // Valid: the re-check keeps it.
+            world.service.cache.note_refreshed(&world.log.scid(), 0);
+            recheck_key_grants(&world.service, now()).await;
+            assert!(!grant.is_ended(), "a valid bot key keeps its sessions");
+
+            let bot_id = "d3".to_string();
+            let revoke_bot = revoke(&world.log.chain(), &world.log.master, &[bot_id]).unwrap();
+            world.log.events.push(revoke_bot);
+            if via_recheck {
+                *world.store.events.lock().unwrap() = world.log.events.clone();
+                world.service.cache.note_refreshed(&world.log.scid(), 0);
+                assert_eq!(recheck_key_grants(&world.service, now()).await, 1);
+            } else {
+                let mut changes = world.service.cache.subscribe();
+                accept_signed(&world.service.cache, &world.log.events).await;
+                let mut ended = 0;
+                while let Ok(change) = changes.try_recv() {
+                    ended += on_verdict_change(&change);
+                }
+                assert_eq!(ended, 1);
+            }
+            assert!(
+                grant.is_ended(),
+                "the bot's session ended (re-check: {via_recheck})"
+            );
+        }
         no_operator();
     }
 
