@@ -777,6 +777,20 @@ pub fn sign_envelope(
     Ok(())
 }
 
+/// The checks every read of a stored `sealed` makes before its record key is trusted: the
+/// store's `receipt` ([`verify_receipt`]: this identity, version and envelope, a store key of
+/// `stores`, the writer valid at the receipt's seq), then the recovery attestation against
+/// the log.
+fn verify_stored(
+    sealed: &SealedRecord,
+    receipt: &RecordReceipt,
+    chain: &KelChain,
+    stores: &[Multikey],
+) -> Result<(), RecordError> {
+    verify_receipt(sealed, receipt, chain, stores)?;
+    check_attested_by_some_master(sealed, chain)
+}
+
 /// Opens `sealed` of the identity whose log is `chain` through its `wrapped[entry]` (a key id,
 /// or `"recovery"`) with that reader's X25519 `secret`. The store's `receipt` and the envelope's
 /// signature are checked first ([`verify_receipt`], against the store keys `stores` the reader
@@ -797,8 +811,7 @@ pub fn open_record(
     entry: &str,
     secret: &X25519Secret,
 ) -> Result<PrivateRecord, RecordError> {
-    verify_receipt(sealed, receipt, chain, stores)?;
-    check_attested_by_some_master(sealed, chain)?;
+    verify_stored(sealed, receipt, chain, stores)?;
     let wrapped = sealed
         .wrapped
         .get(entry)
@@ -825,14 +838,17 @@ pub fn unwrap_key(
 
 /// Decrypts `sealed` of the identity whose log is `chain` with its record `key` (from
 /// [`unwrap_key`], or a key the executor unwrapped for the caller). Like [`open_record`] it
-/// checks the envelope's signature and recovery attestation against the log first.
+/// checks the store's `receipt` (the writer at the receipt's seq, so a record whose writer was
+/// revoked or replaced after the write still opens) and the recovery attestation against the
+/// log first.
 pub fn decrypt_record(
     sealed: &SealedRecord,
+    receipt: &RecordReceipt,
     chain: &KelChain,
+    stores: &[Multikey],
     key: &[u8; RECORD_KEY_LEN],
 ) -> Result<PrivateRecord, RecordError> {
-    verify_envelope(sealed, chain)?;
-    check_attested_by_some_master(sealed, chain)?;
+    verify_stored(sealed, receipt, chain, stores)?;
     decrypt_verified(sealed, chain.id(), key)
 }
 

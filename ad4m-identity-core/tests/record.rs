@@ -116,22 +116,34 @@ fn the_record_key_unwrapped_alone_decrypts_its_version_only() {
     let log = devices_log();
     let v1 = sealed(&log, 1, false);
     let key = unwrap_key(&v1.wrapped["d2"], &scid(&log), &enc_secret(2)).unwrap();
-    assert_eq!(decrypt_record(&v1, &log.chain, &key), Ok(record_fixture()));
+    assert_eq!(
+        decrypt_record(&v1, &receipt(&v1, &log.chain), &log.chain, &stores(), &key),
+        Ok(record_fixture())
+    );
     assert_eq!(
         unwrap_key(&v1.wrapped["d2"], &scid(&log), &enc_secret(1)).map(|k| *k),
         Err(RecordError::Open)
     );
     let v2 = sealed(&log, 2, false);
     assert_eq!(
-        decrypt_record(&v2, &log.chain, &key),
+        decrypt_record(&v2, &receipt(&v2, &log.chain), &log.chain, &stores(), &key),
         Err(RecordError::Open)
     );
     let mut unsigned = v1.clone();
     unsigned.sig = String::new();
-    assert!(decrypt_record(&unsigned, &log.chain, &key).is_err());
+    let mut unsigned_receipt = receipt(&v1, &log.chain);
+    unsigned_receipt.envelope = envelope_hash(&scid(&log), &unsigned).unwrap();
+    assert!(decrypt_record(&unsigned, &unsigned_receipt, &log.chain, &stores(), &key).is_err());
     let mut renamed = v1.clone();
     renamed.signer = "d2".into();
-    assert!(decrypt_record(&renamed, &log.chain, &key).is_err());
+    assert!(decrypt_record(
+        &renamed,
+        &receipt(&v1, &log.chain),
+        &log.chain,
+        &stores(),
+        &key
+    )
+    .is_err());
 }
 
 /// A writer whose key signs elsewhere (an app whose device key is in its executor's wallet)

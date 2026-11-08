@@ -23,7 +23,7 @@
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{InboxAddress, InboxError};
 use ad4m_identity_core::link::may_keep_master;
-use ad4m_identity_core::record::{HoldsMaster, PrivateRecord};
+use ad4m_identity_core::record::{DeviceEntry, DeviceKind, HoldsMaster, PrivateRecord};
 use ad4m_identity_core::{Event, KelChain, KeyId};
 use ad4m_ldk::identity::InboxWrite;
 
@@ -195,7 +195,7 @@ pub(crate) async fn send_with<R: ExecutorRpc>(
         executor, vault, events, chain, did, signer, key_id, clock, random,
     )
     .await?;
-    let record = mark_offered(executor, did, vec![key_id.to_string()], random).await;
+    let record = mark_offered(executor, vault, did, vec![key_id.to_string()], random).await;
     Ok(Sent { message_id, record })
 }
 
@@ -204,12 +204,15 @@ pub(crate) async fn send_with<R: ExecutorRpc>(
 /// holds only on a version where none of their entries says `true` ([`record::write_if`], so
 /// also on every newer version it reads after a stale one). A device whose entry says `true`
 /// took the key before this write landed: it is left out and the rest are written; when none
-/// is left, the answer is [`ClientError::HoldsMaster`] of the last one left out.
+/// is left, the answer is [`ClientError::HoldsMaster`] of the last one left out. A device the
+/// record does not list is left out the same way ([`ClientError::NotListed`]), so one cannot
+/// block the rest.
 ///
 /// The record has one master generation here (no rotation yet), so `true` is always the
 /// current master key.
 pub(crate) async fn mark_offered<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
     did: &str,
     mut key_ids: Vec<KeyId>,
     random: &dyn Random,
@@ -233,9 +236,11 @@ pub(crate) async fn mark_offered<R: ExecutorRpc>(
                 None => Ok(()),
             }
         };
-        let written = record::write_if(executor, did, &changes, &not_held, random).await;
+        let written = record::write_if(executor, vault, did, &changes, &not_held, random).await;
         match written {
-            Err(ClientError::HoldsMaster(held)) if key_ids.len() > 1 => {
+            Err(ClientError::HoldsMaster(held)) | Err(ClientError::NotListed(held))
+                if key_ids.len() > 1 =>
+            {
                 key_ids.retain(|key_id| *key_id != held);
             }
             answer => return answer,
@@ -246,7 +251,10 @@ pub(crate) async fn mark_offered<R: ExecutorRpc>(
 /// Pushes again what the retry list keeps for `did`, the executor's identity, with one unlock
 /// when anything is left: a push whose device key is no longer a device of the log is
 /// forgotten; each push that passes marks its device `holdsMaster: "offered"` in one record
-/// write.
+/// write. A push whose device the record does not list (its entry write and its fallback both
+/// failed when it first ran) writes the entry first, `holdsMaster: false`: a device that took
+/// the key could not mark an entry that is not there, and would hold it with no record of it.
+/// When that entry write fails the push is skipped and stays on the retry list.
 pub async fn retry_pushes<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -279,10 +287,31 @@ pub async fn retry_pushes<R: ExecutorRpc>(
     if live.is_empty() {
         return Ok(retried);
     }
+    let listed: Vec<KeyId> = record::read(executor, vault, did)
+        .await?
+        .map(|opened| opened.record.devices.into_keys().collect())
+        .unwrap_or_default();
     let unlocked = vault.unlock(&scid, MasterUse::SendMaster, clock.now())?;
     let signer = unlocked.signer(clock.now())?;
     let mut offered: Vec<KeyId> = Vec::new();
     for key_id in live {
+        if !listed.contains(&key_id) {
+            let entry = record::write(
+                executor,
+                vault,
+                did,
+                &[Change::Device {
+                    key_id: key_id.clone(),
+                    entry: retry_entry(&key_id),
+                }],
+                random,
+            )
+            .await;
+            if let Err(e) = entry {
+                retried.pushes.push((key_id, Err(e)));
+                continue;
+            }
+        }
         let sent = push(
             executor, vault, &events, &chain, did, signer, &key_id, clock, random,
         )
@@ -293,9 +322,24 @@ pub async fn retry_pushes<R: ExecutorRpc>(
         retried.pushes.push((key_id, sent));
     }
     if !offered.is_empty() {
-        retried.record = Some(mark_offered(executor, did, offered, random).await);
+        retried.record = Some(mark_offered(executor, vault, did, offered, random).await);
     }
     Ok(retried)
+}
+
+/// The entry a retried push writes for a device the record does not list (`retry_pushes`):
+/// the confirm's name and kind were lost with its failed write, so the entry is generic; a
+/// surface can rename it.
+fn retry_entry(key_id: &str) -> DeviceEntry {
+    DeviceEntry {
+        name: key_id.to_string(),
+        kind: DeviceKind::DesktopApp,
+        place: None,
+        address: None,
+        runs_executor: true,
+        holds_master: HoldsMaster::No,
+        operator: None,
+    }
 }
 
 /// The device's side, after its own unlock: takes the master key its executor opened
@@ -328,6 +372,7 @@ pub async fn take_master<R: ExecutorRpc>(
     executor.inbox_ack(&taken.message_id).await?;
     let record = record::write(
         executor,
+        vault,
         &taken.did,
         &[Change::HoldsMaster {
             key_id,

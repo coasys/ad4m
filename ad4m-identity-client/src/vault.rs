@@ -146,6 +146,14 @@ pub trait Vault: Send + Sync {
     /// The push is done (the store took it) or no longer wanted: the vault forgets it (no error
     /// when it holds none).
     fn push_done(&self, push: &PendingPush) -> Result<(), VaultError>;
+    /// Notes `version` of `scid`'s private record as read and answers the highest version read
+    /// before it (the high-water mark, `None` before the first read). A store can serve back
+    /// an older record with a receipt that still verifies, so the reader refuses a version
+    /// under the answer (`crate::record`).
+    fn record_seen(&self, scid: &str, version: u64) -> Result<Option<u64>, VaultError>;
+    /// Forgets the versions of `scid`'s record seen so far: a caller that means to read an
+    /// older version on purpose resets the mark first.
+    fn record_seen_reset(&self, scid: &str) -> Result<(), VaultError>;
 }
 
 /// A master key to put into a device's inbox: the identity and the device's key id. The retry
@@ -229,6 +237,7 @@ mod memory {
         pending: Mutex<Vec<Event>>,
         pushes: Mutex<Vec<PendingPush>>,
         unlocks: Mutex<Vec<MasterUse>>,
+        record_seen: Mutex<HashMap<String, u64>>,
     }
 
     impl MemoryVault {
@@ -304,6 +313,19 @@ mod memory {
             self.pushes.lock().map_err(poisoned)?.retain(|p| p != push);
             Ok(())
         }
+
+        fn record_seen(&self, scid: &str, version: u64) -> Result<Option<u64>, VaultError> {
+            let mut seen = self.record_seen.lock().map_err(poisoned)?;
+            let before = seen.get(scid).copied();
+            let high = before.map_or(version, |h| h.max(version));
+            seen.insert(scid.to_string(), high);
+            Ok(before)
+        }
+
+        fn record_seen_reset(&self, scid: &str) -> Result<(), VaultError> {
+            self.record_seen.lock().map_err(poisoned)?.remove(scid);
+            Ok(())
+        }
     }
 
     #[cfg(test)]
@@ -358,6 +380,22 @@ mod memory {
                 unlocked.signer(100 + UNLOCK_TTL_S),
                 Err(VaultError::Expired)
             ));
+        }
+
+        /// `record_seen` keeps each identity's highest record version and answers the one
+        /// before, so the reader refuses a version served back under it; `record_seen_reset`
+        /// clears the mark.
+        #[test]
+        fn the_record_high_water_rises_only() {
+            let vault = MemoryVault::new();
+            assert_eq!(vault.record_seen("Qm", 1).unwrap(), None);
+            assert_eq!(vault.record_seen("Qm", 3).unwrap(), Some(1));
+            // A version under the mark answers the mark it trips on; the mark does not fall.
+            assert_eq!(vault.record_seen("Qm", 2).unwrap(), Some(3));
+            assert_eq!(vault.record_seen("Qm", 3).unwrap(), Some(3));
+            assert_eq!(vault.record_seen("Qm2", 1).unwrap(), None);
+            vault.record_seen_reset("Qm").unwrap();
+            assert_eq!(vault.record_seen("Qm", 2).unwrap(), None);
         }
     }
 }

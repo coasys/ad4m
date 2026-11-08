@@ -7,7 +7,7 @@
 //! `ad4m-client`'s WebSocket client serves it natively (feature `ws`).
 
 use ad4m_identity_core::inbox::InboxAddress;
-use ad4m_identity_core::record::{SealedRecord, RECORD_KEY_LEN};
+use ad4m_identity_core::record::{RecordReceipt, SealedRecord, RECORD_KEY_LEN};
 use ad4m_identity_core::Event;
 use ad4m_ldk::identity::{
     DeviceRequest, DeviceRequestBody, InboxBind, InboxStored, OfferListing, OfferOpened,
@@ -91,6 +91,15 @@ pub struct IdentityLog {
     pub events: Vec<Value>,
     pub head: Option<SignedHead>,
     pub fork: Option<ForkRecord>,
+}
+
+/// `identity.record`'s answer: the stored record with the store's receipt for it, which the
+/// reader checks before it trusts any field (`crate::record`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredRecord {
+    pub record: SealedRecord,
+    pub receipt: RecordReceipt,
 }
 
 /// `identity.takeMaster`: a master key sealed to this device, opened by its executor for the
@@ -292,9 +301,9 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
         Ok(())
     }
 
-    /// The sealed private record of the executor's identity, read with its device key; `None`
-    /// before the first write.
-    pub async fn record(&self) -> Result<Option<SealedRecord>, RpcError> {
+    /// The sealed private record of the executor's identity, read with its device key, with
+    /// the store's receipt for it; `None` before the first write.
+    pub async fn record(&self) -> Result<Option<StoredRecord>, RpcError> {
         self.call("identity.record", json!({})).await
     }
 

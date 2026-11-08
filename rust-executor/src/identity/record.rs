@@ -619,7 +619,18 @@ pub(crate) mod tests {
             .unwrap()
             .try_into()
             .unwrap();
-        assert_eq!(decrypt_record(&sealed, &chain, &bytes), Ok(record));
+        let receipt = ad4m_identity_core::record::sign_receipt(
+            &world.log.scid(),
+            &sealed,
+            chain.head().seq,
+            &world.store.key.0,
+        )
+        .unwrap();
+        let stores = [world.store.key.multikey()];
+        assert_eq!(
+            decrypt_record(&sealed, &receipt, &chain, &stores, &bytes),
+            Ok(record)
+        );
         assert!(!format!("{key:?}").contains(&key.key));
 
         let refused = world
@@ -673,7 +684,8 @@ pub(crate) mod tests {
                 .record(&world.agent, &RecordParams::default())
                 .await
                 .unwrap()
-                .unwrap(),
+                .unwrap()
+                .record,
         )
         .unwrap();
         assert_eq!(

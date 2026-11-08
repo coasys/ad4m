@@ -427,6 +427,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         // finds its entry to mark `holdsMaster: true`.
         let listed = record::write(
             self.executor,
+            self.vault,
             &self.did,
             &[Change::Device {
                 key_id: key_id.clone(),
@@ -470,6 +471,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             Ok(_) if pushed => {
                 super::master::mark_offered(
                     self.executor,
+                    self.vault,
                     &self.did,
                     vec![key_id.clone()],
                     self.random,
@@ -495,6 +497,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                 };
                 record::write_if(
                     self.executor,
+                    self.vault,
                     &self.did,
                     &[Change::Device {
                         key_id: key_id.clone(),

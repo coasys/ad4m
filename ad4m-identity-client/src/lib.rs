@@ -138,6 +138,14 @@ pub enum ClientError {
     /// (`holdsMaster: true`), and an `"offered"` never replaces that.
     #[error("{0} holds the master key already")]
     HoldsMaster(ad4m_identity_core::KeyId),
+    /// Not written: the record lists no device `key_id`, so a `holdsMaster` for it would be a
+    /// silent no-op its caller reports as done.
+    #[error("the record lists no device {0}, so its master key cannot be marked")]
+    NotListed(ad4m_identity_core::KeyId),
+    /// The store served the record's version `served`, under the highest version `seen` this
+    /// client already opened for the identity: a replayed older version, refused.
+    #[error("the store served version {served} of the record, under version {seen} read before")]
+    ServedRecordVersion { served: u64, seen: u64 },
     /// The record's version moved under every write tried.
     #[error("the private record kept changing; try again")]
     RecordBusy,

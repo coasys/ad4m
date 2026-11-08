@@ -2,27 +2,33 @@
 //!
 //! The record is sealed to the `enc` key of every device key of the log, so this app reads it
 //! as its executor's device: the executor reads the sealed record with its device key
-//! (`identity.record`) and unwraps its own entry's record key in its wallet
-//! (`identity.unwrapRecordKey`); the record is decrypted here. A write ([`write`]) reads the
-//! newest version, applies its [`Change`]s ([`merge`]), seals the result as the next version to
-//! every reader of the log at its head, and writes it (`identity.recordPut`), where the
-//! executor's device key signs the envelope. When another writer got there first (the store
-//! answers a stale version) or the log's readers changed under the write, it reads and merges
-//! again.
+//! (`identity.record`, which answers it with the store's receipt) and unwraps its own entry's
+//! record key in its wallet (`identity.unwrapRecordKey`); the record is decrypted here. A write
+//! ([`write`]) reads the newest version, applies its [`Change`]s ([`merge`]), seals the result
+//! as the next version to every reader of the log at its head, and writes it
+//! (`identity.recordPut`), where the executor's device key signs the envelope. When another
+//! writer got there first (the store answers a stale version) or the log's readers changed
+//! under the write, it reads and merges again.
 //!
-//! A read verifies the envelope's signature and the recovery key's attestation against the log
-//! before it trusts any field ([`decrypt_record`]); the recovery key that counts is
-//! [`recovery_of`]. A device write copies that recovery key and its attestation unchanged: only
-//! a master-signed write installs, replaces or drops it.
+//! A read checks the store's receipt before it trusts any field ([`decrypt_record`]): the
+//! store key the client trusts for signed heads signed over this identity, version and
+//! envelope, so the envelope's writer is checked at the seq the store accepted it — a record
+//! whose writer was revoked after writing still opens — and the recovery key's attestation
+//! against the log. The recovery key that counts is [`recovery_of`]. A device write copies that
+//! recovery key and its attestation unchanged: only a master-signed write installs, replaces or
+//! drops it. A store can serve back an older version with a receipt that still verifies, so a
+//! read also keeps each identity's highest version read in the vault
+//! ([`Vault::record_seen`]) and refuses a lower one.
 
 use ad4m_identity_core::record::{
     decrypt_record, recovery_of, seal_unsigned, DeviceEntry, HoldsMaster, PendingRevocation,
     PrivateRecord, RecordError, Recovery,
 };
-use ad4m_identity_core::{KelChain, KeyId};
+use ad4m_identity_core::{KelChain, KeyId, Multikey};
 
 use crate::executor::{ExecutorRpc, RpcError, ViaExecutor};
-use crate::request::chain_of;
+use crate::request::{chain_of, store_of};
+use crate::vault::Vault;
 use crate::{ClientError, Random, RandomRng};
 
 /// Writes tried before [`ClientError::RecordBusy`].
@@ -97,32 +103,25 @@ fn merge(record: &mut PrivateRecord, chain: &KelChain, changes: &[Change]) {
 /// before the first write.
 pub async fn read<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
     did: &str,
 ) -> Result<Option<Opened>, ClientError> {
     let chain = chain_of(executor, did).await?;
-    Ok(read_at(executor, did, &chain, None)
+    Ok(read_at(executor, vault, did, &chain)
         .await?
         .map(|(opened, _)| opened))
 }
 
-/// What a write after a revocation builds on when the newest version is signed by a key that
-/// revocation ended: a reader refuses that version from the revocation on (spec section 17),
-/// so the write builds on the version read `before` the revocation was published instead.
-/// Whatever the revoked key wrote after that is dropped with it.
-pub(crate) struct AfterRevoke<'a> {
-    pub revoked: &'a [KeyId],
-    pub before: Option<&'a PrivateRecord>,
-}
-
-/// [`read`] against the log `chain` of `did`, with the executor's device key id. With `after`,
-/// a newest version signed by a key it revoked opens as `after.before` at the stored version,
-/// with the stored envelope's recovery key that counts (the host takes only that one from a
-/// device writer, and only the current master's attestation makes it count).
+/// [`read`] against the log `chain` of `did`, with the executor's device key id: the store's
+/// receipt for the stored record is checked against the store key the client trusts for
+/// signed heads (the one whose head the executor accepted, [`store_of`]), so the envelope's
+/// writer is checked at the seq the store accepted it, and the version is kept as the
+/// identity's high-water in `vault` — a record served back under it is refused.
 async fn read_at<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
     did: &str,
     chain: &KelChain,
-    after: Option<&AfterRevoke<'_>>,
 ) -> Result<Option<(Opened, KeyId)>, ClientError> {
     let status = executor.status().await?;
     if status.did.as_deref() != Some(did) {
@@ -133,27 +132,37 @@ async fn read_at<R: ExecutorRpc>(
     let key_id = status
         .key_id
         .ok_or_else(|| ClientError::Protocol("the executor's device key is in no log".into()))?;
-    let Some(sealed) = executor.record().await? else {
+    let Some(stored) = executor.record().await? else {
         return Ok(None);
     };
+    let sealed = &stored.record;
     let wrapped = sealed
         .wrapped
         .get(&key_id)
         .ok_or_else(|| RecordError::NoEntry(key_id.clone()))?;
     let key = executor.unwrap_record_key(wrapped).await?;
-    let record = match (decrypt_record(&sealed, chain, key.expose()), after) {
-        (Ok(record), _) => record,
-        (Err(RecordError::Signer(signer)), Some(after)) if after.revoked.contains(&signer) => {
-            after.before.cloned().unwrap_or_default()
+    let stores = trusted_stores(store_of(executor, did).await?);
+    let record = decrypt_record(sealed, &stored.receipt, chain, &stores, key.expose())?;
+    if let Some(high) = vault.record_seen(chain.id(), sealed.version)? {
+        if sealed.version < high {
+            return Err(ClientError::ServedRecordVersion {
+                served: sealed.version,
+                seen: high,
+            });
         }
-        (Err(e), _) => return Err(e.into()),
-    };
+    }
     let opened = Opened {
         version: sealed.version,
         record,
-        recovery: recovery_of(&sealed, chain),
+        recovery: recovery_of(sealed, chain),
     };
     Ok(Some((opened, key_id)))
+}
+
+/// The store keys a receipt verifies against: the multikeys of the `did:key`s of the stores
+/// whose heads the executor accepted.
+fn trusted_stores(store: String) -> Vec<Multikey> {
+    vec![store.strip_prefix("did:key:").unwrap_or(&store).to_string()]
 }
 
 /// The store refused the write because the record or the log moved under it: a stale version
@@ -171,11 +180,12 @@ fn moved(e: &RpcError) -> bool {
 /// again, at most [`MAX_WRITES`] times.
 pub async fn write<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
     did: &str,
     changes: &[Change],
     random: &dyn Random,
 ) -> Result<u64, ClientError> {
-    write_if(executor, did, changes, &|_, _| Ok(()), random).await
+    write_if(executor, vault, did, changes, &|_, _| Ok(()), random).await
 }
 
 /// A condition a write holds to: it sees the version the write builds on (`None` before the
@@ -190,36 +200,26 @@ pub type Precondition<'a> =
 /// comes.
 pub async fn write_if<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
     did: &str,
     changes: &[Change],
     check: Precondition<'_>,
     random: &dyn Random,
 ) -> Result<u64, ClientError> {
-    write_from(executor, did, changes, check, None, random).await
-}
-
-/// [`write`] after the revocation `after.revoked` was published: a newest version signed by a
-/// revoked key is built over as [`AfterRevoke`] says.
-pub(crate) async fn write_after_revoke<R: ExecutorRpc>(
-    executor: &ViaExecutor<R>,
-    did: &str,
-    after: &AfterRevoke<'_>,
-    random: &dyn Random,
-) -> Result<u64, ClientError> {
-    write_from(executor, did, &[], &|_, _| Ok(()), Some(after), random).await
+    write_from(executor, vault, did, changes, check, random).await
 }
 
 async fn write_from<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
     did: &str,
     changes: &[Change],
     check: Precondition<'_>,
-    after: Option<&AfterRevoke<'_>>,
     random: &dyn Random,
 ) -> Result<u64, ClientError> {
     for _ in 0..MAX_WRITES {
         let chain = chain_of(executor, did).await?;
-        let opened = read_at(executor, did, &chain, after).await?;
+        let opened = read_at(executor, vault, did, &chain).await?;
         check(opened.as_ref().map(|(o, _)| &o.record), &chain)?;
         let (version, mut record, recovery, key_id) = match opened {
             Some((opened, key_id)) => (opened.version + 1, opened.record, opened.recovery, key_id),
@@ -239,9 +239,7 @@ async fn write_from<R: ExecutorRpc>(
             }
             _ => None,
         }) {
-            return Err(ClientError::Protocol(format!(
-                "the record lists no device {missing}, so its master key cannot be marked"
-            )));
+            return Err(ClientError::NotListed(missing));
         }
         // The executor's device key signs it (`identity.recordPut` with an empty `sig`).
         let sealed = seal_unsigned(
@@ -253,7 +251,12 @@ async fn write_from<R: ExecutorRpc>(
             &mut RandomRng(random),
         )?;
         match executor.record_put(&sealed).await {
-            Ok(version) => return Ok(version),
+            Ok(version) => {
+                // A version this client wrote is one it read, for the high-water: a store
+                // serving back an older one trips on it too.
+                vault.record_seen(chain.id(), version)?;
+                return Ok(version);
+            }
             Err(e) if moved(&e) => continue,
             Err(e) => return Err(e.into()),
         }

@@ -158,6 +158,12 @@ struct TestExecutor {
     refuse_inbox_put: Cell<bool>,
     /// The next `identity.recordPut` fails before it reaches the store.
     refuse_record_put: Cell<bool>,
+    /// The next so many `identity.recordPut` calls fail before they reach the store (an
+    /// outage over more than one write).
+    refuse_record_puts: Cell<usize>,
+    /// `identity.record` answers this stored record instead of the store's (a store that
+    /// serves back an older version).
+    serve_record: RefCell<Option<Value>>,
     /// The next `identity.recordPut` answers a stale version, as when another writer was first.
     stale_record_put: Cell<bool>,
     /// `identity.recordPut` calls that reached the store.
@@ -182,6 +188,8 @@ impl TestExecutor {
             refuse_publish: Cell::new(false),
             refuse_inbox_put: Cell::new(false),
             refuse_record_put: Cell::new(false),
+            refuse_record_puts: Cell::new(0),
+            serve_record: RefCell::new(None),
             stale_record_put: Cell::new(false),
             record_puts: Cell::new(0),
             tamper_claim: Cell::new(None),
@@ -679,6 +687,9 @@ impl ExecutorRpc for TestExecutor {
                 Ok(json!(true))
             }
             "identity.record" => {
+                if let Some(served) = self.serve_record.borrow().as_ref() {
+                    return Ok(served.clone());
+                }
                 let (scid, ..) = self.position().await?;
                 let (code, body) = self
                     .as_device("GET", &format!("/v1/private/{scid}"), None)
@@ -686,7 +697,9 @@ impl ExecutorRpc for TestExecutor {
                 Ok(if code == 404 { Value::Null } else { body })
             }
             "identity.recordPut" => {
-                if self.refuse_record_put.replace(false) {
+                if self.refuse_record_put.replace(false) || self.refuse_record_puts.get() > 0 {
+                    self.refuse_record_puts
+                        .set(self.refuse_record_puts.get().saturating_sub(1));
                     return Err(RpcError {
                         code: 503,
                         message: "unavailable: the store is down".into(),
@@ -965,6 +978,18 @@ impl Vault for RefusingVault {
     fn push_done(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
         self.0.push_done(push)
     }
+
+    fn record_seen(
+        &self,
+        scid: &str,
+        version: u64,
+    ) -> Result<Option<u64>, ad4m_identity_client::VaultError> {
+        self.0.record_seen(scid, version)
+    }
+
+    fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.record_seen_reset(scid)
+    }
 }
 
 #[tokio::test]
@@ -1151,7 +1176,7 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     );
     // The record lists the new device, and both executors read it.
     for reader in [&a, &b] {
-        let opened = record::read(reader, &did).await.unwrap().unwrap();
+        let opened = record::read(reader, &vault, &did).await.unwrap().unwrap();
         assert_eq!(opened.version, 1);
         assert_eq!(
             opened.record.devices["d2"],
@@ -1243,7 +1268,7 @@ async fn a_confirm_after_a_failed_publish_succeeds() {
         .await
         .expect_err("the publish failed");
     assert_eq!(join(&b, &claimed_b["offerId"]).await["state"], "claimed");
-    assert!(record::read(&a, &did).await.unwrap().is_none());
+    assert!(record::read(&a, &vault, &did).await.unwrap().is_none());
 
     let linked = flow
         .confirm(&claimed, entry("node.example", DeviceKind::Server), false)
@@ -1286,7 +1311,7 @@ async fn a_retried_confirm_pushes_the_master_key_and_writes_the_record_once() {
         .await
         .expect_err("the publish failed");
     assert!(vault.pending_pushes().unwrap().is_empty());
-    assert!(record::read(&a, &did).await.unwrap().is_none());
+    assert!(record::read(&a, &vault, &did).await.unwrap().is_none());
 
     let linked = flow
         .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
@@ -1299,7 +1324,14 @@ async fn a_retried_confirm_pushes_the_master_key_and_writes_the_record_once() {
     flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .expect_err("the offer is spent");
-    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 2);
+    assert_eq!(
+        record::read(&a, &vault, &did)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        2
+    );
     assert!(vault.pending_pushes().unwrap().is_empty());
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 
@@ -1354,7 +1386,7 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
         "spent"
     );
     assert!(vault.pending_pushes().unwrap().is_empty());
-    assert!(record::read(&a, &did).await.unwrap().is_none());
+    assert!(record::read(&a, &vault, &did).await.unwrap().is_none());
 
     let linked = flow
         .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
@@ -1364,7 +1396,7 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
     assert_eq!((linked.head.seq, linked.key_id.as_str()), (1, "d2"));
     assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
     assert_eq!(linked.record.unwrap(), 2);
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.version, 2);
     assert_eq!(opened.record.devices["d2"].name, "Desk");
     assert_eq!(
@@ -1377,7 +1409,14 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
     flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .expect_err("the offer is spent");
-    assert_eq!(record::read(&a, &did).await.unwrap().unwrap().version, 2);
+    assert_eq!(
+        record::read(&a, &vault, &did)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        2
+    );
     assert!(vault.pending_pushes().unwrap().is_empty());
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 
@@ -1440,7 +1479,7 @@ async fn a_confirm_of_a_spent_offer_whose_add_is_another_claim_is_refused() {
         .confirm(&claimed_b, entry("b.example", DeviceKind::Server), false)
         .await
         .expect_err("the add spends another offer");
-    assert!(record::read(&a, &did).await.unwrap().is_none());
+    assert!(record::read(&a, &vault, &did).await.unwrap().is_none());
 
     let linked = flow_b
         .confirm(&claimed_b, entry("b.example", DeviceKind::Server), false)
@@ -1448,7 +1487,7 @@ async fn a_confirm_of_a_spent_offer_whose_add_is_another_claim_is_refused() {
         .unwrap();
     assert_eq!((linked.head.seq, linked.key_id.as_str()), (1, "d2"));
     assert_eq!(linked.record.unwrap(), 1);
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices.len(), 1);
     assert_eq!(opened.record.devices["d2"].name, "b.example");
 }
@@ -1568,6 +1607,7 @@ async fn revoke_ends_the_second_executors_key() {
     for _ in 0..2 {
         record::write(
             &b,
+            &vault,
             &did,
             &[Change::PendingRevocation(pending.clone())],
             &OsRandom,
@@ -1575,7 +1615,7 @@ async fn revoke_ends_the_second_executors_key() {
         .await
         .unwrap();
     }
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(
         opened.record.pending_revocations,
         vec![pending],
@@ -1607,11 +1647,11 @@ async fn revoke_ends_the_second_executors_key() {
     assert_eq!(revoked.head.seq, 2);
     // The record leaves the revoked device out, and is no longer wrapped to it.
     assert_eq!(revoked.record.unwrap(), 4);
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert!(opened.record.devices.is_empty());
     assert!(opened.record.pending_revocations.is_empty());
     let sealed = a.record().await.unwrap().unwrap();
-    assert_eq!(sealed.wrapped.keys().collect::<Vec<_>>(), ["d1"]);
+    assert_eq!(sealed.record.wrapped.keys().collect::<Vec<_>>(), ["d1"]);
     let status = b.status().await.unwrap();
     assert_eq!(status.key_id.as_deref(), Some("d2"));
     assert_eq!(status.revoked, Some(2));
@@ -1848,7 +1888,7 @@ async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop(
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
     assert!(vault.pending_pushes().unwrap().is_empty());
     join(&desk, &claimed_desk["offerId"]).await;
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(
         opened.record.devices["d2"].holds_master,
         HoldsMaster::Offered
@@ -1876,7 +1916,7 @@ async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop(
         .is_none());
     // Both devices read the same record: the desktop holds the master key now.
     for reader in [&a, &desk] {
-        let opened = record::read(reader, &did).await.unwrap().unwrap();
+        let opened = record::read(reader, &vault, &did).await.unwrap().unwrap();
         assert_eq!(opened.version, 3);
         assert_eq!(opened.record.devices["d2"].holds_master, HoldsMaster::Yes);
         assert_eq!(opened.record.devices["d2"].name, "Desk");
@@ -2020,7 +2060,7 @@ async fn a_failed_push_stays_on_the_retry_list_until_it_passes() {
         key_id: d2.clone(),
     };
     assert_eq!(vault.pending_pushes().unwrap(), vec![pending]);
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::No);
 
     vault
@@ -2045,7 +2085,7 @@ async fn a_failed_push_stays_on_the_retry_list_until_it_passes() {
             MasterUse::SendMaster
         ]
     );
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(
         opened.record.devices[&d2].holds_master,
         HoldsMaster::Offered
@@ -2095,6 +2135,7 @@ async fn record_writes_merge_into_the_newest_version() {
 
     record::write(
         &desk,
+        &vault,
         &did,
         &[Change::Rename {
             key_id: d2.clone(),
@@ -2108,6 +2149,7 @@ async fn record_writes_merge_into_the_newest_version() {
     let puts = a.rpc().record_puts.get();
     let version = record::write(
         &a,
+        &vault,
         &did,
         &[Change::HoldsMaster {
             key_id: d2.clone(),
@@ -2119,7 +2161,7 @@ async fn record_writes_merge_into_the_newest_version() {
     .unwrap();
     assert_eq!(version, 3);
     assert_eq!(a.rpc().record_puts.get(), puts + 1);
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].name, "Studio Mac");
     assert_eq!(
         opened.record.devices[&d2].holds_master,
@@ -2127,7 +2169,7 @@ async fn record_writes_merge_into_the_newest_version() {
     );
 
     let busy = ViaExecutor::new(AlwaysStale(a.rpc()));
-    let refused = record::write(&busy, &did, &[], &OsRandom).await;
+    let refused = record::write(&busy, &vault, &did, &[], &OsRandom).await;
     assert!(
         matches!(refused, Err(ClientError::RecordBusy)),
         "{refused:?}"
@@ -2165,14 +2207,22 @@ async fn a_conditional_write_checks_every_version_it_builds_on() {
     };
     let desk_named = named("Desk");
     assert_eq!(
-        record::write_if(&a, &did, &[rename("Studio")], &desk_named, &OsRandom)
-            .await
-            .unwrap(),
+        record::write_if(
+            &a,
+            &vault,
+            &did,
+            &[rename("Studio")],
+            &desk_named,
+            &OsRandom
+        )
+        .await
+        .unwrap(),
         2
     );
     // The check failed on the version read: nothing is written.
     let puts = a.rpc().record_puts.get();
-    let refused = record::write_if(&a, &did, &[rename("Den")], &desk_named, &OsRandom).await;
+    let refused =
+        record::write_if(&a, &vault, &did, &[rename("Den")], &desk_named, &OsRandom).await;
     assert!(matches!(refused, Err(ClientError::Step(_))), "{refused:?}");
     assert_eq!(a.rpc().record_puts.get(), puts);
 
@@ -2180,6 +2230,7 @@ async fn a_conditional_write_checks_every_version_it_builds_on() {
     struct RenamedFirst<'a> {
         inner: &'a TestExecutor,
         desk: &'a ViaExecutor<TestExecutor>,
+        vault: &'a MemoryVault,
         did: &'a str,
         d2: &'a str,
         done: Cell<bool>,
@@ -2192,7 +2243,7 @@ async fn a_conditional_write_checks_every_version_it_builds_on() {
                     key_id: self.d2.into(),
                     name: "Den".into(),
                 };
-                record::write(self.desk, self.did, &[rename], &OsRandom)
+                record::write(self.desk, self.vault, self.did, &[rename], &OsRandom)
                     .await
                     .unwrap();
             }
@@ -2202,14 +2253,23 @@ async fn a_conditional_write_checks_every_version_it_builds_on() {
     let raced = ViaExecutor::new(RenamedFirst {
         inner: a.rpc(),
         desk: &desk,
+        vault: &vault,
         did: &did,
         d2: &d2,
         done: Cell::new(false),
     });
     let studio_named = named("Studio");
-    let refused = record::write_if(&raced, &did, &[rename("Loft")], &studio_named, &OsRandom).await;
+    let refused = record::write_if(
+        &raced,
+        &vault,
+        &did,
+        &[rename("Loft")],
+        &studio_named,
+        &OsRandom,
+    )
+    .await;
     assert!(matches!(refused, Err(ClientError::Step(_))), "{refused:?}");
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(
         (opened.version, opened.record.devices[&d2].name.as_str()),
         (3, "Den")
@@ -2296,7 +2356,7 @@ async fn a_late_offered_leaves_a_device_that_took_the_master_key() {
         take_when_pushed(&desk, &pushed, &released, None),
     );
     let sent = sent.unwrap();
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::Yes);
     assert_eq!(opened.version, taken);
     assert!(
@@ -2350,7 +2410,7 @@ async fn a_device_that_takes_the_master_key_at_once_at_its_link_ends_holding_it(
     );
     let linked = linked.unwrap();
     assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     let listed = &opened.record.devices[&linked.key_id];
     assert_eq!(
         (listed.name.as_str(), listed.holds_master),
@@ -2409,14 +2469,18 @@ async fn a_retry_marks_offered_only_the_devices_that_do_not_hold_the_master_key(
             })
             .unwrap();
     }
-    let before = record::read(&a, &did).await.unwrap().unwrap().version;
+    let before = record::read(&a, &vault, &did)
+        .await
+        .unwrap()
+        .unwrap()
+        .version;
     let retried = retry_pushes(&a, &vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap();
     assert_eq!(retried.pushes.len(), 2);
     assert!(retried.pushes.iter().all(|(_, sent)| sent.is_ok()));
     assert_eq!(retried.record.unwrap().unwrap(), before + 1);
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::Yes);
     assert_eq!(
         opened.record.devices[&d3].holds_master,
@@ -2478,7 +2542,7 @@ async fn the_holder_answers_a_devices_send_master_request() {
     };
     assert_eq!(sent.record.unwrap(), 2);
     assert!(a.requests(0).await.unwrap().is_empty());
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(
         opened.record.devices[&d2].holds_master,
         HoldsMaster::Offered
@@ -2572,6 +2636,7 @@ async fn a_device_the_record_calls_an_app_but_the_log_does_not_let_keep_gets_no_
     // The device rewrites its own entry: now the record says it is a desktop app.
     record::write(
         &device,
+        &vault,
         &did,
         &[Change::Device {
             key_id: d2.clone(),
@@ -2581,7 +2646,7 @@ async fn a_device_the_record_calls_an_app_but_the_log_does_not_let_keep_gets_no_
     )
     .await
     .unwrap();
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].kind, DeviceKind::DesktopApp);
 
     device
@@ -2633,7 +2698,7 @@ async fn a_device_the_log_lets_keep_gets_the_master_key_whatever_the_record_says
     let listed = a.requests(0).await.unwrap();
     let sent = answer(&a, &vault, &did, &listed[0], &SystemClock, &OsRandom).await;
     assert!(matches!(&sent, Ok(Answered::MasterSent(_))), "{sent:?}");
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].kind, DeviceKind::Server);
     assert_eq!(
         opened.record.devices[&d2].holds_master,
@@ -2735,10 +2800,13 @@ async fn the_holder_answers_a_confirm_revoke_request() {
     revoked.record.unwrap();
     assert_eq!(host.status().await.unwrap().revoked, Some(revoked.head.seq));
     assert!(a.requests(0).await.unwrap().is_empty());
-    let opened = record::read(&a, &did).await.unwrap().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert!(!opened.record.devices.contains_key(&d3));
     let sealed = a.record().await.unwrap().unwrap();
-    assert_eq!(sealed.wrapped.keys().collect::<Vec<_>>(), ["d1", "d2"]);
+    assert_eq!(
+        sealed.record.wrapped.keys().collect::<Vec<_>>(),
+        ["d1", "d2"]
+    );
     assert_eq!(
         vault.unlocks(),
         vec![MasterUse::Link, MasterUse::Link, MasterUse::Revoke]
@@ -2882,7 +2950,7 @@ async fn a_failed_entry_write_holds_the_master_key_back() {
         waiting.is_none(),
         "a master key waits in the device's inbox although the entry write failed"
     );
-    if let Some(opened) = record::read(&a, &did).await.unwrap() {
+    if let Some(opened) = record::read(&a, &vault, &did).await.unwrap() {
         assert_ne!(
             opened
                 .record
@@ -2895,4 +2963,280 @@ async fn a_failed_entry_write_holds_the_master_key_back() {
     }
     // The push waits for `retry_pushes`.
     assert_eq!(vault.pending_pushes().unwrap().len(), 1);
+}
+
+/// Review coasys/ad4m#1649 (Lal, P3): a double failure in one outage — the entry write before
+/// the push and the confirm's fallback both fail — leaves a pending push whose device the
+/// record does not list. The retry must write the entry before the key goes again: without it
+/// the device takes the key, acks it, and its `holdsMaster: true` write is refused for naming
+/// a device the record does not list, so the key is held with no entry. Here the retry writes
+/// the entry, pushes, and the device ends `Yes`.
+#[tokio::test]
+async fn a_retried_push_writes_the_devices_entry_before_the_key_goes() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 25).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_desk = desk
+        .rpc()
+        .call(
+            "identity.claimOffer",
+            json!({ "offer": flow.offer_string(), "canKeepMaster": true }),
+        )
+        .await
+        .unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+    // Both writes of the entry fail: the one before the push and the confirm's fallback.
+    a.rpc().refuse_record_puts.set(2);
+    let linked = flow
+        .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&linked.master, Some(Err(ClientError::Step(_)))),
+        "{:?}",
+        linked.master
+    );
+    assert!(linked.record.is_err());
+    let key_id = linked.key_id.clone();
+    let pending = PendingPush {
+        scid: scid.clone(),
+        key_id: key_id.clone(),
+    };
+    assert_eq!(vault.pending_pushes().unwrap(), vec![pending]);
+    join(&desk, &claimed_desk["offerId"]).await;
+
+    // With the store back the retry writes the entry, then pushes; the device takes the key
+    // and marks the entry the retry wrote `Yes`.
+    let retried = retry_pushes(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(retried.pushes.len(), 1);
+    assert!(retried.pushes[0].1.is_ok(), "{:?}", retried.pushes);
+    assert!(matches!(retried.record, Some(Ok(_))));
+    assert!(vault.pending_pushes().unwrap().is_empty());
+    let desk_vault = MemoryVault::new();
+    let taken = take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("a master key waits");
+    taken.record.unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices[&key_id].holds_master,
+        HoldsMaster::Yes
+    );
+}
+
+/// The same outage over two pending pushes: one device whose entry landed and one whose it
+/// never did, and the retry's entry write for it fails too. The entry-less device stays on
+/// the retry list; the other's push goes and is marked `"offered"`: one cannot block the rest.
+#[tokio::test]
+async fn a_retry_batch_with_an_entry_less_device_still_marks_the_others() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let laptop = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 26).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    // The laptop links to keep the master key, but both writes of its entry fail.
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    laptop
+        .rpc()
+        .call(
+            "identity.claimOffer",
+            json!({ "offer": flow.offer_string(), "canKeepMaster": true }),
+        )
+        .await
+        .unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+    a.rpc().refuse_record_puts.set(2);
+    let linked = flow
+        .confirm(&claimed, entry("Laptop", DeviceKind::DesktopApp), true)
+        .await
+        .unwrap();
+    let d3 = linked.key_id.clone();
+    vault
+        .keep_push(&PendingPush {
+            scid: scid.clone(),
+            key_id: d2.clone(),
+        })
+        .unwrap();
+
+    // The retry's entry write for the laptop fails too: its push is skipped and stays on the
+    // retry list; the desk's push goes and is marked.
+    a.rpc().refuse_record_puts.set(1);
+    let retried = retry_pushes(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(retried.pushes.len(), 2, "{:?}", retried.pushes);
+    assert_eq!(retried.pushes[0].0, d3);
+    assert!(retried.pushes[0].1.is_err(), "{:?}", retried.pushes);
+    assert_eq!(retried.pushes[1].0, d2);
+    assert!(retried.pushes[1].1.is_ok(), "{:?}", retried.pushes);
+    assert_eq!(
+        vault.pending_pushes().unwrap(),
+        vec![PendingPush {
+            scid,
+            key_id: d3.clone()
+        }]
+    );
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices[&d2].holds_master,
+        HoldsMaster::Offered
+    );
+    assert!(!opened.record.devices.contains_key(&d3));
+}
+
+/// A store can serve back an older version with a receipt that still verifies: the read keeps
+/// the highest version seen per identity in the vault and refuses a lower one, until the
+/// caller resets the mark.
+#[tokio::test]
+async fn a_store_serving_back_an_older_record_is_refused() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 27).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    let served_v1 = a.rpc().call("identity.record", json!({})).await.unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert_eq!(opened.version, 1);
+    record::write(
+        &a,
+        &vault,
+        &did,
+        &[Change::Rename {
+            key_id: d2.clone(),
+            name: "Studio".into(),
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+
+    *a.rpc().serve_record.borrow_mut() = Some(served_v1);
+    let refused = record::read(&a, &vault, &did).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ClientError::ServedRecordVersion { served: 1, seen: 2 })
+        ),
+        "{refused:?}"
+    );
+    vault.record_seen_reset(&scid).unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert_eq!(opened.version, 1);
+}
+
+/// A version a device wrote before its revocation still opens for the revoke flow's own
+/// write: the store's receipt names the seq the write was accepted at, where the writer was
+/// valid. The write after the publish builds on it, so what the revoked device wrote last
+/// survives; only its own entry and pending revocation go.
+#[tokio::test]
+async fn what_the_revoked_device_wrote_last_survives_the_revokes_record_write() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 28).await;
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Node,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_b = claim(&b, &flow.offer_string(), None).await.unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+    flow.confirm(&claimed, entry("node.example", DeviceKind::Server), false)
+        .await
+        .unwrap();
+    join(&b, &claimed_b["offerId"]).await;
+    let d2 = key_id_of(&a, &did, &b.rpc().device_key())
+        .await
+        .unwrap()
+        .unwrap();
+    // d2's last write lists d1's executor under a new name.
+    record::write(
+        &b,
+        &vault,
+        &did,
+        &[Change::Device {
+            key_id: "d1".into(),
+            entry: entry("Holder rig", DeviceKind::Server),
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+
+    let revoked = revoke(
+        &a,
+        &vault,
+        &did,
+        std::slice::from_ref(&d2),
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    revoked.record.unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"],
+        entry("Holder rig", DeviceKind::Server),
+        "d2's last write survives the record write over it"
+    );
+    assert!(!opened.record.devices.contains_key(&d2));
 }

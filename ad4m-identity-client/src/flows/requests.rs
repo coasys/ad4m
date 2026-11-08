@@ -143,7 +143,8 @@ pub async fn answer<R: ExecutorRpc>(
         DeviceRequestBody::ConfirmRevoke { key_ids, .. } => {
             let unlocked = vault.unlock(&scid, MasterUse::Revoke, clock.now())?;
             let signer = unlocked.signer(clock.now())?;
-            let revoked = revoke_with(executor, did, &chain, signer, key_ids, random).await?;
+            let revoked =
+                revoke_with(executor, vault, did, &chain, signer, key_ids, random).await?;
             let chain = chain_of(executor, did).await?;
             delete(executor, &chain, did, signer, &request.id, clock, random).await?;
             Ok(Answered::Revoked(revoked))
