@@ -35,6 +35,8 @@ use http_body_util::BodyExt;
 use identity_store::db::Db;
 use identity_store::{router, system_clock, Settings, Store, StoreKey};
 use serde_json::{json, Value};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -846,5 +848,168 @@ async fn a_keystore_that_cannot_open_keeps_the_pre_join_ticket() {
     assert_eq!(
         claimed.match_code,
         entries[0]["matchCode"].as_str().unwrap()
+    );
+}
+
+/// A `HttpClient` over the router that can swap the head of every log page for one identity
+/// (`foreign_head`), or serve one recorded log page for it (`replay`), as a store that lies
+/// about the log would. Tests of the head binding and the rollback checkpoint (review of
+/// coasys/ad4m#1673).
+struct LyingHttp {
+    inner: RouterHttp,
+    /// The log whose pages are tampered with, by SCID.
+    scid: Rc<RefCell<String>>,
+    /// A signed head of another log, put on every page of `scid`'s log.
+    foreign_head: Rc<RefCell<Option<Value>>>,
+    /// A recorded page body, served for every page of `scid`'s log.
+    replay: Rc<RefCell<Option<Vec<u8>>>>,
+}
+
+#[async_trait(?Send)]
+impl HttpClient for LyingHttp {
+    async fn send(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let logs = request.method == "GET"
+            && request
+                .url
+                .starts_with(&format!("{STORE_URL}/v1/logs/{}", self.scid.borrow()));
+        let mut response = self.inner.send(request).await?;
+        if logs && response.status == 200 {
+            if let Some(body) = self.replay.borrow().as_ref() {
+                response.body = body.clone();
+            } else if let Some(head) = self.foreign_head.borrow().as_ref() {
+                let mut page: Value = serde_json::from_slice(&response.body).unwrap();
+                page["head"] = head.clone();
+                response.body = serde_json::to_vec(&page).unwrap();
+            }
+        }
+        Ok(response)
+    }
+}
+
+/// `GET /v1/logs/{scid}?from=0` straight from the router: the page as the store serves it.
+async fn log_page(router: &Router, scid: &str) -> Vec<u8> {
+    RouterHttp {
+        router: router.clone(),
+    }
+    .send(HttpRequest {
+        method: "GET".into(),
+        url: format!("{STORE_URL}/v1/logs/{scid}?from=0"),
+        headers: Vec::new(),
+        body: Vec::new(),
+    })
+    .await
+    .unwrap()
+    .body
+}
+
+/// A phone on `http` speaking for `identity`.
+fn phone_over(http: LyingHttp, seed: u8, identity: Option<String>) -> ViaExecutor<ViaStore> {
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    let enc = SoftEncKey::from_ed25519(&key);
+    ViaExecutor::new(ViaStore::new(
+        Box::new(http),
+        Box::new(key),
+        Box::new(enc),
+        Box::new(SystemClock),
+        Box::new(OsRandom),
+        StoreEndpoint {
+            url: STORE_URL.to_string(),
+            keys: store_keys(),
+        },
+        identity,
+    ))
+}
+
+/// Review coasys/ad4m#1673 at 98211551e (Lal's P2): `log_from` checks only the head's
+/// signature, never that the head names the requested log, or the folded chain's seq and
+/// hash. A store can put the (validly signed) head of another log on the page, and the phone
+/// takes the events as confirmed under it. Fails at 98211551e.
+#[tokio::test]
+async fn a_signed_head_of_another_log_does_not_confirm_this_one() {
+    let (router, _dir) = store();
+    let a = phone(&router, 1, None);
+    let did_a = create(&a, &MemoryVault::new(), 61).await;
+    let b = phone(&router, 2, None);
+    let did_b = create(&b, &MemoryVault::new(), 62).await;
+    let page_b: Value = serde_json::from_slice(&log_page(&router, scid(&did_b)).await).unwrap();
+
+    let lying = LyingHttp {
+        inner: RouterHttp {
+            router: router.clone(),
+        },
+        scid: Rc::new(RefCell::new(scid(&did_a).to_string())),
+        foreign_head: Rc::new(RefCell::new(Some(page_b["head"].clone()))),
+        replay: Rc::new(RefCell::new(None)),
+    };
+    let fooled = phone_over(lying, 1, Some(scid(&did_a).to_string()));
+    let answer = fooled.rpc().call("identity.status", json!({})).await;
+    assert!(
+        answer.is_err(),
+        "a head of another log confirmed this one: {answer:?}"
+    );
+    let message = answer.unwrap_err().message;
+    assert!(message.contains("head"), "{message}");
+}
+
+/// Review coasys/ad4m#1673 at 98211551e (Lal's P2): the phone keeps no checkpoint, so after it
+/// has seen the log at seq 1 a store can serve the (validly signed) page of seq 0 again and
+/// the phone goes back to the older history. Fails at 98211551e.
+#[tokio::test]
+async fn a_lower_signed_head_after_a_newer_one_is_refused() {
+    let (router, _dir) = store();
+    let lied_about = Rc::new(RefCell::new(String::new()));
+    let replay = Rc::new(RefCell::new(None));
+    let lying = LyingHttp {
+        inner: RouterHttp {
+            router: router.clone(),
+        },
+        scid: lied_about.clone(),
+        foreign_head: Rc::new(RefCell::new(None)),
+        replay: replay.clone(),
+    };
+    // The holder's own transport is the lying one; it is honest until `replay` is set.
+    let holder_vault = MemoryVault::new();
+    let holder = phone_over(lying, 1, None);
+    let did = create(&holder, &holder_vault, 63).await;
+    let old_page = log_page(&router, scid(&did)).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&old_page).unwrap()["head"]["seq"],
+        json!(0)
+    );
+
+    // The log grows to seq 1 (a device joins), and the holder reads it there.
+    let other = phone(&router, 8, None);
+    let flow = LinkFlow::open(
+        &holder,
+        &holder_vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed = claim(&other, &flow.offer_string(), None).await;
+    let seen = flow.wait_for_claim().await.unwrap();
+    flow.confirm(&seen, entry("Other", DeviceKind::PhoneApp), false)
+        .await
+        .unwrap();
+    join_status(&other, &claimed["offerId"]).await;
+    let status = holder
+        .rpc()
+        .call("identity.status", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["head"]["seq"], json!(1), "{status}");
+
+    // The store serves the seq-0 page again.
+    *lied_about.borrow_mut() = scid(&did).to_string();
+    *replay.borrow_mut() = Some(old_page);
+    let answer = holder.rpc().call("identity.status", json!({})).await;
+    assert!(
+        answer.is_err(),
+        "the phone went back to seq 0 after reading seq 1: {answer:?}"
     );
 }

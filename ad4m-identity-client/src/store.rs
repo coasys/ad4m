@@ -463,6 +463,10 @@ pub struct ViaStore {
     joins: RefCell<BTreeMap<String, String>>,
     /// The pre-join inbox `identity.prepareDevice` opened, until its device string expires.
     prepared: RefCell<Option<Prepared>>,
+    /// Per identity, the head this phone last accepted (`seq`, `hash`): a store that serves a
+    /// lower seq, or a log that does not pass through that head, is refused
+    /// (`identity.resetLog` forgets it, as the executor's does its cache).
+    accepted: RefCell<BTreeMap<String, (u64, String)>>,
 }
 
 impl ViaStore {
@@ -488,6 +492,7 @@ impl ViaStore {
             identity: RefCell::new(identity),
             joins: RefCell::new(BTreeMap::new()),
             prepared: RefCell::new(None),
+            accepted: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -624,6 +629,13 @@ impl ViaStore {
                 "bad-head-signature: the store's head is not signed by a trusted store key",
             ));
         }
+        // A signature alone binds the head to nothing this read asked for.
+        if head.scid != scid {
+            return Err(error(
+                502,
+                "bad-head: the store's head names another log than the one read",
+            ));
+        }
         Ok((events, head))
     }
 
@@ -638,6 +650,38 @@ impl ViaStore {
             .map_err(|e| bad_request(format!("{} ({e})", e.name())))?;
         let chain =
             crate::fold(&events).map_err(|e| bad_request(format!("the log does not fold: {e}")))?;
+        // The signed head must be the folded log's head: otherwise the events are not what
+        // the store confirmed (a head of another position, or of a prefix).
+        let folded = chain.head();
+        if folded.seq != head.seq || folded.hash != head.hash {
+            return Err(error(
+                502,
+                "bad-head: the store's head is not the head of the log it served",
+            ));
+        }
+        // Never behind, and never beside, the head this phone accepted before.
+        let mut accepted = self.accepted.borrow_mut();
+        if let Some((seq, hash)) = accepted.get(scid) {
+            if head.seq < *seq {
+                return Err(error(
+                    409,
+                    format!(
+                        "store-behind: the store served the log at seq {}, under seq {seq} read before",
+                        head.seq
+                    ),
+                ));
+            }
+            if chain.hash_at(*seq) != Some(hash) {
+                return Err(error(
+                    409,
+                    format!(
+                        "fork: the log served does not pass through the head accepted at seq {seq}"
+                    ),
+                ));
+            }
+        }
+        accepted.insert(scid.to_string(), (head.seq, head.hash.clone()));
+        drop(accepted);
         Ok((chain, head))
     }
 
@@ -931,6 +975,14 @@ impl ViaStore {
             return Err(error(
                 502,
                 "bad-head-signature: the store's head is not signed by a trusted store key",
+            ));
+        }
+        // A signed head confirms this publish only when it is this log's and reaches the
+        // events sent: a head of another log, or of a prefix, does not.
+        if head.scid != scid || events.iter().any(|e| e.seq > head.seq) {
+            return Err(error(
+                502,
+                "bad-head: the store's head does not confirm the events published",
             ));
         }
         // The publish bound this key to `scid` when the log lists it; the index settles it on
@@ -1621,7 +1673,10 @@ impl ExecutorRpc for ViaStore {
             "identity.deleteRequest" => self.delete_request(&params).await,
             "identity.keyOwner" => self.key_owner(&params).await,
             // The phone keeps no cache to drop: every read is fresh from the store.
-            "identity.resetLog" => Ok(json!(true)),
+            "identity.resetLog" => {
+                self.accepted.borrow_mut().clear();
+                Ok(json!(true))
+            }
             // The phone holds its own keys: the custody channel's answer is their multikeys.
             "identity.custodyStatus" => Ok(json!({
                 "sign": self.device.key(),
