@@ -64,6 +64,10 @@ pub fn backend_error(e: IdentityError) -> WsRpcError {
             format!("rate-limited: {scope:?}, retry after {retry_after_s} s"),
         ),
         IdentityError::Unavailable(why) => error(503, format!("unavailable: {why}")),
+        IdentityError::NotServed(call) => error(
+            503,
+            format!("unavailable: the agent language does not serve {call}"),
+        ),
         IdentityError::BadHeadSignature => error(
             502,
             "bad-head-signature: the store's head is not signed by a key of identity.storeKeys",

@@ -14,6 +14,7 @@
 //! the integration test suite, which builds shapes from JSON fixtures
 //! without going through the SHACL writer.
 
+use super::sparql_builder::LinkGuard;
 use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
 use crate::perspectives::sparql_store::SparqlStore;
@@ -66,16 +67,29 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let safe_name = escape_sparql_string(class_name);
     // Step 1: Find the shape URI and target class via SPARQL
     // Use exact suffix matching (/{name} or #{name}) to avoid "Recipe" matching "MyRecipe"
+    //
+    // Every schema triple is joined to a *counting* reifier — the same
+    // `proofValid` cut a model query makes on instance links (`LinkGuard`'s
+    // default). A definition link a peer sent whose stored verdict does not
+    // count must not register a class, a shape, a property or a field of it.
+    let guard = LinkGuard::default();
     let hash_suffix = format!("#{safe_name}");
     let query = format!(
         r#"
         SELECT ?shapeUri ?targetClass WHERE {{
-            ?targetClass <rdf://type> <ad4m://SubjectClass> .
-            ?targetClass <ad4m://shape> ?shapeUri .
+            ?targetClass <rdf://type> <ad4m://SubjectClass> .{type_guard}
+            ?targetClass <ad4m://shape> ?shapeUri .{shape_guard}
             FILTER(STRENDS(STR(?targetClass), "/{safe_name}") || STRENDS(STR(?targetClass), "{hash_suffix}") || STR(?targetClass) = "{safe_name}")
         }}
         LIMIT 1
-        "#
+        "#,
+        type_guard = guard.join(
+            "?_gr_type",
+            "?targetClass",
+            "<rdf://type>",
+            "<ad4m://SubjectClass>"
+        ),
+        shape_guard = guard.join("?_gr_shape", "?targetClass", "<ad4m://shape>", "?shapeUri"),
     );
 
     let result_json = store.query(&query)?;
@@ -111,29 +125,56 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             ?whereFilter ?wherePredicates ?filterEnabled
             ?transform ?interpretationHint ?identity ?ordering
         WHERE {{
-            <{shape_uri}> <sh://property> ?propUri .
-            ?propUri <sh://path> ?path .
-            ?propUri <rdf://type> ?propType .
-            OPTIONAL {{ ?propUri <ad4m://interpretation_hint> ?interpretationHint . }}
-            OPTIONAL {{ ?propUri <ad4m://identity> ?identity . }}
-            OPTIONAL {{ ?propUri <sh://datatype> ?datatype . }}
-            OPTIONAL {{ ?propUri <sh://minCount> ?minCount . }}
-            OPTIONAL {{ ?propUri <sh://maxCount> ?maxCount . }}
-            OPTIONAL {{ ?propUri <ad4m://resolveLanguage> ?resolveLanguage . }}
-            OPTIONAL {{ ?propUri <ad4m://writable> ?writable . }}
-            OPTIONAL {{ ?propUri <ad4m://local> ?local . }}
-            OPTIONAL {{ ?propUri <ad4m://getter> ?getter . }}
-            OPTIONAL {{ ?propUri <ad4m://ordering> ?ordering . }}
-            OPTIONAL {{ ?propUri <sh://hasValue> ?hasValue . }}
-            OPTIONAL {{ ?propUri <sh://class> ?className . }}
-            OPTIONAL {{ ?propUri <ad4m://relationKind> ?relationKind . }}
-            OPTIONAL {{ ?propUri <ad4m://targetClassName> ?targetClassName . }}
-            OPTIONAL {{ ?propUri <ad4m://whereFilter> ?whereFilter . }}
-            OPTIONAL {{ ?propUri <ad4m://wherePredicates> ?wherePredicates . }}
-            OPTIONAL {{ ?propUri <ad4m://filter> ?filterEnabled . }}
-            OPTIONAL {{ ?propUri <ad4m://transform> ?transform . }}
-        }}
-        "#
+            <{shape_uri}> <sh://property> ?propUri .{prop_guard}
+            ?propUri <sh://path> ?path .{path_guard}
+            ?propUri <rdf://type> ?propType .{type_guard}
+{optional_guards}        }}
+        "#,
+        prop_guard = guard.join(
+            "?_gr_prop",
+            &format!("<{shape_uri}>"),
+            "<sh://property>",
+            "?propUri"
+        ),
+        path_guard = guard.join("?_gr_path", "?propUri", "<sh://path>", "?path"),
+        type_guard = guard.join("?_gr_ptype", "?propUri", "<rdf://type>", "?propType"),
+        optional_guards = [
+            ("ad4m://interpretation_hint", "interpretationHint"),
+            ("ad4m://identity", "identity"),
+            ("sh://datatype", "datatype"),
+            ("sh://minCount", "minCount"),
+            ("sh://maxCount", "maxCount"),
+            ("ad4m://resolveLanguage", "resolveLanguage"),
+            ("ad4m://writable", "writable"),
+            ("ad4m://local", "local"),
+            ("ad4m://getter", "getter"),
+            ("ad4m://ordering", "ordering"),
+            ("sh://hasValue", "hasValue"),
+            ("sh://class", "className"),
+            ("ad4m://relationKind", "relationKind"),
+            ("ad4m://targetClassName", "targetClassName"),
+            ("ad4m://whereFilter", "whereFilter"),
+            ("ad4m://wherePredicates", "wherePredicates"),
+            ("ad4m://filter", "filterEnabled"),
+            ("ad4m://transform", "transform"),
+        ]
+        .iter()
+        .map(|(predicate, var)| {
+            // Each OPTIONAL binds its field only when a *counting* link
+            // asserts it: the reifier requirement sits inside the OPTIONAL,
+            // so a field a peer sent with a verdict that does not count is
+            // unbound, exactly as if it had never been written.
+            format!(
+                "            OPTIONAL {{ ?propUri <{predicate}> ?{var} .{} }}\n",
+                guard.join(
+                    &format!("?_gr_{var}"),
+                    "?propUri",
+                    &format!("<{predicate}>"),
+                    &format!("?{var}")
+                )
+            )
+        })
+        .collect::<String>(),
     );
 
     let props_json = store.query(&props_query)?;
@@ -361,10 +402,16 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let class_hint_query = format!(
         r#"
         SELECT ?hint WHERE {{
-            <{shape_uri}> <ad4m://interpretation_hint> ?hint .
+            <{shape_uri}> <ad4m://interpretation_hint> ?hint .{}
         }}
         LIMIT 1
-        "#
+        "#,
+        guard.join(
+            "?_gr_hint",
+            &format!("<{shape_uri}>"),
+            "<ad4m://interpretation_hint>",
+            "?hint"
+        )
     );
     let class_hint = store
         .query(&class_hint_query)
@@ -397,13 +444,20 @@ fn initial_value_from_constructor(
     // class.  Resolve the shape URI from the target class so we can
     // query for its constructor.
     let safe_tc = escape_sparql_string(target_class);
+    let guard = LinkGuard::default();
     let shape_query = format!(
         r#"
         SELECT ?shapeUri WHERE {{
-            <{safe_tc}> <ad4m://shape> ?shapeUri .
+            <{safe_tc}> <ad4m://shape> ?shapeUri .{}
         }}
         LIMIT 1
-        "#
+        "#,
+        guard.join(
+            "?_gr_shape",
+            &format!("<{safe_tc}>"),
+            "<ad4m://shape>",
+            "?shapeUri"
+        )
     );
     let shape_result_json = store.query(&shape_query).ok()?;
     let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
@@ -413,10 +467,16 @@ fn initial_value_from_constructor(
     let ctor_query = format!(
         r#"
         SELECT ?ctor WHERE {{
-            <{safe_shape}> <ad4m://constructor> ?ctor .
+            <{safe_shape}> <ad4m://constructor> ?ctor .{}
         }}
         LIMIT 1
-        "#
+        "#,
+        guard.join(
+            "?_gr_ctor",
+            &format!("<{safe_shape}>"),
+            "<ad4m://constructor>",
+            "?ctor"
+        )
     );
     let ctor_result_json = store.query(&ctor_query).ok()?;
     let ctor_rows: Vec<Value> = serde_json::from_str(&ctor_result_json).ok()?;

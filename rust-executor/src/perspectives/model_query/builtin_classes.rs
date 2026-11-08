@@ -100,25 +100,62 @@ pub fn builtin(uri: &str) -> Option<&'static Builtin> {
 /// in and tested, so a failure here is a build defect.
 fn read_back(name: &str, sdna: &str) -> ModelShape {
     let store = SparqlStore::new(None).expect("an in-memory store for a built-in class");
+    // `load_shape` reads every definition triple through a *counting* reifier
+    // — a link whose signature does not hold never counts. These are the
+    // executor's own bundled definitions with no agent to sign as, so they
+    // carry a throwaway `did:key` signature: verified at insert, judged
+    // `valid`, never trusted elsewhere.
+    let signer = ScratchSigner::new();
     for link in parse_shacl_to_links(sdna, name)
         .unwrap_or_else(|e| panic!("built-in class {name}: invalid SHACL: {e}"))
     {
         store
-            .add_link(&LinkExpression {
-                author: String::new(),
-                timestamp: String::new(),
-                data: link,
-                proof: ExpressionProof {
-                    key: String::new(),
-                    signature: String::new(),
-                    anchor: None,
-                },
-                status: Some(LinkStatus::Shared),
-            })
+            .add_link(&signer.sign(link))
             .unwrap_or_else(|e| panic!("built-in class {name}: {e}"));
     }
     load_shape_from_store(&store, name)
         .unwrap_or_else(|e| panic!("built-in class {name}: shape did not load: {e}"))
+}
+
+/// A one-shot `did:key` signer for the scratch-store SHACL of the built-in
+/// classes — the same wire shape `TestSigner` produces for tests, in
+/// production code where `TestSigner` does not exist.
+struct ScratchSigner {
+    keypair: did_key::PatchedKeyPair,
+    did: String,
+    key_id: String,
+}
+
+impl ScratchSigner {
+    fn new() -> Self {
+        use did_key::{DIDCore, Ed25519KeyPair};
+        let keypair = did_key::generate::<Ed25519KeyPair>(None);
+        let document = keypair.get_did_document(crate::wallet::DID_DOCUMENT_CONFIG);
+        ScratchSigner {
+            did: document.id.clone(),
+            key_id: document.verification_method[0].id.clone(),
+            keypair,
+        }
+    }
+
+    fn sign(&self, data: crate::types::Link) -> LinkExpression {
+        use did_key::CoreSign;
+        let timestamp = chrono::Utc::now();
+        let signature = hex::encode(self.keypair.sign(
+            &crate::agent::signatures::hash_data_and_timestamp(&data, &timestamp),
+        ));
+        LinkExpression {
+            author: self.did.clone(),
+            timestamp: timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            data,
+            proof: ExpressionProof {
+                key: self.key_id.clone(),
+                signature,
+                anchor: None,
+            },
+            status: Some(LinkStatus::Shared),
+        }
+    }
 }
 
 #[cfg(test)]
