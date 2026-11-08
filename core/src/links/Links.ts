@@ -56,8 +56,8 @@ export class LinkExpression extends ExpressionGeneric(Link) {
     }
     status?: WireLinkStatus;
     /** The executor's verdict on the link. Logic reads count only `valid` links;
-     *  `perspective.get` returns `cantCheck` and `flagged` links with it and never
-     *  an `invalid` one. */
+     *  `perspective.get` returns `cantCheck` and `flagged` links with it, and an
+     *  `invalid` one only when the query sets `includeUnverified`. */
     verdict?: LinkVerdict;
     /** The `did:scid` of the person whose device key signed the link (a bot key:
      *  its owner), derived by the executor; only on a `valid` link. `author` stays

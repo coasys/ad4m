@@ -519,7 +519,7 @@ pub async fn fill_container_rows(
     // Required patterns before the first OPTIONAL (see `links::attach_links`): after it,
     // oxigraph leaves the joins before the OPTIONALs unkeyed, a cartesian product.
     let sparql = format!(
-        r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofAnchor ?proofValid WHERE {{
+        r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofAnchor ?proofValid ?person WHERE {{
     {{ {} }}
     {}
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
@@ -530,6 +530,7 @@ pub async fn fill_container_rows(
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofAnchor> ?proofAnchor . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/person> ?person . }}
 }}"#,
         branches.join(" } UNION { "),
         values_or_str_filter("source", &ids),
