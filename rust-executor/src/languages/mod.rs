@@ -125,6 +125,20 @@ pub struct LanguageController {
     installs: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
 }
 
+/// The `(did:key author, proof.anchor)` of an expression in JSON, when its author is a
+/// `did:key`: the signer the key map is filled for before the expression is checked.
+fn did_key_signer(expr_json: &JsonValue) -> Option<(String, Option<u64>)> {
+    let author = expr_json.get("author")?.as_str()?;
+    if !author.starts_with("did:key:") {
+        return None;
+    }
+    let anchor = expr_json
+        .get("proof")
+        .and_then(|proof| proof.get("anchor"))
+        .and_then(JsonValue::as_u64);
+    Some((author.to_string(), anchor))
+}
+
 impl LanguageController {
     pub fn init_global_instance() {
         let mut instance = LANGUAGE_CONTROLLER_INSTANCE.lock().unwrap();
@@ -2583,6 +2597,13 @@ impl LanguageController {
     /// (see [`Self::honours_record`]); otherwise a `did:scid` author is not valid.
     async fn verify_expression_proof(expr_json: &mut JsonValue, record_admitted: bool) {
         let service = crate::identity::service().ok();
+        // A `did:key` signer a log lists is checked from the key map, which admits it only on
+        // a recently confirmed head: refresh it first, as a link's signers are before a write.
+        if let Some(service) = &service {
+            if let Some(signer) = did_key_signer(expr_json) {
+                service.resolver.prepare(&[signer]).await;
+            }
+        }
         Self::verify_expression_proof_with(
             expr_json,
             service.as_deref().map(|s| s.cache.as_ref()),
@@ -3285,6 +3306,27 @@ mod agent_language_profile_tests {
 
     const VALID: (JsonValue, JsonValue) = (JsonValue::Bool(true), JsonValue::Bool(false));
     const INVALID: (JsonValue, JsonValue) = (JsonValue::Bool(false), JsonValue::Bool(true));
+
+    /// A `did:key`-signed expression names its signer (with its anchor) for the key map to be
+    /// filled before the check; a `did:scid` one, checked through its record, names none.
+    #[test]
+    fn a_did_key_expression_names_its_signer_for_a_refresh() {
+        let by_key = serde_json::json!({
+            "author": "did:key:z6MkA",
+            "proof": { "signature": "00", "key": "did:key:z6MkA", "anchor": 3 }
+        });
+        assert_eq!(
+            did_key_signer(&by_key),
+            Some(("did:key:z6MkA".to_string(), Some(3)))
+        );
+        let unanchored = serde_json::json!({ "author": "did:key:z6MkB", "proof": {} });
+        assert_eq!(
+            did_key_signer(&unanchored),
+            Some(("did:key:z6MkB".to_string(), None))
+        );
+        let person = serde_json::json!({ "author": "did:scid:coasys:1:Qm", "proof": {} });
+        assert_eq!(did_key_signer(&person), None);
+    }
 
     /// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
     /// expression authored by `author`, signed by the device key `signer` the way
