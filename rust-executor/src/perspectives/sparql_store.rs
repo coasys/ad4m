@@ -988,6 +988,28 @@ SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proo
     )
 }
 
+/// `filter` for [`decorated_links_query`], limited to the links whose reifier comes after
+/// `after` in [`page_order`].
+fn after_reifier(filter: &str, after: Option<&str>) -> String {
+    match after {
+        Some(after) => format!("({filter}) && STR(?reifier) > {}", sparql_string(after)),
+        None => filter.to_string(),
+    }
+}
+
+/// The order and size of a page of [`decorated_links_query`] rows: by reifier IRI, so
+/// [`after_reifier`] continues where the last page stopped.
+fn page_order(limit: usize) -> String {
+    format!("ORDER BY STR(?reifier) LIMIT {limit}")
+}
+
+/// The reifier IRI of a stored link: the cursor that continues a paged read after it.
+pub fn reifier_of(link: &DecoratedLinkExpression) -> String {
+    make_reifier_iri(&LinkExpression::from(link.clone()))
+        .as_str()
+        .to_string()
+}
+
 impl SparqlStore {
     /// Create a new SparqlStore.
     ///
@@ -1258,10 +1280,13 @@ impl SparqlStore {
         }
     }
 
-    /// The links signed by any of `authors` (`did:key` DIDs), at most `limit`.
+    /// The links signed by any of `authors` (`did:key` DIDs): a page of at most `limit`, in
+    /// reifier order, after the reifier `after` ([`reifier_of`] of the last link of the
+    /// previous page).
     pub fn links_by_authors(
         &self,
         authors: &[String],
+        after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         if authors.is_empty() {
@@ -1272,23 +1297,31 @@ impl SparqlStore {
             .map(|a| sparql_string(a))
             .collect::<Vec<_>>()
             .join(" ");
-        let query = decorated_links_query(&format!("VALUES ?author {{ {values} }}"), "true");
-        self.query_decorated_links(&format!("{query} LIMIT {limit}"))
+        let query = decorated_links_query(
+            &format!("VALUES ?author {{ {values} }}"),
+            &after_reifier("true", after),
+        );
+        self.query_decorated_links(&format!("{query} {}", page_order(limit)))
     }
 
-    /// The links whose stored verdict is `verdict`, at most `limit`.
+    /// The links whose stored verdict is `verdict`: a page of at most `limit`, in reifier
+    /// order, after the reifier `after`.
     pub fn links_with_verdict(
         &self,
         verdict: &LinkVerdict,
+        after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         // A FILTER, not VALUES: `?linkVerdict` is bound in an OPTIONAL, and a VALUES row would
         // survive the OPTIONAL that does not match it.
         let query = decorated_links_query(
             "",
-            &format!("?linkVerdict = {}", sparql_string(&verdict.stored())),
+            &after_reifier(
+                &format!("?linkVerdict = {}", sparql_string(&verdict.stored())),
+                after,
+            ),
         );
-        self.query_decorated_links(&format!("{query} LIMIT {limit}"))
+        self.query_decorated_links(&format!("{query} {}", page_order(limit)))
     }
 
     /// Gives every link stored before verdicts (a `proofValid` annotation and no
@@ -4585,7 +4618,9 @@ mod tests {
             "the read-back link carries what was signed"
         );
 
-        let waiting = svc.links_with_verdict(&LinkVerdict::CantCheck, 10).unwrap();
+        let waiting = svc
+            .links_with_verdict(&LinkVerdict::CantCheck, None, 10)
+            .unwrap();
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].data.target, "ad4m://anchored");
 
@@ -4619,10 +4654,44 @@ mod tests {
         svc.add_link(&make_link(&bob, "ad4m://b", "ad4m://p", "ad4m://t"))
             .unwrap();
         let found = svc
-            .links_by_authors(std::slice::from_ref(&alice.did), 10)
+            .links_by_authors(std::slice::from_ref(&alice.did), None, 10)
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].author, alice.did);
+    }
+
+    /// Pages continue after the reifier of the previous page's last link: every link of the
+    /// author comes once, across more links than a page holds.
+    #[test]
+    fn links_by_authors_pages_after_the_last_reifier() {
+        let alice = TestSigner::generate();
+        let svc = new_service();
+        for i in 0..5 {
+            svc.add_link(&make_link(
+                &alice,
+                "ad4m://a",
+                "ad4m://p",
+                &format!("ad4m://t{i}"),
+            ))
+            .unwrap();
+        }
+        let authors = std::slice::from_ref(&alice.did);
+        let mut seen = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = svc.links_by_authors(authors, after.as_deref(), 2).unwrap();
+            assert!(page.len() <= 2);
+            seen.extend(page.iter().map(|l| l.data.target.clone()));
+            match page.last() {
+                Some(last) if page.len() == 2 => after = Some(reifier_of(last)),
+                _ => break,
+            }
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            (0..5).map(|i| format!("ad4m://t{i}")).collect::<Vec<_>>()
+        );
     }
 
     /// Links stored before verdicts keep the validity they had.
@@ -4658,14 +4727,14 @@ mod tests {
         ];
         assert_eq!(verdicts(&svc), expected);
         assert!(svc
-            .links_with_verdict(&LinkVerdict::Valid, 10)
+            .links_with_verdict(&LinkVerdict::Valid, None, 10)
             .unwrap()
             .is_empty());
 
         assert_eq!(svc.migrate_link_verdicts().unwrap(), 2);
         assert_eq!(verdicts(&svc), expected);
         assert_eq!(
-            svc.links_with_verdict(&LinkVerdict::Valid, 10)
+            svc.links_with_verdict(&LinkVerdict::Valid, None, 10)
                 .unwrap()
                 .len(),
             1,

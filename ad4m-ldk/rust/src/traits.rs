@@ -188,12 +188,13 @@ pub trait IdentityCapability: Language {
         id: String,
         auth: InboxAuth,
     ) -> impl std::future::Future<Output = LanguageResult<()>>;
-    /// `GET /v1/private/{scid}`: `None` before the first write.
+    /// `GET /v1/private/{scid}`: the record with the store's receipt; `None` before the first
+    /// write.
     fn identity_get_record(
         &mut self,
         did: String,
         req: SignedRequest,
-    ) -> impl std::future::Future<Output = LanguageResult<Option<SealedRecord>>>;
+    ) -> impl std::future::Future<Output = LanguageResult<Option<StoredRecord>>>;
     /// `PUT /v1/private/{scid}`.
     fn identity_put_record(
         &mut self,

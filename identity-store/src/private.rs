@@ -12,6 +12,13 @@
 //! (`400 recovery-key`); only a master-signed write installs, replaces or drops it. After a rotation the old master's attestation no longer counts: the store
 //! refuses a write that carries it, and a device writer drops the key until the new master
 //! attests again.
+//!
+//! An accepted write gets the store's receipt (`record::RecordReceipt`, domain
+//! `coasys:record-receipt`, by the head key): `{scid, version, envelope, seq, store}`, where
+//! `envelope` is the hash of the signed envelope and `seq` the log's head the write was checked
+//! against. The store keeps it beside the record and answers it with the write and with every
+//! read (`{record, receipt}`), so a reader checks the writer at `seq` (`record::open_record`)
+//! and a record stays readable after its writer is revoked or its master rotated.
 
 use ad4m_identity_core::record::{check_sealed, recovery_of, SealedRecord, Writer};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -23,7 +30,8 @@ use crate::request::{Incoming, Signer};
 use crate::{limits, Store};
 
 impl Store {
-    /// `GET /v1/private/{scid}`: the stored record, or `None` (`404`).
+    /// `GET /v1/private/{scid}`: the stored record with the store's receipt for it
+    /// (`{record, receipt}`), or `None` (`404`).
     pub fn get_record(
         &self,
         scid: &str,
@@ -32,21 +40,26 @@ impl Store {
         let did = ad4m_identity_core::did_of(scid);
         self.verify_request(incoming, Some(&did), Signer::AnyKey)?;
         let conn = self.db.lock()?;
-        let text: Option<String> = conn
+        let stored: Option<(String, String)> = conn
             .query_row(
-                "SELECT sealed FROM records WHERE scid = ?1",
+                "SELECT sealed, receipt FROM records WHERE scid = ?1",
                 params![scid],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        text.map(|t| {
-            serde_json::from_str(&t).map_err(|e| ApiError::internal(format!("stored record: {e}")))
-        })
-        .transpose()
+        stored
+            .map(|(sealed, receipt)| {
+                let parse = |t: &str| {
+                    serde_json::from_str::<Value>(t)
+                        .map_err(|e| ApiError::internal(format!("stored record: {e}")))
+                };
+                Ok(json!({ "record": parse(&sealed)?, "receipt": parse(&receipt)? }))
+            })
+            .transpose()
     }
 
-    /// `PUT /v1/private/{scid}`: stores `record` when it passes the checks above. Answers
-    /// `{version}`.
+    /// `PUT /v1/private/{scid}`: stores `record` when it passes the checks above, with the
+    /// store's receipt for it at the head it was checked against. Answers `{version, receipt}`.
     pub fn put_record(
         &self,
         scid: &str,
@@ -106,14 +119,29 @@ impl Store {
             }
         }
         limits::take_identity_write(&tx, &self.settings, scid, now)?;
+        // The seq the write was checked against: the transaction holds the log there.
+        let receipt = self
+            .key
+            .sign_receipt(scid, record, chain.head().seq)
+            .map_err(|e| ApiError::invalid(e.name(), e.to_string()))?;
         let text = serde_json::to_string(record).map_err(|e| ApiError::internal(e.to_string()))?;
+        let receipt_text =
+            serde_json::to_string(&receipt).map_err(|e| ApiError::internal(e.to_string()))?;
         tx.execute(
-            "INSERT INTO records (scid, sealed, version, stored_at) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO records (scid, sealed, version, receipt, stored_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(scid) DO UPDATE SET sealed = excluded.sealed, version = excluded.version,
+                                             receipt = excluded.receipt,
                                              stored_at = excluded.stored_at",
-            params![scid, text, to_sql(record.version)?, to_sql(now)?],
+            params![
+                scid,
+                text,
+                to_sql(record.version)?,
+                receipt_text,
+                to_sql(now)?
+            ],
         )?;
         tx.commit()?;
-        Ok(json!({ "version": record.version }))
+        Ok(json!({ "version": record.version, "receipt": receipt }))
     }
 }

@@ -67,8 +67,8 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `PUT /inbox/{scid}/{keyId}` `{sealed}` + master-signed request | `201 {id, expires}` (30 days) · `400` · `403 writer` · `404` no such key valid at the head without the bot mark · `413` · `429 identity` (16 messages, or the bucket) |
 | `GET /inbox/{scid}/{keyId}?wait=` signed by `keyId` | `200 [InboxMessage]` · `403 signer` |
 | `DELETE /inbox/{scid}/{keyId}/{id}` signed by `keyId` | `204` · `403 signer` · `404` |
-| `GET /private/{scid}` signed (device key or master) | `200 SealedRecord` · `403` · `404` none yet |
-| `PUT /private/{scid}` `SealedRecord` + signed request | `200 {version}` · `400 malformed`/`signer`/`signature`/`attestation`/`wrapped`/`recovery-key` · `403` · `409 {version}` · `413` · `429 identity` |
+| `GET /private/{scid}` signed (device key or master) | `200 {record: SealedRecord, receipt: RecordReceipt}` · `403` · `404` none yet |
+| `PUT /private/{scid}` `SealedRecord` + signed request | `200 {version, receipt: RecordReceipt}` · `400 malformed`/`signer`/`signature`/`attestation`/`wrapped`/`recovery-key` · `403` · `409 {version}` · `413` · `429 identity` |
 | `POST /requests/{scid}` `{body, expires}` signed by a device key | `201 {id}` · `400 malformed`/`expires` · `403 signer` · `429 identity` (16 open, or the bucket) |
 | `GET /requests/{scid}?since=` signed (device key or master) | `200 [DeviceRequest]` oldest first |
 | `DELETE /requests/{scid}/{id}` by the poster or the master | `204` · `403 signer` · `404` |
@@ -386,7 +386,12 @@ tests name them by these names.
   the stored record's counting recovery key and attestation unchanged (`record::recovery_of`),
   or carries none when that is none (`400 recovery-key`). Only a master-signed write installs,
   replaces or drops it. After a rotation the old master's attestation is refused, and a device
-  write drops the key until the new master attests it again. The signed
+  write drops the key until the new master attests it again. A kept write gets a receipt
+  signed by the store's head key (`StoreKey::sign_receipt`, `record::RecordReceipt`,
+  `coasys:record-receipt` over `{scid, version, envelope, seq, store}`, `seq` the head the
+  write was checked at), stored in `records.receipt` and returned on the PUT and every GET.
+  Readers check the writer at the receipt's seq, so the record keeps opening after its writer
+  is revoked or the master rotates; a new write is still checked at the head. The signed
   request is checked inside the write's transaction (`Store::verify_request_in`), against the
   held fold at the head it reads; the request box's post and delete do the same.
 - **Request box rules.** Only a device key without the bot mark posts (a master gets

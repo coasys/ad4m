@@ -41,6 +41,18 @@ fn request() -> SignedRequest {
     }
 }
 
+/// The store's receipt for a record write of `version`.
+fn receipt(version: u64) -> RecordReceipt {
+    RecordReceipt {
+        scid: "zScid".into(),
+        version,
+        envelope: "QmEnvelope".into(),
+        seq: 4,
+        store: "did:key:zStore".into(),
+        sig: "zReceiptSig".into(),
+    }
+}
+
 fn signed_offer() -> SignedOffer {
     SignedOffer {
         offer: Offer {
@@ -279,7 +291,7 @@ impl IdentityCapability for Agent {
         &mut self,
         _did: String,
         _req: SignedRequest,
-    ) -> LanguageResult<Option<SealedRecord>> {
+    ) -> LanguageResult<Option<StoredRecord>> {
         Ok(None)
     }
     async fn identity_put_record(
@@ -290,6 +302,7 @@ impl IdentityCapability for Agent {
     ) -> LanguageResult<RecordStored> {
         Ok(RecordStored {
             version: record.version,
+            receipt: receipt(record.version),
         })
     }
     async fn identity_post_request(
@@ -564,10 +577,11 @@ fn identity_inbox_record_and_request_calls() {
         sig: "zSig".into(),
     };
     assert_eq!(
-        block_on(lang.identity_put_record(did(), record, request()))
-            .unwrap()
-            .version,
-        3
+        block_on(lang.identity_put_record(did(), record, request())).unwrap(),
+        RecordStored {
+            version: 3,
+            receipt: receipt(3)
+        }
     );
     let post = PostedRequest {
         body: DeviceRequestBody::SendMaster {},
@@ -661,6 +675,36 @@ fn inbox_record_and_request_wire_types_use_the_stores_field_names() {
         },
         json!({"version": 2, "wrapped": {"d1": "AAAA"}, "recoveryKey": "z6LSRec", "recoveryAttestation": {"keyId": "m0", "sig": "zAtt"},
                "nonce": "zNonce", "ciphertext": "BBBB", "signer": "d1", "sig": "zSig"}),
+    );
+    let receipt_json = json!({"scid": "zScid", "version": 2, "envelope": "QmEnvelope", "seq": 4,
+                              "store": "did:key:zStore", "sig": "zReceiptSig"});
+    wire(&receipt(2), receipt_json.clone());
+    wire(
+        &RecordStored {
+            version: 2,
+            receipt: receipt(2),
+        },
+        json!({"version": 2, "receipt": receipt_json}),
+    );
+    wire(
+        &StoredRecord {
+            record: SealedRecord {
+                version: 2,
+                wrapped: [("d1".to_string(), "AAAA".to_string())]
+                    .into_iter()
+                    .collect(),
+                recovery_key: None,
+                recovery_attestation: None,
+                nonce: "zNonce".into(),
+                ciphertext: "BBBB".into(),
+                signer: "d1".into(),
+                sig: "zSig".into(),
+            },
+            receipt: receipt(2),
+        },
+        json!({"record": {"version": 2, "wrapped": {"d1": "AAAA"}, "nonce": "zNonce", "ciphertext": "BBBB",
+                          "signer": "d1", "sig": "zSig"},
+               "receipt": receipt_json}),
     );
     wire(
         &PostedRequest {
