@@ -472,11 +472,10 @@ mod prepare_tests {
 /// log there, so a link signed after a newer head is accepted carries the new anchor.
 pub fn anchor_for(agent_did: &str) -> Option<u64> {
     let service = SERVICE.get()?;
-    let scid = {
-        let db = crate::db::Ad4mDb::global_instance();
-        let db = db.lock().ok()?;
-        db.as_ref()?.agent_identity(agent_did).ok().flatten()?
-    };
+    let scid = crate::db_backend::db_backend()
+        .agent_identity(agent_did)
+        .ok()
+        .flatten()?;
     anchor_in(service.cache.key_map(), agent_did, &scid)
 }
 
