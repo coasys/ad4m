@@ -320,6 +320,14 @@ pub async fn create(params: CreateBotParams) -> Result<CreatedBot, WsRpcError> {
         return Err(refusal);
     }
     let claimed = claimed?;
+    // The bot's links anchor in its owner's log (`identity::anchor_for`): keep that log in the
+    // key map, as the startup load does for the owners of the bots already here.
+    if let Err(e) = identity.cache.keep_local(&offer.scid).await {
+        ::log::warn!(
+            "bots: the log of {} is unreadable ({e}); the bot's links carry no anchor until its next accepted head",
+            offer.scid
+        );
+    }
     let auth = AuthInfo {
         app_name: name.clone(),
         app_desc: format!("The bot {name}"),

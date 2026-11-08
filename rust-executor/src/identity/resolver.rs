@@ -3626,6 +3626,72 @@ mod link_check_tests {
     }
 
     /// Adds a bot key that may do `can` until `expires` to `log` at the next seq; its secret.
+    // Lal #1671 P2: a bot's links anchor at its owner's trusted seq (the bot row names the
+    // owner; a bot is not in `identity_agents`). Without an anchor a reader judges the link
+    // at the key's add, so once the owner extends the scope past its first expiry, the bot's
+    // new links would all read `invalid:expired`.
+    #[tokio::test]
+    async fn a_bots_links_anchor_at_its_owners_trusted_seq() {
+        use ad4m_identity_core::BotScope;
+        let mut log = TestLog::new(67);
+        let bot = add_bot_key(&mut log, 68, &["read", "write"], 2_000);
+        let chain = log.chain();
+        let id = chain
+            .state()
+            .device_key_id_of(&bot.key().to_string())
+            .expect("the bot key is listed")
+            .clone();
+        let longer = BotScope {
+            can: vec!["read".into(), "write".into()],
+            expires: 4_000_000_000,
+        };
+        let extended = ad4m_identity_core::build::scope(&chain, &log.master, &id, &longer).unwrap();
+        log.events.push(extended);
+        let cache = cache_with(&log).await;
+
+        let bot_did = format!("did:key:{}", bot.key());
+        crate::bots::remember(crate::db::BotRow {
+            did: bot_did.clone(),
+            username: "anchor-bot@bots.ad4m".into(),
+            name: "anchor".into(),
+            owner: log.scid(),
+            offer_id: "offer".into(),
+            created_at: 1,
+            grant: crate::db::BotGrantRow {
+                spaces: vec![],
+                can: vec!["write".into()],
+                expires: None,
+                state: "active".into(),
+                version: 1,
+                updated_at: 1,
+            },
+        });
+        assert_eq!(
+            crate::identity::signer_identity(&bot_did),
+            Some(log.scid()),
+            "a bot signs for its owner"
+        );
+        let anchor = crate::identity::anchor_in(cache.key_map(), &bot_did, &log.scid());
+        assert_eq!(
+            anchor,
+            Some(2),
+            "the trusted seq, after the scope was extended"
+        );
+
+        let after_first_expiry = 3_000;
+        let anchored = signed_with(&bot, anchor);
+        assert_eq!(
+            check_signed_with(&anchored, cache.key_map(), None, after_first_expiry),
+            valid_for(Some(did_of(&log.scid())))
+        );
+        let unanchored = signed_with(&bot, None);
+        assert_eq!(
+            check_signed_with(&unanchored, cache.key_map(), None, after_first_expiry).verdict,
+            LinkVerdict::Invalid(InvalidReason::Expired),
+            "judged at the key's add, the first scope"
+        );
+    }
+
     fn add_bot_key(
         log: &mut TestLog,
         seed: u8,

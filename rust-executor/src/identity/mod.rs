@@ -369,20 +369,31 @@ pub async fn prepare_link_signers(links: &[LinkExpression]) {
 }
 
 /// The anchor of a link that the local agent `agent_did` signs now: the trusted seq of its
-/// identity's log, when the agent is bound to an identity (`identity_agents`) and that log
-/// lists its key as a device key up to that seq. `None` otherwise: the link carries no anchor.
+/// identity's log, when the agent is bound to an identity (`identity_agents`) or is a bot of one
+/// ([`signer_identity`]) and that log lists its key as a device key up to that seq. `None` otherwise: the link carries no anchor.
 ///
 /// Read from the key map, with no I/O: the logs of local identities are loaded at start
 /// ([`load_local_identities`]) and never leave the map, and each accepted head replaces its
 /// log there, so a link signed after a newer head is accepted carries the new anchor.
 pub fn anchor_for(agent_did: &str) -> Option<u64> {
     let service = SERVICE.get()?;
-    let scid = {
-        let db = crate::db::Ad4mDb::global_instance();
-        let db = db.lock().ok()?;
-        db.as_ref()?.agent_identity(agent_did).ok().flatten()?
-    };
+    let scid = signer_identity(agent_did)?;
     anchor_in(service.cache.key_map(), agent_did, &scid)
+}
+
+/// The identity (bare SCID) whose log lists the key of the local agent `agent_did`: its
+/// binding (`identity_agents`), or, for a bot, its owner (the bot row's `owner`). A bot is
+/// not bound to its owner's identity, but its links are anchored in its owner's log like a
+/// device's, so a reader judges them by the scope in force at the anchor, not at the key's add.
+fn signer_identity(agent_did: &str) -> Option<String> {
+    let bound = {
+        let db = crate::db::Ad4mDb::global_instance();
+        let db = db.lock().ok();
+        db.as_ref()
+            .and_then(|db| db.as_ref())
+            .and_then(|db| db.agent_identity(agent_did).ok().flatten())
+    };
+    bound.or_else(|| crate::bots::registered(agent_did).map(|bot| bot.owner))
 }
 
 /// [`anchor_for`] of `agent_did` bound to `scid`, from `key_map`.
@@ -397,22 +408,29 @@ fn anchor_in(key_map: &cache::KeyMap, agent_did: &str, scid: &str) -> Option<u64
         .then_some(log.trusted)
 }
 
-/// Loads the trusted log of every identity a local agent speaks for into the key map and pins
-/// it there ([`KelCache::keep_local`]), so [`anchor_for`] knows it from the first link. Called
-/// once at startup, after [`init`] and before the API and the perspectives start. A log that
+/// Loads the trusted log of every identity a local agent speaks for, and of every local bot's
+/// owner, into the key map and pins it there ([`KelCache::keep_local`]), so [`anchor_for`]
+/// knows it from the first link. Called once at startup, after [`init`] and
+/// `crate::bots::init`, and before the API and the perspectives start. A log that
 /// cannot be read is logged and skipped: links then carry no anchor until its next accepted
 /// head.
 pub async fn load_local_identities() {
     let Some(service) = SERVICE.get() else {
         return;
     };
-    let scids = match crate::db_backend::db_backend().local_identities() {
+    let mut scids = match crate::db_backend::db_backend().local_identities() {
         Ok(scids) => scids,
         Err(e) => {
             log::warn!("identity: could not read the local identities: {e}");
             return;
         }
     };
+    // A bot's links anchor in its owner's log ([`signer_identity`]).
+    for bot in crate::bots::all() {
+        if !scids.contains(&bot.owner) {
+            scids.push(bot.owner);
+        }
+    }
     keep_local_all(&service.cache, &scids).await;
 }
 

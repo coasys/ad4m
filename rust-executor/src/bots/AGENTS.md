@@ -24,6 +24,15 @@ Rules:
   a perspective (`PERSPECTIVE_ADMIN`) and every other guarded method are outside.
 - **A new method** is outside every grant unless its guard is `Owns { Perspective }`. Adding a
   method a bot should call means adding it to `reach` and to the matrix walk's lists.
+- **An event is a read.** `events.watch` passes the grant (`admit_watch`), and each event of
+  a perspective a bot's socket gets passes `delivery` again, as the grant and the owner's log
+  are then: paused, expired, narrowed or a key scope without `read` drops it (and disposes
+  the bot's live queries on that perspective when the event is one of their updates);
+  revoking the bot or its key ends the stream. Revoking the key in the owner's log also ends
+  the bot's sessions (`identity::key_login::end_revoked_bot`, on the verdict change and on
+  the re-check): a bot's token is not key-bound, so `Grants::revoke_key` does not reach it.
+- **A bot's links anchor in its owner's log** (`identity::signer_identity` falls back to the
+  bot row's `owner`); the owners' logs are pinned at startup and on `bot.createAgent`.
 - **Only dispatch records** (`record: true`); `HandlerMap::admit` (MCP's pre-check) does not.
 - **Who enforces what.** The grant (spaces, `can`, expiry, pause, revocation) is the hosting
   executor's: it is not signed by the owner's master key, and only the executor that runs the
