@@ -125,18 +125,25 @@ pub struct LanguageController {
     installs: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
 }
 
-/// The `(did:key author, proof.anchor)` of an expression in JSON, when its author is a
-/// `did:key`: the signer the key map is filled for before the expression is checked.
+/// The `(did:key author, proof.anchor)` of an expression in JSON whose signature holds
+/// under that author: the signer the key map is filled for before the expression is checked.
+/// `None` for a `did:scid` author (checked through its record), for an expression that does
+/// not parse, and for one whose signature does not hold: that one is `invalid` whatever any
+/// log says, so it must not cost the key index a lookup on every read (a fresh `did:key` in
+/// an unsigned expression would otherwise be looked up each time it is read).
 fn did_key_signer(expr_json: &JsonValue) -> Option<(String, Option<u64>)> {
     let author = expr_json.get("author")?.as_str()?;
     if !author.starts_with("did:key:") {
         return None;
     }
-    let anchor = expr_json
-        .get("proof")
-        .and_then(|proof| proof.get("anchor"))
-        .and_then(JsonValue::as_u64);
-    Some((author.to_string(), anchor))
+    let mut expr: crate::types::Expression<JsonValue> =
+        serde_json::from_value(expr_json.clone()).ok()?;
+    // The same bytes the check verifies: the data in its canonical key order.
+    expr.data = crate::js_core::utils::sort_json_value(&expr.data);
+    if !crate::agent::signatures::signature_holds(&expr) {
+        return None;
+    }
+    Some((expr.author, expr.proof.anchor))
 }
 
 impl LanguageController {
@@ -3307,25 +3314,75 @@ mod agent_language_profile_tests {
     const VALID: (JsonValue, JsonValue) = (JsonValue::Bool(true), JsonValue::Bool(false));
     const INVALID: (JsonValue, JsonValue) = (JsonValue::Bool(false), JsonValue::Bool(true));
 
-    /// A `did:key`-signed expression names its signer (with its anchor) for the key map to be
-    /// filled before the check; a `did:scid` one, checked through its record, names none.
+    /// A `did:key`-signed expression whose signature holds names its signer (with its anchor)
+    /// for the key map to be filled before the check. One whose signature does not hold, one
+    /// that does not parse, and a `did:scid` one (checked through its record) name none.
     #[test]
-    fn a_did_key_expression_names_its_signer_for_a_refresh() {
+    fn a_did_key_expression_names_its_signer_for_a_refresh_only_when_signed() {
+        let signed: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+        assert_eq!(
+            did_key_signer(&signed),
+            Some((signed["author"].as_str().unwrap().to_string(), None))
+        );
+        let mut forged = signed.clone();
+        forged["proof"]["signature"] = JsonValue::from(hex::encode([7u8; 64]));
+        assert_eq!(did_key_signer(&forged), None);
         let by_key = serde_json::json!({
             "author": "did:key:z6MkA",
             "proof": { "signature": "00", "key": "did:key:z6MkA", "anchor": 3 }
         });
         assert_eq!(
             did_key_signer(&by_key),
-            Some(("did:key:z6MkA".to_string(), Some(3)))
-        );
-        let unanchored = serde_json::json!({ "author": "did:key:z6MkB", "proof": {} });
-        assert_eq!(
-            did_key_signer(&unanchored),
-            Some(("did:key:z6MkB".to_string(), None))
+            None,
+            "no timestamp, no data: no expression"
         );
         let person = serde_json::json!({ "author": "did:scid:coasys:1:Qm", "proof": {} });
         assert_eq!(did_key_signer(&person), None);
+    }
+
+    /// Reading an expression must not cost the key index a lookup unless the expression's
+    /// signature holds: an unsigned or badly signed expression by a fresh `did:key` author is
+    /// `invalid` whatever any log says, and every read of it (literal, cache, language) would
+    /// otherwise ask the index about a key nobody vouched for.
+    #[tokio::test]
+    async fn an_unsigned_expression_costs_the_key_index_nothing() {
+        use crate::identity::cache::tests::{trusting, FakeStore};
+        use crate::identity::resolver::Resolver;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+        let store = Arc::new(FakeStore::new(vec![]));
+        let backend: Arc<dyn crate::identity::backend::IdentityBackend> = store.clone();
+        let resolver = Resolver::new(Arc::new(trusting()), backend, None, false);
+        let resolver = &resolver;
+        let prepare = |expr: &JsonValue| {
+            let signers: Vec<(String, Option<u64>)> = did_key_signer(expr).into_iter().collect();
+            async move { resolver.prepare(&signers).await }
+        };
+
+        let fresh = crate::agent::signatures::TestSigner::generate();
+        let unsigned = serde_json::json!({
+            "author": fresh.did,
+            "timestamp": "2027-01-15T08:00:00.000Z",
+            "data": { "note": "hi" },
+            "proof": { "key": format!("{}#k", fresh.did), "signature": "" }
+        });
+        prepare(&unsigned).await;
+        let mut garbage = unsigned.clone();
+        garbage["proof"]["signature"] = JsonValue::from(hex::encode([7u8; 64]));
+        prepare(&garbage).await;
+        let mut anchored = garbage.clone();
+        anchored["proof"]["anchor"] = JsonValue::from(0);
+        prepare(&anchored).await;
+        assert_eq!(
+            store.key_owner_calls.load(Ordering::SeqCst),
+            0,
+            "no signature held, so the key index was not asked"
+        );
+
+        // A signed one is prepared: one lookup for its author.
+        let signed: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+        prepare(&signed).await;
+        assert_eq!(store.key_owner_calls.load(Ordering::SeqCst), 1);
     }
 
     /// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
