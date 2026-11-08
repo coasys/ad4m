@@ -4,12 +4,13 @@
 //! and an alias are pinned by `fixtures/shacl_writer_golden.json`.
 
 use super::*;
+use crate::agent::signatures::TestSigner;
 use crate::perspectives::model_query::shape::load_shape_from_store;
 use crate::perspectives::model_query::types::ModelQueryInput;
 use crate::perspectives::model_query::{execute_union_query_with_views, ModelQueryResult};
 use crate::perspectives::shacl_parser::parse_shacl_to_links;
 use crate::perspectives::subject_classes_of::subject_classes_of;
-use crate::types::{ExpressionProof, Link, LinkExpression, LinkStatus};
+use crate::types::{Link, LinkExpression, LinkStatus};
 
 /// The abstract class: anything with `text`. Its path is never compared.
 const TEXT_CONTENT: &str = r#"{"target_class":"app://TextContent","abstract":true,"properties":[
@@ -93,37 +94,33 @@ fn all_classes() -> SparqlStore {
     store
 }
 
-fn link_expression(link: Link, ts: &str) -> LinkExpression {
-    LinkExpression {
-        author: "did:key:test123".to_string(),
-        timestamp: ts.to_string(),
-        data: link,
-        proof: ExpressionProof {
-            key: "key".to_string(),
-            signature: "sig".to_string(),
-            anchor: None,
-        },
-        status: Some(LinkStatus::Shared),
-    }
+fn link_expression(link: Link) -> LinkExpression {
+    // Signed for real: a link whose signature does not hold is judged
+    // `invalid` and never counts, and every schema read now joins the triple
+    // to a counting reifier.
+    let mut le = LinkExpression::from(TestSigner::generate().sign(link.normalize()));
+    le.status = Some(LinkStatus::Shared);
+    le
 }
 
-/// Raw links, past the SHACL writer's checks; timestamps in order.
+/// Raw links, past the SHACL writer's checks.
 fn add(store: &SparqlStore, links: &[(&str, &str, &str)]) {
-    for (i, (source, predicate, target)) in links.iter().enumerate() {
+    for (source, predicate, target) in links.iter() {
         let link = Link {
             source: source.to_string(),
             predicate: Some(predicate.to_string()),
             target: target.to_string(),
         };
-        store
-            .add_link(&link_expression(link, &(i + 1).to_string()))
-            .unwrap();
+        store.add_link(&link_expression(link)).unwrap();
     }
 }
 
 fn install_class(store: &SparqlStore, name: &str, shacl: &str) {
+    // SHACL is read through `load_shape`, which joins every definition
+    // triple to a *counting* reifier — a link whose signature does not hold
+    // never counts, so schema fixtures are signed for real.
     for link in parse_shacl_to_links(shacl, name).unwrap() {
-        store.add_link(&link_expression(link, "0")).unwrap();
+        store.add_link(&link_expression(link)).unwrap();
     }
 }
 
@@ -200,7 +197,7 @@ fn an_abstract_shape_without_names_reads_no_class() {
         let property_link = link.predicate.as_deref() == Some("sh://property")
             || property_nodes.contains(&link.source);
         if !property_link {
-            store.add_link(&link_expression(link, "0")).unwrap();
+            store.add_link(&link_expression(link)).unwrap();
         }
     }
     let index = AbstractIndex::load(&store).unwrap();

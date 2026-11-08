@@ -394,13 +394,14 @@ pub fn create_signed_expression_anchored<T: Serialize>(
 /// Signs a link for `context`, anchored at the trusted head of the agent's identity's log when
 /// the agent is bound to one ([`crate::identity::anchor_for`]); without an anchor otherwise.
 /// Synchronous: the anchor comes from the key map, where the local identities' logs are loaded
-/// at start and replaced by each accepted head.
+/// at start and replaced by each accepted head. The link is signed in its normal form (an empty
+/// predicate is none), the form it is stored and verified in.
 pub fn create_signed_link(
     link: crate::types::Link,
     context: &AgentContext,
 ) -> Result<Expression<crate::types::Link>, AnyError> {
     let anchor = crate::identity::anchor_for(&did_for_context(context)?);
-    create_signed_expression_anchored(link, context, anchor)
+    create_signed_expression_anchored(link.normalize(), context, anchor)
 }
 
 pub fn sign_string_hex_for_context(
@@ -1577,6 +1578,56 @@ mod tests {
                 .expect("Verification failed"),
             "Signature verification for sign_string_hex failed"
         );
+    }
+
+    /// A link with an empty predicate is signed in its normalized form (no predicate), the
+    /// form it is stored and checked in, so its signature holds there.
+    #[test]
+    fn a_signed_link_is_signed_normalized() {
+        ensure_setup();
+        let link = crate::types::Link {
+            source: "ad4m://a".into(),
+            predicate: Some(String::new()),
+            target: "ad4m://b".into(),
+        };
+        let signed: crate::types::LinkExpression =
+            create_signed_link(link, &AgentContext::main_agent())
+                .unwrap()
+                .into();
+        assert_eq!(signed.data.predicate, None);
+        assert!(signatures::signature_holds(&Expression::from(signed)));
+    }
+
+    /// An anchored link whose timestamp is not a date does not hold, though its key signed
+    /// exactly those bytes: date filters and ordering read the timestamp as a date.
+    #[test]
+    fn an_anchored_link_with_a_timestamp_that_is_no_date_does_not_hold() {
+        ensure_setup();
+        let context = AgentContext::main_agent();
+        let data = crate::types::Link {
+            source: "ad4m://a".into(),
+            predicate: None,
+            target: "ad4m://b".into(),
+        };
+        let sign_at = |timestamp: &str| {
+            let bytes = signatures::anchored_signing_bytes(&data, timestamp, 0).unwrap();
+            Expression {
+                author: did_for_context(&context).unwrap(),
+                timestamp: timestamp.to_string(),
+                data: data.clone(),
+                proof: ExpressionProof {
+                    key: signing_key_id_for_context(&context).unwrap(),
+                    signature: hex::encode(sign_for_context(&bytes, &context).unwrap()),
+                    anchor: Some(0),
+                },
+            }
+        };
+        assert!(signatures::signature_holds(&sign_at(
+            "2026-01-01T00:00:00.000Z"
+        )));
+        let no_date = sign_at("tomorrow");
+        assert!(!signatures::signature_holds(&no_date));
+        assert!(signatures::verify(&no_date).is_err());
     }
 
     #[test]

@@ -48,6 +48,11 @@ pub enum IdentityError {
     },
     #[error("the identity store is unavailable: {0}")]
     Unavailable(String),
+    /// The loaded agent language does not serve the call (a language without the identity
+    /// interface, such as a local test language): no store answers through it, now or after a
+    /// retry. Not [`IdentityError::Unavailable`], which a later call may get past.
+    #[error("the agent language does not serve {0}")]
+    NotServed(String),
     /// A head that no key of `identity.storeKeys` signed.
     #[error("the store's head is not signed by a key of identity.storeKeys")]
     BadHeadSignature,
@@ -289,15 +294,23 @@ impl AgentLanguageBackend {
         undefined: Undefined,
     ) -> Result<T, IdentityError> {
         let controller = LanguageController::global_instance();
+        let settled = controller.system_addresses.lock().await.settled;
         let language = controller
             .agent_language_for(cap)
             .await
-            .map_err(|e| IdentityError::Unavailable(e.to_string()))?;
+            .map_err(|e| no_agent_language(cap, e, settled))?;
         if !language.has(cap) {
-            return Err(IdentityError::Unavailable(format!(
-                "the agent language does not serve {}",
-                cap.wire_name()
-            )));
+            // A language whose capabilities are not registered yet may still load them.
+            return Err(
+                if crate::languages::capability::capabilities_registered(language.address()) {
+                    IdentityError::NotServed(cap.wire_name().to_string())
+                } else {
+                    IdentityError::Unavailable(format!(
+                        "the agent language has not loaded {}",
+                        cap.wire_name()
+                    ))
+                },
+            );
         }
         let script = call_script(export, args);
         let run = controller.execute_on_language(language.address(), &script);
@@ -506,10 +519,46 @@ impl IdentityBackend for AgentLanguageBackend {
     }
 }
 
+/// The error of a call that found no agent language. Once the system languages have `settled`
+/// (loaded, or failed to, or the executor runs language-language only) a missing one stays
+/// missing, so no store answers: [`IdentityError::NotServed`]. Before that the agent language
+/// may still come: [`IdentityError::Unavailable`].
+fn no_agent_language(
+    cap: Capability,
+    error: crate::languages::error::LanguageError,
+    settled: bool,
+) -> IdentityError {
+    match error {
+        crate::languages::error::LanguageError::NotFound { .. } if settled => {
+            IdentityError::NotServed(cap.wire_name().to_string())
+        }
+        e => IdentityError::Unavailable(e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// An executor whose system languages settled without an agent language (language-language
+    /// only, or a failed load) has no key index for good: it answers "not served" (no log), not
+    /// "try later". While the system languages are still to come, a missing agent language is a
+    /// transient failure.
+    #[test]
+    fn a_settled_executor_without_an_agent_language_has_no_key_index() {
+        let missing = || crate::languages::error::LanguageError::NotFound {
+            address: "agent_language".into(),
+        };
+        assert!(matches!(
+            no_agent_language(Capability::IdentityKeyOwner, missing(), true),
+            IdentityError::NotServed(_)
+        ));
+        assert!(matches!(
+            no_agent_language(Capability::IdentityKeyOwner, missing(), false),
+            IdentityError::Unavailable(_)
+        ));
+    }
 
     #[test]
     fn the_script_calls_the_export_with_json_arguments() {
