@@ -14,7 +14,7 @@ pub use types::*;
 use crate::agent::grants::now;
 use crate::agent::AgentContext;
 use crate::events::Event;
-use crate::presence::{last_seen_write_due, LAST_SEEN_CLOCK_SKEW_S, LAST_SEEN_WRITE_THROTTLE_S};
+use crate::presence::{last_seen_write_due, LAST_SEEN_CLOCK_SKEW_S};
 use crate::pubsub::get_global_pubsub;
 use crate::secret::Secret;
 use crate::types::*;
@@ -130,7 +130,7 @@ pub async fn track_last_seen(agent_did: &str) {
 }
 
 /// Record activity by the account that owns `agent_did` at `now` in `users.last_seen`, at most
-/// once per [`LAST_SEEN_WRITE_THROTTLE_S`]. Both the in-memory cache path and the DB path decide
+/// once per [`LAST_SEEN_WRITE_THROTTLE_S`](crate::presence::LAST_SEEN_WRITE_THROTTLE_S). Both the in-memory cache path and the DB path decide
 /// through [`last_seen_write_due`], the same rule the presence readers are tested against
 /// (#1070). The cache only avoids DB lookups: a cached value is never fresher than the DB, so it
 /// cannot suppress a write the DB path would make.
@@ -596,6 +596,7 @@ mod tests {
     #[tokio::test]
     async fn track_last_seen_writes_exactly_when_the_throttle_has_elapsed() {
         use crate::db::Ad4mDb;
+        use crate::presence::LAST_SEEN_WRITE_THROTTLE_S;
         crate::perspectives::interpretation_test_support::ensure_db_init();
 
         let email = "track-last-seen-throttle@test";
