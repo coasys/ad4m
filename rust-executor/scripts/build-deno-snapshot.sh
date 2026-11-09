@@ -78,8 +78,9 @@ store() {
     # mktemp: runners in separate containers can share a PID.
     # Another runner may have stored the same hash first; its copy is as good.
     # A partial copy is never published: only a complete $tmp is renamed.
+    # mktemp makes it 0700; runners under other users must read the entry.
     if mkdir -p "$cache" && tmp=$(mktemp -d "$cache/$hash.tmp.XXXXXX") \
-      && cp "${outputs[@]}" "$tmp/"; then
+      && chmod 755 "$tmp" && cp "${outputs[@]}" "$tmp/"; then
       mv -T "$tmp" "$cache/$hash" 2>/dev/null || rm -rf "$tmp"
     else
       rm -rf "${tmp:-}"
