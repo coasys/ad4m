@@ -23,14 +23,15 @@
 //!    log's current master index is *n*+1, leaves it while the log is behind it, and discards
 //!    it once the log is past it. A promote that fails is reported in [`Rotated::kept`]: the
 //!    rotation stands.
-//! 4. Master *n*+1 goes to every other device that kept the master key: each device the record
+//! 4. The record's master-signed write comes first: it re-attests the recovery key with
+//!    master *n*+1 — until it lands, the stored attestation is stale and every device write
+//!    would be refused rather than seal the record without it — and lists this device.
+//! 5. Master *n*+1 goes to every other device that kept the master key: each device the record
 //!    lists as holding it (`true` or `"offered"`), valid at the head, that the log after the
 //!    rotation lets keep it ([`ad4m_identity_core::link::may_keep_master`]; the record's device
 //!    kind grants nothing, any linked device can write the record), sealed to its `enc` key in its joined inbox ([`super::master`], with the retry list). The store
 //!    drops every message master *n* wrote when the rotation lands, so no device takes the
-//!    replaced key after it.
-//! 5. The record is written: each device sent the key is `holdsMaster: "offered"`, this device
-//!    `true`, revoked devices leave it, and a record without the recovery key gets it.
+//!    replaced key after it. Each device sent the key is marked `holdsMaster: "offered"`.
 
 use ad4m_identity_core::build::{rotate as rotate_event, Signer};
 use ad4m_identity_core::link::may_keep_master;
@@ -313,8 +314,12 @@ pub(crate) struct ThisDevice {
     pub kept: Option<u32>,
 }
 
-/// Steps 4 and 5: master `signer` (now current) to every kept holder, then the record written
-/// as `reader`. Answers the pushes and the record write.
+/// Steps 4 and 5: the record's re-attestation first — `reader` (the new master, signing)
+/// writes the record, attesting the recovery key again and marking `this`, before any key is
+/// pushed: until that write lands the stored pair is stale, and every device write — a take's
+/// among them — is refused [`ClientError::RecoveryNeedsReattest`] rather than seal the record
+/// without it. Then master `signer` (now current) to every kept holder, then the pushes'
+/// marks. Answers the pushes and the last record write.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn hand_over<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
@@ -343,34 +348,11 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     let holders = opened
         .map(|o| kept_holders(&o.record, &events, &chain, own))
         .unwrap_or_default();
-    let mut pushes = Vec::new();
-    let mut changes = Vec::new();
     let index = signer.index();
-    for key_id in holders {
-        let sent = master::push(
-            executor, vault, &events, &chain, did, signer, &key_id, clock, random,
-        )
-        .await;
-        // Offered, unless the device took it and wrote so before this write lands: the record
-        // write below builds on the newest version, and `Change::Offered` keeps a take of
-        // `index` (or a later master) as it is. A push the store refused for good: not held.
-        changes.push(match &sent {
-            // On the retry list when transient: it goes when the store takes it.
-            Ok(_) => Change::Offered {
-                key_id: key_id.clone(),
-                index,
-            },
-            Err(e) if transient(e) => Change::Offered {
-                key_id: key_id.clone(),
-                index,
-            },
-            Err(_) => Change::HoldsMaster {
-                key_id: key_id.clone(),
-                holds: HoldsMaster::No,
-            },
-        });
-        pushes.push((key_id, sent));
-    }
+    // The master-signed write comes before the pushes: it re-attests the recovery key with
+    // the new master — while the stored pair is stale, a device that took the key could not
+    // write the record at all — and it lists `this` device.
+    let mut changes = Vec::new();
     match this {
         Some(ThisDevice {
             key_id,
@@ -403,7 +385,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         }),
         None => {}
     }
-    let record = record::write_as(
+    let written = record::write_as(
         executor,
         vault,
         did,
@@ -413,6 +395,50 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         random,
     )
     .await;
+    if written.is_err() {
+        return (Vec::new(), written);
+    }
+    let mut pushes = Vec::new();
+    let mut marks = Vec::new();
+    for key_id in holders {
+        let sent = master::push(
+            executor, vault, &events, &chain, did, signer, &key_id, clock, random,
+        )
+        .await;
+        // Offered, unless the device took it and wrote so before the marking write lands:
+        // that write builds on the newest version, and `Change::Offered` keeps a take of
+        // `index` (or a later master) as it is. A push the store refused for good: not held.
+        marks.push(match &sent {
+            // On the retry list when transient: it goes when the store takes it.
+            Ok(_) => Change::Offered {
+                key_id: key_id.clone(),
+                index,
+            },
+            Err(e) if transient(e) => Change::Offered {
+                key_id: key_id.clone(),
+                index,
+            },
+            Err(_) => Change::HoldsMaster {
+                key_id: key_id.clone(),
+                holds: HoldsMaster::No,
+            },
+        });
+        pushes.push((key_id, sent));
+    }
+    let record = if marks.is_empty() {
+        written
+    } else {
+        record::write_as(
+            executor,
+            vault,
+            did,
+            reader,
+            &marks,
+            Some(recovery_key),
+            random,
+        )
+        .await
+    };
     (pushes, record)
 }
 

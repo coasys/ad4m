@@ -20,7 +20,12 @@
 //! (`identity.takeMaster`), checks it against its own fold of the log, keeps it in the vault
 //! — under the vault's never-go-back rule, so an older key taken late never replaces a newer
 //! one already kept — acknowledges the message, and marks itself `holdsMaster: true` with
-//! the `masterIndex` the vault keeps in the record.
+//! the `masterIndex` the vault keeps in the record. When that write is refused because the
+//! record's recovery pair is stale after a rotation ([`ClientError::RecoveryNeedsReattest`]),
+//! the key and the ack stand all the same — the master copy is never lost behind a record
+//! that cannot be written — and the take answers the marking owed ([`Taken::record_pending`]):
+//! [`reattest_recovery`] signs the write with the master just taken, re-attesting the
+//! recovery key and landing the mark, and [`refresh_master`] makes it on such a take.
 //!
 //! **After a rotation** ([`refresh_master`]): a device whose own rotation was cut off after
 //! its publish promotes the key its vault staged once the log's current master index is the
@@ -49,7 +54,7 @@ use ad4m_identity_core::{Event, KelChain, KeyId};
 use ad4m_ldk::identity::InboxWrite;
 
 use crate::executor::{ExecutorRpc, RpcError, ViaExecutor};
-use crate::record::{self, Change};
+use crate::record::{self, Change, Reader};
 use crate::request::{
     body_bytes, chain_of, log_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
 };
@@ -87,6 +92,13 @@ pub struct Taken {
     /// The record write that marks this device `holdsMaster: true` with `index`. The vault
     /// keeps the key either way.
     pub record: Result<u64, ClientError>,
+    /// The record's `holdsMaster` write is still owed: refused
+    /// [`ClientError::RecoveryNeedsReattest`], since the record's recovery pair went stale
+    /// with a rotation and waits for the new master's attestation. The key is stored and the
+    /// inbox message acked either way — the master copy is never lost behind a record that
+    /// cannot be written; [`reattest_recovery`], which [`refresh_master`] makes on a take
+    /// that answers so, re-attests and lands the mark.
+    pub record_pending: bool,
 }
 
 /// A refusal that a later try may pass: the store or the executor unreachable or busy.
@@ -397,7 +409,10 @@ fn retry_entry(key_id: &str) -> DeviceEntry {
 /// (`identity.takeMaster`, the custody channel), checks that it is the current master of the
 /// log as this app folds it, keeps it in `vault`, acknowledges the message, and marks this
 /// device `holdsMaster: true` in the record. `None` when no master key waits. A key that does
-/// not check, or a vault that refuses it, leaves the message for the next try.
+/// not check, or a vault that refuses it, leaves the message for the next try. The key and
+/// the ack stand even when the record write is refused [`ClientError::RecoveryNeedsReattest`]
+/// — the record's recovery pair waiting on the new master — and the take answers it owed
+/// ([`Taken::record_pending`]); [`reattest_recovery`] completes it.
 pub async fn take_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -435,11 +450,54 @@ pub async fn take_master<R: ExecutorRpc>(
         random,
     )
     .await;
+    // A write refused because the record's recovery pair waits for the new master's
+    // attestation is owed still: reported pending, the key and the ack stand.
+    let record_pending = matches!(record, Err(ClientError::RecoveryNeedsReattest));
     Ok(Some(Taken {
         did: taken.did,
         index,
         record,
+        record_pending,
     }))
+}
+
+/// Re-attests the record's recovery key with the current master key this device's vault
+/// keeps, and marks this device `holdsMaster: true` with its index — the write a device is
+/// refused with [`ClientError::RecoveryNeedsReattest`] while the stored recovery pair is
+/// stale after a rotation: a take's owed mark ([`Taken::record_pending`]), or any device
+/// write's caller seeing that refusal. One unlock; the master signs the record write itself
+/// ([`record::Reader::Master`]), so it attests the key the stored record names and lists the
+/// device holding it. Answers the version written.
+pub async fn reattest_recovery<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    let scid = scid_of(did)?;
+    let key_id =
+        executor.status().await?.key_id.ok_or_else(|| {
+            ClientError::Protocol("the executor's device key is in no log".into())
+        })?;
+    let unlocked = vault.unlock(&scid, MasterUse::Record, clock.now())?;
+    let signer = unlocked.signer(clock.now())?;
+    record::write_as(
+        executor,
+        vault,
+        did,
+        &Reader::Master {
+            master: signer,
+            clock,
+        },
+        &[Change::Holds {
+            key_id,
+            index: signer.index(),
+        }],
+        None,
+        random,
+    )
+    .await
 }
 
 /// What [`refresh_master`] found.
@@ -449,7 +507,8 @@ pub enum Refreshed {
     Current,
     /// A rotation of this device had staged the current master key and was cut off before it
     /// promoted it: the vault keeps a master key now, and the record marks this device
-    /// holding it.
+    /// holding it — by the master itself, re-attesting the recovery key, when the record's
+    /// stored pair went stale with the rotation.
     Promoted {
         /// The index the vault keeps: the staged key's, or a newer one another app sharing
         /// the vault kept first.
@@ -458,6 +517,8 @@ pub enum Refreshed {
         record: Result<u64, ClientError>,
     },
     /// The current master key was waiting in this device's inbox: the vault keeps it now.
+    /// A take whose record write was refused while the record's recovery pair waited on the
+    /// new master is completed with it ([`reattest_recovery`]).
     Taken(Taken),
     /// None waited: the vault forgot the replaced key, and a `send-master` request (its id)
     /// asks a holder for the current one.
@@ -480,9 +541,13 @@ pub enum Refreshed {
 ///    in this app or another one sharing the vault); **behind**, or the identity ended,
 ///    discarded (a later rotation superseded it, or its publish was refused long ago). The
 ///    promotion goes by index only: the words derive the key at each index, and the staged key
-///    is not checked against the log's commitment.
+///    is not checked against the log's commitment. The `holdsMaster` write that follows goes
+///    as the device, or — when the record's recovery pair went stale with the rotation —
+///    as the promoted master itself, re-attesting it ([`reattest_recovery`]).
 /// 2. The vault keeps the current master: [`Refreshed::Current`].
-/// 3. The current master waits in the inbox: taken ([`take_master`], [`Refreshed::Taken`]).
+/// 3. The current master waits in the inbox: taken ([`take_master`], [`Refreshed::Taken`]);
+///    a take whose record write was refused [`ClientError::RecoveryNeedsReattest`] is
+///    completed by [`reattest_recovery`] with the master just taken.
 /// 4. The vault's key is **known** to be replaced ([`Vault::master_index`], authenticated,
 ///    names an index behind the log's current master, or the identity has ended): the vault
 ///    forgets it — a compare-and-delete on the index read, so a key another app sharing the
@@ -493,6 +558,7 @@ pub async fn refresh_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
     did: &str,
+    clock: &dyn Clock,
     random: &dyn Random,
 ) -> Result<Refreshed, ClientError> {
     let scid = scid_of(did)?;
@@ -509,7 +575,7 @@ pub async fn refresh_master<R: ExecutorRpc>(
                 let key_id = executor.status().await?.key_id.ok_or_else(|| {
                     ClientError::Protocol("the executor's device key is in no log".into())
                 })?;
-                record::write(
+                match record::write(
                     executor,
                     vault,
                     did,
@@ -517,6 +583,16 @@ pub async fn refresh_master<R: ExecutorRpc>(
                     random,
                 )
                 .await
+                {
+                    // The record's recovery pair went stale with the rotation that made this
+                    // key current: a device write is refused rather than seal the record
+                    // without it, so the promoted master signs the write that re-attests it
+                    // and lands the mark.
+                    Err(ClientError::RecoveryNeedsReattest) => {
+                        reattest_recovery(executor, vault, did, clock, random).await
+                    }
+                    other => other,
+                }
             }
             .await;
             return Ok(Refreshed::Promoted { index, record });
@@ -535,8 +611,15 @@ pub async fn refresh_master<R: ExecutorRpc>(
     if live && kept == Some(current) {
         return Ok(Refreshed::Current);
     }
-    if let Some(taken) = take_master(executor, vault, random).await? {
+    if let Some(mut taken) = take_master(executor, vault, random).await? {
         if taken.did == did {
+            // The take stored and acked the key though its record write was refused: the
+            // record's recovery pair waited on the new master's attestation, which the
+            // master just taken re-attests; the same write lands the held mark.
+            if taken.record_pending {
+                taken.record = reattest_recovery(executor, vault, did, clock, random).await;
+                taken.record_pending = taken.record.is_err();
+            }
             return Ok(Refreshed::Taken(taken));
         }
     }
