@@ -36,11 +36,12 @@ export function getFreePort(): Promise<number> {
  * released for the executor to bind to.
  */
 export async function getFreePorts(count: number): Promise<number[]> {
-  const ports: number[] = [];
-  for (let i = 0; i < count; i++) {
-    ports.push(await getFreePort());
+  const ports = new Set<number>();
+  // The OS may hand a just-released port out again; probe until `count` differ.
+  while (ports.size < count) {
+    ports.add(await getFreePort());
   }
-  return ports;
+  return [...ports];
 }
 
 // ---------------------------------------------------------------------------

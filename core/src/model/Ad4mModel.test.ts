@@ -1268,6 +1268,13 @@ describe("Lightweight fingerprint optimization", () => {
 
 
 
+/** Turn a LiveQuery's update listener into `push(result)`: each push sends the
+ *  next revision of `subscriptionId` with the whole result. */
+function updatesFor(subscriptionId: string, listener: (update: any) => void) {
+  let revision = 0;
+  return (result: any) => listener({ subscriptionId, revision: ++revision, result });
+}
+
 // ── Subscribe callback timing ──────────────────────────────────────────
 describe("ModelQueryBuilder subscribe callback timing", () => {
   it("subscribe should not invoke callback synchronously before Promise resolves", async () => {
@@ -1280,13 +1287,14 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        updateCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        updateCallback = updatesFor(mockSubscriptionId, cb);
         return () => {}; // unsubscribe function
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
@@ -1333,457 +1341,213 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
 });
 
 describe("ModelQueryBuilder paginateSubscribe", () => {
-  it("paginateSubscribe should use a single query with count: true", async () => {
-    const mockSubscriptionId = "paginate-sub-123";
-
+  // The subscription is the paged query itself (PERF-11). Since #1237 the
+  // executor re-runs a paged subscription when a record outside the page
+  // starts or stops matching (the `joins` / `scan` trigger rules), and the
+  // result carries `totalCount`, so such a write changes the result and is
+  // pushed. Each page is built from the pushed rows: no second query.
+  function buildMocks(initial: any = { instances: [], totalCount: 0 }) {
+    let listener: ((update: any) => void) | null = null;
+    let revision = 0;
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: mockSubscriptionId,
-        result: { instances: [], totalCount: 0 },
+        subscriptionId: "paginate-sub",
+        revision: 0,
+        result: initial,
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
-        return () => {};
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        listener = cb;
+        return () => { if (listener === cb) listener = null; };
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
-
     const mockPerspective = {
       uuid: "test-uuid",
       client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson);
-      }),
-      modelQuery: jest.fn().mockResolvedValue({ instances: [{ id: "item1", type: "test://paginate" }], totalCount: 42 }),
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) =>
+        mockClient.modelSubscribe("test-uuid", className, queryJson)
+      ),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [{ id: "from-query" }], totalCount: 99 }),
     } as any;
+    /** Push the next revision; `update` is `{ result }` or a model delta. */
+    const push = (update: any) => listener?.({ subscriptionId: "paginate-sub", revision: ++revision, ...update });
+    return { mockClient, mockPerspective, push };
+  }
 
+  function testModel(name: string) {
     const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "PaginateTest" })
-    class PaginateTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://paginate" })
-      type: string = "test://paginate";
+    @Model({ name })
+    class M extends Ad4mModel {
+      @Flag({ through: "test://type", value: `test://${name}` })
+      type: string = `test://${name}`;
       @Property({ through: "test://name" })
       name: string = "";
     }
+    return M;
+  }
 
-    const builder = PaginateTest.query(mockPerspective);
-    const result = await builder.paginateSubscribe(10, 1, () => {});
+  const ids = (page: any) => page.results.map((r: any) => r.id);
+  const settle = () => new Promise(r => setTimeout(r, 10));
 
-    // Should return paginated result structure
-    expect(result).toHaveProperty("results");
-    expect(result).toHaveProperty("totalCount");
-    expect(result).toHaveProperty("pageSize", 10);
-    expect(result).toHaveProperty("pageNumber", 1);
+  it("subscribes to the page itself and returns the initial page from the subscription", async () => {
+    const { mockPerspective } = buildMocks({ instances: [{ id: "p2a" }, { id: "p2b" }], totalCount: 12 });
+    const builder = testModel("PaginateInitial").query(mockPerspective);
 
-    // modelQuery should be called exactly once (not twice — no separate count query)
-    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    const result = await builder.paginateSubscribe(10, 2, () => {});
 
-    // The query should have count: true
-    const callArgs = mockPerspective.modelQuery.mock.calls[0];
-    const queryJson = JSON.parse(callArgs[1]);
-    expect(queryJson.count).toBe(true);
+    expect(ids(result)).toEqual(["p2a", "p2b"]);
+    expect(result.totalCount).toBe(12);
+    expect(result.pageSize).toBe(10);
+    expect(result.pageNumber).toBe(2);
+
+    const queryJson = JSON.parse(mockPerspective.modelSubscribe.mock.calls[0][1]);
     expect(queryJson.limit).toBe(10);
-    expect(queryJson.offset).toBe(0);
-  });
-
-  it("paginateSubscribe should re-fetch on real subscription updates", async () => {
-    const mockSubscriptionId = "paginate-update-sub";
-    let capturedCallback: ((result: any) => void) | null = null;
-
-    const mockClient = {
-      modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: mockSubscriptionId,
-        result: { instances: [], totalCount: 0 },
-      }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    };
-
-    let modelQueryCallCount = 0;
-    const mockPerspective = {
-      uuid: "test-uuid",
-      client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson);
-      }),
-      modelQuery: jest.fn().mockImplementation(async () => {
-        modelQueryCallCount++;
-        return { instances: [{ id: "new-item", type: "test://update" }], totalCount: 1 };
-      }),
-    } as any;
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "UpdateTest" })
-    class UpdateTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://update" })
-      type: string = "test://update";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const userCallback = jest.fn();
-    const builder = UpdateTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, userCallback);
-
-    const initialCallCount = modelQueryCallCount;
-
-    // Simulate a subscription update
-    capturedCallback!({ instances: [{ id: "new-item" }], totalCount: 1 });
-
-    // Wait for async processing
-    await new Promise(r => setTimeout(r, 100));
-
-    // modelQuery should have been called again for the re-fetch
-    expect(modelQueryCallCount).toBeGreaterThan(initialCallCount);
-    // User callback should have been invoked with paginated results
-    expect(userCallback).toHaveBeenCalled();
-    const callArg = userCallback.mock.calls[0][0];
-    expect(callArg).toHaveProperty("totalCount");
-    expect(callArg).toHaveProperty("pageSize", 10);
-    expect(callArg).toHaveProperty("pageNumber", 1);
-  });
-
-  it("paginateSubscribe coalesces overlapping dispatches into a trailing fetch", async () => {
-    // Two server dispatches arrive while the first re-fetch is still in
-    // flight. A generation counter (#1020) would start both and could keep
-    // the one that read 1 model while dropping the one that read 2. The
-    // server then has nothing further to dispatch — "Paginate callback did
-    // not see second model save". Coalesce: one in-flight read, then a
-    // trailing fetch after the last dispatch.
-    const mockSubscriptionId = "paginate-stale-sub";
-    let capturedCallback: ((result: any) => void) | null = null;
-
-    const mockClient = {
-      modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: mockSubscriptionId,
-        result: { instances: [], totalCount: 0 },
-      }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    };
-
-    // First call is the initial fetch (resolves immediately, empty). Later
-    // re-fetches are deferred so the test can see coalescing.
-    const deferred: Array<(v: any) => void> = [];
-    let call = 0;
-    const mockPerspective = {
-      uuid: "test-uuid",
-      client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson);
-      }),
-      modelQuery: jest.fn().mockImplementation(() => {
-        call++;
-        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
-        return new Promise(resolve => { deferred.push(resolve); });
-      }),
-    } as any;
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "StaleTest" })
-    class StaleTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://stale" })
-      type: string = "test://stale";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const userCallback = jest.fn();
-    const builder = StaleTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, userCallback);
-
-    capturedCallback!({});
-    capturedCallback!({});
-    await new Promise(r => setTimeout(r, 10));
-    expect(deferred.length).toBe(1);
-
-    // In-flight read saw only the first model.
-    deferred[0]({ instances: [{ id: "m1" }], totalCount: 1 });
-    await new Promise(r => setTimeout(r, 10));
-    // Trailing fetch started because a dispatch arrived during that read.
-    expect(deferred.length).toBe(2);
-
-    deferred[1]({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
-    await new Promise(r => setTimeout(r, 10));
-
-    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
-    expect(lastArg.totalCount).toBe(2);
-    expect(lastArg.results.length).toBe(2);
-
+    expect(queryJson.offset).toBe(10);
+    expect(queryJson.count).toBe(true);
+    // The subscription's first result is the page: no separate read.
+    expect(mockPerspective.modelQuery).not.toHaveBeenCalled();
     builder.dispose();
   });
 
-  it("paginateSubscribe still runs the trailing fetch when the in-flight read rejects", async () => {
-    const mockSubscriptionId = "paginate-reject-sub";
-    let capturedCallback: ((result: any) => void) | null = null;
+  it("delivers each page from the pushed rows without a second query", async () => {
+    const { mockPerspective, push } = buildMocks();
+    const pages: any[] = [];
+    const builder = testModel("PaginatePush").query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, p => pages.push(p));
 
-    const mockClient = {
-      modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: mockSubscriptionId,
-        result: { instances: [], totalCount: 0 },
-      }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    };
+    push({ result: { instances: [{ id: "a" }, { id: "b" }], totalCount: 5 } });
+    await settle();
 
-    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
-    let call = 0;
-    const mockPerspective = {
-      uuid: "test-uuid",
-      client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson);
-      }),
-      modelQuery: jest.fn().mockImplementation(() => {
-        call++;
-        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
-        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
-      }),
-    } as any;
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "RejectTest" })
-    class RejectTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://reject" })
-      type: string = "test://reject";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const userCallback = jest.fn();
-    const builder = RejectTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, userCallback);
-
-    capturedCallback!({});
-    capturedCallback!({});
-    await new Promise(r => setTimeout(r, 10));
-    expect(deferred.length).toBe(1);
-
-    deferred[0].reject(new Error("re-fetch failed"));
-    await new Promise(r => setTimeout(r, 10));
-    expect(deferred.length).toBe(2);
-
-    deferred[1].resolve({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
-    await new Promise(r => setTimeout(r, 10));
-
-    expect(userCallback).toHaveBeenCalled();
-    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
-    expect(lastArg.totalCount).toBe(2);
-    expect(lastArg.results.length).toBe(2);
-
+    expect(mockPerspective.modelQuery).not.toHaveBeenCalled();
+    expect(pages).toHaveLength(1);
+    expect(ids(pages[0])).toEqual(["a", "b"]);
+    expect(pages[0].totalCount).toBe(5);
+    expect(pages[0].pageSize).toBe(10);
+    expect(pages[0].pageNumber).toBe(1);
     builder.dispose();
   });
 
-  it("paginateSubscribe handles a rejection from the trailing fetch", async () => {
-    // The trailing fetch is started from the in-flight read's finally block,
-    // detached from any caller. If it also rejects, only its own .catch()
-    // observes the error; without one it is an unhandled rejection.
+  it("delivers a change outside the page through totalCount", async () => {
+    // A create past the page leaves the rows as they were and moves the
+    // count; the executor pushes that as a delta with no upserts.
+    const { mockPerspective, push } = buildMocks({ instances: [{ id: "a" }], totalCount: 1 });
+    const pages: any[] = [];
+    const builder = testModel("PaginateOutside").query(mockPerspective);
+    await builder.paginateSubscribe(1, 1, p => pages.push(p));
+
+    push({ ids: ["a"], upsert: [], totalCount: 2 });
+    await settle();
+
+    expect(pages).toHaveLength(1);
+    expect(ids(pages[0])).toEqual(["a"]);
+    expect(pages[0].totalCount).toBe(2);
+    expect(mockPerspective.modelQuery).not.toHaveBeenCalled();
+    builder.dispose();
+  });
+
+  it("skips a pushed page equal to the last one, as subscribe() does", async () => {
+    // A resync or a reconnect re-open replaces the result wholesale, and
+    // LiveQuery calls back even when nothing changed.
+    const { mockPerspective, push } = buildMocks({ instances: [{ id: "a" }], totalCount: 1 });
+    const pages: any[] = [];
+    const builder = testModel("PaginateUnchanged").query(mockPerspective);
+    await builder.paginateSubscribe(1, 1, p => pages.push(p));
+
+    push({ result: { instances: [{ id: "a" }], totalCount: 1 } });
+    await settle();
+    expect(pages).toHaveLength(0);
+
+    push({ result: { instances: [{ id: "a" }], totalCount: 2 } });
+    push({ result: { instances: [{ id: "a" }], totalCount: 2 } });
+    await settle();
+    expect(pages.map(p => p.totalCount)).toEqual([2]);
+    builder.dispose();
+  });
+
+  it("ends on the latest state after back-to-back changes (#1051)", async () => {
+    // #1051: two saves in quick succession used to leave the callback on the
+    // first save, because each push started a re-read and a re-read could
+    // finish out of order. The pushes now carry the rows, in revision order,
+    // so the last callback is the last push.
+    const { mockPerspective, push } = buildMocks();
+    const pages: any[] = [];
+    const builder = testModel("PaginateLatest").query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, p => pages.push(p));
+
+    push({ ids: ["m1"], upsert: [{ id: "m1" }], totalCount: 1 });
+    push({ ids: ["m1", "m2"], upsert: [{ id: "m2" }], totalCount: 2 });
+    await settle();
+
+    expect(pages.map(ids)).toEqual([["m1"], ["m1", "m2"]]);
+    expect(pages[pages.length - 1].totalCount).toBe(2);
+    expect(mockPerspective.modelQuery).not.toHaveBeenCalled();
+    builder.dispose();
+  });
+
+  it("delivers nothing after dispose", async () => {
+    const { mockClient, mockPerspective, push } = buildMocks();
+    const callback = jest.fn();
+    const builder = testModel("PaginateDispose").query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, callback);
+
+    builder.dispose();
+    push({ result: { instances: [{ id: "late" }], totalCount: 1 } });
+    await settle();
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "paginate-sub");
+  });
+
+  it("logs a callback that throws and keeps delivering", async () => {
     const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const mockSubscriptionId = "paginate-reject-twice-sub";
-      let capturedCallback: ((result: any) => void) | null = null;
+      const { mockPerspective, push } = buildMocks();
+      const pages: any[] = [];
+      const builder = testModel("PaginateThrow").query(mockPerspective);
+      await builder.paginateSubscribe(10, 1, p => {
+        pages.push(p);
+        if (pages.length === 1) throw new Error("consumer failed");
+      });
 
-      const mockClient = {
-        modelSubscribe: jest.fn().mockResolvedValue({
-          subscriptionId: mockSubscriptionId,
-          result: { instances: [], totalCount: 0 },
-        }),
-        subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-          capturedCallback = cb;
-          return () => {};
-        }),
-        keepAliveQuery: jest.fn().mockResolvedValue(true),
-        disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-      };
+      push({ result: { instances: [{ id: "a" }], totalCount: 1 } });
+      push({ result: { instances: [{ id: "a" }, { id: "b" }], totalCount: 2 } });
+      await settle();
 
-      const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
-      let call = 0;
-      const mockPerspective = {
-        uuid: "test-uuid",
-        client: mockClient,
-        modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
-          return mockClient.modelSubscribe("test-uuid", className, queryJson);
-        }),
-        modelQuery: jest.fn().mockImplementation(() => {
-          call++;
-          if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
-          return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
-        }),
-      } as any;
-
-      const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-      @Model({ name: "RejectTwiceTest" })
-      class RejectTwiceTest extends Ad4mModel {
-        @Flag({ through: "test://type", value: "test://reject-twice" })
-        type: string = "test://reject-twice";
-        @Property({ through: "test://name" })
-        name: string = "";
-      }
-
-      const userCallback = jest.fn();
-      const builder = RejectTwiceTest.query(mockPerspective);
-      await builder.paginateSubscribe(10, 1, userCallback);
-
-      capturedCallback!({});
-      capturedCallback!({});
-      await new Promise(r => setTimeout(r, 10));
-      expect(deferred.length).toBe(1);
-
-      deferred[0].reject(new Error("in-flight read failed"));
-      await new Promise(r => setTimeout(r, 10));
-      expect(deferred.length).toBe(2);
-
-      deferred[1].reject(new Error("trailing read failed"));
-      await new Promise(r => setTimeout(r, 10));
-
-      const logged = errorSpy.mock.calls
-        .filter(args => args[0] === "Paginate subscription error:")
-        .map(args => (args[1] as Error).message);
-      expect(logged).toEqual(["in-flight read failed", "trailing read failed"]);
-      expect(userCallback).not.toHaveBeenCalled();
-
+      expect(pages.map(ids)).toEqual([["a"], ["a", "b"]]);
+      expect(errorSpy.mock.calls.some(args => args[0] === "Paginate subscription error:")).toBe(true);
       builder.dispose();
     } finally {
       errorSpy.mockRestore();
     }
   });
-
-  it("paginateSubscribe delivers nothing and starts no trailing fetch after dispose", async () => {
-    // dispose() while a read is in flight and a trailing fetch is pending.
-    const mockSubscriptionId = "paginate-dispose-sub";
-    let capturedCallback: ((result: any) => void) | null = null;
-
-    const mockClient = {
-      modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: mockSubscriptionId,
-        result: { instances: [], totalCount: 0 },
-      }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    };
-
-    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
-    let call = 0;
-    const mockPerspective = {
-      uuid: "test-uuid",
-      client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson);
-      }),
-      modelQuery: jest.fn().mockImplementation(() => {
-        call++;
-        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
-        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
-      }),
-    } as any;
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "DisposeMidReadTest" })
-    class DisposeMidReadTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://dispose-mid-read" })
-      type: string = "test://dispose-mid-read";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const userCallback = jest.fn();
-    const builder = DisposeMidReadTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, userCallback);
-
-    capturedCallback!({});
-    capturedCallback!({});
-    await new Promise(r => setTimeout(r, 10));
-    expect(deferred.length).toBe(1);
-
-    builder.dispose();
-
-    // The in-flight read's finally block still sees pending === true, so the
-    // coalescing log must not claim a trailing fetch that the disposed guard
-    // then drops.
-    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
-    try {
-      deferred[0].resolve({ instances: [{ id: "m1" }], totalCount: 1 });
-      await new Promise(r => setTimeout(r, 10));
-
-      expect(userCallback).not.toHaveBeenCalled();
-      expect(deferred.length).toBe(1);
-      expect(
-        debugSpy.mock.calls.filter(args =>
-          String(args[0]).includes("coalesced into one trailing fetch")
-        )
-      ).toEqual([]);
-
-      // A dispatch that races the unsubscribe starts no read either.
-      capturedCallback!({});
-      await new Promise(r => setTimeout(r, 10));
-      expect(deferred.length).toBe(1);
-    } finally {
-      debugSpy.mockRestore();
-    }
-  });
 });
 
 // ============================================================================
-// Subscription keepalive recovery tests
+// Subscriptions after a reconnect (the executor ends a socket's subscriptions
+// when it closes; there is no keepalive)
 // ============================================================================
 
-describe("ModelQueryBuilder keepalive recovery", () => {
-  beforeEach(() => jest.useFakeTimers());
-  afterEach(() => jest.useRealTimers());
-
-  /**
-   * Helper: build a mock perspective whose keepAliveQuery rejects after
-   * `failAfter` successful calls, simulating a server-side subscription
-   * eviction (returns "Subscription not found").  On resubscribe (a second
-   * modelSubscribe call) it returns a *new* subscription ID.
-   */
-  function buildMocks(failAfter = 0) {
-    let keepaliveCallCount = 0;
-    let modelSubscribeCallCount = 0;
-
+describe("ModelQueryBuilder reconnect", () => {
+  function buildMocks() {
+    let subscribeCount = 0;
+    const reconnectListeners = new Set<() => void>();
     const mockClient = {
       modelSubscribe: jest.fn().mockImplementation(async () => {
-        modelSubscribeCallCount++;
+        subscribeCount++;
         return {
-          subscriptionId: `sub-${modelSubscribeCallCount}`,
-          result: { instances: [], totalCount: 0 },
+          subscriptionId: `sub-${subscribeCount}`,
+          revision: 0,
+          result: { instances: [], totalCount: subscribeCount },
         };
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockImplementation(async () => {
-        keepaliveCallCount++;
-        if (keepaliveCallCount > failAfter) {
-          throw new Error("RPC error 500: Subscription not found");
-        }
-        return true;
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn((cb: () => void) => {
+        reconnectListeners.add(cb);
+        return () => reconnectListeners.delete(cb);
       }),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
-
     const mockPerspective = {
       uuid: "test-uuid",
       client: mockClient,
@@ -1794,125 +1558,63 @@ describe("ModelQueryBuilder keepalive recovery", () => {
       modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
       getLinks: jest.fn().mockResolvedValue([]),
     } as any;
-
-    return { mockClient, mockPerspective, getKeepaliveCount: () => keepaliveCallCount, getSubscribeCount: () => modelSubscribeCallCount };
+    const reconnect = async () => {
+      reconnectListeners.forEach(cb => cb());
+      await new Promise(r => setTimeout(r, 0));
+    };
+    return { mockClient, mockPerspective, reconnect, subscribeCount: () => subscribeCount };
   }
 
-  it("subscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
-    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(/* failAfter */ 1);
-
+  function testModel(name: string) {
     const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "KeepaliveRecoveryTest" })
-    class KeepaliveRecoveryTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://ka" })
-      type: string = "test://ka";
+    @Model({ name })
+    class M extends Ad4mModel {
+      @Flag({ through: "test://type", value: `test://${name}` })
+      type: string = `test://${name}`;
       @Property({ through: "test://name" })
       name: string = "";
     }
+    return M;
+  }
 
-    const builder = KeepaliveRecoveryTest.query(mockPerspective);
+  it("subscribe re-opens after a reconnect", async () => {
+    const { mockClient, mockPerspective, reconnect, subscribeCount } = buildMocks();
+    const builder = testModel("ReconnectSubscribe").query(mockPerspective);
     await builder.subscribe(() => {});
+    await reconnect();
+    expect(subscribeCount()).toBe(2);
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
+  });
 
-    // Initial subscription
-    expect(getSubscribeCount()).toBe(1);
-
-    // First keepalive at 30s — succeeds (failAfter=1)
-    await jest.advanceTimersByTimeAsync(30_000);
-    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(1);
-
-    // Second keepalive at 60s — fails → should trigger resubscribe
-    await jest.advanceTimersByTimeAsync(30_000);
-    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(2);
-
-    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
-    await jest.advanceTimersByTimeAsync(2500);
-
-    // A second modelSubscribe call means recovery happened
-    expect(getSubscribeCount()).toBe(2);
-
-    // Clean up
+  it("countSubscribe delivers the count from the re-opened subscription", async () => {
+    const { mockPerspective, reconnect } = buildMocks();
+    const counts: number[] = [];
+    const builder = testModel("ReconnectCount").query(mockPerspective);
+    expect(await builder.countSubscribe(c => counts.push(c))).toBe(1);
+    await reconnect();
+    expect(counts).toEqual([2]);
     builder.dispose();
   });
 
-  it("countSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
-    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0); // fail immediately
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "CountKeepaliveTest" })
-    class CountKeepaliveTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://cka" })
-      type: string = "test://cka";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const builder = CountKeepaliveTest.query(mockPerspective);
-    await builder.countSubscribe(() => {});
-
-    expect(getSubscribeCount()).toBe(1);
-
-    // First keepalive at 30s — fails immediately → should trigger resubscribe
-    await jest.advanceTimersByTimeAsync(30_000);
-    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
-    await jest.advanceTimersByTimeAsync(2500);
-
-    expect(getSubscribeCount()).toBe(2);
-
+  it("paginateSubscribe re-reads the page after a reconnect", async () => {
+    const { mockPerspective, reconnect, subscribeCount } = buildMocks();
+    const pages: any[] = [];
+    const builder = testModel("ReconnectPaginate").query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, p => pages.push(p));
+    await reconnect();
+    expect(subscribeCount()).toBe(2);
+    expect(pages).toHaveLength(1);
     builder.dispose();
   });
 
-  it("paginateSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
-    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0);
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "PaginateKeepaliveTest" })
-    class PaginateKeepaliveTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://pka" })
-      type: string = "test://pka";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const builder = PaginateKeepaliveTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, () => {});
-
-    expect(getSubscribeCount()).toBe(1);
-
-    await jest.advanceTimersByTimeAsync(30_000);
-    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
-    await jest.advanceTimersByTimeAsync(2500);
-
-    expect(getSubscribeCount()).toBe(2);
-
-    builder.dispose();
-  });
-
-  it("subscribe: stops retrying after dispose()", async () => {
-    const { mockClient, mockPerspective } = buildMocks(Infinity); // keepalive always succeeds
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "DisposeTest" })
-    class DisposeTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://disp" })
-      type: string = "test://disp";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const builder = DisposeTest.query(mockPerspective);
+  it("a disposed subscription does not re-open", async () => {
+    const { mockPerspective, reconnect, subscribeCount } = buildMocks();
+    const builder = testModel("ReconnectDisposed").query(mockPerspective);
     await builder.subscribe(() => {});
-
     builder.dispose();
-
-    // Advance well past multiple keepalive intervals
-    await jest.advanceTimersByTimeAsync(120_000);
-
-    // No keepalive calls should have happened after dispose
-    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(0);
+    await reconnect();
+    expect(subscribeCount()).toBe(1);
   });
 });
 
@@ -3740,127 +3442,213 @@ describe("includeUnverified — wire format", () => {
   });
 });
 
-// ── Subscribe awaits the previous executor dispose ────────────────────
-describe("ModelQueryBuilder subscribe ordering", () => {
-  function deferred<T>() {
-    let resolve!: (v: T) => void;
-    let reject!: (e: unknown) => void;
-    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
-    return { promise, resolve, reject };
-  }
-
+// ── One subscription per builder ──────────────────────────────────────
+describe("ModelQueryBuilder subscription ownership", () => {
   function makePerspective() {
-    const disposeGate = deferred<boolean>();
+    let n = 0;
     const mockClient = {
-      modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: "shared-sub",
+      modelSubscribe: jest.fn().mockImplementation(async () => ({
+        subscriptionId: `sub-${++n}`,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
-      }),
-      subscribeToQueryUpdates: jest.fn().mockReturnValue(() => {}),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockReturnValue(disposeGate.promise),
+      })),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const mockPerspective = {
       uuid: "test-uuid",
       client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson);
-      }),
+      modelSubscribe: jest.fn().mockImplementation(
+        async (className: string, queryJson: string) =>
+          mockClient.modelSubscribe("test-uuid", className, queryJson)
+      ),
       getLinks: jest.fn().mockResolvedValue([]),
       modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
     } as any;
-    return { mockPerspective, mockClient, disposeGate };
+    return { mockPerspective, mockClient };
   }
 
   const { Ad4mModel, Model, Property, Flag } = require("./index");
 
-  @Model({ name: "OrderingTest" })
-  class OrderingTest extends Ad4mModel {
-    @Flag({ through: "test://type", value: "test://ordering" })
-    type: string = "test://ordering";
+  @Model({ name: "OwnershipTest" })
+  class OwnershipTest extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://ownership" })
+    type: string = "test://ownership";
     @Property({ through: "test://name" })
     name: string = "";
   }
 
-  const flush = () => new Promise((r) => setTimeout(r, 0));
+  it("a failed open does not end a later call's subscription", async () => {
+    const { mockPerspective, mockClient } = makePerspective();
+    let rejectFirst!: (e: Error) => void;
+    mockClient.modelSubscribe
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectFirst = reject; }))
+      .mockImplementationOnce(async () => ({ subscriptionId: "sub-b", revision: 0, result: { instances: [], totalCount: 0 } }));
+    const builder = OwnershipTest.query(mockPerspective);
 
-  it("re-subscribe waits for the executor to release the previous subscription", async () => {
-    const { mockPerspective, mockClient, disposeGate } = makePerspective();
-    const builder = OrderingTest.query(mockPerspective);
-
+    const first = builder.subscribe(() => {});
+    await Promise.resolve();
     await builder.subscribe(() => {});
-    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
+    rejectFirst(new Error("refused"));
+    await expect(first).rejects.toThrow("refused");
 
-    const second = builder.subscribe(() => {});
-    await flush();
-    // The executor has not acknowledged the dispose yet: no new registration.
-    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "shared-sub");
-    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
-
-    disposeGate.resolve(true);
-    await second;
-    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+    expect(mockClient.disposeQuerySubscription).not.toHaveBeenCalledWith("test-uuid", "sub-b");
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-b");
   });
 
-  it("re-subscribe proceeds when the executor dispose fails", async () => {
-    const { mockPerspective, disposeGate } = makePerspective();
-    const builder = OrderingTest.query(mockPerspective);
+  it("paginateSubscribe() disposed while opening leaves the builder usable", async () => {
+    const { mockPerspective, mockClient } = makePerspective();
+    let resolveOpen!: (v: any) => void;
+    mockClient.modelSubscribe.mockImplementationOnce(() => new Promise(resolve => { resolveOpen = resolve; }));
+    const callback = jest.fn();
+    const builder = OwnershipTest.query(mockPerspective);
 
-    await builder.subscribe(() => {});
-    const second = builder.subscribe(() => {});
-    disposeGate.reject(new Error("Subscription not found"));
-    await second;
-    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+    const page = builder.paginateSubscribe(10, 1, callback);
+    await Promise.resolve();
+    builder.dispose();
+    resolveOpen({ subscriptionId: "sub-p", revision: 0, result: { instances: [], totalCount: 0 } });
+    await page;
+
+    expect(() => builder.dispose()).not.toThrow();
+    await expect(builder.subscribe(() => {})).resolves.toBeDefined();
+    expect(callback).not.toHaveBeenCalled();
   });
 
   it("overlapping subscribe() calls leave exactly one live subscription", async () => {
-    const { mockPerspective, mockClient, disposeGate } = makePerspective();
-    const unsubscribes: jest.Mock[] = [];
-    let n = 0;
-    mockClient.modelSubscribe.mockImplementation(async () => ({
-      subscriptionId: `sub-${++n}`,
-      result: { instances: [], totalCount: 0 },
-    }));
-    mockClient.subscribeToQueryUpdates.mockImplementation(() => {
-      const u = jest.fn();
-      unsubscribes.push(u);
-      return u;
-    });
-    mockClient.disposeQuerySubscription.mockResolvedValue(true);
-    disposeGate.resolve(true);
-    const builder = OrderingTest.query(mockPerspective);
+    const { mockPerspective, mockClient } = makePerspective();
+    const builder = OwnershipTest.query(mockPerspective);
 
     await Promise.all([builder.subscribe(() => {}), builder.subscribe(() => {})]);
 
     expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
-    // The second call ran after the first and disposed its subscription.
+    // The second call ended the first subscription.
     expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
     expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
-    expect(unsubscribes).toHaveLength(2);
-    expect(unsubscribes[0]).toHaveBeenCalledTimes(1);
-    expect(unsubscribes[1]).not.toHaveBeenCalled();
-    // And the builder can still release the survivor.
-    await builder.dispose();
-    expect(unsubscribes[1]).toHaveBeenCalledTimes(1);
+    builder.dispose();
     expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
   });
 
-  it("dispose() cleans up locally at once and resolves without a subscription", async () => {
-    const { mockPerspective, mockClient, disposeGate } = makePerspective();
-    const unsubscribe = jest.fn();
-    mockClient.subscribeToQueryUpdates.mockReturnValue(unsubscribe);
-    const builder = OrderingTest.query(mockPerspective);
+  it("dispose() ends the subscription once, however often it is called", async () => {
+    const { mockPerspective, mockClient } = makePerspective();
+    const builder = OwnershipTest.query(mockPerspective);
 
-    await expect(builder.dispose()).resolves.toBeUndefined();
-
+    builder.dispose();
     await builder.subscribe(() => {});
-    const done = builder.dispose();
-    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    builder.dispose();
+    builder.dispose();
+
     expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
-    disposeGate.resolve(true);
-    await expect(done).resolves.toBeUndefined();
-    // Idempotent: a second dispose does not call the executor again.
-    await builder.dispose();
-    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
+  });
+});
+
+describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)", () => {
+  @Model({ name: "UnionTaskU" })
+  class UnionTaskU extends Ad4mModel {
+    @Flag({ through: "u://kind", value: "u://task" })
+    kind: string = "";
+    @Property({ through: "u://status" })
+    status: string = "";
+  }
+
+  @Model({ name: "UnionNoteU" })
+  class UnionNoteU extends Ad4mModel {
+    @Flag({ through: "u://kind", value: "u://note" })
+    kind: string = "";
+    @Property({ through: "u://body" })
+    body: string = "";
+  }
+
+  const rows = {
+    instances: [
+      { id: "u://t1", status: "open", __subjectClass: "UnionTaskU", __subjectClasses: ["UnionTaskU"] },
+      { id: "u://n1", body: "hi", __subjectClass: "UnionNoteU", __subjectClasses: ["UnionNoteU"] },
+      { id: "u://x", __subjectClass: "Other", __subjectClasses: ["Other"] },
+    ],
+    totalCount: 7,
+  };
+
+  it("sends every class name and builds each row as its own class", async () => {
+    const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
+    const results = await Ad4mModel.findAllOf(perspective, [UnionTaskU, UnionNoteU], {
+      where: { status: "open" },
+      order: { status: "DESC" },
+      limit: 2,
+      preferClasses: ["UnionNoteU"],
+    });
+
+    const [classNames, queryJson] = perspective.modelQuery.mock.calls[0];
+    expect(classNames).toEqual(["UnionTaskU", "UnionNoteU"]);
+    const sent = JSON.parse(queryJson);
+    expect(sent.where).toEqual({ status: "open" });
+    expect(sent.order).toEqual([["status", "DESC"]]);
+    expect(sent.limit).toBe(2);
+    expect(sent.preferClasses).toEqual(["UnionNoteU"]);
+
+    expect(results[0]).toBeInstanceOf(UnionTaskU);
+    expect((results[0] as UnionTaskU).status).toBe("open");
+    expect(results[1]).toBeInstanceOf(UnionNoteU);
+    // A class the caller did not list stays plain JSON.
+    expect(results[2]).not.toBeInstanceOf(Ad4mModel);
+  });
+
+  it("queryOf().count() reads the union's totalCount", async () => {
+    const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
+    const count = await Ad4mModel.queryOf(perspective, [UnionTaskU, UnionNoteU]).count();
+    expect(count).toBe(7);
+    expect(JSON.parse(perspective.modelQuery.mock.calls[0][1]).limit).toBe(0);
+  });
+
+  it("refuses a projection key the classes tag with different target classes", () => {
+    @Model({ name: "UnionCardU" })
+    class UnionCardU extends Ad4mModel {
+      @Property({ through: "u://title" })
+      title: string = "";
+    }
+    @Model({ name: "UnionWaypointU" })
+    class UnionWaypointU extends Ad4mModel {
+      @Property({ through: "u://x" })
+      x: string = "";
+    }
+    @Model({ name: "UnionPlacementU" })
+    class UnionPlacementU extends Ad4mModel {
+      @HasMany(() => UnionCardU, { through: "u://items" })
+      items: string[] = [];
+    }
+    @Model({ name: "UnionRouteU" })
+    class UnionRouteU extends Ad4mModel {
+      @HasMany(() => UnionWaypointU, { through: "u://items" })
+      items: string[] = [];
+    }
+    const include = { $items: { from: "items", where: { title: "a" } } } as any;
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionPlacementU, UnionRouteU], { include }),
+    ).toThrow(/different target classes/);
+    // Same target on both: accepted.
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionPlacementU, UnionPlacementU], { include }),
+    ).not.toThrow();
+  });
+
+  it("keeps a raw parent predicate and refuses a scope the classes resolve differently", () => {
+    const { queryJson } = Ad4mModel.prepareUnionQueryParams([UnionTaskU, UnionNoteU], {
+      parent: { id: "u://canvas", predicate: "u://item" },
+    });
+    expect(JSON.parse(queryJson).parent).toEqual({ id: "u://canvas", predicate: "u://item" });
+
+    @Model({ name: "UnionBoardU" })
+    class UnionBoardU extends Ad4mModel {
+      @HasMany(() => UnionTaskU, { through: "u://tasks" })
+      tasks: string[] = [];
+      @HasMany(() => UnionNoteU, { through: "u://notes" })
+      notes: string[] = [];
+    }
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionTaskU, UnionNoteU], {
+        parent: { id: "u://board", model: UnionBoardU },
+      }),
+    ).toThrow(/different predicates/);
   });
 });

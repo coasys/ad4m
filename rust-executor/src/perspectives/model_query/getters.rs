@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use super::filtering::matches_condition;
 use super::hydration::{reorder_members, ORDERING_STASH_KEY};
 use super::sparql_builder::{verified_link_exists, LinkGuard};
-use super::types::{IncludeValue, ModelShape, ShapeProperty};
+use super::types::{ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::LinkStatus;
@@ -206,24 +206,16 @@ pub(super) fn verify_relation_getter(
     if filter.is_empty() {
         return getter.to_string();
     }
-    let own_triple = regex::Regex::new(&format!(
-        r"(?is)^\s*SELECT\s+\?target\s+WHERE\s*\{{\s*<Base>\s+<{}>\s+\?target\b",
-        regex::escape(predicate)
-    ))
-    .expect("escaped predicate");
-    let Some(m) = own_triple.find(getter) else {
+    let Some(end) = own_triple_end(getter, predicate) else {
         return getter.to_string();
     };
-    let rest = &getter[m.end()..];
-    let condition = r"\?target\s+<([^<>\s]+)>\s+(<[^<>\s]+>|\?_v\d+)\s*\.";
-    let generated = regex::Regex::new(&format!(r"(?s)^\s*\.(?:\s*{condition})*\s*\}}\s*$"))
-        .expect("static pattern");
-    let rest = if generated.is_match(rest) {
+    let rest = &getter[end..];
+    let rest = if is_generated_conformance(rest) {
         let guard = LinkGuard {
             status: link_status,
             include_unverified,
         };
-        regex::Regex::new(condition)
+        regex::Regex::new(CONFORMANCE_CONDITION)
             .expect("static pattern")
             .replace_all(rest, |c: &regex::Captures| {
                 let (pred, object) = (format!("<{}>", &c[1]), &c[2]);
@@ -236,7 +228,52 @@ pub(super) fn verify_relation_getter(
     } else {
         rest.to_string()
     };
-    format!("{}{filter}{rest}", &getter[..m.end()])
+    format!("{}{filter}{rest}", &getter[..end])
+}
+
+/// One conformance triple of a generated relation getter: `?target <p> <v> .`
+/// for a flag, `?target <p> ?_vN .` for a required property.
+const CONFORMANCE_CONDITION: &str = r"\?target\s+<([^<>\s]+)>\s+(<[^<>\s]+>|\?_v\d+)\s*\.";
+
+/// Where `getter`'s opening `SELECT ?target WHERE { <Base> <predicate>
+/// ?target` ends, if it opens with the relation's own triple.
+fn own_triple_end(getter: &str, predicate: &str) -> Option<usize> {
+    regex::Regex::new(&format!(
+        r"(?is)^\s*SELECT\s+\?target\s+WHERE\s*\{{\s*<Base>\s+<{}>\s+\?target\b",
+        regex::escape(predicate)
+    ))
+    .expect("escaped predicate")
+    .find(getter)
+    .map(|m| m.end())
+}
+
+/// Whether `rest`, a getter after its own triple, is only conformance
+/// triples and the closing brace.
+fn is_generated_conformance(rest: &str) -> bool {
+    regex::Regex::new(&format!(
+        r"(?s)^\s*\.(?:\s*{CONFORMANCE_CONDITION})*\s*\}}\s*$"
+    ))
+    .expect("static pattern")
+    .is_match(rest)
+}
+
+/// The predicates a relation getter reads on its targets, when the getter is
+/// exactly the conformance form `buildConformanceFilter` generates (see
+/// [`verify_relation_getter`]): every triple after the relation's own has the
+/// target as its subject. `None` for any other getter, whose reads cannot be
+/// placed on the target alone.
+pub(crate) fn conformance_predicates(getter: &str, predicate: &str) -> Option<Vec<String>> {
+    let rest = &getter[own_triple_end(getter, predicate)?..];
+    if !is_generated_conformance(rest) {
+        return None;
+    }
+    Some(
+        regex::Regex::new(CONFORMANCE_CONDITION)
+            .expect("static pattern")
+            .captures_iter(rest)
+            .map(|c| c[1].to_string())
+            .collect(),
+    )
 }
 
 /// Inject a `?source` batching constraint into a `SELECT` getter.
@@ -278,11 +315,14 @@ pub(super) fn inject_values_into_select(select: &str, source_constraint: &str) -
 /// When `deep_query` is `false`, only relation conformance getters (collections
 /// and scalar relations) are evaluated, skipping pure-property getters for
 /// performance.
+///
+/// Only the getters of `returned` keys run (all of them when `None`): each is
+/// a store read, and a value the query does not hand back would be stripped.
 pub(super) fn evaluate_getters(
     store: &SparqlStore,
     instances: &mut [Value],
     shape: &ModelShape,
-    _include: Option<&HashMap<String, IncludeValue>>,
+    returned: Option<&[String]>,
     deep_query: bool,
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
@@ -291,6 +331,7 @@ pub(super) fn evaluate_getters(
         .properties
         .iter()
         .filter(|p| p.getter.is_some() && (deep_query || p.is_collection || p.is_scalar_relation))
+        .filter(|p| returned.is_none_or(|keep| keep.contains(&p.name)))
         .collect();
 
     if getter_props.is_empty() || instances.is_empty() {

@@ -26,22 +26,22 @@ const SEPARATOR = "════════════════════�
  * - **The executor is locked.** Its keys live in memory only, so this is the
  *   normal state after every restart. `request_capability` cannot be confirmed
  *   and no login of any kind can succeed until someone calls `unlockAgent`.
- *   Pasting a JWT does not help — the node would reject it too.
- * - **The handshake ran but was not confirmed**, or the node refused it. Here
+ *   Pasting a JWT does not help — the executor would reject it too.
+ * - **The handshake ran but was not confirmed**, or the executor refused it. Here
  *   a manually obtained JWT *is* the fix.
  *
  * The observed failure (Marvin, 2026-09-09) was the first case reported as the
- * second: setup said "obtain a JWT token manually" against a locked node, the
+ * second: setup said "obtain a JWT token manually" against a locked executor, the
  * operator hand-edited a token into the config, and the token was not the
  * problem. `auth_status` already reports `executor_locked` in every branch, so
  * the cause is one call away — this function only decides what to say about it.
  *
  * A third case is not a cause but an absence: `auth_status` may itself have
- * failed, in which case we do not know whether the node is locked. That is
+ * failed, in which case we do not know whether the executor is locked. That is
  * reported as its own line rather than folded into the not-locked branch —
  * "we checked and you are fine" and "we could not check" must not read alike.
  *
- * Pure so it can be tested without a node: callers pass what the two tools
+ * Pure so it can be tested without an executor: callers pass what the two tools
  * returned, and get back the lines to print and the placeholder the config
  * snippet should carry. The placeholder is part of the same decision: printing
  * `<paste-your-jwt-here>` directly under "a JWT will not help" contradicts the
@@ -65,8 +65,8 @@ export function explainCapabilityFailure(input: {
           "No login can succeed until the executor's operator calls unlockAgent.",
         // The action is stated here, not borrowed from `statusData.message`: an
         // older executor may answer with a terser message, and the operator
-        // still has to be told which call unlocks the node.
-        "A JWT will not help here — a locked node rejects it too. Have the " +
+        // still has to be told which call unlocks the executor.
+        "A JWT will not help here — a locked executor rejects it too. Have the " +
           "executor's operator call unlockAgent, then run `openclaw ad4m-setup` " +
           "again.",
       ],
@@ -141,7 +141,7 @@ export async function runSetup(
   const pluginCfg = openclawConfig?.plugins?.entries?.ad4m?.config ?? {};
   const runHolochain = pluginCfg.runHolochain !== false; // default true
   // Multi-user external: the assistant provisions its OWN user (distinct DID)
-  // via signup/login rather than a capability against the node's base agent.
+  // via signup/login rather than a capability against the executor's main agent.
   const multiUser = pluginCfg.multiUser === true;
   const agentEmail = pluginCfg.email || `openclaw-${generateRandomPassphrase(8)}@agent.local`;
   // Password resolves env var → config field → interactive stdin (setup only).
@@ -164,14 +164,14 @@ export async function runSetup(
   // ── Step 3: Check if executor is already running ──
   const running = await isExecutorRunning(endpoint, 3000, executorUrl);
 
-  // Asking for a remote node and silently getting a local one is the worst
+  // Asking for a remote executor and silently getting a local one is the worst
   // outcome here: managed mode downloads ~60MB and hands back a localhost
-  // config, and nothing in the output says the node you named never answered.
+  // config, and nothing in the output says the executor you named never answered.
   if (!running && !isLoopbackEndpoint(endpoint)) {
     logger.warn(
       `[ad4m-setup] ${endpoint} did not answer, so this is NOT external mode. ` +
         `Setting up a local managed executor instead. If you meant to connect to ` +
-        `that node, stop here and check it is running and reachable.`,
+        `that executor, stop here and check it is running and reachable.`,
     );
   }
 
@@ -350,13 +350,13 @@ async function setupExternalMode(
     // Initialize MCP session (no auth needed)
     const initResp = await mcpInitialize(endpoint);
 
-    // Multi-user node: provision the assistant's OWN user identity (distinct DID)
-    // via signup + login, rather than a capability against the node's base agent.
+    // Multi-user executor: provision the assistant's OWN user identity (distinct DID)
+    // via signup + login, rather than a capability against the executor's main agent.
     if (multiUser && email && password) {
-      logger.info(`[ad4m-setup] Multi-user node — provisioning own identity (${email})...`);
+      logger.info(`[ad4m-setup] Multi-user executor — provisioning own identity (${email})...`);
       // mcpCallTool returns a JSON-RPC error as result text rather than throwing,
       // so inspect the result — the catch alone only sees transport failures.
-      // Did *this* run create the account? If so the node has just emailed a
+      // Did *this* run create the account? If so the executor has just emailed a
       // `signup`-typed code, and that is the one to verify with.
       let justSignedUp = false;
       try {
@@ -389,7 +389,7 @@ async function setupExternalMode(
         });
         return;
       }
-      // login_email returned no token — the node enforces SMTP-backed email
+      // login_email returned no token — the executor enforces SMTP-backed email
       // verification. Fall back to the code-verification flow: get a code to
       // the inbox, read it (interactive prompt / /dev/tty), exchange it for a
       // JWT. A brand-new account has to complete *signup* verification first;
@@ -463,7 +463,7 @@ async function setupExternalMode(
       }
     }
 
-    // JWT auth failed. Ask the node why before telling the operator what to do:
+    // JWT auth failed. Ask the executor why before telling the operator what to do:
     // the two causes need opposite actions, and the old message named neither.
     const statusData = extractMcpResultData(
       await mcpCallTool(endpoint, "auth_status", {}, initResp.sessionId),
@@ -554,7 +554,7 @@ async function resolveMultiUserPassword(
  * 3. generateJwt(requestId, code) → returns JWT
  */
 /**
- * Email-verification fallback for multi-user login. Used when a node enforces
+ * Email-verification fallback for multi-user login. Used when an executor enforces
  * SMTP-backed email verification, so `login_email` alone returns no token: the
  * plugin gets a code to the user's inbox, reads it, and exchanges it for a JWT
  * via `verify_email_code`. `readCode` defaults to an interactive prompt; tests
@@ -582,9 +582,9 @@ export async function loginViaEmailVerification(
     } catch (e: any) {
       logger.info(`[ad4m-setup] request_login_verification: ${e.message}`);
     }
-    logger.info("[ad4m-setup] A verification code has been sent to your email (if the node has SMTP configured).");
+    logger.info("[ad4m-setup] A verification code has been sent to your email (if the executor has SMTP configured).");
   } else {
-    logger.info("[ad4m-setup] signup sent a verification code to your email (if the node has SMTP configured).");
+    logger.info("[ad4m-setup] signup sent a verification code to your email (if the executor has SMTP configured).");
   }
   const code = await readCode();
   if (!code) {

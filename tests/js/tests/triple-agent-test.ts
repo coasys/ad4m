@@ -22,7 +22,7 @@ export default function tripleAgentTests(testContext: TestContext) {
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                 let jimP1 = await jim.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-                await testContext.makeAllThreeNodesKnown()
+                await testContext.makeAllThreeNodesKnown([alice, aliceP1.uuid], [bob, bobP1.uuid], [jim, jimP1.uuid])
                 
                 expect(bobP1!.name).not.to.be.undefined;
                 expect(bobP1!.sharedUrl).to.be.equal(neighbourhoodUrl)

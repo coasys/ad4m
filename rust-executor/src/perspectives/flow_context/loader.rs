@@ -16,7 +16,9 @@
 
 use super::render::summarize_flow_instance;
 use super::types::{ContentionStatus, FlowContext, FlowInstanceRecord, ResolvedFlow};
+use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS;
+use crate::perspectives::flow_instance::replica_state::FlowReplicaState;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{parse_flow_from_links, SHACLFlow};
@@ -33,12 +35,12 @@ use std::collections::{HashMap, HashSet};
 /// in the next model_query result and we don't want that to poison every
 /// future extraction until it's hand-cleaned.
 ///
-/// `currentState` is **not** required: it is this replica's `Local` cache
-/// of the derived state (#987), so a row that synced in from a peer has
-/// none until the local consensus pass runs. Absence hydrates to an empty
-/// `current_state` — "not yet derived here" — never to a dropped record,
-/// or a remote replica would not see the instance at all (and, say, spawn
-/// a duplicate).
+/// The row carries no state: the state is derived, and what this replica
+/// last derived lives outside the graph (#1424, `FlowReplicaState`). So the
+/// record comes back with an empty `current_state` — "not read yet" — and a
+/// caller that needs the state derives it or reads the table. A
+/// `currentState` key on the hydrated row is ignored: it can only come from
+/// a shape registered before #1424, hydrating a dead `Local` link.
 pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowInstanceRecord> {
     let instance_uri = v.get("id").and_then(|x| x.as_str())?.to_string();
     // Property key `flowUri` on the TS @Model (SHACL predicate
@@ -46,11 +48,7 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
     // not the bare name (James PR #929 R5).
     let flow_uri = v.get("flowUri").and_then(|x| x.as_str())?.to_string();
     let subject = v.get("subject").and_then(|x| x.as_str())?.to_string();
-    let current_state = v
-        .get("currentState")
-        .and_then(|x| x.as_str())
-        .unwrap_or_default()
-        .to_string();
+    let current_state = String::new();
     // Ad4mModel synthesises `createdAt` from the earliest link timestamp
     // on hydration (`rust-executor/src/perspectives/model_query/hydration.rs`).
     // When present it's an RFC3339 string; we keep it opaque here.
@@ -73,11 +71,10 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
 /// to scope against, so surfacing every FlowInstance would be
 /// unbounded and violate Model C scope discipline (James PR #929 J#1).
 ///
-/// Single-URI queries push the filter down to `model_query`
-/// (`where.subject == uri`) so the existing typed-in-store path is
-/// preserved. Multi-URI batches load-all and filter in-Rust because
-/// `model_query` has no `in` operator today; the batch is bounded by
-/// the auto-processor's drained item count.
+/// The filter is pushed down to `model_query`: one URI as
+/// `where.subject == uri`, several as an array `where.subject`, which
+/// `model_query` reads as "any of" (#1257). The result is still checked
+/// against `subjects` here.
 ///
 /// Silently returns `Ok(vec![])` when the `FlowInstance` class hasn't
 /// been registered yet on this perspective — a freshly-created
@@ -91,12 +88,11 @@ pub async fn load_flow_instances(
     if subjects.is_empty() {
         return Ok(vec![]);
     }
-    // `model_query` has no `in` operator, so only a single subject is
-    // pushed down; a batch loads everything and filters here.
+    // An array `where` value is "any of" in `model_query`.
     let query = if subjects.len() == 1 {
         serde_json::json!({ "where": { "subject": subjects[0].clone() } })
     } else {
-        serde_json::json!({})
+        serde_json::json!({ "where": { "subject": subjects } })
     };
     let records = query_flow_instances(perspective, &query).await?;
     Ok(records
@@ -222,11 +218,11 @@ pub fn retain_selected_flows(
 /// the fallback is "extract without flow-aware prompting", which is
 /// exactly the pre-slice-10.2 behaviour.
 ///
-/// `subjects` is the set of base-expression URIs the extraction pass is
-/// operating on — the drained batch bases in the auto-processor path
-/// (see `InterpretationRunCursor.sources`). A FlowInstance whose
-/// `subject` matches one of these is running on the same expression the
-/// pass is interpreting and is included in the prompt.
+/// `subjects` is the set of record URIs the extraction pass may touch:
+/// the records its prompt shows as `existing` plus the dedup scope's
+/// anchor (`interpretation::run::flow_subjects_for_pass`, #1257). A
+/// FlowInstance whose `subject` matches one of these governs a record
+/// the model might update and is included in the prompt.
 ///
 /// Empty `subjects` returns an empty result rather than the whole
 /// perspective's FlowInstance set — the pre-fix behaviour (loading
@@ -235,8 +231,12 @@ pub fn retain_selected_flows(
 /// Callers that legitimately want every active flow (e.g. component
 /// tests) can query [`load_flow_instances`] directly with the full
 /// subject set.
+///
+/// `context` is the agent the pass runs as: the cache-first read below is of
+/// *that agent's* recorded state.
 pub async fn gather_active_flow_contexts(
     perspective: &PerspectiveInstance,
+    context: &AgentContext,
     subjects: &[String],
     flow_filter: Option<&[String]>,
 ) -> Vec<FlowContext> {
@@ -249,6 +249,10 @@ pub async fn gather_active_flow_contexts(
     };
     retain_selected_flows(&mut flows_by_uri, flow_filter);
     if flows_by_uri.is_empty() {
+        log::debug!(
+            "🧠 flow context: no flow selected, 0 active flow(s) for {} subject(s)",
+            subjects.len()
+        );
         return Vec::new();
     }
     let records = match load_flow_instances(perspective, subjects).await {
@@ -260,10 +264,11 @@ pub async fn gather_active_flow_contexts(
             return Vec::new();
         }
     };
-    // Cache-first (#987): trust the `Local`-verified `currentState` link when
-    // present — peers cannot write it since #987's Local switch, so it is
-    // exactly what this replica last derived.  Instances whose cache is absent
-    // (never derived yet) fall through to `derive_states`.
+    // Cache-first: trust this agent's recorded state when present — it lives
+    // in the executor's own table (#1424), so no peer or co-owner can write
+    // it, and it is exactly what this agent's pass last derived. Instances
+    // with no recorded state (never derived here) fall through to
+    // `derive_states`.
     //
     // The cache stores only the state name — the fold's contention verdict
     // was NOT computed on this path, so cache-sourced flows carry
@@ -273,30 +278,27 @@ pub async fn gather_active_flow_contexts(
     // *state* is bounded by the sync-triggered re-derive (`trigger.rs`, every
     // incoming flow link), but contention does not expire on its own — a
     // cached flow keeps `Unknown` until something re-folds it.
+    let instances: Vec<String> = records.iter().map(|r| r.instance_uri.clone()).collect();
+    let mut cached = crate::agent::did_for_context(context)
+        .and_then(|did| FlowReplicaState::states(&perspective.uuid, &did, Some(&instances)))
+        .unwrap_or_else(|e| {
+            log::warn!(
+                "gather_active_flow_contexts: reading recorded states failed, deriving every instance: {e:#}"
+            );
+            HashMap::new()
+        });
     let mut resolved: Vec<ResolvedFlow> = Vec::with_capacity(records.len());
     let mut uncached: Vec<FlowInstanceRecord> = Vec::new();
     for record in records {
-        match crate::perspectives::flow_instance::local_cached_state(
-            perspective,
-            &record.instance_uri,
-        )
-        .await
-        {
-            Ok(Some(cached)) => resolved.push(ResolvedFlow {
+        match cached.remove(&record.instance_uri) {
+            Some(state) => resolved.push(ResolvedFlow {
                 record: FlowInstanceRecord {
-                    current_state: cached,
+                    current_state: state,
                     ..record
                 },
                 contention: ContentionStatus::Unknown,
             }),
-            Ok(None) => uncached.push(record),
-            Err(e) => {
-                log::warn!(
-                    "gather_active_flow_contexts: cache read for {} failed, falling back to derive: {e:#}",
-                    record.instance_uri
-                );
-                uncached.push(record);
-            }
+            None => uncached.push(record),
         }
     }
     if !uncached.is_empty() {
@@ -311,14 +313,18 @@ pub async fn gather_active_flow_contexts(
             contention: ContentionStatus::from_fresh_derivation(df.contested),
         }));
     }
-    build_flow_contexts(&resolved, &flows_by_uri)
+    let contexts = build_flow_contexts(&resolved, &flows_by_uri);
+    log::debug!(
+        "🧠 flow context: {} active flow(s) for {} subject(s)",
+        contexts.len(),
+        subjects.len()
+    );
+    contexts
 }
 
-/// Derive the flow-filter subject key from an extraction pass `Scope`.
-/// Kept for the strategy-path call site that has no drained-batch cursor
-/// available yet (it still uses the dedup scope's anchor URI). New code
-/// should prefer wiring `InterpretationRunCursor.sources` through and
-/// calling [`gather_active_flow_contexts`] with the batch bases.
+/// Derive the flow-filter subject key from an extraction pass `Scope`:
+/// the dedup scope's anchor URI, one of the subjects
+/// `interpretation::run::flow_subjects_for_pass` loads flows for.
 pub fn scope_subject(scope: &Scope) -> &str {
     match scope {
         Scope::Model { id, .. } => id.as_str(),
@@ -328,6 +334,7 @@ pub fn scope_subject(scope: &Scope) -> &str {
         // is what any caller reaching here would have written; a traversal with
         // no anchors has no subject at all.
         Scope::Traverse { ids, .. } => ids.first().map(|id| id.as_str()).unwrap_or(""),
+        Scope::Contained(c) => c.id.as_str(),
     }
 }
 
@@ -581,7 +588,10 @@ mod tests {
         assert_eq!(r.instance_uri, "ad4m://flow/instance/inst-1");
         assert_eq!(r.flow_uri, "coasys://DeliveryFlow");
         assert_eq!(r.subject, "ad4m://task/foo");
-        assert_eq!(r.current_state, "scoped");
+        assert_eq!(
+            r.current_state, "",
+            "a hydrated `currentState` is a pre-#1424 shape surfacing a dead link: ignored"
+        );
         assert_eq!(r.created_at.as_deref(), Some("2026-08-26T09:00:00Z"));
     }
 
@@ -604,7 +614,7 @@ mod tests {
         });
         let r = parse_flow_instance_from_hydrated(&v).expect("required scalars present");
         assert_eq!(r.flow_uri, "coasys://DeliberationFlow");
-        assert_eq!(r.current_state, "perspectives");
+        assert_eq!(r.current_state, "");
         assert_eq!(r.created_at.as_deref(), Some("2026-08-26T10:00:00Z"));
     }
 
@@ -621,10 +631,8 @@ mod tests {
         assert!(parse_flow_instance_from_hydrated(&v).is_none());
     }
 
-    /// A row synced from a peer carries no `currentState`: the cache is a
-    /// `Local` link on the replica that derived it (#987). The record must
-    /// still load — with an empty state meaning "not yet derived here" —
-    /// or a remote replica would never see the instance.
+    /// The row carries no state (#1424): the record must still load — with
+    /// an empty state meaning "not read yet" — or no replica would see it.
     #[test]
     fn parse_flow_instance_missing_current_state_is_not_yet_derived() {
         let v = serde_json::json!({
@@ -636,7 +644,7 @@ mod tests {
         assert_eq!(r.instance_uri, "ad4m://flow/instance/synced");
         assert_eq!(
             r.current_state, "",
-            "absent cache reads as empty, not as an error"
+            "no state on the row reads as empty, not as an error"
         );
     }
 

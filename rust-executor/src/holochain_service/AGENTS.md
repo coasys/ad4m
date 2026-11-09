@@ -30,7 +30,13 @@ several tasks must serialize itself, as `unyt_service::call_alliance_zome` does.
   also calls `init`, bypassing both the in-flight claim and `ConductorStarting`; it has
   no in-repo JS caller, so don't add one.
 - Signals are consumed by `lib.rs::holochain_signal_receiver` and routed to the language
-  runtime registered for that cell.
+  runtime registered for that cell. The fan-in carries an app's signals only once
+  `ConductorDispatch` announces it on `new_app_ids`. An `InstallApp` that fails after
+  `enable_app` started the cells (e.g. "database is locked" writing the status) leaves an
+  app that `registerDNAs` still uses through `getAppInfo`, so the dispatcher announces
+  that app too. Without the announcement the executor drops every remote signal to that
+  language: telepresence signals and p-diff-sync's revision broadcasts, which p-diff-sync
+  needs for link sync.
 - Three accessors, all in `interface.rs`: `maybe_get_holochain_service()` returns at once;
   `holochain_service_once_started()` waits while a start is in progress (the
   `ConductorStarting` guard), up to 120 s, then returns `None`; `get_holochain_service()`

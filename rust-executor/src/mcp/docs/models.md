@@ -40,7 +40,9 @@ So, in order:
    properties and lifetime.
 4. **Is it structure rather than schema?** Grouping things under a parent is
    what `ad4m://has_child` and `add_child` are for; you do not need a class to
-   express "these belong together".
+   express "these belong together". A class whose instances hold others names
+   that relation `children` (or aliases it: `"alias": {"Container":
+   "children"}`), and then every containment read follows it.
 
 Add a class when the thing has its own identity, its own properties, and its
 own lifecycle — when you would want to query for *it*, not for something that
@@ -161,7 +163,7 @@ stored two different ways. Declare it once on the property shape instead.
 
 `describe_perspective` reports a local property with `"local": true` and a
 `local_note` explaining the reach, so a client can tell before writing that the
-value will not leave this node.
+value will not leave this executor.
 
 Use it for per-replica derived state — caches, local marks, anything each agent
 should recompute for itself rather than receive. Do not use it for privacy

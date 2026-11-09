@@ -371,7 +371,7 @@ interface peers {
 
     /// Update the set of local agents participating in this instance.
     /// Called by the runtime at instance creation and whenever a local
-    /// agent joins or leaves the node. Used for:
+    /// agent joins or leaves the executor. Used for:
     ///   - routing incoming telepresence signals to the right local
     ///     agent
     ///   - advertising local membership to remote peers via `remote`
@@ -482,7 +482,7 @@ interface agent {
     sign-string-hex: func(payload: string) -> result<string, error>;
     create-signed-expression: func(data: string) -> result<expression, error>;
 
-    /// Multi-user nodes: list every local agent DID.
+    /// Multi-user executors: list every local agent DID.
     all-local-user-dids: func() -> list<did>;
     did-for-user: func(email: string) -> result<did, error>;
     create-signed-expression-for-user: func(
@@ -680,7 +680,7 @@ interface holochain-events {
     /// A signal arrived from a Holochain DNA registered by this Language.
     /// `dna-nick` identifies which DNA inside the Language; `agent-did`
     /// identifies which local agent the cell belongs to (relevant for
-    /// multi-user nodes). `signal-data` is JSON-encoded.
+    /// multi-user executors). `signal-data` is JSON-encoded.
     handle-holochain-signal: func(
         dna-nick: string,
         agent-did: did,

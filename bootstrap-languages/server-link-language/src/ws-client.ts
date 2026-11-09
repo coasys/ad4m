@@ -26,6 +26,8 @@ export interface WsClientHandlers {
     onPeerJoined(msg: Extract<ServerWsMessage, { type: "peer-joined" }>): void;
     onPeerLeft(msg: Extract<ServerWsMessage, { type: "peer-left" }>): void;
     onStatusChanged?(msg: Extract<ServerWsMessage, { type: "status-changed" }>): void;
+    /** A member sealed room key versions to this agent. */
+    onKeysGranted(msg: Extract<ServerWsMessage, { type: "keys-granted" }>): void;
     /** Called on every successful (re)connect — the natural point to kick
      * off an HTTP catch-up sync in case anything was missed while offline. */
     onOpen?(): void;
@@ -40,6 +42,11 @@ export interface WsClientOptions {
     /** Resolves to a fresh JWT for first-message auth. Called after
      * the socket opens, before any application-level messages. */
     getToken: () => Promise<string>;
+    /** Drops the cached token so the next getToken() re-authenticates.
+     * Called on `auth-error`: the server rejected the token (revoked
+     * session, expiry, new signing secret), and reconnecting with the
+     * same token would be rejected again, forever. */
+    invalidateToken?: () => void;
     handlers: WsClientHandlers;
     minBackoffMs?: number;
     maxBackoffMs?: number;
@@ -174,6 +181,9 @@ export class WsClient {
         if (msg.type === "auth-error") {
             console.error("[server-link-language] WS auth rejected:", msg.error);
             this.authenticating = false;
+            // Drop the token first: the reconnect scheduled by the close
+            // below must authenticate afresh, not resend the dead token.
+            this.opts.invalidateToken?.();
             this.conn?.close(4004, "auth rejected");
             return;
         }
@@ -211,6 +221,9 @@ export class WsClient {
                 break;
             case "status-changed":
                 this.opts.handlers.onStatusChanged?.(msg);
+                break;
+            case "keys-granted":
+                this.opts.handlers.onKeysGranted(msg);
                 break;
             default:
                 console.warn(

@@ -56,7 +56,11 @@
 //!   above sync latency, make a same-instant tie rare rather than impossible. A
 //!   hard exactly-once across an unbounded-latency link would need a consensus
 //!   round we deliberately avoid; the min-DID convergence covers every case
-//!   *except* the sub-sync-round simultaneous claim.
+//!   *except* the sub-sync-round simultaneous claim. [`settle_claim`] waits
+//!   [`CLAIM_SETTLE_MS`] for that claim to arrive and re-applies the min-DID
+//!   rule before a pass starts; a claim that arrives during the pass is
+//!   caught again by [`confirm_claim`] before `Processed` is emitted. A claim
+//!   that never syncs is still invisible, and both peers still proceed.
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
@@ -151,6 +155,9 @@ pub async fn ensure_processing_claim_class(
 /// and hang it off the shared batch node. `claimant` is instance *data*, so a
 /// test can simulate another peer's claim by passing an arbitrary DID (the link
 /// author stays `context`'s agent).
+///
+/// All links go in one batch, so a renewal replaces the claim's fields in a
+/// single commit.
 pub async fn write_claim(
     perspective: &mut PerspectiveInstance,
     processor: &str,
@@ -161,6 +168,7 @@ pub async fn write_claim(
 ) -> anyhow::Result<()> {
     ensure_processing_claim_class(perspective, context).await?;
     let node = claim_node(processor, key, claimant);
+    let batch = perspective.create_batch().await;
     perspective
         .create_subject(
             SubjectClassOption {
@@ -173,7 +181,7 @@ pub async fn write_claim(
                 "expires_at": expires_ms.to_string(),
                 "claim_status": STATUS_ACTIVE,
             })),
-            None,
+            Some(batch.clone()),
             context,
         )
         .await
@@ -186,11 +194,15 @@ pub async fn write_claim(
                 target: node,
             },
             LinkStatus::Shared,
-            None,
+            Some(batch.clone()),
             context,
         )
         .await
         .map_err(|e| anyhow::anyhow!("write_claim: add_link(has_claim) failed: {e:#}"))?;
+    perspective
+        .commit_batch(batch, context)
+        .await
+        .map_err(|e| anyhow::anyhow!("write_claim: commit_batch failed: {e:#}"))?;
     Ok(())
 }
 
@@ -323,9 +335,95 @@ pub async fn try_claim(
     }
 }
 
+/// How long a locally-won claim waits for a same-round peer claim to sync
+/// before the pass starts.
+///
+/// Nightly 2026-10-14 job 43581: both executors picked the same two turns
+/// four seconds apart, each having read only its own claim, and both emitted
+/// `Processed`. Eight seconds covers that gap plus a short sync. A smaller
+/// DID that becomes visible ends the wait immediately.
+pub const CLAIM_SETTLE_MS: u64 = 8_000;
+pub(crate) const CLAIM_SETTLE_POLL_MS: u64 = 500;
+
+/// The `settle_ms` the auto-processor tick passes to a pass on `perspective`.
+/// A peer's claim can arrive late when the perspective syncs with other
+/// executors, or when this executor runs one loop per managed user. Only an
+/// unshared perspective on a single-user executor skips the wait.
+pub async fn claim_settle_ms(perspective: &PerspectiveInstance) -> u64 {
+    let shared = perspective.persisted.lock().await.shared_url.is_some();
+    if shared || crate::user_management::is_multi_user_enabled() {
+        CLAIM_SETTLE_MS
+    } else {
+        0
+    }
+}
+
+/// Min-DID decision over an already-loaded holder list. An empty list is a
+/// win: the caller just wrote its own claim, and a failed read must not
+/// stall the only peer that can process the batch.
+pub fn decide_claim(me: &str, holders: &[String]) -> ClaimOutcome {
+    match holders.first() {
+        Some(winner) if winner == me => ClaimOutcome::Won,
+        Some(winner) => ClaimOutcome::BackedOff {
+            holder: winner.clone(),
+        },
+        None => ClaimOutcome::Won,
+    }
+}
+
+/// Re-read claimants. A smaller DID that arrived after [`try_claim`] wins.
+pub async fn confirm_claim(
+    perspective: &PerspectiveInstance,
+    processor: &str,
+    item_ids: &[String],
+    now_ms: i64,
+    context: &AgentContext,
+) -> anyhow::Result<ClaimOutcome> {
+    let me = did_for_context(context).map_err(|e| anyhow::anyhow!("did_for_context: {e:#}"))?;
+    let key = batch_key(item_ids);
+    let holders = active_claimants(perspective, processor, &key, now_ms).await?;
+    Ok(decide_claim(&me, &holders))
+}
+
+/// Poll until a smaller DID is visible or `settle_ms` elapses, then apply
+/// the min-DID rule. A larger peer does not end the wait: the smaller claim
+/// may still be in flight. `settle_ms == 0` re-reads once and does not sleep.
+/// Each read uses `now()`, so a claim that expired during the wait is gone.
+pub async fn settle_claim(
+    perspective: &PerspectiveInstance,
+    processor: &str,
+    item_ids: &[String],
+    context: &AgentContext,
+    settle_ms: u64,
+    poll_ms: u64,
+    mut now: impl FnMut() -> i64,
+) -> anyhow::Result<ClaimOutcome> {
+    let me = did_for_context(context).map_err(|e| anyhow::anyhow!("did_for_context: {e:#}"))?;
+    let key = batch_key(item_ids);
+    let read = |now_ms: i64| active_claimants(perspective, processor, &key, now_ms);
+    if settle_ms == 0 {
+        return Ok(decide_claim(&me, &read(now()).await?));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(settle_ms);
+    let poll = std::time::Duration::from_millis(poll_ms.max(1));
+    loop {
+        let outcome = decide_claim(&me, &read(now()).await?);
+        // Only a smaller DID ends the wait early. A larger peer is not the
+        // winner; the claim that beats us may not have synced yet.
+        if matches!(outcome, ClaimOutcome::BackedOff { .. })
+            || std::time::Instant::now() >= deadline
+        {
+            return Ok(outcome);
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        tokio::time::sleep(remaining.min(poll)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::did_for_context;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::types::LinkQuery;
 
@@ -428,6 +526,143 @@ mod tests {
                 holder: other.to_string()
             }
         );
+    }
+
+    /// The local read in `try_claim` cannot see a claim that arrives in the
+    /// same sync round. Once it is present, `settle_claim` must back off
+    /// even though `try_claim` already returned Won. Nightly job 43581.
+    #[tokio::test]
+    async fn settle_backs_off_when_smaller_claim_arrives_after_local_win() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let items = vec!["i1".to_string(), "i2".to_string()];
+        let key = batch_key(&items);
+        let won = try_claim(&mut p, "proc", &items, 60_000, 1_000, &ctx)
+            .await
+            .expect("try_claim");
+        assert_eq!(won, ClaimOutcome::Won);
+
+        let other = "aaa:late-peer";
+        write_claim(&mut p, "proc", &key, other, 60_000, &ctx)
+            .await
+            .expect("late claim");
+
+        let settled = settle_claim(&p, "proc", &items, &ctx, 0, 1, || 1_000)
+            .await
+            .expect("settle_claim");
+        assert_eq!(
+            settled,
+            ClaimOutcome::BackedOff {
+                holder: other.to_string()
+            }
+        );
+    }
+
+    /// A larger peer must not end the wait. The smaller claim can still be
+    /// in flight. Lal, #1445.
+    #[tokio::test]
+    async fn settle_waits_out_a_larger_peer_for_a_smaller_one() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let items = vec!["i1".to_string(), "i2".to_string()];
+        let key = batch_key(&items);
+        let won = try_claim(&mut p, "proc", &items, 60_000, 1_000, &ctx)
+            .await
+            .expect("try_claim");
+        assert_eq!(won, ClaimOutcome::Won);
+
+        let polling = p.clone();
+        let ctx_poll = ctx.clone();
+        let items_poll = items.clone();
+        let settled = tokio::spawn(async move {
+            settle_claim(&polling, "proc", &items_poll, &ctx_poll, 5_000, 40, || {
+                1_000
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        write_claim(&mut p, "proc", &key, "zzz:larger-peer", 60_000, &ctx)
+            .await
+            .expect("larger claim");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        write_claim(&mut p, "proc", &key, "aaa:smaller-peer", 60_000, &ctx)
+            .await
+            .expect("smaller claim");
+
+        let settled = settled.await.expect("settle task").expect("settle_claim");
+        assert_eq!(
+            settled,
+            ClaimOutcome::BackedOff {
+                holder: "aaa:smaller-peer".to_string()
+            }
+        );
+    }
+
+    /// Expiry is judged by the clock the caller passes, not by the timestamp
+    /// the claim was written against. Past our own expiry, a larger peer who
+    /// still holds the batch wins.
+    #[tokio::test]
+    async fn settle_uses_the_clock_so_an_expired_own_claim_loses() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let items = vec!["i1".to_string()];
+        let key = batch_key(&items);
+        let me = did_for_context(&ctx).expect("did");
+        write_claim(&mut p, "proc", &key, &me, 1_500, &ctx)
+            .await
+            .expect("own claim");
+        write_claim(&mut p, "proc", &key, "zzz:later-peer", 9_000, &ctx)
+            .await
+            .expect("later peer");
+        let outcome = settle_claim(&p, "proc", &items, &ctx, 0, 1, || 2_000)
+            .await
+            .expect("settle_claim");
+        assert_eq!(
+            outcome,
+            ClaimOutcome::BackedOff {
+                holder: "zzz:later-peer".to_string()
+            }
+        );
+    }
+
+    /// A lease renewal rewrites our own claim while `confirm_claim` reads the
+    /// batch. Every read must still see our claim and keep the win over a
+    /// larger peer. Data, #1445.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn confirm_keeps_own_claim_during_a_renewal() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let items = vec!["i1".to_string()];
+        let key = batch_key(&items);
+        let me = did_for_context(&ctx).expect("did");
+        write_claim(&mut p, "proc", &key, &me, 1_000_000_000, &ctx)
+            .await
+            .expect("own");
+        write_claim(&mut p, "proc", &key, "zzz:larger-peer", 1_000_000_000, &ctx)
+            .await
+            .expect("peer");
+        let mut renewer = p.clone();
+        let (ctx_r, me_r, key_r) = (ctx.clone(), me.clone(), key.clone());
+        let h = tokio::spawn(async move {
+            for _ in 0..30 {
+                renew_claim_at(
+                    &mut renewer,
+                    "proc",
+                    &key_r,
+                    &me_r,
+                    1_000_000_000,
+                    1_000,
+                    &ctx_r,
+                )
+                .await
+                .expect("renew");
+            }
+        });
+        while !h.is_finished() {
+            assert_eq!(
+                confirm_claim(&p, "proc", &items, 2_000, &ctx)
+                    .await
+                    .expect("confirm"),
+                ClaimOutcome::Won
+            );
+        }
+        h.await.expect("renewer");
     }
 
     /// A peer with a larger DID does not block us — we win the tiebreak.
@@ -578,5 +813,36 @@ mod tests {
             vec![active.to_string()],
             "only the renewing peer should remain active; got {holders:?}"
         );
+    }
+
+    /// The tick's settle choice: an unshared perspective skips the wait only
+    /// on a single-user executor. With multi-user mode on, each managed user
+    /// runs its own loop on the same perspective, so a smaller DID's claim can
+    /// still arrive after ours.
+    #[tokio::test]
+    async fn settle_waits_when_shared_or_multi_user() {
+        let (p, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+        struct MultiUserFlag;
+        impl Drop for MultiUserFlag {
+            fn drop(&mut self) {
+                let _ =
+                    crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(false));
+            }
+        }
+        let _reset = MultiUserFlag;
+        assert_eq!(claim_settle_ms(&p).await, 0, "unshared, single user");
+
+        crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
+            .expect("enable multi-user");
+        assert_eq!(
+            claim_settle_ms(&p).await,
+            CLAIM_SETTLE_MS,
+            "unshared, multi-user"
+        );
+
+        crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(false))
+            .expect("disable multi-user");
+        p.persisted.lock().await.shared_url = Some("neighbourhood://test".to_string());
+        assert_eq!(claim_settle_ms(&p).await, CLAIM_SETTLE_MS, "shared");
     }
 }

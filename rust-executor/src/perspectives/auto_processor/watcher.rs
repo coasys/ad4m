@@ -16,7 +16,6 @@
 //! events + telepresence presence — it will still delegate the actual pass
 //! to [`run_one_pass`], so the coordination contract stays in one place.
 
-use crate::agent::capabilities::LAST_SEEN_WRITE_THROTTLE_S;
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
     run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
@@ -25,9 +24,10 @@ use crate::perspectives::interpretation::{
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::presence::is_online;
 use crate::types::{Link, LinkStatus};
 
-use super::claim::{batch_key, renew_claim, try_claim, ClaimOutcome};
+use super::claim::{batch_key, confirm_claim, renew_claim, settle_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
 use super::events::{
     emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
@@ -92,13 +92,12 @@ impl LeaseGuard {
                         // Also refresh last_seen so the supervisor sees this
                         // user as still active during a long interpretation
                         // pass (fix for #1010: processing counts as liveness).
-                        if let Some(email) = &context.user_email {
-                            let email = email.clone();
-                            if let Err(e) = crate::db::Ad4mDb::with_global_instance(|db| {
-                                db.update_user_last_seen(&email)
-                            }) {
+                        if let Some(did) = context.managed_did() {
+                            if let Err(e) =
+                                crate::db_backend::db_backend().update_agent_last_seen(did)
+                            {
                                 log::debug!(
-                                    "lease heartbeat: update_user_last_seen({email}) failed: {e:#}"
+                                    "lease heartbeat: update_agent_last_seen({did}) failed: {e:#}"
                                 );
                             }
                         }
@@ -122,6 +121,10 @@ impl LeaseGuard {
     /// `true` while every renewal has succeeded. A `false` here means the
     /// claim may have expired; another peer could have re-claimed the batch.
     fn is_healthy(&self) -> bool {
+        #[cfg(test)]
+        if test_hooks::lease_lost() {
+            return false;
+        }
         !self.renewal_failed.load(Ordering::Relaxed)
     }
 }
@@ -475,35 +478,23 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
     AuthorElection::NoneOnline
 }
 
-/// Threshold (seconds) after which a managed user is treated as offline for
-/// auto-processor loop supervision purposes. `last_seen` is written at most
-/// once per [`LAST_SEEN_WRITE_THROTTLE_S`], so this must exceed that throttle
-/// by a margin for the gap between requests; otherwise an active user ages out
-/// right before their `last_seen` is refreshed and their loop flaps (#1070).
-pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 2 * LAST_SEEN_WRITE_THROTTLE_S;
-
 /// Pure filter: from a list of `(user_email, last_seen_seconds)` tuples, return
-/// the emails of users whose `last_seen` is within `threshold_s` of `now_s`.
+/// the emails of users online at `now_s` under the shared presence window.
 ///
 /// Split from the live supervisor loop so the freshness policy is trivially
 /// testable — no DB, no wall clock, no spawning. `last_seen == None` means
 /// "never seen since server boot" and is treated as offline (a fresh managed
 /// user who has not yet authenticated should not gate an LLM loop against
 /// their DID). `last_seen > now_s` is capped to "just now" — a client with
-/// a slightly-fast clock is still online, not future-perfect.
-pub fn select_online_managed_users<I>(users: I, now_s: i64, threshold_s: i64) -> Vec<String>
+/// a slightly-fast clock is still online, not future-perfect. The predicate is
+/// [`crate::presence::is_online`], shared with `online_agents`.
+pub fn select_online_managed_users<I>(users: I, now_s: i64) -> Vec<String>
 where
     I: IntoIterator<Item = (String, Option<i64>)>,
 {
-    let cutoff = now_s.saturating_sub(threshold_s);
     users
         .into_iter()
-        .filter_map(|(email, last_seen)| {
-            let ls = last_seen?;
-            // Clamp future timestamps forward-into-online; still filter by cutoff.
-            let effective = ls.min(now_s);
-            (effective >= cutoff).then_some(email)
-        })
+        .filter_map(|(email, last_seen)| is_online(last_seen, now_s).then_some(email))
         .collect()
 }
 
@@ -596,6 +587,9 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
 ///    Empty `turns` = [`PassOutcome::EmptyTranscript`].
 /// 4. [`run_interpretation_with_strategy`] with the deserialized dedup.
 ///
+/// `settle_ms` is how long a local claim win waits for a same-round peer
+/// claim to sync before the pass starts. `0` re-reads once and does not sleep.
+///
 /// The pass always uses the executor's default LLM (via `AIService`).
 /// `AutoProcessorConfig` is a neighbourhood-shared record and must not carry
 /// per-peer LLM overrides — each peer picks a model that matches its local
@@ -607,6 +601,7 @@ pub async fn run_one_pass(
     now_ms: i64,
     context: &AgentContext,
     escalate_past_election: bool,
+    settle_ms: u64,
 ) -> anyhow::Result<PassOutcome> {
     // Step signals (P-B2c): observable pass lifecycle for tests + the WS layer.
     // `me` (the acting agent's DID) is resolved up front so every signal is
@@ -752,6 +747,69 @@ pub async fn run_one_pass(
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
         return Ok(PassOutcome::BackedOff { holder });
     }
+    // Renew before the wait. A claim_ttl_ms shorter than the settle window
+    // would otherwise expire while we poll, and the next read would not
+    // see our own lease. The heartbeat then keeps it alive through the wait.
+    let _lease = LeaseGuard::spawn(
+        perspective.clone(),
+        cfg.processor_id.clone(),
+        batch_key_hex.clone(),
+        me.clone(),
+        cfg.claim_ttl_ms,
+        context.clone(),
+    );
+    // One renewal now, not after the first heartbeat. The heartbeat skips its
+    // first tick, and a TTL shorter than the settle wait would expire before
+    // that tick.
+    if let Err(e) = renew_claim(
+        perspective,
+        &cfg.processor_id,
+        &batch_key_hex,
+        &me,
+        cfg.claim_ttl_ms,
+        context,
+    )
+    .await
+    {
+        log::warn!(
+            "⚙️ auto_processor `{}`: could not extend the claim before settling: {e:#}",
+            cfg.processor_id
+        );
+        signal!(
+            AutoProcessorStep::BackedOff,
+            detail = "claim renewal failed".to_string()
+        );
+        return Ok(PassOutcome::BackedOff {
+            holder: "claim renewal failed".to_string(),
+        });
+    }
+    // The local read above cannot see a peer that claimed in this same sync
+    // round. Wait for that claim, then apply the min-DID rule again, before
+    // this pass spends an LLM call or emits `Processed`. Each read uses the
+    // clock now, not the pass-start timestamp.
+    let settled = settle_claim(
+        perspective,
+        &cfg.processor_id,
+        &item_ids,
+        context,
+        settle_ms,
+        super::claim::CLAIM_SETTLE_POLL_MS,
+        || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64
+        },
+    )
+    .await?;
+    if let ClaimOutcome::BackedOff { holder } = settled {
+        log::debug!(
+            "⚙️ auto_processor `{}`: backed off after claim settle — holder `{holder}`",
+            cfg.processor_id
+        );
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
+    }
     // Signal-based Claimed (and the neighbourhood-state Claimed row below)
     // are DID- / perspective-scoped events with their own Abandoned /
     // Finished companions on every exit path, so they can fire here right
@@ -779,28 +837,14 @@ pub async fn run_one_pass(
     // Touch last_seen immediately so the supervisor sees activity before the
     // first heartbeat fires — a managed user running a long pass must not look
     // offline while doing the most active work it ever does (fix for #1010).
-    if let Some(email) = &context.user_email {
-        let email = email.clone();
-        if let Err(e) =
-            crate::db::Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&email))
-        {
-            log::debug!("run_one_pass: initial update_user_last_seen({email}) failed: {e:#}");
+    if let Some(did) = context.managed_did() {
+        if let Err(e) = crate::db_backend::db_backend().update_agent_last_seen(did) {
+            log::debug!("run_one_pass: initial update_agent_last_seen({did}) failed: {e:#}");
         }
     }
 
-    // Spawn the lease-renewal heartbeat. Fires every `claim_ttl_ms / 3` ms,
-    // rewriting the expiry so the TTL acts as a crash-detection window rather
-    // than a capacity limit. Dropped at every exit path (RAII) — the Drop impl
-    // cancels the task so the claim expires naturally after one more TTL window
-    // once the pass ends (fix for #1009).
-    let _lease = LeaseGuard::spawn(
-        perspective.clone(),
-        cfg.processor_id.clone(),
-        batch_key_hex.clone(),
-        me.clone(),
-        cfg.claim_ttl_ms,
-        context.clone(),
-    );
+    // The lease heartbeat was started before the settle wait, so a TTL
+    // shorter than that wait does not expire the claim we are still holding.
 
     // 2. Resolve shapes.
     let store = &*perspective.sparql_store;
@@ -908,6 +952,14 @@ pub async fn run_one_pass(
             uuid
         );
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::BackedOff { holder });
     }
 
@@ -975,8 +1027,24 @@ pub async fn run_one_pass(
     // Both paths return `InterpretationOutcome`; the harness one carries
     // `debug: None` (multi-turn loop — no single prompt/response to
     // snapshot; per-tool-call events cover it instead).
-    let (bases, debug) = match cfg.max_tool_calls {
-        Some(n) if n > 0 => {
+    // Unit tests stand in for the LLM here; production always runs the engine.
+    #[cfg(test)]
+    let stubbed = abandon_on_err!(
+        test_hooks::interpret(
+            perspective,
+            &shapes,
+            &base_prefix,
+            &cursor,
+            &cfg.processor_id,
+            context
+        )
+        .await
+    );
+    #[cfg(not(test))]
+    let stubbed: Option<Vec<String>> = None;
+    let (bases, debug) = match (stubbed, cfg.max_tool_calls) {
+        (Some(bases), _) => (bases, None),
+        (None, Some(n)) if n > 0 => {
             let outcome = abandon_on_err!(
                 run_interpretation_with_harness_and_model(
                     perspective,
@@ -988,9 +1056,10 @@ pub async fn run_one_pass(
                     cfg.existing_scope.as_ref(),
                     Some(&cursor),
                     n,
-                    // Auto-processor is an internal caller — no per-pass user
-                    // token to bill. MCP admin credential (if configured) is
-                    // read from env inside the harness path.
+                    // Auto-processor is an internal caller — no caller session
+                    // to bill. Without one the pass's tools act as the
+                    // perspective's owner, never as the operator
+                    // (`interpretation::run::pass_mcp_context`).
                     None,
                     // `emit_debug_events` gates the same event stream the
                     // classic path uses; `None` when disabled means the
@@ -1014,7 +1083,7 @@ pub async fn run_one_pass(
             );
             (outcome.bases, outcome.debug)
         }
-        _ => {
+        (None, _) => {
             let outcome = abandon_on_err!(
                 run_interpretation_with_strategy_and_model(
                     perspective,
@@ -1066,10 +1135,29 @@ pub async fn run_one_pass(
             uuid
         );
         let holder = String::from("(claim lost during interpretation)");
+        // The interpretation already wrote its bases and the cursor. Link the
+        // fresh ones before leaving, or they stay outside mint_scope and the
+        // cursor keeps the turns from being repaired.
+        link_fresh_bases(
+            perspective,
+            cfg.mint_scope.as_ref(),
+            &bases,
+            &pre_existing_uris,
+            context,
+            &cfg.processor_id,
+        )
+        .await?;
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::BackedOff { holder });
     }
-
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the
     // configured predicate — turning the SoA-tree "children live under this
@@ -1081,19 +1169,57 @@ pub async fn run_one_pass(
     // orphaned but the next pass will upsert by identity + re-attempt the
     // link write (idempotent). The `Processed` signal fires only after the
     // mint-scope write succeeds, so observers never see a false "done" state.
-    if let Some(mint_scope) = &cfg.mint_scope {
-        let created = partition_created(&bases, &pre_existing_uris);
-        abandon_on_err!(
-            write_mint_scope_links(
-                perspective,
-                mint_scope,
-                &created,
-                context,
-                &cfg.processor_id,
-            )
-            .await
+    //
+    // The bases and the cursor are already committed, so the links are
+    // written before the claim re-read below, which can fail or back off.
+    abandon_on_err!(
+        link_fresh_bases(
+            perspective,
+            cfg.mint_scope.as_ref(),
+            &bases,
+            &pre_existing_uris,
+            context,
+            &cfg.processor_id,
+        )
+        .await
+    );
+
+    // A peer claim that synced during the pass. Refuse `Processed` so the
+    // other executor's retirement is not counted twice.
+    let now_confirm = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    #[cfg(test)]
+    test_hooks::confirm_error()?;
+    if let ClaimOutcome::BackedOff { holder } = confirm_claim(
+        perspective,
+        &cfg.processor_id,
+        &item_ids,
+        now_confirm,
+        context,
+    )
+    .await?
+    {
+        log::warn!(
+            "❌ ⚙️ auto-processor lost the claim during the pass — holder `{holder}` \
+             processor={} items={} perspective={}: fresh bases linked, not emitting Processed",
+            cfg.processor_id,
+            item_ids.len(),
+            uuid
         );
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
+        return Ok(PassOutcome::BackedOff { holder });
     }
+
     // Emit the `Processed` event. Carries the final `bases` list — the
     // LLM prompt + response now travel via the mid-pass `LlmRequestSent`
     // and `LlmResponseReceived` events (Nico 2026-08-20), so a subscribing
@@ -1128,6 +1254,26 @@ pub async fn run_one_pass(
         pass_started.elapsed().as_millis()
     );
     Ok(PassOutcome::Won { bases })
+}
+
+/// Link freshly created bases under `mint_scope` before any exit that can
+/// follow the interpretation.
+/// The interpretation has already committed them and the processed-turn
+/// cursor. Leaving without these links keeps them out of the subtree, and
+/// the cursor then suppresses the turns, so a later pass does not repair it.
+async fn link_fresh_bases(
+    perspective: &mut PerspectiveInstance,
+    mint_scope: Option<&crate::perspectives::model_query::types::Scope>,
+    bases: &[String],
+    pre_existing: &HashSet<String>,
+    context: &AgentContext,
+    processor_id: &str,
+) -> anyhow::Result<()> {
+    let Some(mint_scope) = mint_scope else {
+        return Ok(());
+    };
+    let created = partition_created(bases, pre_existing);
+    write_mint_scope_links(perspective, mint_scope, &created, context, processor_id).await
 }
 
 /// Add a `mint_scope.id --predicate--> new_base_uri` link for every URI in
@@ -1175,6 +1321,12 @@ pub(crate) async fn write_mint_scope_links(
                  (id + predicate); `Traverse` scopes describe a read and name no single parent"
             );
         }
+        Scope::Contained(_) => {
+            anyhow::bail!(
+                "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
+                 (id + predicate); a containment scope `{{ id }}` names no predicate to write"
+            );
+        }
     };
     for base in bases {
         perspective
@@ -1199,11 +1351,114 @@ pub(crate) async fn write_mint_scope_links(
     Ok(())
 }
 
+/// Stand-ins for what a unit test cannot run inside [`run_one_pass`]: the LLM,
+/// and a failing claim re-read after the interpretation.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use super::*;
+    use crate::perspectives::interpretation::{
+        apply_interpretation_ops, ensure_interpretation_overlay_classes, existing_instance_context,
+        mint_interpretation_run, plan_interpretation_ops_with_context, InterpretationOp,
+        InterpretationRunMeta, ProposedInstance,
+    };
+    use crate::perspectives::model_query::types::ModelShape;
+
+    #[derive(Clone, Default)]
+    pub(crate) struct PassHooks {
+        /// Written in place of the LLM's answer, with the pass cursor.
+        pub interpret: Option<Vec<ProposedInstance>>,
+        /// Fail the claim re-read that follows the interpretation.
+        pub fail_confirm: bool,
+        /// A peer claim on the batch, written after the run is minted.
+        pub peer_claim: Option<String>,
+        /// The lease counts as lost from the start of the pass.
+        pub lose_lease: bool,
+        /// The lease counts as lost once the stand-in interpretation ran.
+        pub lose_lease_in_interpretation: bool,
+        /// Set by either of the two above; read by `LeaseGuard::is_healthy`.
+        pub lease_lost: Arc<AtomicBool>,
+    }
+
+    tokio::task_local! {
+        pub(crate) static HOOKS: PassHooks;
+    }
+
+    fn hooks() -> PassHooks {
+        HOOKS.try_with(|h| h.clone()).unwrap_or_default()
+    }
+
+    /// Plan and write the canned proposals, then mint the run with `cursor`,
+    /// as the interpretation engine does. `None` when no stand-in is set.
+    pub(super) async fn interpret(
+        perspective: &mut PerspectiveInstance,
+        shapes: &[ModelShape],
+        base_prefix: &str,
+        cursor: &InterpretationRunCursor,
+        processor_id: &str,
+        context: &AgentContext,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        let hooks = hooks();
+        let Some(proposals) = hooks.interpret else {
+            return Ok(None);
+        };
+        let existing = existing_instance_context(perspective, shapes, None).await?;
+        let ops = plan_interpretation_ops_with_context(shapes, &proposals, base_prefix, &existing);
+        apply_interpretation_ops(perspective, &ops, context).await?;
+        ensure_interpretation_overlay_classes(perspective, context).await?;
+        let meta = InterpretationRunMeta {
+            run_id: uuid::Uuid::new_v4().to_string(),
+            model: "stub".into(),
+            prompt_version: "stub".into(),
+            ran_at: chrono::Utc::now().timestamp_millis().to_string(),
+            debug_prompt: None,
+            debug_response: None,
+        };
+        mint_interpretation_run(perspective, &meta, Some(cursor), None, context).await?;
+        if hooks.lose_lease_in_interpretation {
+            hooks.lease_lost.store(true, Ordering::Relaxed);
+        }
+        if let Some(peer) = hooks.peer_claim {
+            let expires = chrono::Utc::now().timestamp_millis() + 60_000;
+            super::super::claim::write_claim(
+                perspective,
+                processor_id,
+                &batch_key(&cursor.sources),
+                &peer,
+                expires,
+                context,
+            )
+            .await?;
+        }
+        Ok(Some(
+            ops.iter()
+                .filter_map(|op| match op {
+                    InterpretationOp::Create { base, .. } => Some(base.clone()),
+                    _ => None,
+                })
+                .collect(),
+        ))
+    }
+
+    pub(super) fn lease_lost() -> bool {
+        HOOKS
+            .try_with(|h| h.lose_lease || h.lease_lost.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
+    pub(super) fn confirm_error() -> anyhow::Result<()> {
+        if hooks().fail_confirm {
+            anyhow::bail!("injected claim re-read failure");
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::perspectives::auto_processor::claim::{batch_key, write_claim};
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::presence::MANAGED_USER_ONLINE_WINDOW_S;
 
     fn cfg(id: &str, debounce_ms: i64, batch_max: usize) -> AutoProcessorConfig {
         AutoProcessorConfig {
@@ -1335,17 +1590,16 @@ mod tests {
     #[test]
     fn selects_users_within_freshness_window() {
         let now = 1_000_000_i64;
-        let window = 300_i64;
+        let window = MANAGED_USER_ONLINE_WINDOW_S;
         let online = select_online_managed_users(
             vec![
-                ("alice@x".into(), Some(now - 10)),   // seen 10s ago
-                ("bob@x".into(), Some(now - 299)),    // right on the edge, still in
-                ("carol@x".into(), Some(now - 301)),  // just past — out
-                ("dave@x".into(), Some(now - 5_000)), // long stale — out
-                ("eve@x".into(), None),               // never seen — out
+                ("alice@x".into(), Some(now - 10)),         // seen 10s ago
+                ("bob@x".into(), Some(now - window)),       // exactly on the edge, still in
+                ("carol@x".into(), Some(now - window - 1)), // just past — out
+                ("dave@x".into(), Some(now - 5_000)),       // long stale — out
+                ("eve@x".into(), None),                     // never seen — out
             ],
             now,
-            window,
         );
         assert_eq!(online, vec!["alice@x", "bob@x"]);
     }
@@ -1356,14 +1610,15 @@ mod tests {
     #[test]
     fn future_last_seen_is_treated_as_online() {
         let now = 1_000_000_i64;
-        let window = 300_i64;
         let online = select_online_managed_users(
             vec![
                 ("skewed@x".into(), Some(now + 60)), // 1 min in the future
-                ("stale@x".into(), Some(now - 400)), // 400s ago — out
+                (
+                    "stale@x".into(),
+                    Some(now - MANAGED_USER_ONLINE_WINDOW_S - 100),
+                ), // past the window — out
             ],
             now,
-            window,
         );
         assert_eq!(online, vec!["skewed@x"]);
     }
@@ -1372,30 +1627,8 @@ mod tests {
     /// as "no managed users online right now" and spawns no loops.
     #[test]
     fn empty_input_selects_no_users() {
-        let selected =
-            select_online_managed_users(Vec::<(String, Option<i64>)>::new(), 1_000_000, 300);
+        let selected = select_online_managed_users(Vec::<(String, Option<i64>)>::new(), 1_000_000);
         assert!(selected.is_empty());
-    }
-
-    /// The online window must leave room for the `last_seen` write-throttle
-    /// plus the gap between requests (#1070).
-    #[test]
-    fn online_window_exceeds_last_seen_write_throttle() {
-        assert!(
-            MANAGED_USER_ONLINE_WINDOW_S >= 2 * LAST_SEEN_WRITE_THROTTLE_S,
-            "`last_seen` is only rewritten once it is {LAST_SEEN_WRITE_THROTTLE_S}s old, so a \
-             {MANAGED_USER_ONLINE_WINDOW_S}s window without margin reaps every active user just \
-             before their `last_seen` is refreshed and respawns their loop (#1070)"
-        );
-        let now = 1_000_000_i64;
-        let stale_but_active = (
-            "u@x".to_string(),
-            Some(now - LAST_SEEN_WRITE_THROTTLE_S - 1),
-        );
-        assert_eq!(
-            select_online_managed_users(vec![stale_but_active], now, MANAGED_USER_ONLINE_WINDOW_S),
-            vec!["u@x"]
-        );
     }
 
     // ---- WatcherState -------------------------------------------------------
@@ -1758,7 +1991,7 @@ mod tests {
             .await
             .expect("seed incumbent");
 
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false, 0)
             .await
             .expect("run_one_pass");
         assert!(
@@ -1777,7 +2010,7 @@ mod tests {
         let mut cfg = cfg("proc", 100, 32);
         cfg.interpretation_classes = vec!["ns://Unregistered".into()];
         let items = vec![pt("i1")];
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false, 0)
             .await
             .expect("run_one_pass");
         match outcome {
@@ -1785,6 +2018,365 @@ mod tests {
                 assert_eq!(missing, vec!["ns://Unregistered".to_string()]);
             }
             other => panic!("expected ShapesMissing, got {other:?}"),
+        }
+    }
+
+    /// The claim re-read after the interpretation fails. The bases and the
+    /// cursor are already committed, so the fresh bases must still be linked
+    /// under mint_scope, and the pass must not report `Processed`.
+    #[tokio::test]
+    async fn run_one_pass_links_fresh_bases_when_the_claim_reread_fails() {
+        use crate::perspectives::auto_processor::cursor::load_processed_source_ids;
+        use crate::perspectives::interpretation_test_support::{proposal, TASK_SDNA};
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let mut cfg = cfg("proc", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        cfg.mint_scope = Some(Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        });
+        let items = vec![pt("i1"), pt("i2")];
+        let hooks = test_hooks::PassHooks {
+            interpret: Some(vec![proposal(
+                "Task",
+                None,
+                &[("title", serde_json::json!("Ship the parser"))],
+            )]),
+            fail_confirm: true,
+            ..Default::default()
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut rx = super::super::events::subscribe().await;
+
+        let result = test_hooks::HOOKS
+            .scope(
+                hooks,
+                run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 0),
+            )
+            .await;
+        let err = result.expect_err("the injected re-read error must propagate");
+        assert!(
+            format!("{err:#}").contains("injected claim re-read failure"),
+            "unexpected error: {err:#}"
+        );
+
+        let processed = load_processed_source_ids(&p, "proc", now, None)
+            .await
+            .expect("load cursor");
+        assert!(
+            processed.contains("i1") && processed.contains("i2"),
+            "the interpretation committed the cursor before the re-read: {processed:?}"
+        );
+
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://project/42".into()),
+                predicate: Some("soa://contains".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        let base_prefix = "ad4m://autoprocessor/proc/instance/";
+        assert_eq!(
+            links.len(),
+            1,
+            "the fresh base must be linked under mint_scope: {links:?}"
+        );
+        assert!(
+            links[0].data.target.starts_with(base_prefix),
+            "linked target is the minted base: {}",
+            links[0].data.target
+        );
+
+        // The pass has ended, so every event it emitted is already queued.
+        let processed = super::super::events::next_event_matching(
+            &mut rx,
+            std::time::Duration::from_millis(100),
+            |ev| ev.perspective_uuid == p.uuid && ev.step == AutoProcessorStep::Processed,
+        )
+        .await;
+        assert!(
+            processed.is_none(),
+            "a failed re-read must not emit Processed"
+        );
+    }
+
+    /// A peer claim with a smaller DID syncs during the pass. `confirm_claim`
+    /// must back off before `Processed`: the fresh bases are linked, the
+    /// pass returns `BackedOff`, and the neighbourhood-state `Claimed` row is
+    /// closed with `Abandoned`, not `Finished`. Data, #1445.
+    #[tokio::test]
+    async fn run_one_pass_backs_off_at_confirm_when_a_smaller_claim_arrives() {
+        use super::super::events::{
+            subscribe_neighbourhood_state, AutoProcessorNeighbourhoodState,
+        };
+        use crate::perspectives::interpretation_test_support::{proposal, TASK_SDNA};
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let mut cfg = cfg("proc", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        cfg.mint_scope = Some(Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        });
+        let items = vec![pt("i1"), pt("i2")];
+        let key = batch_key(&ids(&items));
+        let hooks = test_hooks::PassHooks {
+            interpret: Some(vec![proposal(
+                "Task",
+                None,
+                &[("title", serde_json::json!("Ship the parser"))],
+            )]),
+            peer_claim: Some("aaa:peer".into()),
+            ..Default::default()
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut rx = super::super::events::subscribe().await;
+        let mut nh = subscribe_neighbourhood_state().await;
+
+        let outcome = test_hooks::HOOKS
+            .scope(
+                hooks,
+                run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 0),
+            )
+            .await
+            .expect("run_one_pass");
+        assert!(
+            matches!(&outcome, PassOutcome::BackedOff { holder } if holder == "aaa:peer"),
+            "expected BackedOff{{holder: aaa:peer}}, got {outcome:?}"
+        );
+
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://project/42".into()),
+                predicate: Some("soa://contains".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert_eq!(links.len(), 1, "the fresh base must be linked: {links:?}");
+
+        while let Ok(json) = rx.try_recv() {
+            let ev: AutoProcessorEvent = serde_json::from_str(&json).expect("event json");
+            assert!(
+                !(ev.perspective_uuid == p.uuid && ev.step == AutoProcessorStep::Processed),
+                "a pass that backed off at confirm must not emit Processed"
+            );
+        }
+        let mut phases = Vec::new();
+        while let Ok(json) = nh.try_recv() {
+            let ev: AutoProcessorNeighbourhoodState =
+                serde_json::from_str(&json).expect("state json");
+            if ev.perspective_uuid == p.uuid && ev.batch_key == key {
+                phases.push(ev.phase);
+            }
+        }
+        assert_eq!(
+            phases,
+            vec![NeighbourhoodPhase::Claimed, NeighbourhoodPhase::Abandoned],
+            "the Claimed row must be closed with Abandoned"
+        );
+    }
+
+    /// Run a pass whose lease is lost at the point `hooks` says; return its
+    /// outcome, whether it emitted `Processed`, the neighbourhood-state
+    /// phases of its batch, and the links under its mint scope.
+    async fn run_pass_with_lost_lease(
+        hooks: test_hooks::PassHooks,
+    ) -> (
+        PassOutcome,
+        bool,
+        Vec<NeighbourhoodPhase>,
+        Vec<crate::types::DecoratedLinkExpression>,
+    ) {
+        use super::super::events::{
+            subscribe_neighbourhood_state, AutoProcessorNeighbourhoodState,
+        };
+        use crate::perspectives::interpretation_test_support::{proposal, TASK_SDNA};
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let mut cfg = cfg("proc", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        cfg.mint_scope = Some(Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        });
+        let items = vec![pt("i1"), pt("i2")];
+        let key = batch_key(&ids(&items));
+        let hooks = test_hooks::PassHooks {
+            interpret: Some(vec![proposal(
+                "Task",
+                None,
+                &[("title", serde_json::json!("Ship the parser"))],
+            )]),
+            ..hooks
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut rx = super::super::events::subscribe().await;
+        let mut nh = subscribe_neighbourhood_state().await;
+
+        let outcome = test_hooks::HOOKS
+            .scope(
+                hooks,
+                run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 0),
+            )
+            .await
+            .expect("run_one_pass");
+
+        let mut processed = false;
+        while let Ok(json) = rx.try_recv() {
+            let ev: AutoProcessorEvent = serde_json::from_str(&json).expect("event json");
+            processed |= ev.perspective_uuid == p.uuid && ev.step == AutoProcessorStep::Processed;
+        }
+        let mut phases = Vec::new();
+        while let Ok(json) = nh.try_recv() {
+            let ev: AutoProcessorNeighbourhoodState =
+                serde_json::from_str(&json).expect("state json");
+            if ev.perspective_uuid == p.uuid && ev.batch_key == key {
+                phases.push(ev.phase);
+            }
+        }
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://project/42".into()),
+                predicate: Some("soa://contains".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        (outcome, processed, phases, links)
+    }
+
+    /// A lease lost before the interpretation: the pass backs off without
+    /// interpreting, and the `Claimed` row is closed with `Abandoned`.
+    #[tokio::test]
+    async fn run_one_pass_abandons_when_the_lease_is_lost_before_interpretation() {
+        let (outcome, processed, phases, links) = run_pass_with_lost_lease(test_hooks::PassHooks {
+            lose_lease: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(
+            matches!(&outcome, PassOutcome::BackedOff { holder } if holder == "(claim expired mid-pass)"),
+            "expected BackedOff before interpretation, got {outcome:?}"
+        );
+        assert!(!processed, "a lost lease must not emit Processed");
+        assert!(links.is_empty(), "nothing was interpreted: {links:?}");
+        assert_eq!(
+            phases,
+            vec![NeighbourhoodPhase::Claimed, NeighbourhoodPhase::Abandoned],
+            "the Claimed row must be closed with Abandoned"
+        );
+    }
+
+    /// A lease lost during the interpretation: the fresh bases are linked,
+    /// the pass backs off, and the `Claimed` row is closed with `Abandoned`.
+    #[tokio::test]
+    async fn run_one_pass_abandons_when_the_lease_is_lost_during_interpretation() {
+        let (outcome, processed, phases, links) = run_pass_with_lost_lease(test_hooks::PassHooks {
+            lose_lease_in_interpretation: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(
+            matches!(&outcome, PassOutcome::BackedOff { holder } if holder == "(claim lost during interpretation)"),
+            "expected BackedOff after interpretation, got {outcome:?}"
+        );
+        assert!(!processed, "a lost lease must not emit Processed");
+        assert_eq!(links.len(), 1, "the fresh base must be linked: {links:?}");
+        assert_eq!(
+            phases,
+            vec![NeighbourhoodPhase::Claimed, NeighbourhoodPhase::Abandoned],
+            "the Claimed row must be closed with Abandoned"
+        );
+    }
+
+    /// A smaller peer claim lands while the pass waits in `settle_claim`.
+    /// The pass must back off before the interpretation runs: no cursor, no
+    /// `Claimed`. Data, #1445.
+    #[tokio::test]
+    async fn run_one_pass_backs_off_in_settle_before_the_interpretation() {
+        use crate::perspectives::auto_processor::claim::active_claimants;
+        use crate::perspectives::auto_processor::cursor::load_processed_source_ids;
+        use crate::perspectives::interpretation_test_support::{proposal, TASK_SDNA};
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let mut cfg = cfg("proc", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        let items = vec![pt("i1"), pt("i2")];
+        let key = batch_key(&ids(&items));
+        let me = did_for_context(&ctx).expect("did");
+        let hooks = test_hooks::PassHooks {
+            interpret: Some(vec![proposal(
+                "Task",
+                None,
+                &[("title", serde_json::json!("Ship the parser"))],
+            )]),
+            ..Default::default()
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut rx = super::super::events::subscribe().await;
+
+        // Write the peer claim only once our own claim is in: `try_claim` has
+        // then returned `Won`, and only the settle wait can see the peer.
+        let mut peer = p.clone();
+        let (ctx_w, key_w) = (ctx.clone(), key.clone());
+        let writer = tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let t = chrono::Utc::now().timestamp_millis();
+                if active_claimants(&peer, "proc", &key_w, t)
+                    .await
+                    .expect("read claims")
+                    .contains(&me)
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "own claim never appeared"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let expires = chrono::Utc::now().timestamp_millis() + 60_000;
+            write_claim(&mut peer, "proc", &key_w, "aaa:peer", expires, &ctx_w)
+                .await
+                .expect("peer claim");
+        });
+
+        let outcome = test_hooks::HOOKS
+            .scope(
+                hooks,
+                run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 2_000),
+            )
+            .await
+            .expect("run_one_pass");
+        writer.await.expect("writer");
+        assert!(
+            matches!(&outcome, PassOutcome::BackedOff { holder } if holder == "aaa:peer"),
+            "expected BackedOff{{holder: aaa:peer}}, got {outcome:?}"
+        );
+
+        let processed = load_processed_source_ids(&p, "proc", now, None)
+            .await
+            .expect("load cursor");
+        assert!(
+            processed.is_empty(),
+            "the interpretation must not run after a settle back-off: {processed:?}"
+        );
+        while let Ok(json) = rx.try_recv() {
+            let ev: AutoProcessorEvent = serde_json::from_str(&json).expect("event json");
+            assert!(
+                !(ev.perspective_uuid == p.uuid
+                    && matches!(
+                        ev.step,
+                        AutoProcessorStep::Claimed | AutoProcessorStep::RunningInterpretation
+                    )),
+                "a settle back-off must stop before {:?}",
+                ev.step
+            );
         }
     }
 
@@ -1828,6 +2420,42 @@ mod tests {
         for l in &links {
             assert_eq!(l.status, Some(LinkStatus::Shared), "child link must sync");
         }
+    }
+
+    /// A late back-off still links the bases the interpretation already
+    /// committed. Skipping that leaves them outside mint_scope, and the
+    /// cursor then keeps a later pass from repairing them.
+    #[tokio::test]
+    async fn late_backoff_still_links_fresh_bases() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let scope = Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        };
+        let bases = vec!["ad4m://base/a".into(), "ad4m://base/b".into()];
+        link_fresh_bases(
+            &mut p,
+            Some(&scope),
+            &bases,
+            &std::collections::HashSet::new(),
+            &ctx,
+            "test-proc",
+        )
+        .await
+        .expect("link_fresh_bases");
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://project/42".into()),
+                predicate: Some("soa://contains".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert_eq!(
+            links.len(),
+            2,
+            "both fresh bases must be reachable from mint_scope"
+        );
     }
 
     /// Empty base list → no writes; a no-op is still success.
@@ -1908,7 +2536,6 @@ mod tests {
     #[test]
     fn liveness_touch_keeps_active_user_and_reaps_idle_user() {
         let now = 2_000_000_i64;
-        let window = MANAGED_USER_ONLINE_WINDOW_S;
         // `active` had last_seen refreshed 10s ago (simulates lease heartbeat).
         // `idle` had last_seen 700s ago (no heartbeat — idle loop).
         let online = select_online_managed_users(
@@ -1917,7 +2544,6 @@ mod tests {
                 ("idle@x".into(), Some(now - 700)),  // no activity — should be reaped
             ],
             now,
-            window,
         );
         assert_eq!(
             online,

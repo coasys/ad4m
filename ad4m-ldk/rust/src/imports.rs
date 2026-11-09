@@ -27,6 +27,10 @@ extern "C" {
     pub fn agent_sign(payload: &[u8]) -> Result<Vec<u8>, JsValue>;
     #[wasm_bindgen(js_name = "agentSignStringHex", catch)]
     pub fn agent_sign_string_hex(payload: &str) -> Result<String, JsValue>;
+    /// Opens a box sealed to the calling agent; returns the plaintext as hex.
+    /// Fails for a box sealed to any other DID.
+    #[wasm_bindgen(js_name = "agentOpenSealed", catch)]
+    pub fn agent_open_sealed(sealed: JsValue) -> Result<String, JsValue>;
     #[wasm_bindgen(js_name = "agentCreateSignedExpression", catch)]
     pub fn agent_create_signed_expression(data: JsValue) -> Result<JsValue, JsValue>;
 
@@ -64,14 +68,29 @@ extern "C" {
     // headers), `body` is a raw request body string (empty for GET/HEAD).
     // Returns `{ status: number, body: string }` — the caller decides
     // how to handle non-2xx status codes. Only rejects on network-level
-    // failures (DNS, connection refused, etc.) and when the call, body
-    // included, takes longer than 10 s (the error names the URL).
+    // failures (DNS, connection refused, etc.), when the call, body
+    // included, takes longer than 10 s (the error names the URL), and when
+    // the reply body passes the host's limit (32 MiB; the error's `code` is
+    // "too-large", see `http_fetch_too_large`).
     #[wasm_bindgen(js_name = "httpFetch", catch)]
     pub async fn http_fetch(
         url: &str,
         method: &str,
         headers_json: &str,
         body: &str,
+    ) -> Result<JsValue, JsValue>;
+    // `http_fetch` with a lower limit on the reply body: the host reads the
+    // body as a stream and refuses it ("too-large") as soon as it passes
+    // `max_bytes` (or the host's own limit, whichever is lower). A host
+    // older than the limit ignores `max_bytes`, so a caller still checks the
+    // length of what it gets.
+    #[wasm_bindgen(js_name = "httpFetch", catch)]
+    pub async fn http_fetch_capped(
+        url: &str,
+        method: &str,
+        headers_json: &str,
+        body: &str,
+        max_bytes: f64,
     ) -> Result<JsValue, JsValue>;
 
     // ----- Language context (spec §7.3) -----
@@ -159,6 +178,13 @@ pub fn emit_signal_typed<T: Serialize + ?Sized>(data: &T) {
     }
 }
 
+/// Report a token transfer (new, or a change of state) to the executor as
+/// the `token-transfer` language signal (section 5.9 of
+/// `docs-src/language-interface-spec.md`).
+pub fn emit_token_transfer(transfer: &crate::token::TokenTransfer) {
+    emit_signal_typed(&crate::token::TokenTransferSignal::new(transfer.clone()));
+}
+
 // ---------------------------------------------------------------------------
 // Typed wrappers for the remaining JsValue-shaped imports.
 //
@@ -225,15 +251,41 @@ pub async fn http_fetch_typed(
     body: &str,
 ) -> Result<HttpFetchResponse, JsValue> {
     let v = http_fetch(url, method, headers_json, body).await?;
-    let status = js_sys::Reflect::get(&v, &JsValue::from_str("status"))
+    Ok(fetch_response(&v))
+}
+
+/// [`http_fetch_typed`] over [`http_fetch_capped`]: the host refuses a reply body past
+/// `max_bytes` before reading it all ([`http_fetch_too_large`] tells that refusal apart).
+pub async fn http_fetch_typed_capped(
+    url: &str,
+    method: &str,
+    headers_json: &str,
+    body: &str,
+    max_bytes: usize,
+) -> Result<HttpFetchResponse, JsValue> {
+    let v = http_fetch_capped(url, method, headers_json, body, max_bytes as f64).await?;
+    Ok(fetch_response(&v))
+}
+
+/// True when `err`, from `http_fetch` or `http_fetch_capped`, is the host's refusal of a reply
+/// body over its limit (an error whose `code` is `"too-large"`).
+pub fn http_fetch_too_large(err: &JsValue) -> bool {
+    js_sys::Reflect::get(err, &JsValue::from_str("code"))
+        .ok()
+        .and_then(|code| code.as_string())
+        .is_some_and(|code| code == "too-large")
+}
+
+fn fetch_response(v: &JsValue) -> HttpFetchResponse {
+    let status = js_sys::Reflect::get(v, &JsValue::from_str("status"))
         .ok()
         .and_then(|s| s.as_f64())
         .unwrap_or(0.0) as u16;
-    let resp_body = js_sys::Reflect::get(&v, &JsValue::from_str("body"))
+    let resp_body = js_sys::Reflect::get(v, &JsValue::from_str("body"))
         .ok()
         .and_then(|b| b.as_string())
         .unwrap_or_default();
-    Ok(HttpFetchResponse { status, body: resp_body })
+    HttpFetchResponse { status, body: resp_body }
 }
 
 /// POST a JSON-serializable body to `url` and return the response body as

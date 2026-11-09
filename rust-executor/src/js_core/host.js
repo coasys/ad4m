@@ -81,6 +81,7 @@ export function agentDid() { return agent().did(); }
 export function agentSigningKeyId() { return agent().signingKeyId(); }
 export function agentSign(payload) { return agent().sign(payload); }
 export function agentSignStringHex(payload) { return agent().signStringHex(payload); }
+export function agentOpenSealed(sealed) { return agent().openSealed(sealed); }
 export function agentCreateSignedExpression(data) { return agent().createSignedExpression(data); }
 export function agentGetAllLocalUserDids() { return agent().getAllLocalUserDIDs(); }
 export function agentCreateSignedExpressionForUser(userEmail, data) {
@@ -123,6 +124,62 @@ export async function holochainCallAsync(dnaNick, zome, fnName, params) {
 
 var HTTP_FETCH_TIMEOUT_MS = 10000;
 
+// The most bytes of one reply body httpFetch reads, whatever the caller asks.
+// The body is read as a stream and the call is refused as soon as it passes
+// the limit (or at once when its Content-Length does), so a server cannot
+// push more than this into the isolate per call. A caller may lower it with
+// `maxBytes`; a larger, missing or invalid `maxBytes` leaves this one.
+var HTTP_FETCH_MAX_BYTES = 32 * 1024 * 1024;
+
+function replyLimit(maxBytes) {
+    if (typeof maxBytes === "number" && isFinite(maxBytes) && maxBytes >= 0) {
+        return Math.min(Math.floor(maxBytes), HTTP_FETCH_MAX_BYTES);
+    }
+    return HTTP_FETCH_MAX_BYTES;
+}
+
+// The refusal of a reply over the limit: `code` "too-large", so a caller can
+// tell it from a network failure without reading the message.
+function tooLarge(method, url, limit) {
+    var e = new Error(
+        "httpFetch " + method + " " + redactUrl(url) +
+        " refused: the reply body is larger than " + limit + " bytes"
+    );
+    e.code = "too-large";
+    return e;
+}
+
+// The body of `res` as text, read chunk by chunk and refused past `limit`
+// bytes. A refusal cancels the body, which closes the connection.
+async function readCapped(res, limit, method, url) {
+    if (!res.body) return "";
+    var declared = res.headers.get("content-length");
+    if (declared !== null && Number(declared) > limit) {
+        res.body.cancel().catch(function () {});
+        throw tooLarge(method, url, limit);
+    }
+    var reader = res.body.getReader();
+    var chunks = [];
+    var total = 0;
+    for (;;) {
+        var step = await reader.read();
+        if (step.done) break;
+        total += step.value.byteLength;
+        if (total > limit) {
+            reader.cancel().catch(function () {});
+            throw tooLarge(method, url, limit);
+        }
+        chunks.push(step.value);
+    }
+    var all = new Uint8Array(total);
+    var at = 0;
+    chunks.forEach(function (c) {
+        all.set(c, at);
+        at += c.byteLength;
+    });
+    return new TextDecoder().decode(all);
+}
+
 // The URL as it may appear in an error: fetch sends `user:pass@` as Basic
 // auth and query strings often carry tokens, and these errors reach the
 // executor log and clients. Keeps scheme, host, port and path.
@@ -139,7 +196,8 @@ function redactUrl(url) {
     }
 }
 
-async function httpFetchImpl(url, method, headersJson, body) {
+async function httpFetchImpl(url, method, headersJson, body, maxBytes) {
+    var limit = replyLimit(maxBytes);
     var headers = {};
     if (headersJson && headersJson.length > 0) {
         try {
@@ -156,9 +214,12 @@ async function httpFetchImpl(url, method, headersJson, body) {
     }
     try {
         var res = await globalThis.fetch(url, init);
-        var text = await res.text();
+        var text = await readCapped(res, limit, init.method, url);
         return { status: res.status, body: text };
     } catch (e) {
+        if (e && e.code === "too-large") {
+            throw e;
+        }
         if (signal.aborted) {
             throw new Error(
                 "httpFetch " + init.method + " " + redactUrl(url) + " timed out after " +
@@ -193,8 +254,8 @@ function scrubUrl(message, url) {
     return out;
 }
 
-export function httpFetch(url, method, headersJson, body) {
-    return httpFetchImpl(url, method, headersJson, body);
+export function httpFetch(url, method, headersJson, body, maxBytes) {
+    return httpFetchImpl(url, method, headersJson, body, maxBytes);
 }
 
 // ============================================================================
@@ -339,8 +400,10 @@ export function writeStorageFile(path, content) {
 //   * Read-through cache: persistent storage is loaded lazily into an
 //     in-memory Map on the first storage call and kept consistent on
 //     every mutation via a full rewrite.
-//   * Writes are flushed synchronously on every put/delete so that a
-//     process crash cannot lose already-observed data.
+//   * A put/delete marks the store dirty and schedules one flush at the
+//     end of the current turn (a microtask), so many writes in one turn
+//     cost one file write. Rewriting the whole file on every write made a
+//     1,833-link commit take 42.6 s (7,352 rewrites).
 //   * Any I/O failure degrades to in-memory semantics and logs a warning.
 
 var KV_FILENAME = "ad4m-language-kv.json";
@@ -422,6 +485,17 @@ function flushStorage() {
     }
 }
 
+var __storageFlushQueued = false;
+
+function scheduleFlush() {
+    if (__storageFlushQueued) return;
+    __storageFlushQueued = true;
+    queueMicrotask(function () {
+        __storageFlushQueued = false;
+        flushStorage();
+    });
+}
+
 function storageKey(key) {
     var addr = "";
     try { addr = languageAddress(); } catch (_) { addr = "unknown"; }
@@ -435,12 +509,12 @@ export function storageGet(key) {
 export function storagePut(key, value) {
     ensureStorageLoaded();
     __storage.set(storageKey(key), value);
-    flushStorage();
+    scheduleFlush();
 }
 export function storageDelete(key) {
     ensureStorageLoaded();
     __storage.delete(storageKey(key));
-    flushStorage();
+    scheduleFlush();
 }
 export function storageListKeys(prefix) {
     ensureStorageLoaded();

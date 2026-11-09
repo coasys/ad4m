@@ -29,7 +29,7 @@
 //! AIService, which none of the code paths under test touch.
 
 use super::loader::{gather_active_flow_contexts, load_all_flow_instances, load_flow_instances};
-use crate::perspectives::flow_classes::{advance_flow_instance_state, mint_flow_instance};
+use crate::perspectives::flow_classes::mint_flow_instance;
 use crate::perspectives::interpretation::{
     build_interpretation_input, ExistingInstances, TranscriptTurn,
 };
@@ -137,7 +137,8 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    FlowInstance's subject (J#1, PR #929 James review — the fix
     //    replaced `Option<&Scope>` on the dedup axis with
     //    `subjects: &[String]` sourced from the batch cursor).
-    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
+    let contexts =
+        gather_active_flow_contexts(&perspective, &ctx, &[base_uri.to_string()], None).await;
     assert_eq!(
         contexts.len(),
         1,
@@ -170,7 +171,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
         base_uri.to_string(),
         "ad4m://task/other-batch-item".to_string(),
     ];
-    let scoped = gather_active_flow_contexts(&perspective, &multi_matching, None).await;
+    let scoped = gather_active_flow_contexts(&perspective, &ctx, &multi_matching, None).await;
     assert_eq!(
         scoped.len(),
         1,
@@ -181,9 +182,13 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     // 6) Subjects that don't include the instance's base URI: empty.
     //    This is the property that lets batch-scoped passes ignore
     //    flows running on unrelated bases.
-    let other =
-        gather_active_flow_contexts(&perspective, &["ad4m://task/unrelated".to_string()], None)
-            .await;
+    let other = gather_active_flow_contexts(
+        &perspective,
+        &ctx,
+        &["ad4m://task/unrelated".to_string()],
+        None,
+    )
+    .await;
     assert!(
         other.is_empty(),
         "batch narrowed to a different subject must drop the running flow, got {other:?}"
@@ -193,7 +198,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //     used to sweep every FlowInstance on the perspective and
     //     inject it into every prompt (unbounded). The fix makes empty
     //     mean empty — no flow context, no unbounded sweep.
-    let empty = gather_active_flow_contexts(&perspective, &[] as &[String], None).await;
+    let empty = gather_active_flow_contexts(&perspective, &ctx, &[] as &[String], None).await;
     assert!(
         empty.is_empty(),
         "empty subjects must not surface any flows, got {empty:?}"
@@ -245,10 +250,10 @@ async fn load_flow_instances_absent_class_returns_empty() {
     assert!(all.is_empty());
 }
 
-/// `gather_active_flow_contexts` must use the `Local` `currentState` cache
-/// rather than deriving.  Observable: set the cache to "scoped" WITHOUT any
-/// transition proposals in the graph.  The fold, seeing no quorum, returns
-/// "identified" (genesis state).  Only cache-first can return "scoped".
+/// `gather_active_flow_contexts` must use this agent's recorded state rather
+/// than deriving. Observable: record "scoped" WITHOUT any transition
+/// proposals in the graph. The fold, seeing no quorum, returns "identified"
+/// (genesis state). Only cache-first can return "scoped".
 #[tokio::test(flavor = "multi_thread")]
 async fn gather_active_flow_contexts_cache_first_skips_derive() {
     let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
@@ -275,14 +280,21 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
     .await
     .expect("mint_flow_instance");
 
-    // Advance the Local cache to "scoped" WITHOUT any proposals.
+    // Record "scoped" WITHOUT any proposals.
     // The fold sees no quorum and would return "identified".
     // Only a cache-first reader can produce "scoped".
-    advance_flow_instance_state(&mut perspective, &inst_uri, "scoped", None, &ctx)
-        .await
-        .expect("advance_flow_instance_state to scoped");
+    let did = crate::agent::did_for_context(&ctx).expect("did");
+    crate::perspectives::flow_instance::replica_state::FlowReplicaState::set_current_state(
+        &perspective.uuid,
+        &did,
+        &inst_uri,
+        "scoped",
+        &perspective.is_teardown,
+    )
+    .expect("record scoped");
 
-    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
+    let contexts =
+        gather_active_flow_contexts(&perspective, &ctx, &[base_uri.to_string()], None).await;
     assert_eq!(
         contexts.len(),
         1,
@@ -290,6 +302,17 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
     );
     assert_eq!(
         contexts[0].current_state, "scoped",
-        "Local cache at 'scoped' must be returned (fold would give 'identified' — no proposals)"
+        "recorded 'scoped' must be returned (fold would give 'identified' — no proposals)"
+    );
+
+    // The record is per agent: another agent on the executor has none, so its
+    // gather derives — and gets the fold's "identified".
+    let bob = crate::perspectives::flow_evaluator_e2e::second_agent("bob-gather@flow.local");
+    let theirs =
+        gather_active_flow_contexts(&perspective, &bob, &[base_uri.to_string()], None).await;
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(
+        theirs[0].current_state, "identified",
+        "another agent's gather never sees this agent's record"
     );
 }

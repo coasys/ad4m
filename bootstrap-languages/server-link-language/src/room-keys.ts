@@ -1,0 +1,127 @@
+/**
+ * Room key exchange: the room admin rotates, any member grants.
+ *
+ * Every member's key follows from its DID (src/encryption.ts), so nothing
+ * waits for a member to connect: a rotation seals the new version to every
+ * ACL member, and any member holding a version seals it to an ACL member
+ * lacking it. The link server lets a member grant only versions it holds
+ * and keeps the first box stored per member and version.
+ */
+
+import type { RoomConfig } from "./adapters.js";
+import * as api from "./api.js";
+import { generateRoomKey, roomKeyCommitment, sealToDid, type KeyRing } from "./encryption.js";
+
+function message(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * There is no plaintext mode: only "ready" commits.
+ * - "pending": this agent holds no room key it opens (the admin has not
+ *   rotated one in yet, or no member holding one has granted it).
+ * - "ready": the key ring is loaded.
+ * - "error": the key ring could not be read or opened.
+ */
+export type KeyRingStatus = "pending" | "ready" | "error";
+
+/**
+ * An admin holding no room key it can open ("pending": the room has none
+ * yet, or none sealed to it opens) mints one, once a run. A box it just
+ * sealed to its own DID that does not open means its executor cannot open
+ * any, so another version would only pile up unopened keys.
+ */
+export function adminRotates(status: KeyRingStatus, rotatedThisRun: boolean): boolean {
+    return !rotatedThisRun && status === "pending";
+}
+
+/** What the room's ACL says this agent is: its admin, a member, or "unknown" (the read failed). */
+export type RoomRole = "admin" | "member" | "unknown";
+
+/**
+ * The next step for an agent that may have to mint a room key. "read-acl"
+ * only while a rotation is due and the role is unknown: a member the ACL
+ * already named is not re-read on every commit (each read counts against the
+ * room's rate limit), and an admin whose startup read failed still finds out
+ * and rotates.
+ */
+export function adminRotationStep(
+    status: KeyRingStatus,
+    rotatedThisRun: boolean,
+    role: RoomRole,
+): "rotate" | "read-acl" | "none" {
+    if (!adminRotates(status, rotatedThisRun)) return "none";
+    if (role === "admin") return "rotate";
+    return role === "unknown" ? "read-acl" : "none";
+}
+
+/**
+ * The key ring after a `/keys` read or open failed (network, server, a locked
+ * agent). The keys already held are still the room's keys: a loaded ring
+ * stays loaded, so commits still encrypt and inbound links still open. Catch-up
+ * re-reads `/keys` while any link is held, so dropping the ring here would
+ * turn one failed read into refused commits and held links. Only a ring that
+ * never loaded becomes "error".
+ */
+export function afterFailedKeyRead(
+    status: KeyRingStatus,
+    ring: KeyRing | null,
+): { status: KeyRingStatus; ring: KeyRing | null } {
+    if (status === "ready" && ring && ring.size > 0) return { status, ring };
+    return { status: "error", ring: null };
+}
+
+/**
+ * Room admin only (the server refuses anyone else): a new room key version,
+ * sealed to the DID of every ACL member. Returns null, and rotates nothing,
+ * when no member's DID can be sealed to.
+ */
+export async function rotateRoomKey(
+    config: RoomConfig,
+    token: string,
+): Promise<api.RotateResponse | null> {
+    const acl = await api.fetchAclInfo(config, token);
+    const roomKey = generateRoomKey();
+    const keys: api.RotateKeyEntry[] = [];
+    for (const member of acl.members) {
+        try {
+            keys.push({ did: member.did, encryptedKey: sealToDid(member.did, roomKey) });
+        } catch (err) {
+            console.error(`[server-link-language] cannot seal the room key to ${member.did}, skipping: ${message(err)}`);
+        }
+    }
+    if (keys.length === 0) return null;
+    return api.rotateKeys(config, token, keys, roomKeyCommitment(roomKey));
+}
+
+/**
+ * Any member: seals each version in `ring` to every other ACL member that
+ * lacks it. A member it cannot grant to (removed meanwhile, a DID that is
+ * not an Ed25519 did:key) is logged and skipped. Returns the versions the
+ * server stored, per member.
+ */
+export async function grantMissingRoomKeys(
+    config: RoomConfig,
+    token: string,
+    ring: KeyRing,
+    myDid: string,
+): Promise<Array<{ did: string; versions: number[] }>> {
+    const { membersNeedingHistoricalKeys } = await api.fetchMissingKeys(config, token);
+    const grants: Array<{ did: string; versions: number[] }> = [];
+    for (const member of membersNeedingHistoricalKeys) {
+        if (member.did === myDid) continue;
+        try {
+            const keys: api.GrantKeyEntry[] = [];
+            for (const version of member.missingVersions) {
+                const roomKey = ring.get(version);
+                if (roomKey) keys.push({ version, encryptedKey: sealToDid(member.did, roomKey) });
+            }
+            if (keys.length === 0) continue;
+            const versions = await api.grantKeys(config, token, member.did, keys);
+            if (versions.length > 0) grants.push({ did: member.did, versions });
+        } catch (err) {
+            console.error(`[server-link-language] key grant to ${member.did} failed: ${message(err)}`);
+        }
+    }
+    return grants;
+}

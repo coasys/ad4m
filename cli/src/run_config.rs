@@ -246,6 +246,108 @@ pub struct RunArgs {
     /// Useful for test harnesses that need targeted process cleanup.
     #[arg(long, env = "AD4M_PID_FILE", value_parser = non_empty(StringValueParser::new()))]
     pub pid_file: Option<String>,
+    /// Shut down once the process that started the executor is gone, however it ended
+    /// (SIGKILLed, crashed, exited without stopping the executor). For launchers and test
+    /// harnesses. Linux and macOS only; no effect on Windows. Default: false
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        env = "AD4M_EXIT_WITH_PARENT",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub exit_with_parent: Option<bool>,
+    /// Local DID for this SFU node in a cascade cluster. Required alongside
+    /// --sfu-cascade-listen to enable cascade gossip.
+    #[arg(long, env = "AD4M_SFU_LOCAL_DID", value_parser = non_empty(StringValueParser::new()))]
+    pub sfu_local_did: Option<String>,
+    /// Capacity hint published by this SFU node in every announce.
+    #[arg(
+        long,
+        env = "AD4M_SFU_MAX_PARTICIPANTS_PER_NODE",
+        value_parser = non_empty(value_parser!(u32))
+    )]
+    pub sfu_max_participants_per_node: Option<u32>,
+    /// Local `host:port` the cascade gossip listener binds.
+    #[arg(
+        long,
+        env = "AD4M_SFU_CASCADE_LISTEN",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_cascade_listen: Option<String>,
+    /// Peer SFU nodes as `did=host:port`, comma separated. The gossip listener
+    /// accepts connections only from these hosts, so each peer must connect
+    /// from the address it is listed under (not through NAT).
+    #[arg(
+        long,
+        env = "AD4M_SFU_CASCADE_PEERS",
+        value_delimiter = ',',
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_cascade_peers: Option<Vec<String>>,
+    /// IP address the SFU media server binds its UDP socket to. Default:
+    /// 127.0.0.1, so calls reach only this machine; with `--localhost false`,
+    /// the machine's outbound interface. Set it (e.g. a LAN address) to choose
+    /// which interface accepts media from other machines.
+    #[arg(long, env = "AD4M_SFU_BIND_ADDR", value_parser = non_empty(StringValueParser::new()))]
+    pub sfu_bind_addr: Option<String>,
+    /// STUN server (`host:port`) the SFU asks once at startup for its public
+    /// address. Unset: no probe, and a public bind address reports
+    /// reachability "unknown".
+    #[arg(
+        long,
+        env = "AD4M_SFU_STUN_SERVER",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_stun_server: Option<String>,
+    /// UDP port the SFU binds. Default: a free port, chosen at each start.
+    /// Fix it to forward it from a router; startup fails when it is taken.
+    #[arg(long, env = "AD4M_SFU_UDP_PORT", value_parser = non_empty(value_parser!(u16)))]
+    pub sfu_udp_port: Option<u16>,
+    /// Public IP the SFU offers callers next to its bind address, for an SFU
+    /// behind NAT. Default: the address the STUN probe reports.
+    #[arg(
+        long,
+        env = "AD4M_SFU_PUBLIC_ADDR",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_public_addr: Option<String>,
+    /// DID of the cascade node that takes redirected joins first; others
+    /// get joins only when it is full. Unset: the least-loaded node.
+    #[arg(
+        long,
+        env = "AD4M_SFU_PREFERRED_NODE",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_preferred_node: Option<String>,
+    /// The identity store's base URL (`identity.storeUrl`), given to the agent language.
+    /// Default: the store the network's seed names (`identityStore` in the seed `init`
+    /// wrote; this build's seed names `https://store.ad4m.dev`); without one, no store.
+    #[arg(
+        long,
+        env = "AD4M_IDENTITY_STORE_URL",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub identity_store_url: Option<String>,
+    /// The identity store's head keys (`identity.storeKeys`, Ed25519 multikeys), comma
+    /// separated: a head from the store counts only when one of them signed it. Default: the
+    /// seed's store keys when `--identity-store-url` is unset too; none for another store.
+    #[arg(
+        long,
+        env = "AD4M_IDENTITY_STORE_KEYS",
+        value_delimiter = ',',
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub identity_store_keys: Option<Vec<String>>,
+    /// Let the `src` of a DID URL that `identity.resolve` reads reach loopback and private
+    /// addresses (`identity.allowPrivateSrc`). Off by default; for tests and local development.
+    #[arg(
+        long,
+        action,
+        env = "AD4M_IDENTITY_ALLOW_PRIVATE_SRC",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub identity_allow_private_src: Option<bool>,
 }
 
 /// Only the literal `true` enables the insecure mode; the usual "off"
@@ -289,6 +391,22 @@ impl RunArgs {
         overlay(&mut file.run_dapp_server, &self.run_dapp_server);
         overlay(&mut file.mcp_enabled, &self.enable_mcp);
         overlay(&mut file.mcp_port, &self.mcp_port);
+        overlay(&mut file.sfu_bind_addr, &self.sfu_bind_addr);
+        overlay(&mut file.sfu_udp_port, &self.sfu_udp_port);
+        overlay(&mut file.sfu_public_addr, &self.sfu_public_addr);
+        overlay(&mut file.sfu_stun_server, &self.sfu_stun_server);
+        if self.identity_store_url.is_some()
+            || self.identity_store_keys.is_some()
+            || self.identity_allow_private_src.is_some()
+        {
+            let identity = file.identity.get_or_insert_with(Default::default);
+            overlay(&mut identity.store_url, &self.identity_store_url);
+            overlay(&mut identity.store_keys, &self.identity_store_keys);
+            overlay(
+                &mut identity.allow_private_src,
+                &self.identity_allow_private_src,
+            );
+        }
         overlay(
             &mut file.auto_permit_cap_requests,
             &self.auto_permit_cap_requests,
@@ -341,7 +459,9 @@ impl RunArgs {
         let mut secrets =
             ExecutorSecrets::from_env(env, &file).context("cannot read the executor's secrets")?;
         // A flag beats the environment, as for every other setting.
-        overlay(&mut secrets.admin_credential, &self.admin_credential);
+        if let Some(credential) = &self.admin_credential {
+            secrets.admin_credential = Some(credential.clone().into());
+        }
 
         let mut config = file.to_ad4m_config(&secrets)?;
         config.network_bootstrap_seed = self.network_bootstrap_seed;
@@ -358,7 +478,13 @@ impl RunArgs {
         config.log_holochain_metrics = self.log_holochain_metrics;
         config.dynamic_class_tools = self.dynamic_class_tools;
         config.pid_file = self.pid_file;
+        config.exit_with_parent = self.exit_with_parent;
         config.insecure_no_admin_credential = Some(self.insecure_no_admin_credential);
+        config.sfu_local_did = self.sfu_local_did;
+        config.sfu_max_participants_per_node = self.sfu_max_participants_per_node;
+        config.sfu_cascade_listen = self.sfu_cascade_listen;
+        config.sfu_cascade_peers = self.sfu_cascade_peers;
+        config.sfu_preferred_node = self.sfu_preferred_node;
         Ok(ResolvedRun {
             config,
             unlock_passphrase: secrets.unlock_passphrase,
@@ -434,6 +560,14 @@ pub(crate) mod tests {
         let mut full = vec!["ad4m-executor"];
         full.extend_from_slice(argv);
         Cli::try_parse_from(full)?.run.resolve(process_env)
+    }
+
+    fn credential_is(resolved: &ResolvedRun, expected: &str) -> bool {
+        resolved
+            .config
+            .admin_credential
+            .as_ref()
+            .is_some_and(|c| c.expose_for_compare(expected))
     }
 
     fn scratch_dir(name: &str) -> PathBuf {
@@ -592,6 +726,48 @@ pub(crate) mod tests {
             "14203",
             "14303",
         ),
+        (
+            "/sfu_bind_addr",
+            "AD4M_SFU_BIND_ADDR",
+            "--sfu-bind-addr",
+            "192.168.0.20",
+            "192.168.0.30",
+        ),
+        (
+            "/sfu_udp_port",
+            "AD4M_SFU_UDP_PORT",
+            "--sfu-udp-port",
+            "40001",
+            "40002",
+        ),
+        (
+            "/sfu_public_addr",
+            "AD4M_SFU_PUBLIC_ADDR",
+            "--sfu-public-addr",
+            "203.0.113.20",
+            "203.0.113.30",
+        ),
+        (
+            "/sfu_stun_server",
+            "AD4M_SFU_STUN_SERVER",
+            "--sfu-stun-server",
+            "stun.b.example:3478",
+            "stun.c.example:3478",
+        ),
+        (
+            "/identity/storeUrl",
+            "AD4M_IDENTITY_STORE_URL",
+            "--identity-store-url",
+            "http://127.0.0.1:8081",
+            "http://127.0.0.1:8082",
+        ),
+        (
+            "/identity/allowPrivateSrc",
+            "AD4M_IDENTITY_ALLOW_PRIVATE_SRC",
+            "--identity-allow-private-src",
+            "true",
+            "false",
+        ),
     ];
 
     /// For every row of [`OVERRIDABLE`]: the variable alone, the flag alone,
@@ -624,6 +800,15 @@ pub(crate) mod tests {
             log_config: Some([("holochain".to_string(), "warn".to_string())].into()),
             mcp_enabled: Some(true),
             mcp_port: Some(14104),
+            sfu_bind_addr: Some("192.168.0.10".into()),
+            sfu_udp_port: Some(40000),
+            sfu_public_addr: Some("203.0.113.10".into()),
+            sfu_stun_server: Some("stun.a.example:3478".into()),
+            identity: Some(rust_executor::config_file::IdentityFileSettings {
+                store_url: Some("http://127.0.0.1:8080".into()),
+                store_keys: Some(vec!["z6MkA".into()]),
+                allow_private_src: Some(false),
+            }),
         };
         let file_json = serde_json::to_value(&file).unwrap();
         let config = write_config(&dir, &file_json.to_string());
@@ -644,6 +829,8 @@ pub(crate) mod tests {
             "/log_config/holochain",
             "/multi_user_config/smtp_config",
             "/multi_user_config/tls_config/enabled",
+            // A list: `identity_store_keys_take_a_comma_separated_list` covers it.
+            "/identity/storeKeys",
         ];
         for key in keys.iter().filter(|key| !flagless.contains(&key.as_str())) {
             assert!(
@@ -678,6 +865,42 @@ pub(crate) mod tests {
                 "{flag} over {var}"
             );
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `--identity-store-keys` / `AD4M_IDENTITY_STORE_KEYS` take a comma-separated list and
+    /// replace the file's, the flag over the variable; both identity keys reach the config.
+    #[test]
+    fn identity_store_keys_take_a_comma_separated_list() {
+        let _env = lock_env();
+        let dir = scratch_dir("identity-keys");
+        let config = write_config(
+            &dir,
+            r#"{"identity": {"storeUrl": "http://127.0.0.1:8080", "storeKeys": ["z6MkA"]}}"#,
+        );
+        let keys = |argv: &[&str], env: &[(&'static str, &str)]| {
+            let mut full = vec!["--config", config.as_str()];
+            full.extend_from_slice(argv);
+            resolve(&full, env).unwrap().config.identity_store_keys
+        };
+        let list = |items: &[&str]| Some(items.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(keys(&[], &[]), list(&["z6MkA"]));
+        assert_eq!(
+            keys(&[], &[("AD4M_IDENTITY_STORE_KEYS", "z6MkB,z6MkC")]),
+            list(&["z6MkB", "z6MkC"])
+        );
+        assert_eq!(
+            keys(
+                &["--identity-store-keys", "z6MkD"],
+                &[("AD4M_IDENTITY_STORE_KEYS", "z6MkB")]
+            ),
+            list(&["z6MkD"])
+        );
+        let resolved = resolve(&["--config", &config], &[]).unwrap().config;
+        assert_eq!(
+            resolved.identity_store_url.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -801,10 +1024,7 @@ pub(crate) mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(
-            resolved.config.admin_credential.as_deref(),
-            Some("admin-secret")
-        );
+        assert!(credential_is(&resolved, "admin-secret"));
         assert_eq!(
             resolved.config.smtp_config.as_ref().unwrap().password,
             "smtp-secret"
@@ -828,10 +1048,7 @@ pub(crate) mod tests {
             &[("AD4M_ADMIN_CREDENTIAL_FILE", &admin)],
         )
         .unwrap();
-        assert_eq!(
-            resolved.config.admin_credential.as_deref(),
-            Some("from-flag")
-        );
+        assert!(credential_is(&resolved, "from-flag"));
 
         let err = resolve(
             &["--config", &config],
@@ -908,7 +1125,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 30, "every flag of run has a variable");
+        assert_eq!(checked, 43, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

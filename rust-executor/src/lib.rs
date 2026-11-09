@@ -6,15 +6,21 @@ pub mod config;
 pub mod config_file;
 pub mod email_service;
 pub mod entanglement_service;
+#[cfg(unix)]
+pub mod fd_limit;
 mod globals;
 pub mod helpers;
 pub mod holochain_service;
+pub mod identity;
 pub mod js_core;
 pub mod mcp;
 pub mod perspective_snapshot;
 pub mod perspectives;
+pub mod presence;
 mod prolog_service;
 pub mod runtime_service;
+pub mod secret;
+pub mod sfu;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
@@ -26,11 +32,13 @@ pub mod billing;
 mod dapp_server;
 pub mod db;
 pub mod db_backend;
+mod events;
 pub mod init;
 pub mod languages;
 pub mod logging;
 mod neighbourhoods;
 mod pubsub;
+pub mod tool_bundles;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
 mod test_utils;
@@ -48,6 +56,7 @@ use crate::{
     languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
+pub use secret::Secret;
 
 #[cfg(unix)]
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
@@ -252,6 +261,24 @@ pub async fn unlock_agent_at_startup(passphrase: String) {
     }
 }
 
+/// How long the graceful shutdown that a signal starts may take before the process exits anyway.
+/// Below the 5 s after which test harnesses escalate to SIGKILL, so the cleanup that does finish
+/// (the Holochain conductor's own shutdown is bounded at 3 s) is not cut short by them.
+#[cfg(unix)]
+const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Whether the executor was started with SIGHUP ignored, as `nohup` does. Read before any handler
+/// is installed: installing one replaces the inherited disposition.
+#[cfg(unix)]
+fn sighup_ignored() -> bool {
+    // SAFETY: a null new action only reads the current disposition into `current`.
+    unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
+    }
+}
+
 /// Runs the REST server and the deno core runtime.
 ///
 /// Returns the REST API server's thread. It ends with `Err` when the server
@@ -279,26 +306,56 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         *guard = Some(shutdown_tx);
     }
 
-    // Spawn a task that listens for OS signals (SIGTERM/SIGINT) and triggers shutdown.
-    // This replaces the old ctrlc handler in the CLI binaries with an in-executor handler
-    // that allows graceful cleanup of Holochain conductor and databases.
+    // Spawn a task that listens for OS signals (SIGTERM, SIGINT, SIGHUP) and triggers shutdown.
+    // It is the process's only handler for them: the executor binaries install none of their
+    // own (one would replace this one). SIGHUP, a closed terminal, gets the same cleanup, unless
+    // the executor was started with SIGHUP ignored (`nohup`): then it stays ignored.
+    // It logs and never prints: stdout may be a pipe whose reader (the launcher) is gone, and
+    // `println!` panics on the broken pipe.
     #[cfg(unix)]
     {
         tokio::spawn(async {
-            use tokio::signal;
-            let ctrl_c = signal::ctrl_c();
-            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
-
-            tokio::select! {
-                _ = ctrl_c => info!("Received SIGINT, initiating graceful shutdown..."),
-                _ = sigterm.recv() => info!("Received SIGTERM, initiating graceful shutdown..."),
+            use tokio::signal::unix::{signal, Signal, SignalKind};
+            let mut sigint =
+                signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            let mut sighup = (!sighup_ignored())
+                .then(|| signal(SignalKind::hangup()).expect("failed to install SIGHUP handler"));
+            async fn hangup(sighup: &mut Option<Signal>) {
+                match sighup {
+                    Some(sighup) => {
+                        sighup.recv().await;
+                    }
+                    None => std::future::pending().await,
+                }
             }
 
-            // Trigger shutdown via the global channel
+            let received = tokio::select! {
+                _ = sigint.recv() => "SIGINT",
+                _ = sigterm.recv() => "SIGTERM",
+                _ = hangup(&mut sighup) => "SIGHUP",
+            };
+
+            // Trigger shutdown via the global channel, before logging: a log write that blocks (a
+            // launcher that no longer drains stderr) must not hold up the cleanup.
             if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
                 let _ = tx.send(());
             }
+            info!("Received {received}, initiating graceful shutdown...");
+
+            // The cleanup must not keep the process alive: a second signal, or the deadline,
+            // ends it without waiting any longer.
+            tokio::select! {
+                _ = sigint.recv() => warn!("⚠️ Received SIGINT again, exiting without finishing the cleanup"),
+                _ = sigterm.recv() => warn!("⚠️ Received SIGTERM again, exiting without finishing the cleanup"),
+                _ = hangup(&mut sighup) => warn!("⚠️ Received SIGHUP again, exiting without finishing the cleanup"),
+                _ = tokio::time::sleep(SHUTDOWN_DEADLINE) => warn!(
+                    "⚠️ Cleanup did not finish within {:?}, exiting without it",
+                    SHUTDOWN_DEADLINE
+                ),
+            }
+            std::process::exit(1);
         });
     }
 
@@ -329,9 +386,44 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     });
 
+    // `exit_with_parent`: end with the process that started us, however it ended. A launcher
+    // that is SIGKILLed, crashes or exits without stopping us (a cancelled CI job, a crashed
+    // Electron) sends no signal, and an executor nobody stops runs on with nobody to talk to.
+    // The parent's PID is polled, not watched with PR_SET_PDEATHSIG, so it works on macOS too.
+    #[cfg(unix)]
+    if config.exit_with_parent.unwrap_or(false) {
+        let parent = std::os::unix::process::parent_id();
+        std::thread::Builder::new()
+            .name("parent-watch".to_string())
+            .spawn(move || {
+                while std::os::unix::process::parent_id() == parent {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                // Nothing in this thread logs: a stderr nobody drains would block the write, and
+                // with it the forced exit below. The line goes out from a thread of its own.
+                std::thread::spawn(move || {
+                    warn!(
+                        "The process that started the executor (PID {parent}) is gone, shutting \
+                         down; exiting anyway after {SHUTDOWN_DEADLINE:?} if cleanup is not done"
+                    )
+                });
+                std::thread::sleep(SHUTDOWN_DEADLINE);
+                std::process::exit(1);
+            })
+            .expect("failed to start the parent-watch thread");
+    }
+
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(config.log_config.as_ref());
+
+    // Before any perspective store or language opens files.
+    #[cfg(unix)]
+    crate::fd_limit::raise_fd_limit_at_startup();
+
     config.prepare();
 
     if let Err(message) = config.check_admin_credential() {
@@ -370,7 +462,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     .as_ref()
                     .expect("INTERNAL_API_TOKEN required for shared backends");
                 info!("Initialising shared wallet backend at {}", url);
-                Arc::new(crate::wallet::SharedWallet::new(url.clone(), token.clone()))
+                // The Worker's bearer token: the shared wallet sends it on every call.
+                Arc::new(crate::wallet::SharedWallet::new(
+                    url.clone(),
+                    token.expose().to_string(),
+                ))
             }
             _ => {
                 info!("Initialising local wallet backend");
@@ -396,7 +492,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     .as_ref()
                     .expect("INTERNAL_API_TOKEN required for shared backends");
                 info!("Initialising shared database backend at {}", url);
-                Arc::new(crate::db_backend::SharedDb::new(url.clone(), token.clone()))
+                // The Worker's bearer token: the shared database sends it on every call.
+                Arc::new(crate::db_backend::SharedDb::new(
+                    url.clone(),
+                    token.expose().to_string(),
+                ))
             }
             _ => {
                 info!("Initialising local database backend");
@@ -425,7 +525,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         if let (Some(internal), Some(admin)) =
             (&config.internal_api_token, &config.admin_credential)
         {
-            if internal == admin {
+            if admin.expose_for_compare(internal.expose()) {
                 panic!(
                     "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
                      Using the same value collapses two trust boundaries."
@@ -483,13 +583,52 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     )
     .expect("Failed to initialize Ad4mDb");
 
+    // The seed names the network's identity store, which the identity module reads below.
+    info!("Initializing Runtime service...");
+    RuntimeService::init_global_instance(
+        std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
+            .join("mainnet_seed.seed")
+            .to_string_lossy()
+            .into_owned(),
+    );
+
+    // The key-log cache lives in the same database file.
+    {
+        let db_path = std::path::Path::new(
+            config
+                .app_data_path
+                .as_ref()
+                .expect("App data path not set in Ad4mConfig"),
+        )
+        .join("ad4m_db.sqlite");
+        let settings = crate::identity::IdentitySettings::from_config(
+            &config,
+            RuntimeService::seed_identity_store().as_ref(),
+        );
+        if let Err(e) = settings.check() {
+            return failed_start(e);
+        }
+        if let Err(e) = crate::identity::init(&db_path, &settings) {
+            return failed_start(format!("Could not open the key-log cache: {e}"));
+        }
+    }
+
     // Set multi-user mode before starting services to avoid race condition
     if let Some(enable_multi_user) = config.enable_multi_user {
         if enable_multi_user {
             info!("Enabling multi-user mode...");
-            Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
+            crate::db_backend::db_backend()
+                .set_multi_user_enabled(true)
                 .expect("Failed to enable multi-user mode");
         }
+    }
+    // `check_admin_credential` refused `--enable-multi-user` without a credential; the mode
+    // may also be on in the database, from `user.setMultiUserEnabled` on an earlier run.
+    if let Err(reason) = crate::config::refuse_multi_user_from_db(
+        &config.admin_credential,
+        crate::user_management::is_multi_user_enabled(),
+    ) {
+        return failed_start(reason);
     }
 
     info!("Initializing AI service...");
@@ -511,11 +650,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     });
 
+    // Notifications of older executors name their owner by email; move them to DIDs.
+    if let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) {
+        crate::db_backend::db_backend()
+            .migrate_notification_owners(&main_agent_did)
+            .expect("Failed to migrate notification owners");
+    }
+
     // Spawn background task to clean up expired verification codes every 5 minutes
     tokio::spawn(async {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
-            if let Err(e) = Ad4mDb::with_global_instance(|db| db.cleanup_expired_codes()) {
+            if let Err(e) = crate::db_backend::db_backend().cleanup_expired_codes() {
                 error!("Failed to cleanup expired verification codes: {}", e);
             } else {
                 info!("Cleaned up expired verification codes");
@@ -523,26 +669,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     });
 
-    info!("Initializing Runtime service...");
-    RuntimeService::init_global_instance(
-        std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
-            .join("mainnet_seed.seed")
-            .to_string_lossy()
-            .into_owned(),
-    );
-
-    agent::capabilities::apps_map::set_data_file_path(
-        config
-            .app_data_path
-            .as_ref()
-            .map(|path| {
-                std::path::Path::new(path)
-                    .join("apps_data.json")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .expect("App data path not set in Ad4mConfig"),
-    );
+    // Grants are the allowlist of tokens: load them before the API serves.
+    if let Err(e) = agent::grants::load_at_start() {
+        // Without its grants the API would refuse every token: it does not start.
+        return failed_start(format!("Could not load the grants: {e}"));
+    }
 
     if config.admin_credential.is_none() {
         // Only reachable with insecure_no_admin_credential (checked above).
@@ -551,6 +682,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         warn!("║  A caller with no token gets ALL_CAPABILITY (full admin      ║");
         warn!("║  access) on a loopback listener. On --localhost false, TLS,  ║");
         warn!("║  or a request with a forwarding header it is anonymous.      ║");
+        warn!("║  Multi-user mode is refused: it needs an admin credential.   ║");
         warn!("║  This mode is intended for local testing ONLY.               ║");
         warn!("╚══════════════════════════════════════════════════════════════╝");
     }
@@ -558,6 +690,45 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     {
         info!("Initializing Prolog service...");
         init_prolog_service().await;
+    }
+
+    {
+        info!("Initializing SFU service...");
+        let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
+        let (bind_addr, public_ip) = crate::sfu::server::sfu_media_addrs(
+            config.sfu_bind_addr.as_deref(),
+            config.localhost.unwrap_or(true),
+            config.sfu_udp_port,
+            config.sfu_public_addr.as_deref(),
+        )
+        .unwrap_or_else(|message| {
+            error!("{}", message);
+            panic!("{}", message);
+        });
+        let fixed_port = Some(bind_addr.port()).filter(|port| *port != 0);
+        let sfu_config = crate::sfu::server::SfuServerConfig {
+            bind_addr,
+            stun_server: config.sfu_stun_server.clone(),
+            public_ip,
+            preferred_node: config.sfu_preferred_node.clone(),
+            cascade_peer_dids: config
+                .sfu_cascade_peers
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|entry| entry.split_once('=').map(|(did, _)| did.to_string()))
+                .collect(),
+        };
+        match crate::sfu::SfuService::start(sfu_config, gossip).await {
+            Ok(_) => {}
+            // A fixed port is what the router forwards: running without it
+            // would leave calls broken with nothing to say why.
+            Err(e) if fixed_port.is_some() => {
+                error!("{}", e);
+                panic!("{}", e);
+            }
+            Err(e) => warn!("SFU service failed to start: {}", e),
+        }
     }
 
     find_and_set_port(&mut config.port, 4000, "REST API");
@@ -631,6 +802,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 info!("No Unyt membrane proof stored — skipping eager DNA install");
                 return;
             }
+            // Wait for the conductor without a limit: the agent unlock may take a while.
+            while !crate::holochain_service::maybe_get_holochain_service()
+                .await
+                .is_some_and(|service| !service.is_stopped())
+            {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            }
             match unyt_service::ensure_installed().await {
                 Ok(()) => info!("Unyt alliance DNA ready"),
                 Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
@@ -655,10 +833,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // When any credit mutation marks a user dirty, this drains the set
     // and publishes updated HostingUserInfo only for affected users.
     tokio::spawn(async {
-        use crate::db::Ad4mDb;
-        use crate::pubsub::{
-            get_global_pubsub, DIRTY_CREDIT_USERS, HOSTING_USER_INFO_CHANGED_TOPIC,
-        };
+        use crate::events::Event;
+        use crate::pubsub::{get_global_pubsub, DIRTY_CREDIT_USERS};
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -680,8 +856,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
 
             let pubsub = get_global_pubsub().await;
-            let global_free = match Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
-            {
+            let global_free = match crate::db_backend::db_backend().get_free_hosting_enabled() {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Credit flush: get_free_hosting_enabled failed: {}", e);
@@ -692,7 +867,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 let free_access = if global_free {
                     true
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
+                    match crate::db_backend::db_backend().get_user_free_access(email) {
                         Ok(v) => v,
                         Err(e) => {
                             error!(
@@ -706,7 +881,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 let remaining_credits = if free_access {
                     "unlimited".to_string()
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_credits(email)) {
+                    match crate::db_backend::db_backend().get_user_credits(email) {
                         Ok(credits) => format!("{}", credits),
                         Err(e) => {
                             error!("Credit flush: get_user_credits failed for {}: {}", email, e);
@@ -715,7 +890,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     }
                 };
                 let hot_wallet_address =
-                    match Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email)) {
+                    match crate::db_backend::db_backend().get_user_hot_wallet(email) {
                         Ok(v) => v,
                         Err(e) => {
                             error!(
@@ -733,10 +908,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     free_access,
                 };
 
-                if let Ok(json) = serde_json::to_string(&info) {
-                    pubsub
-                        .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &json)
-                        .await;
+                for event in Event::hosting_user_info(&info) {
+                    pubsub.publish_event(event);
                 }
             }
         }
@@ -765,11 +938,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 tls: mcp_tls,
                 ..Default::default()
             };
-            if let Err(e) = runtime.block_on(mcp::start_mcp_server(
-                admin_credential,
-                None, // No pre-set auth token
-                mcp_config,
-            )) {
+            if let Err(e) = runtime.block_on(mcp::start_mcp_server(admin_credential, mcp_config)) {
                 error!("MCP server error: {:?}", e);
             }
         });
@@ -791,6 +960,72 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     })
 }
 
+/// The handle [`run`] returns when the executor cannot start: it ends at once with `reason`, as
+/// a failed API does, so the launcher shows it and executor binaries exit through
+/// [`exit_when_api_fails`].
+fn failed_start(reason: String) -> JoinHandle<Result<(), AnyError>> {
+    error!("{reason}");
+    std::thread::spawn(move || Err(deno_core::anyhow::anyhow!(reason)))
+}
+
+/// Build the cascade-gossip transport based on the SFU-related fields
+/// of [`Ad4mConfig`].  Returns a [`NoopGossip`] when cascade is
+/// unconfigured, a [`TcpGossip`] when `sfu_cascade_listen` is set, or
+/// falls back to no-op (with a warning) if the requested transport
+/// fails to bind.
+async fn build_sfu_gossip(config: &Ad4mConfig) -> std::sync::Arc<dyn crate::sfu::CascadeGossip> {
+    let max = config.sfu_max_participants_per_node.unwrap_or(8);
+    let local_did = match config.sfu_local_did.clone() {
+        Some(did) => did,
+        None => {
+            return std::sync::Arc::new(crate::sfu::NoopGossip::new("self".to_string(), max));
+        }
+    };
+    let Some(listen) = config.sfu_cascade_listen.as_ref() else {
+        return std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max));
+    };
+    let bind_addr: std::net::SocketAddr = match listen.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            warn!(
+                "SFU cascade listen `{}` parse error: {} — running standalone",
+                listen, e
+            );
+            return std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max));
+        }
+    };
+    let peers: Vec<crate::sfu::GossipPeer> = config
+        .sfu_cascade_peers
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|entry| {
+            let (did, addr) = entry.split_once('=')?;
+            let addr: std::net::SocketAddr = addr.parse().ok()?;
+            Some(crate::sfu::GossipPeer {
+                did: did.to_string(),
+                addr,
+            })
+        })
+        .collect();
+    info!(
+        "SFU cascade: local_did={}, listen={}, {} peer(s)",
+        local_did,
+        bind_addr,
+        peers.len()
+    );
+    match crate::sfu::TcpGossip::start(local_did.clone(), max, bind_addr, peers).await {
+        Ok(g) => g as std::sync::Arc<dyn crate::sfu::CascadeGossip>,
+        Err(e) => {
+            warn!(
+                "SFU cascade gossip failed to start: {} — running standalone",
+                e
+            );
+            std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max))
+        }
+    }
+}
+
 /// For executor binaries: exit with status 1 once the REST API thread from
 /// [`run`] fails or panics.
 ///
@@ -808,4 +1043,18 @@ pub fn exit_when_api_fails(api_thread: JoinHandle<Result<(), AnyError>>) {
         error!("REST API server failed, exiting: {}", reason);
         std::process::exit(1);
     });
+}
+
+#[cfg(test)]
+mod start_tests {
+    // Grants that did not load used to panic inside `run`, which the launcher runs in its own
+    // process. The failure now comes back through the handle `run` returns.
+    #[test]
+    fn a_failed_start_reports_its_reason_through_the_handle() {
+        let reason = super::failed_start("Could not load the grants: no database".to_string())
+            .join()
+            .expect("the handle does not panic")
+            .unwrap_err();
+        assert_eq!(reason.to_string(), "Could not load the grants: no database");
+    }
 }

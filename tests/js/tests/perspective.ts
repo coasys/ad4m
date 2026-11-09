@@ -1,8 +1,18 @@
-import { Ad4mClient, Link, LinkQuery, MentionMessage, PerspectiveProxy, PerspectiveState, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, HasMany, Link, LinkQuery, Literal, MentionMessage, Mentioning, Model, PerspectiveProxy, PerspectiveState, Property, QuerySubscriptionProxy, TextContent, WakerSubscriptionManager } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
 import { pollUntil } from "../utils/utils";
+
+/** A note that takes part in TextContent and Mentioning, as an app's message would. */
+@Model({ name: "WakerNote", implements: [TextContent, Mentioning] })
+class WakerNote extends Ad4mModel {
+    @Property({ through: "test://note_text", required: true, alias: { TextContent: "text" } })
+    body: string = ""
+
+    @HasMany({ through: "test://mentions", alias: { Mentioning: "mentions" } })
+    mentioned: string[] = []
+}
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
@@ -128,6 +138,41 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 const linksPostMutation = await create.get({} as LinkQuery);
                 expect(linksPostMutation.length).to.equal(2);
+            })
+
+            // #1176: flow links are monotonic only when Shared. The executor
+            // reads the stored status, not the one a call names, so the
+            // engine's Local cache stays replaceable: by a batched update whose
+            // old link carries no status, and by a linkMutations removal
+            // labelled 'shared' (the default).
+            it('can replace a Local ad4m://flow/ link by batched update and by linkMutations', async () => {
+                const ad4mClient = testContext.ad4mClient!;
+                const p = await ad4mClient.perspective.add("test-local-flow-cache");
+                const query = new LinkQuery({source: 'ad4m://proposal-1176', predicate: 'ad4m://flow/current_state'})
+                const cache = await p.add(new Link({
+                    source: 'ad4m://proposal-1176',
+                    predicate: 'ad4m://flow/current_state',
+                    target: 'literal:string:done'
+                }), 'local')
+
+                const { status: _status, ...oldWithoutStatus } = cache as any
+                const batchId = await p.createBatch()
+                await p.update(oldWithoutStatus, new Link({
+                    source: 'ad4m://proposal-1176',
+                    predicate: 'ad4m://flow/current_state',
+                    target: 'literal:string:next'
+                }), batchId)
+                const committed = await p.commitBatch(batchId)
+                expect(committed.removals.length).to.equal(1)
+                let links = await p.get(query)
+                expect(links.map(l => l.data.target)).to.deep.equal(['literal:string:next'])
+
+                const removed = await p.linkMutations({additions: [], removals: links})
+                expect(removed.removals.length).to.equal(1)
+                links = await p.get(query)
+                expect(links.length, "the Local cache link is gone").to.equal(0)
+
+                await ad4mClient.perspective.remove(p.uuid)
             })
 
             it(`doesn't error when duplicate entries passed to removeLinks`, async () => {
@@ -273,21 +318,75 @@ export default function perspectiveTests(testContext: TestContext) {
                     debounceMs: 50,
                     onWake: (_sub, _result, mentions) => { wakes.push(mentions) },
                 })
+                // The agent a mention is for: not the executor's agent, which writes
+                // the links here, since the agent's own links never mention it.
+                const me = 'did:test:me'
                 try {
+                    await p.ensureSubjectClass(WakerNote)
                     await manager.subscribe({
                         id: 'waker-mention-parents',
                         type: 'mention',
                         perspective: p.uuid,
                         channel: '',
-                        query: 'SELECT ?source WHERE { ?source <test://mentions> <test://me> . }',
+                        // The shape of get_mention_waker_config's queries: names in
+                        // TextContent text, and Mentioning's `mentions` (here `test://mentions`).
+                        className: TextContent.builtinUri,
+                        query: JSON.stringify({
+                            where: { OR: [{ text: { contains: 'Mia', author: { not: me } } }] },
+                            properties: ['text'],
+                            links: ['text'],
+                        }),
+                        terms: ['Mia', me],
+                        did: me,
+                        mentionClass: Mentioning.builtinUri,
+                        mentionQuery: JSON.stringify({
+                            where: { mentions: { eq: me, author: { not: me } } },
+                            properties: ['mentions'],
+                            links: ['mentions'],
+                        }),
                     })
                     await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'test://msg1' }))
-                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: 'test://me' }))
+                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://note_text', target: Literal.from('@Miai have news').toUrl() }))
+                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: me }))
 
                     await pollUntil(() => wakes.length > 0, { label: 'waker wake for test://msg1' })
-                    expect(wakes).to.deep.equal([[{ address: 'test://msg1', parents: ['test://channel'] }]])
+                    const executorAgent = (await ad4mClient.agent.me()).did
+                    expect(wakes).to.have.length(1)
+                    expect(wakes[0]).to.have.length(1)
+                    const [mention] = wakes[0]!
+                    expect(mention).to.deep.include({
+                        address: 'test://msg1',
+                        parents: ['test://channel'],
+                        ancestors: [],
+                        // The mention link's provenance: who wrote it, verified. Its
+                        // text holds "Mia" only as a substring, so the link woke it.
+                        author: executorAgent,
+                        verified: true,
+                        via: 'mentions',
+                    })
+                    expect(mention.timestamp).to.be.a('string')
                 } finally {
                     manager.disposeAll()
+                    await ad4mClient.perspective.remove(p.uuid)
+                }
+            })
+
+            it('a SPARQL live query follows a link that is added, then removed', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add("live sparql rows")
+                const subscription = await p.subscribeQuery('SELECT ?target WHERE { <test://live-source> <test://live-predicate> ?target . }')
+                const rows = () => subscription.result as unknown as any[]
+                try {
+                    expect(rows()).to.eql([])
+
+                    const link = await p.add(new Link({ source: 'test://live-source', predicate: 'test://live-predicate', target: 'test://live-target' }))
+                    await pollUntil(() => rows().length === 1, { label: 'live query row for the added link' })
+                    expect(JSON.stringify(rows()[0])).to.include('test://live-target')
+
+                    await p.remove(link)
+                    await pollUntil(() => rows().length === 0, { label: 'live query row removed with the link' })
+                } finally {
+                    subscription.dispose()
                     await ad4mClient.perspective.remove(p.uuid)
                 }
             })
@@ -341,49 +440,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 await pollUntil(() => linkRemoved.called, { timeoutMs: 5000, label: "linkRemoved callback fires" });
                 expect(linkRemoved.called).to.be.true;
                 //expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
-            })
-
-            // SdnaOnly doesn't load links into prolog engine
-            it.skip('shares subscription between identical prolog queries', async () => {
-                const ad4mClient: Ad4mClient = testContext.ad4mClient!
-                const p = await ad4mClient.perspective.add("Subscription test")
-
-                const query = 'triple(X, _, "test://target").'
-                
-                // Create first subscription
-                const sub1 = await p.subscribeInfer(query)
-                const sub1Id = sub1.id
-                const callback1 = sinon.fake()
-                sub1.onResult(callback1)
-
-                // Create second subscription with same query
-                const sub2 = await p.subscribeInfer(query) 
-                const sub2Id = sub2.id
-                const callback2 = sinon.fake()
-                sub2.onResult(callback2)
-
-                // Assert they got same subscription ID
-                expect(sub1Id).to.equal(sub2Id)
-
-                // Add a link that matches the query
-                await p.add(new Link({
-                    source: "test://source",
-                    target: "test://target"
-                }))
-
-                // Wait for subscription callbacks to fire (covers establishment + propagation)
-                await pollUntil(() => callback1.called && callback2.called, { timeoutMs: 5000, intervalMs: 100, label: "subscription callbacks fire" });
-
-                // Verify both callbacks were called
-                expect(callback1.called).to.be.true
-                expect(callback2.called).to.be.true
-
-                // Verify both got same result
-                const result1 = callback1.getCall(callback1.callCount - 1).args[0]
-                const result2 = callback2.getCall(callback2.callCount - 1).args[0]
-                console.log("result1", result1)
-                expect(result1).to.deep.equal(result2)
-                expect(result1[0].X).to.equal("test://source")
             })
 
             // SdnaOnly doesn't load links into prolog engine
@@ -896,55 +952,17 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(await proxy.getSingleTarget(new LinkQuery(link1))).to.equal('test://target2')
             })
 
-            // SdnaOnly doesn't load links into prolog engine
-            it.skip('can subscribe to Prolog query results', async () => {
-                // Add some test data
-                await proxy.add(new Link({
-                    source: "ad4m://root",
-                    target: "note-ipfs://Qm123"
-                }))
-                await proxy.add(new Link({
-                    source: "note-ipfs://Qm123",
-                    target: "todo-ontology://is-todo"
-                }))
-
-                // Create subscription
-                const subscription = await (proxy as any).subscribeInfer('triple(X, _, "todo-ontology://is-todo").')
-                
-                // Check initial result
-                const initialResult = subscription.result
-                expect(initialResult).to.be.an('array')
-                expect(initialResult.length).to.equal(1)
-                expect(initialResult[0].X).to.equal('note-ipfs://Qm123')
-
-                // Set up callback for updates
-                const updates: any[] = []
-                const unsubscribe = subscription.onResult((result: any) => {
-                    updates.push(result)
-                })
-
-                // Add another link that should trigger an update
-                await proxy.add(new Link({
-                    source: "note-ipfs://Qm456",
-                    target: "todo-ontology://is-todo"
-                }))
-
-                // Wait for subscription update
-                await pollUntil(() => updates.length > 0, { timeoutMs: 5000, intervalMs: 100, label: "subscription update received" });
-
-                // Verify we got an update
-                expect(updates.length).to.be.greaterThan(0)
-                const latestResult = updates[updates.length - 1]
-                expect(latestResult).to.be.an('array')
-                expect(latestResult.length).to.equal(2)
-                expect(latestResult.map((r: any) => r.X)).to.include('note-ipfs://Qm123')
-                expect(latestResult.map((r: any) => r.X)).to.include('note-ipfs://Qm456')
-
-                // Clean up subscription
-                unsubscribe()
-                subscription.dispose()
+            it('refuses a Prolog live query with 400', async () => {
+                let error: any
+                try {
+                    await ad4mClient.perspective.subscribeQuery(proxy.uuid, 'triple(X, _, "todo-ontology://is-todo").')
+                } catch (e) {
+                    error = e
+                }
+                expect(error, 'subscribeQuery rejects').to.exist
+                expect(error.status).to.equal(400)
+                expect(error.body).to.include('Prolog live queries are no longer supported')
             })
-
         })
     }
 }

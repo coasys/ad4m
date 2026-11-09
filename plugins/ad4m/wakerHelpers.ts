@@ -24,16 +24,35 @@ export function buildWakeMessage(
 
   if (mentions && mentions.length > 0) {
     lines.push("");
-    // "items", not "messages": the mention query matches any link whose text
-    // carries the agent's name, so the address can be an instance of any class
-    // the space defines — the agent types it from the ontology, not from here.
+    // "items", not "messages": any record can carry the mention link, so the
+    // address can be an instance of any class the space defines — the agent
+    // types it from the ontology, not from here.
     lines.push(`Mentioned items (${mentions.length}):`);
     for (const m of mentions) {
       lines.push(`  Item: ${m.address}`);
+      // Who put the mention on the item, and when: the signer of the link it is
+      // in (the mention link to the agent, or the text link that names it), not
+      // necessarily whoever wrote the rest of the item.
+      lines.push(
+        `  Mentioned by: ${m.author ?? "(unknown)"} (signature ${m.verified ? "verified" : "NOT verified"})`,
+      );
+      if (m.timestamp) lines.push(`  Mentioned at: ${m.timestamp}`);
+      // A mention link names the agent on purpose; a name in the text may only use the word.
+      if (m.via === "mentions") lines.push("  Matched by: a mention link to you");
+      if (m.via === "text") {
+        lines.push(
+          "  Matched by: your name or DID in the text; a mention link may also exist (a name used as a word can be a false alarm)",
+        );
+      }
       if (m.parents.length > 0) {
         lines.push(`  Parents: ${m.parents.join(", ")}`);
       } else {
         lines.push(`  Parents: (unknown)`);
+      }
+      // Everything above the parents, nearest first — the context an item sits in, given rather
+      // than left for the agent to walk to one call at a time.
+      if (m.ancestors?.length) {
+        lines.push(`  Ancestors: ${m.ancestors.join(", ")}`);
       }
     }
   }
@@ -47,7 +66,7 @@ export async function postWake(
   agentDid: string,
   logger: any,
   mentions?: MentionMessage[],
-): Promise<void> {
+): Promise<boolean> {
   logger.info(
     `[ad4m-waker] postWake: sub=${sub.id}, type=${sub.type}, mentions=${mentions?.length ?? 0}`,
   );
@@ -67,10 +86,12 @@ export async function postWake(
     });
     if (!resp.ok) {
       logger.error(`[ad4m-waker] wake POST failed: ${resp.status}`);
-    } else {
-      logger.info(`[ad4m-waker] wake POST sent successfully`);
+      return false;
     }
+    logger.info(`[ad4m-waker] wake POST sent successfully`);
+    return true;
   } catch (e: any) {
     logger.error(`[ad4m-waker] wake POST error: ${e.message}`);
+    return false;
   }
 }

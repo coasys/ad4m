@@ -22,8 +22,7 @@
 use crate::agent::AgentContext;
 use crate::perspectives::hardwired_class::ensure_subject_class;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::{Link, LinkQuery, LinkStatus};
-use ad4m_client::literal::Literal;
+use crate::types::{Link, LinkStatus};
 
 pub(crate) const FLOW_INSTANCE_CLASS: &str = "FlowInstance";
 pub(crate) const FLOW_INSTANCE_TARGET_CLASS: &str = "ad4m://FlowInstance";
@@ -32,10 +31,14 @@ pub(crate) const FLOW_INSTANCE_SDNA: &str = include_str!("hardwired_sdna/flow_in
 pub(crate) const FLOW_URI_PREDICATE: &str = "ad4m://flow/flow_uri";
 /// `FlowInstance → subject` — the base expression the flow runs on.
 pub(crate) const FLOW_BASE_PREDICATE: &str = "ad4m://flow/base";
-/// `FlowInstance → currentState` — the engine's per-replica cache of the
-/// derived state. Written [`LinkStatus::Local`] only (see
-/// [`write_local_current_state`]); the fold never reads it.
-pub(crate) const FLOW_CURRENT_STATE_PREDICATE: &str = "ad4m://flow/current_state";
+/// `FlowInstance → currentState`: the engine's per-replica state cache as it
+/// was written before #1424, as a `Local` link. Nothing writes or reads it any
+/// more — the state lives in
+/// [`replica_state`](crate::perspectives::flow_instance::replica_state) — and
+/// old links under it are dead data. Kept only so a perspective whose
+/// registered `FlowInstance` shape still declares it can be told to
+/// re-register ([`ensure_flow_model_classes`]).
+pub(crate) const LEGACY_FLOW_CURRENT_STATE_PREDICATE: &str = "ad4m://flow/current_state";
 
 pub(crate) const FLOW_TRANSITION_PROPOSAL_CLASS: &str = "FlowTransitionProposal";
 pub(crate) const FLOW_TRANSITION_PROPOSAL_TARGET_CLASS: &str = "ad4m://FlowTransitionProposal";
@@ -44,35 +47,72 @@ pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
 
 /// Idempotently register both hard-wired flow-runtime subject classes into the
 /// perspective. Mirrors [`super::interpretation::overlay::classes::ensure_interpretation_overlay_classes`].
-/// `FlowTransitionProposal` carries a `required_path` guard since the outputs
-/// commitment was added to it (#1104); `FlowInstance` has none yet.
+///
+/// A registered shape is replaced when it is out of date in either direction:
+/// it lacks the newest path, or it still declares a path #1424 removed.
+/// `acceptedBy` (read through a getter) is the newest `FlowTransitionProposal`
+/// path; `nonce` was #1108's and `outputs_hash` #1104's — a shape from before
+/// them reads proposals without their votes, and before `nonce` would silently
+/// drop the nonce every proposal now writes. The removed paths are the old
+/// `Local` bookkeeping (`currentState`, `resolvedAs`): a shape still declaring
+/// them would hydrate those dead links as if they were current.
 pub(crate) async fn ensure_flow_model_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    ensure_subject_class(
-        perspective,
-        FLOW_INSTANCE_CLASS,
-        FLOW_INSTANCE_TARGET_CLASS,
-        FLOW_INSTANCE_SDNA,
-        None,
-        context,
-    )
-    .await?;
-    // `resolved_as` is the newest path (with `acceptedBy`, read through a
-    // getter); `nonce` was #1108's and `outputs_hash` #1104's. A perspective
-    // that registered the shape before them reads proposals without their
-    // votes and marks, and before `nonce` would silently drop the nonce every
-    // proposal now writes — so the newest path's presence forces a re-register.
-    ensure_subject_class(
-        perspective,
-        FLOW_TRANSITION_PROPOSAL_CLASS,
-        FLOW_TRANSITION_PROPOSAL_TARGET_CLASS,
-        FLOW_TRANSITION_PROPOSAL_SDNA,
-        Some(crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE),
-        context,
-    )
-    .await
+    use crate::perspectives::flow_instance::atom::{
+        ACCEPTED_BY_PREDICATE, LEGACY_RESOLVED_AS_PREDICATE,
+    };
+    for (class_name, target_class, sdna, required, removed) in [
+        (
+            FLOW_INSTANCE_CLASS,
+            FLOW_INSTANCE_TARGET_CLASS,
+            FLOW_INSTANCE_SDNA,
+            None,
+            LEGACY_FLOW_CURRENT_STATE_PREDICATE,
+        ),
+        (
+            FLOW_TRANSITION_PROPOSAL_CLASS,
+            FLOW_TRANSITION_PROPOSAL_TARGET_CLASS,
+            FLOW_TRANSITION_PROPOSAL_SDNA,
+            Some(ACCEPTED_BY_PREDICATE),
+            LEGACY_RESOLVED_AS_PREDICATE,
+        ),
+    ] {
+        if crate::perspectives::hardwired_class::subject_class_registered(perspective, target_class)
+            .await?
+            && crate::perspectives::hardwired_class::shacl_path_present(
+                perspective,
+                target_class,
+                removed,
+            )
+            .await?
+        {
+            perspective
+                .add_sdna(
+                    class_name.to_string(),
+                    String::new(),
+                    crate::perspectives::perspective_instance::SdnaType::SubjectClass,
+                    Some(sdna.to_string()),
+                    context,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("re-registering {class_name} without `{removed}`: {e:#}")
+                })?;
+            continue;
+        }
+        ensure_subject_class(
+            perspective,
+            class_name,
+            target_class,
+            sdna,
+            required,
+            context,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// URI scheme for a freshly-minted `FlowInstance` node: `ad4m://flow/instance/{id}`.
@@ -114,7 +154,9 @@ pub(crate) fn flow_transition_proposal_uri(proposal_id: &str) -> String {
 /// `batch_id` groups this instance write with any consumer's follow-on writes
 /// (e.g. the auto-processor bundling instance mint + first proposal in one
 /// atomic commit). Pass `None` for standalone mints — a single
-/// `create_subject` writes the whole record.
+/// `create_subject` writes the whole record. With a batch, the minter's
+/// bookkeeping row is NOT written here: call [`record_minted_state`] after
+/// `commit_batch` succeeds.
 ///
 /// Returns the freshly-minted `FlowInstance` URI (`ad4m://flow/instance/{id}`).
 ///
@@ -140,13 +182,9 @@ pub(crate) async fn mint_flow_instance(
     // URI (e.g. `coasys://DeliveryFlow`), not the bare name — see
     // James PR #929 R5.
     //
-    // `currentState` is deliberately NOT in this value set: it is the
-    // engine's per-replica cache and goes in as a `Local` link below, in the
-    // same batch, so the shared row never carries a state claim for peers to
-    // read (#987). The SDNA setter is `local: true` as well, for writers that
-    // go through `update_subject`; this path writes the link directly so the
-    // status does not depend on which shape revision this perspective
-    // registered.
+    // No state in the row: the state is per-replica bookkeeping and lives in
+    // `FlowReplicaState` (#1424), seeded below at `initial_state` for the
+    // minting agent so its first pass reports rather than catches up.
     let values = serde_json::json!({
         "flowUri": flow_uri,
         "subject": base_expression,
@@ -164,10 +202,39 @@ pub(crate) async fn mint_flow_instance(
         )
         .await
         .map_err(|e| anyhow::anyhow!("mint_flow_instance: create_subject failed: {e:#}"))?;
-    write_local_current_state(perspective, &uri, initial_state, batch_id, context)
-        .await
-        .map_err(|e| anyhow::anyhow!("mint_flow_instance: {e:#}"))?;
+    // A standalone mint is on the graph now, so its row is written now. A
+    // batched mint's links exist only once the caller's `commit_batch`
+    // succeeds, and `perspective.flowStates` lists every row: written before
+    // that, the row would name an instance that never exists if the batch is
+    // discarded or the commit fails. The caller records it after the commit.
+    if batch_id.is_none() {
+        record_minted_state(perspective, &uri, initial_state, context)
+            .map_err(|e| anyhow::anyhow!("mint_flow_instance: {e:#}"))?;
+    }
     Ok(uri)
+}
+
+/// Record `initial_state` as the minting agent's state for `instance_uri`, so
+/// its first pass reports rather than catches up (#1424).
+///
+/// [`mint_flow_instance`] calls it for a standalone mint. A caller that
+/// minted inside a batch calls it for each instance once `commit_batch` has
+/// succeeded, and never when the batch is discarded or the commit fails.
+pub(crate) fn record_minted_state(
+    perspective: &PerspectiveInstance,
+    instance_uri: &str,
+    initial_state: &str,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    let agent_did = crate::agent::did_for_context(context)?;
+    crate::perspectives::flow_instance::replica_state::FlowReplicaState::set_current_state(
+        &perspective.uuid,
+        &agent_did,
+        instance_uri,
+        initial_state,
+        &perspective.is_teardown,
+    )
+    .map(|_| ())
 }
 
 /// Mint one `FlowTransitionProposal` at its **content-addressed** URI:
@@ -332,87 +399,6 @@ pub(crate) async fn write_flow_transition_proposal(
 /// hardwired SDNA's `evidence` path (locked by the SDNA tests below).
 pub(crate) const PROPOSAL_EVIDENCE_PREDICATE: &str = "ad4m://flow/evidence";
 
-/// Write a `FlowInstance`'s `currentState` link — the engine's **cache** of
-/// what [`crate::perspectives::flow_instance::fold_read_set`] derived.
-///
-/// Nothing reads it back as authority; it exists so a reader without a
-/// perspective (a UI, a prompt block, a model query filtering on state) can
-/// see the fold's answer without walking the atoms. It is written
-/// [`LinkStatus::Local`]: every replica materialises only its own
-/// derivation, so a peer can neither show this replica an unverified claim
-/// nor overwrite its cache with a stale one (#987). A replica that has not
-/// derived yet simply has no `currentState` link — readers treat absence as
-/// "not yet derived", never as an error.
-///
-/// An empty `to_state` is rejected up front: an empty cache would be
-/// indistinguishable from "not yet derived".
-pub(crate) async fn advance_flow_instance_state(
-    perspective: &mut PerspectiveInstance,
-    flow_instance_uri: &str,
-    to_state: &str,
-    batch_id: Option<String>,
-    context: &AgentContext,
-) -> anyhow::Result<()> {
-    if to_state.is_empty() {
-        return Err(anyhow::anyhow!(
-            "advance_flow_instance_state: to_state must not be empty (an empty cache reads as `not yet derived`)"
-        ));
-    }
-    ensure_flow_model_classes(perspective, context).await?;
-    write_local_current_state(perspective, flow_instance_uri, to_state, batch_id, context)
-        .await
-        .map_err(|e| anyhow::anyhow!("advance_flow_instance_state: {e:#}"))
-}
-
-/// Replace this replica's own `currentState` link with `state`, as a
-/// `Local` link. Same single-target semantics as the SDNA setter, restricted
-/// to what is ours: only existing **`Local`** `currentState` links are
-/// removed. A `Shared` value some peer wrote (the pre-#987 executor did) is
-/// left where it is — this engine deletes nothing shared, and hydration
-/// prefers the later write, which is ours.
-pub(crate) async fn write_local_current_state(
-    perspective: &mut PerspectiveInstance,
-    flow_instance_uri: &str,
-    state: &str,
-    batch_id: Option<String>,
-    context: &AgentContext,
-) -> anyhow::Result<()> {
-    let existing = perspective
-        .get_links(&LinkQuery {
-            source: Some(flow_instance_uri.to_string()),
-            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("reading the currentState cache failed: {e:#}"))?;
-    for link in existing
-        .into_iter()
-        .filter(|l| l.status == Some(LinkStatus::Local))
-    {
-        perspective
-            .remove_link(link.into(), batch_id.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("dropping the old currentState cache failed: {e:#}"))?;
-    }
-    let target = Literal::from_string(state.to_string())
-        .to_url()
-        .map_err(|e| anyhow::anyhow!("encoding state `{state}` failed: {e:#}"))?;
-    perspective
-        .add_link(
-            Link {
-                source: flow_instance_uri.to_string(),
-                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-                target,
-            },
-            LinkStatus::Local,
-            batch_id,
-            context,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("writing the currentState cache failed: {e:#}"))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,14 +424,14 @@ mod tests {
         let names: Vec<&str> = props.iter().filter_map(|p| p["name"].as_str()).collect();
         // No "startedAt" property — `Ad4mModel`'s built-in `createdAt`
         // (earliest link timestamp) carries flow-start time on hydration.
-        for expected in ["flowUri", "subject", "currentState"] {
+        for expected in ["flowUri", "subject"] {
             assert!(
                 names.contains(&expected),
                 "FlowInstance SDNA missing '{expected}' property (found {names:?})",
             );
         }
-        // The predicate constants the sync trigger and the direct cache
-        // write use must be the paths the shape declares.
+        // The predicate constants the sync trigger uses must be the paths
+        // the shape declares.
         let path_of = |name: &str| {
             props
                 .iter()
@@ -454,7 +440,6 @@ mod tests {
         };
         assert_eq!(path_of("flowUri"), Some(FLOW_URI_PREDICATE));
         assert_eq!(path_of("subject"), Some(FLOW_BASE_PREDICATE));
-        assert_eq!(path_of("currentState"), Some(FLOW_CURRENT_STATE_PREDICATE));
     }
 
     #[test]
@@ -512,9 +497,7 @@ mod tests {
         // SDNA-declared property names inside `create_subject`; a silent mismatch
         // no-ops the write while the mint returns Ok. This test asserts the
         // scalar properties `mint_flow_instance` passes to `create_subject`
-        // are exactly ones the FlowInstance SDNA declares. `currentState` is
-        // not among them: it bypasses the setter and goes in as a direct
-        // `Local` link (see `write_local_current_state`).
+        // are exactly ones the FlowInstance SDNA declares.
         let v = parse(FLOW_INSTANCE_SDNA);
         let props: Vec<&str> = v["properties"]
             .as_array()
@@ -530,45 +513,27 @@ mod tests {
         }
     }
 
-    /// The `currentState` cache is per-replica (#987): the SDNA declares the
-    /// property `local`, its setter writes `local`, and the predicate the
-    /// direct write path uses is the one the shape declares — so a
-    /// `Local` link written by `write_local_current_state` hydrates as the
-    /// `currentState` property, and an `update_subject` caller lands on the
-    /// same status.
+    /// The engine's bookkeeping left the graph in #1424: neither hardwired
+    /// shape may declare the old `Local` paths, or hydration would surface
+    /// dead links as the current state and as fired marks — and
+    /// `ensure_flow_model_classes` would re-register on every call.
     #[test]
-    fn current_state_property_is_local_in_sdna() {
-        let v = parse(FLOW_INSTANCE_SDNA);
-        let prop = v["properties"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["name"].as_str() == Some("currentState"))
-            .expect("currentState property must exist");
-        assert_eq!(
-            prop["path"].as_str(),
-            Some(FLOW_CURRENT_STATE_PREDICATE),
-            "the direct write path and the SDNA must agree on the predicate",
-        );
-        assert_eq!(
-            prop["local"].as_bool(),
-            Some(true),
-            "property must be local"
-        );
-        // Optional: a row synced from a peer carries no cache until this
-        // replica's pass runs, and `model_query` only returns instances that
-        // satisfy every `min_count >= 1` property — so a required cache would
-        // hide every remote instance.
-        assert_eq!(
-            prop["min_count"].as_u64(),
-            Some(0),
-            "currentState must be optional (min_count 0)"
-        );
-        let setter = prop["setter"].as_array().expect("setter array");
-        assert!(
-            !setter.is_empty() && setter.iter().all(|a| a["local"].as_bool() == Some(true)),
-            "every setter action must be local, got {setter:?}",
-        );
+    fn no_shape_declares_the_removed_bookkeeping_paths() {
+        use crate::perspectives::flow_instance::atom::LEGACY_RESOLVED_AS_PREDICATE;
+        for (sdna, removed) in [
+            (FLOW_INSTANCE_SDNA, LEGACY_FLOW_CURRENT_STATE_PREDICATE),
+            (FLOW_TRANSITION_PROPOSAL_SDNA, LEGACY_RESOLVED_AS_PREDICATE),
+        ] {
+            let v = parse(sdna);
+            for prop in v["properties"].as_array().unwrap() {
+                assert_ne!(prop["path"].as_str(), Some(removed), "{prop}");
+                assert_ne!(prop["local"].as_bool(), Some(true), "{prop}");
+            }
+            assert!(
+                !sdna.contains(removed),
+                "{removed} must not appear anywhere in the SDNA, setters included"
+            );
+        }
     }
 
     #[test]
@@ -710,13 +675,10 @@ mod tests {
     }
 
     #[test]
-    fn votes_and_marks_are_read_through_the_predicates_the_engine_writes() {
-        // `acceptedBy` and `resolvedAs` are the engine's, not a client's: a
-        // vote goes through `acceptProposal` and a mark through the pass. The
-        // shape reads them and must never offer to write them.
-        use crate::perspectives::flow_instance::atom::{
-            ACCEPTED_BY_PREDICATE, RESOLVED_AS_PREDICATE,
-        };
+    fn votes_are_read_through_the_predicate_the_engine_writes() {
+        // `acceptedBy` is the engine's, not a client's: a vote goes through
+        // `acceptProposal`. The shape reads it and must never offer to write it.
+        use crate::perspectives::flow_instance::atom::ACCEPTED_BY_PREDICATE;
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
         let property = |name: &str| {
             v["properties"]
@@ -727,10 +689,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} property must exist"))
                 .clone()
         };
-        for (name, predicate) in [
-            ("acceptedBy", ACCEPTED_BY_PREDICATE),
-            ("resolvedAs", RESOLVED_AS_PREDICATE),
-        ] {
+        for (name, predicate) in [("acceptedBy", ACCEPTED_BY_PREDICATE)] {
             let p = property(name);
             assert_eq!(p["path"].as_str(), Some(predicate), "{name} path");
             assert_eq!(p["writable"].as_bool(), Some(false), "{name} is read-only");
@@ -828,6 +787,232 @@ mod tests {
         assert!(
             fi["instances"].as_array().map_or(false, |a| a.is_empty()),
             "fresh perspective must return empty FlowInstance list"
+        );
+    }
+
+    /// Read the flows back through the loader the engine uses and check the
+    /// Delivery fixture survived: name, both states, the one transition, and
+    /// the input type.
+    async fn assert_delivery_flow_loaded(perspective: &PerspectiveInstance) {
+        let flows = crate::perspectives::flow_context::load_shacl_flows(perspective)
+            .await
+            .expect("load_shacl_flows");
+        let flow = flows
+            .get("delivery://DeliveryFlow")
+            .unwrap_or_else(|| panic!("Delivery flow not loaded, got {:?}", flows.keys()));
+        assert_eq!(flow.name, "Delivery");
+        let states: Vec<&str> = flow.states.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(states, vec!["identified", "scoped"]);
+        let transitions: Vec<(&str, &str, &str)> = flow
+            .transitions
+            .iter()
+            .map(|t| {
+                (
+                    t.action_name.as_str(),
+                    t.from_state.as_str(),
+                    t.to_state.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(transitions, vec![("Scope", "identified", "scoped")]);
+        assert_eq!(flow.input_types, vec!["Task".to_string()]);
+    }
+
+    /// #1650: `add_sdna(Flow, Some(flow_json))` — the path `addSdna` with
+    /// `sdnaType: "flow"` and the MCP `add_flow` tool take — must parse the
+    /// JSON as a flow. It used to go through the class-shape parser and fail
+    /// with "missing field `target_class`".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_registers_a_flow_definition() {
+        use crate::perspectives::interpretation_test_support::delivery_flow_json_for;
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        perspective
+            .add_sdna(
+                "Delivery".to_string(),
+                String::new(),
+                SdnaType::Flow,
+                Some(delivery_flow_json_for("Task")),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna(Flow, flow JSON) must succeed");
+
+        assert_delivery_flow_loaded(&perspective).await;
+    }
+
+    /// #1650, batch variant: `add_sdna_batch` parses each entry by its own
+    /// type, so a flow next to a subject class registers both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_batch_registers_a_flow_definition() {
+        use crate::perspectives::interpretation_test_support::delivery_flow_json_for;
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        perspective
+            .add_sdna_batch(
+                vec![
+                    (
+                        "Note".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(
+                            r#"{"target_class": "ns://Note", "properties": [
+                                {"path": "ns://title", "name": "title", "datatype": "xsd://string"}
+                            ]}"#
+                            .to_string(),
+                        ),
+                    ),
+                    (
+                        "Delivery".to_string(),
+                        String::new(),
+                        SdnaType::Flow,
+                        Some(delivery_flow_json_for("Task")),
+                    ),
+                ],
+                &ctx,
+            )
+            .await
+            .expect("add_sdna_batch with a flow entry must succeed");
+
+        assert_delivery_flow_loaded(&perspective).await;
+        assert!(
+            perspective.get_shape("Note").is_ok(),
+            "the subject-class entry of the batch must still register"
+        );
+    }
+
+    /// A flow definition whose state carries a `consensusRule` the reader
+    /// cannot read back: `fromRole.linkedTo` with a key outside the known set
+    /// (#1144). `linkedTo` is a raw `Value` in `ModelQuery`, so serde keeps
+    /// the key and `parse_flow_to_links` emits it as written.
+    fn unreadable_gate_flow_json() -> String {
+        serde_json::json!({
+            "name": "Gated",
+            "namespace": "gated://",
+            "start_action": [],
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                {
+                    "name": "scoped",
+                    "value": 1.0,
+                    "consensusRule": {
+                        "n": 1,
+                        "fromRole": {
+                            "className": "ns://Role",
+                            "didProperty": "agent",
+                            "linkedTo": { "via": "ns://has", "to": "base", "author": "did:key:admin" }
+                        }
+                    }
+                }
+            ],
+            "transitions": [
+                { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
+            ],
+            "inputTypes": [],
+            "outputTypes": [],
+        })
+        .to_string()
+    }
+
+    /// Nothing of the `Gated` flow is stored: no `ad4m://has_flow` link naming
+    /// it, no link under its namespace, and the loader does not return it.
+    async fn assert_gated_flow_not_stored(perspective: &PerspectiveInstance) {
+        let gated_name = ad4m_client::literal::Literal::from_string("Gated".to_string())
+            .to_url()
+            .expect("literal url");
+        let links = perspective
+            .get_links(&crate::types::LinkQuery::default())
+            .await
+            .expect("get_links");
+        let has_flow: Vec<_> = links
+            .iter()
+            .filter(|l| {
+                l.data.predicate.as_deref() == Some("ad4m://has_flow")
+                    && l.data.target == gated_name
+            })
+            .collect();
+        assert!(has_flow.is_empty(), "has_flow link stored: {has_flow:?}");
+        let under_namespace: Vec<_> = links
+            .iter()
+            .filter(|l| l.data.source.starts_with("gated://"))
+            .collect();
+        assert!(
+            under_namespace.is_empty(),
+            "flow links stored: {under_namespace:?}"
+        );
+        let flows = crate::perspectives::flow_context::load_shacl_flows(perspective)
+            .await
+            .expect("load_shacl_flows");
+        assert!(
+            !flows.contains_key("gated://GatedFlow"),
+            "loader returned the refused flow"
+        );
+    }
+
+    /// #1650 review: `add_sdna(Flow)` refuses a flow whose `consensusRule`
+    /// cannot be read before anything is written. It used to store the
+    /// `has_flow` / `sdna` links and only then fail in `add_links` on the
+    /// SHACL links, leaving a half-registered flow.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_refuses_an_unreadable_consensus_rule_before_writing() {
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        let err = perspective
+            .add_sdna(
+                "Gated".to_string(),
+                String::new(),
+                SdnaType::Flow,
+                Some(unreadable_gate_flow_json()),
+                &ctx,
+            )
+            .await
+            .expect_err("add_sdna must refuse an unreadable consensusRule")
+            .to_string();
+        assert!(
+            err.contains("gated://Gated.scoped") && err.contains("author"),
+            "the error names the state and the key; got: {err}"
+        );
+
+        assert_gated_flow_not_stored(&perspective).await;
+    }
+
+    /// Batch variant: every entry is parsed and checked before any is
+    /// written, so a bad flow second refuses the whole batch — the valid
+    /// class entry before it is not stored either.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_batch_refuses_an_unreadable_consensus_rule_before_writing() {
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        perspective
+            .add_sdna_batch(
+                vec![
+                    (
+                        "Note".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(
+                            r#"{"target_class": "ns://Note", "properties": [
+                                {"path": "ns://title", "name": "title", "datatype": "xsd://string"}
+                            ]}"#
+                            .to_string(),
+                        ),
+                    ),
+                    (
+                        "Gated".to_string(),
+                        String::new(),
+                        SdnaType::Flow,
+                        Some(unreadable_gate_flow_json()),
+                    ),
+                ],
+                &ctx,
+            )
+            .await
+            .expect_err("add_sdna_batch must refuse an unreadable consensusRule");
+
+        assert_gated_flow_not_stored(&perspective).await;
+        assert!(
+            perspective.get_shape("Note").is_err(),
+            "the batch is refused whole: the class entry before the bad flow is not stored"
         );
     }
 }

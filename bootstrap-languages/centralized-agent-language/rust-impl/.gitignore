@@ -1,4 +1,5 @@
 target/
 build-deno/
 build/
-Cargo.lock
+# Cargo.lock is committed: without it every build resolves the newest
+# dependency versions, and the bundle's address in the network seed moves.

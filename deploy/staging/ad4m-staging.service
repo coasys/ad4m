@@ -1,6 +1,6 @@
 # AD4M staging executor: the build of origin/staging that update.sh deployed
 # last. Every listener is on 127.0.0.1 (RPC 12400, Holochain 12401/12402,
-# MCP 3003); nginx publishes 12400 as https://staging.ad4m.dev.
+# MCP 12403); nginx publishes 12400 as https://staging.ad4m.dev.
 # Setup, update and rollback: deploy/staging/README.md. The general guide
 # for a headless executor is docs-src/headless-executor.md.
 [Unit]
@@ -25,6 +25,10 @@ ExecStart=%h/.local/share/ad4m-staging/current/ad4m-executor run --config %h/.co
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=60
+# Each perspective keeps its store's files open; the default soft limit of
+# 1024 ran out at about 40 perspectives. The executor raises its own soft
+# limit at startup as well; this sets it before the process starts.
+LimitNOFILE=65536
 
 [Install]
 WantedBy=default.target

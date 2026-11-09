@@ -10,20 +10,36 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
 |---|---|
 | `mod.rs` | `JsCore`: Deno `MainWorker` from the custom snapshot, extension registration, `new_for_language` |
 | `language_bootstrap.js` | Main module of every language isolate: loads the bundle, wires `ad4m:host` |
-| `host.js` | `ad4m:host` shim: ~28 functions (agent, holochain, http, hashing, language ctx, emit, storage) backed by ops |
-| `*_extension.rs` + `.js` | `#[op2]` ops per area: agent (15), languages (8), utils (5), signature (2), pubsub (1). Holochain (15), runtime (3), entanglement (5) ops live in their service dirs |
+| `host.js` | `ad4m:host` shim: ~28 functions (agent, holochain, http, hashing, language ctx, emit, storage) backed by ops. `httpFetch`: 10 s for headers and body; the body is read as a stream and refused (`code` `"too-large"`) past `HTTP_FETCH_MAX_BYTES` (32 MiB) or the call's lower `maxBytes` (5th argument). The limit counts decompressed bytes: Deno's fetch decompresses a `Content-Encoding: gzip` reply and the stream yields only those (`host_http_fetch_tests.rs`) |
+| `*_extension.rs` + `.js` | `#[op2]` ops per area: agent (16), languages (8), utils (5), signature (2), pubsub (1). Holochain (15), runtime (3), entanglement (5) ops live in their service dirs |
 | `string_module_loader.rs`, `options.rs`, `futures.rs`, `error.rs` | module loading from strings, worker options, future bridging |
-| `residual_lazy.rs`, `../../CUSTOM_DENO_SNAPSHOT.bin` | snapshot artifacts; rebuild with `pnpm build` after any `.js` change |
+| `residual_lazy.rs`, `../../CUSTOM_DENO_SNAPSHOT.bin` | snapshot artifacts; `pnpm build` in `rust-executor/` rebuilds them when an input changed |
 
 ## Rules
 
 - JS files here must be pure ASCII (`ascii_str_include!`). Non-ASCII fails const-eval.
 - Changing any op or `.js` requires `pnpm build` in `rust-executor/` (snapshot),
-  not just `cargo build`.
+  not just `cargo build`. `scripts/build-deno-snapshot.sh` hashes this directory's
+  `.rs` and `.js` files, the holochain and runtime service extensions,
+  `bin/generate_snapshot.rs`, `Cargo.lock` and the two `Cargo.toml`; when the hash
+  matches the stamp (`CUSTOM_DENO_SNAPSHOT.inputs`) it skips the build.
+  `FORCE_DENO_SNAPSHOT=1` builds anyway.
+- A new extension in `ad4m_language_extensions()`, or a file one of them reads
+  (`esm`, ops), outside this directory goes into that script's `inputs` list.
+  Otherwise a change to it keeps the old snapshot.
 - `main.js` is unreferenced (deleted in spec item 1). Do not add to it.
 - There is no `core.languageController` any more; Rust owns the controller, JS
   only runs bundles.
 - Every language runtime gets the extensions in `options.rs::ad4m_language_extensions()`,
   and the snapshot builder uses the same list. Language code comes from third parties:
   no wallet extension, and no op that unlocks, locks or reloads the keystore or writes
-  the node's profile. Languages sign through `signature_service` / `agent_service`.
+  the main agent's profile. Languages sign through `signature_service` / `agent_service`.
+- `agent_open_sealed` (`agentOpenSealed` in `host.js`, `AGENT.openSealed`) opens boxes
+  sealed to the runtime's agent context (`agent::sealed_box`) with the agent's secret
+  inside the executor; no op hands a secret key to a language. Sealing needs only the
+  recipient's DID, so languages seal themselves.
+- Language code publishes no executor event directly (#1371): `PUBSUB.publish` always
+  fails (`pubsub_extension.rs`). The events a language raises go through the dedicated ops
+  in `languages_extension.rs` (perspective diff, sync state, telepresence signal), and the
+  Rust side names each one's topic and audience. A new language event gets its own op the
+  same way, never a topic string from JS.

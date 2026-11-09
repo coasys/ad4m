@@ -209,6 +209,17 @@ const EXECUTOR_STARTUP_TIMEOUT_MS = 300_000;
 /** Output lines startExecutor() includes when the executor never gets ready. */
 const STARTUP_LOG_TAIL_LINES = 50;
 
+/**
+ * The data folder `startExecutor` runs an executor in for `dataPath`: a short path under the
+ * OS temp dir (socket paths have a length limit), the same for the same `dataPath`.
+ */
+export function executorDataPath(dataPath: string): string {
+    return path.join(
+        os.tmpdir(),
+        `ad4m-${createHash('sha1').update(dataPath).digest('hex').slice(0, 12)}`,
+    );
+}
+
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
     apiPort: number,
@@ -233,6 +244,10 @@ export async function startExecutor(dataPath: string,
     dynamicClassTools: boolean = false,
     runHolochain: boolean = true,
     sharedStores: boolean = true,
+    // Added to the executor's environment, e.g. `AD4M_<FLAG>` settings.
+    env: Record<string, string> = {},
+    // Added to `ad4m-executor init`, e.g. `--operator <did:scid>`.
+    initArgs: string[] = [],
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
@@ -244,10 +259,7 @@ export async function startExecutor(dataPath: string,
     }
     const command = executorBinary();
 
-    const effectiveDataPath = path.join(
-        os.tmpdir(),
-        `ad4m-${createHash('sha1').update(dataPath).digest('hex').slice(0, 12)}`,
-    );
+    const effectiveDataPath = executorDataPath(dataPath);
 
     console.log(bootstrapSeedPath);
     console.log(dataPath);
@@ -256,7 +268,7 @@ export async function startExecutor(dataPath: string,
     }
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
-    execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
+    execSync(`"${command}" init --data-path "${effectiveDataPath}" --network-bootstrap-seed "${bootstrapSeedPath}" ${initArgs.join(' ')}`, {cwd: process.cwd()})
 
     // Shared mode for the local language-language and neighbourhood store,
     // so executors see each other's published languages and neighbourhoods
@@ -313,11 +325,13 @@ export async function startExecutor(dataPath: string,
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
     else { args.push('--insecure-no-admin-credential'); }
 
-    return spawnExecutor(args, apiPort, { enableMcp });
+    return spawnExecutor(args, apiPort, { enableMcp, env });
 }
 
-/** The `ad4m-executor` binary the suites run. */
+/** The `ad4m-executor` binary the suites run: `EXECUTOR_PATH` if set (as in
+ *  the SFU wind tunnel's harness), else this checkout's release build. */
 export function executorBinary(): string {
+    if (process.env.EXECUTOR_PATH) return path.resolve(process.env.EXECUTOR_PATH);
     return path.resolve(__dirname, '..', '..', '..', 'target', 'release', 'ad4m-executor');
 }
 
@@ -339,7 +353,11 @@ export async function spawnExecutor(
     const { enableMcp = false, env = {}, onOutput } = opts;
     const executorProcess = spawn(executorBinary(), args, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, ...env },
+        // AD4M_EXIT_WITH_PARENT: the executor ends with this process, however it ends. A
+        // SIGKILLed or cancelled job, or mocha --exit past a test that never stopped its
+        // executor, otherwise leaves it running on the runner. An executor too old to know the
+        // variable ignores it.
+        env: { ...process.env, AD4M_EXIT_WITH_PARENT: 'true', ...env },
     });
     // Decode as a stream, so a multibyte character split across two chunks
     // survives in the startup-failure tail. Every data handler below gets strings.
