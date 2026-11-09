@@ -154,7 +154,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
             continue;
         }
 
-        match sparql_store.add_link(&link_expr) {
+        match sparql_store.add_link_supplied(&link_expr) {
             Ok(_) => {
                 migrated_count += 1;
             }
