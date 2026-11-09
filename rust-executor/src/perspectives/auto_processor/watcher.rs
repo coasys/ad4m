@@ -93,9 +93,9 @@ impl LeaseGuard {
                         // user as still active during a long interpretation
                         // pass (fix for #1010: processing counts as liveness).
                         if let Some(did) = context.managed_did() {
-                            if let Err(e) = crate::db::Ad4mDb::with_global_instance(|db| {
-                                db.update_agent_last_seen(did)
-                            }) {
+                            if let Err(e) =
+                                crate::db_backend::db_backend().update_agent_last_seen(did)
+                            {
                                 log::debug!(
                                     "lease heartbeat: update_agent_last_seen({did}) failed: {e:#}"
                                 );
@@ -850,8 +850,7 @@ pub async fn run_one_pass(
     // first heartbeat fires — a managed user running a long pass must not look
     // offline while doing the most active work it ever does (fix for #1010).
     if let Some(did) = context.managed_did() {
-        if let Err(e) = crate::db::Ad4mDb::with_global_instance(|db| db.update_agent_last_seen(did))
-        {
+        if let Err(e) = crate::db_backend::db_backend().update_agent_last_seen(did) {
             log::debug!("run_one_pass: initial update_agent_last_seen({did}) failed: {e:#}");
         }
     }
