@@ -162,6 +162,10 @@ pub struct Ad4mConfig {
     /// next start reads it. The file's shape, so no secret.
     #[serde(default)]
     pub config_overrides: serde_json::Map<String, serde_json::Value>,
+    /// Shut down once the process that started the executor is gone (unix). For launchers and
+    /// test harnesses that may die without stopping it. Default `false`: a daemonised executor
+    /// (`nohup`, `&` from a shell that then exits) keeps running.
+    pub exit_with_parent: Option<bool>,
     /// Local DID for this SFU node in a cascade cluster.  Required if
     /// any cascade options are set; otherwise the SFU runs single-node.
     pub sfu_local_did: Option<String>,
@@ -606,6 +610,7 @@ impl Ad4mConfig {
             config_file: None,
             pinned_config_keys: Vec::new(),
             config_overrides: serde_json::Map::new(),
+            exit_with_parent: None,
             sfu_local_did: None,
             sfu_max_participants_per_node: None,
             sfu_cascade_listen: None,

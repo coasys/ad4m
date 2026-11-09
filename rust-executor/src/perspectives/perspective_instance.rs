@@ -4,7 +4,7 @@ use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
+use super::shacl_parser::{check_consensus_rule_links, parse_flow_to_links, parse_shacl_to_links};
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
@@ -364,6 +364,26 @@ impl SdnaType {
                 s
             )),
         }
+    }
+}
+
+/// Parse the `shacl_json` handed to `add_sdna` / `add_sdna_batch` into links.
+/// A flow definition (`SHACLFlow`: states, transitions, no `target_class`)
+/// goes through the flow parser; everything else is a class shape (#1650).
+/// A flow whose `consensusRule` could not be read back is refused here, before
+/// `add_sdna` / `add_sdna_batch` write anything (#1144).
+fn parse_sdna_json_to_links(
+    sdna_type: &SdnaType,
+    json: &str,
+    name: &str,
+) -> Result<Vec<Link>, AnyError> {
+    match sdna_type {
+        SdnaType::Flow => {
+            let links = parse_flow_to_links(json, name)?;
+            check_consensus_rule_links(&links)?;
+            Ok(links)
+        }
+        SdnaType::SubjectClass | SdnaType::Custom => parse_shacl_to_links(json, name),
     }
 }
 
@@ -2851,7 +2871,7 @@ impl PerspectiveInstance {
         // Validate before touching the store: see `add_sdna_inner`.
         let shacl_links = shacl_json
             .as_deref()
-            .map(|shacl| parse_shacl_to_links(shacl, &name))
+            .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
             .transpose()?;
         let result = {
             let mutex = self.sdna_change_mutex.clone();
@@ -2981,7 +3001,7 @@ impl PerspectiveInstance {
             .map(|(name, sdna_code, sdna_type, shacl_json)| {
                 let shacl_links = shacl_json
                     .as_deref()
-                    .map(|shacl| parse_shacl_to_links(shacl, &name))
+                    .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
                     .transpose()?;
                 Ok((name, sdna_code, sdna_type, shacl_links))
             })
