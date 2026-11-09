@@ -125,6 +125,10 @@ pub struct IdentitySettings {
     /// The API port: without `public_origins`, a key statement's `audience` must be one of the
     /// loopback origins on it.
     pub api_port: Option<u16>,
+    /// Whether the API answers on a listener the network reaches
+    /// (`Ad4mConfig::listens_on_network`): with it and no `public_origins`, `audiences`
+    /// accepts no origin — key login is refused until `public_origins` names them.
+    pub network_listener: bool,
 }
 
 impl IdentitySettings {
@@ -168,6 +172,7 @@ impl IdentitySettings {
             allow_private_src: config.identity_allow_private_src.unwrap_or(false),
             public_origins: config.public_origins.clone().unwrap_or_default(),
             api_port: config.port,
+            network_listener: config.listens_on_network(),
         }
     }
 
@@ -180,9 +185,11 @@ impl IdentitySettings {
     }
 
     /// The origins a key statement may name here: `public_origins` normalised, else the
-    /// loopback origins of the API port. Fails on a configured value that is no origin.
+    /// loopback origins of the API port — and none at all on a network listener without
+    /// `public_origins` (`key_login::Audiences::None`). Fails on a configured value that is
+    /// no origin.
     pub fn audiences(&self) -> Result<key_login::Audiences, String> {
-        key_login::Audiences::new(&self.public_origins, self.api_port)
+        key_login::Audiences::new(&self.public_origins, self.api_port, self.network_listener)
     }
 }
 
@@ -247,6 +254,14 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         settings.store_url.as_deref(),
         settings.allow_private_src,
     );
+    // `check` refused a bad origin at start; past it, none is accepted.
+    let audiences = settings.audiences().unwrap_or_default();
+    if audiences == key_login::Audiences::None {
+        log::warn!(
+            "identity: key login is off: this executor listens on the network and has no \
+             public_origins (--public-origin)"
+        );
+    }
     let service = IdentityService {
         backend,
         cache,
@@ -255,8 +270,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         resolver: Arc::new(resolver),
         challenges: Default::default(),
         inbox: Default::default(),
-        // `check` refused a bad origin at start; past it, none is accepted.
-        audiences: settings.audiences().unwrap_or_default(),
+        audiences,
     };
     let service = Arc::new(service);
     if SERVICE.set(service.clone()).is_err() {
@@ -269,7 +283,10 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
             let changes = service.cache.subscribe();
             handle.spawn(run_recheck(service.clone(), changes));
             handle.spawn(inbox::run_pull(service.clone()));
-            handle.spawn(key_login::run_key_session_watch(service));
+            // The key sessions' watcher too: `load_local_identities` replays the held
+            // verdicts before the spawned task may first run.
+            let changes = service.cache.subscribe();
+            handle.spawn(key_login::run_key_session_watch(service, changes));
         }
         Err(_) => log::error!(
             "identity: no runtime for the re-check of links, the inbox pull and key sessions"
@@ -1129,6 +1146,53 @@ mod tests {
             assert!(written.is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
             assert!(temp_files_in(&lang).is_empty());
+        }
+    }
+
+    /// With no `public_origins` on a listener the network reaches (`localhost` off, or
+    /// TLS — that listener binds 0.0.0.0), `audiences` accepts no origin: key login is
+    /// refused until `public_origins` names the origins clients reach the executor at.
+    /// Loopback-only executors keep their own loopback origins, and a configured
+    /// `public_origins` counts on a network listener too.
+    #[test]
+    fn on_a_network_listener_without_public_origins_key_login_accepts_no_audience() {
+        let mut network = config(None, None);
+        network.port = Some(12000);
+        network.localhost = Some(false);
+        let settings = IdentitySettings::from_config(&network, None);
+        assert_eq!(settings.audiences(), Ok(key_login::Audiences::None));
+
+        // The TLS listener binds 0.0.0.0 even when `localhost` stays on.
+        network.localhost = Some(true);
+        network.tls = Some(crate::config::TlsConfig {
+            cert_file_path: "/cert".into(),
+            key_file_path: "/key".into(),
+            tls_port: 12001,
+        });
+        assert_eq!(
+            IdentitySettings::from_config(&network, None).audiences(),
+            Ok(key_login::Audiences::None)
+        );
+
+        // With `public_origins` they alone are the audiences, on a network listener too.
+        network.public_origins = Some(vec!["https://a.example".into()]);
+        assert_eq!(
+            IdentitySettings::from_config(&network, None).audiences(),
+            Ok(key_login::Audiences::Public(vec![
+                "https://a.example".into()
+            ]))
+        );
+
+        // A loopback-only executor keeps its own loopback origins on the API port.
+        let mut local = config(None, None);
+        local.port = Some(12000);
+        for localhost in [None, Some(true)] {
+            local.localhost = localhost;
+            assert_eq!(
+                IdentitySettings::from_config(&local, None).audiences(),
+                Ok(key_login::Audiences::loopback(12000)),
+                "{localhost:?}"
+            );
         }
     }
 

@@ -239,7 +239,9 @@ pub struct Ad4mConfig {
     /// reach loopback and private addresses. Off by default; for tests and local development.
     pub identity_allow_private_src: Option<bool>,
     /// `public_origins`: the origins clients reach this executor at. A key statement's
-    /// `audience` must be one of them; unset, one of this executor's own loopback origins.
+    /// `audience` must be one of them; unset, one of this executor's own loopback origins —
+    /// and on a listener the network reaches (`listens_on_network`: TLS, or `localhost`
+    /// off) none at all, so key login is refused.
     pub public_origins: Option<Vec<String>>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
@@ -280,6 +282,14 @@ impl Ad4mConfig {
             Some("shared") => KEY_NAME_PLATFORM.to_string(),
             _ => KEY_NAME_MAIN.to_string(),
         }
+    }
+
+    /// Whether the API answers on a listener the network reaches: the TLS listener
+    /// binds 0.0.0.0, and the cleartext one does too when `localhost` is off without
+    /// TLS (`api::bind_api_listeners`). With no `public_origins` such a listener
+    /// accepts no key statement (`key_login::Audiences::None`).
+    pub fn listens_on_network(&self) -> bool {
+        self.tls.is_some() || self.localhost == Some(false)
     }
 
     /// The data folder: `app_data_path`, else the default `prepare` fills in.

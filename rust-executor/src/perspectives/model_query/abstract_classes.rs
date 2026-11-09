@@ -45,14 +45,32 @@ pub struct AbstractIndex {
 
 impl AbstractIndex {
     pub fn load(store: &SparqlStore) -> Result<Self, Error> {
+        // Every definition triple joins a *counting* reifier, as the shape loader's do: a
+        // marker or an alias a peer sent whose stored verdict does not count must neither
+        // make a class abstract (which blocks its create) nor pick the property an abstract
+        // write targets.
+        let guard = super::sparql_builder::LinkGuard::default();
         let marked = format!(
             r#"
             SELECT ?targetClass WHERE {{
-                ?targetClass <rdf://type> <ad4m://SubjectClass> .
-                ?targetClass <ad4m://shape> ?shape .
-                ?shape <{ABSTRACT_PREDICATE}> ?marker .
+                ?targetClass <rdf://type> <ad4m://SubjectClass> .{type_guard}
+                ?targetClass <ad4m://shape> ?shape .{shape_guard}
+                ?shape <{ABSTRACT_PREDICATE}> ?marker .{marker_guard}
             }}
-            "#
+            "#,
+            type_guard = guard.join(
+                "?_gr_type",
+                "?targetClass",
+                "<rdf://type>",
+                "<ad4m://SubjectClass>"
+            ),
+            shape_guard = guard.join("?_gr_shape", "?targetClass", "<ad4m://shape>", "?shape"),
+            marker_guard = guard.join(
+                "?_gr_marker",
+                "?shape",
+                &format!("<{ABSTRACT_PREDICATE}>"),
+                "?marker"
+            ),
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query(&marked)?)?;
         let abstract_classes = rows
@@ -65,12 +83,26 @@ impl AbstractIndex {
         let aliased = format!(
             r#"
             SELECT ?targetClass ?prop ?alias WHERE {{
-                ?targetClass <rdf://type> <ad4m://SubjectClass> .
-                ?targetClass <ad4m://shape> ?shape .
-                ?shape <sh://property> ?prop .
-                ?prop <{ALIAS_PREDICATE}> ?alias .
+                ?targetClass <rdf://type> <ad4m://SubjectClass> .{type_guard}
+                ?targetClass <ad4m://shape> ?shape .{shape_guard}
+                ?shape <sh://property> ?prop .{prop_guard}
+                ?prop <{ALIAS_PREDICATE}> ?alias .{alias_guard}
             }}
-            "#
+            "#,
+            type_guard = guard.join(
+                "?_ga_type",
+                "?targetClass",
+                "<rdf://type>",
+                "<ad4m://SubjectClass>"
+            ),
+            shape_guard = guard.join("?_ga_shape", "?targetClass", "<ad4m://shape>", "?shape"),
+            prop_guard = guard.join("?_ga_prop", "?shape", "<sh://property>", "?prop"),
+            alias_guard = guard.join(
+                "?_ga_alias",
+                "?prop",
+                &format!("<{ALIAS_PREDICATE}>"),
+                "?alias"
+            ),
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query(&aliased)?)?;
         let mut aliases: HashMap<String, HashMap<String, BTreeMap<String, String>>> =

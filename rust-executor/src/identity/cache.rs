@@ -436,8 +436,14 @@ pub struct KelCache {
     /// One fetch per identity at a time, so concurrent callers share store round trips.
     fetching: Mutex<HashMap<String, Arc<Gate>>>,
     /// When each log last refreshed from the configured store (unix seconds), in memory only:
-    /// after a restart every log counts as stale ([`KelCache::refreshed_within`]).
+    /// after a restart every log counts as stale ([`KelCache::refreshed_within`]). A failed
+    /// refresh notes one too, so a link's read keeps its backoff; a session admission counts
+    /// only `read_ok`.
     refreshed: StdMutex<HashMap<String, u64>>,
+    /// When the store last answered each log's read (unix seconds), in memory only: what a
+    /// session admission's freshness counts ([`KelCache::read_ok_within`]). A failed refresh
+    /// never notes one, so an outage cannot age-stamp a stale head as fresh.
+    read_ok: StdMutex<HashMap<String, u64>>,
     /// The logs the configured store answers behind the cache ([`CacheError::Behind`]), in
     /// memory only, until a refresh succeeds ([`KelCache::store_behind`]).
     behind: StdMutex<HashMap<String, StoreBehind>>,
@@ -657,6 +663,7 @@ impl KelCache {
             chains: Mutex::new(HashMap::new()),
             fetching: Mutex::new(HashMap::new()),
             refreshed: StdMutex::new(HashMap::new()),
+            read_ok: StdMutex::new(HashMap::new()),
             behind: StdMutex::new(HashMap::new()),
             store_keys,
             on_fork: None,
@@ -910,6 +917,9 @@ impl KelCache {
         chains.remove(scid);
         if let Ok(mut refreshed) = self.refreshed.lock() {
             refreshed.remove(scid);
+        }
+        if let Ok(mut read_ok) = self.read_ok.lock() {
+            read_ok.remove(scid);
         }
         self.note_behind(scid, None);
         self.key_map.forget(scid);
@@ -1194,9 +1204,14 @@ impl KelCache {
         };
         match &result {
             Ok(_) => {
-                self.note_refreshed(&scid, now());
+                let at = now();
+                self.note_refreshed(&scid, at);
+                self.note_read(&scid, at);
                 self.note_behind(&scid, None);
             }
+            // A head the store signed below the cache's is no read of the cached head:
+            // it does not mark it fresh (no `note_read`), so a session is not admitted
+            // on a head the store has not confirmed. The cached log stays the newer one.
             Err(CacheError::Behind { store, .. }) => self.note_behind(&scid, Some(*store)),
             Err(_) => {}
         }
@@ -1224,6 +1239,34 @@ impl KelCache {
             }
             refreshed.insert(scid.to_string(), at);
         }
+    }
+
+    /// Marks `scid`'s log as answered by the store at `at`: a refresh that folded, or a head
+    /// the store signed behind the cache's. Sessions count these, never a failed attempt.
+    pub(crate) fn note_read(&self, scid: &str, at: u64) {
+        if let Ok(mut read_ok) = self.read_ok.lock() {
+            if read_ok.len() >= REFRESHED_BOUND && !read_ok.contains_key(scid) {
+                let oldest = read_ok
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(scid, _)| scid.clone());
+                if let Some(oldest) = oldest {
+                    read_ok.remove(&oldest);
+                }
+            }
+            read_ok.insert(scid.to_string(), at);
+        }
+    }
+
+    /// Whether the store answered `scid`'s log within `window` seconds before `now` (in this
+    /// run of the executor). Session admission uses this, never
+    /// [`KelCache::refreshed_within`]: a failed refresh marks an attempt, not a read.
+    pub fn read_ok_within(&self, scid: &str, now: u64, window: u64) -> bool {
+        self.read_ok
+            .lock()
+            .ok()
+            .and_then(|read_ok| read_ok.get(scid).copied())
+            .is_some_and(|at| now.saturating_sub(at) < window)
     }
 
     /// Whether `scid`'s log refreshed from the configured store within `window` seconds before
@@ -1539,6 +1582,9 @@ pub(crate) mod tests {
         pub key_owner_override: StdMutex<Option<String>>,
         /// When set, the first `log` call notifies `.0`, then waits for `.1`.
         pub pause_store: StdMutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+        /// A `log` call for one of these DIDs notifies the paired `Notify` once and never
+        /// answers: a store that stalls for that log only.
+        pub stall_for: StdMutex<HashMap<String, Arc<Notify>>>,
         /// A `log` call fails as unavailable.
         pub store_down: AtomicBool,
         /// A `key_owner` call fails as unavailable.
@@ -1579,6 +1625,7 @@ pub(crate) mod tests {
                 log_calls: AtomicUsize::new(0),
                 key_owner_override: StdMutex::new(None),
                 pause_store: StdMutex::new(None),
+                stall_for: StdMutex::new(HashMap::new()),
                 store_down: AtomicBool::new(false),
                 key_index_down: AtomicBool::new(false),
                 key_index_down_for: StdMutex::new(HashSet::new()),
@@ -1656,6 +1703,11 @@ pub(crate) mod tests {
     impl IdentityBackend for FakeStore {
         async fn log(&self, _did: &str, from: u64) -> Result<Option<LogPage>, IdentityError> {
             self.log_calls.fetch_add(1, Ordering::SeqCst);
+            let stalled = self.stall_for.lock().unwrap().get(_did).cloned();
+            if let Some(entered) = stalled {
+                entered.notify_one();
+                std::future::pending::<()>().await;
+            }
             let pause = self.pause_store.lock().unwrap().take();
             if let Some((entered, release)) = pause {
                 entered.notify_one();
