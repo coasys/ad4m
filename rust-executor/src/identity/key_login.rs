@@ -1444,7 +1444,7 @@ pub async fn run_key_session_watch(
             // awaiting a finished handle returns at once and the dispatch check
             // replaces it, so a pass that ends between the check and this guard is
             // still dispatched past, not waited out to the next tick.
-            _ = async { rechecking.as_mut().unwrap().await }, if due && rechecking.is_some() => {}
+            _ = async { rechecking.as_mut().unwrap().await }, if wakes_on_pass_end(due, rechecking.as_ref()) => {}
         }
         if due && rechecking.as_ref().is_none_or(|r| r.is_finished()) {
             due = false;
@@ -1454,6 +1454,14 @@ pub async fn run_key_session_watch(
             }));
         }
     }
+}
+
+/// Whether the watch's wait wakes when the re-check pass `pass` ends: while a
+/// pass is due and one is in flight. A pass that already finished counts too —
+/// awaiting its handle returns at once and the dispatch check replaces it, so
+/// the due pass starts on this step rather than at the next event.
+fn wakes_on_pass_end(due: bool, pass: Option<&tokio::task::JoinHandle<()>>) -> bool {
+    due && pass.is_some()
 }
 
 #[cfg(test)]
@@ -3925,6 +3933,22 @@ mod tests {
         );
         watch.abort();
         no_operator();
+    }
+
+    // The interleaving the old `!r.is_finished()` guard got wrong: a pass that
+    // has already finished — its handle not yet dispatched past — while a pass
+    // is due. The wait must still wake on it: awaiting the finished handle
+    // returns at once and the dispatch check replaces it, instead of parking
+    // the due pass to the next event.
+    #[tokio::test]
+    async fn a_finished_pass_still_wakes_a_due_recheck() {
+        let pass = tokio::spawn(async {});
+        while !pass.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        assert!(wakes_on_pass_end(true, Some(&pass)));
+        assert!(!wakes_on_pass_end(false, Some(&pass)));
+        assert!(!wakes_on_pass_end(true, None));
     }
 
     // A key whose grants are gone leaves the re-check's attempts: the next pass retains
