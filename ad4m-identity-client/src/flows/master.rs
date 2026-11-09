@@ -786,8 +786,15 @@ pub async fn remove_master<R: ExecutorRpc>(
     // app sharing the vault installed since (a duplicate delivery of the same master taken, a
     // promote) is never removed, whatever its index, since the check did not see it; an
     // unknown index (`None`) forgets nothing.
-    if vault.master_index(&scid)?.is_some() {
-        vault.forget_master_at(&scid, epoch)?;
+    let mut version = version;
+    if vault.master_index(&scid)?.is_some()
+        && matches!(vault.forget_master_at(&scid, epoch)?, Forgot::Forgot)
+    {
+        // A holder mark that read the custody before this forget (between the write above and
+        // here) may have written `true` back: mark again from what the vault keeps now, so the
+        // record matches the vault once the key is gone. A copy installed since (a take, a
+        // promote) moved the epoch and is marked `true` with its index.
+        version = hold_mark(executor, vault, did, &scid, &own, &Reader::Executor, random).await?;
     }
     // A stage at or behind the log would be promoted or kept by the next refresh, bringing back
     // the key the person just removed. One ahead is a rotation in flight: its owner decides.
