@@ -629,15 +629,18 @@ async fn t3_a_shared_tombstone_in_the_same_diff_does_not_cover_a_local_addition(
     let local = own_local(&alice, TO_STATE, "literal:string:draft");
     let shared = signed(&alice, PROPOSAL, TO_STATE, "literal:string:done");
 
-    p.persist_link_diff(&PerspectiveDiff {
-        additions: vec![
-            retraction_of(&alice, &local),
-            local.clone(),
-            retraction_of(&alice, &shared),
-            shared.clone(),
-        ],
-        removals: vec![],
-    })
+    p.persist_link_diff(
+        &PerspectiveDiff {
+            additions: vec![
+                retraction_of(&alice, &local),
+                local.clone(),
+                retraction_of(&alice, &shared),
+                shared.clone(),
+            ],
+            removals: vec![],
+        },
+        false,
+    )
     .await
     .expect("persist");
 

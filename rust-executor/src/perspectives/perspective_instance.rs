@@ -4,7 +4,7 @@ use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
+use super::shacl_parser::{check_consensus_rule_links, parse_flow_to_links, parse_shacl_to_links};
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression_anchored, create_signed_link, did_for_context};
@@ -372,6 +372,26 @@ impl SdnaType {
                 s
             )),
         }
+    }
+}
+
+/// Parse the `shacl_json` handed to `add_sdna` / `add_sdna_batch` into links.
+/// A flow definition (`SHACLFlow`: states, transitions, no `target_class`)
+/// goes through the flow parser; everything else is a class shape (#1650).
+/// A flow whose `consensusRule` could not be read back is refused here, before
+/// `add_sdna` / `add_sdna_batch` write anything (#1144).
+fn parse_sdna_json_to_links(
+    sdna_type: &SdnaType,
+    json: &str,
+    name: &str,
+) -> Result<Vec<Link>, AnyError> {
+    match sdna_type {
+        SdnaType::Flow => {
+            let links = parse_flow_to_links(json, name)?;
+            check_consensus_rule_links(&links)?;
+            Ok(links)
+        }
+        SdnaType::SubjectClass | SdnaType::Custom => parse_shacl_to_links(json, name),
     }
 }
 
@@ -2009,7 +2029,7 @@ impl PerspectiveInstance {
         link.validate()?;
         let link_expr: LinkExpression = create_signed_link(link.normalize(), context)?.into();
         let result = self
-            .add_link_expression(link_expr, status, batch_id)
+            .add_link_expression_inner(link_expr, status, batch_id, true)
             .await?;
 
         if let Some(agent_did) = context.managed_did() {
@@ -2081,7 +2101,7 @@ impl PerspectiveInstance {
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
                 // Remove from SPARQL store (primary storage)
-                self.persist_link_diff(&diff).await?;
+                self.persist_link_diff(&diff, false).await?;
 
                 // Queue the Prolog fact update and the notification + live-query checks
                 self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2137,11 +2157,30 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Write a link expression whose proof arrived with it — `perspective.addLinkExpression`,
+    /// the SDK's snapshot import. The proof is the caller's, not one this executor created
+    /// now, so the store judges the link as a peer's is (`own == false`), whichever key
+    /// signed it. [`Self::add_link`] and the other signing paths go through
+    /// [`Self::add_link_expression_inner`] with `own == true`.
     pub async fn add_link_expression(
         &mut self,
         link_expression: LinkExpression,
         status: LinkStatus,
         batch_id: Option<String>,
+    ) -> Result<DecoratedLinkExpression, AnyError> {
+        self.add_link_expression_inner(link_expression, status, batch_id, false)
+            .await
+    }
+
+    /// [`Self::add_link_expression`]; `own`: the link's proof was created during the call
+    /// that writes it, so the store writes it as this executor's own
+    /// ([`crate::identity::check_signed_own`]).
+    async fn add_link_expression_inner(
+        &mut self,
+        link_expression: LinkExpression,
+        status: LinkStatus,
+        batch_id: Option<String>,
+        own: bool,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         // Test seam (#981) — see `fail_add_link_after`'s doc comment. The
         // field (and this check) only exist in test builds, so this is
@@ -2191,7 +2230,7 @@ impl PerspectiveInstance {
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&diff)
+        self.persist_link_diff(&diff, own)
             .await?
             .fold_into(&mut decorated_perspective_diff);
 
@@ -2278,7 +2317,7 @@ impl PerspectiveInstance {
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&perspective_diff)
+            self.persist_link_diff(&perspective_diff, true)
                 .await?
                 .fold_into(&mut decorated_perspective_diff);
 
@@ -2399,7 +2438,7 @@ impl PerspectiveInstance {
         };
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&store_diff)
+        self.persist_link_diff(&store_diff, true)
             .await?
             .fold_into(&mut decorated_diff);
 
@@ -2529,7 +2568,7 @@ impl PerspectiveInstance {
             );
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&diff)
+            self.persist_link_diff(&diff, true)
                 .await?
                 .fold_into(&mut decorated_diff);
 
@@ -2635,7 +2674,7 @@ impl PerspectiveInstance {
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
             // Remove from SPARQL store (primary storage)
-            self.persist_link_diff(&persist_diff).await?;
+            self.persist_link_diff(&persist_diff, false).await?;
 
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2933,7 +2972,7 @@ impl PerspectiveInstance {
         // Validate before touching the store: see `add_sdna_inner`.
         let shacl_links = shacl_json
             .as_deref()
-            .map(|shacl| parse_shacl_to_links(shacl, &name))
+            .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
             .transpose()?;
         let result = {
             let mutex = self.sdna_change_mutex.clone();
@@ -3063,7 +3102,7 @@ impl PerspectiveInstance {
             .map(|(name, sdna_code, sdna_type, shacl_json)| {
                 let shacl_links = shacl_json
                     .as_deref()
-                    .map(|shacl| parse_shacl_to_links(shacl, &name))
+                    .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
                     .transpose()?;
                 Ok((name, sdna_code, sdna_type, shacl_links))
             })
@@ -4405,9 +4444,15 @@ impl PerspectiveInstance {
     /// Returns what `ad4m://retracted` tombstones did on the way in
     /// (`monotonic::RetractionEffects`); callers that publish the diff fold
     /// it in so subscribers see what the store holds.
+    /// `own`: every addition of `diff` was signed by this executor during the
+    /// call that writes it, so the store writes them as its own
+    /// ([`crate::identity::check_signed_own`]). `false` for a diff whose
+    /// additions arrived already signed (a caller-supplied proof, an import):
+    /// they are judged as a peer's links are, whichever key signed them.
     pub(crate) async fn persist_link_diff(
         &self,
         diff: &PerspectiveDiff,
+        own: bool,
     ) -> Result<super::monotonic::RetractionEffects, AnyError> {
         // The store judges each link from the key map without I/O: fill it for the
         // signers first (the key index and their logs, through the agent language).
@@ -4416,15 +4461,16 @@ impl PerspectiveInstance {
             .persist_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        self.write_link_diff(diff)
+        self.write_link_diff(diff, own)
     }
 
     /// The store write of [`Self::persist_link_diff`], for a caller that holds `persist_lock`
     /// and has filled the key map for the signers of `diff`
-    /// ([`crate::identity::prepare_link_signers`]).
+    /// ([`crate::identity::prepare_link_signers`]). `own` as it takes it.
     fn write_link_diff(
         &self,
         diff: &PerspectiveDiff,
+        own: bool,
     ) -> Result<super::monotonic::RetractionEffects, AnyError> {
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
@@ -4446,7 +4492,12 @@ impl PerspectiveInstance {
         }
         // Additions after
         for addition in diff.additions.iter().filter(|a| !effects.covers(a)) {
-            if let Err(e) = self.sparql_store.add_link(addition) {
+            let write = if own {
+                self.sparql_store.add_link(addition)
+            } else {
+                self.sparql_store.add_link_supplied(addition)
+            };
+            if let Err(e) = write {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
         }
@@ -8481,11 +8532,12 @@ mod tests {
         map.forget(&log.scid());
     }
 
-    /// The local write path is exempt from the fresh head only for links this executor's own
-    /// agents sign. A local caller with write access hands `addLinkExpression` a link signed
-    /// by a foreign key (revoked in the store, the cache on the head before): it waits for a
-    /// fresh head (`cantCheck`), as it would from a peer. A link a managed user's agent signs,
-    /// written the same way on a stale head, still counts.
+    /// `addLinkExpression` writes what the caller hands it, already signed, so it is judged
+    /// as a peer's link whatever key signed it. A local caller with write access hands it a
+    /// link signed by a foreign key (revoked in the store, the cache on the head before): it
+    /// waits for a fresh head (`cantCheck`), as it would from a peer. So does a link signed
+    /// by a managed user's key — the exemption belongs to a proof this executor creates
+    /// during the call (`add_link` and the paths through it), not to a key it holds.
     #[tokio::test]
     async fn a_foreign_link_written_locally_waits_for_a_fresh_head() {
         use crate::identity::cache::tests::TestLog;
@@ -8559,14 +8611,127 @@ mod tests {
         );
         assert_eq!(
             stored("mine"),
-            (
-                Some(LinkVerdict::Valid),
-                Some(ad4m_identity_core::did_of(&own.scid()))
-            ),
-            "this executor's agent's link: {mine:?}"
+            (Some(LinkVerdict::CantCheck), None),
+            "this executor's agent's key, but the proof is the caller's: {mine:?}"
         );
         map.forget(&foreign.scid());
         map.forget(&own.scid());
+    }
+
+    /// `perspective.addLinkExpression` takes a proof the caller supplied, so what it writes is
+    /// judged as a peer's link: the fresh-head exemption belongs to a proof this executor
+    /// creates during the call, not to a key it holds. A link signed elsewhere by this
+    /// executor's own device key (copied off the machine), handed in through
+    /// `add_link_expression` while the signer's cached head is older than `ADMIT_FRESHNESS`,
+    /// is stored `cantCheck`; the same identity's link this executor signs now through
+    /// `add_link` still counts.
+    #[tokio::test]
+    async fn a_supplied_link_by_this_executors_key_waits_for_a_fresh_head() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+        use ad4m_identity_core::build::Signer;
+
+        let mut perspective = setup().await;
+
+        // The test identity's device `d1` is this executor's own key: the main agent's
+        // wallet secret, as a copy of the key off the machine would hold it.
+        let secret = crate::wallet::wallet_backend()
+            .get_secret_key(crate::wallet::KEY_NAME_MAIN)
+            .expect("the test wallet holds the main key");
+        let device = ed25519_dalek::SigningKey::from_bytes(
+            &secret[..32]
+                .try_into()
+                .expect("the wallet holds a 32-byte ed25519 secret"),
+        );
+        let log = TestLog::with_device(93, device);
+        assert_eq!(
+            format!("did:key:{}", log.device.key()),
+            crate::agent::did(),
+            "the test identity's device is this executor's key"
+        );
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        // The store confirmed that head longer than ADMIT_FRESHNESS ago.
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+
+        // Signed elsewhere by the copied key: the shape `create_signed_expression_anchored`
+        // produces, but the proof arrives with the link — the caller supplied it.
+        let key = log.device.key();
+        let data = {
+            let mut data = create_link().normalize();
+            data.target = "supplied".to_string();
+            data
+        };
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+        let supplied = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data: data.clone(),
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Local),
+        };
+        perspective
+            .add_link_expression(supplied, LinkStatus::Local, None)
+            .await
+            .unwrap();
+
+        // Signed here: `add_link` creates the proof during the call, so the link keeps the
+        // local write's exemption.
+        perspective
+            .add_link(
+                Link {
+                    source: data.source.clone(),
+                    predicate: data.predicate.clone(),
+                    target: "own".to_string(),
+                },
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        let stored = |target: &str| {
+            perspective
+                .sparql_store
+                .get_all_links()
+                .unwrap()
+                .into_iter()
+                .find(|l| l.data.target == target)
+                .unwrap_or_else(|| panic!("no stored link with target {target}"))
+        };
+        let supplied = stored("supplied");
+        assert_eq!(
+            supplied.verdict,
+            Some(LinkVerdict::CantCheck),
+            "the caller-supplied proof waits for a fresh head"
+        );
+        assert_eq!(supplied.person, None);
+        assert_ne!(supplied.proof.valid, Some(true), "it does not count");
+        let own = stored("own");
+        assert_eq!(
+            (own.verdict.clone(), own.person.clone()),
+            (
+                Some(LinkVerdict::Valid),
+                Some(ad4m_identity_core::did_of(&log.scid()))
+            ),
+            "the link this executor signs counts on the stale head"
+        );
+        assert_eq!(own.proof.valid, Some(true));
+        map.forget(&log.scid());
     }
 
     /// The reply and the link-added event carry the judgement the store
@@ -8580,10 +8745,20 @@ mod tests {
         use crate::identity::cache::tests::TestLog;
         use crate::identity::cache::{global_key_map, TrustedLog};
         use crate::identity::resolver::ADMIT_FRESHNESS;
-        use ad4m_identity_core::build::Signer;
 
         let mut perspective = setup().await;
-        let log = TestLog::new(103);
+
+        // The signer's log lists this executor's own key, so `add_link` signs
+        // for it: the store checks the link as this executor's own write.
+        let secret = crate::wallet::wallet_backend()
+            .get_secret_key(crate::wallet::KEY_NAME_MAIN)
+            .expect("the test wallet holds the main key");
+        let device = ed25519_dalek::SigningKey::from_bytes(
+            &secret[..32]
+                .try_into()
+                .expect("the wallet holds a 32-byte ed25519 secret"),
+        );
+        let log = TestLog::with_device(103, device);
         let map = global_key_map();
         map.publish(
             &log.scid(),
@@ -8594,32 +8769,14 @@ mod tests {
         );
         let now = chrono::Utc::now().timestamp() as u64;
         map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
-        let device = log.device.clone();
-        let key = device.key();
-        // The signing key is a managed user's agent on this executor, so the
-        // store checks the link as this executor's own write.
-        Ad4mDb::with_global_instance(|db| {
-            db.add_user("judgement@test", &format!("did:key:{key}"), "pw")
-        })
-        .unwrap();
-
-        let data = create_link().normalize();
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
-        let link = LinkExpression {
-            author: format!("did:key:{key}"),
-            timestamp,
-            data,
-            proof: ExpressionProof {
-                key: format!("did:key:{key}#{key}"),
-                signature: hex::encode(device.sign(&bytes)),
-                anchor: Some(0),
-            },
-            status: Some(LinkStatus::Local),
-        };
 
         let reply = perspective
-            .add_link_expression(link.clone(), LinkStatus::Local, None)
+            .add_link(
+                create_link(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
         let stored = perspective.sparql_store.get_all_links().unwrap();
@@ -8635,6 +8792,12 @@ mod tests {
         );
         assert_eq!(reply.person, stored[0].person);
         assert_eq!(reply.proof.valid, stored[0].proof.valid);
+        // A plain `check_signed` — what the decoration ran before
+        // `persist_link_diff` filled the key map — still reports `cantCheck`
+        // with no person: the stored judgement is the write path's.
+        let checked = LinkExpression::from(reply.clone()).check();
+        assert_eq!(checked.verdict, LinkVerdict::CantCheck);
+        assert_eq!(checked.person, None);
         map.forget(&log.scid());
     }
 

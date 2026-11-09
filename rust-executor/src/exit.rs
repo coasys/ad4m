@@ -4,13 +4,15 @@
 //!
 //! | Code | [`ExitReason`] | When |
 //! |---|---|---|
-//! | 0 | `Stopped` | `runtime.quit`, SIGTERM, SIGINT, stdin closed with `--watch-stdin` |
+//! | 0 | `Stopped` | `runtime.quit`, SIGTERM, SIGINT, SIGHUP, stdin closed with `--watch-stdin`, the parent gone with `--exit-with-parent` |
 //! | 75 | `RestartRequested` | `runtime.restart`: start the executor again with the same arguments |
 //! | 78 | `ConfigRefused` | the config file or a flag is invalid, or two settings refuse each other |
 //! | 79 | `DataFolderBusy` | another executor holds the data folder's lock |
 //! | 80 | `BindFailed` | the API listener cannot bind its port |
 //!
-//! Any other code, or a stop by a signal, is a crash.
+//! Any other code, or a stop by a signal, is a crash. A stop by a signal or by the parent going
+//! whose cleanup a second signal or the 4 s deadline cuts short ends with 1: the stop was asked
+//! for, but nothing was cleaned up.
 
 use std::fs::File;
 use std::io::Read;

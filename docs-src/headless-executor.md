@@ -44,7 +44,9 @@ pnpm install && pnpm build-dapp && (cd core && pnpm install) && pnpm run build-d
 ```
 
 Expected: a `Finished` line for the `release` profile at the end. The first
-build takes 30 to 90 minutes; later ones reuse `target/`. Install it under
+build takes 30 to 90 minutes; later ones reuse `target/`, and
+`build-deno-snapshot` skips the snapshot when its inputs did not change
+(`FORCE_DENO_SNAPSHOT=1` makes it anyway). Install it under
 the commit it was built from:
 
 ```bash

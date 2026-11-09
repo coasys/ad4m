@@ -1584,8 +1584,14 @@ pub(crate) mod tests {
 
     impl TestLog {
         pub fn new(seed: u8) -> Self {
-            let master = SigningKey::from_bytes(&[seed; 32]);
             let device = SigningKey::from_bytes(&[seed.wrapping_add(100); 32]);
+            Self::with_device(seed, device)
+        }
+
+        /// [`TestLog::new`] with `d1`'s key given: a test identity that lists a key the test
+        /// did not mint here (this executor's own device key).
+        pub(crate) fn with_device(seed: u8, device: SigningKey) -> Self {
+            let master = SigningKey::from_bytes(&[seed; 32]);
             let next = ad4m_identity_core::commitment(&master.key(), "salt");
             let enc = ad4m_identity_core::encode_x25519_multikey(&[seed; 32]);
             let mut incept = incept_human(
