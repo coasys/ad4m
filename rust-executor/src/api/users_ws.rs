@@ -134,9 +134,9 @@ async fn create_user(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
     let did =
         um::create_user(&email, &body.password).map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    um::init_user_profile(&did)
-        .await
-        .map_err(WsRpcError::internal)?;
+    // Detached: the reply does not wait for the agent-language publish (see
+    // `init_user_profile`).
+    let _publish = um::init_user_profile(&did).map_err(WsRpcError::internal)?;
 
     let code = um::create_verification_code(&email, "signup")
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
