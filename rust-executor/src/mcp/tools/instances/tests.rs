@@ -1621,6 +1621,157 @@ async fn instance_remove_from_collection_removes_only_the_membership_link() {
     );
 }
 
+/// A membership link that does not count must not pass the idempotency
+/// check: a forged, uncheckable or flagged member link would otherwise
+/// suppress every legitimate add of that item. The counting cut is the
+/// same one model reads apply — `proof.valid == Some(true)` — so Invalid,
+/// CantCheck and Flagged all fail it.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_add_to_collection_writes_when_the_only_membership_does_not_count() {
+    use crate::agent::signatures::{anchored_signing_bytes, TestSigner};
+    use crate::identity::cache::tests::TestLog;
+    use crate::identity::cache::{global_key_map, TrustedLog};
+    use crate::identity::verdict::LinkVerdict;
+    use crate::types::{ExpressionProof, Link as CoreLink, LinkExpression, LinkStatus};
+    use ad4m_identity_core::build::Signer;
+
+    let (handler, uuid, _guard) = setup(false).await;
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("room"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    )["base_uri"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let data_for = |target: &str| {
+        CoreLink {
+            source: channel.clone(),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: target.to_string(),
+        }
+        .normalize()
+    };
+    let store = |link: &LinkExpression| {
+        let mut link = link.clone();
+        link.status = Some(LinkStatus::Shared);
+        perspective.sparql_store.add_link(&link).unwrap();
+    };
+    let verdict_of = |target: &str| {
+        perspective
+            .sparql_store
+            .get_all_links()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.data.target == target)
+            .and_then(|l| l.verdict)
+    };
+
+    // Invalid: a real signature over the membership, then corrupted.
+    let invalid_item = "flux://item/invalid".to_string();
+    let mut forged: LinkExpression = TestSigner::generate().sign(data_for(&invalid_item)).into();
+    forged.proof.signature = "ab".repeat(64);
+    store(&forged);
+    assert!(
+        matches!(verdict_of(&invalid_item), Some(LinkVerdict::Invalid(_))),
+        "premise: the membership must be invalid, got {:?}",
+        verdict_of(&invalid_item)
+    );
+
+    // CantCheck: genuinely signed and anchored, by a key the key map has
+    // no answer for.
+    let cant_check_item = "flux://item/cantcheck".to_string();
+    let uncheckable: LinkExpression = TestSigner::generate()
+        .sign_anchored(data_for(&cant_check_item), 0)
+        .into();
+    store(&uncheckable);
+    assert_eq!(
+        verdict_of(&cant_check_item),
+        Some(LinkVerdict::CantCheck),
+        "premise: the membership must be uncheckable"
+    );
+
+    // Flagged: the signer's log revoked its key after the link's anchor,
+    // and no stored order says the link arrived first.
+    let mut log = TestLog::new(61);
+    log.revoke_d1();
+    let chain = log.chain();
+    let map = global_key_map();
+    map.publish(
+        &log.scid(),
+        TrustedLog {
+            state: chain.state().clone(),
+            trusted: chain.head().seq,
+        },
+    );
+    let flagged_item = "flux://item/flagged".to_string();
+    let data = data_for(&flagged_item);
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let key = log.device.key();
+    let bytes = anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+    store(&LinkExpression {
+        author: format!("did:key:{key}"),
+        timestamp,
+        data,
+        proof: ExpressionProof {
+            key: format!("did:key:{key}#{key}"),
+            signature: hex::encode(log.device.sign(&bytes)),
+            anchor: Some(0),
+        },
+        status: Some(LinkStatus::Shared),
+    });
+    assert_eq!(
+        verdict_of(&flagged_item),
+        Some(LinkVerdict::Flagged),
+        "premise: the membership must be flagged"
+    );
+
+    for item in [&invalid_item, &cant_check_item, &flagged_item] {
+        let add = parse(
+            &handler
+                .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Channel".into(),
+                    base_uri: channel.clone(),
+                    collection: "messages".into(),
+                    item_uri: item.clone(),
+                }))
+                .await,
+        );
+        assert_eq!(add["success"], true, "{add}");
+        assert_eq!(
+            add["links_added"], 1,
+            "a membership that does not count must not suppress the add: {add}"
+        );
+    }
+
+    // Control: with a counting membership already stored, the add is the
+    // documented no-op.
+    let control_item = "flux://item/control".to_string();
+    for expected in [1, 0] {
+        let add = parse(
+            &handler
+                .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Channel".into(),
+                    base_uri: channel.clone(),
+                    collection: "messages".into(),
+                    item_uri: control_item.clone(),
+                }))
+                .await,
+        );
+        assert_eq!(add["links_added"], expected, "{add}");
+    }
+    map.forget(&log.scid());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn add_child_and_get_children_are_class_agnostic() {
     let (handler, uuid, _guard) = setup(false).await;
@@ -4534,4 +4685,180 @@ async fn a_property_stored_through_a_language_takes_the_value_the_language_does(
             .await,
     );
     assert_eq!(on_a_file["success"], true, "{on_a_file}");
+}
+
+/// A channel class for the verdict tests: constructor plus one `local: true`
+/// collection (`messages`), so a `sh://path` or an `ad4m://local` link exists
+/// to corrupt.
+const VERDICT_CHANNEL_SDNA: &str = r#"{
+  "target_class": "flux://VerdictedChannel",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"flux://VerdictedChannel"}
+  ],
+  "properties": [
+    {"path":"flux://vc_name","name":"name","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://vc_name","target":"value"}]},
+    {"path":"ad4m://has_child","name":"messages","collection":true,"writable":true,"local":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ad4m://has_child","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ad4m://has_child","target":"value"}]}
+  ]
+}"#;
+
+/// Write `class`'s SHACL into the perspective's store as a peer would send
+/// it: every link signed by a second signer so it counts, except the
+/// (source-suffix, predicate) pairs in `not_counting`, whose signatures are
+/// corrupted after signing — the store keeps them, judges them `invalid`,
+/// and no schema read may take them.
+fn store_shacl_links(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+    class: &str,
+    sdna: &str,
+    not_counting: &[(&str, &str)],
+) {
+    use crate::agent::signatures::TestSigner;
+    use crate::types::{LinkExpression, LinkStatus};
+
+    let signer = TestSigner::generate();
+    for l in crate::perspectives::shacl_parser::parse_shacl_to_links(sdna, class).unwrap() {
+        let mut le = LinkExpression::from(signer.sign(l.normalize()));
+        if not_counting.iter().any(|(suffix, predicate)| {
+            le.data.source.ends_with(suffix) && le.data.predicate.as_deref() == Some(predicate)
+        }) {
+            le.proof.signature = "ab".repeat(64);
+        }
+        le.status = Some(LinkStatus::Shared);
+        perspective.sparql_store.add_link(&le).unwrap();
+    }
+}
+
+/// A collection whose only `sh://path` does not count is no collection: the
+/// add resolves no predicate from it and writes nothing — a definition link
+/// a peer sent that does not count must not decide the predicate of an
+/// authorised write. The counting control keeps its collection.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_add_to_collection_does_not_use_a_path_that_does_not_count() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    store_shacl_links(
+        &perspective,
+        "VerdictedChannel",
+        VERDICT_CHANNEL_SDNA,
+        &[("VerdictedChannel.messages", "sh://path")],
+    );
+    store_shacl_links(
+        &perspective,
+        "CountedChannel",
+        &VERDICT_CHANNEL_SDNA.replace("VerdictedChannel", "CountedChannel"),
+        &[],
+    );
+
+    for (class_name, want_error) in [("VerdictedChannel", true), ("CountedChannel", false)] {
+        let channel = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: class_name.into(),
+                    properties: Some(props(&[("name", json!("vc"))])),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        )["base_uri"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let add = parse(
+            &handler
+                .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                    perspective_id: uuid.clone(),
+                    class_name: class_name.into(),
+                    base_uri: channel.clone(),
+                    collection: "messages".into(),
+                    item_uri: "flux://item/1".into(),
+                }))
+                .await,
+        );
+        if want_error {
+            assert!(
+                add["error"]
+                    .as_str()
+                    .map(|e| e.contains("unknown collection"))
+                    .unwrap_or(false),
+                "{class_name}: a path that does not count must leave the write refused: {add}"
+            );
+        } else {
+            assert_eq!(add["links_added"], 1, "the counting control writes: {add}");
+        }
+    }
+}
+
+/// `ad4m://local` decides the `LinkStatus` of a write that bypasses the
+/// property's actions. A local declaration that does not count leaves the
+/// collection Shared — the safe direction is the one that withholds, never
+/// the one that gossips what a revoked definition asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_create_writes_a_collection_shared_when_its_local_does_not_count() {
+    use crate::types::{LinkQuery, LinkStatus};
+
+    let (handler, uuid, _guard) = setup(false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    store_shacl_links(
+        &perspective,
+        "VerdictedChannel",
+        VERDICT_CHANNEL_SDNA,
+        &[("VerdictedChannel.messages", "ad4m://local")],
+    );
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "VerdictedChannel".into(),
+                properties: Some(props(&[
+                    ("name", json!("vc")),
+                    ("messages", json!(["flux://item/1"])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let membership = perspective
+        .get_links(&LinkQuery {
+            predicate: Some("ad4m://has_child".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(membership.len(), 1, "{membership:?}");
+    assert_eq!(
+        membership[0].status,
+        Some(LinkStatus::Shared),
+        "an ad4m://local that does not count must not be read: {membership:?}"
+    );
+}
+
+/// The MCP loader's own reads get the same cut: with the class's only
+/// `ad4m://shacl_shape_uri` link not counting, the raw-link parser finds no
+/// shape — `resolve_property_predicate` refuses rather than guessing a
+/// predicate off a definition that does not count.
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_property_predicate_refuses_when_the_shape_pointer_does_not_count() {
+    let (_handler, uuid, _guard) = setup(false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    store_shacl_links(
+        &perspective,
+        "VerdictedChannel",
+        VERDICT_CHANNEL_SDNA,
+        &[("shacl://VerdictedChannel", "ad4m://shacl_shape_uri")],
+    );
+
+    let result =
+        crate::mcp::shacl::resolve_property_predicate(&perspective, "VerdictedChannel", "messages")
+            .await;
+    assert!(
+        matches!(&result, Err(e) if e.contains("No SHACL shape found")),
+        "the shape pointer is required reading and must count: {result:?}"
+    );
 }

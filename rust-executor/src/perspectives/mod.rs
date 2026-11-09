@@ -390,8 +390,11 @@ pub enum Recheck {
 }
 
 /// Judges the links of `scope` again in every perspective, from the key map, and rewrites
-/// those whose verdict or person changed.
-pub async fn recheck_links(scope: &Recheck) {
+/// those whose verdict or person changed. `false` when a perspective's re-check failed (a
+/// store error): the caller runs the scope again later, since nothing else revisits a valid
+/// link whose signer's verdict changed.
+pub async fn recheck_links(scope: &Recheck) -> bool {
+    let mut all = true;
     for perspective in all_perspectives() {
         match perspective.recheck_links(scope).await {
             Ok(0) => {}
@@ -399,9 +402,13 @@ pub async fn recheck_links(scope: &Recheck) {
                 "identity: {changed} links of perspective {} have a new verdict",
                 perspective.persisted.lock().await.uuid
             ),
-            Err(e) => log::warn!("identity: re-check of links failed: {e}"),
+            Err(e) => {
+                all = false;
+                log::warn!("identity: re-check of links failed: {e}")
+            }
         }
     }
+    all
 }
 
 pub fn all_perspectives() -> Vec<PerspectiveInstance> {
