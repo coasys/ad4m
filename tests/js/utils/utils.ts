@@ -385,7 +385,11 @@ export async function spawnExecutor(
     const { enableMcp = false, env = {}, onOutput, stdinFirstLine } = opts;
     const executorProcess = spawn(executorBinary(), args, {
         stdio: [stdinFirstLine === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-        env: { ...process.env, ...env },
+        // AD4M_EXIT_WITH_PARENT: the executor ends with this process, however it ends. A
+        // SIGKILLed or cancelled job, or mocha --exit past a test that never stopped its
+        // executor, otherwise leaves it running on the runner. An executor too old to know the
+        // variable ignores it.
+        env: { ...process.env, AD4M_EXIT_WITH_PARENT: 'true', ...env },
     });
     if (stdinFirstLine !== undefined) {
         executorProcess.stdin!.end(`${stdinFirstLine}\n`);

@@ -263,8 +263,9 @@ impl LinkExpression {
         crate::identity::check_signed_entered(&link_expr, entered_after_revoke)
     }
 
-    /// [`LinkExpression::check_entered`] for a link this executor writes itself
-    /// ([`crate::identity::check_signed_own`]): the local write path only.
+    /// [`LinkExpression::check_entered`] for a link this executor signed during the call that
+    /// writes it ([`crate::identity::check_signed_own`]): the local write path only, never a
+    /// link that arrives already signed.
     pub fn check_own_entered(
         &self,
         entered_after_revoke: Option<bool>,
