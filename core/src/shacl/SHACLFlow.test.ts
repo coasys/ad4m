@@ -298,6 +298,50 @@ describe('SHACLFlow', () => {
       }
     });
 
+    // The decimal grammar must match in linear time: `stateValue` targets
+    // come from other agents' links. Written `[0-9]+\.?[0-9]*`, a digit run
+    // without a dot splits between the two digit classes in every way, and
+    // V8 backtracks through all of them when the match fails at the end
+    // (100k digits then `x`: about 10 s).
+    it('state value decoder rejects a long non-number in linear time', () => {
+      const digits = '1'.repeat(50_000);
+      for (const tail of ['x', 'e', 'e+', '.x']) {
+        const target = `literal:number:${digits}${tail}`;
+        const started = performance.now();
+        const flow = SHACLFlow.fromLinks(flowLinksWithStates('xrt://XFlow', [['s', target]], false), 'xrt://XFlow');
+        const elapsed = performance.now() - started;
+        expect([tail, Number.isNaN(flow.states[0].value)]).toEqual([tail, true]);
+        expect([tail, elapsed < 200]).toEqual([tail, true]);
+      }
+    });
+
+    // Every short payload over the grammar's alphabet decodes as the
+    // grammar in the decoder's doc comment says, written here as that
+    // comment writes it.
+    it('state value decoder matches its documented grammar on every short payload', () => {
+      const grammar = /^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
+      const infinite = /^[+-]?[iI][nN][fF](?:[iI][nN][iI][tT][yY])?$/;
+      const expected = (payload: string) =>
+        grammar.test(payload) ? Number(payload)
+          : infinite.test(payload) ? (payload.startsWith('-') ? -Infinity : Infinity)
+          : NaN;
+      const payloads = [''];
+      for (const [alphabet, maxLength] of [['01.eE+-x', 4], ['1.e+-', 6]] as const) {
+        let layer = [''];
+        for (let length = 1; length <= maxLength; length++) {
+          layer = layer.flatMap(p => [...alphabet].map(c => p + c));
+          payloads.push(...layer);
+        }
+      }
+      const mismatches = payloads.filter(payload => {
+        const target = `literal:number:${encodeURIComponent(payload)}`;
+        const flow = SHACLFlow.fromLinks(flowLinksWithStates('xrt://XFlow', [['s', target]], false), 'xrt://XFlow');
+        return !Object.is(flow.states[0].value, expected(payload));
+      });
+      expect(payloads.length).toBeGreaterThan(10_000);
+      expect(mismatches).toEqual([]);
+    });
+
     // Cross-runtime initial-state table (lifted from Marvin's #1204 review
     // scratch and extended). **Same rows, same winners as
     // `initial_state_table_matches_ts` in
