@@ -297,8 +297,14 @@ function compareCodePoints(a: string, b: string): number {
  *
  * A *missing* `stateValue` link is not this function's case: `fromLinks`
  * reads it as `0`, as Rust does.
+ *
+ * `STATE_VALUE_DECIMAL` is rule 3's grammar with the dot and the digits after
+ * it grouped, `[0-9]+(\.[0-9]*)?`. Same strings, but a digit run can no longer
+ * split between two digit classes, so V8 does not backtrack quadratically on a
+ * long run that fails at the end. Rust's `regex` crate matches in linear time
+ * either way.
  */
-const STATE_VALUE_DECIMAL = /^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
+const STATE_VALUE_DECIMAL = /^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
 const STATE_VALUE_INFINITE = /^[+-]?[iI][nN][fF](?:[iI][nN][iI][tT][yY])?$/;
 function decodeStateValue(target: string): number {
   const payload = target.startsWith("literal:number:")
