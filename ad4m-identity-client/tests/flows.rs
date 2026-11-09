@@ -7397,6 +7397,93 @@ async fn a_reattestation_marks_no_custody_a_removal_took() {
     );
 }
 
+/// Runs a holder mark on the shared vault (through `complete_pending_mark`) right after a
+/// removal's `holdsMaster: false` lands, before that removal forgets the key.
+struct MarkAfterRemovalWrite<'a> {
+    inner: &'a TestExecutor,
+    marker: &'a TestExecutor,
+    shared: SharedVault,
+    did: String,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for MarkAfterRemovalWrite<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let answer = self.inner.call(method, params).await;
+        if method == "identity.recordPut" && answer.is_ok() && !self.done.replace(true) {
+            complete_pending_mark(
+                &ViaExecutor::new(Yielding(self.marker)),
+                &self.shared,
+                &self.did,
+                &SystemClock,
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+        }
+        answer
+    }
+}
+
+/// Lal's ordering gap at c7949a5e2. A and B both hold master #0. A removal on A's shared vault
+/// writes `A = No`; before it forgets the key, a holder mark on A reads the unchanged epoch and
+/// the key still kept, and writes `A = Yes`; the removal then forgets the key. The removal must
+/// end with the record matching the vault (`A = No`), so B's removal is refused `OnlyCopy` and
+/// B keeps the master key.
+#[tokio::test]
+async fn a_mark_between_a_removals_write_and_its_forget_does_not_outlive_the_forget() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &shared, 73).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &b_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+
+    let racing = ViaExecutor::new(MarkAfterRemovalWrite {
+        inner: a.rpc(),
+        marker: a.rpc(),
+        shared: SharedVault(shared.clone()),
+        did: did.clone(),
+        done: Cell::new(false),
+    });
+    remove_master(&racing, &SharedVault(shared.clone()), &did, &OsRandom)
+        .await
+        .unwrap();
+    assert!(
+        racing.rpc().done.get(),
+        "the mark ran between the removal's write and its forget"
+    );
+    assert_eq!(
+        shared.master_index(&scid).unwrap(),
+        None,
+        "the removal took this computer's copy"
+    );
+
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"].holds_master,
+        HoldsMaster::No,
+        "the record says A holds a key the removal forgot"
+    );
+    let refused = remove_master(&b, &b_vault, &did, &OsRandom).await;
+    assert!(
+        matches!(refused, Err(ClientError::OnlyCopy)),
+        "B removed the last copy on a stale mark: {refused:?}"
+    );
+    assert_eq!(b_vault.master_index(&scid).unwrap(), Some(0));
+}
+
 /// A re-attestation attests the recovery pair only: it writes no `holdsMaster` mark, so a
 /// caller's `false` stands — the holder mark comes only from the operation that keeps the
 /// key.
