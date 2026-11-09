@@ -187,7 +187,10 @@ pub async fn create_from_seed<R: ExecutorRpc>(
         },
     };
     // The first version installs the recovery key: a master-signed write (only the master
-    // attests a recovery key), which master #0 signs.
+    // attests a recovery key), which master #0 signs. Its `holdsMaster: true` mark is
+    // fenced by the custody epoch the store produced: moved under the write — a removal
+    // won — the entry is set to what the vault keeps now.
+    let epoch = vault.custody_epoch(&created.scid)?;
     let master = master_of(seed, 0)?;
     let secret = words::recovery_secret(seed);
     let reader = Reader::Recovery {
@@ -195,18 +198,29 @@ pub async fn create_from_seed<R: ExecutorRpc>(
         master: &master,
         clock,
     };
-    created.record = Some(
-        record::write_as(
+    let mut written = record::write_as(
+        executor,
+        vault,
+        &created.did,
+        &reader,
+        &[this],
+        Some(&recovery_key_of(seed)),
+        random,
+    )
+    .await;
+    if written.is_ok() && vault.custody_epoch(&created.scid)? != epoch {
+        written = crate::flows::master::hold_mark(
             executor,
             vault,
             &created.did,
+            &created.scid,
+            &created.device_key_id,
             &reader,
-            &[this],
-            Some(&recovery_key_of(seed)),
             random,
         )
-        .await,
-    );
+        .await;
+    }
+    created.record = Some(written);
     Ok(created)
 }
 

@@ -73,7 +73,7 @@ pub enum Reader<'a> {
 }
 
 /// Writes tried before [`ClientError::RecordBusy`].
-const MAX_WRITES: usize = 4;
+pub(crate) const MAX_WRITES: usize = 4;
 
 /// One change to the record. A write applies its changes to the newest version, so two
 /// writers' changes to different entries both stay.
