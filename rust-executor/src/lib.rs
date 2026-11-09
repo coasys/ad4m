@@ -385,6 +385,36 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     });
 
+    // `exit_with_parent`: end with the process that started us, however it ended. A launcher
+    // that is SIGKILLed, crashes or exits without stopping us (a cancelled CI job, a crashed
+    // Electron) sends no signal, and an executor nobody stops runs on with nobody to talk to.
+    // The parent's PID is polled, not watched with PR_SET_PDEATHSIG, so it works on macOS too.
+    #[cfg(unix)]
+    if config.exit_with_parent.unwrap_or(false) {
+        let parent = std::os::unix::process::parent_id();
+        std::thread::Builder::new()
+            .name("parent-watch".to_string())
+            .spawn(move || {
+                while std::os::unix::process::parent_id() == parent {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                // Nothing in this thread logs: a stderr nobody drains would block the write, and
+                // with it the forced exit below. The line goes out from a thread of its own.
+                std::thread::spawn(move || {
+                    warn!(
+                        "The process that started the executor (PID {parent}) is gone, shutting \
+                         down; exiting anyway after {SHUTDOWN_DEADLINE:?} if cleanup is not done"
+                    )
+                });
+                std::thread::sleep(SHUTDOWN_DEADLINE);
+                std::process::exit(1);
+            })
+            .expect("failed to start the parent-watch thread");
+    }
+
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(config.log_config.as_ref());
