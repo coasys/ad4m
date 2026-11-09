@@ -905,6 +905,41 @@ describe('ApiClient.setToken', () => {
         }
     })
 
+    it('rejects a read sent tokenless and dropped before setToken, not sent under the new token', async () => {
+        jest.useFakeTimers()
+        try {
+            const read = call('perspective.all')
+            await jest.advanceTimersByTimeAsync(0) // socket 0 opens, the read goes out tokenless
+            socket(0).drop() // armed for a retry under the anonymous principal
+            client.setToken('new')
+            await jest.advanceTimersByTimeAsync(500) // the reconnect dials 'new'
+            expect(socket(1).readyState).toBe(1)
+            // The read went out once, tokenless: answered under 'new' it would serve
+            // the new principal's data.
+            expect(socket(1).sent.map(m => m.type)).not.toContain('perspective.all')
+            await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('still retries a tokenless read once on the next socket while no token is set', async () => {
+        jest.useFakeTimers()
+        try {
+            const read = call('perspective.all')
+            await jest.advanceTimersByTimeAsync(0)
+            socket(0).drop()
+            await jest.advanceTimersByTimeAsync(500)
+            expect(socket(1).readyState).toBe(1)
+            const resent = socket(1).sent.find(m => m.type === 'perspective.all')
+            expect(resent).toBeTruthy()
+            socket(1).reply({ id: resent!.id, result: ['p'] })
+            await expect(read).resolves.toEqual(['p'])
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
     it('retries a read on the successor when the socket swap keeps the principal', async () => {
         client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
         const read = call<string[]>('perspective.all')
@@ -946,6 +981,54 @@ describe('ApiClient.setToken', () => {
         const watch = socket(1).sent.find(m => m.type === 'events.watch')!
         socket(1).reply({ id: watch.id, error: { code: 401, message: 'token expired' } })
         await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401 })
+    })
+
+    it('keeps a watchApplied() waiter until the replacement socket\'s retried watch is applied', async () => {
+        jest.useFakeTimers()
+        try {
+            client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+            open()
+            await jest.advanceTimersByTimeAsync(0)
+            const applied = outcomeOf(client.watchApplied())
+            client.setToken('new')
+            await jest.advanceTimersByTimeAsync(0)
+            const watch = socket(1).sent.find(m => m.type === 'events.watch')!
+            // A failure that is no refusal and no close schedules a retry: the waiter's
+            // answer is the retried watch's, not this one's.
+            socket(1).reply({ id: watch.id, error: { code: 408, message: 'timed out' } })
+            await jest.advanceTimersByTimeAsync(0)
+            expect(applied()).toBe('pending')
+            await jest.advanceTimersByTimeAsync(1_000) // the retry sends a fresh events.watch
+            const watches = socket(1).sent.filter(m => m.type === 'events.watch')
+            expect(watches).toHaveLength(2)
+            expect(applied()).toBe('pending')
+            socket(1).reply({ id: watches[1].id, result: {} })
+            await jest.advanceTimersByTimeAsync(0)
+            expect(applied()).toBe('resolved')
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('rejects a watchApplied() waiter once the watch retries run out', async () => {
+        jest.useFakeTimers()
+        try {
+            const error = jest.spyOn(console, 'error').mockImplementation(() => {})
+            open()
+            await jest.advanceTimersByTimeAsync(0)
+            const applied = outcomeOf(client.watchApplied())
+            // The first events.watch and its five retries all time out.
+            for (let i = 0; i < 6; i++) {
+                const watches = socket(0).sent.filter(m => m.type === 'events.watch')
+                socket(0).reply({ id: watches.at(-1)!.id, error: { code: 408, message: 'timed out' } })
+                await jest.advanceTimersByTimeAsync(1_000)
+            }
+            expect(applied()).toMatchObject({ name: 'RpcError', status: 408 })
+            expect(socket(0).sent.filter(m => m.type === 'events.watch')).toHaveLength(6)
+            error.mockRestore()
+        } finally {
+            jest.useRealTimers()
+        }
     })
 
     it('rejects a subscribeQuery reply that lands on the replaced socket', async () => {
@@ -1002,6 +1085,75 @@ describe('ApiClient.setToken', () => {
         } finally {
             facade.close()
         }
+    })
+
+    it('lets a call in flight on the superseded socket settle there when the new token is refused', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        const stale = call<string>('agent.get')
+        const staleOutcome = outcomeOf(stale)
+        await flush()
+        client.setToken('new')
+        const refused = call('agent.status')
+        await flush()
+        // The new token's 401 is its own verdict: the call still in flight on the
+        // superseded socket keeps its own — it settles there, and that socket drains.
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'agent.status')!.id, error: { code: 401, message: 'token expired' } })
+        await expect(refused).rejects.toMatchObject({ name: 'RpcError', status: 401 })
+        await flush()
+        expect(staleOutcome()).toBe('pending')
+        expect(socket(0).readyState).toBe(1) // still open: it drains, it is not closed
+        socket(0).reply({ id: socket(0).sent[0].id, result: 'ok' })
+        await expect(stale).resolves.toBe('ok')
+        await flush()
+        expect(socket(0).readyState).toBe(3) // drained: let go
+        expect(failed).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not answer a later watchApplied() with the refused watch\'s 401 after setToken', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const unsub = client.on('agent-updated', () => {})
+        await flush()
+        const watch = socket(0).sent.find(m => m.type === 'events.watch')!
+        socket(0).reply({ id: watch.id, error: { code: 401, message: 'token expired' } })
+        await flush()
+        unsub() // every handler removed, as an auth-failed app leaves them
+        client.setToken('new')
+        // The refused token's watch outcome is stale: a watch on the new socket
+        // opens and resolves the waiter, not the old 401.
+        await expect(client.watchApplied()).resolves.toBeUndefined()
+    })
+
+    it('settles a watchApplied() waiter from the successor after setToken replaced a connecting socket', async () => {
+        TestSocket.autoOpen = false
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        open()
+        const applied = outcomeOf(client.watchApplied())
+        client.setToken('new')
+        // The connecting socket's open settles against the new socket: its rejection
+        // is the replaced socket's verdict, not the wait's.
+        socket(0).drop()
+        socket(1).open()
+        await flush()
+        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
+        socket(1).reply({ id: watch.id, result: {} })
+        await flush()
+        expect(applied()).toBe('resolved')
+    })
+
+    it('rejects a watchApplied() waiter with the successor\'s own refusal after setToken replaced a connecting socket', async () => {
+        TestSocket.autoOpen = false
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        open()
+        const applied = client.watchApplied()
+        client.setToken('new')
+        socket(0).drop()
+        socket(1).open()
+        await flush()
+        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
+        socket(1).reply({ id: watch.id, error: { code: 401, message: 'token expired' } })
+        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401 })
     })
 })
 

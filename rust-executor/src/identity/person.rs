@@ -299,6 +299,7 @@ mod tests {
     /// by that key at the trusted head, which every reader accepts. Only the first binding does.
     #[tokio::test]
     async fn binding_an_agent_publishes_the_persons_profile_at_the_trusted_seq() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let world = World::new(81);
         world.bind().await;
         let puts = world.puts();
@@ -389,6 +390,7 @@ mod tests {
     /// the agent speaks for the person at the trusted seq.
     #[tokio::test]
     async fn a_profile_publish_writes_the_persons_profile_only_while_bound() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let mut world = World::new(82);
         let (result, sent) = world.publish(false).await;
         result.unwrap();
@@ -420,6 +422,7 @@ mod tests {
     /// reaches it they answer no identity, though the binding stays.
     #[tokio::test]
     async fn a_revoked_device_key_no_longer_names_its_person() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let mut world = World::new(85);
         assert_eq!(
             world.service.identity_of(&world.agent_did).await,
@@ -447,6 +450,7 @@ mod tests {
     /// next record goes one past the store's version, not its own clock, so the store takes it.
     #[tokio::test]
     async fn a_record_written_by_a_clock_ahead_does_not_block_the_next_put() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let world = World::new(84);
         world.bind().await;
         let mut ahead = world.puts()[0].0.clone();
@@ -468,6 +472,7 @@ mod tests {
     /// writes it; a failed did:key publish fails the publish and writes no person's profile.
     #[tokio::test]
     async fn a_failed_persons_profile_leaves_the_did_key_publish_successful() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let world = World::new(83);
         world.store.put_down.store(true, Ordering::SeqCst);
         world.bind().await;

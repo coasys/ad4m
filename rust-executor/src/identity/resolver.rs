@@ -62,6 +62,15 @@ pub const BREAKER: Duration = Duration::from_secs(30);
 /// unreachable store is not paid a read timeout per login attempt.
 const SESSION_READ_BACKOFF: Duration = Duration::from_secs(5);
 
+/// The most identities `admission_failed` remembers a failed read for: past it the
+/// oldest goes, as `note_refreshed`'s bound does. Per-identity backoff, never a
+/// global one.
+const ADMISSION_FAILED_BOUND: usize = 1024;
+/// The most identities an admission read serialises at once (`admission_reads`): a
+/// cancelled caller's entry goes on every insert, and a live one is evicted only past
+/// the bound — losing the read-sharing for it, never the lock it is waited on under.
+const ADMISSION_READS_BOUND: usize = 1024;
+
 // ---------------------------------------------------------------------------------------------
 // Keys that speak for an identity
 // ---------------------------------------------------------------------------------------------
@@ -855,6 +864,12 @@ pub struct Resolver {
     /// answers `StoreUnavailable` during it without another store call — and never
     /// counts the cached head as a fresh read.
     admission_failed: StdMutex<HashMap<String, Instant>>,
+    /// One "stale? → refresh → record the outcome" per identity at a time
+    /// ([`Resolver::admission_read`]): the cache's fetch gate shares successful
+    /// reads, not failures, so a caller that waited on a peer's read sees the
+    /// failure the peer recorded instead of paying a store read of its own. An
+    /// entry is dropped once no caller waits on it, as the fetch gate's is.
+    admission_reads: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Signers the key map does not know → the discovery pass that last asked about them
     /// ([`Resolver::discovery_turn`]).
     discovery_tried: StdMutex<HashMap<String, u64>>,
@@ -890,6 +905,7 @@ impl Resolver {
             keys: StdMutex::new(HashMap::new()),
             index_down_until: StdMutex::new(None),
             admission_failed: StdMutex::new(HashMap::new()),
+            admission_reads: StdMutex::new(HashMap::new()),
             discovery_tried: StdMutex::new(HashMap::new()),
             discovery_pass: AtomicU64::new(0),
             key_index_absent: AtomicBool::new(false),
@@ -1123,6 +1139,42 @@ impl Resolver {
             if self.admission_down(scid) {
                 return Err(SessionKeyError::StoreUnavailable);
             }
+            self.admission_read(scid, max_age).await?;
+        }
+        self.cached_session_key(scid, key).await
+    }
+
+    /// The stale-log sequence of [`Resolver::session_key`] — refresh the log and
+    /// record the read's outcome — under one lock per identity. A caller that
+    /// waited on a peer's sequence re-checks instead of reading: the peer's
+    /// success made its read fresh, the peer's failure started the identity's
+    /// backoff and answers it `StoreUnavailable` at once.
+    async fn admission_read(&self, scid: &str, max_age: u64) -> Result<(), SessionKeyError> {
+        let one_read = {
+            let mut reads = self
+                .admission_reads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // A caller cancelled between taking the lock handle and awaiting it leaves
+            // an entry only the map still holds: prune those, and cap the map at the
+            // most identities read at once — evicting a live one loses the sharing
+            // for it (its waiters keep the lock they took), never correctness.
+            reads.retain(|_, lock| Arc::strong_count(lock) > 1);
+            let over = (reads.len() + 1).saturating_sub(ADMISSION_READS_BOUND);
+            for stale in reads.keys().take(over).cloned().collect::<Vec<_>>() {
+                reads.remove(&stale);
+            }
+            reads.entry(scid.to_string()).or_default().clone()
+        };
+        let held = one_read.lock().await;
+        let outcome = if self
+            .cache
+            .read_ok_within(scid, super::service::now(), max_age)
+        {
+            Ok(())
+        } else if self.admission_down(scid) {
+            Err(SessionKeyError::StoreUnavailable)
+        } else {
             match self
                 .cache
                 .refresh(self.backend.as_ref(), &did_of(scid))
@@ -1132,23 +1184,30 @@ impl Resolver {
                     if let Ok(mut failed) = self.admission_failed.lock() {
                         failed.remove(scid);
                     }
+                    Ok(())
                 }
                 Err(CacheError::NotFound) => {
                     if let Ok(mut failed) = self.admission_failed.lock() {
                         failed.remove(scid);
                     }
-                    return Err(SessionKeyError::NotListed);
+                    Err(SessionKeyError::NotListed)
                 }
                 Err(e) => {
                     log::info!("identity: refresh of {} failed ({e})", did_of(scid));
-                    if let Ok(mut failed) = self.admission_failed.lock() {
-                        failed.insert(scid.to_string(), Instant::now());
-                    }
-                    return Err(SessionKeyError::StoreUnavailable);
+                    self.note_admission_failure(scid);
+                    Err(SessionKeyError::StoreUnavailable)
                 }
             }
+        };
+        drop(held);
+        // The map's handle and this one are the only refs once no caller waits
+        // on the lock: the entry goes, and many identities keep no state.
+        if let Ok(mut reads) = self.admission_reads.lock() {
+            if Arc::strong_count(&one_read) <= 2 {
+                reads.remove(scid);
+            }
         }
-        self.cached_session_key(scid, key).await
+        outcome
     }
 
     /// Whether a failed admission read of `scid`'s log is still within its backoff.
@@ -1160,6 +1219,26 @@ impl Resolver {
             .is_some_and(|at| at.elapsed() < SESSION_READ_BACKOFF)
     }
 
+    /// A failed admission read of `scid` starts its backoff now. Entries older than
+    /// [`SESSION_READ_BACKOFF`] — never checked again — go, and past
+    /// [`ADMISSION_FAILED_BOUND`] the oldest: the map is bounded by live backoffs.
+    fn note_admission_failure(&self, scid: &str) {
+        let Ok(mut failed) = self.admission_failed.lock() else {
+            return;
+        };
+        failed.retain(|_, at| at.elapsed() < SESSION_READ_BACKOFF);
+        if failed.len() >= ADMISSION_FAILED_BOUND && !failed.contains_key(scid) {
+            let oldest = failed
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(scid, _)| scid.clone());
+            if let Some(oldest) = oldest {
+                failed.remove(&oldest);
+            }
+        }
+        failed.insert(scid.to_string(), Instant::now());
+    }
+
     /// Test seam: drops every recorded admission-read failure, so the next
     /// `session_key` reads the store again.
     #[cfg(test)]
@@ -1169,16 +1248,26 @@ impl Resolver {
         }
     }
 
-    /// [`Resolver::session_key`] from the cached log only, whatever its age.
+    /// [`Resolver::session_key`] from the cached log only, whatever its age. A cache
+    /// that cannot read its log is an outage, not a verdict — [`SessionKeyError::StoreUnavailable`],
+    /// never `NotListed`: a caller must not end a grant on a verdict nothing gave.
     pub async fn cached_session_key(
         &self,
         scid: &str,
         key: &str,
     ) -> Result<SessionKey, SessionKeyError> {
         let scid = scid_from(scid);
-        let (chain, trusted) = trusted_log(&self.cache, scid)
-            .await
-            .ok_or(SessionKeyError::NotListed)?;
+        let (chain, trusted) = match self.cache.trusted(scid).await {
+            Ok(Some(found)) => found,
+            Ok(None) => return Err(SessionKeyError::NotListed),
+            Err(e) => {
+                log::warn!(
+                    "identity: the cached log of {} is unreadable: {e}",
+                    did_of(scid)
+                );
+                return Err(SessionKeyError::StoreUnavailable);
+            }
+        };
         session_key_in(scid, chain.state(), trusted, key, super::service::now())
     }
 
@@ -2129,6 +2218,60 @@ mod tests {
             .with_src_fetch(SrcFetch::plain_http(true, lookup))
     }
 
+    // A failure older than the backoff leaves the map on the next noted failure, and
+    // past the bound the oldest goes: bounded by live backoffs, per identity still.
+    #[test]
+    fn expired_admission_failures_leave_the_map_and_the_bound_holds() {
+        let resolver = local_resolver(trusting(), Arc::new(FakeStore::new(vec![])));
+        let old = Instant::now()
+            .checked_sub(2 * SESSION_READ_BACKOFF)
+            .unwrap();
+        resolver
+            .admission_failed
+            .lock()
+            .unwrap()
+            .insert("old".into(), old);
+        resolver.note_admission_failure("new");
+        {
+            let failed = resolver.admission_failed.lock().unwrap();
+            assert!(
+                !failed.contains_key("old"),
+                "an expired entry leaves the map"
+            );
+            assert!(failed.contains_key("new"));
+        }
+        for i in 0..ADMISSION_FAILED_BOUND {
+            resolver.note_admission_failure(&format!("s{i}"));
+        }
+        resolver.note_admission_failure("one-more");
+        let failed = resolver.admission_failed.lock().unwrap();
+        assert_eq!(failed.len(), ADMISSION_FAILED_BOUND, "the cap holds");
+        assert!(failed.contains_key("one-more"));
+    }
+
+    // An entry only the map holds — a caller cancelled between taking the lock and
+    // awaiting it — goes on the next insert, and the map never grows past the bound.
+    #[tokio::test]
+    async fn a_cancelled_callers_entry_leaves_the_admission_reads_map() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        let resolver = local_resolver(trusting(), store);
+        for i in 0..ADMISSION_READS_BOUND + 1 {
+            resolver
+                .admission_reads
+                .lock()
+                .unwrap()
+                .insert(format!("stale-{i}"), Default::default());
+        }
+        let _ = resolver.admission_read("the-scid", 0).await;
+        let reads = resolver.admission_reads.lock().unwrap();
+        assert!(
+            reads.len() <= ADMISSION_READS_BOUND,
+            "dead entries go, the bound holds: {}",
+            reads.len()
+        );
+        assert!(!reads.contains_key("stale-0"));
+    }
+
     #[tokio::test]
     async fn the_cache_answers_without_a_fetch() {
         let mut log = TestLog::new(1);
@@ -3046,7 +3189,9 @@ mod tests {
         let d1 = log.device.key();
         let url = format!("{did}?src=log.example:{}", host.port);
         let (result, ()) = tokio::join!(resolver.resolve(&url, false), async {
-            entered.notified().await;
+            tokio::time::timeout(std::time::Duration::from_secs(60), entered.notified())
+                .await
+                .expect("the read reached the paused store");
             // The src has answered (this is the window) and the store's answer is pending.
             // The prefix serves this resolution only: the shared cache holds none of it, and
             // only a store-signed head makes a key speak.
