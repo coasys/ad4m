@@ -369,13 +369,15 @@ pub fn check_signed_entered<T: serde::Serialize>(
     )
 }
 
-/// [`check_signed_entered`] for a link written on this executor's local write path
-/// (`perspective.addLink` and the other local writes): a link one of this executor's own
-/// agents signed ([`is_local_agent`]) needs no head the store confirmed within the window,
-/// since no revocation this executor has not seen can be at stake for a link it signs now. A
-/// link a local caller hands in signed by anyone else (`addLinkExpression`, an import) is
-/// checked as one from a peer, as is every link that arrives from a peer, whichever key
-/// signed it.
+/// [`check_signed_entered`] for a link this executor signs during the call that writes it —
+/// the paths that create the proof (`perspective.addLink`, `perspective.addLinks`,
+/// `perspective.linkMutations`, `perspective.updateLink`, a `commitBatch`, and every write
+/// through them). A link one of this executor's own agents signed ([`is_local_agent`]) needs
+/// no head the store confirmed within the window, since no revocation this executor has not
+/// seen can be at stake for a link it signs now. A link a caller hands in already signed
+/// (`perspective.addLinkExpression`, `import_perspective`, a store rebuild) is checked as one
+/// from a peer, whichever key signed it — the exemption is the write's, not the key's: the
+/// same key, copied and revoked, may have signed it elsewhere.
 pub fn check_signed_own<T: serde::Serialize>(
     expr: &Expression<T>,
     entered_after_revoke: Option<bool>,
