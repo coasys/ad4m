@@ -843,12 +843,15 @@ pub fn session_key_in(
 /// ([`Resolver::admission_reads`]). Its drop — the read answered, or the caller's
 /// future was cancelled — removes the map's entry, but only while the map still
 /// holds this very handle and no other caller does ([`Arc::strong_count`] `== 2`:
-/// the map's and this guard's): a stale generation's drop removes no newer
-/// caller's entry.
+/// the map's and the handle the drop took out of this guard): a stale
+/// generation's drop removes no newer caller's entry. The drop takes the handle
+/// before it counts and lets it go while the map's mutex is still held, so two
+/// guards dropped at once can never both count their own holds: the second
+/// one's check sees the first one's handle already gone.
 struct AdmissionRead<'a> {
     reads: &'a StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     scid: String,
-    lock: Arc<tokio::sync::Mutex<()>>,
+    lock: Option<Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl Drop for AdmissionRead<'_> {
@@ -857,10 +860,13 @@ impl Drop for AdmissionRead<'_> {
             .reads
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(lock) = self.lock.take() else {
+            return;
+        };
         if reads
             .get(&self.scid)
-            .is_some_and(|held| Arc::ptr_eq(held, &self.lock))
-            && Arc::strong_count(&self.lock) == 2
+            .is_some_and(|held| Arc::ptr_eq(held, &lock))
+            && Arc::strong_count(&lock) == 2
         {
             reads.remove(&self.scid);
         }
@@ -1182,7 +1188,7 @@ impl Resolver {
         AdmissionRead {
             reads: &self.admission_reads,
             scid: scid.to_string(),
-            lock,
+            lock: Some(lock),
         }
     }
 
@@ -1193,7 +1199,7 @@ impl Resolver {
     /// backoff and answers it `StoreUnavailable` at once.
     async fn admission_read(&self, scid: &str, max_age: u64) -> Result<(), SessionKeyError> {
         let one_read = self.admission_lock(scid);
-        let held = one_read.lock.lock().await;
+        let held = one_read.lock.as_ref().unwrap().lock().await;
         let outcome = if self
             .cache
             .read_ok_within(scid, super::service::now(), max_age)
@@ -2401,6 +2407,37 @@ mod tests {
             resolver.admission_reads.lock().unwrap().is_empty(),
             "the last caller's drop empties the map"
         );
+    }
+
+    // Two callers' guards of one identity's lock, dropped at the same instant,
+    // leave no entry behind: the second drop's check runs only after the
+    // first's hold is gone, so the last of them sees the map's and its own
+    // hold alone and removes it. `a`'s `scid` is swapped for a long string so
+    // the tail of its drop — freeing the field — outlasts `b`'s whole check;
+    // which entry `a`'s own lookup names no longer matters: its count is never
+    // two either way.
+    #[test]
+    fn concurrent_drops_of_one_locks_guards_leave_no_entry() {
+        let resolver = local_resolver(trusting(), Arc::new(FakeStore::new(vec![])));
+        for round in 0..200 {
+            let mut a = resolver.admission_lock("the-scid");
+            a.scid = "s".repeat(4 << 20);
+            let b = resolver.admission_lock("the-scid");
+            std::thread::scope(|scope| {
+                scope.spawn(|| drop(a));
+                // Once `a`'s drop holds the map — the long lookup keeps it
+                // there — `b`'s drop starts: its check lands inside the tail
+                // of `a`'s teardown.
+                while resolver.admission_reads.try_lock().is_ok() {
+                    std::hint::spin_loop();
+                }
+                drop(b);
+            });
+            assert!(
+                resolver.admission_reads.lock().unwrap().is_empty(),
+                "round {round}: an entry no caller holds stayed in the map"
+            );
+        }
     }
 
     #[tokio::test]

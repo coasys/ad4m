@@ -324,10 +324,14 @@ the offer's state).
   `KeyMap::note_confirmed`) less than `ADMIT_FRESHNESS` ago, whatever its anchor: an older
   head may miss a revocation of the key. Otherwise the link is `cantCheck`, and `prepare`
   re-reads the log (at most once per window); with the store unreachable it stays
-  `cantCheck` and the 60 s re-check tries again. Exempt: a link this executor writes itself
-  (`check_signed_own`, passed only by the local write `SparqlStore::add_link`; a peer's link
-  is checked as any other, whichever key signed it), so local links count offline, and a link
-  already counted. A restart confirms nothing until each log is read again. `ADMIT_FRESHNESS` is
+  `cantCheck` and the 60 s re-check tries again. Exempt: a link this executor signs during
+  the call that writes it (`addLink`, `addLinks`, `linkMutations`, `updateLink`, `commitBatch`
+  and the paths through them — `check_signed_own`, the store's `own` write), so local links
+  count offline, and a link already counted. Every write of a link that arrives already
+  signed is judged as a peer's is — `addLinkExpression`, `import_perspective`, the
+  rusqlite migration and the boot rebuild, a link language's diff, a re-check — whichever
+  key signed it: the same key, copied and revoked, may have signed it elsewhere. A restart
+  confirms nothing until each log is read again. `ADMIT_FRESHNESS` is
   the exposure after a revocation: for up to 60 s after the store holds a `revoke`, this
   executor may still count new links by the revoked key. A link admitted in that window
   stays counted (stored `valid`, so the re-check keeps it): without the store's append
