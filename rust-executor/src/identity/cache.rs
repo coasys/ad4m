@@ -838,6 +838,10 @@ impl KelCache {
     /// to its person reads the log only up to this seq. Events past it (from a foreign `src`,
     /// or not yet under a store head) are for resolution display only.
     pub async fn trusted(&self, scid: &str) -> Result<Option<(KelChain, u64)>, CacheError> {
+        #[cfg(test)]
+        if tests::FAIL_TRUSTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(CacheError::Storage("the read was made to fail".into()));
+        }
         let Some(head) = self.accepted_head(scid)? else {
             return Ok(None);
         };
@@ -1235,8 +1239,9 @@ impl KelCache {
         }
     }
 
-    /// Marks `scid`'s log as answered by the store at `at`: a refresh that folded, or a head
-    /// the store signed behind the cache's. Sessions count these, never a failed attempt.
+    /// Marks `scid`'s log as answered by the store at `at`: a refresh that folded. A
+    /// head the store signed behind the cache's is no read of the cached head — it
+    /// is noted `Behind`, never here. Sessions count these, never a failed attempt.
     pub(crate) fn note_read(&self, scid: &str, at: u64) {
         if let Ok(mut read_ok) = self.read_ok.lock() {
             if read_ok.len() >= REFRESHED_BOUND && !read_ok.contains_key(scid) {
@@ -1507,6 +1512,9 @@ pub(crate) mod tests {
     pub(crate) fn trusting() -> KelCache {
         in_memory(vec![store_key().multikey()])
     }
+
+    /// Test seam: the next `trusted` fails as a cache whose storage cannot be read.
+    pub(crate) static FAIL_TRUSTED: AtomicBool = AtomicBool::new(false);
 
     /// Takes `events` (a log from seq 0) into `cache` as the configured store would answer
     /// them: with a head signed by [`store_key`] at their last event, so that event is the log's
@@ -2512,7 +2520,9 @@ pub(crate) mod tests {
             tokio::spawn(async move { cache.refresh(store.as_ref(), &did).await.map(|c| c.head()) })
         };
         let mut tasks = vec![refresh()];
-        entered.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), entered.notified())
+            .await
+            .expect("the read reached the paused store");
         for _ in 0..19 {
             tasks.push(refresh());
         }

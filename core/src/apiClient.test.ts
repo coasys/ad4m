@@ -1086,6 +1086,75 @@ describe('ApiClient.setToken', () => {
             facade.close()
         }
     })
+
+    it('lets a call in flight on the superseded socket settle there when the new token is refused', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        const stale = call<string>('agent.get')
+        const staleOutcome = outcomeOf(stale)
+        await flush()
+        client.setToken('new')
+        const refused = call('agent.status')
+        await flush()
+        // The new token's 401 is its own verdict: the call still in flight on the
+        // superseded socket keeps its own — it settles there, and that socket drains.
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'agent.status')!.id, error: { code: 401, message: 'token expired' } })
+        await expect(refused).rejects.toMatchObject({ name: 'RpcError', status: 401 })
+        await flush()
+        expect(staleOutcome()).toBe('pending')
+        expect(socket(0).readyState).toBe(1) // still open: it drains, it is not closed
+        socket(0).reply({ id: socket(0).sent[0].id, result: 'ok' })
+        await expect(stale).resolves.toBe('ok')
+        await flush()
+        expect(socket(0).readyState).toBe(3) // drained: let go
+        expect(failed).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not answer a later watchApplied() with the refused watch\'s 401 after setToken', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const unsub = client.on('agent-updated', () => {})
+        await flush()
+        const watch = socket(0).sent.find(m => m.type === 'events.watch')!
+        socket(0).reply({ id: watch.id, error: { code: 401, message: 'token expired' } })
+        await flush()
+        unsub() // every handler removed, as an auth-failed app leaves them
+        client.setToken('new')
+        // The refused token's watch outcome is stale: a watch on the new socket
+        // opens and resolves the waiter, not the old 401.
+        await expect(client.watchApplied()).resolves.toBeUndefined()
+    })
+
+    it('settles a watchApplied() waiter from the successor after setToken replaced a connecting socket', async () => {
+        TestSocket.autoOpen = false
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        open()
+        const applied = outcomeOf(client.watchApplied())
+        client.setToken('new')
+        // The connecting socket's open settles against the new socket: its rejection
+        // is the replaced socket's verdict, not the wait's.
+        socket(0).drop()
+        socket(1).open()
+        await flush()
+        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
+        socket(1).reply({ id: watch.id, result: {} })
+        await flush()
+        expect(applied()).toBe('resolved')
+    })
+
+    it('rejects a watchApplied() waiter with the successor\'s own refusal after setToken replaced a connecting socket', async () => {
+        TestSocket.autoOpen = false
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        open()
+        const applied = client.watchApplied()
+        client.setToken('new')
+        socket(0).drop()
+        socket(1).open()
+        await flush()
+        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
+        socket(1).reply({ id: watch.id, error: { code: 401, message: 'token expired' } })
+        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401 })
+    })
 })
 
 describe('ApiClient when the executor refuses the token', () => {

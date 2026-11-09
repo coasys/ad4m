@@ -180,6 +180,9 @@ export class ApiClient {
         this.token = token
         if (this._authFailed !== null) {
             this._authFailed = null
+            // The refused token's watch outcome is stale: a rejected `events.watch`
+            // (its 401) must not answer a later `watchApplied()` on the new socket.
+            this._watchSent = Promise.resolve()
             if (this._handlers.size > 0) this._ensureWs()
             return
         }
@@ -192,6 +195,7 @@ export class ApiClient {
         // watch it sent is re-sent on the new socket, so it keeps nothing open.
         this._stopPing()
         this._superseded.add(ws)
+        this._wasSuperseded.add(ws)
         this._ws = null
         this._wsOpen = null
         this._wsToken = undefined
@@ -222,6 +226,10 @@ export class ApiClient {
     private _wsToken?: string
     /** Sockets `setToken` replaced, kept open while calls they carry are in flight. */
     private _superseded = new Set<WebSocket>()
+    /** Sockets `setToken` ever replaced, remembered past their close (`_superseded`
+     *  forgets one then), so `watchApplied()` can tell a replaced socket's
+     *  open-rejection — its own verdict, never the wait's — from a live socket's. */
+    private _wasSuperseded = new WeakSet<WebSocket>()
     /** Settles when `_ws` opens (resolve) or closes first (reject). */
     private _wsOpen: Promise<void> | null = null
     /** `on()` handlers by event type; a type with none has no entry. */
@@ -450,13 +458,23 @@ export class ApiClient {
         }
     }
 
-    /** The executor refused the token: fail every call with 401, stop
-     *  reconnecting and tell the `onAuthFailed` callbacks, once. */
+    /** The executor refused the token: fail the refused socket's calls and the
+     *  calls that never went out with 401, stop reconnecting and tell the
+     *  `onAuthFailed` callbacks, once. A call in flight on a superseded socket
+     *  keeps its own verdict — it settles there, and that socket closes when
+     *  they drain, as for any other close. */
     private _failAuth(reason: string): void {
         if (this._authFailed !== null) return
         this._authFailed = reason
         const error = new RpcError(401, reason)
-        for (const pending of this._pendingCalls.values()) pending.reject(error)
+        const refused = this._ws
+        for (const pending of this._pendingCalls.values()) {
+            // A call that went out on a socket `setToken` replaced answers on that
+            // socket: the refusal is the verdict of the refused socket's token, not
+            // of the token the call's socket dialed with.
+            if (pending.ws !== undefined && pending.ws !== refused) continue
+            pending.reject(error)
+        }
         this._closeWs()
         for (const cb of [...this._authFailedCallbacks]) callSafely(cb, 'Error in auth-failed callback:', reason)
     }
@@ -699,7 +717,18 @@ export class ApiClient {
             this._ensureWs()
             const ws = this._ws!
             const open = this._wsOpen!
-            if (ws.readyState !== 1 /* OPEN */) await open
+            if (ws.readyState !== 1 /* OPEN */) {
+                try {
+                    await open
+                } catch (e) {
+                    // A rejection of a socket `setToken` replaced before it opened —
+                    // its close's verdict is that replaced socket's, not the wait's:
+                    // loop onto the current socket. Every other rejection propagates,
+                    // a still-current socket's close or a refusal among them.
+                    if (this._wasSuperseded.has(ws)) continue
+                    throw e
+                }
+            }
             await this._watchDone
             await this._watchSent
             // The socket these settled on may not be the current one any more —
@@ -802,8 +831,14 @@ export class ApiClient {
         this._wsOpen = null
         this._wsToken = undefined
         ws?.close()
-        for (const old of this._superseded) old.close()
-        this._superseded.clear()
+        // A superseded socket still carrying calls drains as designed; the rest
+        // can go now.
+        for (const old of this._superseded) {
+            if (![...this._pendingCalls.values()].some(p => p.ws === old)) {
+                this._superseded.delete(old)
+                old.close()
+            }
+        }
     }
 
     /** Register a callback that fires after a successful WebSocket reconnect.
