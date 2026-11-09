@@ -398,18 +398,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 while std::os::unix::process::parent_id() == parent {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                // Shutdown first, then the log line: a stderr nobody drains must not hold it up.
                 if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
                     let _ = tx.send(());
                 }
-                warn!(
-                    "The process that started the executor (PID {parent}) is gone, shutting down"
-                );
+                // Nothing in this thread logs: a stderr nobody drains would block the write, and
+                // with it the forced exit below. The line goes out from a thread of its own.
+                std::thread::spawn(move || {
+                    warn!(
+                        "The process that started the executor (PID {parent}) is gone, shutting \
+                         down; exiting anyway after {SHUTDOWN_DEADLINE:?} if cleanup is not done"
+                    )
+                });
                 std::thread::sleep(SHUTDOWN_DEADLINE);
-                warn!(
-                    "Cleanup did not finish within {:?}, exiting without it",
-                    SHUTDOWN_DEADLINE
-                );
                 std::process::exit(1);
             })
             .expect("failed to start the parent-watch thread");
