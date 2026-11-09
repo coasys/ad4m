@@ -139,10 +139,11 @@ fn canonical_and_non_literal_targets_verify_after_a_read_back() {
 }
 
 /// Re-inserting a link on the same reifier (same author, source, predicate,
-/// timestamp and stored value) with a canonical target drops the wire target
-/// the first encoding left, so the read-back matches the later signature.
+/// timestamp and stored value) with a second valid encoding keeps the first
+/// one: a verified proof, including the signed target bytes, is replaced only
+/// by an upgrade (#1146). The read-back still matches the stored signature.
 #[test]
-fn a_canonical_re_insert_clears_the_earlier_wire_target() {
+fn a_second_valid_encoding_keeps_the_first_wire_target() {
     let signer = TestSigner::generate();
     let a = SparqlStore::new(None).unwrap();
     let raw = signed(&signer, "rt://s", "literal:string:Write the guide");
@@ -163,10 +164,8 @@ fn a_canonical_re_insert_clears_the_earlier_wire_target() {
 
     let read_back = a.get_all_links().unwrap();
     assert_eq!(read_back.len(), 1, "same reifier, one link");
-    assert_eq!(
-        read_back[0].data.target,
-        "literal:string:Write%20the%20guide"
-    );
+    assert_eq!(read_back[0].data.target, "literal:string:Write the guide");
+    assert_eq!(read_back[0].proof.signature, raw.proof.signature);
     assert_eq!(not_verified_after_read_back(&a), Vec::<String>::new());
 }
 

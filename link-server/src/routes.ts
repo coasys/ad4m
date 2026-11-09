@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { didToPublicKey, hashMessageForVerify, verifyHex, type AuthManager, type ChallengeStore } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
-import type { EncryptedKeyPayload } from "./encryption.js";
+import type { SealedBox } from "./encryption.js";
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import {
@@ -56,6 +56,46 @@ function requireAdmin(ctx: RouteContext) {
   };
 }
 
+function isSealedBox(value: unknown): value is SealedBox {
+  const box = value as Partial<SealedBox> | null;
+  return (
+    !!box &&
+    typeof box === "object" &&
+    typeof box.ephemeralPublicKey === "string" &&
+    typeof box.nonce === "string" &&
+    typeof box.ciphertext === "string"
+  );
+}
+
+/** The ACL members lacking one or more of the room's key versions, by DID. */
+function membersMissingKeys(
+  ctx: Pick<RouteContext, "db">,
+  roomId: string
+): Array<{ did: string; missingVersions: number[] }> {
+  const latestVersion = ctx.db.getLatestKeyVersion(roomId);
+  if (latestVersion === 0) return [];
+  const held = ctx.db.getAllMemberKeyVersions(roomId);
+  const expected = Array.from({ length: latestVersion }, (_, i) => i + 1);
+  const missing: Array<{ did: string; missingVersions: number[] }> = [];
+  for (const row of ctx.db.getAcl(roomId)) {
+    const has = new Set(held.get(row.did) ?? []);
+    const missingVersions = expected.filter((v) => !has.has(v));
+    if (missingVersions.length > 0) missing.push({ did: row.did, missingVersions });
+  }
+  return missing;
+}
+
+/**
+ * Takes a DID out of a room: ACL row, sessions and open sockets, so access ends at once on every path.
+ * Returns false when the DID was not a member (sessions and sockets are still cleared).
+ */
+export function removeMember(ctx: Pick<RouteContext, "db" | "auth" | "ws">, roomId: string, did: string): boolean {
+  const removed = ctx.db.removeAcl(roomId, did);
+  ctx.auth.revokeSessionsForDid(roomId, did);
+  ctx.ws.disconnectDid(roomId, did);
+  return removed;
+}
+
 function rateLimitHook(limiter: SlidingWindowLimiter, keyOf: (request: FastifyRequest) => string) {
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const check = limiter.check(keyOf(request));
@@ -76,6 +116,43 @@ function jwtRateLimit(limiter: SlidingWindowLimiter) {
   return rateLimitHook(limiter, (request) => request.authClaims?.token ?? request.ip);
 }
 
+/** The most links (`/render`) or diffs (`/sync`) one page may carry. */
+export const MAX_PAGE_LIMIT = 5000;
+
+/** The page size of a `/render` or `/sync` request that names no `limit`. */
+export const DEFAULT_PAGE_LIMIT = 500;
+
+/** The page size a request asks for; null when `limit` is not an integer from 1 to MAX_PAGE_LIMIT. */
+function parsePageLimit(raw: string | undefined): number | null {
+  if (raw === undefined) return DEFAULT_PAGE_LIMIT;
+  if (!/^\d+$/.test(raw)) return null;
+  const limit = Number(raw);
+  return limit >= 1 && limit <= MAX_PAGE_LIMIT ? limit : null;
+}
+
+/** Where a paged `/render` resumes: the snapshot's `upto` and the last `(sequence, link_hash)` sent. */
+interface RenderCursor {
+  upto: number;
+  sequence: number;
+  hash: string;
+}
+
+function encodeRenderCursor(cursor: RenderCursor): string {
+  return Buffer.from(JSON.stringify([cursor.upto, cursor.sequence, cursor.hash])).toString("base64url");
+}
+
+function decodeRenderCursor(raw: string): RenderCursor | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as unknown;
+    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+    const [upto, sequence, hash] = parsed as unknown[];
+    if (!Number.isSafeInteger(upto) || !Number.isSafeInteger(sequence) || typeof hash !== "string") return null;
+    return { upto: upto as number, sequence: sequence as number, hash };
+  } catch {
+    return null;
+  }
+}
+
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // ---- health check (public, unauthenticated) ----
 
@@ -94,8 +171,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         did?: string;
         challenge?: string;
         signature?: string;
-        x25519PublicKey?: string;
-        x25519Signature?: string;
       } | null;
 
       if (!body || typeof body.did !== "string") {
@@ -145,32 +220,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         }
       }
 
-      // Store the agent's derived X25519 public key for E2E room-key
-      // sealing. The language sends this during step 2 of the DID
-      // challenge-response — the one point where DID ownership has
-      // already been verified.
-      //
-      // When x25519Signature is provided, verify that the key genuinely
-      // belongs to the DID (prevents a MITM from substituting keys).
-      // The signature is: ed25519.sign(SHA-256(x25519PublicKey), privateKey)
-      // — same hashing convention as agentSignStringHex.
-      if (
-        typeof body.x25519PublicKey === "string" &&
-        body.x25519PublicKey.length === 64 &&
-        /^[0-9a-fA-F]{64}$/.test(body.x25519PublicKey)
-      ) {
-        let x25519Sig: string | undefined;
-        if (typeof body.x25519Signature === "string") {
-          const keyHash = hashMessageForVerify(body.x25519PublicKey);
-          const sigValid = await verifyHex(pubkey, keyHash, body.x25519Signature);
-          if (!sigValid) {
-            return reply.code(400).send({ error: "x25519 public key signature verification failed" });
-          }
-          x25519Sig = body.x25519Signature;
-        }
-        ctx.db.setX25519PublicKey(roomId, body.did, body.x25519PublicKey, x25519Sig);
-      }
-
       const { token, expiresAt } = await ctx.auth.issueSession(body.did, roomId);
       return reply.send({ token, expiresAt });
     }
@@ -206,19 +255,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return reply.code(400).send({ error: "commit must contain at least one addition or removal" });
       }
 
-      // Enforce E2E: once a room has been rotated to E2E, reject plaintext
-      // links.
-      const room = ctx.db.getRoom(claims.roomId);
-      if (room && room.e2e_enabled) {
-        for (const link of [...additions, ...removals]) {
-          if (link && typeof link === "object" && link.data && !isEncryptedLinkData(link.data)) {
-            return reply.code(400).send({
-              error: "this room requires end-to-end encryption; plaintext links are not accepted",
-            });
-          }
-        }
-      }
-
+      // Every room is end-to-end encrypted from creation: refuse plaintext links.
       for (const link of [...additions, ...removals]) {
         if (!link || typeof link !== "object") {
           return reply.code(400).send({ error: "each link must be an object" });
@@ -226,19 +263,17 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         if (!link.data || typeof link.data !== "object") {
           return reply.code(400).send({ error: "each link must have a data object" });
         }
-        if (isEncryptedLinkData(link.data)) {
-          if (!link.link_hash || typeof link.link_hash !== "string") {
-            return reply.code(400).send({ error: "encrypted links must include a link_hash" });
-          }
-        } else {
-          if (link.author !== claims.did) {
-            return reply
-              .code(400)
-              .send({ error: "every link's author must match the authenticated DID" });
-          }
-          if (typeof link.timestamp !== "string") {
-            return reply.code(400).send({ error: "each link must have a string timestamp" });
-          }
+        // Only ciphertext and nonce: a plaintext key beside them would be stored and served in the clear.
+        if (!isEncryptedLinkData(link.data) || Object.keys(link.data).length !== 2) {
+          return reply.code(400).send({
+            error: "this room requires end-to-end encryption; link data must be exactly {ciphertext, nonce}",
+          });
+        }
+        if (!link.link_hash || typeof link.link_hash !== "string") {
+          return reply.code(400).send({ error: "encrypted links must include a link_hash" });
+        }
+        if (link.key_version !== undefined && !(Number.isSafeInteger(link.key_version) && link.key_version > 0)) {
+          return reply.code(400).send({ error: "key_version must be a positive integer" });
         }
       }
 
@@ -260,18 +295,26 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   // ---- sync / render / revision / peers ----
 
+  // Both routes are paged; see README, "Paged snapshot, then tail".
   app.get(
     "/rooms/:roomId/sync",
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const query = request.query as { since?: string };
+      const query = request.query as { since?: string; limit?: string };
       const parsedSince = query.since !== undefined ? Number.parseInt(query.since, 10) : 0;
       const since = Number.isFinite(parsedSince) ? Math.max(parsedSince, 0) : 0;
-      const rows = ctx.db.getDiffsSinceParsed(claims.roomId, since);
+      const limit = parsePageLimit(query.limit);
+      if (limit === null) return reply.code(400).send({ error: `limit must be an integer from 1 to ${MAX_PAGE_LIMIT}` });
       const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);
-      return reply.send({ diffs: rows.map((r) => r.diff), revision, sequence });
+      // One row past the page tells whether another page follows.
+      const rows = ctx.db.getDiffPageSince(claims.roomId, since, limit + 1);
+      const page = rows.slice(0, limit);
+      const next = rows.length > limit ? page[page.length - 1].sequence : null;
+      // Each entry names its sequence, so a client's cursor never runs ahead of what it applied.
+      const diffs = page.map((row) => ({ ...(JSON.parse(row.diff_data) as object), sequence: row.sequence }));
+      return reply.send({ diffs, revision, sequence, next });
     }
   );
 
@@ -280,10 +323,27 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const links = ctx.db.getActiveLinks(claims.roomId);
+      const query = request.query as { limit?: string; next?: string };
+      const limit = parsePageLimit(query.limit);
+      if (limit === null) return reply.code(400).send({ error: `limit must be an integer from 1 to ${MAX_PAGE_LIMIT}` });
       const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);
-      return reply.send({ links, revision, sequence });
+      // The first page pins the snapshot at the room's current sequence; the
+      // cursor carries it to every later page.
+      let cursor: RenderCursor = { upto: sequence, sequence: 0, hash: "" };
+      if (query.next !== undefined) {
+        const decoded = decodeRenderCursor(query.next);
+        if (!decoded) return reply.code(400).send({ error: "malformed next cursor" });
+        cursor = decoded;
+      }
+      const rows = ctx.db.getActiveLinkPage(claims.roomId, cursor.upto, cursor, limit + 1);
+      const page = rows.slice(0, limit);
+      const last = page[page.length - 1];
+      const next = rows.length > limit
+        ? encodeRenderCursor({ upto: cursor.upto, sequence: last.sequence, hash: last.link_hash })
+        : null;
+      const links = page.map((row) => JSON.parse(row.link_data) as LinkExpression);
+      return reply.send({ links, revision, sequence, upto: cursor.upto, next });
     }
   );
 
@@ -323,15 +383,13 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return reply.code(400).send({ error: "did is required" });
       }
 
-      if (body.action === "remove") {
-        if (body.did === claims.did) {
-          return reply.code(400).send({ error: "admin cannot remove themselves from the ACL" });
-        }
-        ctx.db.removeAcl(claims.roomId, body.did);
-        ctx.auth.revokeSessionsForDid(claims.roomId, body.did);
-      } else {
-        ctx.db.addAcl(claims.roomId, body.did);
+      if (body.action === "remove" && body.did === claims.did) {
+        return reply.code(400).send({ error: "admin cannot remove themselves from the ACL" });
       }
+      const changed =
+        body.action === "remove" ? removeMember(ctx, claims.roomId, body.did) : ctx.db.addAcl(claims.roomId, body.did);
+      // A repeated add or a removal of a non-member changes nothing, so it is not history.
+      if (changed) ctx.db.recordAclChange(claims.roomId, body.did, body.action, claims.did, "room-admin");
 
       const acl = ctx.db.getAcl(claims.roomId);
       const room = ctx.db.getRoom(claims.roomId)!;
@@ -348,11 +406,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const acl = ctx.db.getAcl(claims.roomId);
       return reply.send({
         admin: room.admin_did,
-        members: acl.map((a) => ({
-          did: a.did,
-          x25519PublicKey: a.x25519_public_key ?? null,
-          x25519Signature: a.x25519_signature ?? null,
-        })),
+        // A member is its DID: its X25519 key for room keys follows from it.
+        members: acl.map((a) => ({ did: a.did })),
       });
     }
   );
@@ -364,19 +419,15 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const room = ctx.db.getRoom(claims.roomId);
-      const e2eEnabled = !!(room && room.e2e_enabled);
+      // An empty list: the admin has not rotated a key in yet, or no holder
+      // has granted this agent one.
       const rows = ctx.db.getAllRoomKeys(claims.roomId, claims.did);
-      if (rows.length === 0 && !e2eEnabled) {
-        // Room has never had E2E enabled — genuinely no keys.
-        return reply.code(404).send({ error: "no room key available for this agent yet" });
-      }
-      // Room has E2E (agent may or may not have keys yet). Return the
-      // e2e_enabled flag so the client can distinguish "no E2E" (404)
-      // from "E2E but keys pending" (200, empty keys array).
       return reply.send({
-        keys: rows.map((r) => ({ encryptedKey: JSON.parse(r.encrypted_key), version: r.version })),
-        e2e_enabled: e2eEnabled,
+        keys: rows.map((r) => ({
+          encryptedKey: JSON.parse(r.encrypted_key),
+          version: r.version,
+          commitment: r.commitment ?? undefined,
+        })),
       });
     }
   );
@@ -388,6 +439,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const claims = request.authClaims!;
       const body = request.body as {
         keys?: Array<{ did: string; encryptedKey: unknown }>;
+        commitment?: unknown;
       } | null;
 
       if (!body || !Array.isArray(body.keys) || body.keys.length === 0) {
@@ -409,20 +461,20 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
             error: `DID ${entry.did ?? "(missing)"} is not in this room's ACL`,
           });
         }
-        const ek = entry.encryptedKey as Partial<EncryptedKeyPayload> | null;
-        if (
-          !ek ||
-          typeof ek.ephemeralPublicKey !== "string" ||
-          typeof ek.nonce !== "string" ||
-          typeof ek.ciphertext !== "string"
-        ) {
+        if (!isSealedBox(entry.encryptedKey)) {
           return reply.code(400).send({
             error: `malformed encryptedKey for DID ${entry.did}`,
           });
         }
       }
 
+      // Members check every key they open against it, whoever granted the box.
+      if (typeof body.commitment !== "string" || !/^[0-9a-f]{64}$/.test(body.commitment)) {
+        return reply.code(400).send({ error: "commitment is required: 64 hex characters committing to the new key" });
+      }
+
       const version = ctx.db.getLatestKeyVersion(claims.roomId) + 1;
+      ctx.db.addKeyCommitment(claims.roomId, version, body.commitment);
       const recipients: string[] = [];
       for (const entry of body.keys) {
         ctx.db.addRoomKey(
@@ -433,81 +485,48 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         );
         recipients.push(entry.did);
       }
-      ctx.db.setE2eEnabled(claims.roomId, true);
 
-      // Detect members missing historical key versions so the admin can
-      // grant them (same logic as the old server-side rotate).
-      const membersNeedingHistoricalKeys: Array<{
-        did: string;
-        missingVersions: number[];
-        x25519PublicKey: string;
-        x25519Signature: string | null;
-      }> = [];
-      if (version > 1) {
-        const allAcl = ctx.db.getAcl(claims.roomId);
-        const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
-        const expected = Array.from({ length: version }, (_, i) => i + 1);
-        for (const row of allAcl) {
-          if (!row.x25519_public_key) continue;
-          const has = new Set(allVersions.get(row.did) ?? []);
-          const missing = expected.filter((v) => !has.has(v));
-          if (missing.length > 0) {
-            membersNeedingHistoricalKeys.push({
-              did: row.did,
-              missingVersions: missing,
-              x25519PublicKey: row.x25519_public_key,
-              x25519Signature: row.x25519_signature ?? null,
-            });
-          }
-        }
-      }
-
-      return reply.send({ version, recipients, membersNeedingHistoricalKeys });
+      return reply.send({ version, recipients, membersNeedingHistoricalKeys: membersMissingKeys(ctx, claims.roomId) });
     }
   );
 
-  // ---- E2E missing keys (admin query — who needs historical keys?) ----
+  // ---- E2E missing keys (any member: who lacks which version?) ----
 
   app.get(
     "/rooms/:roomId/keys/missing",
-    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const latestVersion = ctx.db.getLatestKeyVersion(claims.roomId);
-      if (latestVersion === 0) {
-        return reply.send({ membersNeedingHistoricalKeys: [] });
-      }
-      const aclRows = ctx.db.getAcl(claims.roomId);
-      const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
-      const expectedVersions = Array.from({ length: latestVersion }, (_, i) => i + 1);
-      const missingKeys: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string; x25519Signature: string | null }> = [];
-      for (const row of aclRows) {
-        if (!row.x25519_public_key) continue;
-        const memberVersions = new Set(allVersions.get(row.did) ?? []);
-        const missing = expectedVersions.filter((v) => !memberVersions.has(v));
-        if (missing.length > 0) {
-          missingKeys.push({
-            did: row.did,
-            missingVersions: missing,
-            x25519PublicKey: row.x25519_public_key,
-            x25519Signature: row.x25519_signature ?? null,
-          });
-        }
-      }
-      return reply.send({ membersNeedingHistoricalKeys: missingKeys });
+      return reply.send({ membersNeedingHistoricalKeys: membersMissingKeys(ctx, claims.roomId) });
     }
   );
 
-  // ---- E2E key grant (admin re-seals historical versions for a member) ----
+  // ---- E2E: a member drops its own box for a version (it did not open to the committed key) ----
+
+  app.delete(
+    "/rooms/:roomId/keys/:version",
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
+    async (request, reply) => {
+      const claims = request.authClaims!;
+      const version = Number((request.params as { version: string }).version);
+      if (!Number.isInteger(version) || version < 1) {
+        return reply.code(400).send({ error: "version must be a positive integer" });
+      }
+      // The version is then missing for this member again, so a member holding it grants it.
+      return reply.send({ deleted: ctx.db.deleteRoomKey(claims.roomId, claims.did, version) });
+    }
+  );
+
+  // ---- E2E key grant (any member re-seals versions it holds for a member lacking them) ----
 
   app.post(
     "/rooms/:roomId/keys/grant",
-    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
       const body = request.body as {
         targetDid?: string;
-        keys?: Array<{ version: number; encryptedKey: EncryptedKeyPayload }>;
+        keys?: Array<{ version: number; encryptedKey: SealedBox }>;
       } | null;
 
       if (!body || typeof body.targetDid !== "string") {
@@ -522,33 +541,37 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return reply.code(404).send({ error: "target DID is not a member of this room" });
       }
 
-      // Validate each entry: version must be a positive integer, encryptedKey
-      // must have the expected shape. The server cannot verify the plaintext
-      // inside — the admin holds the trust anchor for the room.
+      // Validate every entry before storing any: the version exists, the
+      // granter holds it (a member passes on only what it was given), and the
+      // box has the expected shape. The server cannot check the key inside;
+      // the first box stored for a version stays.
       const latestVersion = ctx.db.getLatestKeyVersion(claims.roomId);
-      const stored: number[] = [];
+      const held = new Set(ctx.db.getAllRoomKeys(claims.roomId, claims.did).map((r) => r.version));
       for (const entry of body.keys) {
-        if (typeof entry.version !== "number" || entry.version < 1 || entry.version > latestVersion) {
+        if (!entry || typeof entry !== "object") {
+          return reply.code(400).send({ error: "each key entry must be a non-null object" });
+        }
+        if (!Number.isInteger(entry.version) || entry.version < 1 || entry.version > latestVersion) {
           return reply.code(400).send({ error: `invalid version ${entry.version}; latest is ${latestVersion}` });
         }
-        const ek = entry.encryptedKey;
-        if (
-          !ek ||
-          typeof ek.ephemeralPublicKey !== "string" ||
-          typeof ek.nonce !== "string" ||
-          typeof ek.ciphertext !== "string"
-        ) {
+        if (!held.has(entry.version)) {
+          return reply.code(403).send({ error: `you do not hold key version ${entry.version}` });
+        }
+        if (!isSealedBox(entry.encryptedKey)) {
           return reply.code(400).send({ error: `malformed encryptedKey for version ${entry.version}` });
         }
-        const inserted = ctx.db.addRoomKeyIfMissing(
-          claims.roomId,
-          body.targetDid,
-          entry.version,
-          JSON.stringify(ek)
-        );
-        if (inserted) stored.push(entry.version);
       }
 
+      const stored: number[] = [];
+      for (const entry of body.keys) {
+        if (ctx.db.addRoomKeyIfMissing(claims.roomId, body.targetDid, entry.version, JSON.stringify(entry.encryptedKey))) {
+          stored.push(entry.version);
+        }
+      }
+      // The grantee waits for these to read the room's history: tell it now.
+      if (stored.length > 0) {
+        ctx.ws.sendToDid(claims.roomId, body.targetDid, { type: "keys-granted", versions: stored });
+      }
       return reply.send({ granted: stored });
     }
   );

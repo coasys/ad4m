@@ -1,12 +1,13 @@
 use crate::agent::AgentContext;
 use crate::js_core::JsCore;
-use crate::languages::capability::{parse_capability_list, Capability};
+use crate::languages::capability::{detection_script, parse_capability_list, Capability};
 use crate::languages::LanguageContext;
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 
@@ -68,7 +69,13 @@ pub(crate) struct LanguageRuntimeRequest {
     pub response_tx: oneshot::Sender<Result<String, String>>,
     /// When the handle sent it; the runtime logs the time in queue on dequeue (#1133).
     pub queued_at: Instant,
+    /// Names the request in `RunningRequest`.
+    pub id: u64,
 }
+
+/// The request a runtime is running, if any: its id and when it started. The runtime writes
+/// it; the handle reads it to tell a caller whose call runs from one queued behind another.
+pub(crate) type RunningRequest = Arc<Mutex<Option<(u64, Instant)>>>;
 
 /// Operations that can be sent to a LanguageRuntime
 #[derive(Debug)]
@@ -305,36 +312,9 @@ impl LanguageRuntime {
         // Detect which capabilities the language actually exports. Returns
         // a JSON array of kebab-case capability names that parse_capability_list
         // converts to the typed enum set. Kept as one v8 round-trip per
-        // language load, not per call.
-        let detect_script = r#"
-            (function() {
-                const language = globalThis.__ad4m_language_instance__;
-                const caps = [];
-                if (!language) return JSON.stringify(caps);
-                if (typeof language.expressionCreate === "function"
-                    || typeof language.expressionAddressOf === "function"
-                    || typeof language.addressOf === "function") {
-                    caps.push("expression-create");
-                }
-                if (typeof language.expressionGet === "function") caps.push("expression-get");
-                if (typeof language.perspectiveCommit === "function") caps.push("perspective-commit");
-                if (typeof language.perspectiveSyncSync === "function") caps.push("perspective-sync");
-                if (typeof language.perspectiveSyncRender === "function") caps.push("perspective-render");
-                if (typeof language.perspectiveSyncCurrentRevision === "function") caps.push("perspective-current-revision");
-                if (typeof language.peersSetLocal === "function") caps.push("peers-local");
-                if (typeof language.peersRemote === "function") caps.push("peers-remote");
-                if (typeof language.perspectiveQueryRun === "function") caps.push("perspective-query");
-                if (typeof language.telepresenceSetOnlineStatus === "function") caps.push("telepresence-set-status");
-                if (typeof language.telepresenceGetOnlineAgents === "function") caps.push("telepresence-get-agents");
-                if (typeof language.telepresenceSendSignal === "function") caps.push("telepresence-send-signal");
-                if (typeof language.telepresenceSendBroadcast === "function") caps.push("telepresence-send-broadcast");
-                if (typeof language.languageGetSource === "function") caps.push("language-get-source");
-                if (typeof language.handleHolochainSignal === "function") caps.push("holochain-signal");
-                return JSON.stringify(caps);
-            })()
-        "#;
-
-        let raw = self.execute(detect_script).await?;
+        // language load, not per call. The script checks one flat export
+        // per capability (`Capability::export_name`).
+        let raw = self.execute(&detection_script()).await?;
         let caps = parse_capability_list(raw.trim());
 
         info!(
@@ -391,7 +371,11 @@ impl LanguageRuntime {
     /// receive requests, mirroring the pattern in `JsCore::start()`.
     /// Without event loop polling, JS async operations (timers, promises,
     /// pending ops) would stall between requests.
-    pub(crate) async fn process_requests(self, mut rx: UnboundedReceiver<LanguageRuntimeRequest>) {
+    pub(crate) async fn process_requests(
+        self,
+        mut rx: UnboundedReceiver<LanguageRuntimeRequest>,
+        running: RunningRequest,
+    ) {
         let local_set = tokio::task::LocalSet::new();
         let js_core = self.js_core.clone();
         let addr = self.language_address.clone();
@@ -416,7 +400,24 @@ impl LanguageRuntime {
                                     debug!("📚 [lang:{}] {} waited {} ms in queue", addr, request.operation.name(), waited.as_millis());
                                 }
 
+                                // An `Execute` whose caller has gone (the call deadline, or a
+                                // dropped future) is not run: nobody would get the result, and
+                                // the caller may have queued the work again (a commit goes to
+                                // the pending diffs). The caller gives up under the same lock,
+                                // so a call either runs with its caller waiting or not at all.
+                                let skip = {
+                                    let mut running = running.lock().unwrap();
+                                    let skip = matches!(request.operation, LanguageOperation::Execute(..))
+                                        && request.response_tx.is_closed();
+                                    if !skip {
+                                        *running = Some((request.id, Instant::now()));
+                                    }
+                                    skip
+                                };
                                 let result = match request.operation {
+                                    LanguageOperation::Execute(..) if skip => {
+                                        Err(format!("Call to language {} not started: its caller stopped waiting", addr))
+                                    }
                                     LanguageOperation::Execute(script, ref agent_ctx) => {
                                         set_runtime_agent_context(agent_ctx);
                                         let r = self.execute(&script).await;
@@ -434,23 +435,8 @@ impl LanguageRuntime {
                                             // Serialize the capability set as a JSON array of
                                             // kebab-case wire names so the handle side can
                                             // parse it back into the same enum.
-                                            let names: Vec<&'static str> = caps.iter().map(|c| match c {
-                                                Capability::ExpressionCreate => "expression-create",
-                                                Capability::ExpressionGet => "expression-get",
-                                                Capability::PerspectiveCommit => "perspective-commit",
-                                                Capability::PerspectiveSync => "perspective-sync",
-                                                Capability::PerspectiveRender => "perspective-render",
-                                                Capability::PerspectiveCurrentRevision => "perspective-current-revision",
-                                                Capability::PerspectiveQuery => "perspective-query",
-                                                Capability::PeersLocal => "peers-local",
-                                                Capability::PeersRemote => "peers-remote",
-                                                Capability::TelepresenceSetStatus => "telepresence-set-status",
-                                                Capability::TelepresenceGetAgents => "telepresence-get-agents",
-                                                Capability::TelepresenceSendSignal => "telepresence-send-signal",
-                                                Capability::TelepresenceSendBroadcast => "telepresence-send-broadcast",
-                                                Capability::LanguageGetSource => "language-get-source",
-                                                Capability::HolochainSignal => "holochain-signal",
-                                            }).collect();
+                                            let names: Vec<&'static str> =
+                                                caps.iter().map(|c| c.wire_name()).collect();
                                             serde_json::to_string(&names).map_err(|e| e.to_string())
                                         })
                                     }
@@ -465,6 +451,7 @@ impl LanguageRuntime {
                                     debug!("[lang:{}] Operation completed successfully", addr);
                                 }
 
+                                *running.lock().unwrap() = None;
                                 let _ = request.response_tx.send(result);
 
                                 if is_teardown {

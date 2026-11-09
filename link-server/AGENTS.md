@@ -23,12 +23,14 @@ Composition root is `src/server.ts` (`buildServer(opts)`), wired in this depende
 types.ts        shared types + pure hash/canonicalization helpers, no deps
 db.ts           better-sqlite3 wrapper, schema, all queries incl. applyDiffAndAppend (the OR-Set merge transaction)
 auth.ts         did:key <-> raw ed25519 pubkey (base58btc hand-rolled, no bs58 dep), sign/verify, challenge store, JWT session manager
-encryption.ts   E2E key distribution: ECIES-style room-key sealing (X25519 ECDH + HKDF-SHA256 + AES-256-GCM), X25519 unseal for tests
+encryption.ts   the SealedBox type (the AD4M executor's sealed box); tests/sealed-box.ts seals and opens it as clients do
 rate-limit.ts   sliding-window limiter, fully standalone
 telepresence.ts online/offline + grace-period timers; DOES NOT import ws.ts (returns state, caller broadcasts) to avoid a cycle
 ws.ts           WebSocket connection registry + telepresence message routing; imports auth.ts + telepresence.ts
 routes.ts       all HTTP handlers; imports everything above
-server.ts       composition root: builds db/auth/telepresence/ws, registers routes
+log-tail.ts     in-memory ring buffer of recent log lines (both apps' pino output, teed from stdout) for the operator's live log view
+operator.ts     optional loopback-only operator app (admission UI + /api, incl. the /api/logs SSE stream); shares db/auth/ws with routes.ts, page in operator-page.ts
+server.ts       composition root: builds db/auth/telepresence/ws, registers routes, builds the operator app when asked
 index.ts        CLI arg parsing, calls buildServer + app.listen
 ```
 
@@ -36,7 +38,9 @@ index.ts        CLI arg parsing, calls buildServer + app.listen
 
 ### Data model
 
-- `links` table = the current active OR-Set (add-wins insert by hash, remove deletes by hash). `diffs` table = append-only history, replay-only, never mutated.
+- `links` table = the current active OR-Set (add-wins insert by hash, remove deletes by hash). `diffs` table = append-only history, replay-only, never mutated and never pruned. `/sync?since=N` answers from it, so dropping old rows would silently cost every member whose cursor is behind them those diffs (BUG-118: a 10,000-entry cap did this until it was removed). Any future compaction must come with an answer that tells a client its cursor is too old (e.g. 410 with the oldest retained sequence), and a client that re-renders on it.
+- **`/render` and `/sync` are always paged (README "Paged snapshot, then tail").** `limit` is 1 to `MAX_PAGE_LIMIT` (5000), `DEFAULT_PAGE_LIMIT` (500) when absent, a 400 otherwise. `/render` pages the links with `sequence <= upto` by the keyset `(sequence, link_hash)` (index `idx_links_room_seq_hash`); `upto` is the room's max sequence when the first page is read and travels inside the opaque `next` cursor. It holds because `links.sequence` is the sequence of the diff that inserted the row and a new row always gets a sequence above every existing one. `/sync` returns each diff with its `sequence`, plus `next`. There is no unpaged answer. Clients render only on their first load and tail `/sync` from their cursor after that, so they need the whole diff log. `npm run bench` measures a large room.
+- **Compression.** `@fastify/compress` compresses JSON answers above 1 kB for a client sending `Accept-Encoding`; request decompression is off so a compressed upload cannot grow past `bodyLimit`.
 - **Revision is a content hash, not a sequence number**: `sha256(sorted(linkHashes).join(","))`. Two rooms with the same active links converge to the same revision no matter what order or how many diffs got them there — this is load-bearing for tests that assert convergence.
 - **Removals resend the exact original `LinkExpression`** (same author/timestamp/data/proof as the addition), not a new tombstone. `linkHash()` of a removal entry is therefore identical to the hash of the link it removes, which is what makes "remove by hash" work. This also means only the *original author* can remove their own links via commit — there's no admin force-remove.
 - `linkHash()`/`canonicalLinkPayload()` (types.ts) are shared by hashing AND signature verification. For E2E-encrypted links, `ciphertext`+`nonce` stand in for `source`/`predicate`/`target` in that canonical payload — same code path, same function, so a client signs and the server verifies identically whether or not the room is encrypted.
@@ -54,13 +58,25 @@ The spec text was internally ambiguous — the endpoint table calls it "authenti
 
 ### E2E encryption trust model — opaque link data
 
-**The server treats link data as opaque.** It never parses, validates, or decrypts the `data` field of committed links — encrypted rooms and plaintext rooms follow the same commit path. The server's role in E2E is limited to key *storage and distribution*: it stores sealed (encrypted) room key envelopes and serves them to the appropriate members. All key generation, sealing, and encryption/decryption of actual link content happens client-side (in the server-link-language).
+**The server treats link data as opaque.** It never parses or decrypts the `data` field of committed links; it only checks that `data` has the encrypted shape (`{ciphertext, nonce}`, `isEncryptedLinkData`) and that the link carries a `link_hash`. The server's role in E2E is limited to key *storage and distribution*: it stores sealed (encrypted) room key envelopes and serves them to the appropriate members. All key generation, sealing, and encryption/decryption of actual link content happens client-side (in the server-link-language).
 
-There's no dedicated "enable E2E" endpoint. **The first call to `POST /rooms/:roomId/keys/rotate` both enables E2E and stores key version 1**; every subsequent call rotates to a new version. The admin's language client generates the AES-256-GCM room key locally, fetches the ACL to get each member's X25519 public key, seals the key to every member (ephemeral-X25519 ECDH + HKDF-SHA256 + AES-GCM, see `encryption.ts`), and POSTs only the sealed envelopes. The server validates that each DID exists in the ACL and that each envelope has the expected shape, then stores the sealed copies. **The server never sees the plaintext room key.** Members whose X25519 key has not yet been registered (they haven't completed auth since E2E was set up) get skipped — they receive their sealed copy on the next rotation after they authenticate. A DID added to the ACL *after* a rotation has no key until the *next* rotation — they appear in `membersNeedingHistoricalKeys` so the admin can grant them older versions.
+There's no "enable E2E" endpoint and no per-room E2E state. **Every room is E2E from creation**: the commit route refuses a plaintext link (400) in every room, before any key exists, and `GET /keys` answers `200 {keys: []}` to a member without a key (never 404). The admin's first `POST /rooms/:roomId/keys/rotate` stores key version 1; every subsequent call rotates to a new version. Rotation is admin-only. The admin's language client generates the AES-256-GCM room key locally, seals it to the DID of every ACL member, connected or not (ephemeral-X25519 ECDH + HKDF-SHA256 + AES-GCM, see `tests/sealed-box.ts`), and POSTs only the sealed boxes. The server validates that each DID exists in the ACL and that each box has the expected shape, then stores the sealed copies. **The server never sees the plaintext room key.** A DID added to the ACL *after* a rotation appears in `membersNeedingHistoricalKeys` (`GET /keys/missing`, any member); any member holding a version may `POST /keys/grant` it to that DID. The grant route refuses (403) a version the caller does not hold and validates every entry before storing any; `addRoomKeyIfMissing` keeps the first box per member and version.
 
-**X25519 key derivation**: clients derive their X25519 keypair from their Ed25519 *signing capability* (sha256(sign(FIXED_MESSAGE))), NOT from direct Ed25519→X25519 Montgomery conversion, because the Deno sandbox never exposes the raw Ed25519 private key. The public key is sent during the DID auth challenge-response (step 2, `x25519PublicKey` field) and stored in the `acl` table's `x25519_public_key` column. The server never derives X25519 keys from DIDs.
+**Member keys are DIDs**: a member's X25519 key is the Montgomery form of the Ed25519 key in its `did:key`, so clients compute it from the DID and the server stores none. `/auth` takes `{did, challenge, signature}` only; the ACL response is `[{did}]`.
+
+**Unused columns in existing database files.** `SCHEMA` (`db.ts`) is `CREATE TABLE IF NOT EXISTS` with no migrations, so a database file created by an earlier schema keeps columns the code no longer names: `rooms.e2e_enabled` (`INTEGER DEFAULT 0`), `acl.x25519_public_key`/`x25519_signature`. They are nullable or defaulted, so inserts that omit them work, and nothing reads them. Plaintext links that older language builds stored stay in such a file and are still served; the current language skips them on read, so members do not see them. Do not wipe the database to get rid of them: it also holds every room's ACL and key boxes, and after a wipe the first member to reconnect becomes the room's admin.
 
 **WebSocket keepalive**: connections use a 30-second ping/pong heartbeat. Sockets that miss a pong get terminated. This prevents stale connections from accumulating on the server.
+
+### Operator listener
+
+`--operator-port` + `--operator-token-file` start a second Fastify app (`operator.ts`) on loopback. It lets the server operator list rooms and add/remove DIDs without the room admin's DID key. It is a separate app, not a route prefix, so the public port can never serve it. Any change to who can reach it must keep these properties, each covered by `tests/operator.test.ts`:
+- The token comes from a mode-600 file only (never argv/URL), and the request log never sees headers.
+- Every `/api` call carries the signed-in login (`X-Forwarded-User`, set by the proxy; trusted only because the listener is loopback). Every ACL change is stored in `acl_changes` with that login. The `/acl` route stores the admin DID.
+- Every POST carries an allowed `Origin` (or `Referer`), as a CSRF guard for the cookie sign-in.
+- Removal goes through `removeMember()` in `routes.ts` (ACL row, sessions and sockets together). The page script builds DOM with `textContent` only, because room ids and DIDs are client-chosen strings (log lines carry them too).
+- Admission (`tests/admission.test.ts`): allowlist unless `autoAdmit`. The mode is logged at startup and returned by `/api/whoami`; the page shows it. The server keeps no queue of refused joins: the operator admits a DID the person sends them.
+- `GET /api/logs` (`tests/log-stream.test.ts`) streams `LogTail` as Server-Sent Events and hijacks the reply, so the `onSend` hook does not run for it: it sets its own headers. Its open streams are ended in a `preClose` hook, or `close()` would wait on them. Events carry no id: every (re)connect gets the whole buffer and the page clears its list on `open`, keeping at most as many rows as `LogTail` holds (1000), so a row goes when its line leaves the buffer. Both apps log through one tee destination (`server.ts`); tests pass `logger: true` with a `logDestination` sink to keep stdout quiet.
 
 ## Known gotchas
 

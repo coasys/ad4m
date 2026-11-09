@@ -31,18 +31,15 @@ use uuid::Uuid;
 /// Held as a plain field, not an `Arc<AIService>`, because `AIService` is
 /// a global singleton reached via `AIService::global_instance()` — the
 /// bridge just remembers a handle for the duration of the interpretation
-/// pass. `auth_token` is per-pass (billing context follows the pass owner).
+/// pass. `bill_to` is per-pass: the user each completion bills, if any.
 pub struct OpenAiCompatBridge {
     service: Arc<AIService>,
-    auth_token: Option<String>,
+    bill_to: Option<String>,
 }
 
 impl OpenAiCompatBridge {
-    pub fn new(service: Arc<AIService>, auth_token: Option<String>) -> Self {
-        Self {
-            service,
-            auth_token,
-        }
+    pub fn new(service: Arc<AIService>, bill_to: Option<String>) -> Self {
+        Self { service, bill_to }
     }
 }
 
@@ -97,12 +94,7 @@ impl CompletionSource for OpenAiCompatBridge {
 
         let result = self
             .service
-            .prompt_messages(
-                model_id.to_string(),
-                flat,
-                self.auth_token.clone(),
-                constraint,
-            )
+            .prompt_messages(model_id.to_string(), flat, self.bill_to.clone(), constraint)
             .await?;
 
         // The model's text is either a plain answer or a tool-call block
@@ -189,7 +181,7 @@ impl OpenAiCompatBridge {
 
         let reply = self
             .service
-            .prompt_with_tools(model_id.to_string(), turns, specs, self.auth_token.clone())
+            .prompt_with_tools(model_id.to_string(), turns, specs, self.bill_to.clone())
             .await?;
 
         Ok(HarnessCompletion {

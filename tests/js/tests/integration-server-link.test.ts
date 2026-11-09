@@ -22,6 +22,7 @@ import { TestContext } from './test-context';
 import neighbourhoodTests from "./neighbourhood";
 import autoProcessorNeighbourhoodTests from "./auto-processor-neighbourhood";
 import crossPeerShapeSyncTests from "./cross-peer-shape-sync";
+import flowReplicaJoinTests from "./flow/flow-replica-join";
 import { startLinkServer, LinkServerHandle } from "../utils/linkServer";
 import { LinkLangConfig, serverLinkLang } from "../utils/linkLangConfig";
 
@@ -104,6 +105,7 @@ describe("Multi-node integration tests [server-link] (no Holochain)", function (
     describe('Neighbourhood [server-link]', neighbourhoodTests(testContext, getServerLinkConfig))
     describe('Auto-processor (two executors) [server-link]', autoProcessorNeighbourhoodTests(testContext, getServerLinkConfig))
     describe('Cross-peer SHACL shape sync [server-link]', crossPeerShapeSyncTests(testContext, getServerLinkConfig))
+    describe('Flow replica state on join [server-link]', flowReplicaJoinTests(testContext, getServerLinkConfig))
 })
 
 function startLocalExecutor(appDataPath: string, apiPort: number, hcAdminPort: number, hcAppPort: number) {

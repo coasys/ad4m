@@ -45,6 +45,7 @@ const __dirname = path.dirname(__filename);
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+const ADMIN_CREDENTIAL = "auto-processor-multi-user-admin";
 
 // Same shape as the two-executor test uses: speaker + timestamp come off the
 // body link's reifier, so `?speaker` is the DID that signed the body — which
@@ -84,9 +85,9 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
   before(async () => {
     [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
     registerPorts([apiPort, hcAdminPort, hcAppPort]);
-    if (!fs.existsSync(appDataPath)) {
-      fs.mkdirSync(appDataPath, { recursive: true });
-    }
+    // rmSync with force also clears a dangling symlink, which existsSync reports as missing.
+    fs.rmSync(appDataPath, { recursive: true, force: true });
+    fs.mkdirSync(appDataPath, { recursive: true });
 
     const localServices = await runHcLocalServices();
     proxyUrl = localServices.proxyUrl;
@@ -100,12 +101,14 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
       hcAdminPort,
       hcAppPort,
       false,
-      undefined,
+      // Multi-user mode needs an admin credential: without one a caller with no token is
+      // the operator, which a multi-user executor must not have.
+      ADMIN_CREDENTIAL,
       proxyUrl!,
       bootstrapUrl!,
     );
 
-    admin = new Ad4mClient(baseUrl(apiPort));
+    admin = new Ad4mClient(baseUrl(apiPort), ADMIN_CREDENTIAL);
     await admin.agent.generate("passphrase");
     await admin.runtime.setMultiUserEnabled(true);
 

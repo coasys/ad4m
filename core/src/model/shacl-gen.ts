@@ -52,6 +52,8 @@ export function buildSHACL(
      * an `ad4m://interpretation_hint` link by `SHACLShape.toLinks()`.
      */
     interpretationHint?: string,
+    /** `@Model({ abstract: true })`: emitted as one `ad4m://abstract` link. */
+    isAbstract?: boolean,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
 
@@ -85,6 +87,9 @@ export function buildSHACL(
     const shape = new SHACLShape(shapeUri, targetClass);
     if (interpretationHint) {
         shape.interpretationHint = interpretationHint;
+    }
+    if (isAbstract) {
+        shape.isAbstract = true;
     }
 
     // ── Seed the memoisation cache while we keep building ──────────────
@@ -238,6 +243,11 @@ export function buildSHACL(
             propShape.identity = true;
         }
 
+        // Names for abstract classes (emitted as `ad4m://alias`).
+        if (propMeta.alias) {
+            propShape.alias = propMeta.alias;
+        }
+
         // ── Setter actions ──────────────────────────────────────────────
         if (propMeta.prologSetter) {
             console.warn(
@@ -349,6 +359,9 @@ export function buildSHACL(
         // "prior beliefs this intention derives from", not just "some link").
         if (relMeta.interpretationHint) {
             relShape.interpretationHint = relMeta.interpretationHint;
+        }
+        if (relMeta.alias) {
+            relShape.alias = relMeta.alias;
         }
 
         // Adder / Remover actions — only meaningful for relations backed

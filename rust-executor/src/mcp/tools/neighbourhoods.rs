@@ -2,19 +2,14 @@
 //!
 //! High-level tools for P2P collaboration. Agents select from known link language
 //! templates; the system handles cloning and unique instance creation automatically.
+//! The tools call the RPC methods `runtime.linkLanguageTemplates`, `neighbourhood.publish` and
+//! `neighbourhood.join` through the handler map, so their guards apply.
 
-use super::Ad4mMcpHandler;
-use crate::agent::capabilities::{
-    check_capability,
-    defs::{
-        NEIGHBOURHOOD_CREATE_CAPABILITY, NEIGHBOURHOOD_READ_CAPABILITY,
-        RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
-    },
-};
+use super::{labelled_json, method_error, Ad4mMcpHandler};
+use crate::agent::AgentContext;
+use crate::api::ws_handler::WsRpcError;
 use crate::languages::LanguageController;
-use crate::neighbourhoods;
-use crate::runtime_service::RuntimeService;
-use crate::types::Perspective;
+use crate::types::{LanguageMeta, Perspective, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -61,51 +56,31 @@ impl Ad4mMcpHandler {
         description = "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language` when calling `neighbourhood_publish_from_perspective`."
     )]
     pub async fn list_link_language_templates(&self) -> String {
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) =
-            check_capability(&capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
+        // The method answers each template's meta already (#1517).
+        let metas: Vec<LanguageMeta> = match self
+            .call(
+                "runtime.linkLanguageTemplates",
+                json!({}),
+                labelled_json("Failed to get link language templates"),
+            )
+            .await
         {
-            return format!("Capability error: {}", e);
-        }
-
-        let addresses = match RuntimeService::with_global_instance(|runtime_service| {
-            Ok::<Vec<String>, String>(runtime_service.get_know_link_languages())
-        }) {
-            Ok(addrs) => addrs,
-            Err(e) => {
-                return json!({"error": format!("Failed to get link language templates: {}", e)})
-                    .to_string()
-            }
+            Ok(metas) => metas,
+            Err(e) => return e,
         };
 
-        // Fetch meta information for each template
-        let controller = LanguageController::global_instance();
-        let mut templates = Vec::new();
-        for address in &addresses {
-            let meta = controller.get_language_expression(address).await;
-            match meta {
-                Ok(m) => {
-                    templates.push(json!({
-                        "address": m.address,
-                        "name": m.name,
-                        "description": m.description,
-                        "author": m.author,
-                        "possible_template_params": m.possible_template_params,
-                    }));
-                }
-                Err(_) => {
-                    // Fallback: try to get at least the name from local runtime
-                    let name = controller.get_language_name(address).await;
-                    templates.push(json!({
-                        "address": address,
-                        "name": name,
-                        "description": null,
-                        "author": null,
-                        "possible_template_params": null,
-                    }));
-                }
-            }
-        }
+        let templates: Vec<_> = metas
+            .into_iter()
+            .map(|m| {
+                json!({
+                    "address": m.address,
+                    "name": m.name,
+                    "description": m.description,
+                    "author": m.author,
+                    "possible_template_params": m.possible_template_params,
+                })
+            })
+            .collect();
 
         let result = json!({
             "templates": templates,
@@ -113,128 +88,6 @@ impl Ad4mMcpHandler {
             "hint": "Pass the address of a template as link_language when publishing a neighbourhood."
         });
         serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
-    }
-
-    /// Clone a link language template and publish the cloned instance.
-    /// Returns the new language address.
-    async fn clone_link_language(
-        &self,
-        template_address: &str,
-        name: &str,
-    ) -> Result<String, String> {
-        let controller = LanguageController::global_instance();
-
-        // Check if language language is available
-        let language_language_address = {
-            let sys = controller.system_addresses.lock().await;
-            sys.language_language
-                .clone()
-                .ok_or("Language language not loaded — cannot clone link language template")?
-        };
-
-        let meta = controller
-            .get_language_expression(template_address)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to get template meta for '{}': {}. Use `list_link_language_templates` to see available templates.",
-                    template_address, e
-                )
-            })?;
-        let declared_params: Vec<String> = meta.possible_template_params.unwrap_or_default();
-
-        let template_map = build_clone_template_map(&declared_params, name);
-
-        // Apply template to generate unique language source
-        let input = controller
-            .language_apply_template_on_source(template_address, template_map)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to clone template '{}': {}. Use `list_link_language_templates` to see available templates.",
-                    template_address, e
-                )
-            })?;
-
-        let input_name = input.meta.name.clone();
-
-        // Save locally and get the path
-        let (saved_hash, bundle_path) = controller
-            .save_language_bundle(&input.bundle, None)
-            .map_err(|e| format!("Failed to save cloned language bundle locally: {}", e))?;
-
-        // Publish via the language language
-        let input_json = serde_json::to_string(&input)
-            .map_err(|e| format!("Failed to serialize cloned language: {}", e))?;
-
-        // See the matching comment in mutation_resolvers.rs publish path:
-        // wrap in JSON.stringify and parse as JSON so addresses containing
-        // quotes / backslashes / whitespace don't get silently corrupted.
-        // Coerce undefined/null to JSON null before stringifying for the
-        // same reason as the expressionGet sweep — a bare
-        // JSON.stringify(undefined) yields the JS value undefined, which
-        // to_rust_string_lossy then captures as the raw string
-        // "undefined" and from_str::<String> fails with a confusing
-        // type-mismatch instead of a clear "no address" error.
-        let publish_script = format!(
-            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionCreate({})) ?? null)"#,
-            input_json
-        );
-
-        let address_raw = controller
-            .execute_on_language(&language_language_address, &publish_script)
-            .await
-            .map_err(|e| format!("Failed to publish cloned language: {}", e))?;
-
-        let trimmed_addr_raw = address_raw.trim();
-        if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
-            return Err(format!(
-                "Language language returned no address from expressionCreate when cloning template {} (got {:?})",
-                template_address, trimmed_addr_raw
-            ));
-        }
-
-        let address: String = serde_json::from_str(trimmed_addr_raw).map_err(|e| {
-            format!(
-                "Failed to parse published cloned language address: {} ({:?})",
-                e, address_raw
-            )
-        })?;
-
-        // Load into runtime - use the saved bundle path
-        // Verify the saved hash matches the published address
-        if saved_hash != address {
-            log::warn!(
-                "Saved language hash ({}) doesn't match published address ({}). Using published address.",
-                saved_hash, address
-            );
-        }
-
-        if bundle_path.exists() {
-            controller
-                .load_language(bundle_path, false)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Failed to load cloned language into runtime: {}. The language was published but cannot be used locally.",
-                        e
-                    )
-                })?;
-        } else {
-            return Err(format!(
-                "Language bundle not found at expected path: {:?}",
-                bundle_path
-            ));
-        }
-
-        log::info!(
-            "Cloned link language template '{}' → '{}' (name: {})",
-            template_address,
-            address,
-            input_name
-        );
-
-        Ok(address)
     }
 
     /// Publish a local perspective as a shared neighbourhood for P2P collaboration
@@ -247,46 +100,52 @@ impl Ad4mMcpHandler {
     ) -> String {
         let p = &params.0;
 
+        // `neighbourhood.publish` decides who may publish this perspective, and
+        // `language.applyTemplate` who may clone and publish a language, the work of
+        // `clone_link_language`. Both guards run first, so a refused caller clones nothing.
+        let publish = |link_language: &str| {
+            json!({
+                "perspectiveUuid": p.perspective_uuid,
+                "linkLanguage": link_language,
+                "meta": Perspective::default(),
+            })
+        };
+        if let Err(e) = self
+            .admit_method("neighbourhood.publish", &publish(&p.link_language))
+            .await
+        {
+            return method_error(e);
+        }
+        let apply_template = json!({
+            "sourceLanguageHash": p.link_language,
+            "templateData": json!({ "name": p.name }).to_string(),
+        });
+        if let Err(e) = self
+            .admit_method("language.applyTemplate", &apply_template)
+            .await
+        {
+            return method_error(e);
+        }
         let agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
+            Err(e) => return method_error(WsRpcError::unauthorized(e)),
         };
-
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        // Check perspective access
-        let perspective = match crate::perspectives::get_perspective(&p.perspective_uuid) {
-            Some(p) => p,
-            None => {
-                return json!({"error": format!("Perspective not found: {}", p.perspective_uuid)})
-                    .to_string()
-            }
-        };
-
-        let handle = perspective.persisted.lock().await.clone();
-        if !self.can_access_perspective(&handle).await {
-            return json!({"error": "Perspective not found or not accessible"}).to_string();
-        }
 
         // Clone the link language template
-        let cloned_address = match self.clone_link_language(&p.link_language, &p.name).await {
-            Ok(addr) => addr,
-            Err(e) => return json!({"error": e}).to_string(),
-        };
+        let cloned_address =
+            match clone_link_language(&p.link_language, &p.name, &agent_context).await {
+                Ok(addr) => addr,
+                Err(e) => return json!({"error": e}).to_string(),
+            };
 
-        let meta = Perspective::default();
-
-        match neighbourhoods::neighbourhood_publish_from_perspective_with_context(
-            &p.perspective_uuid,
-            cloned_address.clone(),
-            meta,
-            &agent_context,
-        )
-        .await
-        {
+        let published = self
+            .call::<String>(
+                "neighbourhood.publish",
+                publish(&cloned_address),
+                labelled_json("Failed to publish neighbourhood"),
+            )
+            .await;
+        match published {
             Ok(url) => json!({
                 "success": true,
                 "neighbourhood_url": url,
@@ -296,9 +155,7 @@ impl Ad4mMcpHandler {
                 "message": "Perspective published as neighbourhood. Share the neighbourhood_url for others to join."
             })
             .to_string(),
-            Err(e) => {
-                json!({"error": format!("Failed to publish neighbourhood: {}", e)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 
@@ -312,19 +169,14 @@ impl Ad4mMcpHandler {
     ) -> String {
         let p = &params.0;
 
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &NEIGHBOURHOOD_READ_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        match neighbourhoods::install_neighbourhood_with_context(p.url.clone(), &agent_context)
-            .await
-        {
+        let joined = self
+            .call::<PerspectiveHandle>(
+                "neighbourhood.join",
+                json!({ "url": p.url }),
+                labelled_json("Failed to join neighbourhood"),
+            )
+            .await;
+        match joined {
             Ok(handle) => json!({
                 "success": true,
                 "perspective_uuid": handle.uuid,
@@ -333,11 +185,135 @@ impl Ad4mMcpHandler {
                 "message": "Successfully joined neighbourhood. Use the perspective_uuid to interact with it."
             })
             .to_string(),
-            Err(e) => {
-                json!({"error": format!("Failed to join neighbourhood: {}", e)}).to_string()
-            }
+            Err(e) => e,
         }
     }
+}
+
+/// Clone a link language template and publish the cloned instance as `agent_context`: a
+/// user's neighbourhood publishes its link language as the user, never as the main agent.
+/// Returns the new language address.
+pub(crate) async fn clone_link_language(
+    template_address: &str,
+    name: &str,
+    agent_context: &AgentContext,
+) -> Result<String, String> {
+    let controller = LanguageController::global_instance();
+
+    // Check if language language is available
+    let language_language_address = {
+        let sys = controller.system_addresses.lock().await;
+        sys.language_language
+            .clone()
+            .ok_or("Language language not loaded — cannot clone link language template")?
+    };
+
+    let meta = controller
+        .get_language_expression(template_address)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to get template meta for '{}': {}. Use `list_link_language_templates` to see available templates.",
+                template_address, e
+            )
+        })?;
+    let declared_params: Vec<String> = meta.possible_template_params.unwrap_or_default();
+
+    let template_map = build_clone_template_map(&declared_params, name);
+
+    // Apply template to generate unique language source
+    let input = controller
+        .language_apply_template_on_source(template_address, template_map)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to clone template '{}': {}. Use `list_link_language_templates` to see available templates.",
+                template_address, e
+            )
+        })?;
+
+    let input_name = input.meta.name.clone();
+
+    // Save locally and get the path
+    let (saved_hash, bundle_path) = controller
+        .save_language_bundle(&input.bundle, None)
+        .map_err(|e| format!("Failed to save cloned language bundle locally: {}", e))?;
+
+    // Publish via the language language
+    let input_json = serde_json::to_string(&input)
+        .map_err(|e| format!("Failed to serialize cloned language: {}", e))?;
+
+    // See the matching comment in mutation_resolvers.rs publish path:
+    // wrap in JSON.stringify and parse as JSON so addresses containing
+    // quotes / backslashes / whitespace don't get silently corrupted.
+    // Coerce undefined/null to JSON null before stringifying for the
+    // same reason as the expressionGet sweep — a bare
+    // JSON.stringify(undefined) yields the JS value undefined, which
+    // to_rust_string_lossy then captures as the raw string
+    // "undefined" and from_str::<String> fails with a confusing
+    // type-mismatch instead of a clear "no address" error.
+    let publish_script = format!(
+        r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionCreate({})) ?? null)"#,
+        input_json
+    );
+
+    let address_raw = controller
+        .execute_on_language_with_context(
+            &language_language_address,
+            &publish_script,
+            agent_context,
+        )
+        .await
+        .map_err(|e| format!("Failed to publish cloned language: {}", e))?;
+
+    let trimmed_addr_raw = address_raw.trim();
+    if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
+        return Err(format!(
+            "Language language returned no address from expressionCreate when cloning template {} (got {:?})",
+            template_address, trimmed_addr_raw
+        ));
+    }
+
+    let address: String = serde_json::from_str(trimmed_addr_raw).map_err(|e| {
+        format!(
+            "Failed to parse published cloned language address: {} ({:?})",
+            e, address_raw
+        )
+    })?;
+
+    // Load into runtime - use the saved bundle path
+    // Verify the saved hash matches the published address
+    if saved_hash != address {
+        log::warn!(
+            "Saved language hash ({}) doesn't match published address ({}). Using published address.",
+            saved_hash, address
+        );
+    }
+
+    if !bundle_path.exists() {
+        return Err(format!(
+            "Language bundle not found at expected path: {:?}",
+            bundle_path
+        ));
+    }
+    // Loaded in the background, as `language.applyTemplate` does: the
+    // perspective's `ensure_link_language` waits for this install and its
+    // state reports a failure.
+    let installing = saved_hash.clone();
+    tokio::spawn(async move {
+        if let Err(e) = LanguageController::install_language(installing).await {
+            log::warn!("Failed to load cloned language into runtime: {}", e);
+        }
+    });
+
+    log::info!(
+        "Cloned link language template '{}' → '{}' (name: {})",
+        template_address,
+        address,
+        input_name
+    );
+
+    Ok(address)
 }
 
 fn build_clone_template_map(
@@ -358,6 +334,149 @@ fn build_clone_template_map(
         serde_json::Value::String(name.to_string()),
     );
     m
+}
+
+/// Publishing runs both of its methods' guards before any clone (#851): the order the method
+/// matrix through MCP does not pin.
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use crate::agent::capabilities::{
+        ALL_CAPABILITY, LANGUAGE_CREATE_CAPABILITY, NEIGHBOURHOOD_CREATE_CAPABILITY,
+    };
+    use crate::mcp::tools::test_support::{
+        app, handler_as, operator, perspective, setup, status, user,
+    };
+    use rmcp::handler::server::wrapper::Parameters;
+
+    async fn publish(handler: &Ad4mMcpHandler, uuid: &str) -> String {
+        handler
+            .neighbourhood_publish_from_perspective(Parameters(NeighbourhoodPublishParams {
+                perspective_uuid: uuid.to_string(),
+                link_language: "QmNoSuchTemplate".into(),
+                name: "n".into(),
+            }))
+            .await
+    }
+
+    // The tool checked the user's own perspectives and NEIGHBOURHOOD_CREATE; the operator could
+    // not publish a user's perspective, and a refusal named no status.
+    #[tokio::test]
+    async fn publishing_follows_the_perspective_guard_before_any_clone() {
+        setup();
+        let owner_did = "did:key:mcp-publisher";
+        let uuid = perspective(Some(vec![owner_did.into()])).await;
+
+        let other = handler_as(user(
+            "did:key:mcp-other-publisher",
+            vec![ALL_CAPABILITY.clone()],
+        ));
+        let refused = publish(&other, &uuid).await;
+        assert_eq!(status(&refused), Some(404), "{refused}");
+        assert!(refused.contains("not found"), "{refused}");
+
+        let without = publish(&handler_as(app(vec![])), &uuid).await;
+        assert_eq!(status(&without), Some(403), "{without}");
+
+        // Past the guard the tool clones the template, which this test executor cannot do.
+        for session in [
+            operator(),
+            user(
+                owner_did,
+                vec![
+                    NEIGHBOURHOOD_CREATE_CAPABILITY.clone(),
+                    LANGUAGE_CREATE_CAPABILITY.clone(),
+                ],
+            ),
+        ] {
+            let answer = publish(&handler_as(session), &uuid).await;
+            assert_eq!(status(&answer), None, "{answer}");
+            assert!(answer.contains("error"), "{answer}");
+        }
+        crate::perspectives::remove_perspective(&uuid).await;
+    }
+
+    // Cloning applies a template and publishes a language: `language.applyTemplate`'s work,
+    // which needs LANGUAGE_CREATE. Publishing the perspective alone did not check it.
+    #[tokio::test]
+    async fn publishing_needs_the_language_create_capability_before_any_clone() {
+        setup();
+        let owner_did = "did:key:mcp-publisher-without-language";
+        let uuid = perspective(Some(vec![owner_did.into()])).await;
+        let owner = handler_as(user(
+            owner_did,
+            vec![NEIGHBOURHOOD_CREATE_CAPABILITY.clone()],
+        ));
+        let refused = publish(&owner, &uuid).await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+        assert!(!refused.contains("template"), "no clone ran: {refused}");
+        crate::perspectives::remove_perspective(&uuid).await;
+    }
+
+    // `runtime.linkLanguageTemplates` answers each template's meta (#1517); the tool decoded
+    // the result as addresses, so any non-empty list failed. The matrix lists no template.
+    #[tokio::test]
+    async fn listing_templates_answers_each_template_meta() {
+        use crate::languages::language_runtime::LanguageOperation;
+        use crate::languages::language_runtime_handle::LanguageRuntimeHandle;
+        use crate::mcp::tools::test_support::RuntimeService;
+        use crate::runtime_service::RuntimeService as Service;
+
+        setup();
+        let _runtime = RuntimeService::start();
+        let template = format!("QmMcpTemplate{}", uuid::Uuid::new_v4().simple());
+        Service::with_global_instance(|s| s.add_know_link_language(vec![template.clone()]));
+
+        // A language language that has the template's meta.
+        let controller = LanguageController::global_instance();
+        let ll = format!("QmFakeLanguageLanguage{}", uuid::Uuid::new_v4().simple());
+        let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        controller
+            .set_runtime_for_test(
+                &ll,
+                Some(LanguageRuntimeHandle::from_channel(ll.clone(), tx)),
+            )
+            .await;
+        let previous = controller
+            .system_addresses
+            .lock()
+            .await
+            .language_language
+            .replace(ll.clone());
+        let asked = format!("expressionGet(\"{template}\")");
+        tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                let LanguageOperation::Execute(script, _) = &request.operation else {
+                    continue;
+                };
+                let answer = if script.contains(&asked) {
+                    Ok(r#"{"author":"did:test:t","data":{"name":"T","description":"t","possibleTemplateParams":["uid","name"]}}"#.to_string())
+                } else {
+                    Err("no such expression".to_string())
+                };
+                let _ = request.response_tx.send(answer);
+            }
+        });
+
+        let answer = handler_as(operator()).list_link_language_templates().await;
+
+        controller.system_addresses.lock().await.language_language = previous;
+        controller.set_runtime_for_test(&ll, None).await;
+        Service::with_global_instance(|s| s.remove_know_link_language(vec![template.clone()]));
+
+        let listed: serde_json::Value = serde_json::from_str(&answer).expect(&answer);
+        let ours: Vec<_> = listed["templates"]
+            .as_array()
+            .expect(&answer)
+            .iter()
+            .filter(|t| t["address"] == template.as_str())
+            .collect();
+        assert_eq!(ours.len(), 1, "{answer}");
+        assert_eq!(ours[0]["name"], "T");
+        assert_eq!(ours[0]["description"], "t");
+        assert_eq!(ours[0]["author"], "did:test:t");
+        assert_eq!(ours[0]["possible_template_params"], json!(["uid", "name"]));
+    }
 }
 
 #[cfg(test)]

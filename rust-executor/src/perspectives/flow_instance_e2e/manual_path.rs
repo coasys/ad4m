@@ -651,7 +651,7 @@ async fn role_grant_evidence_is_reachable_through_model_query() {
 ///   fixture's intent explicit rather than leaning on name order.
 ///
 /// Note that `seed_flow`'s `initial_state` argument cannot rescue this: it
-/// writes the `currentState` **cache**, and the fold never reads the cache —
+/// records the minting agent's **cached** state, and the fold never reads it —
 /// `read_set` takes its genesis from the flow definition alone.
 fn merge_flow() -> serde_json::Value {
     let guard = serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]);

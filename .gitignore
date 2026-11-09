@@ -7,6 +7,7 @@
 !executor/scripts/*.js
 !skills/ad4m/waker/*.js
 !bootstrap-languages/local/*.js
+!rust-executor/src/tool_bundles/*.js
 bootstrap-languages/local/dist/
 build/*
 node_modules
@@ -16,6 +17,7 @@ executor/scripts/note-ipfs-hash
 executor/scripts/perspective-diff-sync-hash
 tests/js/scripts/perspective-diff-sync-hash
 tests/js/scripts/server-link-language-hash
+tests/js/scripts/centralized-agent-language-hash
 executorsrc/tests/publishing-agent/ad4m/data/db.json
 .DS_Store
 tests/js/ad4m/users/*
@@ -97,3 +99,6 @@ rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
 .overnight-status/
 .codegraph/
 .graphcoder/
+
+# Multi-machine verification config (contains SSH hosts / network details)
+tests/js/helpers/sfu/multi-machine.config.json

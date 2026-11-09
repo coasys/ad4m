@@ -7,7 +7,7 @@
 //!
 //! The invariants enforced here, each with a matching test:
 //! 1. `toState` must be reachable from the instance's **derived** state
-//!    (not the `currentState` Local cache).
+//!    (not this agent's recorded state).
 //! 2. If the target state carries a `requires` guard it must be satisfied on
 //!    this replica at mint time; an unmet guard is a hard error, not a skip.
 //!    The seal comes from [`recompute_evidence_seal`] — the same code every
@@ -64,12 +64,14 @@
 //! behaviour-preserving. Left for the change that owns the engine pass. See
 //! [`proposal_already_exists`](crate::perspectives::flow_evaluator).
 
-use super::accept::{accept_flow_proposal, load_outputs};
+use super::accept::{accept_flow_proposal_locked, load_outputs};
 use super::atom::{
     check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
     TransitionAtom,
 };
-use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::pass::{
+    catch_up_before_own_vote, run_flow_consensus_pass, run_flow_pass_for_co_owners, FireOutcome,
+};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -143,6 +145,10 @@ pub async fn propose_flow_transition(
     rationale: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<ProposeOutcome> {
+    // Held from the read that decides through the vote's own pass — see
+    // `accept_flow_proposal`.
+    let lock = perspective.flow_pass_lock.clone();
+    let _passes = lock.lock().await;
     let flows = load_shacl_flows(perspective).await?;
     let instances = load_all_flow_instances(perspective).await?;
     let record = instances
@@ -250,7 +256,14 @@ pub async fn propose_flow_transition(
     // the two. Classifying only the first would mint past a joinable proposal
     // sitting behind a foreign one — and mint again on the next press, which is
     // invariant 4 broken in the one shape it exists to cover.
-    let live = find_live_proposals(perspective, &transition).await?;
+    let live = find_live_proposals(
+        &crate::perspectives::flow_evaluator::AgentProposals {
+            perspective,
+            agent_did: &acting_did,
+        },
+        &transition,
+    )
+    .await?;
     let mut already_voted = None;
     let mut joinable = None;
     let mut other_outputs = Vec::new();
@@ -316,7 +329,7 @@ pub async fn propose_flow_transition(
         // second sweep here would find every mark already written and return
         // nothing.
         (None, Some(uri)) => {
-            let outcomes = accept_flow_proposal(perspective, &uri, context).await?;
+            let outcomes = accept_flow_proposal_locked(perspective, &uri, context).await?;
             (uri, false, true, outcomes)
         }
         // An open proposal on this edge commits to other outputs. A twin
@@ -378,6 +391,9 @@ async fn mint(
     rationale: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<(String, bool, bool, Vec<FireOutcome>)> {
+    // So the sweep reports what this proposal settles, even when it is this
+    // agent's first contact with the instance.
+    catch_up_before_own_vote(perspective, context, &transition.instance_uri).await;
     let uri = write_proposal(perspective, transition, acting_did, rationale, context).await?;
     let outcomes = sweep(perspective, &transition.instance_uri, context).await;
     Ok((uri, true, true, outcomes))
@@ -389,7 +405,9 @@ async fn sweep(
     context: &AgentContext,
 ) -> Vec<FireOutcome> {
     let only = [instance_uri.to_string()];
-    run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await
+    let outcomes = run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
+    run_flow_pass_for_co_owners(perspective, context, None, Some(&only)).await;
+    outcomes
 }
 
 /// What an already-open proposal carrying our dedup key means for this call.
