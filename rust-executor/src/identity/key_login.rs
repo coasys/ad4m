@@ -636,6 +636,34 @@ enum Role {
     Agent(AgentContext),
 }
 
+/// Whether `grant`'s agent still speaks for the identity `scid` its key is bound to,
+/// as `role_for` asked at the mint: still bound to it in `identity_agents`, its own
+/// device key still admitted at the log's trusted seq. An operator-role grant names
+/// no agent. The check reads only the cache and the database: it holds in an outage.
+async fn agent_speaks(service: &IdentityService, grant: &LiveGrant, scid: &str) -> bool {
+    if grant.is_operator() {
+        return true;
+    }
+    let Ok(agent_did) = did_for_context(&grant.agent) else {
+        return false;
+    };
+    // An agent bound to another identity cannot speak for this one. An agent the
+    // table does not bind at all, and a key the cache cannot judge, keep it: a
+    // check that cannot read is no revocation, as for the bound key's own outage.
+    // `identity_agents` holds the bare SCID; a grant's binding names the identity's DID.
+    let bound = db(|db| db.agent_identity(&agent_did)).unwrap_or_default();
+    if bound.is_some_and(|s| scid_from(&s) != scid_from(scid)) {
+        return false;
+    }
+    match multikey_of(&agent_did) {
+        Some(agent_key) => match service.resolver.cached_session_key(scid, agent_key).await {
+            Err(_) => true,
+            Ok(key) => key.admits(),
+        },
+        None => false,
+    }
+}
+
 /// `user.loginWithKey`: checks the statement (see the module doc) and mints a key-bound grant.
 pub async fn login(
     service: &IdentityService,
@@ -796,12 +824,15 @@ pub async fn renew(
     // (backoff), and a renewal on that cached log would count as a check. On the cached log, the
     // key was not checked: the grace keeps running from the last real check, so a device
     // revoked on the store during the outage cannot renew past it.
-    let (read, checked_at) = match service
-        .resolver
-        .session_key(&binding.scid, &binding.key, 0)
-        .await
+    let (read, checked_at) = match tokio::time::timeout(
+        KEY_READ_TIMEOUT,
+        service.resolver.session_key(&binding.scid, &binding.key, 0),
+    )
+    .await
     {
-        Err(SessionKeyError::StoreUnavailable)
+        // The wait on the identity's lock counts too: a renewal queued behind a
+        // stalled read still reaches the cached-verdict fallback inside the bound.
+        Err(_) | Ok(Err(SessionKeyError::StoreUnavailable))
             if now.saturating_sub(binding.checked_at()) < STORE_OUTAGE_GRACE =>
         {
             (
@@ -812,7 +843,8 @@ pub async fn renew(
                 binding.checked_at(),
             )
         }
-        other => (other, now),
+        Err(_) => (Err(SessionKeyError::StoreUnavailable), now),
+        Ok(other) => (other, now),
     };
     let key = match read {
         Ok(key) if key.admits() => key,
@@ -822,6 +854,12 @@ pub async fn renew(
         }
         Err(SessionKeyError::StoreUnavailable) => return Err(KeyLoginError::StoreUnavailable),
     };
+    // The grant's agent must still speak for the identity, as `role_for` asked at
+    // the mint: a grant never renews as an agent whose binding or key is gone.
+    if !agent_speaks(service, &grant, &binding.scid).await {
+        end(&grant);
+        return Err(KeyLoginError::NotKnown);
+    }
     let until = now + KEY_SESSION_TTL;
     let grant = Grants::global()
         .renew(&grant.id, until, key.head_seq, checked_at)
@@ -966,15 +1004,28 @@ pub fn end_all_sessions(
     let keep = keep_current.then(|| session.grant_id()).flatten();
     let store = |e: grants::GrantError| KeyLoginError::Internal(e.to_string());
     let mut ended = 0;
+    let mut first_err = None;
+    // Both revocations run: a grant's write that fails must not spare the other set
+    // (the grants are ended in memory either way — the error is the caller's, about
+    // persistence). The first error is what answers.
     if let Some(binding) = binding {
-        ended += Grants::global()
-            .revoke_identity(&binding.scid, keep, before)
-            .map_err(store)?;
+        match Grants::global().revoke_identity(&binding.scid, keep, before) {
+            Ok(n) => ended += n,
+            Err(e) => first_err = Some(store(e)),
+        }
     }
     if let Some(agent) = managed {
-        ended += Grants::global()
-            .revoke_agent_except(&agent, keep, before)
-            .map_err(store)?;
+        match Grants::global().revoke_agent_except(&agent, keep, before) {
+            Ok(n) => ended += n,
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(store(e));
+                }
+            }
+        }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
     }
     Ok(EndedSessions {
         ended: u32::try_from(ended).unwrap_or(u32::MAX),
@@ -1037,8 +1088,8 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
     if change.verdict == KeyVerdict::Valid {
         return 0;
     }
-    let bot = end_revoked_bot(&change.key, change.verdict);
-    bot + match Grants::global().revoke_key(&change.key) {
+    let mut ended = end_revoked_bot(&change.key, change.verdict);
+    ended += match Grants::global().revoke_key(&change.key) {
         Ok(ended) => {
             if ended > 0 {
                 log::info!(
@@ -1057,7 +1108,43 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
             );
             0
         }
+    };
+    // The changed key can be an agent's own device key, not a grant's: a grant acting
+    // as an agent whose key fell in its identity's log ends with it — the binding
+    // `role_for` asked at the mint holds no more.
+    let to_end: Vec<Arc<LiveGrant>> = Grants::global()
+        .key_bound()
+        .into_iter()
+        .filter(|grant| {
+            !grant.is_operator()
+                && grant
+                    .key
+                    .as_ref()
+                    .is_some_and(|b| b.scid == did_of(&change.scid))
+                && did_for_context(&grant.agent)
+                    .ok()
+                    .is_some_and(|did| multikey_of(&did) == Some(change.key.as_str()))
+        })
+        .collect();
+    if !to_end.is_empty() {
+        let active = to_end.iter().filter(|g| !g.is_ended()).count();
+        match Grants::global().revoke(&to_end) {
+            Ok(()) => {
+                log::info!(
+                    "identity: ended {active} key session(s) acting as did:key:{}: {:?} in {}",
+                    change.key,
+                    change.verdict,
+                    did_of(&change.scid)
+                );
+                ended += active;
+            }
+            Err(e) => log::error!(
+                "identity: ending the sessions acting as did:key:{}: {e}",
+                change.key
+            ),
+        }
     }
+    ended
 }
 
 /// Ends the sessions of the local bot whose key is `key` (a multikey) when its owner's log
@@ -1155,6 +1242,22 @@ async fn recheck_bot_keys(service: &IdentityService) -> usize {
     ended
 }
 
+/// Revokes `grants`, ended on a verdict of `key` (or its outage-grace expiry).
+/// Returns how many were active.
+fn end_on_verdict(grants: Vec<Arc<LiveGrant>>, key: &str) -> usize {
+    let active = grants.iter().filter(|g| !g.is_ended()).count();
+    match Grants::global().revoke(&grants) {
+        Ok(()) => {
+            log::info!("identity: ended {active} key session(s) of did:key:{key} on the re-check");
+            active
+        }
+        Err(e) => {
+            log::error!("identity: ending the sessions of did:key:{key}: {e}");
+            0
+        }
+    }
+}
+
 /// Reads the key of every live key-bound grant again from the store, whatever the cache's age
 /// (a cached read up to an interval old would let a revocation the cache missed stand for two
 /// intervals): a key no longer valid, or a bot's, ends its grants; a valid one records the
@@ -1213,68 +1316,81 @@ pub async fn recheck_key_grants(
     )
     .buffer_unordered(reads_at_once);
     let mut reads = Box::pin(reads);
-    let mut results: HashMap<(String, String), Result<SessionKey, SessionKeyError>> =
-        HashMap::new();
+    let mut ended = 0;
+    let db = crate::db_backend::db_backend();
+    // A key whose read came back not-admitting ends its grants as soon as that
+    // verdict arrives — another key's read stalled to the deadline holds them
+    // open no longer. An unavailable read's grants wait for the pass's end: the
+    // cached verdict and the outage grace decide them below, once.
     let _ = tokio::time::timeout(KEY_RECHECK_INTERVAL, async {
-        while let Some((key, read)) = reads.next().await {
-            results.insert(key, read);
+        while let Some(((scid, key), read)) = reads.next().await {
+            let Some(grants) = by_key.remove(&(scid.clone(), key.clone())) else {
+                continue;
+            };
+            match read {
+                Ok(found) if found.admits() => {
+                    let mut to_end = Vec::new();
+                    for grant in grants {
+                        if let Some(binding) = &grant.key {
+                            binding.checked(found.head_seq, now);
+                            // The check is kept in the row too, so a restart reads when the key
+                            // was last seen valid, not when the grant started. The expiry does
+                            // not move.
+                            if let Err(e) = db.note_key_check(&grant.id.0, found.head_seq, now) {
+                                log::warn!(
+                                    "identity: noting the check of {} failed: {e}",
+                                    grant.id.0
+                                );
+                            }
+                        }
+                        // The grant's agent must still speak for the identity, as
+                        // `role_for` asked at the mint.
+                        if !agent_speaks(service, &grant, &scid).await {
+                            to_end.push(grant);
+                        }
+                    }
+                    if !to_end.is_empty() {
+                        ended += end_on_verdict(to_end, &key);
+                    }
+                }
+                Ok(_) | Err(SessionKeyError::NotListed) => {
+                    ended += end_on_verdict(grants, &key);
+                }
+                // The outage pass below decides it.
+                Err(SessionKeyError::StoreUnavailable) => {
+                    by_key.insert((scid, key), grants);
+                }
+            }
         }
     })
     .await;
-    let mut ended = recheck_bot_keys(service).await;
-    let db = crate::db_backend::db_backend();
+    // The bots' keys come after the key-bound reads, so they never delay them.
+    ended += recheck_bot_keys(service).await;
     for ((scid, key), grants) in by_key {
         // A read that did not answer in [`KEY_READ_TIMEOUT`], or that the pass did not
         // reach within it, counts as the outage it is: the grant's own last check
         // decides, bounded by [`STORE_OUTAGE_GRACE`].
-        let read = results
-            .remove(&(scid.clone(), key.clone()))
-            .unwrap_or(Err(SessionKeyError::StoreUnavailable));
-        let to_end: Vec<Arc<LiveGrant>> = match read {
-            Ok(found) if found.admits() => {
-                for grant in &grants {
-                    if let Some(binding) = &grant.key {
-                        binding.checked(found.head_seq, now);
-                        // The check is kept in the row too, so a restart reads when the key
-                        // was last seen valid, not when the grant started. The expiry does
-                        // not move.
-                        if let Err(e) = db.note_key_check(&grant.id.0, found.head_seq, now) {
-                            log::warn!("identity: noting the check of {} failed: {e}", grant.id.0);
+        let to_end: Vec<Arc<LiveGrant>> =
+            match service.resolver.cached_session_key(&scid, &key).await {
+                // The cached verdict first: a revocation it already holds ends the
+                // grant now. A valid one is no fresh check — the outage grace still
+                // runs from the grant's own last check.
+                Ok(cached) if !cached.admits() => grants,
+                _ => {
+                    let mut to_end = Vec::new();
+                    for g in grants {
+                        let past_grace = g.key.as_ref().is_some_and(|b| {
+                            now.saturating_sub(b.checked_at()) >= STORE_OUTAGE_GRACE
+                        });
+                        if past_grace || !agent_speaks(service, &g, &scid).await {
+                            to_end.push(g);
                         }
                     }
+                    to_end
                 }
-                continue;
-            }
-            Ok(_) | Err(SessionKeyError::NotListed) => grants,
-            Err(SessionKeyError::StoreUnavailable) => {
-                match service.resolver.cached_session_key(&scid, &key).await {
-                    // The cached verdict first: a revocation it already holds ends the
-                    // grant now. A valid one is no fresh check — the outage grace still
-                    // runs from the grant's own last check.
-                    Ok(cached) if !cached.admits() => grants,
-                    _ => grants
-                        .into_iter()
-                        .filter(|g| {
-                            g.key.as_ref().is_some_and(|b| {
-                                now.saturating_sub(b.checked_at()) >= STORE_OUTAGE_GRACE
-                            })
-                        })
-                        .collect(),
-                }
-            }
-        };
-        if to_end.is_empty() {
-            continue;
-        }
-        let active = to_end.iter().filter(|g| !g.is_ended()).count();
-        match Grants::global().revoke(&to_end) {
-            Ok(()) => {
-                log::info!(
-                    "identity: ended {active} key session(s) of did:key:{key} on the re-check"
-                );
-                ended += active;
-            }
-            Err(e) => log::error!("identity: ending the sessions of did:key:{key}: {e}"),
+            };
+        if !to_end.is_empty() {
+            ended += end_on_verdict(to_end, &key);
         }
     }
     ended
@@ -1304,7 +1420,7 @@ pub async fn end_key_grants_revoked_in_cache(service: &IdentityService, grants: 
                     .is_ok_and(|found| found.admits()),
             ),
         };
-        if !admits {
+        if !admits || !agent_speaks(service, &grant, &binding.scid).await {
             to_end.push(grant);
         }
     }
@@ -1353,6 +1469,11 @@ pub async fn run_key_session_watch(
                 Err(RecvError::Closed) => return,
             },
             _ = tick.tick() => due = true,
+            // A pass made due while one runs starts when the running pass ends:
+            // without this branch the loop would wait for the next select event —
+            // the next tick — so a revocation a stalled pass missed could stand
+            // for almost another interval.
+            _ = async { rechecking.as_mut().unwrap().await }, if due && rechecking.as_ref().is_some_and(|r| !r.is_finished()) => {}
         }
         if due && rechecking.as_ref().is_none_or(|r| r.is_finished()) {
             due = false;
@@ -1397,6 +1518,9 @@ mod tests {
         phone: SigningKey,
         bot: SigningKey,
         did: String,
+        /// Held for the test: the operator record and `identity_agents` are global,
+        /// so a world that reads or writes them shares them with no other test.
+        _op: tokio::sync::MutexGuard<'static, ()>,
     }
 
     fn add_key(log: &mut TestLog, sign: String, enc: String, life: KeyLife) {
@@ -1420,6 +1544,7 @@ mod tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let mut log = TestLog::new(seed);
         let phone = signing_key(seed.wrapping_add(1));
         let bot = signing_key(seed.wrapping_add(2));
@@ -1447,6 +1572,7 @@ mod tests {
             phone,
             bot,
             did,
+            _op,
         };
         accept_signed(&world.service.cache, &world.log.events).await;
         world.with_store()
@@ -1531,6 +1657,7 @@ mod tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let mut log = TestLog::new(seed);
         let phone = signing_key(seed.wrapping_add(1));
         let bot = signing_key(seed.wrapping_add(2));
@@ -1571,6 +1698,7 @@ mod tests {
             phone,
             bot,
             did,
+            _op,
         };
         accept_signed(&world.service.cache, &world.log.events).await;
         world
@@ -1620,6 +1748,15 @@ mod tests {
         )
     }
 
+    /// `entered` fires when the paused store read began; a login that never reaches it
+    /// would hang the test — the bound turns that into a failure.
+    async fn entered_store(entered: &tokio::sync::Notify) {
+        tokio::time::timeout(Duration::from_secs(60), entered.notified())
+            .await
+            .expect("the read reached the paused store");
+    }
+
+    /// Records the operator record as this world's identity.
     fn no_operator() {
         test_db(|db| db.set_operator_record_for_test(None)).unwrap();
     }
@@ -1951,6 +2088,32 @@ mod tests {
         assert!(!session.may(&crate::agent::capabilities::ALL_CAPABILITY));
         assert!(session.may(&crate::agent::capabilities::AGENT_UPDATE_CAPABILITY));
         assert_eq!(session_info(&session).role, SessionRole::Tenant);
+
+        // The agent still speaks for the identity (bound by its bare SCID, the grant naming
+        // the identity's DID): the re-check keeps the grant and a renewal renews it.
+        recheck_key_grants(&world.service, now(), &RecheckAttempts::default()).await;
+        assert!(
+            session.check().is_ok(),
+            "the re-check keeps a bound agent's grant"
+        );
+        let mut statement = world.statement(&world.phone);
+        statement.purpose = KeyPurpose::Renew;
+        statement.grant = Some(result.grant_id.clone());
+        statement.challenge = world
+            .service
+            .challenges
+            .issue(&ChallengeSource::Grant(result.grant_id.clone()), now())
+            .unwrap()
+            .0;
+        renew(
+            &world.service,
+            &session,
+            signed(statement, &world.phone),
+            now(),
+        )
+        .await
+        .expect("a bound agent's grant renews");
+        assert!(session.check().is_ok());
     }
 
     // The main agent speaking for the identity, without an operator record: a grant on the
@@ -2282,8 +2445,8 @@ mod tests {
         // Both writes of the end fail: no pending note lands and the row stays active,
         // so a restart forgets the in-memory end too.
         Grants::global().retry_pending();
-        crate::db::FAIL_NEXT_GRANT_NOTE.store(true, Ordering::SeqCst);
-        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_NOTE.store(true, Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, Ordering::SeqCst);
         on_verdict_change(&change);
         assert_eq!(open(&result.token).unwrap_err(), AuthError::Revoked);
 
@@ -2396,6 +2559,54 @@ mod tests {
         world.store.store_down.store(false, Ordering::SeqCst);
         world.service.resolver.forget_admission_failures();
         assert!(world.login_as(&world.phone).await.is_ok());
+        no_operator();
+    }
+
+    // Several logins of one identity behind a store that stalls then fails pay one read
+    // between them: the first caller's failure backs the identity off for every caller
+    // waiting on its read. Another identity's read is not blocked by this one's.
+    #[tokio::test]
+    async fn concurrent_admission_reads_share_one_failed_read() {
+        use tokio::sync::Notify;
+        let world = world(95).await;
+        world.operate();
+        let scid = world.log.scid();
+        // The log's last store read is old: every `session_key` asks the store again.
+        world.service.cache.note_read(&scid, 0);
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *world.store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        world.store.store_down.store(true, Ordering::SeqCst);
+        let key = world.phone.key();
+        let reads: Vec<_> = (0..4)
+            .map(|_| {
+                let resolver = world.service.resolver.clone();
+                let (scid, key) = (scid.clone(), key.clone());
+                tokio::spawn(async move { resolver.session_key(&scid, &key, LOGIN_MAX_AGE).await })
+            })
+            .collect();
+        entered_store(&entered).await;
+        // A second identity's read proceeds while the first's is stalled in the store.
+        assert_eq!(
+            world
+                .service
+                .resolver
+                .session_key("0-other-scid", &key, LOGIN_MAX_AGE)
+                .await
+                .unwrap_err(),
+            SessionKeyError::StoreUnavailable
+        );
+        release.notify_one();
+        for read in reads {
+            assert_eq!(
+                read.await.unwrap().unwrap_err(),
+                SessionKeyError::StoreUnavailable
+            );
+        }
+        assert_eq!(
+            world.store.log_calls.load(Ordering::SeqCst),
+            2,
+            "one stalled read failed for all four callers, one for the other identity"
+        );
         no_operator();
     }
 
@@ -3073,6 +3284,7 @@ mod tests {
     // must not log the user out everywhere.
     #[tokio::test]
     async fn a_read_only_app_cannot_end_its_owners_sessions() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
@@ -3188,7 +3400,7 @@ mod tests {
             let proof = signed(statement, &world.phone);
             tokio::spawn(async move { login(&service, params(proof), now()).await })
         };
-        entered.notified().await;
+        entered_store(&entered).await;
         let revoke_phone =
             revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
         world.log.events.push(revoke_phone);
@@ -3241,7 +3453,7 @@ mod tests {
         let recheck = tokio::spawn(async move {
             recheck_key_grants(&service, now(), &RecheckAttempts::default()).await;
         });
-        entered.notified().await;
+        entered_store(&entered).await;
         tokio::time::advance(KEY_READ_TIMEOUT + Duration::from_secs(1)).await;
         recheck.await.unwrap();
         assert!(session.check().is_ok(), "kept on its fresh check");
@@ -3384,7 +3596,7 @@ mod tests {
             let proof = signed(statement, &world.phone);
             tokio::spawn(async move { login(&service, params(proof), now()).await })
         };
-        entered.notified().await;
+        entered_store(&entered).await;
         attempt.abort();
         assert!(attempt.await.is_err(), "the caller went away");
         assert!(Grants::global()
@@ -3442,7 +3654,7 @@ mod tests {
             service.clone(),
             service.cache.subscribe(),
         ));
-        entered.notified().await;
+        entered_store(&entered).await;
         let revoke_phone =
             revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
         world.log.events.push(revoke_phone);
@@ -3511,7 +3723,7 @@ mod tests {
             recheck_key_grants(&service, now(), &RecheckAttempts::default()).await
         });
         for notify in &entered {
-            notify.notified().await;
+            entered_store(notify).await;
         }
         tokio::time::advance(KEY_READ_TIMEOUT + Duration::from_secs(1)).await;
         let ended = recheck.await.unwrap();
@@ -3666,7 +3878,7 @@ mod tests {
             service.clone(),
             service.cache.subscribe(),
         ));
-        entered[0].notified().await;
+        entered_store(&entered[0]).await;
         while session.check().is_ok()
             && started.elapsed() <= KEY_RECHECK_INTERVAL + KEY_READ_TIMEOUT
         {
@@ -3681,6 +3893,89 @@ mod tests {
         assert_eq!(session.check(), Err(AuthError::Revoked));
         watch.abort();
         world.store.stall_for.lock().unwrap().clear();
+        no_operator();
+    }
+
+    // A revocation that lands just after the pass read the key valid is judged by the pass
+    // the tick made due — and that pass starts when the stalled pass ends, not a tick
+    // later: the grant ends within the interval and one read timeout of the revocation.
+    #[tokio::test(start_paused = true)]
+    async fn a_revocation_just_after_its_read_is_judged_when_the_stalled_pass_ends() {
+        use tokio::sync::Notify;
+        let mut world = world(68).await;
+        world.operate();
+        // Earlier tests' leftover key-bound grants go, so the pass's reads and
+        // reads-at-once are this test's alone.
+        let leftovers = Grants::global().key_bound();
+        if !leftovers.is_empty() {
+            Grants::global().revoke(&leftovers).unwrap();
+        }
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // Stalled reads in the same pass, sorted after the session's DID so its key is
+        // read first: five waves of them hold the pass running past the next tick.
+        for i in 0..4 * KEY_RECHECK_READS_AT_ONCE + 1 {
+            let scid = format!("z-due-{i}");
+            world
+                .store
+                .stall_for
+                .lock()
+                .unwrap()
+                .insert(format!("did:scid:coasys:1:{scid}"), Arc::new(Notify::new()));
+            Grants::global()
+                .insert(
+                    LiveGrant::for_test(
+                        &format!("due-stall-{i}"),
+                        AgentContext::main_agent(),
+                        now() + 3600,
+                    )
+                    .bound_to(KeyBinding::new(
+                        scid.clone(),
+                        format!("z6Mk{scid}"),
+                        "d1".into(),
+                        0,
+                        now(),
+                    )),
+                )
+                .unwrap();
+        }
+        // The pass's successful read of the session's log marks it read fresh: stale
+        // until then, so the read's end is observable before the revocation lands.
+        let scid = world.log.scid();
+        world.service.cache.note_read(&scid, 0);
+        let service = Arc::new(world.service);
+        let watch = tokio::spawn(run_key_session_watch(
+            service.clone(),
+            service.cache.subscribe(),
+        ));
+        while !service.cache.read_ok_within(&scid, now(), 60) {
+            tokio::task::yield_now().await;
+        }
+        // The key is revoked on the store just after that read: no verdict change
+        // reaches this executor.
+        let revoked_at = tokio::time::Instant::now();
+        let revoke_phone =
+            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(revoke_phone);
+        *world.store.events.lock().unwrap() = world.log.events.clone();
+        while session.check().is_ok()
+            && revoked_at.elapsed() <= KEY_RECHECK_INTERVAL + KEY_READ_TIMEOUT
+        {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            revoked_at.elapsed() <= KEY_RECHECK_INTERVAL + KEY_READ_TIMEOUT,
+            "the due pass started when the stalled pass ended, not a tick later: {:?}",
+            revoked_at.elapsed()
+        );
+        assert_eq!(session.check(), Err(AuthError::Revoked));
+        watch.abort();
+        world.store.stall_for.lock().unwrap().clear();
+        let leftovers = Grants::global().key_bound();
+        if !leftovers.is_empty() {
+            Grants::global().revoke(&leftovers).unwrap();
+        }
         no_operator();
     }
 
@@ -3806,6 +4101,7 @@ mod tests {
     // password login, an approved app) still takes AGENT_UPDATE.
     #[tokio::test]
     async fn a_key_session_ends_its_identitys_grants_whatever_its_capabilities() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
@@ -3879,5 +4175,295 @@ mod tests {
         assert!(may_ask_challenge(&key_session));
         assert!(!may_ask_challenge(&no_auth));
         assert!(may_ask_challenge(&anonymous));
+    }
+
+    // A renewal that falls back on the cached verdict while the store is down must not
+    // end the grant when the CACHE cannot read the log either: a storage error is an
+    // outage, not a verdict — the renewal answers StoreUnavailable and the grant stands.
+    #[tokio::test]
+    async fn a_renewal_on_an_unreadable_cache_keeps_the_grant() {
+        let world = world(42).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        let at = now() + 30;
+        let mut statement = world.statement(&world.phone);
+        statement.purpose = KeyPurpose::Renew;
+        statement.grant = Some(result.grant_id.clone());
+        statement.challenge = world
+            .service
+            .challenges
+            .issue(&ChallengeSource::Grant(result.grant_id.clone()), at)
+            .unwrap()
+            .0;
+        statement.issued_at = at;
+        world.store.store_down.store(true, Ordering::SeqCst);
+        crate::identity::cache::tests::FAIL_TRUSTED.store(true, Ordering::SeqCst);
+        assert_eq!(
+            renew(
+                &world.service,
+                &session,
+                signed(statement, &world.phone),
+                at
+            )
+            .await
+            .unwrap_err(),
+            KeyLoginError::StoreUnavailable,
+            "an unreadable cache is an outage, not a verdict"
+        );
+        assert!(session.check().is_ok(), "the grant was not revoked");
+        world.store.store_down.store(false, Ordering::SeqCst);
+        no_operator();
+    }
+
+    // A key whose read came back revoked ends its grant when that result arrives, not
+    // at the pass's deadline: another key's read stalled to the deadline holds nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_revoked_keys_grant_ends_when_its_read_answers_not_at_the_deadline() {
+        use tokio::sync::Notify;
+        let mut world = world(47).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // A second key-bound grant whose store read stalls forever.
+        let stalled = Arc::new(Notify::new());
+        world
+            .store
+            .stall_for
+            .lock()
+            .unwrap()
+            .insert("did:scid:coasys:1:0-stall".into(), stalled.clone());
+        Grants::global()
+            .insert(
+                LiveGrant::for_test("stall-grant", AgentContext::main_agent(), now() + 3600)
+                    .bound_to(KeyBinding::new(
+                        "0-stall".into(),
+                        "z6Mk0-stall".into(),
+                        "d1".into(),
+                        0,
+                        now(),
+                    )),
+            )
+            .unwrap();
+        // The session's key is revoked on the store.
+        let revoke_phone =
+            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(revoke_phone);
+        *world.store.events.lock().unwrap() = world.log.events.clone();
+        let service = Arc::new(world.service);
+        let recheck = tokio::spawn(async move {
+            recheck_key_grants(&service, now(), &RecheckAttempts::default()).await
+        });
+        entered_store(&stalled).await;
+        // The revoked key's read answered while the stalled read still runs: its grant
+        // ends now, well before the pass's deadline.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            if session.check().is_err() {
+                break;
+            }
+        }
+        assert_eq!(
+            session.check(),
+            Err(AuthError::Revoked),
+            "ended when its read answered"
+        );
+        tokio::time::advance(KEY_RECHECK_INTERVAL + Duration::from_secs(1)).await;
+        recheck.await.unwrap();
+        assert!(
+            Grants::global()
+                .get(&crate::agent::session::TokenId("stall-grant".into()))
+                .is_some(),
+            "the stalled grant kept its fresh check"
+        );
+        world.store.stall_for.lock().unwrap().clear();
+        no_operator();
+    }
+
+    // A failed write ending the identity's grants does not spare the agent's: both
+    // revocations run, and the first error is what answers.
+    #[tokio::test]
+    async fn a_failed_revoke_of_the_identitys_grants_still_ends_the_agents() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_test_db();
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
+        let user = AgentContext::managed("did:key:z6MkKeyLogout2".into());
+        let scid = "did:scid:coasys:1:QmKeyLogout2";
+        let key_grant = Grants::global()
+            .insert(
+                LiveGrant::for_test("key-grant-2", user.clone(), now() + 3600).bound_to(
+                    KeyBinding::new(scid.into(), "z6MkPhone2".into(), "d2".into(), 1, now()),
+                ),
+            )
+            .unwrap();
+        let other = Grants::global()
+            .insert(
+                LiveGrant::for_test("other-device-2", user.clone(), now() + 3600).bound_to(
+                    KeyBinding::new(scid.into(), "z6MkLaptop2".into(), "d2".into(), 1, now()),
+                ),
+            )
+            .unwrap();
+        let (_, app_grant) = grants::mint(
+            user.clone(),
+            AuthInfo {
+                app_name: "app".into(),
+                capabilities: Some(vec![]),
+                ..AuthInfo::default()
+            },
+            None,
+            3600,
+        )
+        .unwrap();
+        let session = Session::for_test(Principal::Agent(user.clone()))
+            .with_caps(vec![AGENT_UPDATE_CAPABILITY.clone()])
+            .with_grant(key_grant);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, Ordering::SeqCst);
+        assert!(
+            matches!(
+                end_all_sessions(&session, true, None),
+                Err(KeyLoginError::Internal(_))
+            ),
+            "the failed write is reported"
+        );
+        assert!(other.is_ended(), "the identity's other grant ended");
+        assert!(app_grant.is_ended(), "the agent's grants were still ended");
+        Grants::global().retry_pending();
+    }
+
+    // A grant acts as an agent only while the agent speaks for the identity: when the
+    // agent's own device key is revoked in the log — the phone's stays valid — the
+    // change ends the grant.
+    #[tokio::test]
+    async fn an_agents_key_revocation_ends_the_key_bound_grant() {
+        let mut world = world(72).await;
+        no_operator();
+        let main = did_for_context(&AgentContext::main_agent()).unwrap();
+        let main_key = device_multikey(&main).unwrap();
+        let agent_key_id = world.log.chain().state().next_device_id();
+        add_key(
+            &mut world.log,
+            main_key,
+            enc_key_of(&device_multikey(&main).unwrap()).unwrap(),
+            KeyLife::Standing,
+        );
+        let mut world = world.with_store();
+        accept_signed(&world.service.cache, &world.log.events).await;
+        let _bound = MainBound::to(&world.log.scid());
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // The agent's device key is revoked; the phone's stays valid.
+        let revoke_agent = revoke(&world.log.chain(), &world.log.master, &[agent_key_id]).unwrap();
+        world.log.events.push(revoke_agent);
+        let mut changes = world.service.cache.subscribe();
+        accept_signed(&world.service.cache, &world.log.events).await;
+        let mut change = None;
+        while let Ok(c) = changes.try_recv() {
+            if c.key == multikey_of(&main).unwrap() {
+                change = Some(c);
+            }
+        }
+        let change = change.expect("the agent key's verdict change");
+        assert_eq!(
+            on_verdict_change(&change),
+            1,
+            "the grant acting as that agent ends"
+        );
+        assert_eq!(session.check(), Err(AuthError::Revoked));
+        no_operator();
+    }
+
+    // What a missed change cannot carry: the store learns the agent key's revocation
+    // without a change reaching this executor — the re-check ends the grant all the
+    // same, and a renewal does too.
+    #[tokio::test]
+    async fn an_agents_key_revocation_the_change_missed_ends_the_grant_on_the_recheck() {
+        let mut world = world(82).await;
+        no_operator();
+        let main = did_for_context(&AgentContext::main_agent()).unwrap();
+        let main_key = device_multikey(&main).unwrap();
+        let agent_key_id = world.log.chain().state().next_device_id();
+        add_key(
+            &mut world.log,
+            main_key,
+            enc_key_of(&device_multikey(&main).unwrap()).unwrap(),
+            KeyLife::Standing,
+        );
+        let mut world = world.with_store();
+        accept_signed(&world.service.cache, &world.log.events).await;
+        let _bound = MainBound::to(&world.log.scid());
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        let revoke_agent = revoke(&world.log.chain(), &world.log.master, &[agent_key_id]).unwrap();
+        world.log.events.push(revoke_agent);
+        *world.store.events.lock().unwrap() = world.log.events.clone();
+        recheck_key_grants(&world.service, now(), &RecheckAttempts::default()).await;
+        assert_eq!(
+            session.check(),
+            Err(AuthError::Revoked),
+            "the grant ends as its agent lost the key"
+        );
+        no_operator();
+    }
+
+    // A renewal queued behind a stalled read of the same identity reaches the
+    // cached-verdict fallback within the read bound: the whole wait is bounded.
+    #[tokio::test(start_paused = true)]
+    async fn a_renewal_queued_behind_a_stalled_read_still_reaches_the_fallback() {
+        use tokio::sync::Notify;
+        let world = world(92).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        let binding = session.key_binding().unwrap();
+        let checked_before = binding.checked_at();
+        // One read of the identity stalls in the store; the renewal queues behind it.
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *world.store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        world.service.cache.note_read(&world.log.scid(), 0);
+        let resolver = world.service.resolver.clone();
+        let scid = world.log.scid();
+        let key = world.phone.key();
+        let stalled = tokio::spawn(async move { resolver.session_key(&scid, &key, 0).await });
+        entered_store(&entered).await;
+        // The renewal's own read now queues behind the stalled one.
+        let at = now() + 30;
+        let mut statement = world.statement(&world.phone);
+        statement.purpose = KeyPurpose::Renew;
+        statement.grant = Some(result.grant_id.clone());
+        statement.challenge = world
+            .service
+            .challenges
+            .issue(&ChallengeSource::Grant(result.grant_id.clone()), at)
+            .unwrap()
+            .0;
+        statement.issued_at = at;
+        let proof = signed(statement, &world.phone);
+        let service = Arc::new(world.service);
+        let renewing = tokio::spawn({
+            let session = session.clone();
+            async move { renew(&service, &session, proof, at).await }
+        });
+        let started = tokio::time::Instant::now();
+        loop {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            if renewing.is_finished() {
+                break;
+            }
+            assert!(
+                started.elapsed() < KEY_READ_TIMEOUT + Duration::from_secs(20),
+                "the renewal reached the fallback inside the bound"
+            );
+        }
+        let renewed = renewing.await.unwrap().unwrap();
+        assert_eq!(renewed.expires_at, at + KEY_SESSION_TTL);
+        assert_eq!(
+            binding.checked_at(),
+            checked_before,
+            "the fallback renewal is no check"
+        );
+        stalled.abort();
+        release.notify_one();
+        no_operator();
     }
 }

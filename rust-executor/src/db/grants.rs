@@ -81,6 +81,24 @@ const KEY_LOGIN_COLUMNS: &[(&str, &str)] = &[
 const COLUMNS: &str = "id, request_id, agent_did, auth_info, state, expires_at, created_at, \
      role, scid, signing_key, key_id, head_seq, checked_at";
 
+/// Test seam: the next end-of-grant write (`revoke_grants`, `delete_grants`) fails, so
+/// `agent::grants` sees a write the table did not take.
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_GRANT_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Test seam: the next note of a pending grant write (`note_pending_grant_writes`) fails,
+/// so a restart finds no durable note of the end a caller was writing.
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_GRANT_NOTE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Test seam: the next clear of a pending grant write (`clear_pending_grant_writes`)
+/// fails, so the note of a landed change stays behind.
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_GRANT_CLEAR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 impl Ad4mDb {
     pub(super) fn create_grants_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         conn.execute_batch(
@@ -195,7 +213,7 @@ impl Ad4mDb {
     /// Marks the grants `ids` revoked.
     pub fn revoke_grants(&self, ids: &[String]) -> Ad4mDbResult<()> {
         #[cfg(test)]
-        if super::FAIL_NEXT_GRANT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        if FAIL_NEXT_GRANT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(rusqlite::Error::InvalidQuery.into());
         }
         for id in ids {
@@ -241,7 +259,7 @@ impl Ad4mDb {
     /// Deletes the grants `ids`.
     pub fn delete_grants(&self, ids: &[String]) -> Ad4mDbResult<()> {
         #[cfg(test)]
-        if super::FAIL_NEXT_GRANT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        if FAIL_NEXT_GRANT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(rusqlite::Error::InvalidQuery.into());
         }
         for id in ids {
@@ -265,7 +283,7 @@ impl Ad4mDb {
     /// grants ended. A pending `delete` covers a `revoke` of the same grant.
     pub fn note_pending_grant_writes(&self, ids: &[String], op: &str) -> Ad4mDbResult<()> {
         #[cfg(test)]
-        if super::FAIL_NEXT_GRANT_NOTE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        if FAIL_NEXT_GRANT_NOTE.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(rusqlite::Error::InvalidQuery.into());
         }
         for id in ids {
@@ -294,7 +312,7 @@ impl Ad4mDb {
     /// still unlanded.
     pub fn clear_pending_grant_writes(&self, ids: &[String], op: &str) -> Ad4mDbResult<()> {
         #[cfg(test)]
-        if super::FAIL_NEXT_GRANT_CLEAR.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        if FAIL_NEXT_GRANT_CLEAR.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(rusqlite::Error::InvalidQuery.into());
         }
         for id in ids {
