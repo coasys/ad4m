@@ -61,14 +61,18 @@ pub const CLOCK_SKEW: u64 = 120;
 /// always reads the store.
 pub const LOGIN_MAX_AGE: u64 = 5 * 60;
 /// How often the keys of live key-bound grants are read again from the store: the longest a
-/// revocation the store holds leaves a session open when the cache's change missed it.
+/// revocation the store holds leaves a session open when the cache's change missed it. It
+/// is also one re-check pass's deadline.
 pub const KEY_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// The most one store read of a re-check may take: longer counts as the outage it is, so a
-/// stuck read cannot hold the interval's revocation window open.
+/// stuck read cannot hold the interval's revocation window open. A pass fits
+/// [`KEY_RECHECK_INTERVAL`] / [`KEY_READ_TIMEOUT`] sequential reads per slot.
 pub const KEY_READ_TIMEOUT: Duration = Duration::from_secs(60);
-/// The most store reads of one re-check that run at once: the keys are read together under
-/// one deadline for the pass ([`KEY_READ_TIMEOUT`]), so a stalled read delays no other
-/// key's and a key the pass does not reach counts as unread.
+/// The least store reads of one re-check that run at once; a pass widens it to
+/// ⌈keys × [`KEY_READ_TIMEOUT`] / [`KEY_RECHECK_INTERVAL`]⌉ when more keys are live.
+/// With every read stalled to its timeout, every key's read then still starts within the
+/// pass's one deadline ([`KEY_RECHECK_INTERVAL`]), so a readable revoked key waits at most
+/// an interval, not a pass per batch.
 pub const KEY_RECHECK_READS_AT_ONCE: usize = 8;
 /// How long a key-bound grant lasts on its last valid verdict while the store cannot be read:
 /// a renewal proceeds, and the re-check keeps it, until then.
@@ -1001,10 +1005,11 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
 }
 
 /// When each key's store read in a re-check last began, by `(scid, key)`: each pass reads
-/// the least-recently-attempted first, so a read that stalls until the deadline moves its
-/// key to the back and every key is attempted within ⌈keys /
-/// [`KEY_RECHECK_READS_AT_ONCE`]⌉ passes. In memory only — it is the watcher's, and a
-/// restart asks every key again in its own order.
+/// the least-recently-attempted first — a read that stalls until its timeout moves its
+/// key to the back — and sizes its reads-at-once to the key count
+/// ([`KEY_RECHECK_READS_AT_ONCE`]), so every live key's read starts within the pass's one
+/// deadline. Entries go when their keys do ([`RecheckAttempts::retain`]). In memory only —
+/// it is the watcher's, and a restart asks every key again in its own order.
 #[derive(Default)]
 pub struct RecheckAttempts(Mutex<HashMap<(String, String), std::time::Instant>>);
 
@@ -1025,6 +1030,15 @@ impl RecheckAttempts {
                 (scid.to_string(), key.to_string()),
                 std::time::Instant::now(),
             );
+        }
+    }
+
+    /// Drops the attempts of keys `live` does not hold: a key whose grants are gone leaves
+    /// the map, which is then bounded by the keys now live, not by every key a pass ever
+    /// marked.
+    fn retain(&self, live: &BTreeMap<(String, String), Vec<Arc<LiveGrant>>>) {
+        if let Ok(mut last) = self.0.lock() {
+            last.retain(|key, _| live.contains_key(key));
         }
     }
 }
@@ -1049,13 +1063,21 @@ pub async fn recheck_key_grants(
                 .push(grant.clone());
         }
     }
-    // The reads run together, at most [`KEY_RECHECK_READS_AT_ONCE`] at a time and under
-    // one deadline for the pass, least-recently-attempted first: a read that stalls until
-    // the deadline moves its key to the back, so it holds back no other key past one
-    // pass; a key the pass does not reach counts as unread, as a timed-out read does.
+    // The reads run together under one deadline for the pass — the interval —
+    // least-recently-attempted first: a read that stalls until its timeout moves its key
+    // to the back, holds its slot at most [`KEY_READ_TIMEOUT`], and frees it for the
+    // next key then, so a slot starts [`KEY_RECHECK_INTERVAL`] / [`KEY_READ_TIMEOUT`]
+    // reads in a pass. `reads_at_once` is sized to the key count so their product covers
+    // every key — with every read stalled, every live key's read still starts within one
+    // interval. A key the pass does not reach counts as unread, as a timed-out read does.
     use futures::StreamExt;
+    attempts.retain(&by_key);
     let mut keys: Vec<(String, String)> = by_key.keys().cloned().collect();
     keys.sort_by_key(|(scid, key)| attempts.last(scid, key));
+    let reads_at_once = KEY_RECHECK_READS_AT_ONCE.max(
+        (keys.len() * KEY_READ_TIMEOUT.as_secs() as usize)
+            .div_ceil(KEY_RECHECK_INTERVAL.as_secs() as usize),
+    );
     let reads = futures::stream::iter(
         keys.into_iter()
             .map(|(scid, key)| {
@@ -1076,11 +1098,11 @@ pub async fn recheck_key_grants(
             })
             .collect::<Vec<_>>(),
     )
-    .buffer_unordered(KEY_RECHECK_READS_AT_ONCE);
+    .buffer_unordered(reads_at_once);
     let mut reads = Box::pin(reads);
     let mut results: HashMap<(String, String), Result<SessionKey, SessionKeyError>> =
         HashMap::new();
-    let _ = tokio::time::timeout(KEY_READ_TIMEOUT, async {
+    let _ = tokio::time::timeout(KEY_RECHECK_INTERVAL, async {
         while let Some((key, read)) = reads.next().await {
             results.insert(key, read);
         }
@@ -3116,12 +3138,12 @@ mod tests {
         no_operator();
     }
 
-    // The reads that stall until a pass's deadline move to the back of the order: each
-    // pass reads least-recently-attempted first, so a key starved behind them is reached
-    // on the next pass — every key is attempted within ⌈keys /
-    // KEY_RECHECK_READS_AT_ONCE⌉ passes.
+    // The reads that stall until their own timeout free their slots for the rest of the
+    // pass: under the pass's one deadline — the interval — a slot starts a read per
+    // KEY_READ_TIMEOUT, and the reads-at-once is sized to the key count, so a key starved
+    // behind them is read in the same pass, not a later one.
     #[tokio::test(start_paused = true)]
-    async fn stalled_reads_move_to_the_back_of_the_rechecks_order() {
+    async fn stalled_reads_hold_the_starved_key_back_only_a_wave() {
         use tokio::sync::Notify;
         let mut world = world(64).await;
         world.operate();
@@ -3129,11 +3151,85 @@ mod tests {
         let session = open(&result.token).unwrap();
         // Two full batches of key-bound grants whose store reads stall, all sorted ahead
         // of the session's key: the first batch holds the slots until the read timeout,
-        // the second fills them only to die at the pass's deadline — the session's key is
-        // never reached on a pass that orders the keys the same way.
-        let entered: Vec<Arc<Notify>> = (0..2 * KEY_RECHECK_READS_AT_ONCE)
+        // the second fills them for the next wave — then the session's key is read.
+        for i in 0..2 * KEY_RECHECK_READS_AT_ONCE {
+            let scid = format!("0-stall-{i}");
+            world
+                .store
+                .stall_for
+                .lock()
+                .unwrap()
+                .insert(format!("did:scid:coasys:1:{scid}"), Arc::new(Notify::new()));
+            Grants::global()
+                .insert(
+                    LiveGrant::for_test(
+                        &format!("starved-stall-{i}"),
+                        AgentContext::main_agent(),
+                        now() + 3600,
+                    )
+                    .bound_to(KeyBinding::new(
+                        scid.clone(),
+                        format!("z6Mk{scid}"),
+                        "d1".into(),
+                        0,
+                        now(),
+                    )),
+                )
+                .unwrap();
+        }
+        // The session's key is revoked on the store; no verdict change reached this
+        // executor.
+        let revoke_phone =
+            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(revoke_phone);
+        *world.store.events.lock().unwrap() = world.log.events.clone();
+
+        let service = Arc::new(world.service);
+        let attempts = Arc::new(RecheckAttempts::default());
+        let recheck = tokio::spawn({
+            let (service, attempts) = (service.clone(), attempts.clone());
+            async move { recheck_key_grants(&service, now(), &attempts).await }
+        });
+        // Two stalled waves, then the starved key's read: the pass is done well inside
+        // the interval.
+        tokio::time::advance(3 * KEY_READ_TIMEOUT + Duration::from_secs(5)).await;
+        recheck.await.unwrap();
+        assert_eq!(
+            session.check(),
+            Err(AuthError::Revoked),
+            "reached in the same pass"
+        );
+        for i in 0..2 * KEY_RECHECK_READS_AT_ONCE {
+            assert!(
+                attempts
+                    .last(&format!("0-stall-{i}"), &format!("z6Mk0-stall-{i}"))
+                    .is_some(),
+                "key 0-stall-{i} was attempted"
+            );
+        }
+        world.store.stall_for.lock().unwrap().clear();
+        no_operator();
+    }
+
+    // So many stalled reads ahead of a revoked key that a pass reading only
+    // [`KEY_RECHECK_READS_AT_ONCE`] at a time would need passes — whole intervals — to
+    // reach it. The pass sizes its reads-at-once to the key count instead, so the revoked
+    // key's read starts within one interval and its session ends within it and one read
+    // timeout of the watch starting.
+    #[tokio::test(start_paused = true)]
+    async fn a_revoked_key_behind_many_stalled_reads_is_ended_within_the_interval() {
+        use tokio::sync::Notify;
+        let mut world = world(66).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // Enough key-bound grants that their stalled reads outnumber four full batches:
+        // the pass marks the batch it reads and the batch the deadline frees the slots
+        // for, so the revoked key — sorted last ('0' sorts before 'did:scid:…') — waited
+        // passes, one whole interval each.
+        let entered: Vec<Arc<Notify>> = (0..4 * KEY_RECHECK_READS_AT_ONCE + 1)
             .map(|i| {
-                let scid = format!("0-stall-{i}");
+                let scid = format!("0-crowd-{i}");
                 let notify = Arc::new(Notify::new());
                 world
                     .store
@@ -3144,7 +3240,7 @@ mod tests {
                 Grants::global()
                     .insert(
                         LiveGrant::for_test(
-                            &format!("starved-stall-{i}"),
+                            &format!("crowd-stall-{i}"),
                             AgentContext::main_agent(),
                             now() + 3600,
                         )
@@ -3168,31 +3264,56 @@ mod tests {
         *world.store.events.lock().unwrap() = world.log.events.clone();
 
         let service = Arc::new(world.service);
-        let attempts = Arc::new(RecheckAttempts::default());
-        // The first pass is consumed by the stalled reads: the session's key is never
-        // reached, and the grant keeps its fresh check.
+        let started = tokio::time::Instant::now();
+        let watch = tokio::spawn(run_key_session_watch(
+            service.clone(),
+            service.cache.subscribe(),
+        ));
+        entered[0].notified().await;
+        while session.check().is_ok()
+            && started.elapsed() <= KEY_RECHECK_INTERVAL + KEY_READ_TIMEOUT
         {
-            let (service, attempts) = (service.clone(), attempts.clone());
-            let recheck =
-                tokio::spawn(async move { recheck_key_grants(&service, now(), &attempts).await });
-            for notify in &entered[..KEY_RECHECK_READS_AT_ONCE] {
-                notify.notified().await;
-            }
-            tokio::time::advance(KEY_READ_TIMEOUT + Duration::from_secs(1)).await;
-            assert_eq!(recheck.await.unwrap(), 0);
-            assert!(session.check().is_ok(), "the starved key is never reached");
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
         }
-        // The next pass reads the starved key first — the stalled reads moved to the
-        // back — and its revocation ends the session.
-        {
-            let recheck =
-                tokio::spawn(async move { recheck_key_grants(&service, now(), &attempts).await });
-            tokio::time::advance(KEY_READ_TIMEOUT + Duration::from_secs(1)).await;
-            recheck.await.unwrap();
-            assert_eq!(session.check(), Err(AuthError::Revoked));
-        }
+        assert!(
+            started.elapsed() <= KEY_RECHECK_INTERVAL + KEY_READ_TIMEOUT,
+            "the revoked key's read started within the interval; the session ended after {:?}",
+            started.elapsed()
+        );
+        assert_eq!(session.check(), Err(AuthError::Revoked));
+        watch.abort();
         world.store.stall_for.lock().unwrap().clear();
         no_operator();
+    }
+
+    // A key whose grants are gone leaves the re-check's attempts: the next pass retains
+    // only the keys of the live snapshot, so the map is bounded by the live keys, not by
+    // every key a pass ever marked.
+    #[tokio::test]
+    async fn a_key_whose_grants_are_gone_leaves_the_rechecks_attempts() {
+        let world = world(67).await;
+        let attempts = RecheckAttempts::default();
+        let grant = Grants::global()
+            .insert(
+                LiveGrant::for_test("gone-key-grant", AgentContext::main_agent(), now() + 3600)
+                    .bound_to(KeyBinding::new(
+                        "0-0gone".into(),
+                        "z6Mk0-0gone".into(),
+                        "d1".into(),
+                        0,
+                        now(),
+                    )),
+            )
+            .unwrap();
+        recheck_key_grants(&world.service, now(), &attempts).await;
+        assert!(
+            attempts.last("0-0gone", "z6Mk0-0gone").is_some(),
+            "the pass marked the key's read"
+        );
+        Grants::global().revoke(&[grant]).unwrap();
+        recheck_key_grants(&world.service, now(), &attempts).await;
+        assert_eq!(attempts.last("0-0gone", "z6Mk0-0gone"), None);
     }
 
     // A successful periodic check is persisted: the row's `checked_at` moves to the check's
