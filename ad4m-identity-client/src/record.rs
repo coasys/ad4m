@@ -16,7 +16,12 @@
 //! whose writer was revoked after writing still opens — and the recovery key's attestation
 //! against the log. The recovery key that counts is [`recovery_of`]. A device write copies that
 //! recovery key and its attestation unchanged: only a master-signed write installs, replaces or
-//! drops it. A store can serve back an older version with a receipt that still verifies, so a
+//! drops it. When the stored pair's attestation is stale — by a master a rotation replaced — a
+//! device write is refused [`ClientError::RecoveryNeedsReattest`] rather than seal the record
+//! without the recovery key (the store takes the stale pair as none, and the words could not
+//! open it any more); a device holding the new master re-attests it with a master-signed write
+//! ([`Reader::Master`]), as a rotation's rewrite does ([`Reader::Recovery`]). A store can
+//! serve back an older version with a receipt that still verifies, so a
 //! read also keeps each identity's highest version read in the vault
 //! ([`Vault::record_seen`]) and refuses a lower one.
 //!
@@ -46,6 +51,16 @@ pub enum Reader<'a> {
     /// The executor's device: its own entry, unwrapped in its wallet; its device key signs the
     /// envelope and the store requests.
     Executor,
+    /// The device as the current master key's holder: opens the record through the executor's
+    /// own entry, as [`Reader::Executor`], but `master` signs the envelope and the store
+    /// requests. Only a master-signed write installs, replaces or drops the recovery key, so
+    /// this write re-attests the stored record's recovery key when its attestation is stale —
+    /// by a master a rotation replaced — which is what a device write is refused for
+    /// ([`ClientError::RecoveryNeedsReattest`]) until a holder signs again.
+    Master {
+        master: &'a dyn MasterSigner,
+        clock: &'a dyn Clock,
+    },
     /// A restore or a rotation's re-attestation: the words' recovery key opens the `"recovery"`
     /// entry (the executor's entry when the record has none), and `master` (the current master
     /// key) signs the envelope and the store requests. Only a master-signed write installs,
@@ -93,6 +108,12 @@ pub struct Opened {
     /// The recovery key that counts ([`recovery_of`]): attested by the log's current master.
     /// A device write copies it unchanged into the next version.
     pub recovery: Option<Recovery>,
+    /// The recovery key the stored envelope names, counting or not. `Some` while `recovery`
+    /// is `None` means the stored pair's attestation is stale — by a master a rotation
+    /// replaced — so the record waits for the new master to re-attest it: a device write is
+    /// refused [`ClientError::RecoveryNeedsReattest`], and a master-signed write attests this
+    /// key again.
+    pub recovery_key: Option<Multikey>,
 }
 
 /// Applies `changes` to `record`, then keeps only what the log at `chain`'s head still holds:
@@ -263,6 +284,7 @@ fn opened_of(
         version: sealed.version,
         record,
         recovery: recovery_of(sealed, chain),
+        recovery_key: sealed.recovery_key.clone(),
     })
 }
 
@@ -365,7 +387,9 @@ fn moved(e: &RpcError) -> bool {
 
 /// Writes `changes` into the record of `did`, the executor's identity, as its next version;
 /// answers the version written. A stale version or a changed log reads, merges and writes
-/// again, at most [`MAX_WRITES`] times.
+/// again, at most [`MAX_WRITES`] times. Refused with [`ClientError::RecoveryNeedsReattest`]
+/// while the stored record's recovery pair is stale: a device write would seal the record
+/// without it, so the record waits for the new master to re-attest it.
 pub async fn write<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -386,11 +410,13 @@ pub async fn write<R: ExecutorRpc>(
 }
 
 /// [`write`] as `reader`; with `recovery_key` (the words' recovery key, as
-/// `x25519_multikey_of`) a master-signed write ([`Reader::Recovery`]) gives a record without
+/// `x25519_multikey_of`) a master-signed write ([`Reader::Recovery`], or [`Reader::Master`]
+/// with the key the stored record names) gives a record without
 /// one the key, attested by `reader`'s master ([`attest_recovery_key`]): only a master-signed
 /// write installs or replaces it, so a rotation's rewrite re-attests it with the new master.
 /// A device write copies the record's own recovery key and its attestation unchanged, or
-/// carries none when it has none.
+/// carries none when it has none — and is refused [`ClientError::RecoveryNeedsReattest`]
+/// while the stored pair is stale, since it would seal the record without the key.
 pub async fn write_as<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -422,7 +448,8 @@ pub type Precondition<'a> =
 /// each read after a stale version, and the store takes only the stored version plus one, so a
 /// version written was built on a version that passed: a change that must not land over some
 /// state (an `"offered"` over a device that took the master key) never does, however late it
-/// comes.
+/// comes. A device write, it is refused [`ClientError::RecoveryNeedsReattest`] while the
+/// stored record's recovery pair is stale.
 pub async fn write_if<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -458,19 +485,26 @@ async fn write_checked<R: ExecutorRpc>(
     for _ in 0..MAX_WRITES {
         let chain = chain_of(executor, did).await?;
         let (opened, device_key) = match reader {
-            Reader::Executor => match read_at(executor, vault, did, &chain).await? {
-                Some((opened, key_id)) => (Some(opened), Some(key_id)),
-                None => (None, None),
-            },
+            Reader::Executor | Reader::Master { .. } => {
+                match read_at(executor, vault, did, &chain).await? {
+                    Some((opened, key_id)) => (Some(opened), Some(key_id)),
+                    None => (None, None),
+                }
+            }
             Reader::Recovery { .. } => (
                 read_as(executor, vault, did, &chain, reader, random).await?,
                 None,
             ),
         };
         check(opened.as_ref().map(|o| &o.record), &chain)?;
-        let (version, mut record, carried) = match opened {
-            Some(opened) => (opened.version + 1, opened.record, opened.recovery),
-            None => (1, PrivateRecord::default(), None),
+        let (version, mut record, carried, stored_key) = match opened {
+            Some(opened) => (
+                opened.version + 1,
+                opened.record,
+                opened.recovery,
+                opened.recovery_key,
+            ),
+            None => (1, PrivateRecord::default(), None, None),
         };
         merge(&mut record, &chain, changes);
         // A `holdsMaster` (or a master held or offered) for a device the record does not list
@@ -489,6 +523,14 @@ async fn write_checked<R: ExecutorRpc>(
         }
         let put = match reader {
             Reader::Executor => {
+                // The stored record's recovery pair went stale with a rotation (its
+                // attestation is not the current master's, so `carried` is `None`): a device
+                // write would seal the record without the recovery key and the store would
+                // take it, leaving the words unable to open the record. Refuse instead: the
+                // record waits for the new master to re-attest the key.
+                if stored_key.is_some() && carried.is_none() {
+                    return Err(ClientError::RecoveryNeedsReattest);
+                }
                 // The executor's device key signs it (`identity.recordPut` with an empty
                 // `sig`); a device write carries the still attested recovery key unchanged,
                 // or none.
@@ -508,13 +550,15 @@ async fn write_checked<R: ExecutorRpc>(
                 )?;
                 executor.record_put(&sealed).await
             }
-            Reader::Recovery { master, clock, .. } => {
+            Reader::Master { master, clock } | Reader::Recovery { master, clock, .. } => {
                 // The master signs the envelope itself, so the write may install the
-                // recovery key: kept unchanged when it still counts, else `recovery_key`
-                // attested by `master` (a rotation re-attests it with the new master).
+                // recovery key: kept unchanged when it still counts, else `recovery_key` —
+                // or the stale key the stored record names — attested by `master` (a
+                // rotation re-attests it with the new master).
                 let recovery = match carried {
                     Some(kept) => Some(kept),
                     None => recovery_key
+                        .or(stored_key.as_ref())
                         .map(|key| attest_recovery_key(&chain, key.clone(), *master))
                         .transpose()?,
                 };

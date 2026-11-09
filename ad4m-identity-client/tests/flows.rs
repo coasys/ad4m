@@ -12,7 +12,8 @@ use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
 use ad4m_identity_client::flows::create::{resume, CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::{Claimed, LinkFlow};
 use ad4m_identity_client::flows::master::{
-    refresh_master, remove_master, retry_pushes, send_master, take_master, Refreshed, Taken,
+    reattest_recovery, refresh_master, remove_master, retry_pushes, send_master, take_master,
+    Refreshed, Taken,
 };
 use ad4m_identity_client::flows::requests::{
     answer, answer_with_words, ask_confirm_revoke, ask_for_master, check_poster, Answered,
@@ -3217,7 +3218,7 @@ async fn a_rotation_reveals_the_next_master_and_hands_it_to_the_kept_holder() {
     );
 
     assert_eq!(desk_vault.master_index(&scid).unwrap(), Some(0));
-    let Refreshed::Taken(taken) = refresh_master(&desk, &desk_vault, &did, &OsRandom)
+    let Refreshed::Taken(taken) = refresh_master(&desk, &desk_vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap()
     else {
@@ -3227,7 +3228,7 @@ async fn a_rotation_reveals_the_next_master_and_hands_it_to_the_kept_holder() {
     taken.record.unwrap();
     assert_eq!(desk_vault.master_index(&scid).unwrap(), Some(1));
     assert!(matches!(
-        refresh_master(&desk, &desk_vault, &did, &OsRandom)
+        refresh_master(&desk, &desk_vault, &did, &SystemClock, &OsRandom)
             .await
             .unwrap(),
         Refreshed::Current
@@ -3273,7 +3274,7 @@ async fn a_stale_holder_gets_the_new_master_through_send_master() {
         HoldsMaster::Offered
     );
 
-    let Refreshed::Asked(id) = refresh_master(&phone, &phone_vault, &did, &OsRandom)
+    let Refreshed::Asked(id) = refresh_master(&phone, &phone_vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap()
     else {
@@ -3571,7 +3572,7 @@ async fn a_holder_of_a_replaced_master_is_not_another_copy() {
     assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
 
     // Once it takes master #1 it is one.
-    let Refreshed::Taken(taken) = refresh_master(&desk, &desk_vault, &did, &OsRandom)
+    let Refreshed::Taken(taken) = refresh_master(&desk, &desk_vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap()
     else {
@@ -4133,7 +4134,10 @@ async fn the_creating_computer_counts_as_a_holder() {
     assert_eq!(rotated.pushes.len(), 1);
     assert_eq!(rotated.pushes[0].0, "d1");
     assert!(rotated.pushes[0].1.is_ok(), "{:?}", rotated.pushes[0].1);
-    let Refreshed::Taken(taken) = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap() else {
+    let Refreshed::Taken(taken) = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap()
+    else {
         panic!("expected master #1 taken by the creator");
     };
     assert_eq!(taken.index, 1);
@@ -4189,13 +4193,15 @@ async fn a_rotation_whose_vault_refuses_the_stage_publishes_nothing() {
     assert_eq!(vault.master_index(&scid).unwrap(), Some(0));
     assert_eq!(desk_vault.master_index(&scid).unwrap(), Some(0));
     assert!(matches!(
-        refresh_master(&desk, &desk_vault, &did, &OsRandom)
+        refresh_master(&desk, &desk_vault, &did, &SystemClock, &OsRandom)
             .await
             .unwrap(),
         Refreshed::Current
     ));
     assert!(matches!(
-        refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
+        refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+            .await
+            .unwrap(),
         Refreshed::Current
     ));
     let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
@@ -4330,7 +4336,9 @@ async fn a_rotation_cut_off_after_its_publish_is_promoted_by_refresh() {
     assert_eq!(vault.staged_index(&scid).unwrap(), Some(1));
 
     let Refreshed::Promoted { index, record } =
-        refresh_master(&a, &vault, &did, &OsRandom).await.unwrap()
+        refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+            .await
+            .unwrap()
     else {
         panic!("expected the staged master #1 promoted");
     };
@@ -4359,7 +4367,9 @@ async fn a_rotation_cut_off_after_its_publish_is_promoted_by_refresh() {
         )
         .unwrap();
     assert!(matches!(
-        refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
+        refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+            .await
+            .unwrap(),
         Refreshed::Current
     ));
     assert_eq!(vault.staged_index(&scid).unwrap(), Some(5));
@@ -4375,7 +4385,9 @@ async fn a_rotation_cut_off_after_its_publish_is_promoted_by_refresh() {
         )
         .unwrap();
     assert!(matches!(
-        refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
+        refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+            .await
+            .unwrap(),
         Refreshed::Current
     ));
     assert_eq!(vault.staged_index(&scid).unwrap(), None);
@@ -4455,7 +4467,7 @@ async fn a_refresh_while_a_rotation_publishes_keeps_its_staged_key() {
         async {
             held.rpc().until_held().await;
             assert_eq!(other.staged_index(&scid).unwrap(), Some(1), "staged");
-            let refreshed = refresh_master(&a, other, &did, &OsRandom).await;
+            let refreshed = refresh_master(&a, other, &did, &SystemClock, &OsRandom).await;
             held.rpc().release.set(true);
             refreshed
         }
@@ -4478,7 +4490,9 @@ async fn a_refresh_while_a_rotation_publishes_keeps_its_staged_key() {
         (HoldsMaster::Yes, Some(1))
     );
     assert!(matches!(
-        refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
+        refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+            .await
+            .unwrap(),
         Refreshed::Current
     ));
     assert!(a.requests(0).await.unwrap().is_empty(), "nothing asked");
@@ -4502,7 +4516,7 @@ async fn a_refresh_that_promotes_first_leaves_the_rotation_kept() {
         rotate(&held, &vault, &did, &words, &[], &SystemClock, &OsRandom),
         async {
             held.rpc().until_held().await;
-            let refreshed = refresh_master(&a, other, &did, &OsRandom).await;
+            let refreshed = refresh_master(&a, other, &did, &SystemClock, &OsRandom).await;
             held.rpc().release.set(true);
             refreshed
         }
@@ -4555,7 +4569,9 @@ async fn a_key_staged_behind_the_log_is_discarded_by_refresh() {
         )
         .unwrap();
     assert!(matches!(
-        refresh_master(&a, &vault, &did, &OsRandom).await.unwrap(),
+        refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+            .await
+            .unwrap(),
         Refreshed::Current
     ));
     assert_eq!(vault.staged_index(&scid).unwrap(), None, "discarded");
@@ -5011,7 +5027,9 @@ async fn a_refresh_that_trusts_a_stale_index_forgets_the_current_master() {
     drop(unlocked);
     assert_eq!(vault.master_index(&scid).unwrap(), None, "unknown");
 
-    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
     assert!(matches!(refreshed, Refreshed::Unknown), "{refreshed:?}");
     let unlocked = vault.unlock(&scid, MasterUse::Link, 0).unwrap();
     assert_eq!(
@@ -5219,7 +5237,14 @@ struct ReadBeforePublish<'a> {
 impl ExecutorRpc for ReadBeforePublish<'_> {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         if method == "identity.publish" && self.read.borrow().is_none() {
-            let read = refresh_master(self.other, &self.other_vault, &self.did, &OsRandom).await;
+            let read = refresh_master(
+                self.other,
+                &self.other_vault,
+                &self.did,
+                &SystemClock,
+                &OsRandom,
+            )
+            .await;
             *self.read.borrow_mut() = Some(format!("{read:?}"));
         }
         self.inner.call(method, params).await
@@ -5292,13 +5317,21 @@ async fn a_custody_read_between_the_stage_and_the_publish_leaves_the_staged_key_
     );
     // Both apps' next reads find the current key kept.
     assert!(matches!(
-        refresh_master(&a, &mine, &did, &OsRandom).await.unwrap(),
+        refresh_master(&a, &mine, &did, &SystemClock, &OsRandom)
+            .await
+            .unwrap(),
         Refreshed::Current
     ));
     assert!(matches!(
-        refresh_master(&other_app, &theirs_again(&shared), &did, &OsRandom)
-            .await
-            .unwrap(),
+        refresh_master(
+            &other_app,
+            &theirs_again(&shared),
+            &did,
+            &SystemClock,
+            &OsRandom
+        )
+        .await
+        .unwrap(),
         Refreshed::Current
     ));
 }
@@ -5436,7 +5469,9 @@ async fn removing_the_master_key_discards_a_key_staged_at_the_current_master() {
     );
     assert_eq!(vault.staged_index(&scid).unwrap(), None, "stage discarded");
 
-    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
     assert!(
         !matches!(refreshed, Refreshed::Promoted { .. }),
         "the removed key came back: {refreshed:?}"
@@ -5517,7 +5552,9 @@ async fn removing_the_master_key_leaves_a_rotation_in_flight_in_another_app() {
     assert_eq!(unlocked.signer(0).unwrap().index(), 1);
     drop(unlocked);
     assert!(matches!(
-        refresh_master(&a, &mine, &did, &OsRandom).await.unwrap(),
+        refresh_master(&a, &mine, &did, &SystemClock, &OsRandom)
+            .await
+            .unwrap(),
         Refreshed::Current
     ));
 }
@@ -5707,7 +5744,9 @@ async fn a_restored_device_is_a_keeper_in_the_log() {
 
     // d1 kept #0 and was sent #1; it takes it, then removes its copy: the restored laptop holds
     // the other one.
-    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
     assert!(matches!(refreshed, Refreshed::Taken(_)), "{refreshed:?}");
     remove_master(&a, &vault, &did, &OsRandom)
         .await
@@ -5889,9 +5928,15 @@ async fn a_refresh_forgets_only_the_key_it_decided_on() {
         key: key1,
         installed: Cell::new(false),
     });
-    let refreshed = refresh_master(&racing, &SharedVault(shared.clone()), &did, &OsRandom)
-        .await
-        .unwrap();
+    let refreshed = refresh_master(
+        &racing,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
     assert!(
         racing.rpc().installed.get(),
         "the other app installed #1 mid-refresh"
@@ -6202,7 +6247,9 @@ async fn a_promote_never_replaces_a_newer_kept_key() {
         )
         .unwrap();
 
-    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
     let Refreshed::Promoted { index, record } = refreshed else {
         panic!("expected the promotion, got {refreshed:?}")
     };
@@ -6719,13 +6766,12 @@ async fn a_retry_batch_with_an_entry_less_device_still_marks_the_others() {
 }
 
 /// Lal's P2-1 at 8f8a46e56, end to end. A rotation lands and its flow is cut off before the
-/// master-signed rewrite of the record (the record still carries master #0's attestation of the
-/// recovery key). The next custody read promotes the staged key and writes `holdsMaster` as the
-/// device: that write carries no recovery key, since the old attestation no longer counts, and
-/// the store takes it. From then on the words cannot open the record: a restore on a fresh
-/// executor finds a record no recovery key wraps.
+/// master-signed rewrite of the record (the record still carries master #0's attestation of
+/// the recovery key). An ordinary device write is refused (`RecoveryNeedsReattest`) rather
+/// than seal the record without the recovery key — which the store takes as none — and the
+/// refresh that promotes the staged master makes the re-attesting write, so the words on a
+/// fresh executor open the record.
 #[tokio::test]
-#[ignore = "known gap (review of #1667 at 8f8a46e56): a device write after a rotation drops the recovery key the words need; the fix is a design call (see the PR). Run with --ignored."]
 async fn a_device_write_after_a_rotation_keeps_the_words_access_to_the_record() {
     let store = TestStore::new();
     let a = ViaExecutor::new(TestExecutor::new(&store, 1));
@@ -6750,14 +6796,40 @@ async fn a_device_write_after_a_rotation_keeps_the_words_access_to_the_record() 
     let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
     assert_eq!(chain.state().masters.len(), 2, "the rotation landed");
 
-    // The next custody read finishes the rotation on this device: an ordinary device write.
-    let refreshed = refresh_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    // The next ordinary device write is refused: it would seal the record without the
+    // recovery key, so the record waits for the new master to re-attest it.
+    let refused = record::write(
+        &a,
+        &vault,
+        &did,
+        &[Change::Rename {
+            key_id: "d1".into(),
+            name: "Desk".into(),
+        }],
+        &OsRandom,
+    )
+    .await;
     assert!(
-        matches!(refreshed, Refreshed::Promoted { .. }),
-        "{refreshed:?}"
+        matches!(refused, Err(ClientError::RecoveryNeedsReattest)),
+        "{refused:?}"
     );
+
+    // The next custody read finishes the rotation on this device: the promote's
+    // master-signed write re-attests the recovery key with master #1.
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Promoted { index, record } = refreshed else {
+        panic!("expected the staged master #1 promoted: {refreshed:?}")
+    };
+    assert_eq!(index, 1);
+    record.unwrap();
     let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
-    let recovery_after_refresh = opened.recovery.is_some();
+    let recovery = opened
+        .recovery
+        .as_ref()
+        .expect("the record's recovery key counts again after the re-attestation");
+    assert_eq!(recovery.attestation.key_id, "m1");
 
     // The computer is lost; the words on a fresh executor.
     let new = ViaExecutor::new(TestExecutor::new(&store, 4));
@@ -6767,14 +6839,184 @@ async fn a_device_write_after_a_rotation_keeps_the_words_access_to_the_record() 
         .unwrap();
     assert!(
         flow.record_error().is_none(),
-        "the words cannot open the record after the device write: {:?} (the record carried a \
-         recovery key that counts after the refresh: {recovery_after_refresh})",
+        "the words cannot open the record after the device write: {:?}",
         flow.record_error()
     );
     assert!(
         !flow.devices().is_empty() && flow.devices().iter().any(|d| d.name.is_some()),
         "the restore lists the devices by their recorded names: {:?}",
         flow.devices()
+    );
+}
+
+/// Lal's P2-1, the take's side. A rotation lands, its flow is cut off before the record's
+/// re-attestation, and the rotating device is lost. Another device takes the new master its
+/// pusher sent while the record was still stale: the key is stored and the message acked
+/// though the take's own record write is refused, the take answers the marking owed
+/// (`record_pending`), the device re-attests the recovery key with the master it now holds,
+/// and the words still open the record.
+#[tokio::test]
+async fn a_take_while_the_record_waits_for_reattestation_keeps_the_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 62).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    let words = words::from_entropy(&[62; 16]);
+
+    let cut = ViaExecutor::new(CutOffAfterPublish {
+        inner: a.rpc(),
+        published: Cell::new(false),
+    });
+    tokio::select! {
+        rotated = rotate(&cut, &vault, &did, &words, &[], &SystemClock, &OsRandom) => {
+            panic!("the rotation was not cut off: {rotated:?}")
+        }
+        _ = async {
+            while !cut.rpc().published.get() {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().masters.len(), 2, "the rotation landed");
+
+    // The vault promotes the staged master #1 (as a custody read on the lost computer
+    // would), and the last thing it does is push #1 to the desk: the push lands, the
+    // offered-marking write is refused.
+    vault.promote_master(&scid, 1).unwrap();
+    let sent = send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(
+        matches!(sent.record, Err(ClientError::RecoveryNeedsReattest)),
+        "{:?}",
+        sent.record
+    );
+
+    // The desk takes the key: stored and acked though the record write is refused.
+    let taken = take_master(&b, &b_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("the pushed master key waits in the inbox");
+    assert!(taken.record_pending, "{taken:?}");
+    assert!(
+        matches!(taken.record, Err(ClientError::RecoveryNeedsReattest)),
+        "{:?}",
+        taken.record
+    );
+    assert_eq!(taken.index, 1);
+    assert_eq!(b_vault.master_index(&scid).unwrap(), Some(1));
+    assert!(
+        take_master(&b, &b_vault, &OsRandom)
+            .await
+            .unwrap()
+            .is_none(),
+        "the message was acked"
+    );
+
+    // The desk re-attests with the master it now holds; the record names it holding #1.
+    reattest_recovery(&b, &b_vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
+    assert_eq!(opened.recovery.as_ref().unwrap().attestation.key_id, "m1");
+    let entry_b = &opened.record.devices[&d2];
+    assert_eq!(
+        (entry_b.holds_master, entry_b.master_index),
+        (HoldsMaster::Yes, Some(1))
+    );
+
+    // The words still open the record on a fresh executor.
+    let new = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let new_vault = MemoryVault::new();
+    let flow = RestoreFlow::start(&new, &new_vault, words.phrase(), &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(
+        flow.record_error().is_none(),
+        "the words cannot open the record: {:?}",
+        flow.record_error()
+    );
+    assert!(flow.devices().iter().any(|d| d.name.is_some()));
+}
+
+/// An executor that checks, at the first `identity.inboxPut` of a rotation's hand-over,
+/// that the stored record's recovery key is already attested by the new master: the
+/// re-attesting write lands before any key is pushed.
+struct ReattestedBeforePush<'a> {
+    inner: &'a TestExecutor,
+    checked: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for ReattestedBeforePush<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.inboxPut" && !self.checked.replace(true) {
+            let (scid, _, chain, _) = self.inner.position().await.unwrap();
+            let (_, body) = self
+                .inner
+                .as_device("GET", &format!("/v1/private/{scid}"), None)
+                .await
+                .unwrap();
+            let sealed: record_core::SealedRecord =
+                serde_json::from_value(body["record"].clone()).unwrap();
+            let recovery = record_core::recovery_of(&sealed, &chain)
+                .expect("the recovery key is re-attested before any push");
+            assert_eq!(recovery.attestation.key_id, "m1");
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// The hand-over's order: the record's master-signed re-attestation lands before the new
+/// master key is pushed to any holder, so a completed rotation's record carries the new
+/// master's attestation of the recovery key.
+#[tokio::test]
+async fn a_rotation_reattests_the_recovery_key_before_handing_over() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 63).await;
+    holding_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        &b_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[63; 16]);
+
+    let checked = ViaExecutor::new(ReattestedBeforePush {
+        inner: a.rpc(),
+        checked: Cell::new(false),
+    });
+    let rotated = rotate(&checked, &vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(rotated.index, 1);
+    assert!(checked.rpc().checked.get(), "the rotation pushed a key");
+    rotated.record.as_ref().unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.recovery.unwrap().attestation.key_id,
+        "m1",
+        "the record after a completed rotation carries the new master's attestation"
     );
 }
 

@@ -739,13 +739,14 @@ refuses a write whose attestation does not (`400 attestation`). A device-signed 
 stored record's counting recovery key and attestation unchanged, or carries none when it has
 none (`400 recovery-key`). Only a master-signed write installs, replaces or drops it, so a
 device cannot put back a key the master replaced. After a rotation the old master's attestation
-no longer counts. A host refuses a write that carries it. A device writer drops the recovery key
-until the new master attests it again. A reader still opens a record written before the
+no longer counts. A host refuses a write that carries it, and a device writer refuses to
+write rather than seal the record without the recovery key, until the new master attests it
+again. A reader still opens a record written before the
 rotation (its receipt names a seq where the writer was valid), but does not trust its recovery
 key. A reader refuses outright a record whose attestation no master of the log signed. So a
 rotation is followed promptly by a master-signed write that attests the recovery key with the
 new master and rewraps the record to the log's readers at the new head; until then the words
-still open the stored record, but no writer copies its recovery key. The record
+still open the stored record, and a device write waits on the new master's attestation. The record
 key is sealed (above) with `info = "coasys:record" ‖ 0x00 ‖ scid` to the `enc` key of every
 device key valid at the head without the bot mark (`wrapped[keyId]`), and to `recoveryKey` when
 set (`wrapped["recovery"]`). A writer reads the `enc` keys from the log, so a removed or revoked
@@ -810,7 +811,9 @@ a new string ends the read of the last one.
   recovery key's attestation against the log. That app's writes are its device's: it seals
   the envelope naming the device key as `signer` with an empty `sig`, and the executor signs
   it with the device key before the put (it refuses an unsigned envelope naming any other
-  key). A device write copies the recovery key and its attestation that still count, unchanged.
+  key). A device write copies the recovery key and its attestation that still count, unchanged,
+  and while the stored attestation is stale after a rotation it is refused rather than seal
+  the record without it.
 
 **The holder's side.** The 12 words are the root authority of the identity: they derive
 every master key, the salts that open each rotation's commitment, and the recovery secret

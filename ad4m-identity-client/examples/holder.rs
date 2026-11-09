@@ -274,7 +274,7 @@ async fn main() {
             Some("refreshMaster") => {
                 async {
                     let did = field(&command, "did")?;
-                    match refresh_master(&executor, &vault, did, &RANDOM)
+                    match refresh_master(&executor, &vault, did, &CLOCK, &RANDOM)
                         .await
                         .map_err(|e| e.to_string())?
                     {
