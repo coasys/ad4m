@@ -789,4 +789,230 @@ mod tests {
             "fresh perspective must return empty FlowInstance list"
         );
     }
+
+    /// Read the flows back through the loader the engine uses and check the
+    /// Delivery fixture survived: name, both states, the one transition, and
+    /// the input type.
+    async fn assert_delivery_flow_loaded(perspective: &PerspectiveInstance) {
+        let flows = crate::perspectives::flow_context::load_shacl_flows(perspective)
+            .await
+            .expect("load_shacl_flows");
+        let flow = flows
+            .get("delivery://DeliveryFlow")
+            .unwrap_or_else(|| panic!("Delivery flow not loaded, got {:?}", flows.keys()));
+        assert_eq!(flow.name, "Delivery");
+        let states: Vec<&str> = flow.states.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(states, vec!["identified", "scoped"]);
+        let transitions: Vec<(&str, &str, &str)> = flow
+            .transitions
+            .iter()
+            .map(|t| {
+                (
+                    t.action_name.as_str(),
+                    t.from_state.as_str(),
+                    t.to_state.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(transitions, vec![("Scope", "identified", "scoped")]);
+        assert_eq!(flow.input_types, vec!["Task".to_string()]);
+    }
+
+    /// #1650: `add_sdna(Flow, Some(flow_json))` — the path `addSdna` with
+    /// `sdnaType: "flow"` and the MCP `add_flow` tool take — must parse the
+    /// JSON as a flow. It used to go through the class-shape parser and fail
+    /// with "missing field `target_class`".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_registers_a_flow_definition() {
+        use crate::perspectives::interpretation_test_support::delivery_flow_json_for;
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        perspective
+            .add_sdna(
+                "Delivery".to_string(),
+                String::new(),
+                SdnaType::Flow,
+                Some(delivery_flow_json_for("Task")),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna(Flow, flow JSON) must succeed");
+
+        assert_delivery_flow_loaded(&perspective).await;
+    }
+
+    /// #1650, batch variant: `add_sdna_batch` parses each entry by its own
+    /// type, so a flow next to a subject class registers both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_batch_registers_a_flow_definition() {
+        use crate::perspectives::interpretation_test_support::delivery_flow_json_for;
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        perspective
+            .add_sdna_batch(
+                vec![
+                    (
+                        "Note".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(
+                            r#"{"target_class": "ns://Note", "properties": [
+                                {"path": "ns://title", "name": "title", "datatype": "xsd://string"}
+                            ]}"#
+                            .to_string(),
+                        ),
+                    ),
+                    (
+                        "Delivery".to_string(),
+                        String::new(),
+                        SdnaType::Flow,
+                        Some(delivery_flow_json_for("Task")),
+                    ),
+                ],
+                &ctx,
+            )
+            .await
+            .expect("add_sdna_batch with a flow entry must succeed");
+
+        assert_delivery_flow_loaded(&perspective).await;
+        assert!(
+            perspective.get_shape("Note").is_ok(),
+            "the subject-class entry of the batch must still register"
+        );
+    }
+
+    /// A flow definition whose state carries a `consensusRule` the reader
+    /// cannot read back: `fromRole.linkedTo` with a key outside the known set
+    /// (#1144). `linkedTo` is a raw `Value` in `ModelQuery`, so serde keeps
+    /// the key and `parse_flow_to_links` emits it as written.
+    fn unreadable_gate_flow_json() -> String {
+        serde_json::json!({
+            "name": "Gated",
+            "namespace": "gated://",
+            "start_action": [],
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                {
+                    "name": "scoped",
+                    "value": 1.0,
+                    "consensusRule": {
+                        "n": 1,
+                        "fromRole": {
+                            "className": "ns://Role",
+                            "didProperty": "agent",
+                            "linkedTo": { "via": "ns://has", "to": "base", "author": "did:key:admin" }
+                        }
+                    }
+                }
+            ],
+            "transitions": [
+                { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
+            ],
+            "inputTypes": [],
+            "outputTypes": [],
+        })
+        .to_string()
+    }
+
+    /// Nothing of the `Gated` flow is stored: no `ad4m://has_flow` link naming
+    /// it, no link under its namespace, and the loader does not return it.
+    async fn assert_gated_flow_not_stored(perspective: &PerspectiveInstance) {
+        let gated_name = ad4m_client::literal::Literal::from_string("Gated".to_string())
+            .to_url()
+            .expect("literal url");
+        let links = perspective
+            .get_links(&crate::types::LinkQuery::default())
+            .await
+            .expect("get_links");
+        let has_flow: Vec<_> = links
+            .iter()
+            .filter(|l| {
+                l.data.predicate.as_deref() == Some("ad4m://has_flow")
+                    && l.data.target == gated_name
+            })
+            .collect();
+        assert!(has_flow.is_empty(), "has_flow link stored: {has_flow:?}");
+        let under_namespace: Vec<_> = links
+            .iter()
+            .filter(|l| l.data.source.starts_with("gated://"))
+            .collect();
+        assert!(
+            under_namespace.is_empty(),
+            "flow links stored: {under_namespace:?}"
+        );
+        let flows = crate::perspectives::flow_context::load_shacl_flows(perspective)
+            .await
+            .expect("load_shacl_flows");
+        assert!(
+            !flows.contains_key("gated://GatedFlow"),
+            "loader returned the refused flow"
+        );
+    }
+
+    /// #1650 review: `add_sdna(Flow)` refuses a flow whose `consensusRule`
+    /// cannot be read before anything is written. It used to store the
+    /// `has_flow` / `sdna` links and only then fail in `add_links` on the
+    /// SHACL links, leaving a half-registered flow.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_refuses_an_unreadable_consensus_rule_before_writing() {
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        let err = perspective
+            .add_sdna(
+                "Gated".to_string(),
+                String::new(),
+                SdnaType::Flow,
+                Some(unreadable_gate_flow_json()),
+                &ctx,
+            )
+            .await
+            .expect_err("add_sdna must refuse an unreadable consensusRule")
+            .to_string();
+        assert!(
+            err.contains("gated://Gated.scoped") && err.contains("author"),
+            "the error names the state and the key; got: {err}"
+        );
+
+        assert_gated_flow_not_stored(&perspective).await;
+    }
+
+    /// Batch variant: every entry is parsed and checked before any is
+    /// written, so a bad flow second refuses the whole batch — the valid
+    /// class entry before it is not stored either.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_batch_refuses_an_unreadable_consensus_rule_before_writing() {
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        perspective
+            .add_sdna_batch(
+                vec![
+                    (
+                        "Note".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(
+                            r#"{"target_class": "ns://Note", "properties": [
+                                {"path": "ns://title", "name": "title", "datatype": "xsd://string"}
+                            ]}"#
+                            .to_string(),
+                        ),
+                    ),
+                    (
+                        "Gated".to_string(),
+                        String::new(),
+                        SdnaType::Flow,
+                        Some(unreadable_gate_flow_json()),
+                    ),
+                ],
+                &ctx,
+            )
+            .await
+            .expect_err("add_sdna_batch must refuse an unreadable consensusRule");
+
+        assert_gated_flow_not_stored(&perspective).await;
+        assert!(
+            perspective.get_shape("Note").is_err(),
+            "the batch is refused whole: the class entry before the bad flow is not stored"
+        );
+    }
 }
