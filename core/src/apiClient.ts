@@ -106,6 +106,10 @@ interface PendingCall {
     message: string
     /** True once the message went out on a socket. */
     sent: boolean
+    /** True once the message went out at all: unlike `sent`, it stays set while a
+     *  retryable read is armed to go out again, so the retry may go out only
+     *  under the principal the first send ran as (a tokenless one included). */
+    wentOut: boolean
     /** The socket the message went out on — a superseded one keeps answering it. */
     ws?: WebSocket
     /** The token of the socket the message went out on: the principal it executes
@@ -245,10 +249,18 @@ export class ApiClient {
     private _watching: string | null = '{}'
     private _watchScheduled = false
     private _watchDone: Promise<void> = Promise.resolve()
-    // The last `events.watch` sent, settled once the executor replied.
+    // The last `events.watch` sent, settled once the executor replied — or, while
+    // a failed send waits out its retry delay, once the retried watch's reply is in.
     private _watchSent: Promise<void> = Promise.resolve()
     private _watchRetries = 0
     private _watchRetryTimer: ReturnType<typeof setTimeout> | null = null
+    /** Settles with the watch the pending retry's flush sends (its own retries
+     *  chain off it), or resolves when that flush sends none: a dropped socket's
+     *  watch goes out on the next open instead. A failed `events.watch` waits on
+     *  it so `watchApplied()` answers only an applied watch. */
+    private _watchRetryDone: Promise<void> | null = null
+    /** Resolves `_watchRetryDone` when the retry it waits on is gone (the socket closed). */
+    private _watchRetryResolve: (() => void) | null = null
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -384,7 +396,9 @@ export class ApiClient {
             if (!pending.sent && ++pending.failedConnects < MAX_CONNECT_ATTEMPTS) continue
             if (pending.sent && pending.ws !== ws) continue // a superseded socket's close decides
             pending.ws = undefined
-            if (pending.sent && pending.retry) {
+            // A read gets its one retry only under the principal it went out as:
+            // answered under a different token it would serve the new principal's data.
+            if (pending.sent && pending.retry && pending.token === this.token) {
                 pending.sent = false
                 pending.retry = false
             } else {
@@ -420,14 +434,16 @@ export class ApiClient {
     private _flushCalls(ws: WebSocket): void {
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent) {
-                // A read armed for its retry under another principal does not go out
-                // on this token's session: its answer would be the new principal's.
-                if (pending.token !== undefined && pending.token !== this.token) {
+                // A call that went out once does not go out again under another
+                // principal — a tokenless one included: its answer would be the
+                // new principal's. A call that never went out still may.
+                if (pending.wentOut && pending.token !== this.token) {
                     pending.reject(closedError())
                     continue
                 }
                 this._send(ws, pending.message)
                 pending.sent = true
+                pending.wentOut = true
                 pending.ws = ws
                 pending.token = this._wsToken
             }
@@ -611,6 +627,7 @@ export class ApiClient {
             const pending: PendingCall = {
                 message,
                 sent: false,
+                wentOut: false,
                 failedConnects: 0,
                 retry: (READ_METHODS as ReadonlySet<string>).has(type),
                 watch: type === 'events.watch',
@@ -630,6 +647,7 @@ export class ApiClient {
             if (this._ws!.readyState === 1 /* OPEN */) {
                 this._send(this._ws!, message)
                 pending.sent = true
+                pending.wentOut = true
                 pending.ws = this._ws!
                 pending.token = this._wsToken
             }
@@ -736,16 +754,37 @@ export class ApiClient {
             // A closed socket (503) gets the watch again when the next one opens.
             if (e instanceof RpcError && e.status === 503) return
             console.error('events.watch failed:', e)
-            if (!this._watchRetryTimer && this._watchRetries++ < MAX_WATCH_RETRIES) {
-                this._watchRetryTimer = setTimeout(() => {
-                    this._watchRetryTimer = null
-                    this._scheduleWatch()
-                }, WATCH_RETRY_DELAY_MS)
-            }
+            if (this._watchRetries++ >= MAX_WATCH_RETRIES) throw e
+            return this._retryWatch()
         })
         // Only watchApplied() awaits this; a refused watch is not an unhandled rejection otherwise.
         sent.catch(() => {})
         this._watchSent = sent
+    }
+
+    /** The outcome of the watch a scheduled retry sends, awaited by the failed
+     *  send instead of resolving: a waiter's `_watchSent` stays unsettled across
+     *  the retry delay. Every failure while a retry is pending waits on the same
+     *  one. */
+    private _retryWatch(): Promise<void> {
+        if (this._watchRetryDone) return this._watchRetryDone
+        this._watchRetryDone = new Promise<void>((resolve, reject) => {
+            this._watchRetryResolve = resolve
+            this._watchRetryTimer = setTimeout(() => {
+                this._watchRetryTimer = null
+                this._watchRetryDone = null
+                this._watchRetryResolve = null
+                this._scheduleWatch()
+                this._watchDone.then(() => {
+                    // The flush the timer queued sent a watch: its `_watchSent` is the
+                    // outcome. It sent none when the socket is gone — the next open's
+                    // watch answers instead, which watchApplied() reaches through its loop.
+                    if (this._watching === null) resolve()
+                    else this._watchSent.then(resolve, reject)
+                })
+            }, WATCH_RETRY_DELAY_MS)
+        })
+        return this._watchRetryDone
     }
 
     private _closeWs(): void {
@@ -754,6 +793,9 @@ export class ApiClient {
             clearTimeout(this._watchRetryTimer)
             this._watchRetryTimer = null
         }
+        this._watchRetryResolve?.()
+        this._watchRetryDone = null
+        this._watchRetryResolve = null
         this._cancelReconnect()
         const ws = this._ws
         this._ws = null

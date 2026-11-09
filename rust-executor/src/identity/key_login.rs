@@ -1294,6 +1294,11 @@ pub async fn run_key_session_watch(
                 Err(RecvError::Closed) => return,
             },
             _ = tick.tick() => due = true,
+            // A pass made due while one runs starts when the running pass ends:
+            // without this branch the loop would wait for the next select event —
+            // the next tick — so a revocation a stalled pass missed could stand
+            // for almost another interval.
+            _ = async { rechecking.as_mut().unwrap().await }, if due && rechecking.as_ref().is_some_and(|r| !r.is_finished()) => {}
         }
         if due && rechecking.as_ref().is_none_or(|r| r.is_finished()) {
             due = false;
@@ -2269,6 +2274,54 @@ mod tests {
         world.store.store_down.store(false, Ordering::SeqCst);
         world.service.resolver.forget_admission_failures();
         assert!(world.login_as(&world.phone).await.is_ok());
+        no_operator();
+    }
+
+    // Several logins of one identity behind a store that stalls then fails pay one read
+    // between them: the first caller's failure backs the identity off for every caller
+    // waiting on its read. Another identity's read is not blocked by this one's.
+    #[tokio::test]
+    async fn concurrent_admission_reads_share_one_failed_read() {
+        use tokio::sync::Notify;
+        let world = world(95).await;
+        world.operate();
+        let scid = world.log.scid();
+        // The log's last store read is old: every `session_key` asks the store again.
+        world.service.cache.note_read(&scid, 0);
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *world.store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        world.store.store_down.store(true, Ordering::SeqCst);
+        let key = world.phone.key();
+        let reads: Vec<_> = (0..4)
+            .map(|_| {
+                let resolver = world.service.resolver.clone();
+                let (scid, key) = (scid.clone(), key.clone());
+                tokio::spawn(async move { resolver.session_key(&scid, &key, LOGIN_MAX_AGE).await })
+            })
+            .collect();
+        entered.notified().await;
+        // A second identity's read proceeds while the first's is stalled in the store.
+        assert_eq!(
+            world
+                .service
+                .resolver
+                .session_key("0-other-scid", &key, LOGIN_MAX_AGE)
+                .await
+                .unwrap_err(),
+            SessionKeyError::StoreUnavailable
+        );
+        release.notify_one();
+        for read in reads {
+            assert_eq!(
+                read.await.unwrap().unwrap_err(),
+                SessionKeyError::StoreUnavailable
+            );
+        }
+        assert_eq!(
+            world.store.log_calls.load(Ordering::SeqCst),
+            2,
+            "one stalled read failed for all four callers, one for the other identity"
+        );
         no_operator();
     }
 
@@ -3554,6 +3607,89 @@ mod tests {
         assert_eq!(session.check(), Err(AuthError::Revoked));
         watch.abort();
         world.store.stall_for.lock().unwrap().clear();
+        no_operator();
+    }
+
+    // A revocation that lands just after the pass read the key valid is judged by the pass
+    // the tick made due — and that pass starts when the stalled pass ends, not a tick
+    // later: the grant ends within the interval and one read timeout of the revocation.
+    #[tokio::test(start_paused = true)]
+    async fn a_revocation_just_after_its_read_is_judged_when_the_stalled_pass_ends() {
+        use tokio::sync::Notify;
+        let mut world = world(68).await;
+        world.operate();
+        // Earlier tests' leftover key-bound grants go, so the pass's reads and
+        // reads-at-once are this test's alone.
+        let leftovers = Grants::global().key_bound();
+        if !leftovers.is_empty() {
+            Grants::global().revoke(&leftovers).unwrap();
+        }
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // Stalled reads in the same pass, sorted after the session's DID so its key is
+        // read first: five waves of them hold the pass running past the next tick.
+        for i in 0..4 * KEY_RECHECK_READS_AT_ONCE + 1 {
+            let scid = format!("z-due-{i}");
+            world
+                .store
+                .stall_for
+                .lock()
+                .unwrap()
+                .insert(format!("did:scid:coasys:1:{scid}"), Arc::new(Notify::new()));
+            Grants::global()
+                .insert(
+                    LiveGrant::for_test(
+                        &format!("due-stall-{i}"),
+                        AgentContext::main_agent(),
+                        now() + 3600,
+                    )
+                    .bound_to(KeyBinding::new(
+                        scid.clone(),
+                        format!("z6Mk{scid}"),
+                        "d1".into(),
+                        0,
+                        now(),
+                    )),
+                )
+                .unwrap();
+        }
+        // The pass's successful read of the session's log marks it read fresh: stale
+        // until then, so the read's end is observable before the revocation lands.
+        let scid = world.log.scid();
+        world.service.cache.note_read(&scid, 0);
+        let service = Arc::new(world.service);
+        let watch = tokio::spawn(run_key_session_watch(
+            service.clone(),
+            service.cache.subscribe(),
+        ));
+        while !service.cache.read_ok_within(&scid, now(), 60) {
+            tokio::task::yield_now().await;
+        }
+        // The key is revoked on the store just after that read: no verdict change
+        // reaches this executor.
+        let revoked_at = tokio::time::Instant::now();
+        let revoke_phone =
+            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(revoke_phone);
+        *world.store.events.lock().unwrap() = world.log.events.clone();
+        while session.check().is_ok()
+            && revoked_at.elapsed() <= KEY_RECHECK_INTERVAL + KEY_READ_TIMEOUT
+        {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            revoked_at.elapsed() <= KEY_RECHECK_INTERVAL + KEY_READ_TIMEOUT,
+            "the due pass started when the stalled pass ended, not a tick later: {:?}",
+            revoked_at.elapsed()
+        );
+        assert_eq!(session.check(), Err(AuthError::Revoked));
+        watch.abort();
+        world.store.stall_for.lock().unwrap().clear();
+        let leftovers = Grants::global().key_bound();
+        if !leftovers.is_empty() {
+            Grants::global().revoke(&leftovers).unwrap();
+        }
         no_operator();
     }
 

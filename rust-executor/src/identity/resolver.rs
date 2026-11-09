@@ -855,6 +855,12 @@ pub struct Resolver {
     /// answers `StoreUnavailable` during it without another store call — and never
     /// counts the cached head as a fresh read.
     admission_failed: StdMutex<HashMap<String, Instant>>,
+    /// One "stale? → refresh → record the outcome" per identity at a time
+    /// ([`Resolver::admission_read`]): the cache's fetch gate shares successful
+    /// reads, not failures, so a caller that waited on a peer's read sees the
+    /// failure the peer recorded instead of paying a store read of its own. An
+    /// entry is dropped once no caller waits on it, as the fetch gate's is.
+    admission_reads: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Signers the key map does not know → the discovery pass that last asked about them
     /// ([`Resolver::discovery_turn`]).
     discovery_tried: StdMutex<HashMap<String, u64>>,
@@ -890,6 +896,7 @@ impl Resolver {
             keys: StdMutex::new(HashMap::new()),
             index_down_until: StdMutex::new(None),
             admission_failed: StdMutex::new(HashMap::new()),
+            admission_reads: StdMutex::new(HashMap::new()),
             discovery_tried: StdMutex::new(HashMap::new()),
             discovery_pass: AtomicU64::new(0),
             key_index_absent: AtomicBool::new(false),
@@ -1123,6 +1130,33 @@ impl Resolver {
             if self.admission_down(scid) {
                 return Err(SessionKeyError::StoreUnavailable);
             }
+            self.admission_read(scid, max_age).await?;
+        }
+        self.cached_session_key(scid, key).await
+    }
+
+    /// The stale-log sequence of [`Resolver::session_key`] — refresh the log and
+    /// record the read's outcome — under one lock per identity. A caller that
+    /// waited on a peer's sequence re-checks instead of reading: the peer's
+    /// success made its read fresh, the peer's failure started the identity's
+    /// backoff and answers it `StoreUnavailable` at once.
+    async fn admission_read(&self, scid: &str, max_age: u64) -> Result<(), SessionKeyError> {
+        let one_read = {
+            let mut reads = self
+                .admission_reads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            reads.entry(scid.to_string()).or_default().clone()
+        };
+        let held = one_read.lock().await;
+        let outcome = if self
+            .cache
+            .read_ok_within(scid, super::service::now(), max_age)
+        {
+            Ok(())
+        } else if self.admission_down(scid) {
+            Err(SessionKeyError::StoreUnavailable)
+        } else {
             match self
                 .cache
                 .refresh(self.backend.as_ref(), &did_of(scid))
@@ -1132,23 +1166,32 @@ impl Resolver {
                     if let Ok(mut failed) = self.admission_failed.lock() {
                         failed.remove(scid);
                     }
+                    Ok(())
                 }
                 Err(CacheError::NotFound) => {
                     if let Ok(mut failed) = self.admission_failed.lock() {
                         failed.remove(scid);
                     }
-                    return Err(SessionKeyError::NotListed);
+                    Err(SessionKeyError::NotListed)
                 }
                 Err(e) => {
                     log::info!("identity: refresh of {} failed ({e})", did_of(scid));
                     if let Ok(mut failed) = self.admission_failed.lock() {
                         failed.insert(scid.to_string(), Instant::now());
                     }
-                    return Err(SessionKeyError::StoreUnavailable);
+                    Err(SessionKeyError::StoreUnavailable)
                 }
             }
+        };
+        drop(held);
+        // The map's handle and this one are the only refs once no caller waits
+        // on the lock: the entry goes, and many identities keep no state.
+        if let Ok(mut reads) = self.admission_reads.lock() {
+            if Arc::strong_count(&one_read) <= 2 {
+                reads.remove(scid);
+            }
         }
-        self.cached_session_key(scid, key).await
+        outcome
     }
 
     /// Whether a failed admission read of `scid`'s log is still within its backoff.
