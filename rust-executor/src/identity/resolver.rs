@@ -66,10 +66,6 @@ const SESSION_READ_BACKOFF: Duration = Duration::from_secs(5);
 /// oldest goes, as `note_refreshed`'s bound does. Per-identity backoff, never a
 /// global one.
 const ADMISSION_FAILED_BOUND: usize = 1024;
-/// The most identities an admission read serialises at once (`admission_reads`): a
-/// cancelled caller's entry goes on every insert, and a live one is evicted only past
-/// the bound — losing the read-sharing for it, never the lock it is waited on under.
-const ADMISSION_READS_BOUND: usize = 1024;
 
 // ---------------------------------------------------------------------------------------------
 // Keys that speak for an identity
@@ -843,6 +839,34 @@ pub fn session_key_in(
     })
 }
 
+/// A caller's hold on one identity's admission-read lock
+/// ([`Resolver::admission_reads`]). Its drop — the read answered, or the caller's
+/// future was cancelled — removes the map's entry, but only while the map still
+/// holds this very handle and no other caller does ([`Arc::strong_count`] `== 2`:
+/// the map's and this guard's): a stale generation's drop removes no newer
+/// caller's entry.
+struct AdmissionRead<'a> {
+    reads: &'a StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    scid: String,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Drop for AdmissionRead<'_> {
+    fn drop(&mut self) {
+        let mut reads = self
+            .reads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if reads
+            .get(&self.scid)
+            .is_some_and(|held| Arc::ptr_eq(held, &self.lock))
+            && Arc::strong_count(&self.lock) == 2
+        {
+            reads.remove(&self.scid);
+        }
+    }
+}
+
 /// DID resolution through the key-log cache and the agent language.
 pub struct Resolver {
     cache: Arc<KelCache>,
@@ -867,8 +891,10 @@ pub struct Resolver {
     /// One "stale? → refresh → record the outcome" per identity at a time
     /// ([`Resolver::admission_read`]): the cache's fetch gate shares successful
     /// reads, not failures, so a caller that waited on a peer's read sees the
-    /// failure the peer recorded instead of paying a store read of its own. An
-    /// entry is dropped once no caller waits on it, as the fetch gate's is.
+    /// failure the peer recorded instead of paying a store read of its own. Each
+    /// caller takes the lock through a guard ([`AdmissionRead`]) whose drop removes
+    /// the entry once no other caller holds it: the map holds exactly the
+    /// identities with a caller in flight, which the login rate limits bound.
     admission_reads: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Signers the key map does not know → the discovery pass that last asked about them
     /// ([`Resolver::discovery_turn`]).
@@ -1144,29 +1170,30 @@ impl Resolver {
         self.cached_session_key(scid, key).await
     }
 
+    /// The lock one caller's [`Resolver::admission_read`] runs under: the map's
+    /// entry for `scid` or a new one, handed back in a guard whose drop removes it
+    /// once no other caller holds the handle.
+    fn admission_lock(&self, scid: &str) -> AdmissionRead<'_> {
+        let mut reads = self
+            .admission_reads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = reads.entry(scid.to_string()).or_default().clone();
+        AdmissionRead {
+            reads: &self.admission_reads,
+            scid: scid.to_string(),
+            lock,
+        }
+    }
+
     /// The stale-log sequence of [`Resolver::session_key`] — refresh the log and
     /// record the read's outcome — under one lock per identity. A caller that
     /// waited on a peer's sequence re-checks instead of reading: the peer's
     /// success made its read fresh, the peer's failure started the identity's
     /// backoff and answers it `StoreUnavailable` at once.
     async fn admission_read(&self, scid: &str, max_age: u64) -> Result<(), SessionKeyError> {
-        let one_read = {
-            let mut reads = self
-                .admission_reads
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // A caller cancelled between taking the lock handle and awaiting it leaves
-            // an entry only the map still holds: prune those, and cap the map at the
-            // most identities read at once — evicting a live one loses the sharing
-            // for it (its waiters keep the lock they took), never correctness.
-            reads.retain(|_, lock| Arc::strong_count(lock) > 1);
-            let over = (reads.len() + 1).saturating_sub(ADMISSION_READS_BOUND);
-            for stale in reads.keys().take(over).cloned().collect::<Vec<_>>() {
-                reads.remove(&stale);
-            }
-            reads.entry(scid.to_string()).or_default().clone()
-        };
-        let held = one_read.lock().await;
+        let one_read = self.admission_lock(scid);
+        let held = one_read.lock.lock().await;
         let outcome = if self
             .cache
             .read_ok_within(scid, super::service::now(), max_age)
@@ -1200,13 +1227,6 @@ impl Resolver {
             }
         };
         drop(held);
-        // The map's handle and this one are the only refs once no caller waits
-        // on the lock: the entry goes, and many identities keep no state.
-        if let Ok(mut reads) = self.admission_reads.lock() {
-            if Arc::strong_count(&one_read) <= 2 {
-                reads.remove(scid);
-            }
-        }
         outcome
     }
 
@@ -2249,27 +2269,138 @@ mod tests {
         assert!(failed.contains_key("one-more"));
     }
 
-    // An entry only the map holds — a caller cancelled between taking the lock and
-    // awaiting it — goes on the next insert, and the map never grows past the bound.
+    // More identities with a caller in flight than the old bound keep their
+    // locks — nothing evicts a held lock — and concurrent callers of one of
+    // them still share its one store read. Every entry goes as its caller ends.
     #[tokio::test]
-    async fn a_cancelled_callers_entry_leaves_the_admission_reads_map() {
+    async fn held_admission_locks_are_never_evicted() {
         let store = Arc::new(FakeStore::new(vec![]));
-        let resolver = local_resolver(trusting(), store);
-        for i in 0..ADMISSION_READS_BOUND + 1 {
+        let resolver = Arc::new(local_resolver(trusting(), store.clone()));
+        const CALLERS: usize = 1025;
+        let mut entered = Vec::with_capacity(CALLERS);
+        for i in 0..CALLERS {
+            let notify = Arc::new(Notify::new());
+            store
+                .stall_for
+                .lock()
+                .unwrap()
+                .insert(did_of(&format!("held-{i}")), notify.clone());
+            entered.push(notify);
+        }
+        let mut calls = Vec::with_capacity(CALLERS);
+        for i in 0..CALLERS {
+            let resolver = resolver.clone();
+            calls.push(tokio::spawn(async move {
+                resolver.admission_read(&format!("held-{i}"), 0).await
+            }));
+        }
+        for notify in &entered {
+            tokio::time::timeout(Duration::from_secs(30), notify.notified())
+                .await
+                .expect("every caller reached its stalled store read");
+        }
+        assert_eq!(
+            resolver.admission_reads.lock().unwrap().len(),
+            CALLERS,
+            "no held lock is evicted"
+        );
+        // Concurrent callers of one held identity wait on its lock: no second read.
+        for _ in 0..4 {
+            let resolver = resolver.clone();
+            calls.push(tokio::spawn(async move {
+                resolver.admission_read("held-0", 0).await
+            }));
+        }
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            resolver.admission_reads.lock().unwrap().len(),
+            CALLERS,
+            "the waiters share the held entry"
+        );
+        assert_eq!(
+            store.log_calls.load(Ordering::SeqCst),
+            CALLERS,
+            "the waiters paid no read of their own"
+        );
+        for call in &calls {
+            call.abort();
+        }
+        for call in calls {
+            let _ = call.await;
+        }
+        assert!(
+            resolver.admission_reads.lock().unwrap().is_empty(),
+            "a cancelled caller's entry goes with it"
+        );
+    }
+
+    // A caller dropped while the map held its entry removes it; a caller whose
+    // generation the map no longer holds — a newer caller's entry names the
+    // identity — removes nothing.
+    #[tokio::test]
+    async fn a_stale_callers_drop_leaves_the_newer_callers_entry() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        let resolver = Arc::new(local_resolver(trusting(), store.clone()));
+        // A's read stalls inside the store while holding the lock.
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let a = {
+            let resolver = resolver.clone();
+            tokio::spawn(async move { resolver.admission_read("the-scid", 0).await })
+        };
+        tokio::time::timeout(Duration::from_secs(30), entered.notified())
+            .await
+            .expect("the read reached the paused store");
+        // The map lost A's entry — an eviction as the old cap did — and B's
+        // caller took the name under a new lock.
+        resolver.admission_reads.lock().unwrap().remove("the-scid");
+        store
+            .stall_for
+            .lock()
+            .unwrap()
+            .insert(did_of("the-scid"), Arc::new(Notify::new()));
+        let b = {
+            let resolver = resolver.clone();
+            tokio::spawn(async move { resolver.admission_read("the-scid", 0).await })
+        };
+        for _ in 0..10 {
+            if resolver
+                .admission_reads
+                .lock()
+                .unwrap()
+                .contains_key("the-scid")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
             resolver
                 .admission_reads
                 .lock()
                 .unwrap()
-                .insert(format!("stale-{i}"), Default::default());
-        }
-        let _ = resolver.admission_read("the-scid", 0).await;
-        let reads = resolver.admission_reads.lock().unwrap();
-        assert!(
-            reads.len() <= ADMISSION_READS_BOUND,
-            "dead entries go, the bound holds: {}",
-            reads.len()
+                .contains_key("the-scid"),
+            "the newer caller's entry is in"
         );
-        assert!(!reads.contains_key("stale-0"));
+        // A's stale drop removes nothing of B's.
+        release.notify_one();
+        assert_eq!(a.await.unwrap(), Err(SessionKeyError::NotListed));
+        assert!(
+            resolver
+                .admission_reads
+                .lock()
+                .unwrap()
+                .contains_key("the-scid"),
+            "the stale drop removed no newer caller's entry"
+        );
+        b.abort();
+        let _ = b.await;
+        assert!(
+            resolver.admission_reads.lock().unwrap().is_empty(),
+            "the last caller's drop empties the map"
+        );
     }
 
     #[tokio::test]
