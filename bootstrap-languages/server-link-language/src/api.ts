@@ -15,6 +15,7 @@ import type {
     KeysResponse,
     PeersResponse,
     RenderResponse,
+    SealedBox,
     SyncResponse,
     WirePerspectiveDiff,
 } from "./types.js";
@@ -78,30 +79,21 @@ export async function requestChallenge(config: RoomConfig, did: string): Promise
 }
 
 /**
- * Step 2: POST {did, challenge, signature} -> {token}
- *
- * `x25519PublicKeyHex` is an additive field (not in the base spec) this
- * language sends so the server can capture the agent's E2E public key at
- * the one point it already verifies DID ownership. A server that doesn't
- * care about E2E simply ignores it. See src/encryption.ts module doc.
+ * Step 2: POST {did, challenge, signature} -> {token}. The call that creates
+ * the room makes this agent its admin; every room refuses plaintext from
+ * creation.
  */
 export async function verifyChallenge(
     config: RoomConfig,
     did: string,
     challenge: string,
     signature: string,
-    x25519PublicKeyHex?: string,
-    x25519Signature?: string,
 ): Promise<string> {
-    const payload: Record<string, unknown> = { did, challenge, signature };
-    if (x25519PublicKeyHex) payload.x25519PublicKey = x25519PublicKeyHex;
-    if (x25519Signature) payload.x25519Signature = x25519Signature;
-
     const res = await request<AuthTokenResponse>(
         roomUrl(config, "/auth"),
         "POST",
         jsonHeaders(),
-        JSON.stringify(payload),
+        JSON.stringify({ did, challenge, signature }),
     );
     return res.token;
 }
@@ -110,27 +102,60 @@ export async function verifyChallenge(
 // Perspective sync / commit
 // ---------------------------------------------------------------------------
 
-export async function commitDiff(config: RoomConfig, token: string, diff: WirePerspectiveDiff): Promise<void> {
-    await request<unknown>(roomUrl(config, "/commit"), "POST", jsonHeaders(token), JSON.stringify(diff));
+/** Where the server put an accepted commit in the room's diff log. A field
+ *  the answer does not carry is absent. */
+export interface CommitResult {
+    sequence?: number;
+    revision?: string;
 }
 
-export async function fetchSync(config: RoomConfig, token: string, since: number): Promise<SyncResponse> {
-    const url = roomUrl(config, `/sync?since=${encodeURIComponent(String(since))}`);
-    const res = await request<Partial<SyncResponse>>(url, "GET", jsonHeaders(token));
+export async function commitDiff(config: RoomConfig, token: string, diff: WirePerspectiveDiff): Promise<CommitResult> {
+    const res = await request<unknown>(roomUrl(config, "/commit"), "POST", jsonHeaders(token), JSON.stringify(diff));
+    if (!res || typeof res !== "object") return {};
+    const { sequence, revision } = res as { sequence?: unknown; revision?: unknown };
     return {
-        diffs: res.diffs ?? [],
-        revision: res.revision ?? "",
-        sequence: typeof res.sequence === "number" ? res.sequence : since,
+        sequence: typeof sequence === "number" ? sequence : undefined,
+        revision: typeof revision === "string" ? revision : undefined,
     };
 }
 
-export async function fetchRender(config: RoomConfig, token: string): Promise<RenderResponse> {
-    const res = await request<Partial<RenderResponse>>(roomUrl(config, "/render"), "GET", jsonHeaders(token));
-    return {
-        links: res.links ?? [],
-        revision: res.revision ?? "",
-        sequence: typeof res.sequence === "number" ? res.sequence : 0,
-    };
+/** Throws unless `ok`: an answer without the paged fields cannot be read as a page. */
+function expectPage(ok: boolean, path: string): void {
+    if (!ok) throw new Error(`link server answered GET ${path} without a paged body`);
+}
+
+/** One page of the diff log after `since`: at most `limit` diffs, each with its sequence. */
+export async function fetchSync(config: RoomConfig, token: string, since: number, limit: number): Promise<SyncResponse> {
+    const path = `/sync?since=${encodeURIComponent(String(since))}&limit=${limit}`;
+    const res = await request<SyncResponse>(roomUrl(config, path), "GET", jsonHeaders(token));
+    expectPage(
+        Array.isArray(res?.diffs) &&
+            res.diffs.every((d) => typeof d?.sequence === "number") &&
+            typeof res.revision === "string" &&
+            typeof res.sequence === "number" &&
+            (res.next === null || (typeof res.next === "number" && res.next > since)),
+        path,
+    );
+    return res;
+}
+
+/** One page of the room's snapshot: the first when `next` is null. */
+export async function fetchRender(
+    config: RoomConfig,
+    token: string,
+    page: { limit: number; next: string | null },
+): Promise<RenderResponse> {
+    const path = `/render?limit=${page.limit}` + (page.next !== null ? `&next=${encodeURIComponent(page.next)}` : "");
+    const res = await request<RenderResponse>(roomUrl(config, path), "GET", jsonHeaders(token));
+    expectPage(
+        Array.isArray(res?.links) &&
+            typeof res.revision === "string" &&
+            typeof res.sequence === "number" &&
+            typeof res.upto === "number" &&
+            (res.next === null || (typeof res.next === "string" && res.next.length > 0)),
+        path,
+    );
+    return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +173,7 @@ export async function fetchPeers(config: RoomConfig, token: string): Promise<str
 
 export interface RotateKeyEntry {
     did: string;
-    encryptedKey: { ephemeralPublicKey: string; nonce: string; ciphertext: string };
+    encryptedKey: SealedBox;
 }
 
 export interface RotateResponse {
@@ -157,53 +182,50 @@ export interface RotateResponse {
 }
 
 /**
- * Rotates the room's E2E key. The caller generates the room key locally,
- * seals it to each member's X25519 public key, and sends only the sealed
- * envelopes. The server never touches the plaintext key.
+ * Rotates the room's E2E key (room admin only). The caller generates the
+ * room key locally, seals it to each ACL member's DID, and sends only the
+ * sealed boxes and the key's commitment (`roomKeyCommitment`). The server
+ * never touches the plaintext key.
  */
 export async function rotateKeys(
     config: RoomConfig,
     token: string,
     keys: RotateKeyEntry[],
+    commitment: string,
 ): Promise<RotateResponse> {
     return request<RotateResponse>(
         roomUrl(config, "/keys/rotate"),
         "POST",
         jsonHeaders(token),
-        JSON.stringify({ keys }),
+        JSON.stringify({ keys, commitment }),
     );
 }
 
+/** Drops this agent's box for `version`, so a member holding the version grants it again. */
+export async function deleteRoomKey(config: RoomConfig, token: string, version: number): Promise<void> {
+    // No body, so no JSON content type: the server refuses an empty JSON body.
+    await request<unknown>(roomUrl(config, `/keys/${version}`), "DELETE", { Authorization: `Bearer ${token}` });
+}
+
 /**
- * Fetches the room's E2E keys for this agent.
- *
- * Returns null when the room has no E2E at all (server responds 404).
- * Returns `{ keys: [], e2e_enabled: true }` when the room HAS E2E but
- * this agent has no keys yet (freshly added member awaiting grant).
+ * Fetches the room key versions sealed to this agent. The server answers 200
+ * with an empty list when it holds none: the agent waits for one. Any error
+ * status, 404 included, throws.
  */
-export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse | null> {
-    try {
-        const res = await request<Partial<KeysResponse>>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
-        if (!res) return null;
-        return {
-            keys: res.keys ?? [],
-            e2e_enabled: res.e2e_enabled ?? (!!res.keys && res.keys.length > 0),
-        };
-    } catch (err) {
-        if (err instanceof ApiError && (err.status === 404 || err.status === 204)) {
-            return null; // Room has no E2E — 404
-        }
-        throw err;
-    }
+export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse> {
+    const res = await request<Partial<KeysResponse> | undefined>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
+    // A body without a list is a broken answer, not "no keys": throwing keeps a loaded ring (`afterFailedKeyRead`).
+    if (!Array.isArray(res?.keys)) throw new Error("server-link-language: /keys answered without a keys list");
+    return { keys: res.keys };
 }
 
 // ---------------------------------------------------------------------------
-// E2E key grant (admin re-seals historical versions for late members)
+// E2E key grant (any member re-seals versions it holds for a member lacking them)
 // ---------------------------------------------------------------------------
 
 export interface GrantKeyEntry {
     version: number;
-    encryptedKey: { ephemeralPublicKey: string; nonce: string; ciphertext: string };
+    encryptedKey: SealedBox;
 }
 
 export async function grantKeys(
@@ -222,10 +244,10 @@ export async function grantKeys(
 }
 
 // ---------------------------------------------------------------------------
-// E2E admin: missing keys + ACL query
+// E2E missing keys + ACL query
 // ---------------------------------------------------------------------------
 
-/** Admin only. Returns members missing historical key versions. */
+/** Any member. Returns the ACL members lacking key versions, by DID. */
 export async function fetchMissingKeys(config: RoomConfig, token: string): Promise<MissingKeysResponse> {
     const res = await request<Partial<MissingKeysResponse>>(
         roomUrl(config, "/keys/missing"), "GET", jsonHeaders(token),
@@ -233,7 +255,7 @@ export async function fetchMissingKeys(config: RoomConfig, token: string): Promi
     return { membersNeedingHistoricalKeys: res.membersNeedingHistoricalKeys ?? [] };
 }
 
-/** Returns the room's admin DID and full member list (with X25519 public keys). */
+/** Returns the room's admin DID and its ACL members' DIDs. */
 export async function fetchAclInfo(config: RoomConfig, token: string): Promise<AclResponse> {
     const res = await request<Partial<AclResponse>>(roomUrl(config, "/acl"), "GET", jsonHeaders(token));
     return { admin: res.admin ?? "", members: res.members ?? [] };

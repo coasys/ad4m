@@ -6,35 +6,16 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::agent::capabilities::ALL_CAPABILITY;
 use crate::api::ws_handler::{build_handler_map, WsRpcError};
 use crate::types::RequestContext;
 
 pub(crate) fn admin_ctx() -> Arc<RequestContext> {
-    Arc::new(RequestContext {
-        capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential: true,
-        user_email: None,
-        user_did: None,
-        cancel_token: None,
-        connection_id: None,
-    })
+    Arc::new(RequestContext::operator_for_test())
 }
 
 /// A context that holds no capability at all.
 pub(crate) fn no_cap_ctx() -> Arc<RequestContext> {
-    Arc::new(RequestContext {
-        capabilities: Ok(vec![]),
-        auto_permit_cap_requests: false,
-        auth_token: "not-a-token".into(),
-        is_admin_credential: false,
-        user_email: None,
-        user_did: None,
-        cancel_token: None,
-        connection_id: None,
-    })
+    Arc::new(RequestContext::app_for_test(vec![]))
 }
 
 pub(crate) async fn call(

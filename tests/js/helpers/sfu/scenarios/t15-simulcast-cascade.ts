@@ -34,8 +34,6 @@ import { wireRenegotiation, RenegotiationWire } from "../renegotiation.js";
 
 const ROOM_NAME = "t15-simulcast-cascade";
 const NEIGHBOURHOOD = `windtunnel://t15`;
-const WS_BASE = 16700;
-const GOSSIP_BASE = 26700;
 const MAX_PER_NODE = 1;
 const MEDIA_FLOW_MS = 12_000;
 const PIPE_TIMEOUT_MS = 15_000;
@@ -76,8 +74,7 @@ export const t15SimulcastCascade: Scenario = {
         executorBin: ctx.executorPath!,
         nodeCount: 2,
         maxParticipantsPerNode: MAX_PER_NODE,
-        wsBasePort: WS_BASE,
-        gossipBasePort: GOSSIP_BASE,
+        workDir: ctx.tmpDirBase,
       });
       const [nodeA, nodeB] = cluster.nodes;
 

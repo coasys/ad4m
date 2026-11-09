@@ -83,12 +83,14 @@
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
 //! | [`union`] | One query over several classes: per-class rows, one classification, one sort and page over the union |
 //! | [`abstract_classes`] | Abstract classes: the concrete classes one reads, and the views it reads them through |
-//! | [`builtin_classes`] | Built-in abstract classes (`ad4m://TextContent`), addressed by URI and never stored |
+//! | [`builtin_classes`] | Built-in abstract classes (`ad4m://TextContent`, `ad4m://Container`), addressed by URI and never stored |
+//! | [`containment`] | Containment through `Container`: the edge set, and the patterns and rows that read it |
 
 pub(crate) mod abstract_classes;
 pub(crate) mod builtin_classes;
 #[cfg(test)]
 mod collection_provenance_tests;
+pub(crate) mod containment;
 mod eval_transform;
 mod filtering;
 mod getters;
@@ -103,11 +105,15 @@ mod link_status_relation_tests;
 #[cfg(test)]
 mod link_status_tests;
 mod links;
+#[cfg(test)]
+mod page_before_resolve_tests;
 mod projection;
 #[cfg(test)]
 mod proof_valid_tests;
 mod query;
 mod relations;
+#[cfg(test)]
+mod resolve_selection_tests;
 #[cfg(test)]
 mod round_trip_tests;
 #[cfg(test)]
@@ -126,7 +132,7 @@ pub(crate) mod utils;
 pub(crate) use filtering::matches_condition;
 pub(crate) use getters::conformance_predicates;
 pub use getters::evaluate_getters_batch;
-pub(crate) use links::{links_trigger_predicates, LINKS_KEY};
+pub(crate) use links::{links_rows, links_trigger_predicates};
 pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::{load_shape_from_store, MissingShape};

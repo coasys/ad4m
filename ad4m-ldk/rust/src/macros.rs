@@ -196,6 +196,49 @@ macro_rules! __ad4m_cap {
         }
     };
 
+    (identity, $lang:ty) => {
+        // Async shims, as for expression: the store is reached through
+        // `httpFetch`, so each call holds the slot's async lock across
+        // the await. Numbers and optional arguments arrive as `JsValue`
+        // (a JS number is not a wasm-bindgen u64); answers go out
+        // through `to_json_js`, so `None` is `null`.
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityLog",
+            __ad4m_identity_log, identity_log, (did: String), [from: u64]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityHead",
+            __ad4m_identity_head, identity_head, (did: String), []);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityAppend",
+            __ad4m_identity_append, identity_append, (did: String), [req: $crate::identity::AppendRequest]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityKeyOwner",
+            __ad4m_identity_key_owner, identity_key_owner, (multikey: String), [], default [wait_s: u8]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityPowParams",
+            __ad4m_identity_pow_params, identity_pow_params, (), []);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityAttachNote",
+            __ad4m_identity_attach_note, identity_attach_note, (did: String, token: String), [req: $crate::identity::SignedRequest]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityPutAgent",
+            __ad4m_identity_put_agent, identity_put_agent, (), [record: $crate::identity::AgentRecord, req: Option<$crate::identity::SignedRequest>]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityOpenOffer",
+            __ad4m_identity_open_offer, identity_open_offer, (), [offer: $crate::identity::SignedOffer]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityListOffers",
+            __ad4m_identity_list_offers, identity_list_offers, (did: String), [req: $crate::identity::SignedRequest], default [wait_s: u8]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityCancelOffer",
+            __ad4m_identity_cancel_offer, identity_cancel_offer, (did: String, offer_id: String), [req: $crate::identity::SignedRequest]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityClaimOffer",
+            __ad4m_identity_claim_offer, identity_claim_offer, (did: String, offer_id: String), [claim: $crate::identity::Claim]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityOfferState",
+            __ad4m_identity_offer_state, identity_offer_state, (did: String, offer_id: String, key: String), [], default [wait_s: u8]);
+    };
+
+    (token, $lang:ty) => {
+        $crate::__ad4m_async_shim!($lang, TokenCapability, "tokenAssets",
+            __ad4m_token_assets, token_assets, (), []);
+        $crate::__ad4m_async_shim!($lang, TokenCapability, "tokenBalance",
+            __ad4m_token_balance, token_balance, (account: String, asset: String), []);
+        $crate::__ad4m_async_shim!($lang, TokenCapability, "tokenSend",
+            __ad4m_token_send, token_send, (to: String, asset: String), [amount: $crate::token::Amount, memo: Option<String>]);
+        $crate::__ad4m_async_shim!($lang, TokenCapability, "tokenReceived",
+            __ad4m_token_received, token_received, (), [cursor: Option<String>, limit: u32]);
+    };
+
     (perspective_commit, $lang:ty) => {
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveCommit")]
         pub fn __ad4m_perspective_commit(
@@ -320,6 +363,35 @@ macro_rules! __ad4m_cap {
                 .map_err($crate::errors::LanguageError::from)?;
             let r = __ad4m_with("telepresenceSendBroadcast", |l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_send_broadcast(l, p))??;
             Ok($crate::__serde::to_js(&r).map_err($crate::errors::LanguageError::from)?)
+        }
+    };
+}
+
+/// One async capability shim. `(name: String, …)` are JS strings passed
+/// as they are; `[name: Type, …]` arrive as `JsValue` and deserialise
+/// into `Type`; `default [name: Type, …]`, last, are optional JS
+/// arguments that read as `Type::default()` when absent (a `waitSec` the
+/// caller left out is 0).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __ad4m_async_shim {
+    ($lang:ty, $trait:ident, $js:literal, $shim:ident, $method:ident,
+     ($($s:ident: String),*), [$($v:ident: $vty:ty),*]
+     $(, default [$($o:ident: $oty:ty),*])?) => {
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = $js)]
+        pub async fn $shim(
+            $($s: String,)*
+            $($v: ::wasm_bindgen::JsValue,)*
+            $($($o: ::wasm_bindgen::JsValue,)*)?
+        ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
+            $(let $v: $vty = $crate::__serde::from_js($v)?;)*
+            $($(let $o: $oty = $crate::__serde::from_js::<Option<$oty>>($o)?.unwrap_or_default();)*)?
+            let m = __ad4m_instance($js)?;
+            let answer = {
+                let mut guard = m.lock($js).await?;
+                <$lang as $crate::traits::$trait>::$method(&mut *guard, $($s,)* $($v,)* $($($o,)*)?).await?
+            };
+            Ok($crate::__serde::to_json_js(&answer)?)
         }
     };
 }

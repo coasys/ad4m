@@ -111,19 +111,17 @@ test("operator admits a DID, which can then authenticate in an allowlist room", 
     await authenticateAgent(server.url, roomId, admin);
     await assert.rejects(() => authenticateAgent(server.url, roomId, joiner), /403/);
 
-    const res = await op<{ admin: string; members: Array<{ did: string; hasX25519Key: boolean }> }>(
+    const res = await op<{ admin: string; members: Array<{ did: string }> }>(
       `${opUrl}/api/rooms/${roomId}/acl`,
       { action: "add", did: joiner.did }
     );
     assert.equal(res.status, 200);
     assert.equal(res.body.admin, admin.did);
-    assert.ok(res.body.members.some((m) => m.did === joiner.did && !m.hasX25519Key));
+    assert.ok(res.body.members.some((m) => m.did === joiner.did));
 
     const token = await authenticateAgent(server.url, roomId, joiner);
     const acl = await getJson<{ members: Array<{ did: string }> }>(`${server.url}/rooms/${roomId}/acl`, token);
     assert.equal(acl.status, 200);
-    const detail = await op<{ members: Array<{ did: string; hasX25519Key: boolean }> }>(`${opUrl}/api/rooms/${roomId}`);
-    assert.ok(detail.body.members.some((m) => m.did === joiner.did && m.hasX25519Key));
   });
 });
 

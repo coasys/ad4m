@@ -18,13 +18,13 @@ import {
   normalizeValue,
 } from "./hydration";
 import type {
-  Scope, IncludeMap, Query,
+  Scope, TraverseScope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
-import { isTraverseScope } from "./types";
+import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./types";
 
 
 
@@ -373,6 +373,37 @@ function jsonToModelInstance<T extends Ad4mModel>(
   return instance;
 }
 
+
+/**
+ * Put `childId` under `parent`. A containment scope `{ id }` writes through the
+ * built-in `Container` (#1446): the executor runs the adder of the parent's own
+ * `children` relation when its class has one (a block's `we://child`), else
+ * writes `ad4m://has_child`. The other forms write their one predicate.
+ */
+async function linkToParent(
+  perspective: PerspectiveProxy,
+  parent: Exclude<Scope, TraverseScope>,
+  childCtor: Function,
+  childId: string,
+  batchId?: string,
+): Promise<void> {
+  if (isContainedScope(parent)) {
+    await perspective.updateSubject(
+      "ad4m://Container",
+      parent.id,
+      { children: { action: "adder", value: [childId] } },
+      batchId,
+    );
+    return;
+  }
+  const link = new Link({
+    source: parent.id,
+    predicate: resolveParentPredicate(parent, childCtor),
+    target: childId,
+  });
+  await perspective.add(link, 'shared', batchId);
+}
+
 /**
  * Base class for defining data models in AD4M.
  * 
@@ -489,6 +520,10 @@ export class Ad4mModel {
   private _baseExpression: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
+  /** True when the constructor minted the id: no record can hold links yet. */
+  private _idMinted: boolean = false;
+  /** Predicates this instance has already written relation links under (`add*`/`set*`), so they may hold links. */
+  private _relationsWritten = new Set<string>();
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -729,6 +764,7 @@ export class Ad4mModel {
     // IRIs, so relation links like `<post> --has_comment--> <comment-id>`
     // round-trip correctly through the SPARQL store.
     this._baseExpression = baseExpression ? baseExpression : `ad4m://obj/${makeRandomId(24)}`;
+    this._idMinted = !baseExpression;
     this._perspective = perspective;
   }
 
@@ -1105,7 +1141,21 @@ export class Ad4mModel {
     }
 
     const queryInput: any = {};
-    if (query.parent) {
+    if (query.parent && isContainedScope(query.parent)) {
+      // Containment: the executor resolves the predicates from the installed
+      // classes, so only the id travels.
+      queryInput.parent = { id: query.parent.id };
+    } else if (query.parent && isContainmentTraversal(query.parent)) {
+      // A traversal over containment: no predicate travels either.
+      const t = query.parent;
+      const traverse: Record<string, unknown> = { ids: t.ids };
+      if (t.transitive !== undefined) traverse.transitive = t.transitive;
+      if (t.direction !== undefined) traverse.direction = t.direction;
+      if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+      if (t.levels !== undefined) traverse.levels = t.levels;
+      if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
+      queryInput.parent = traverse;
+    } else if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
       // A traversal keeps its own shape on the wire: the executor reads `ids`,
       // and flattening it to one `id` here is how a request for a whole level
@@ -1125,6 +1175,7 @@ export class Ad4mModel {
         if (t.direction !== undefined) traverse.direction = t.direction;
         if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
         if (t.levels !== undefined) traverse.levels = t.levels;
+        if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
         queryInput.parent = traverse;
       } else {
         queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
@@ -1190,6 +1241,20 @@ export class Ad4mModel {
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
     return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+  }
+
+  /**
+   * Snapshot freshly built instances for dirty tracking, with the relations
+   * `include` loaded (its `$`-prefixed projection keys are not relations).
+   * Used by every query path, and by ModelQueryBuilder for pushed results.
+   * @internal
+   */
+  static takeSnapshots(instances: Ad4mModel[], include?: IncludeMap): void {
+    const relations = include
+      ? Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
+    const snapshot = relations && Object.keys(relations).length > 0 ? relations : undefined;
+    for (const inst of instances) inst.takeSnapshot?.(snapshot);
   }
 
 
@@ -1306,14 +1371,7 @@ export class Ad4mModel {
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
     const result = await perspective.modelQuery(classNames, queryJson, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of results) {
-      (inst as any).takeSnapshot?.(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
+    Ad4mModel.takeSnapshots(results, query.include);
     return { results, totalCount: result.totalCount };
   }
 
@@ -1403,15 +1461,7 @@ export class Ad4mModel {
       return jsonToModelInstance(this, perspective, json, query.include, query.properties);
     });
 
-    // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
+    Ad4mModel.takeSnapshots(instances, query.include);
 
     return {
       results: instances,
@@ -1640,6 +1690,7 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    this._relationsWritten.add(metadata.predicate);
     const abstractName = this.abstractName();
     if (abstractName) {
       if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
@@ -1669,6 +1720,7 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    this._relationsWritten.add(metadata.predicate);
     const abstractName = this.abstractName();
     if (abstractName) {
       if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
@@ -1952,7 +2004,10 @@ export class Ad4mModel {
               break;
           }
         } else if (Array.isArray(value)) {
-          // Handle all arrays as relations, including empty ones (which clears the relation)
+          // Handle all arrays as relations, including empty ones (which clears the relation).
+          // A record being created under an id minted here has no links to
+          // clear, so an empty relation there costs a round trip and writes nothing.
+          if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(this.getRelationOptions(key)?.predicate ?? key)) continue;
           await this.setRelationValues(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           // A scalar handed to a relation field is a single-member relation.
@@ -2240,14 +2295,7 @@ export class Ad4mModel {
     if (options?.parent && !options?.batchId) {
       const batchId = await perspective.createBatch();
       await instance.save(batchId);
-      const parent = requireSingleParent(options.parent);
-      const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, batchId);
       await perspective.commitBatch(batchId);
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
@@ -2259,14 +2307,7 @@ export class Ad4mModel {
 
     // Create parent → child link if a parent scope was provided
     if (options?.parent) {
-      const parent = requireSingleParent(options.parent);
-      const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', options?.batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, options?.batchId);
     }
 
     return instance;

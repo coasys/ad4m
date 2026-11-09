@@ -22,6 +22,7 @@
 //! group or others (mode 0600 or 0400).
 
 use crate::config::{Ad4mConfig, SmtpConfig, TlsConfig, DEFAULT_PORT};
+use crate::secret::Secret;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -222,6 +223,28 @@ pub struct ExecutorConfigFile {
     /// address. Unset: no probe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sfu_stun_server: Option<String>,
+    /// `identity.storeUrl` and `identity.storeKeys`: the identity store the agent language
+    /// reaches and the keys its heads must be signed by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityFileSettings>,
+}
+
+/// `identity` in the config file.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityFileSettings {
+    /// The identity store's base URL, e.g. `https://store.ad4m.dev`. Unset: the store the
+    /// network's seed names (`identityStore`), else none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_url: Option<String>,
+    /// The store's head keys (Ed25519 multikeys, `z6Mk…`). Unset: the seed's store keys when
+    /// `storeUrl` is unset too, else none (`identity::IdentitySettings::from_config`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_keys: Option<Vec<String>>,
+    /// Let a DID URL's `src` reach loopback and private addresses (tests, local development).
+    /// Off by default: on a server a `src` comes from untrusted input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_private_src: Option<bool>,
 }
 
 /// Secret keys someone may paste into the config file, as JSON pointers,
@@ -244,7 +267,7 @@ const INLINE_SECRETS: &[(&str, &str)] = &[
 /// which ones are set.
 #[derive(Clone, Default)]
 pub struct ExecutorSecrets {
-    pub admin_credential: Option<String>,
+    pub admin_credential: Option<Secret>,
     pub smtp_password: Option<String>,
     pub unlock_passphrase: Option<String>,
 }
@@ -253,7 +276,10 @@ impl fmt::Debug for ExecutorSecrets {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let shown = |s: &Option<String>| s.as_ref().map(|_| REDACTED);
         f.debug_struct("ExecutorSecrets")
-            .field("admin_credential", &shown(&self.admin_credential))
+            .field(
+                "admin_credential",
+                &self.admin_credential.as_ref().map(|_| REDACTED),
+            )
             .field("smtp_password", &shown(&self.smtp_password))
             .field("unlock_passphrase", &shown(&self.unlock_passphrase))
             .finish()
@@ -289,7 +315,8 @@ impl ExecutorSecrets {
                 Some("AD4M_ADMIN_CREDENTIAL"),
                 "AD4M_ADMIN_CREDENTIAL_FILE",
                 None,
-            )?,
+            )?
+            .map(Secret::from),
             smtp_password: secret_from_env(
                 &env,
                 Some("AD4M_SMTP_PASSWORD"),
@@ -511,6 +538,9 @@ impl ExecutorConfigFile {
             sfu_udp_port: self.sfu_udp_port,
             sfu_public_addr: self.sfu_public_addr.clone(),
             sfu_stun_server: self.sfu_stun_server.clone(),
+            identity_store_url: self.identity.as_ref().and_then(|i| i.store_url.clone()),
+            identity_store_keys: self.identity.as_ref().and_then(|i| i.store_keys.clone()),
+            identity_allow_private_src: self.identity.as_ref().and_then(|i| i.allow_private_src),
             admin_credential: secrets.admin_credential.clone(),
             ..Ad4mConfig::unprepared()
         })
@@ -523,6 +553,34 @@ mod tests {
 
     fn parse(json: &str) -> Result<ExecutorConfigFile, ConfigFileError> {
         ExecutorConfigFile::parse(json)
+    }
+
+    /// `identity.storeUrl` and `identity.storeKeys` reach the executor's config.
+    #[test]
+    fn identity_keys_reach_the_executor_config() {
+        let file = parse(
+            r#"{"identity": {"storeUrl": "http://127.0.0.1:8080",
+                "storeKeys": ["z6MkA", "z6MkB"], "allowPrivateSrc": true}}"#,
+        )
+        .unwrap();
+        let config = file.to_ad4m_config(&ExecutorSecrets::default()).unwrap();
+        assert_eq!(
+            config.identity_store_url.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
+        assert_eq!(
+            config.identity_store_keys,
+            Some(vec!["z6MkA".to_string(), "z6MkB".to_string()])
+        );
+        assert_eq!(config.identity_allow_private_src, Some(true));
+        assert!(parse(r#"{"identity": {"storeUrls": "x"}}"#).is_err());
+        let unset = parse("{}")
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap();
+        assert_eq!(unset.identity_store_url, None);
+        assert_eq!(unset.identity_store_keys, None);
+        assert_eq!(unset.identity_allow_private_src, None);
     }
 
     /// The SFU keys an operator behind NAT sets reach the executor's config.
@@ -887,7 +945,7 @@ mod tests {
 
         let secrets = ExecutorSecrets::from_env(env_of(vec![]), &file).unwrap();
         assert_eq!(secrets.smtp_password.as_deref(), Some("config-pw"));
-        assert_eq!(secrets.admin_credential, None);
+        assert!(secrets.admin_credential.is_none());
         assert_eq!(secrets.unlock_passphrase, None);
 
         let path = |p: &PathBuf| p.to_string_lossy().into_owned();
@@ -902,7 +960,10 @@ mod tests {
         .unwrap();
         assert_eq!(secrets.smtp_password.as_deref(), Some("env-file-pw"));
         assert_eq!(secrets.unlock_passphrase.as_deref(), Some("passphrase"));
-        assert_eq!(secrets.admin_credential.as_deref(), Some("passphrase"));
+        assert!(secrets
+            .admin_credential
+            .as_ref()
+            .is_some_and(|c| c.expose_for_compare("passphrase")));
 
         let secrets = ExecutorSecrets::from_env(
             env_of(vec![("AD4M_SMTP_PASSWORD", "env-pw".to_string())]),

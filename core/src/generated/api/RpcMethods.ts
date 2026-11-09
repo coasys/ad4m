@@ -8,9 +8,11 @@ import type { Agent } from "./Agent";
 import type { AgentAddEntanglementProofsParams } from "./AgentAddEntanglementProofsParams";
 import type { AgentByDidParams } from "./AgentByDidParams";
 import type { AgentRemoveAppParams } from "./AgentRemoveAppParams";
+import type { AgentReply } from "./AgentReply";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
+import type { AgentWithIdentity } from "./AgentWithIdentity";
 import type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
 import type { AiAddModelParams } from "./AiAddModelParams";
 import type { AiAddTaskParams } from "./AiAddTaskParams";
@@ -26,12 +28,17 @@ import type { AiUpdateTaskParams } from "./AiUpdateTaskParams";
 import type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 import type { Apps } from "./Apps";
 import type { CallSessionInfo } from "./CallSessionInfo";
+import type { ClaimOfferParams } from "./ClaimOfferParams";
+import type { ClaimOfferResult } from "./ClaimOfferResult";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
+import type { CosignInceptParams } from "./CosignInceptParams";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
+import type { DeviceView } from "./DeviceView";
+import type { DidResolutionResult } from "./DidResolutionResult";
 import type { EmbedRequest } from "./EmbedRequest";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
@@ -51,10 +58,14 @@ import type { HostRate } from "./HostRate";
 import type { HostingInfoResult } from "./HostingInfoResult";
 import type { HostingRequestPaymentResult } from "./HostingRequestPaymentResult";
 import type { HostingWalletResult } from "./HostingWalletResult";
+import type { IdentityLog } from "./IdentityLog";
+import type { IdentityStatus } from "./IdentityStatus";
 import type { ImportAgentRequest } from "./ImportAgentRequest";
 import type { ImportRequest } from "./ImportRequest";
 import type { InteractionMeta } from "./InteractionMeta";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
+import type { JoinStatus } from "./JoinStatus";
+import type { JoinStatusParams } from "./JoinStatusParams";
 import type { JsonValue } from "./serde_json/JsonValue";
 import type { LanguageAddressParams } from "./LanguageAddressParams";
 import type { LanguageHandle } from "./LanguageHandle";
@@ -64,6 +75,7 @@ import type { LanguageRef } from "./LanguageRef";
 import type { LanguageWriteSettingsParams } from "./LanguageWriteSettingsParams";
 import type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
 import type { LockAgentRequest } from "./LockAgentRequest";
+import type { LogParams } from "./LogParams";
 import type { Model } from "./Model";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
 import type { NeighbourhoodOnlineStatusParams } from "./NeighbourhoodOnlineStatusParams";
@@ -71,8 +83,12 @@ import type { NeighbourhoodSignalParams } from "./NeighbourhoodSignalParams";
 import type { NeighbourhoodUuidParams } from "./NeighbourhoodUuidParams";
 import type { Notification } from "./Notification";
 import type { NotificationInput } from "./NotificationInput";
+import type { OfferListing } from "./OfferListing";
+import type { OfferOpened } from "./OfferOpened";
+import type { OffersParams } from "./OffersParams";
 import type { OnlineAgent } from "./OnlineAgent";
 import type { OpenLinkRequest } from "./OpenLinkRequest";
+import type { OpenOfferParams } from "./OpenOfferParams";
 import type { OverlayView } from "./OverlayView";
 import type { PermitCapabilityRequest } from "./PermitCapabilityRequest";
 import type { PerspectiveAddAutoProcessorParams } from "./PerspectiveAddAutoProcessorParams";
@@ -126,8 +142,12 @@ import type { PromptRequest } from "./PromptRequest";
 import type { ProposeOutcome } from "./ProposeOutcome";
 import type { PublishLanguageRequest } from "./PublishLanguageRequest";
 import type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest";
+import type { PublishParams } from "./PublishParams";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
+import type { ResetLogParams } from "./ResetLogParams";
+import type { ResolveParams } from "./ResolveParams";
+import type { RunAgentRequest } from "./RunAgentRequest";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
 import type { RuntimeComputeLogParams } from "./RuntimeComputeLogParams";
@@ -164,6 +184,7 @@ import type { SfuSendDataParams } from "./SfuSendDataParams";
 import type { SfuSetConfigParams } from "./SfuSetConfigParams";
 import type { SfuStatus } from "./SfuStatus";
 import type { SignMessageRequest } from "./SignMessageRequest";
+import type { SignedHead } from "./SignedHead";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
 import type { UnytVersionInfo } from "./UnytVersionInfo";
@@ -175,6 +196,7 @@ import type { UsersEmailTestParams } from "./UsersEmailTestParams";
 import type { UsersEmailTestResult } from "./UsersEmailTestResult";
 import type { UsersLoginParams } from "./UsersLoginParams";
 import type { UsersRequestVerificationParams } from "./UsersRequestVerificationParams";
+import type { UsersRevokeAllSessionsParams } from "./UsersRevokeAllSessionsParams";
 import type { UsersSetCreditsParams } from "./UsersSetCreditsParams";
 import type { UsersVerifyEmailParams } from "./UsersVerifyEmailParams";
 import type { ValidOutput } from "./ValidOutput";
@@ -192,7 +214,7 @@ export interface RpcMethods {
   "agent.entanglementProofPreflight": { params: EntanglementProofPreflightRequest; result: EntanglementProof };
   "agent.generate": { params: GenerateAgentRequest; result: AgentStatus };
   "agent.generateJwt": { params: GenerateJwtRequest; result: string };
-  "agent.get": { params: Record<string, never>; result: Agent };
+  "agent.get": { params: Record<string, never>; result: AgentWithIdentity };
   "agent.getApps": { params: Record<string, never>; result: Array<Apps> };
   "agent.getEntanglementProofs": { params: Record<string, never>; result: Array<EntanglementProof> };
   "agent.getTrustedAgents": { params: Record<string, never>; result: Array<string> };
@@ -236,6 +258,17 @@ export interface RpcMethods {
   "hosting.setHotWallet": { params: SetHotWalletAddressRequest; result: boolean };
   "hosting.wallet": { params: Record<string, never>; result: HostingWalletResult };
   "hosting.walletHistory": { params: Record<string, never>; result: JsonValue };
+  "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
+  "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
+  "identity.devices": { params: Record<string, never>; result: Array<DeviceView> };
+  "identity.joinStatus": { params: JoinStatusParams; result: JoinStatus };
+  "identity.log": { params: LogParams; result: IdentityLog };
+  "identity.offers": { params: OffersParams; result: Array<OfferListing> };
+  "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
+  "identity.publish": { params: PublishParams; result: SignedHead };
+  "identity.resetLog": { params: ResetLogParams; result: boolean };
+  "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
+  "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
@@ -297,6 +330,7 @@ export interface RpcMethods {
   "perspective.removeLinks": { params: PerspectiveRemoveLinksParams; result: Array<DecoratedLinkExpression> };
   "perspective.removeSubject": { params: PerspectiveRemoveSubjectParams; result: boolean };
   "perspective.resyncSubscription": { params: PerspectiveSubscriptionParams; result: PerspectiveResynced };
+  "perspective.runAgent": { params: RunAgentRequest; result: AgentReply };
   "perspective.runInterpretation": { params: RunInterpretationRequest; result: Array<string> };
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
@@ -323,7 +357,7 @@ export interface RpcMethods {
   "runtime.importData": { params: ImportRequest; result: RuntimeImportResult };
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
-  "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<string> };
+  "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
   "runtime.openLink": { params: OpenLinkRequest; result: boolean };
@@ -371,8 +405,10 @@ export interface RpcMethods {
   "user.freeAccess": { params: SetUserFreeAccessRequest; result: boolean };
   "user.list": { params: Record<string, never>; result: Array<UserStatistics> };
   "user.login": { params: UsersLoginParams; result: string };
+  "user.logout": { params: Record<string, never>; result: boolean };
   "user.multiUserEnabled": { params: Record<string, never>; result: boolean };
   "user.requestVerification": { params: UsersRequestVerificationParams; result: VerificationRequestResult };
+  "user.revokeAllSessions": { params: UsersRevokeAllSessionsParams; result: boolean };
   "user.setMultiUserEnabled": { params: SetMultiUserRequest; result: boolean };
   "user.verifyEmail": { params: UsersVerifyEmailParams; result: string };
   "user.wallet": { params: UsersEmailParams; result: string };
@@ -403,6 +439,12 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "hosting.info",
   "hosting.wallet",
   "hosting.walletHistory",
+  "identity.devices",
+  "identity.joinStatus",
+  "identity.log",
+  "identity.offers",
+  "identity.resolve",
+  "identity.status",
   "language.all",
   "language.get",
   "language.meta",
@@ -473,6 +515,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "language.publish",
   "neighbourhood.join",
   "neighbourhood.publish",
+  "perspective.runAgent",
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
   "runtime.restartHolochain",

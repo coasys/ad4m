@@ -19,8 +19,10 @@ import { e2eScenario } from "../scenario.js";
 const EVERYONE = ["ann", "ben", "cat"];
 const LOCAL = "127.0.0.1";
 const PUBLISHED = "127.0.0.2";
-/** Fixed for the run; a taken port stops the executor with a message that names it. */
-const PORT = 42000 + Math.floor(Math.random() * 1000);
+/** Fixed for the run; a taken port stops the executor with a message that names it.
+ *  Below Linux's ephemeral range (32768–60999), so another socket's ephemeral
+ *  port (the other executors' WebRTC ones) cannot take it first. */
+const PORT = 23000 + Math.floor(Math.random() * 1000);
 const ADVERTISED = `${PUBLISHED}:${PORT}`;
 
 export const e14AdvertisedAddress = e2eScenario({

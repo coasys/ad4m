@@ -22,7 +22,8 @@ use crate::agent::capabilities::ALL_CAPABILITY;
 use crate::agent::AgentService;
 use crate::api::agent_ws::register_ws_handlers;
 use crate::api::ws_handler::HandlerMap;
-use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC};
+use crate::events::{Audience, Topic};
+use crate::pubsub::get_global_pubsub;
 use crate::test_utils::{
     assert_no_private_keys, private_key_values, setup_agent, setup_wallet,
     wallet_private_key_values,
@@ -106,10 +107,7 @@ async fn lock_reply_status_changed_event_and_unlock_carry_no_private_key() {
     setup_agent();
     let secrets = wallet_private_key_values("main");
     let did = main_did();
-    let mut events = get_global_pubsub()
-        .await
-        .subscribe(&AGENT_STATUS_CHANGED_TOPIC)
-        .await;
+    let mut events = get_global_pubsub().await.subscribe_events();
 
     let lock_reply = handlers()
         .dispatch(
@@ -120,10 +118,19 @@ async fn lock_reply_status_changed_event_and_unlock_carry_no_private_key() {
         .await
         .expect("agent.lock")
         .to_string();
-    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
-        .await
-        .expect("agent.lock publishes agent-status-changed")
-        .expect("event");
+    let event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.expect("event");
+            if event.topic == Topic::AgentStatusChanged {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("agent.lock publishes agent-status-changed");
+    // The main agent's status goes to the sessions that act as the main agent.
+    assert_eq!(event.audience, Audience::Dids(vec![did.clone()]));
+    let event = event.payload.to_string();
     // Unlock before asserting, so a failure here leaves the wallet usable.
     let unlocked = AgentService::with_mutable_global_instance(|s| s.unlock("pw-1229".into()));
     let unlock_reply =
@@ -330,27 +337,20 @@ async fn when_agent_json_cannot_be_rewritten_load_still_serves_no_private_key() 
     assert_eq!(entries, 1, "a failed rewrite must not leave a temp file");
 }
 
-/// Multi-user mode: `agent.status` for a managed user and the `AgentData` it
+/// Multi-user mode: `agent.status` for a managed user and the DID document it
 /// is built from.
 #[tokio::test]
 async fn agent_status_for_a_managed_user_carries_no_private_key() {
     setup_wallet();
     setup_agent();
     let email = "did-doc-1229@example.com";
-    AgentService::ensure_user_key_exists(email).unwrap();
-    let secrets = wallet_private_key_values(email);
-    let user_did = AgentService::get_user_did_by_email(email).unwrap();
+    let user_did = crate::test_utils::create_test_user(email);
+    let secrets = wallet_private_key_values(&user_did);
 
-    let ctx = Arc::new(RequestContext {
-        capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential: false,
-        user_email: Some(email.to_string()),
-        user_did: Some(user_did.clone()),
-        cancel_token: None,
-        connection_id: None,
-    });
+    let ctx = Arc::new(RequestContext::user_for_test(
+        &user_did,
+        vec![ALL_CAPABILITY.clone()],
+    ));
     let reply = handlers()
         .dispatch("agent.status", json!({}), ctx)
         .await
@@ -359,11 +359,13 @@ async fn agent_status_for_a_managed_user_carries_no_private_key() {
     assert_no_private_keys(&reply, &secrets, "agent.status for a user");
     assert_public_document_present(&reply, &user_did, "agent.status for a user");
 
-    let agent_data = AgentService::get_user_agent_data(email).unwrap();
-    assert_no_private_keys(&agent_data.did_document, &secrets, "AgentData.did_document");
-    assert_public_document_present(
-        &agent_data.did_document,
-        &user_did,
-        "AgentData.did_document",
-    );
+    let did_document = serde_json::to_string(
+        &crate::agent::did_document_for_context(&crate::agent::AgentContext::managed(
+            user_did.clone(),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_no_private_keys(&did_document, &secrets, "the user's DID document");
+    assert_public_document_present(&did_document, &user_did, "the user's DID document");
 }

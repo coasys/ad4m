@@ -10,14 +10,14 @@ import type { AutoProcessorNeighbourhoodState } from "./AutoProcessorNeighbourho
 import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { FlowStateChangedEvent } from "./FlowStateChangedEvent";
 import type { HostingUserInfo } from "./HostingUserInfo";
-import type { MessageReceivedEvent } from "./MessageReceivedEvent";
+import type { IdentityForkEvent } from "./IdentityForkEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
-import type { PerspectiveLinkUpdatedWithOwner } from "./PerspectiveLinkUpdatedWithOwner";
-import type { PerspectiveLinkWithOwner } from "./PerspectiveLinkWithOwner";
-import type { PerspectiveRemovedWithOwner } from "./PerspectiveRemovedWithOwner";
+import type { PerspectiveEvent } from "./PerspectiveEvent";
+import type { PerspectiveLinkEvent } from "./PerspectiveLinkEvent";
+import type { PerspectiveLinkUpdatedEvent } from "./PerspectiveLinkUpdatedEvent";
+import type { PerspectiveRemovedEvent } from "./PerspectiveRemovedEvent";
 import type { PerspectiveStateFilter } from "./PerspectiveStateFilter";
-import type { PerspectiveWithOwner } from "./PerspectiveWithOwner";
 import type { QuerySubscriptionUpdateEvent } from "./QuerySubscriptionUpdateEvent";
 import type { SfuCallRenegotiationOffer } from "./SfuCallRenegotiationOffer";
 import type { SfuDataMessage } from "./SfuDataMessage";
@@ -31,15 +31,14 @@ export interface EventMap {
   "agent-updated": AgentUpdatedEvent;
   "apps-changed": Apps;
   "hosting-user-info-changed": HostingUserInfo;
-  "perspective-added": PerspectiveWithOwner;
-  "perspective-removed": PerspectiveRemovedWithOwner;
-  "perspective-updated": PerspectiveWithOwner;
+  "perspective-added": PerspectiveEvent;
+  "perspective-removed": PerspectiveRemovedEvent;
+  "perspective-updated": PerspectiveEvent;
   "sync-state-change": PerspectiveStateFilter;
-  "link-added": PerspectiveLinkWithOwner;
-  "link-removed": PerspectiveLinkWithOwner;
-  "link-updated": PerspectiveLinkUpdatedWithOwner;
+  "link-added": PerspectiveLinkEvent;
+  "link-removed": PerspectiveLinkEvent;
+  "link-updated": PerspectiveLinkUpdatedEvent;
   "signal": NeighbourhoodSignalFilter;
-  "message-received": MessageReceivedEvent;
   "notification-triggered": NotificationTriggeredEvent;
   "exception-occurred": ExceptionOccurredEvent;
   "transcription-text": TranscriptionTextFilter;
@@ -52,6 +51,7 @@ export interface EventMap {
   "sfu-data": SfuDataMessage;
   "sfu-room-roster": SfuRoomRoster;
   "flow-state-changed": FlowStateChangedEvent;
+  "identity-fork": IdentityForkEvent;
 }
 
 export type EventName = keyof EventMap;

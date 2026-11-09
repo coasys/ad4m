@@ -64,8 +64,8 @@ assume they are there; prefer the static tools below.
 
 | Tool | What it does |
 | --- | --- |
-| `instance_create(perspective_id, class_name, properties, base_uri?, parent?)` | Create an instance; `parent` also links it as an `ad4m://has_child` child (e.g. a Message into a Channel). Returns its `base_uri` |
-| `instance_query(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with property values; `filter` is a where clause, `parent` scopes to one node's children |
+| `instance_create(perspective_id, class_name, properties, base_uri?, parent?)` | Create an instance; `parent` also puts it under that node (e.g. a Message into a Channel), the way the node holds children. Returns its `base_uri` |
+| `instance_query(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with property values; `filter` is a where clause, `parent` scopes to what one node contains |
 | `instance_get(perspective_id, class_name, base_uri)` | One instance, fully resolved |
 | `instance_update(perspective_id, class_name, base_uri, properties)` | Set single-valued properties |
 | `instance_add_to_collection(perspective_id, class_name, base_uri, collection, item_uri)` | Add an item to a collection property |
@@ -77,12 +77,23 @@ Every write is validated against the class schema before anything is
 written; a rejection names the property, the expected type and the
 cardinality, so fix what the error says rather than guessing.
 
+### WE templates
+
+| Tool | What it does |
+| --- | --- |
+| `template_read(perspective_id, base_uri, ...)` | Read a WE app's Template record: the template whole, or as an outline when it is large, and its version |
+| `template_update(perspective_id, base_uri, version, patches)` | Patch the template by WE's own rules and save it as you, all at once |
+
+Use these, not `instance_update`, for a Template: they apply WE's rules for a template — what
+makes it valid, and that its version moves with it — where a raw property write does not.
+`get_documentation(topic="template")` is the guide; read it before a first edit.
+
 ### Tree and raw links
 
 | Tool | What it does |
 | --- | --- |
-| `add_child(perspective_id, parent, child)` | Link any two nodes with `ad4m://has_child` (class-agnostic; e.g. a Channel under `ad4m://self`) |
-| `get_children(perspective_id, parent, limit?)` | Children of any node with timestamp and author, oldest first |
+| `add_child(perspective_id, parent, child)` | Put any node under another (class-agnostic; e.g. a Channel under `ad4m://self`): through the parent class's own `children` relation, else `ad4m://has_child` |
+| `get_children(perspective_id, parent, limit?)` | Children of any node, whatever their class and however the node holds them, with timestamp and author, oldest first |
 | `add_link` / `query_links` | Raw triples — rarely needed, see "classes, not links" below |
 | `execute_commands` | Run raw SDNA actions on an instance (escape hatch) *(direct MCP only)* |
 
@@ -141,28 +152,35 @@ wins over the default.
 
 ### Authentication
 
-`auth_status()` reports on the **session** token — the one `generate_jwt` /
-`login_email` store. It and the other auth tools need no authentication
+`auth_status()` reports on the session every other tool uses: the token in
+your `Authorization` header, or the one `generate_jwt` / `login_email` /
+`verify_email_code` stored. `authenticated: true` means a tool call would
+pass; the answer also names the `principal` (`operator`, `app` or `user`),
+the `did` you act as and your `capabilities`. A token that stopped working
+(revoked, expired, logged out) answers `authenticated: false` with the
+reason in `error`. It and the other auth tools need no authentication
 themselves.
 
 - **Admin credential** — if the executor was started with
-  `AD4M_ADMIN_CREDENTIAL` / `--admin-credential`, the session still starts
-  with no token: send the credential as an `Authorization: Bearer <credential>`
-  header on your calls. The first protected call that carries a matching
-  header stores it in the session, and everything after that is authenticated.
-  Until then `auth_status()` answers `authenticated: false` — it does not
-  check the header, so treat that answer as "no *session* token yet", not as
-  "your credential is wrong".
-- **Multi-user node** — `signup(email, password)` once, then
+  `AD4M_ADMIN_CREDENTIAL` / `--admin-credential`, send the credential as an
+  `Authorization: Bearer <credential>` header. It authenticates you as the
+  executor's operator, with every capability, exactly as on the executor's RPC
+  API. The first call that carries it stores it in the session.
+- **No admin credential** — on an executor started without one, a caller
+  with no token on the executor's own machine is the operator; nothing to do.
+- **Multi-user executor** — `signup(email, password)` once, then
   `login_email(email, password)` returns a JWT that authenticates the rest of
-  the session. `verify_email_code` is only needed if the node enforces email
+  the session. `verify_email_code` is only needed if the executor enforces email
   verification; try `login_email` first rather than assuming it does.
-- **Capability flow** (one shared node identity, not a per-agent account) —
-  `request_capability(app_name, app_desc)` auto-permits the request and
-  returns `request_id` and `code`; pass both to `generate_jwt`, which stores
+- **Capability flow** (the executor's main agent, or the agent you name) —
+  `request_capability(app_name, app_desc)` returns a `request_id`. When your
+  session may grant capabilities (the operator), it also auto-permits the
+  request and returns the `code`; otherwise the agent's owner (the executor's
+  operator for the main agent, the user for theirs) approves the
+  request and gives you the code. Pass both to `generate_jwt`, which stores
   the resulting JWT in the session for every later call.
 
-Both JWT paths need an unlocked executor: right after a restart the node's
+Both JWT paths need an unlocked executor: right after a restart the executor's
 operator has to run `agent.unlock` first, otherwise `login_email` and
 `generate_jwt` fail with a "key not found" error.
 

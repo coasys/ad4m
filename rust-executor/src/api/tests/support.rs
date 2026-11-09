@@ -2,27 +2,15 @@
 
 use std::sync::Arc;
 
-use crate::agent::capabilities::ALL_CAPABILITY;
 use crate::types::RequestContext;
 
 pub(crate) fn admin_ctx() -> Arc<RequestContext> {
-    Arc::new(RequestContext {
-        capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential: true,
-        user_email: None,
-        user_did: None,
-        cancel_token: None,
-        connection_id: None,
-    })
+    Arc::new(RequestContext::operator_for_test())
 }
 
 /// `admin_ctx()` on the WS RPC connection `connection_id`.
 pub(crate) fn admin_conn_ctx(connection_id: &str) -> Arc<RequestContext> {
-    let mut ctx = (*admin_ctx()).clone();
-    ctx.connection_id = Some(connection_id.to_string());
-    Arc::new(ctx)
+    Arc::new(RequestContext::operator_for_test().on_connection(connection_id))
 }
 
 /// Unregisters the fixture perspective when the test ends (also on panic).

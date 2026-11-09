@@ -1,8 +1,8 @@
-//! Language tools — introspect installed languages and their metadata.
+//! Language tools — introspect installed languages and their metadata. `language_meta`
+//! calls the RPC method `language.meta` through the handler map, so its guard applies.
 
 use super::Ad4mMcpHandler;
-use crate::agent::capabilities::{check_capability, defs::LANGUAGE_READ_CAPABILITY};
-use crate::languages::LanguageController;
+use crate::types::LanguageMeta;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -31,32 +31,27 @@ impl Ad4mMcpHandler {
     pub async fn language_meta(&self, params: Parameters<LanguageMetaParams>) -> String {
         let p = &params.0;
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &LANGUAGE_READ_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        let controller = LanguageController::global_instance();
-        match controller.get_language_expression(&p.address).await {
-            Ok(meta) => {
-                let result = json!({
-                    "address": meta.address,
-                    "name": meta.name,
-                    "description": meta.description,
-                    "author": meta.author,
-                    "possible_template_params": meta.possible_template_params,
-                    "source_code_link": meta.source_code_link,
-                    "template_applied_params": meta.template_applied_params,
-                    "template_source_language_address": meta.template_source_language_address,
-                });
-                serde_json::to_string_pretty(&result)
-                    .unwrap_or_else(|e| format!("Error serializing: {}", e))
-            }
-            Err(e) => {
-                json!({"error": format!("Failed to get language meta for '{}': {}", p.address, e)})
-                    .to_string()
-            }
-        }
+        let meta: LanguageMeta = match self
+            .call("language.meta", json!({ "address": p.address }), |e| {
+                json!({ "error": e.message }).to_string()
+            })
+            .await
+        {
+            Ok(meta) => meta,
+            Err(e) => return e,
+        };
+        let result = json!({
+            "address": meta.address,
+            "name": meta.name,
+            "description": meta.description,
+            "author": meta.author,
+            "possible_template_params": meta.possible_template_params,
+            "source_code_link": meta.source_code_link,
+            "template_applied_params": meta.template_applied_params,
+            "template_source_language_address": meta.template_source_language_address,
+        });
+        serde_json::to_string_pretty(&result)
+            .unwrap_or_else(|e| format!("Error serializing: {}", e))
     }
 }
 

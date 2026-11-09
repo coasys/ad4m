@@ -1,19 +1,19 @@
 /**
- * Tests for src/sync.ts — most importantly applyInboundWireDiff, the
- * single choke point that MUST call emitDiff for every inbound diff
- * (see the "CRITICAL TRAP" note in src/sync.ts and the task brief: 7 of
- * 13 existing link languages got this wrong).
+ * Tests for src/sync.ts — most importantly the single inbound path, which
+ * MUST call emitDiff for every link that enters the store, once (see the
+ * "CRITICAL RULE" note in src/sync.ts: 7 of 13 existing link languages got
+ * this wrong), and must not lose a link it cannot decrypt yet.
  */
 
-import { describe, it } from "node:test";
+import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 
 import type { RoomConfig, StorageAdapter, Transport, TransportResponse } from "../src/adapters.js";
 import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
-import { encryptLinkForWire, generateRoomKey, type KeyRing } from "../src/encryption.js";
-import type { LinkExpression, PerspectiveDiff } from "../src/types.js";
+import { decryptLinkFromWire, encryptLinkForWire, generateRoomKey, type KeyRing } from "../src/encryption.js";
+import type { LinkExpression, PerspectiveDiff, WireLinkExpression } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
@@ -77,17 +77,23 @@ let emittedDiffs: PerspectiveDiff[];
 let syncStates: string[];
 let keyRing: KeyRing | null;
 
+/** The room key `setup()` gives the agent: every room is E2E, so a member holding its key is the normal state. */
+const TEST_KEY = generateRoomKey();
+
+/** `link` as a member commits it: encrypted with the room key. */
+function wire(link: LinkExpression): WireLinkExpression {
+    return encryptLinkForWire(link, TEST_KEY, 1);
+}
+
 function setup(transport: MockTransport): void {
     resetAdapters();
-    // Wipe any leftover batch state so a previous test's queued diff can't
-    // flush against this test's transport.
-    syncModule._resetBatchStateForTests();
+    syncModule._resetRenderStateForTests();
     initAdapters({ storage: new MockStorage(), transport, config });
     store.initStore(simpleHash);
 
     emittedDiffs = [];
     syncStates = [];
-    keyRing = null;
+    keyRing = new Map([[1, TEST_KEY]]);
 
     syncModule.initSync({
         config,
@@ -107,16 +113,49 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const transport = new MockTransport();
         setup(transport);
         const link = makeLink();
+        store.setSequence(4);
 
-        const result = syncModule.applyInboundWireDiff({ additions: [link], removals: [] }, 5, "rev-5");
+        const result = syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, 5, "rev-5");
 
         assert.deepEqual(store.allLinks().links, [link]);
         assert.equal(store.getSequence(), 5);
         assert.equal(store.getRevision(), "rev-5");
         assert.equal(emittedDiffs.length, 1);
         assert.deepEqual(emittedDiffs[0], { additions: [link], removals: [] });
-        assert.deepEqual(result.diff, { additions: [link], removals: [] });
-        assert.equal(result.missingVersions.size, 0);
+        assert.deepEqual(result, { additions: [link], removals: [] });
+    });
+
+    it("a push ahead of the next sequence is applied but leaves the cursor, so the tail fetches the diffs in between", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        store.setSequence(4);
+        store.setRevision("rev-4");
+        const link = makeLink();
+
+        syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, 7, "rev-7");
+
+        assert.deepEqual(store.allLinks().links, [link]);
+        assert.equal(store.getSequence(), 4, "diffs 5 and 6 are still to come");
+        assert.equal(store.getRevision(), "rev-4");
+    });
+
+    it("a push at or below the cursor is ignored, so it cannot re-add a link a later diff removed", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const link = makeLink();
+        // The tail applied 5 (add) and 6 (remove); the push of 5 arrives late.
+        store.setSequence(6);
+        store.setRevision("rev-6");
+
+        // Below the cursor (a late push), and equal to it (the echo of our own commit).
+        for (const sequence of [5, 6]) {
+            const result = syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, sequence, `rev-${sequence}`);
+            assert.deepEqual(result, { additions: [], removals: [] });
+        }
+
+        assert.deepEqual(store.allLinks().links, []);
+        assert.equal(store.getSequence(), 6);
+        assert.equal(store.getRevision(), "rev-6");
     });
 
     it("applies removals and still emits", () => {
@@ -125,7 +164,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const link = makeLink();
         store.putLink(link);
 
-        syncModule.applyInboundWireDiff({ additions: [], removals: [link] }, 1, "rev-1");
+        syncModule.applyInboundWireDiff({ additions: [], removals: [wire(link)] }, 1, "rev-1");
 
         assert.equal(store.allLinks().links.length, 0);
         assert.equal(emittedDiffs.length, 1);
@@ -147,23 +186,24 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.deepEqual(store.allLinks().links[0], link);
     });
 
-    it("skips encrypted diff without key ring — reports missing versions, advances cursor", () => {
+    it("holds an encrypted link without a key ring, advances the cursor, and emits nothing", () => {
         const transport = new MockTransport();
         setup(transport);
-        // keyRing stays null — simulates a freshly joined member awaiting key grant
+        keyRing = null; // a freshly joined member awaiting key grant
         const rk = generateRoomKey();
         const link = makeLink({ source: "encrypted-no-ring" });
         const wireLink = encryptLinkForWire(link, rk, 1);
 
-        const result = syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
+        store.setSequence(4);
+        syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
 
         assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
-        assert.equal(store.getSequence(), 5, "sequence must advance — cursor must not get stuck");
-        assert.equal(result.missingVersions.size, 1, "must report the missing version");
-        assert.ok(result.missingVersions.has(1), "must report version 1");
+        assert.equal(store.getSequence(), 5, "sequence must advance — the link is held, not lost");
+        assert.equal(emittedDiffs.length, 0, "nothing changed in the store, nothing is emitted");
+        assert.ok(syncModule.hasHeldLinks());
     });
 
-    it("skips encrypted diff with missing key version — applies rest, reports missing versions", () => {
+    it("holds a link encrypted with a key version it lacks until that version arrives", () => {
         const transport = new MockTransport();
         setup(transport);
         const rk1 = generateRoomKey();
@@ -172,30 +212,34 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const link = makeLink({ source: "wrong-version" });
         const wireLink = encryptLinkForWire(link, rk2, 2); // encrypted with version 2, ring only has 1
 
-        const result = syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
-
+        store.setSequence(4);
+        syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
         assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
-        assert.equal(store.getSequence(), 5, "sequence must advance — cursor must not get stuck");
-        assert.equal(emittedDiffs.length, 1, "still emits (empty) diff");
-        assert.deepEqual(result.missingVersions, new Set([2]));
+        assert.equal(store.getSequence(), 5, "sequence must advance — the link is held, not lost");
+        assert.deepEqual(syncModule.retryHeld(), { additions: [], removals: [] }, "version 1 does not open it");
+
+        keyRing = new Map([[1, rk1], [2, rk2]]);
+        assert.deepEqual(syncModule.retryHeld(), { additions: [link], removals: [] });
+        assert.deepEqual(emittedDiffs, [{ additions: [link], removals: [] }]);
+        assert.equal(syncModule.hasHeldLinks(), false);
     });
 
-    it("applies plaintext links and skips undecryptable ones in a mixed batch", () => {
+    it("never applies a plaintext link: every room this build reads is end-to-end encrypted", () => {
         const transport = new MockTransport();
         setup(transport);
         const rk = generateRoomKey();
         keyRing = new Map([[1, rk]]);
-        const plaintextLink = makeLink({ source: "visible" });
-        const encryptedLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 2); // version 2, ring only has 1
+        const injected = makeLink({ source: "injected" }); // plaintext: what a server, not a member, could add
+        const member = makeLink({ source: "from-a-member" });
 
-        const result = syncModule.applyInboundWireDiff(
-            { additions: [plaintextLink, encryptedLink], removals: [] }, 5, "rev-5",
+        store.setSequence(4);
+        syncModule.applyInboundWireDiff(
+            { additions: [injected, encryptLinkForWire(member, rk, 1)], removals: [] }, 5, "rev-5",
         );
 
-        assert.equal(store.allLinks().links.length, 1, "plaintext link must be applied");
-        assert.deepEqual(store.allLinks().links[0].data.source, "visible");
-        assert.equal(emittedDiffs.length, 1, "diff emitted with the plaintext link");
-        assert.deepEqual(result.missingVersions, new Set([2]));
+        assert.deepEqual(store.allLinks().links, [member], "only the encrypted link is applied");
+        assert.deepEqual(emittedDiffs, [{ additions: [member], removals: [] }]);
+        assert.equal(syncModule.hasHeldLinks(), false, "a plaintext link is not held for a key either");
         assert.equal(store.getSequence(), 5, "sequence advances past the batch");
     });
 
@@ -224,25 +268,21 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
 // ---------------------------------------------------------------------------
 
 describe("sync: toWireLink contracts", () => {
-    it("produces plaintext wire link when key ring is null", async () => {
+    it("refuses to commit without a key ring, and posts nothing: there is no plaintext mode", async () => {
         const transport = new MockTransport();
         setup(transport);
-        // keyRing stays null
-        let capturedBody = "";
+        keyRing = null; // a member no one has granted the room key yet
         transport.route(
             (url, method) => method === "POST" && url.includes("/commit"),
-            (_url, _method, body) => {
-                capturedBody = body;
-                return { status: 200, headers: {}, body: JSON.stringify({ sequence: 1, revision: "rev-1" }) };
-            },
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ sequence: 1, revision: "rev-1" }) }),
         );
 
-        const link = makeLink();
-        await syncModule.commit({ additions: [link], removals: [] });
-        const sent = JSON.parse(capturedBody);
-        assert.equal(sent.additions[0].author, "did:key:zAuthor", "plaintext link must retain author");
-        assert.equal(sent.additions[0].data.source, "a", "plaintext link must retain data fields");
-        assert.equal(isEncryptedLinkData(sent.additions[0].data), false, "data must not be encrypted");
+        await assert.rejects(
+            () => syncModule.commit({ additions: [makeLink()], removals: [makeLink({ source: "gone" })] }),
+            /no room key/,
+        );
+        assert.deepEqual(transport.calls, [], "nothing reaches the server");
+        assert.equal(store.allLinks().links.length, 0, "the store does not take a refused commit");
     });
 
     it("encrypts wire link when key ring has keys", async () => {
@@ -299,22 +339,23 @@ describe("sync: catchUp / performSync", () => {
                 headers: {},
                 body: JSON.stringify({
                     diffs: [
-                        { additions: [linkA], removals: [] },
-                        { additions: [linkB], removals: [] },
+                        { additions: [wire(linkA)], removals: [], sequence: 1 },
+                        { additions: [wire(linkB)], removals: [], sequence: 2 },
                     ],
                     revision: "rev-2",
                     sequence: 2,
+                    next: null,
                 }),
             }),
         );
 
-        const last = await syncModule.catchUp();
+        const emitted = await syncModule.catchUp();
 
         assert.equal(emittedDiffs.length, 2);
         assert.equal(store.allLinks().links.length, 2);
         assert.equal(store.getSequence(), 2);
         assert.equal(store.getRevision(), "rev-2");
-        assert.deepEqual(last.additions[0].data, linkB.data);
+        assert.deepEqual(emitted, { additions: [linkA, linkB], removals: [] });
         assert.ok(syncStates.includes("Synced"));
     });
 
@@ -333,10 +374,10 @@ describe("sync: catchUp / performSync", () => {
                     return {
                         status: 200,
                         headers: {},
-                        body: JSON.stringify({ diffs: [{ additions: [linkA], removals: [] }], revision: "rev-1", sequence: 1 }),
+                        body: JSON.stringify({ diffs: [{ additions: [wire(linkA)], removals: [], sequence: 1 }], revision: "rev-1", sequence: 1, next: null }),
                     };
                 }
-                return { status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) };
+                return { status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1, next: null }) };
             },
         );
 
@@ -347,44 +388,31 @@ describe("sync: catchUp / performSync", () => {
         assert.equal(emittedDiffs.length, 1);
     });
 
-    it("normalizes nested-shape diff entries ({diff: {additions, removals}})", async () => {
+    it("refuses an answer without the paged fields instead of reading it as a page", async () => {
         const transport = new MockTransport();
         setup(transport);
-        const link = makeLink();
-
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync"),
-            () => ({
-                status: 200,
-                headers: {},
-                body: JSON.stringify({
-                    diffs: [{ diff: { additions: [link], removals: [] }, revision: "rev-1", sequence: 1 }],
-                    revision: "rev-1",
-                    sequence: 1,
-                }),
-            }),
+            () => jsonResponse({ diffs: [{ additions: [wire(makeLink())], removals: [] }], revision: "rev-1", sequence: 1 }),
         );
 
-        await syncModule.catchUp();
-        assert.equal(emittedDiffs.length, 1);
-        assert.deepEqual(emittedDiffs[0].additions[0].data, link.data);
-        assert.equal(store.getSequence(), 1);
+        await assert.rejects(() => syncModule.catchUp(), /without a paged body/);
+        assert.equal(emittedDiffs.length, 0);
+        assert.equal(store.getSequence(), 0);
     });
 
-    it("retries refreshKeyRing on subsequent sync when first attempt found no new keys", async () => {
-        // Simulates the CI race condition: Bob's first catchUp encounters an
-        // encrypted diff but refreshKeyRing finds no key yet (admin hasn't
-        // granted). The cursor advances past the diff. On the SECOND catchUp,
-        // the server returns empty diffs — but the persistent missing-versions
-        // set triggers another refreshKeyRing attempt, which now succeeds.
+    it("re-reads the key ring on every catch-up while links are held, and emits them once a key opens them", async () => {
+        // A member's first catch-up meets an encrypted diff before any member
+        // has granted it the key. The cursor advances past the diff; the link
+        // is held. A later catch-up's key ring read finds the grant.
         const transport = new MockTransport();
         setup(transport);
+        keyRing = null;
         const rk = generateRoomKey();
         const link = makeLink({ source: "encrypted-retry" });
         const wireLink = encryptLinkForWire(link, rk, 1);
 
         let refreshCallCount = 0;
-
         syncModule.initSync({
             config,
             getToken: async () => "test-token",
@@ -393,144 +421,33 @@ describe("sync: catchUp / performSync", () => {
             getKeyRing: () => keyRing,
             refreshKeyRing: async () => {
                 refreshCallCount++;
-                if (refreshCallCount >= 2) {
-                    // Second attempt: admin has granted the key
-                    keyRing = new Map([[1, rk]]);
-                    return true;
-                }
-                // First attempt: no key yet
-                return false;
+                if (refreshCallCount === 1) throw new Error("timed out after 10000 ms");
+                if (refreshCallCount === 3) keyRing = new Map([[1, rk]]);
             },
         });
-
-        let syncCallCount = 0;
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync"),
-            () => {
-                syncCallCount++;
-                if (syncCallCount === 1) {
-                    // First sync: returns encrypted diff
-                    return {
-                        status: 200, headers: {},
-                        body: JSON.stringify({
-                            diffs: [{ additions: [wireLink], removals: [] }],
-                            revision: "rev-1", sequence: 1,
-                        }),
-                    };
-                }
-                // Second sync: empty — cursor already advanced past the diff
-                return {
-                    status: 200, headers: {},
-                    body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }),
-                };
+            (url) => {
+                const since = new URL(url).searchParams.get("since");
+                const diffs = since === "0" ? [{ additions: [wireLink], removals: [], sequence: 1 }] : [];
+                return jsonResponse({ diffs, revision: "rev-1", sequence: 1, next: null });
             },
         );
-        // bootstrap(/render) route for re-bootstrap after key ring refresh
-        transport.route(
-            (url, method) => method === "GET" && url.includes("/render"),
-            () => ({
-                status: 200, headers: {},
-                body: JSON.stringify({ links: [wireLink], revision: "rev-1" }),
-            }),
-        );
 
-        // First catchUp: encrypted diff skipped, refreshKeyRing returns false
-        await syncModule.catchUp();
-        assert.equal(refreshCallCount, 1, "first catchUp must call refreshKeyRing");
-        assert.equal(emittedDiffs.length, 1, "first catchUp emits (with skipped links)");
-        const firstEmit = emittedDiffs[0];
-        assert.equal(firstEmit.additions.length, 0, "encrypted link must be skipped");
+        await syncModule.catchUp(); // refresh throws
+        await syncModule.catchUp(); // refresh finds no key
+        assert.equal(emittedDiffs.length, 0);
+        await syncModule.catchUp(); // refresh finds the key
+        await syncModule.catchUp(); // nothing held: no refresh
 
-        // Second catchUp: empty diffs, but persistent missing versions
-        // triggers retry — this time refreshKeyRing succeeds → re-bootstrap
-        emittedDiffs = [];
-        await syncModule.catchUp();
-        assert.equal(refreshCallCount, 2, "second catchUp must retry refreshKeyRing");
-        // Re-bootstrap should have emitted the decrypted link
-        assert.ok(emittedDiffs.length > 0, "re-bootstrap must emit the recovered link");
-        const recoveredLinks = emittedDiffs.flatMap((d) => d.additions);
-        assert.ok(
-            recoveredLinks.some((l) => l.data.source === "encrypted-retry"),
-            "recovered link must have the original plaintext data",
-        );
+        assert.equal(refreshCallCount, 3);
+        assert.deepEqual(emittedDiffs, [{ additions: [link], removals: [] }]);
+        assert.equal(store.getSequence(), 1);
     });
 
-    it("trackMissingKeyVersions bridges WS-path misses into the HTTP-sync retry set", async () => {
-        // Simulates the real-world flow: Bob receives an encrypted diff via
-        // WebSocket (applyInboundWireDiff called OUTSIDE catchUp), can't
-        // decrypt it, and calls trackMissingKeyVersions. The next catchUp
-        // sees _pendingMissingVersions > 0 even though the HTTP response
-        // has 0 diffs (cursor already advanced by applyInboundWireDiff).
+    it("does not re-read the key ring when no link is held", async () => {
         const transport = new MockTransport();
         setup(transport);
-        const rk = generateRoomKey();
-        const link = makeLink({ source: "ws-recovery" });
-        const wireLink = encryptLinkForWire(link, rk, 1);
-
-        let refreshCallCount = 0;
-
-        syncModule.initSync({
-            config,
-            getToken: async () => "test-token",
-            emitDiff: (diff) => emittedDiffs.push(diff),
-            emitSyncState: (state) => syncStates.push(state),
-            getKeyRing: () => keyRing,
-            refreshKeyRing: async () => {
-                refreshCallCount++;
-                // First call (from catchUp): grant the key
-                keyRing = new Map([[1, rk]]);
-                return true;
-            },
-        });
-
-        // Step 1: Simulate WS onDiff — applyInboundWireDiff outside catchUp.
-        // This advances the sequence cursor but can't decrypt.
-        const wsResult = syncModule.applyInboundWireDiff(
-            { additions: [wireLink], removals: [] }, 1, "rev-1",
-        );
-        assert.equal(wsResult.missingVersions.size, 1, "WS diff must report missing version");
-        assert.equal(emittedDiffs.length, 1, "WS diff must emit (with skipped links)");
-        assert.equal(emittedDiffs[0].additions.length, 0, "encrypted link must be skipped");
-
-        // Step 2: Bridge the missing versions — this is what index.ts does
-        syncModule.trackMissingKeyVersions(wsResult.missingVersions);
-
-        // Step 3: HTTP catchUp — server returns empty (cursor already past)
-        transport.route(
-            (url, method) => method === "GET" && url.includes("/sync"),
-            () => ({
-                status: 200, headers: {},
-                body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }),
-            }),
-        );
-        // bootstrap route for re-bootstrap after key ring refresh
-        transport.route(
-            (url, method) => method === "GET" && url.includes("/render"),
-            () => ({
-                status: 200, headers: {},
-                body: JSON.stringify({ links: [wireLink], revision: "rev-1" }),
-            }),
-        );
-
-        emittedDiffs = [];
-        await syncModule.catchUp();
-        assert.equal(refreshCallCount, 1, "catchUp must call refreshKeyRing from pending set");
-        assert.ok(emittedDiffs.length > 0, "re-bootstrap must emit the recovered link");
-        const recoveredLinks = emittedDiffs.flatMap((d) => d.additions);
-        assert.ok(
-            recoveredLinks.some((l) => l.data.source === "ws-recovery"),
-            "recovered link must have the original plaintext data",
-        );
-    });
-
-    it("clearPendingMissingVersions prevents redundant retries", async () => {
-        const transport = new MockTransport();
-        setup(transport);
-
-        // Populate and then clear
-        syncModule.trackMissingKeyVersions(new Set([1, 2, 3]));
-        syncModule.clearPendingMissingVersions();
-
         let refreshCalled = false;
         syncModule.initSync({
             config,
@@ -538,16 +455,15 @@ describe("sync: catchUp / performSync", () => {
             emitDiff: (diff) => emittedDiffs.push(diff),
             emitSyncState: (state) => syncStates.push(state),
             getKeyRing: () => keyRing,
-            refreshKeyRing: async () => { refreshCalled = true; return false; },
+            refreshKeyRing: async () => { refreshCalled = true; },
         });
-
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 0 }) }),
+            () => jsonResponse({ diffs: [{ additions: [wire(makeLink())], removals: [], sequence: 1 }], revision: "rev-1", sequence: 1, next: null }),
         );
 
         await syncModule.catchUp();
-        assert.equal(refreshCalled, false, "refreshKeyRing must not be called after clear");
+        assert.equal(refreshCalled, false);
     });
 
     it("performSync never throws — logs and reports LinkLanguageInstalledButNotSynced on failure", async () => {
@@ -568,27 +484,6 @@ describe("sync: catchUp / performSync", () => {
 // ---------------------------------------------------------------------------
 
 describe("sync: commit", () => {
-    it("posts a plaintext wire diff when there is no room key", async () => {
-        const transport = new MockTransport();
-        setup(transport);
-        const link = makeLink();
-        let posted: any = null;
-
-        transport.route(
-            (url, method) => method === "POST" && url.endsWith("/commit"),
-            (_url, _method, body) => {
-                posted = JSON.parse(body);
-                return { status: 200, headers: {}, body: "{}" };
-            },
-        );
-
-        await syncModule.commit({ additions: [link], removals: [] });
-
-        assert.ok(posted);
-        assert.deepEqual(posted.additions[0].data, link.data);
-        assert.ok(!isEncryptedLinkData(posted.additions[0].data));
-    });
-
     it("posts an encrypted wire diff when a key ring is set", async () => {
         const transport = new MockTransport();
         setup(transport);
@@ -619,19 +514,172 @@ describe("sync: commit", () => {
 });
 
 // ---------------------------------------------------------------------------
+// commit: the store follows the server
+// ---------------------------------------------------------------------------
+
+/** A link-server stand-in: an OR-Set keyed by link identity (as the real
+ *  server keys by link hash), one sequence number per accepted POST. */
+class MockLinkServer {
+    links = new Map<string, LinkExpression>();
+    sequence = 0;
+    /** Answers the next N POSTs with a 500 instead of accepting them. */
+    failNext = 0;
+    /** Every POST /commit, accepted or not. */
+    posts = 0;
+
+    constructor(transport: MockTransport) {
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/commit"),
+            (_url, _method, body) => {
+                this.posts++;
+                if (this.failNext > 0) {
+                    this.failNext--;
+                    return { status: 500, headers: {}, body: "{\"error\":\"down\"}" };
+                }
+                const diff = JSON.parse(body) as PerspectiveDiff;
+                for (const l of diff.additions) this.links.set(identity(l), l);
+                for (const l of diff.removals) this.links.delete(identity(l));
+                this.sequence++;
+                return {
+                    status: 200,
+                    headers: {},
+                    body: JSON.stringify({ sequence: this.sequence, revision: `rev-${this.sequence}` }),
+                };
+            },
+        );
+    }
+}
+
+function identity(l: LinkExpression | WireLinkExpression): string {
+    // Encrypted links carry their identity as link_hash, as the real server keys them.
+    if ("link_hash" in l && l.link_hash) return l.link_hash;
+    const link = l as LinkExpression;
+    return JSON.stringify([link.author, link.timestamp, link.data.source, link.data.predicate ?? null, link.data.target]);
+}
+
+function manyLinks(n: number, prefix = "s"): LinkExpression[] {
+    return Array.from({ length: n }, (_, i) => makeLink({ source: `${prefix}-${i}` }));
+}
+
+describe("sync: commit keeps the store in step with the server", () => {
+    it("a commit the server rejects leaves the store unchanged", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const server = new MockLinkServer(transport);
+        server.failNext = 1;
+
+        await assert.rejects(() => syncModule.commit({ additions: manyLinks(3), removals: [] }));
+
+        assert.equal(store.allLinks().links.length, 0, "links the server never got must not be stored");
+        assert.equal(server.links.size, 0);
+    });
+
+    it("a retry after recovery stores each link once, and the server has them all", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const server = new MockLinkServer(transport);
+        const diff = { additions: manyLinks(3), removals: [] };
+        server.failNext = 2;
+
+        await assert.rejects(() => syncModule.commit(diff));
+        await assert.rejects(() => syncModule.commit(diff));
+        await syncModule.commit(diff);
+
+        assert.equal(store.allLinks().links.length, 3);
+        assert.equal(server.links.size, 3);
+    });
+
+    it("a refused commit leaves nothing behind for a restart: the executor's retry is its only send", async () => {
+        // The executor keeps a diff the language refused in its own
+        // pending-diffs table and retries it after a restart; the language
+        // keeps no outbox, so a restarted instance sends nothing by itself.
+        const transport = new MockTransport();
+        const storage = new MockStorage();
+        const server = new MockLinkServer(transport);
+        const start = () => {
+            resetAdapters();
+            initAdapters({ storage, transport, config });
+            store.initStore(simpleHash);
+            syncModule.initSync({
+                config,
+                getToken: async () => "test-token",
+                emitDiff: (diff) => emittedDiffs.push(diff),
+                getKeyRing: () => new Map([[1, TEST_KEY]]),
+            });
+        };
+        const diff = { additions: manyLinks(3), removals: [] };
+        start();
+        server.failNext = 1;
+        await assert.rejects(() => syncModule.commit(diff));
+        assert.deepEqual(storage.listKeys(""), [], "a refused commit writes nothing to the language's storage");
+
+        start(); // the restart: a new instance over the same storage
+        assert.equal(server.posts, 1, "a restarted instance sends nothing by itself");
+        await syncModule.commit(diff); // the executor's retry
+        assert.equal(server.posts, 2);
+        assert.equal(server.sequence, 1, "the server accepted the diff once");
+        assert.equal(store.allLinks().links.length, 3);
+    });
+
+    it("an accepted commit is in the store and is not echoed back to the executor", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        new MockLinkServer(transport);
+
+        await syncModule.commit({ additions: manyLinks(2), removals: [] });
+
+        assert.equal(store.allLinks().links.length, 2);
+        assert.equal(emittedDiffs.length, 0, "the executor already holds its own links");
+    });
+
+    it("an accepted removal leaves the store", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        new MockLinkServer(transport);
+        const [a, b] = manyLinks(2);
+        await syncModule.commit({ additions: [a, b], removals: [] });
+
+        await syncModule.commit({ additions: [], removals: [a] });
+
+        assert.deepEqual(store.allLinks().links, [b]);
+    });
+
+    it("advances the sync cursor past its own commit when nothing came in between", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const server = new MockLinkServer(transport);
+
+        await syncModule.commit({ additions: manyLinks(1), removals: [] });
+        assert.equal(store.getSequence(), 1);
+        assert.equal(store.getRevision(), "rev-1");
+
+        // Another agent's diff (sequence 2) has not reached us yet: our
+        // commit lands at 3, so the cursor must stay at 1 or catch-up
+        // would skip sequence 2.
+        server.sequence++;
+        await syncModule.commit({ additions: manyLinks(1, "t"), removals: [] });
+        assert.equal(store.getSequence(), 1);
+    });
+});
+
+// ---------------------------------------------------------------------------
 // bootstrap
 // ---------------------------------------------------------------------------
 
 describe("sync: bootstrap", () => {
-    it("pulls a full render snapshot into the local store and sets the cursor, without emitting", async () => {
+    it("pulls a full render snapshot into the local store, emits it, and sets the cursor", async () => {
         const transport = new MockTransport();
         setup(transport);
         const linkA = makeLink({ source: "a" });
         const linkB = makeLink({ source: "b" });
 
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [linkA, linkB], revision: "rev-snap", sequence: 7 }) }),
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => jsonResponse({ links: [wire(linkA), wire(linkB)], revision: "rev-snap", sequence: 7, upto: 7, next: null }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=7"),
+            () => jsonResponse({ diffs: [], revision: "rev-snap", sequence: 7, next: null }),
         );
 
         await syncModule.bootstrap();
@@ -639,18 +687,17 @@ describe("sync: bootstrap", () => {
         assert.equal(store.allLinks().links.length, 2);
         assert.equal(store.getRevision(), "rev-snap");
         assert.equal(store.getSequence(), 7);
-        assert.equal(emittedDiffs.length, 0);
+        assert.deepEqual(emittedDiffs, [{ additions: [linkA, linkB], removals: [] }]);
     });
 
-    it("tracks missing key versions so catchUp retries key ring refresh", async () => {
+    it("holds the snapshot's undecryptable links, so catchUp re-reads the key ring", async () => {
         const transport = new MockTransport();
         resetAdapters();
-        syncModule._resetBatchStateForTests();
         initAdapters({ storage: new MockStorage(), transport, config });
         store.initStore(simpleHash);
         emittedDiffs = [];
         syncStates = [];
-        keyRing = null;
+        keyRing = new Map([[1, TEST_KEY]]);
 
         let refreshCalled = false;
         syncModule.initSync({
@@ -663,54 +710,53 @@ describe("sync: bootstrap", () => {
         });
 
         const rk = generateRoomKey();
-        const plainLink = makeLink({ source: "plain" });
+        const opens = wire(makeLink({ source: "opens" }));
         const encLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 3);
 
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({
-                status: 200,
-                headers: {},
-                body: JSON.stringify({ links: [plainLink, encLink], revision: "rev-1", sequence: 1 }),
-            }),
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => jsonResponse({ links: [opens, encLink], revision: "rev-1", sequence: 1, upto: 1, next: null }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse({ diffs: [], revision: "rev-1", sequence: 1, next: null }),
         );
 
         await syncModule.bootstrap();
 
-        assert.equal(store.allLinks().links.length, 1, "only the plaintext link should be stored");
-        assert.equal(store.allLinks().links[0].data.source, "plain");
+        assert.equal(store.allLinks().links.length, 1, "only the link the key ring opens is stored");
+        assert.equal(store.allLinks().links[0].data.source, "opens");
 
         // catchUp with empty diffs — should still attempt refresh because
-        // bootstrap tracked version 3 via trackMissingKeyVersions.
-        transport.route(
-            (url, method) => method === "GET" && url.includes("/sync"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) }),
-        );
-
+        // bootstrap held the version 3 link.
+        refreshCalled = false;
         await syncModule.catchUp();
         assert.equal(refreshCalled, true, "catchUp should retry key ring refresh for versions tracked by bootstrap");
     });
 
-    it("replaces stale local links with the server snapshot", async () => {
+    it("a member with a cursor above 0 sends no /render: it tails /sync from its cursor", async () => {
         const transport = new MockTransport();
         setup(transport);
+        const kept = makeLink({ source: "kept" });
+        const added = makeLink({ source: "added" });
+        store.putLink(kept);
+        store.setSequence(4);
 
-        // Pre-populate with a stale link that the server no longer has.
-        const staleLink = makeLink({ source: "stale" });
-        store.putLink(staleLink);
-        assert.equal(store.allLinks().links.length, 1);
-
-        const freshLink = makeLink({ source: "fresh" });
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [freshLink], revision: "rev-2", sequence: 5 }) }),
+            (url, method) => method === "GET" && url.includes("/sync?since=4"),
+            () => jsonResponse({ diffs: [{ additions: [wire(added)], removals: [wire(kept)], sequence: 5 }], revision: "rev-5", sequence: 5, next: null }),
         );
 
         await syncModule.bootstrap();
 
-        const links = store.allLinks().links;
-        assert.equal(links.length, 1, "stale link should have been removed");
-        assert.equal(links[0].data.source, "fresh");
+        assert.deepEqual(transport.calls.map((c) => new URL(c.url).pathname + new URL(c.url).search), [
+            "/rooms/room-1/sync?since=4&limit=100",
+        ]);
+        assert.equal(store.getRenderProgress(), null, "no render is stored");
+        assert.deepEqual(store.allLinks().links, [added]);
+        assert.equal(store.getSequence(), 5);
+        assert.deepEqual(emittedDiffs, [{ additions: [added], removals: [kept] }]);
+        assert.ok(syncStates.includes("Synced"));
     });
 });
 
@@ -736,427 +782,40 @@ describe("sync: render / currentRevision", () => {
 });
 
 // ---------------------------------------------------------------------------
-// coalesceDiffs — pure logic
+// No history is lost (BUG-103) and every stored link is emitted once
 // ---------------------------------------------------------------------------
 
-describe("sync: coalesceDiffs (batch merge safety)", () => {
-    function link(overrides: Partial<LinkExpression["data"]> & { sig?: string; author?: string }): LinkExpression {
-        const { sig, author, ...data } = overrides;
-        return {
-            author: author ?? "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.000Z",
-            data: { source: "s", target: "t", predicate: "p", ...data },
-            proof: { signature: sig ?? "", key: "key" },
-        };
+/** How often each link (by source) was emitted as an addition / a removal. */
+function emitCounts(kind: "additions" | "removals"): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const diff of emittedDiffs) {
+        for (const link of diff[kind]) counts.set(link.data.source, (counts.get(link.data.source) ?? 0) + 1);
     }
+    return counts;
+}
 
-    it("merges consecutive pure additions into a single segment (bulk-add hot path)", () => {
-        const diffs = Array.from({ length: 1500 }, (_, i) => ({
-            additions: [link({ source: `s${i}` })],
-            removals: [] as LinkExpression[],
-        }));
-        const segments = syncModule.coalesceDiffs(diffs);
-        assert.equal(segments.length, 1, "1500 pure additions should collapse to one POST");
-        assert.equal(segments[0].additions.length, 1500);
-        assert.equal(segments[0].removals.length, 0);
-    });
+function jsonResponse(body: unknown): TransportResponse {
+    return { status: 200, headers: {}, body: JSON.stringify(body) };
+}
 
-    it("splits when a later diff adds a link that an earlier diff removed (remove-then-add preserves ordering)", () => {
-        // User intent: remove X, then re-add X → X should exist afterwards.
-        // Merging would give additions:[X],removals:[X]. Server applies adds
-        // then removes, and X would be gone. Split forces two POSTs so the
-        // server applies them in caller order.
-        const X = link({ source: "x", sig: "sig-X" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [], removals: [X] },
-            { additions: [X], removals: [] },
-        ]);
-        assert.equal(segments.length, 2);
-        assert.deepEqual(segments[0].removals, [X]);
-        assert.deepEqual(segments[1].additions, [X]);
-    });
+/** The last (here: only) `/render` page of a snapshot at `sequence`. */
+function renderPage(links: unknown[], sequence: number) {
+    return { links, revision: `rev-${sequence}`, sequence, upto: sequence, next: null };
+}
 
-    it("splits when a later diff removes a link that an earlier diff added", () => {
-        // User intent: add X, then remove X → X should be gone.
-        // Merging here would happen to give the right answer (adds-then-removes
-        // in server order), but caller-visible ordering is still preserved by
-        // splitting — critical for anything relying on emitted-diff sequence.
-        const X = link({ source: "x", sig: "sig-X" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [X], removals: [] },
-            { additions: [], removals: [X] },
-        ]);
-        assert.equal(segments.length, 2);
-    });
+/** The last `/sync` page: `diffs` (each with its sequence) and the room's head at `sequence`. */
+function syncPage(diffs: unknown[], sequence: number) {
+    return { diffs, revision: `rev-${sequence}`, sequence, next: null };
+}
 
-    it("merges when link identities never collide across the boundary", () => {
-        const X = link({ source: "x", sig: "sig-X" });
-        const Y = link({ source: "y", sig: "sig-Y" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [X], removals: [] },
-            { additions: [Y], removals: [] },
-            { additions: [], removals: [X] },
-        ]);
-        // First two diffs merge (X-add + Y-add, no collision). Third splits
-        // because removing X collides with the segment's X-add.
-        assert.equal(segments.length, 2);
-        assert.deepEqual(segments[0].additions.map((l) => l.data.source), ["x", "y"]);
-        assert.deepEqual(segments[1].removals.map((l) => l.data.source), ["x"]);
-    });
-
-    it("uses canonical fields (not signature) — same link with different signatures collides", () => {
-        // Two links with identical canonical fields but different
-        // signatures ARE the same link from the server's perspective
-        // (linkHash ignores the signature). A signature-based identity
-        // would let remove(oldSig) + add(newSig) merge into one segment
-        // and the server would apply add-then-remove → X gone, contrary
-        // to caller intent. Canonical-only identity forces the split.
-        const oldSig = link({ source: "x", sig: "sig-old" });
-        const reSigned = link({ source: "x", sig: "sig-new" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [], removals: [oldSig] },
-            { additions: [reSigned], removals: [] },
-        ]);
-        assert.equal(segments.length, 2, "identity must treat re-signed links as the same link");
-    });
-
-    it("works for signature-less fixtures via canonical fields", () => {
-        // Same canonical fields, no signature at all → same identity.
-        const X = link({ source: "x", sig: "" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [], removals: [X] },
-            { additions: [X], removals: [] },
-        ]);
-        assert.equal(segments.length, 2, "signature-less links must still collide by canonical fields");
-    });
-
-    it("collides regardless of whether one side has a signature and the other doesn't", () => {
-        // Locks in the identity invariant across the mixed-signature case:
-        // remove(unsigned copy) then add(signed copy) of the same logical
-        // link must still split into two segments, because canonical
-        // identity ignores the signature entirely.
-        const signed = link({ source: "x", sig: "sig-X" });
-        const unsigned = link({ source: "x", sig: "" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [], removals: [unsigned] },
-            { additions: [signed], removals: [] },
-        ]);
-        assert.equal(segments.length, 2, "same link identity must split regardless of signature presence");
-    });
-
-    it("distinguishes links whose fields would collide under naïve pipe-serialisation", () => {
-        // author="a|b" timestamp="t" vs author="a" timestamp="b|t" would
-        // collide under `${author}|${timestamp}`. JSON serialisation
-        // escapes the boundary so identities stay distinct — meaning a
-        // remove of A must NOT be treated as a conflict with a segment
-        // containing B, and vice versa.
-        const A: LinkExpression = {
-            author: "a|b",
-            timestamp: "t",
-            data: { source: "s", target: "t", predicate: "p" },
-            proof: { signature: "", key: "k" },
-        };
-        const B: LinkExpression = {
-            author: "a",
-            timestamp: "b|t",
-            data: { source: "s", target: "t", predicate: "p" },
-            proof: { signature: "", key: "k" },
-        };
-        // Adding both together shouldn't count as a self-conflict when a
-        // later diff removes A: only A's segment should conflict.
-        const segments = syncModule.coalesceDiffs([
-            { additions: [A, B], removals: [] },
-            { additions: [], removals: [A] },
-        ]);
-        assert.equal(segments.length, 2);
-        assert.equal(segments[1].removals[0].author, "a|b");
-    });
-});
-
-// ---------------------------------------------------------------------------
-// enqueueCommitBatched / drainCommitBatch — flush behavior
-// ---------------------------------------------------------------------------
-
-describe("sync: enqueueCommitBatched", () => {
-    function makeCommitTransport(): { transport: MockTransport; posts: any[] } {
+describe("sync: no history is lost", () => {
+    it("links that arrive before their key are emitted once the key is held, though /render fails", async () => {
         const transport = new MockTransport();
-        const posts: any[] = [];
-        transport.route(
-            (url, method) => method === "POST" && url.endsWith("/commit"),
-            (_url, _method, body) => {
-                posts.push(JSON.parse(body));
-                return { status: 200, headers: {}, body: "{}" };
-            },
-        );
-        return { transport, posts };
-    }
-
-    it("collapses a burst of 1500 addLinks into ONE POST (the stress-test hot path)", async () => {
-        const { transport, posts } = makeCommitTransport();
         setup(transport);
-        for (let i = 0; i < 1500; i++) {
-            syncModule.enqueueCommitBatched({
-                additions: [{
-                    author: "did:key:zAuthor",
-                    timestamp: `2026-01-01T00:00:00.${String(i).padStart(3, "0")}Z`,
-                    data: { source: `s${i}`, target: "t", predicate: "p" },
-                    proof: { signature: `sig-${i}`, key: "k" },
-                }],
-                removals: [],
-            });
-        }
-        await syncModule.drainCommitBatch();
-        assert.equal(posts.length, 1, "microtask flush should coalesce the burst into one POST");
-        assert.equal(posts[0].additions.length, 1500);
-    });
-
-    it("splits into two POSTs when remove(X) is followed by add(X)", async () => {
-        const { transport, posts } = makeCommitTransport();
-        setup(transport);
-        const X: LinkExpression = {
-            author: "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.000Z",
-            data: { source: "x", target: "t", predicate: "p" },
-            proof: { signature: "sig-X", key: "k" },
-        };
-        syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
-        syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
-        await syncModule.drainCommitBatch();
-        assert.equal(posts.length, 2, "must not swap remove-then-add into add-then-remove");
-        assert.deepEqual(posts[0].removals.length, 1);
-        assert.deepEqual(posts[1].additions.length, 1);
-    });
-
-    it("drainCommitBatch flushes anything still pending (used by teardown)", async () => {
-        const { transport, posts } = makeCommitTransport();
-        setup(transport);
-        syncModule.enqueueCommitBatched({
-            additions: [{
-                author: "did:key:zAuthor",
-                timestamp: "2026-01-01T00:00:00.000Z",
-                data: { source: "s", target: "t", predicate: "p" },
-                proof: { signature: "sig", key: "k" },
-            }],
-            removals: [],
-        });
-        await syncModule.drainCommitBatch();
-        assert.equal(posts.length, 1);
-    });
-
-    it("retries a failing segment with backoff and succeeds when the server recovers", async () => {
-        const transport = new MockTransport();
-        let calls = 0;
-        transport.route(
-            (url, method) => method === "POST" && url.endsWith("/commit"),
-            () => {
-                calls++;
-                if (calls < 3) return { status: 500, headers: {}, body: "transient" };
-                return { status: 200, headers: {}, body: "{}" };
-            },
-        );
-        setup(transport);
-        syncModule.enqueueCommitBatched({
-            additions: [{
-                author: "did:key:zAuthor",
-                timestamp: "2026-01-01T00:00:00.000Z",
-                data: { source: "s", target: "t", predicate: "p" },
-                proof: { signature: "sig", key: "k" },
-            }],
-            removals: [],
-        });
-        await syncModule.drainCommitBatch();
-        assert.equal(calls, 3, "must retry up to MAX_COMMIT_ATTEMPTS on transient failure");
-        assert.ok(!syncStates.includes("LinkLanguageInstalledButNotSynced"),
-            "successful retry should not emit the not-synced state");
-    });
-
-    it("a throwing emitSyncState during a failed flush does not poison the flush chain", async () => {
-        // Regression: _inflight is a single promise chain. If a flush
-        // rejects (e.g. because emitSyncState throws after resetAdapters),
-        // every subsequent `_inflight.then(flushBatch)` would be skipped
-        // and no future enqueue would ever POST. The terminal `.catch()`
-        // on the chain — plus emitSyncStateSafe wrapping the emit — must
-        // keep the chain live.
-        const transport = new MockTransport();
-        const posts: any[] = [];
-        let shouldFail = true;
-        transport.route(
-            (url, method) => method === "POST" && url.endsWith("/commit"),
-            (_url, _method, body) => {
-                posts.push(JSON.parse(body));
-                if (shouldFail) return { status: 500, headers: {}, body: "hard failure" };
-                return { status: 200, headers: {}, body: "{}" };
-            },
-        );
-        resetAdapters();
-        syncModule._resetBatchStateForTests();
-        initAdapters({ storage: new MockStorage(), transport, config });
-        store.initStore(simpleHash);
-        emittedDiffs = [];
-        syncStates = [];
+        const roomKey = generateRoomKey();
+        const granted: KeyRing = new Map([[1, roomKey]]);
+        // The member holds no key yet; the next key ring read finds the grant.
         keyRing = null;
-        // Throw from emitSyncState — simulates a torn-down runtime.
-        syncModule.initSync({
-            config,
-            getToken: async () => "test-token",
-            emitDiff: (diff) => emittedDiffs.push(diff),
-            emitSyncState: () => { throw new Error("runtime torn down"); },
-            getKeyRing: () => keyRing,
-        });
-
-        // First flush: hard-fails all retries → tries to emit → emitter throws.
-        const X: LinkExpression = {
-            author: "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.000Z",
-            data: { source: "x", target: "t", predicate: "p" },
-            proof: { signature: "sig-X", key: "k" },
-        };
-        syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
-        // Await one flush cycle only — drainCommitBatch would re-schedule
-        // the permanently-failing segment indefinitely.
-        await syncModule._awaitInflightForTests();
-        assert.equal(posts.length, 3, "first flush must attempt all 3 retries");
-
-        // Now the server recovers. The chain must still be live — the
-        // next enqueue must actually POST. The re-enqueued X from the
-        // failed flush coalesces with Y into one successful commit.
-        shouldFail = false;
-        const Y: LinkExpression = {
-            author: "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.001Z",
-            data: { source: "y", target: "t", predicate: "p" },
-            proof: { signature: "sig-Y", key: "k" },
-        };
-        syncModule.enqueueCommitBatched({ additions: [Y], removals: [] });
-        await syncModule.drainCommitBatch();
-        assert.ok(posts.length > 3, "chain must still be live after the poisoning attempt");
-        const successfulAdds = posts.slice(3).flatMap((p: any) => p.additions);
-        assert.ok(
-            successfulAdds.some((a: any) => a.data.source === "y"),
-            "Y must appear in a successful commit after the chain survived",
-        );
-    });
-
-    it("re-enqueues failed segments for the next flush cycle", async () => {
-        // When a segment fails all retries, it and all remaining
-        // downstream segments get re-enqueued into the pending queue
-        // so the next flush picks them up automatically.
-        const transport = new MockTransport();
-        const posts: any[] = [];
-        let failCount = 0;
-        transport.route(
-            (url, method) => method === "POST" && url.endsWith("/commit"),
-            (_url, _method, body) => {
-                posts.push(JSON.parse(body));
-                failCount++;
-                // Fail the first 3 attempts (one full retry cycle),
-                // then succeed so the drain can settle.
-                if (failCount <= 3) return { status: 500, headers: {}, body: "hard failure" };
-                return { status: 200, headers: {}, body: "{}" };
-            },
-        );
-        setup(transport);
-        const X: LinkExpression = {
-            author: "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.000Z",
-            data: { source: "x", target: "t", predicate: "p" },
-            proof: { signature: "sig-X", key: "k" },
-        };
-        // Forces three segments: remove(X); add(X); remove(X).
-        syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
-        syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
-        syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
-        await syncModule.drainCommitBatch();
-        // First flush: segment 1 fails 3 times → re-enqueued with segments 2+3.
-        // Second flush: segment 1 succeeds (attempt 4), then segments 2+3.
-        assert.ok(posts.length > 3,
-            `re-enqueued segments should produce more POSTs than the initial 3 retries (got ${posts.length})`);
-        assert.ok(syncStates.includes("LinkLanguageInstalledButNotSynced"),
-            "must report LinkLanguageInstalledButNotSynced on first failure");
-    });
-});
-
-// ---------------------------------------------------------------------------
-// refreshKeyRing — cooldown and recovery
-// ---------------------------------------------------------------------------
-
-describe("sync: refreshKeyRing cooldown and recovery", () => {
-    it("returns null when skipped by cooldown and does not re-bootstrap", async () => {
-        const transport = new MockTransport();
-        resetAdapters();
-        syncModule._resetBatchStateForTests();
-        initAdapters({ storage: new MockStorage(), transport, config });
-        store.initStore(simpleHash);
-        emittedDiffs = [];
-        syncStates = [];
-        keyRing = null;
-
-        let refreshCallCount = 0;
-        let lastReturnValue: boolean | null = null;
-        let cooldownTimestamp = 0;
-
-        const refreshKeyRing = async (): Promise<boolean | null> => {
-            refreshCallCount++;
-            const now = Date.now();
-            if (now - cooldownTimestamp < 10_000) {
-                return null;
-            }
-            cooldownTimestamp = now;
-            return false;
-        };
-
-        syncModule.initSync({
-            config,
-            getToken: async () => "test-token",
-            emitDiff: (diff) => emittedDiffs.push(diff),
-            emitSyncState: (state) => syncStates.push(state),
-            getKeyRing: () => keyRing,
-            refreshKeyRing,
-        });
-
-        const rk = generateRoomKey();
-        const encLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 3);
-
-        transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({
-                status: 200,
-                headers: {},
-                body: JSON.stringify({ links: [encLink], revision: "rev-1", sequence: 1 }),
-            }),
-        );
-
-        await syncModule.bootstrap();
-
-        transport.route(
-            (url, method) => method === "GET" && url.includes("/sync"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) }),
-        );
-
-        // First catchUp: refresh fires (not within cooldown)
-        await syncModule.catchUp();
-        assert.equal(refreshCallCount, 1, "first catchUp should call refreshKeyRing");
-
-        // Second catchUp immediately: within cooldown window, should get null
-        await syncModule.catchUp();
-        assert.equal(refreshCallCount, 2, "second catchUp should still call refreshKeyRing");
-        // The dep returns null; _pendingMissingVersions survives for next cycle
-    });
-
-    it("catchUp re-bootstraps when refreshKeyRing returns true", async () => {
-        const transport = new MockTransport();
-        resetAdapters();
-        syncModule._resetBatchStateForTests();
-        initAdapters({ storage: new MockStorage(), transport, config });
-        store.initStore(simpleHash);
-        emittedDiffs = [];
-        syncStates = [];
-
-        const rk = generateRoomKey();
-        keyRing = new Map([[3, rk]]);
-
-        let callCount = 0;
-
         syncModule.initSync({
             config,
             getToken: async () => "test-token",
@@ -1164,54 +823,399 @@ describe("sync: refreshKeyRing cooldown and recovery", () => {
             emitSyncState: (state) => syncStates.push(state),
             getKeyRing: () => keyRing,
             refreshKeyRing: async () => {
-                callCount++;
-                return callCount === 1 ? false : true;
+                const grew = keyRing === null;
+                keyRing = granted;
+                return grew;
             },
         });
-
-        const encLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 3);
-
-        // Bootstrap with null keyRing — link goes to pending
-        keyRing = null;
+        const wsLink = encryptLinkForWire(makeLink({ source: "pushed" }), roomKey, 1);
+        const syncedLink = encryptLinkForWire(makeLink({ source: "caught-up" }), roomKey, 1);
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({
-                status: 200,
-                headers: {},
-                body: JSON.stringify({ links: [encLink], revision: "rev-1", sequence: 1 }),
-            }),
+            (url, method) => method === "GET" && url.includes("/sync?since=1"),
+            () => jsonResponse(syncPage([{ additions: [syncedLink], removals: [], sequence: 2 }], 2)),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=2"),
+            () => jsonResponse(syncPage([], 2)),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => { throw new Error("timed out after 10000 ms"); },
+        );
+
+        // A WebSocket push the member cannot decrypt, then a catch-up batch it
+        // cannot decrypt either; the key arrives during that catch-up.
+        syncModule.applyInboundWireDiff({ additions: [wsLink], removals: [] }, 1, "rev-1");
+        await syncModule.catchUp();
+        await syncModule.catchUp();
+        await syncModule.catchUp();
+
+        const added = emitCounts("additions");
+        assert.equal(added.get("pushed"), 1, "the WebSocket link is emitted exactly once");
+        assert.equal(added.get("caught-up"), 1, "the catch-up link is emitted exactly once");
+        assert.deepEqual(
+            store.allLinks().links.map((l) => l.data.source).sort(),
+            ["caught-up", "pushed"],
+        );
+    });
+
+    it("a member holding its key at start gets the room's history from the startup snapshot", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const roomKey = generateRoomKey();
+        keyRing = new Map([[1, roomKey]]);
+        const a = encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1);
+        const b = encryptLinkForWire(makeLink({ source: "b" }), roomKey, 1);
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => jsonResponse(renderPage([a, b], 7)),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=7"),
+            () => jsonResponse(syncPage([], 7)),
         );
 
         await syncModule.bootstrap();
-        assert.equal(store.allLinks().links.length, 0, "encrypted link should be skipped without key ring");
+        await syncModule.catchUp();
 
+        const added = emitCounts("additions");
+        assert.equal(added.get("a"), 1);
+        assert.equal(added.get("b"), 1);
+        assert.equal(store.getSequence(), 7);
+    });
+
+    it("the startup snapshot before the key arrives holds the history, and emits it once the key is held", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        keyRing = null;
+        const roomKey = generateRoomKey();
+        const a = encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1);
         transport.route(
-            (url, method) => method === "GET" && url.includes("/sync"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) }),
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => jsonResponse(renderPage([a], 1)),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=1"),
+            () => jsonResponse(syncPage([], 1)),
         );
 
-        // First catchUp: refreshKeyRing returns false — no recovery
+        await syncModule.bootstrap();
+        assert.equal(emitCounts("additions").get("a"), undefined, "nothing to emit without the key");
+
+        keyRing = new Map([[1, roomKey]]);
         await syncModule.catchUp();
-        assert.equal(callCount, 1);
-        assert.equal(emittedDiffs.length, 0, "no emit when refresh returns false");
+        await syncModule.catchUp();
 
-        // Set keyRing so re-bootstrap can decrypt
-        keyRing = new Map([[3, rk]]);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
 
-        // Re-route /render to return the encrypted link (re-bootstrap will re-fetch)
+    it("a later removal of a held link cancels it: it is never emitted", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const v1 = generateRoomKey();
+        const v2 = generateRoomKey();
+        keyRing = new Map([[1, v1]]);
+        const link = makeLink({ source: "short-lived" });
+
+        syncModule.applyInboundWireDiff({ additions: [encryptLinkForWire(link, v2, 2)], removals: [] }, 1, "rev-1");
+        syncModule.applyInboundWireDiff({ additions: [], removals: [encryptLinkForWire(link, v1, 1)] }, 2, "rev-2");
+        keyRing = new Map([[1, v1], [2, v2]]);
+        syncModule.retryHeld();
+
+        assert.equal(emitCounts("additions").get("short-lived"), undefined);
+        assert.equal(emitCounts("removals").get("short-lived"), undefined);
+        assert.equal(store.allLinks().links.length, 0);
+    });
+
+    it("a link that arrives twice (own commit fetched back, a WS push and a catch-up) is emitted once", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const link = makeLink({ source: "twice" });
+
+        syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, 1, "rev-1");
+        syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, 1, "rev-1");
+
+        assert.equal(emitCounts("additions").get("twice"), 1);
+    });
+});
+
+describe("sync: a link no key opens costs that link only", () => {
+    /** `link` encrypted with `key`, its ciphertext altered so the key it names
+     *  does not open it (an AES-GCM tag failure). */
+    function unopenable(link: LinkExpression, key: Uint8Array, version: number) {
+        const wire = encryptLinkForWire(link, key, version);
+        const data = wire.data as { ciphertext: string; nonce: string };
+        const bytes = Buffer.from(data.ciphertext, "base64");
+        bytes[0] ^= 0xff;
+        return { ...wire, data: { ...data, ciphertext: bytes.toString("base64") } };
+    }
+
+    it("held links around one the key does not open are all emitted once the key is held", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        keyRing = null;
+        const roomKey = generateRoomKey();
+        // Held in this order under a missing key: valid, unopenable, valid.
+        syncModule.applyInboundWireDiff(
+            { additions: [encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1)], removals: [] }, 1, "rev-1");
+        syncModule.applyInboundWireDiff(
+            { additions: [unopenable(makeLink({ source: "b" }), roomKey, 1)], removals: [] }, 2, "rev-2");
+        syncModule.applyInboundWireDiff(
+            { additions: [encryptLinkForWire(makeLink({ source: "c" }), roomKey, 1)], removals: [] }, 3, "rev-3");
+        assert.equal(emittedDiffs.length, 0);
+
+        keyRing = new Map([[1, roomKey]]);
+        for (let i = 0; i < 2; i++) {
+            try { syncModule.retryHeld(); } catch { /* the defect: a throw here must not lose a link */ }
+        }
+
+        const added = emitCounts("additions");
+        assert.equal(added.get("a"), 1, "a valid held link before the unopenable one reaches the executor");
+        assert.equal(added.get("c"), 1, "a valid held link after the unopenable one reaches the executor");
+        assert.equal(added.get("b"), undefined);
+        assert.equal(syncModule.hasHeldLinks(), false, "nothing stays held for a key the member already has");
+    });
+
+    it("a catch-up batch with a link the key does not open still applies the rest of the batch", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const roomKey = generateRoomKey();
+        keyRing = new Map([[1, roomKey]]);
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({
-                status: 200,
-                headers: {},
-                body: JSON.stringify({ links: [encLink], revision: "rev-2", sequence: 2 }),
+            (url, method) => method === "GET" && url.includes("/sync?since=0"),
+            () => jsonResponse({
+                diffs: [
+                    { additions: [encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1)], removals: [], sequence: 1 },
+                    { additions: [unopenable(makeLink({ source: "b" }), roomKey, 1)], removals: [], sequence: 2 },
+                    { additions: [encryptLinkForWire(makeLink({ source: "c" }), roomKey, 1)], removals: [], sequence: 3 },
+                ],
+                revision: "rev-3",
+                sequence: 3,
+                next: null,
             }),
         );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=3"),
+            () => jsonResponse(syncPage([], 3)),
+        );
 
-        // Second catchUp: refreshKeyRing returns true — re-bootstraps and emits
+        for (let i = 0; i < 2; i++) {
+            try { await syncModule.catchUp(); } catch { /* the defect: a throw here must not lose a link */ }
+        }
+
+        const added = emitCounts("additions");
+        assert.equal(added.get("a"), 1);
+        assert.equal(added.get("c"), 1, "the entry after the unopenable one is applied");
+        assert.equal(store.getSequence(), 3);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// The startup render is retried until it succeeds (BUG-115)
+// ---------------------------------------------------------------------------
+
+describe("sync: a failed startup render is retried", () => {
+    afterEach(() => mock.timers.reset());
+
+    /** A transport whose `/render` answers come from `renders`, one per call
+     *  (an Error is thrown, as the host's httpFetch does on its deadline), and
+     *  whose `/sync` reports the head at `head` with no new diffs. A member
+     *  set up here is fresh (cursor 0), the only one that renders. */
+    function renderServer(renders: Array<Error | object | Promise<TransportResponse>>, head: number) {
+        const transport = new MockTransport();
+        setup(transport);
+        let renderCalls = 0;
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => {
+                const next = renders[Math.min(renderCalls, renders.length - 1)];
+                renderCalls++;
+                if (next instanceof Error) throw next;
+                if (next instanceof Promise) return next as unknown as TransportResponse;
+                return jsonResponse(next);
+            },
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse(syncPage([], head)),
+        );
+        return { transport, renderCalls: () => renderCalls };
+    }
+
+    const timeout = () => new Error("httpFetch GET https://server.example/rooms/room-1/render timed out after 10000 ms");
+
+    it("a render that fails then succeeds is retried by catch-up, and its links are emitted", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const early = makeLink({ source: "early" });
+        const late = makeLink({ source: "late" });
+        const server = renderServer([timeout(), renderPage([wire(early), wire(late)], 9)], 9);
+
+        await assert.rejects(syncModule.bootstrap(), /timed out/);
+        // A push while the render is stored is left to the render: the cursor
+        // stays at 0 and nothing is emitted yet.
+        syncModule.applyInboundWireDiff({ additions: [wire(late)], removals: [] }, 9, "rev-9");
+        assert.equal(emitCounts("additions").get("late"), undefined);
+        assert.equal(store.getSequence(), 0);
         await syncModule.catchUp();
-        assert.equal(callCount, 2);
-        assert.ok(emittedDiffs.length > 0, "should emit recovered links after re-bootstrap");
-        assert.equal(emittedDiffs[0].additions[0].data.source, "secret");
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 1, "no retry before the backoff elapses");
+
+        mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(server.renderCalls(), 2);
+        assert.equal(emitCounts("additions").get("early"), 1);
+        assert.equal(emitCounts("additions").get("late"), 1, "the pushed link arrives once, with the snapshot");
+        assert.deepEqual(store.allLinks().links.map((l) => l.data.source).sort(), ["early", "late"]);
+        assert.equal(store.getSequence(), 9);
+
+        // Once a render succeeded it is never asked for again.
+        mock.timers.tick(60 * 60 * 1000);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 2);
+    });
+
+    it("a successful first render is not retried", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const server = renderServer([renderPage([wire(makeLink({ source: "a" }))], 1)], 1);
+        syncModule.needRender();
+
+        await syncModule.bootstrap();
+        for (let i = 0; i < 3; i++) {
+            mock.timers.tick(60 * 60 * 1000);
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+        }
+
+        assert.equal(server.renderCalls(), 1);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
+
+    it("backs off: each failure doubles the wait before the next attempt", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const base = syncModule.RENDER_RETRY_BASE_MS;
+        const server = renderServer([timeout(), timeout(), renderPage([], 0)], 0);
+        const attempt = async (ms: number) => {
+            mock.timers.tick(ms);
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+            return server.renderCalls();
+        };
+
+        await assert.rejects(syncModule.bootstrap());
+        assert.equal(await attempt(base), 2, "first retry after the base delay");
+        assert.equal(await attempt(base), 2, "the second wait is twice as long");
+        assert.equal(await attempt(base), 3);
+        assert.equal(await attempt(10 * base), 3, "no attempt after a success");
+    });
+
+    it("a render that never ran at startup (authentication failed first) is run by catch-up", async () => {
+        const a = makeLink({ source: "a" });
+        const server = renderServer([renderPage([wire(a)], 1)], 1);
+
+        syncModule.needRender();
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(server.renderCalls(), 1);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
+
+    it("a catch-up while the startup render is still out does not start a second one", async () => {
+        let answerRender!: (res: TransportResponse) => void;
+        const slowRender = new Promise<TransportResponse>((resolve) => { answerRender = resolve; });
+        const server = renderServer([slowRender], 1);
+        syncModule.needRender();
+
+        const startup = syncModule.bootstrap();
+        await new Promise((resolve) => setImmediate(resolve));
+        await syncModule.catchUp();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(server.renderCalls(), 1);
+
+        answerRender(jsonResponse(renderPage([wire(makeLink({ source: "a" }))], 1)));
+        await startup;
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 1);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
+
+    it("catch-up does not wait for a retried render: it returns while the render is in flight, and a diff pushed meanwhile arrives with the render's tail", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        let answerRender!: (res: TransportResponse) => void;
+        const slowRender = new Promise<TransportResponse>((resolve) => { answerRender = resolve; });
+        const transport = new MockTransport();
+        setup(transport);
+        let renderCalls = 0;
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => {
+                renderCalls++;
+                if (renderCalls === 1) throw timeout();
+                return slowRender as unknown as TransportResponse;
+            },
+        );
+        const fresh = makeLink({ source: "fresh" });
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=1"),
+            () => jsonResponse(syncPage([{ additions: [wire(fresh)], removals: [], sequence: 2 }], 2)),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse(syncPage([], 2)),
+        );
+        const syncGets = () => transport.calls.filter((c) => c.url.includes("/sync?")).map((c) => new URL(c.url).search);
+
+        await assert.rejects(syncModule.bootstrap());
+        mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
+        const emitted = await syncModule.catchUp();
+        await new Promise((resolve) => setImmediate(resolve));
+
+        assert.equal(renderCalls, 2, "the retry is in flight");
+        assert.deepEqual(emitted, { additions: [], removals: [] }, "catch-up returned without waiting for the render");
+
+        // A diff the WebSocket pushes while the render is out waits for the
+        // render: it is after the snapshot, so the tail from upto brings it.
+        syncModule.applyInboundWireDiff({ additions: [wire(fresh)], removals: [] }, 2, "rev-2");
+        assert.equal(emitCounts("additions").get("fresh"), undefined);
+
+        // A second catch-up while the render is still out does not start another.
+        mock.timers.tick(60 * 60 * 1000);
+        await syncModule.catchUp();
+        assert.equal(renderCalls, 2);
+        assert.deepEqual(syncGets(), [], "no /sync from cursor 0 while the render is pending");
+
+        // The snapshot is pinned at 1, before the pushed diff; the tail from 1 brings `fresh`.
+        const old = makeLink({ source: "old" });
+        answerRender(jsonResponse(renderPage([wire(old)], 1)));
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(emitCounts("additions").get("old"), 1);
+        assert.equal(emitCounts("additions").get("fresh"), 1);
+        assert.deepEqual(store.allLinks().links.map((l) => l.data.source).sort(), ["fresh", "old"]);
+        assert.deepEqual(syncGets(), ["?since=1&limit=100"], "the render's own completion tails from its upto");
+        assert.equal(store.getSequence(), 2);
+    });
+
+    it("a failed render page is not re-requested by every catch-up before its backoff elapses", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const server = renderServer([timeout(), renderPage([], 0)], 0);
+
+        await assert.rejects(syncModule.bootstrap());
+        for (let i = 0; i < 3; i++) {
+            mock.timers.tick(3_000);
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+        }
+        assert.equal(server.renderCalls(), 1, "three 3 s syncs inside the 10 s backoff send no render");
+        assert.notEqual(store.getRenderProgress(), null, "the failed render stays stored, to be resumed");
+
+        mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 2);
+        assert.equal(store.getRenderProgress(), null);
     });
 });

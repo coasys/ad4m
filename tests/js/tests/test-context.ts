@@ -1,4 +1,4 @@
-import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
+import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective, PerspectiveState } from "@coasys/ad4m";
 import { ChildProcess } from 'child_process';
 import { pollUntil } from "../utils/utils";
 
@@ -55,8 +55,13 @@ export class TestContext {
       this.#jimCore = jimCore
     }
 
-    async makeAllNodesKnown() {
+    /** Exchange Alice's and Bob's Holochain agent infos. A publish or join
+     *  returns before its link language's cell exists, and an exchange before
+     *  that leaves the new cell out: pass each such `[client, perspective uuid]`
+     *  so the exchange waits until its link language is attached. */
+    async makeAllNodesKnown(...perspectives: [Ad4mClient, string][]) {
       if (!this.holochain) return;
+      await linkLanguagesAttached(perspectives);
       await pollUntil(async () => {
         const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
         const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
@@ -67,8 +72,10 @@ export class TestContext {
       }, { timeoutMs: 15000, intervalMs: 3000, label: "agent info exchange (alice ↔ bob)" });
     }
 
-    async makeAllThreeNodesKnown() {
+    /** As `makeAllNodesKnown`, for Alice, Bob and Jim. */
+    async makeAllThreeNodesKnown(...perspectives: [Ad4mClient, string][]) {
       if (!this.holochain) return;
+      await linkLanguagesAttached(perspectives);
       await pollUntil(async () => {
         const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
         const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
@@ -80,4 +87,16 @@ export class TestContext {
         return true;
       }, { timeoutMs: 15000, intervalMs: 3000, label: "agent info exchange (alice ↔ bob ↔ jim)" });
     }
+}
+
+/** Wait until each perspective's link language is attached: its state has moved
+ *  past `NeighbourhoodCreationInitiated` / `NeighbourhoodJoinInitiated`. */
+export async function linkLanguagesAttached(perspectives: [Ad4mClient, string][]) {
+  for (const [client, uuid] of perspectives) {
+    await pollUntil(async () => {
+      const state = (await client.perspective.byUUID(uuid))?.state;
+      return state === PerspectiveState.LinkLanguageInstalledButNotSynced
+        || state === PerspectiveState.Synced;
+    }, { timeoutMs: 60000, label: `link language attached for ${uuid}` });
+  }
 }

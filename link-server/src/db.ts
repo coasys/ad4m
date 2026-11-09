@@ -5,7 +5,6 @@ import {
   EMPTY_REVISION,
   linkHash,
   xorHex,
-  type LinkExpression,
   type PerspectiveDiff,
 } from "./types.js";
 
@@ -14,15 +13,12 @@ CREATE TABLE IF NOT EXISTS rooms (
   id TEXT PRIMARY KEY,
   admin_did TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  e2e_enabled INTEGER DEFAULT 0,
   revision TEXT
 );
 CREATE TABLE IF NOT EXISTS acl (
   room_id TEXT,
   did TEXT,
   added_at TEXT,
-  x25519_public_key TEXT,
-  x25519_signature TEXT,
   PRIMARY KEY (room_id, did)
 );
 CREATE TABLE IF NOT EXISTS links (
@@ -52,12 +48,22 @@ CREATE TABLE IF NOT EXISTS room_keys (
   version INTEGER,
   PRIMARY KEY (room_id, did, version)
 );
+-- The admin's commitment to each room key version: a member keeps an opened key only if it
+-- matches, so a member cannot grant a wrong key that decrypts.
+CREATE TABLE IF NOT EXISTS room_key_commitments (
+  room_id TEXT,
+  version INTEGER,
+  commitment TEXT,
+  PRIMARY KEY (room_id, version)
+);
 CREATE TABLE IF NOT EXISTS server_identity (
   key_type TEXT PRIMARY KEY,
   public_key TEXT,
   private_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_links_room ON links(room_id);
+-- The keyset of a paged /render: (sequence, link_hash) within a room.
+CREATE INDEX IF NOT EXISTS idx_links_room_seq_hash ON links(room_id, sequence, link_hash);
 CREATE INDEX IF NOT EXISTS idx_diffs_room_seq ON diffs(room_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_acl_room ON acl(room_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_room_did ON sessions(room_id, did);
@@ -78,7 +84,6 @@ export interface RoomRow {
   id: string;
   admin_did: string;
   created_at: string;
-  e2e_enabled: number;
   revision: string | null;
 }
 
@@ -86,8 +91,6 @@ export interface AclRow {
   room_id: string;
   did: string;
   added_at: string;
-  x25519_public_key: string | null;
-  x25519_signature: string | null;
 }
 
 /** One row of the ACL audit trail. `source` is "operator" (actor = signed-in login) or "room-admin" (actor = admin DID). */
@@ -128,6 +131,8 @@ export interface RoomKeyRow {
   did: string;
   encrypted_key: string;
   version: number;
+  /** The version's commitment; null for a version rotated before commitments. */
+  commitment: string | null;
 }
 
 export interface ServerIdentityRow {
@@ -141,14 +146,8 @@ export interface ServerIdentityRow {
  * shapes the rest of the server needs. Kept dependency-free of any other
  * module in this package so it can be imported everywhere without cycles.
  */
-export interface LinkServerDBOptions {
-  /** Maximum diffs to retain per room. Older diffs get pruned. Default 10000. 0 disables pruning. */
-  maxDiffsPerRoom?: number;
-}
-
 export class LinkServerDB {
   readonly raw: Database.Database;
-  readonly maxDiffsPerRoom: number;
 
   // Cached prepared statements — prepared once, reused for the lifetime of
   // the DB connection. Avoids re-parsing SQL on every call (particularly
@@ -156,7 +155,7 @@ export class LinkServerDB {
   // otherwise prepare the same INSERT 1500 times).
   private readonly stmts: ReturnType<LinkServerDB["prepareStatements"]>;
 
-  constructor(filePath: string, opts?: LinkServerDBOptions) {
+  constructor(filePath: string) {
     if (filePath !== ":memory:") {
       mkdirSync(dirname(filePath), { recursive: true });
     }
@@ -164,7 +163,6 @@ export class LinkServerDB {
     this.raw.pragma("journal_mode = WAL");
     this.raw.pragma("foreign_keys = ON");
     this.raw.exec(SCHEMA);
-    this.maxDiffsPerRoom = opts?.maxDiffsPerRoom ?? 10_000;
     this.stmts = this.prepareStatements();
   }
 
@@ -176,20 +174,14 @@ export class LinkServerDB {
          FROM rooms r ORDER BY r.created_at DESC`
       ),
       createRoom: this.raw.prepare(
-        "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled, revision) VALUES (?, ?, ?, 0, ?)"
+        "INSERT INTO rooms (id, admin_did, created_at, revision) VALUES (?, ?, ?, ?)"
       ),
-      setE2e: this.raw.prepare("UPDATE rooms SET e2e_enabled = ? WHERE id = ?"),
       updateRevision: this.raw.prepare("UPDATE rooms SET revision = ? WHERE id = ?"),
 
       getAcl: this.raw.prepare("SELECT * FROM acl WHERE room_id = ? ORDER BY added_at ASC"),
       isMember: this.raw.prepare("SELECT 1 FROM acl WHERE room_id = ? AND did = ?"),
       addAcl: this.raw.prepare("INSERT OR IGNORE INTO acl (room_id, did, added_at) VALUES (?, ?, ?)"),
       removeAcl: this.raw.prepare("DELETE FROM acl WHERE room_id = ? AND did = ?"),
-      setX25519: this.raw.prepare("UPDATE acl SET x25519_public_key = ? WHERE room_id = ? AND did = ?"),
-      setX25519WithSig: this.raw.prepare(
-        "UPDATE acl SET x25519_public_key = ?, x25519_signature = ? WHERE room_id = ? AND did = ?"
-      ),
-      getX25519: this.raw.prepare("SELECT x25519_public_key FROM acl WHERE room_id = ? AND did = ?"),
       transferAdmin: this.raw.prepare("UPDATE rooms SET admin_did = ? WHERE id = ?"),
       recordAclChange: this.raw.prepare(
         "INSERT INTO acl_changes (room_id, did, action, actor, source, at) VALUES (?, ?, ?, ?, ?, ?)"
@@ -207,7 +199,11 @@ export class LinkServerDB {
          VALUES (?, ?, ?, ?)`
       ),
       removeLink: this.raw.prepare("DELETE FROM links WHERE room_id = ? AND link_hash = ?"),
-      getActiveLinkRows: this.raw.prepare("SELECT * FROM links WHERE room_id = ?"),
+      getActiveLinkPage: this.raw.prepare(
+        `SELECT * FROM links
+         WHERE room_id = ? AND sequence <= ? AND (sequence > ? OR (sequence = ? AND link_hash > ?))
+         ORDER BY sequence ASC, link_hash ASC LIMIT ?`
+      ),
 
       getNextSequence: this.raw.prepare(
         "SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM diffs WHERE room_id = ?"
@@ -219,8 +215,8 @@ export class LinkServerDB {
         `INSERT INTO diffs (room_id, sequence, diff_data, timestamp, author_did)
          VALUES (?, ?, ?, ?, ?)`
       ),
-      getDiffsSince: this.raw.prepare(
-        "SELECT * FROM diffs WHERE room_id = ? AND sequence > ? ORDER BY sequence ASC"
+      getDiffPageSince: this.raw.prepare(
+        "SELECT * FROM diffs WHERE room_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?"
       ),
 
       createSession: this.raw.prepare(
@@ -234,10 +230,20 @@ export class LinkServerDB {
          VALUES (?, ?, ?, ?)`
       ),
       getAllRoomKeys: this.raw.prepare(
-        `SELECT * FROM room_keys WHERE room_id = ? AND did = ? ORDER BY version ASC`
+        `SELECT k.*, c.commitment FROM room_keys k
+         LEFT JOIN room_key_commitments c ON c.room_id = k.room_id AND c.version = k.version
+         WHERE k.room_id = ? AND k.did = ? ORDER BY k.version ASC`
       ),
       getLatestKeyVersion: this.raw.prepare(
-        "SELECT COALESCE(MAX(version), 0) AS max FROM room_keys WHERE room_id = ?"
+        `SELECT COALESCE(MAX(version), 0) AS max FROM (
+           SELECT version FROM room_keys WHERE room_id = ?
+           UNION ALL SELECT version FROM room_key_commitments WHERE room_id = ?)`
+      ),
+      addKeyCommitment: this.raw.prepare(
+        `INSERT INTO room_key_commitments (room_id, version, commitment) VALUES (?, ?, ?)`
+      ),
+      deleteRoomKey: this.raw.prepare(
+        `DELETE FROM room_keys WHERE room_id = ? AND did = ? AND version = ?`
       ),
       getAllMemberKeyVersions: this.raw.prepare(
         `SELECT did, version FROM room_keys WHERE room_id = ? ORDER BY did, version ASC`
@@ -251,15 +257,6 @@ export class LinkServerDB {
       setIdentity: this.raw.prepare(
         `INSERT OR REPLACE INTO server_identity (key_type, public_key, private_key)
          VALUES (?, ?, ?)`
-      ),
-
-      // diff retention
-      countDiffs: this.raw.prepare("SELECT COUNT(*) AS cnt FROM diffs WHERE room_id = ?"),
-      getOldestRetainedSeq: this.raw.prepare(
-        "SELECT sequence FROM diffs WHERE room_id = ? ORDER BY sequence ASC LIMIT 1 OFFSET ?"
-      ),
-      deleteDiffsBefore: this.raw.prepare(
-        "DELETE FROM diffs WHERE room_id = ? AND sequence < ?"
       ),
 
       // session sweep
@@ -285,20 +282,17 @@ export class LinkServerDB {
     return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number }>;
   }
 
+  /** Every room is end-to-end encrypted: the commit route refuses plaintext links from creation. */
   createRoom(roomId: string, adminDid: string): RoomRow {
     const createdAt = new Date().toISOString();
     this.stmts.createRoom.run(roomId, adminDid, createdAt, EMPTY_REVISION);
-    return { id: roomId, admin_did: adminDid, created_at: createdAt, e2e_enabled: 0, revision: EMPTY_REVISION };
+    return { id: roomId, admin_did: adminDid, created_at: createdAt, revision: EMPTY_REVISION };
   }
 
   /** Returns the revision for a room. Always present — set at creation and updated on every commit. */
   getRoomRevision(roomId: string): string {
     const room = this.getRoom(roomId);
     return room?.revision ?? EMPTY_REVISION;
-  }
-
-  setE2eEnabled(roomId: string, enabled: boolean): void {
-    this.stmts.setE2e.run(enabled ? 1 : 0, roomId);
   }
 
   // ---- acl ----
@@ -341,19 +335,6 @@ export class LinkServerDB {
     return this.stmts.getLatestAdds.all(roomId) as AclChangeRow[];
   }
 
-  setX25519PublicKey(roomId: string, did: string, x25519PublicKey: string, x25519Signature?: string): void {
-    if (x25519Signature) {
-      this.stmts.setX25519WithSig.run(x25519PublicKey, x25519Signature, roomId, did);
-    } else {
-      this.stmts.setX25519.run(x25519PublicKey, roomId, did);
-    }
-  }
-
-  getX25519PublicKey(roomId: string, did: string): string | null {
-    const row = this.stmts.getX25519.get(roomId, did) as { x25519_public_key: string | null } | undefined;
-    return row?.x25519_public_key ?? null;
-  }
-
   // ---- links (active OR-Set) ----
 
   /** Returns true if the link was actually inserted (false if it already existed). */
@@ -373,14 +354,23 @@ export class LinkServerDB {
     return info.changes > 0;
   }
 
-  getActiveLinkRows(roomId: string): LinkRow[] {
-    return this.stmts.getActiveLinkRows.all(roomId) as LinkRow[];
-  }
-
-  getActiveLinks(roomId: string): LinkExpression[] {
-    return this.getActiveLinkRows(roomId).map(
-      (row) => JSON.parse(row.link_data) as LinkExpression
-    );
+  /**
+   * One page of the active links that were added at or before `upto`, in
+   * `(sequence, link_hash)` order, strictly after the cursor `after`
+   * (`{sequence: 0, hash: ""}` for the first page). A link added after
+   * `upto` gets a sequence above it, so the pages of one `upto` never shift:
+   * links removed meanwhile drop out, and the diff log after `upto` carries
+   * every change the pages miss.
+   */
+  getActiveLinkPage(
+    roomId: string,
+    upto: number,
+    after: { sequence: number; hash: string },
+    limit: number
+  ): LinkRow[] {
+    return this.stmts.getActiveLinkPage.all(
+      roomId, upto, after.sequence, after.sequence, after.hash, limit
+    ) as LinkRow[];
   }
 
   // ---- diffs (append-only log) ----
@@ -404,20 +394,9 @@ export class LinkServerDB {
     this.stmts.appendDiff.run(roomId, sequence, diffData, new Date().toISOString(), authorDid);
   }
 
-  getDiffsSince(roomId: string, since: number): DiffRow[] {
-    return this.stmts.getDiffsSince.all(roomId, since) as DiffRow[];
-  }
-
-  getDiffsSinceParsed(
-    roomId: string,
-    since: number
-  ): { sequence: number; diff: PerspectiveDiff; timestamp: string; authorDid: string }[] {
-    return this.getDiffsSince(roomId, since).map((row) => ({
-      sequence: row.sequence,
-      diff: JSON.parse(row.diff_data) as PerspectiveDiff,
-      timestamp: row.timestamp,
-      authorDid: row.author_did,
-    }));
+  /** At most `limit` diffs after `since`, in sequence order. */
+  getDiffPageSince(roomId: string, since: number, limit: number): DiffRow[] {
+    return this.stmts.getDiffPageSince.all(roomId, since, limit) as DiffRow[];
   }
 
   /**
@@ -449,9 +428,6 @@ export class LinkServerDB {
       }
       this.appendDiff(roomId, sequence, JSON.stringify(diff), authorDid);
       this.stmts.updateRevision.run(revision, roomId);
-      if (this.maxDiffsPerRoom > 0) {
-        this.pruneOldDiffs(roomId, this.maxDiffsPerRoom);
-      }
       return { sequence, revision };
     });
     return run();
@@ -492,7 +468,7 @@ export class LinkServerDB {
   }
 
   getLatestKeyVersion(roomId: string): number {
-    const row = this.stmts.getLatestKeyVersion.get(roomId) as { max: number };
+    const row = this.stmts.getLatestKeyVersion.get(roomId, roomId) as { max: number };
     return row.max;
   }
 
@@ -509,6 +485,15 @@ export class LinkServerDB {
       }
     }
     return result;
+  }
+
+  addKeyCommitment(roomId: string, version: number, commitment: string): void {
+    this.stmts.addKeyCommitment.run(roomId, version, commitment);
+  }
+
+  /** Deletes one member's box for one version; true when there was one. */
+  deleteRoomKey(roomId: string, did: string, version: number): boolean {
+    return this.stmts.deleteRoomKey.run(roomId, did, version).changes > 0;
   }
 
   /** INSERT OR IGNORE — stores a sealed key only if that (room, did, version) doesn't exist yet. */
@@ -531,18 +516,6 @@ export class LinkServerDB {
 
   setIdentity(keyType: string, publicKey: string, privateKey: string): void {
     this.stmts.setIdentity.run(keyType, publicKey, privateKey);
-  }
-
-  // ---- diff retention ----
-
-  /** Prune the oldest diffs for a room, keeping at most `maxDiffs` entries. */
-  pruneOldDiffs(roomId: string, maxDiffs: number): void {
-    const row = this.stmts.countDiffs.get(roomId) as { cnt: number };
-    if (row.cnt <= maxDiffs) return;
-    const cutoff = this.stmts.getOldestRetainedSeq.get(roomId, maxDiffs) as { sequence: number } | undefined;
-    if (cutoff) {
-      this.stmts.deleteDiffsBefore.run(roomId, cutoff.sequence);
-    }
   }
 
   // ---- session sweep ----

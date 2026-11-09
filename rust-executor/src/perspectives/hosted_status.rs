@@ -194,7 +194,7 @@ fn bundled_status(target: &str) -> Option<PerspectiveExpression> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{did_for_context, AgentService};
+    use crate::agent::did_for_context;
     use crate::test_utils::{setup_agent, setup_wallet};
     use std::sync::OnceLock;
 
@@ -208,10 +208,8 @@ mod tests {
     }
 
     fn user(email: &str) -> (AgentContext, String) {
-        AgentService::ensure_user_key_exists(email).expect("user key");
-        let ctx = AgentContext::for_user_email(email.to_string());
-        let did = did_for_context(&ctx).expect("user did");
-        (ctx, did)
+        let did = crate::test_utils::create_test_user(email);
+        (AgentContext::managed(did.clone()), did)
     }
 
     fn status(

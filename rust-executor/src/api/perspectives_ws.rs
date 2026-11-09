@@ -7,8 +7,6 @@ use std::time::Duration;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
-use crate::agent::AgentContext;
-use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
 use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::perspective_instance::{
@@ -17,12 +15,13 @@ use crate::perspectives::perspective_instance::{
 use crate::perspectives::{
     add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
-    remove_perspective, update_perspective,
+    remove_perspective, update_perspective_with,
     utils::prolog_resolution_to_string,
 };
 use crate::pubsub::mark_credits_dirty;
 use crate::types::*;
 
+use super::guards::Guard;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -51,10 +50,12 @@ pub(crate) async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInst
         }
     }
 
-    Err(WsRpcError::not_found(format!(
-        "Perspective {} not found",
-        uuid
-    )))
+    Err(perspective_not_found(uuid))
+}
+
+/// What a missing perspective answers, and one the caller may not reach: the same 404.
+fn perspective_not_found(uuid: &str) -> WsRpcError {
+    WsRpcError::not_found(format!("Perspective {} not found", uuid))
 }
 
 /// Fetch perspective metadata from the shared backend, create it locally, and populate links.
@@ -90,11 +91,7 @@ fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveIn
     };
 
     // Store in local DB
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
+    crate::db_backend::db_backend()
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
@@ -110,35 +107,48 @@ fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveIn
     Ok(Some(p))
 }
 
-async fn get_perspective_with_access(
+/// The perspective `uuid` if the session may reach it: the operator every one; a session on
+/// a managed agent those its agent owns; a grant on the main agent the main agent's and the
+/// unowned ones; an anonymous caller none. Missing and not the caller's are both 404 (D6), so
+/// a caller cannot learn which perspectives exist. `Guard::Owns` runs it before every
+/// perspective method's handler.
+pub(crate) async fn get_perspective_with_access(
     uuid: &str,
     ctx: &RequestContext,
 ) -> Result<PerspectiveInstance, WsRpcError> {
     let perspective = get_perspective_or_404(uuid).await?;
 
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         let handle = perspective.persisted.lock().await.clone();
-        if !can_access_perspective_with_did(&ctx.user_did, &handle) {
-            return Err(WsRpcError::forbidden(
-                "Access denied: You don't have permission to access this perspective",
-            ));
+        if !ctx.session.is_authenticated()
+            || !can_access_perspective_with_did(ctx.user_did(), &handle)
+        {
+            return Err(perspective_not_found(uuid));
         }
     }
 
     Ok(perspective)
 }
 
-fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+/// Refuses a write whose managed agent's account has no credits left. `agent_did` is the
+/// managed agent the request acts as; the main agent pays nothing.
+pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
+    if agent_did.is_none() {
+        return Ok(());
+    }
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     if global_free {
         return Ok(());
     }
-    if let Some(ref email) = user_email {
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+    if let Some(did) = agent_did {
+        let free = crate::db_backend::db_backend()
+            .get_agent_free_access(did)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+            let credits = crate::db_backend::db_backend()
+                .get_agent_credits(did)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             if credits <= 0.0 {
                 return Err(WsRpcError::forbidden("Insufficient compute credits"));
@@ -148,19 +158,25 @@ fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
     Ok(())
 }
 
-fn reserve_credits(user_email: &Option<String>, amount: f64) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
+    if agent_did.is_none() {
+        return Ok(());
+    }
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     if global_free {
         return Ok(());
     }
-    if let Some(ref email) = user_email {
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+    if let Some(did) = agent_did {
+        let free = crate::db_backend::db_backend()
+            .get_agent_free_access(did)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
+            let email = crate::db_backend::db_backend()
+                .deduct_agent_credits_if_available(did, amount)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
-            mark_credits_dirty(email);
+            mark_credits_dirty(&email);
         }
     }
     Ok(())
@@ -181,13 +197,13 @@ const DEFAULT_LINK_WRITE: f64 = 0.25;
 /// fire-and-forget deduction that logs on `InsufficientCredits` but
 /// doesn't halt the loop. A pass that ends with zero bases used to be
 /// free regardless of how many completions it burned.
-struct WsHarnessCreditGate {
-    user_email: Option<String>,
+pub(super) struct WsHarnessCreditGate {
+    agent_did: Option<String>,
 }
 
 impl WsHarnessCreditGate {
-    fn new(user_email: Option<String>) -> Self {
-        Self { user_email }
+    pub(super) fn new(agent_did: Option<String>) -> Self {
+        Self { agent_did }
     }
 }
 
@@ -196,33 +212,33 @@ impl crate::ai_service::harness::CreditGate for WsHarnessCreditGate {
     async fn check(&self) -> anyhow::Result<()> {
         // Pre-check: cheap "credits > 0" gate. Free hosting / free-access
         // paths short-circuit inside `check_credits`.
-        check_credits(&self.user_email).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        check_credits(self.agent_did.as_deref()).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         // Reserve the per-completion opportunity cost. Fire-and-forget
         // wrt success — the ledger deduction happens atomically and any
         // downstream `InsufficientCredits` will fail the NEXT `check`.
-        reserve_credits(&self.user_email, DEFAULT_LINK_WRITE)
+        reserve_credits(self.agent_did.as_deref(), DEFAULT_LINK_WRITE)
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         Ok(())
     }
 }
 
-fn parse_link_status(s: Option<&str>) -> LinkStatus {
+/// The `status` of a link write: `shared` or `local` in any casing, `Shared` when absent.
+/// Any other value is refused (400) rather than read as Local: a mistyped status would keep
+/// a link meant for the neighbourhood on this executor, with no error.
+pub(crate) fn parse_link_status(s: Option<&str>) -> Result<LinkStatus, WsRpcError> {
     match s {
-        Some("shared" | "SHARED") => LinkStatus::Shared,
-        Some(_) => LinkStatus::Local,
-        None => LinkStatus::Shared,
+        None => Ok(LinkStatus::Shared),
+        Some(v) if v.eq_ignore_ascii_case("shared") => Ok(LinkStatus::Shared),
+        Some(v) if v.eq_ignore_ascii_case("local") => Ok(LinkStatus::Local),
+        Some(v) => Err(WsRpcError::bad_request(format!(
+            "Unknown link status {v:?}: expected \"shared\" or \"local\" (any casing)"
+        ))),
     }
 }
 
 // ── Handlers ──
 
 async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![WILD_CARD.to_string()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     // In shared mode, rehydrate any backend perspectives not yet loaded
     // locally. Both `DbBackend::list` (network) and
     // `rehydrate_perspective_from_backend` (network + DB writes) are
@@ -251,7 +267,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     let all: Vec<PerspectiveInstance> = crate::perspectives::all_perspectives();
 
     // Admin sees everything; regular users see only their own perspectives
-    if ctx.is_admin_credential {
+    if ctx.is_operator() {
         let mut handles: Vec<PerspectiveHandle> = Vec::new();
         for p in all {
             handles.push(p.persisted.lock().await.clone());
@@ -262,7 +278,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
         let handle = p.persisted.lock().await.clone();
-        if can_access_perspective_with_did(&ctx.user_did, &handle) {
+        if can_access_perspective_with_did(ctx.user_did(), &handle) {
             filtered.push(handle);
         }
     }
@@ -270,41 +286,25 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     Ok(serde_json::to_value(filtered)?)
 }
 
+/// The perspective a guarded handler acts on, by its `uuid` param
+/// ([`crate::api::guards::UUID_PARAM`], read as the guard reads it). The method's
+/// `Guard::Owns` has already checked the caller's capability and access, so this only fetches
+/// it: 404 if it went away since (`null` for a method flagged `.or_null()`).
+pub(crate) async fn guarded_perspective(params: &Value) -> Result<PerspectiveInstance, WsRpcError> {
+    get_perspective_or_404(&crate::api::guards::UUID_PARAM.require(&params)?).await
+}
+
 async fn get_perspective_handler(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    // Return null (via 404, caught by client) if perspective doesn't exist or user can't access it
-    let perspective = match get_perspective_with_access(&uuid, &ctx).await {
-        Ok(p) => p,
-        Err(e) if e.code == 403 || e.code == 404 => return Ok(Value::Null),
-        Err(e) => return Err(e),
-    };
+    let perspective = guarded_perspective(&params).await?;
     let handle = perspective.persisted.lock().await.clone();
     Ok(serde_json::to_value(handle)?)
 }
 
-async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    // Return null if perspective doesn't exist or user can't access it
-    let perspective = match get_perspective_with_access(&uuid, &ctx).await {
-        Ok(p) => p,
-        Err(e) if e.code == 403 || e.code == 404 => return Ok(Value::Null),
-        Err(e) => return Err(e),
-    };
+async fn get_snapshot(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let perspective = guarded_perspective(&params).await?;
     let links = perspective
         .get_links(&LinkQuery {
             source: None,
@@ -321,29 +321,14 @@ async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     })?)
 }
 
-async fn publish_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let _perspective = get_perspective_with_access(&uuid, &ctx).await?;
+async fn publish_snapshot(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     Err(WsRpcError::not_implemented(
         "publish_snapshot not yet implemented",
     ))
 }
 
-async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+async fn query_links(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let perspective = guarded_perspective(&params).await?;
 
     let query = LinkQuery {
         source: params.opt_str("source"),
@@ -369,13 +354,10 @@ async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn create_perspective(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: CreatePerspectiveRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let owner_did = ctx.user_did.clone();
+    let owner_did = ctx.user_did().map(str::to_string);
 
     let handle = if let Some(owner) = &owner_did {
         PerspectiveHandle::new_with_owner(body.name.clone(), owner.clone())
@@ -392,64 +374,42 @@ async fn create_perspective(params: Value, ctx: Arc<RequestContext>) -> Result<V
 
 async fn update_perspective_handler(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: UpdatePerspectiveRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let mut handle = perspective.persisted.lock().await.clone();
-    handle.name = Some(body.name);
-    update_perspective(&handle)
+    let perspective = guarded_perspective(&params).await?;
+    let handle = update_perspective_with(&perspective.uuid, |h| h.name = Some(body.name))
         .await
         .map_err(|e| WsRpcError::internal(e))?;
 
     Ok(serde_json::to_value(handle)?)
 }
 
-async fn delete_perspective(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_delete_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let _perspective = get_perspective_with_access(&uuid, &ctx).await?;
+async fn delete_perspective(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = crate::api::guards::UUID_PARAM.require(&params)?;
     remove_perspective(&uuid).await;
     Ok(Value::Bool(true))
 }
 
 async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_did())?;
 
     let body: AddLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
-    let status = parse_link_status(body.status.as_deref());
+    let status = parse_link_status(body.status.as_deref())?;
 
     let result = perspective
         .add_link(Link::from(body.link), status, body.batch_id, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+    if let Err(e) = reserve_credits(ctx.user_did(), DEFAULT_LINK_WRITE) {
         // KEEP AT warn (Nico + CodeRabbit, PR #942 round 2): money-losing
         // credit-ledger failures at debug hide ledger inconsistency. The
         // link write already committed, so this is not fatal to the
@@ -465,21 +425,15 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 }
 
 async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_did())?;
 
     let body: AddLinksBulkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
-    let status = parse_link_status(body.status.as_deref());
+    let status = parse_link_status(body.status.as_deref())?;
 
     let mutations = LinkMutations {
         additions: body.links,
@@ -493,7 +447,7 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let count = diff.additions.len();
     if count > 0 {
-        if let Err(e) = reserve_credits(&ctx.user_email, count as f64 * DEFAULT_LINK_WRITE) {
+        if let Err(e) = reserve_credits(ctx.user_did(), count as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
                 "Credit deduction failed for bulk add (operation already committed): {}",
                 e
@@ -505,18 +459,11 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: RemoveLinksBulkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     if let Some(batch_id) = body.batch_id {
         let mut removals = Vec::with_capacity(body.links.len());
@@ -547,21 +494,15 @@ async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_did())?;
 
     let body: LinkMutationsRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
-    let status = parse_link_status(body.status.as_deref());
+    let status = parse_link_status(body.status.as_deref())?;
 
     let diff = perspective
         .link_mutations(body.mutations, status, &agent_context)
@@ -570,7 +511,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let total = diff.additions.len() + diff.removals.len();
     if total > 0 {
-        if let Err(e) = reserve_credits(&ctx.user_email, total as f64 * DEFAULT_LINK_WRITE) {
+        if let Err(e) = reserve_credits(ctx.user_did(), total as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
                 "Credit deduction failed for mutations (operation already committed): {}",
                 e
@@ -586,27 +527,21 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_did())?;
 
     let body: AddLinkExpressionRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let mut perspective = guarded_perspective(&params).await?;
 
-    let status = parse_link_status(body.status.as_deref());
+    let status = parse_link_status(body.status.as_deref())?;
 
     let result = perspective
         .add_link_expression(body.link, status, body.batch_id)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+    if let Err(e) = reserve_credits(ctx.user_did(), DEFAULT_LINK_WRITE) {
         log::warn!(
             "Credit deduction failed (operation already committed): {}",
             e
@@ -616,18 +551,11 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn update_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: UpdateLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     let result = perspective
         .update_link(
@@ -642,18 +570,11 @@ async fn update_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(serde_json::to_value(result)?)
 }
 
-async fn remove_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn remove_link(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: RemoveLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let mut perspective = guarded_perspective(&params).await?;
 
     let link_expr = LinkExpression::from_input_without_proof(body.link);
     perspective
@@ -665,16 +586,9 @@ async fn remove_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let query = params.require_str("query")?;
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     let res = perspective
         .prolog_query_with_context(query, &agent_context)
@@ -703,18 +617,11 @@ const RUN_INTERPRETATION_TIMEOUT_SECS: u64 = 300;
 const RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS: u64 = 1200;
 
 async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let query = params.require_str("query")?;
     let engine = params
         .opt_str("engine")
         .unwrap_or_else(|| "sparql".to_string());
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
 
     match engine.as_str() {
         "sparql" => {
@@ -782,15 +689,8 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     // Batch mode: entries array present
     if let Some(entries_val) = params.get("entries") {
@@ -841,18 +741,11 @@ async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 }
 
 async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: ExecuteCommandsRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     let commands: Vec<crate::perspectives::perspective_instance::Command> =
         serde_json::from_str(&body.commands)
@@ -881,33 +774,19 @@ async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(serde_json::to_value(result)?)
 }
 
-async fn create_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+async fn create_batch(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let perspective = guarded_perspective(&params).await?;
     let batch_id = perspective.create_batch().await;
 
     Ok(Value::String(batch_id))
 }
 
 async fn commit_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: CommitBatchRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     let diff = perspective
         .commit_batch(body.batch_id.clone(), &agent_context)
@@ -923,29 +802,15 @@ async fn commit_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
 /// `perspective.discardBatch` → `true` if the batch was open and is now
 /// dropped, `false` if it was already committed, discarded or timed out.
-async fn discard_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(WsRpcError::forbidden)?;
-
+async fn discard_batch(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: DiscardBatchRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
     Ok(Value::Bool(perspective.discard_batch(&body.batch_id).await))
 }
 
 async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     // Live queries are SPARQL; Prolog live queries were removed.
@@ -954,10 +819,10 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     }
     let connection_id = connection_id(&ctx)?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
 
     let reply = perspective
-        .subscribe_and_query(body.query, connection_id)
+        .subscribe_and_query(body.query, connection_id, subscriber(&ctx))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     subscribed(reply)
@@ -969,6 +834,12 @@ fn connection_id(ctx: &RequestContext) -> Result<String, WsRpcError> {
     ctx.connection_id.clone().ok_or_else(|| {
         WsRpcError::bad_request("Subscriptions need a WebSocket connection (/api/v1/ws)")
     })
+}
+
+/// The agent a subscription runs as, whose sessions alone get its updates: the
+/// managed agent the caller acts as, `None` for the main agent.
+fn subscriber(ctx: &RequestContext) -> Option<String> {
+    ctx.user_did().map(str::to_string)
 }
 
 /// Reply to a subscribe call: the result as JSON at its revision (0 unless
@@ -990,19 +861,13 @@ fn subscribed(
 /// and applies the updates after `revision`. 404 unless this connection
 /// opened the subscription.
 async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(WsRpcError::forbidden)?;
-
     let body: ResyncSubscriptionRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let connection_id = connection_id(&ctx)?;
+    let perspective = guarded_perspective(&params).await?;
     match perspective
-        .subscription_state(&body.subscription_id, &connection_id(&ctx)?)
+        .subscription_state(&body.subscription_id, &connection_id)
         .await
     {
         Some((revision, result)) => Ok(serde_json::to_value(PerspectiveResynced {
@@ -1017,35 +882,20 @@ async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn subscribe_sparql_query(
-    params: Value,
-    ctx: Arc<RequestContext>,
+    _params: Value,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let _ = get_perspective_with_access(&uuid, &ctx).await?;
     Err(WsRpcError::not_implemented(
         "subscribe_sparql_query not yet implemented",
     ))
 }
 
 async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: DisposeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let connection_id = connection_id(&ctx)?;
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
     Ok(Value::Bool(
         perspective
             .dispose_query_subscription(&body.subscription_id, &connection_id)
@@ -1054,18 +904,11 @@ async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 }
 
 async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: CreateSubjectRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     let (resolved_class_name, parsed_initial_values) =
         match serde_json::from_str::<serde_json::Value>(&body.subject_class) {
@@ -1104,17 +947,11 @@ async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn update_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
     let body: UpdateSubjectRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let values: Value = serde_json::from_str(&body.values)
         .map_err(|e| WsRpcError::bad_request(format!("values: {}", e)))?;
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let mut perspective = guarded_perspective(&params).await?;
     perspective
         .update_subject(
             crate::perspectives::perspective_instance::SubjectClassOption {
@@ -1124,7 +961,7 @@ async fn update_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
             body.expression_address,
             values,
             body.batch_id,
-            &AgentContext::from_request(&ctx),
+            &ctx.acts_as(),
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -1132,15 +969,9 @@ async fn update_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn remove_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
     let body: RemoveSubjectRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let mut perspective = guarded_perspective(&params).await?;
     perspective
         .remove_subject(
             crate::perspectives::perspective_instance::SubjectClassOption {
@@ -1149,7 +980,7 @@ async fn remove_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
             },
             body.expression_address,
             body.batch_id,
-            &AgentContext::from_request(&ctx),
+            &ctx.acts_as(),
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -1157,18 +988,11 @@ async fn remove_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: GetSubjectDataRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     let subject_class = crate::perspectives::perspective_instance::SubjectClassOption {
         class_name: Some(body.subject_class.clone()),
@@ -1188,15 +1012,8 @@ async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 
 async fn subject_classes_of_handler(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     // A malformed element cannot be dropped here. The result map omits URIs that
     // matched no class, so a silently discarded input would be indistinguishable
     // from a URI that is simply not a subject instance — the caller would read a
@@ -1213,7 +1030,7 @@ async fn subject_classes_of_handler(
         })?,
     };
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
 
     // Classification is synchronous SPARQL plus in-memory containment over every
     // class × every URI, so it runs on a blocking thread with the same timeout as
@@ -1246,18 +1063,14 @@ async fn subject_classes_of_handler(
     }
 }
 
-async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn model_query_handler(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
 
     // Run async model query with timeout
     let result = tokio::time::timeout(
@@ -1281,15 +1094,8 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
 
 async fn evaluate_getters_handler(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let class_name = params.require_str("class_name")?;
 
     // Parse instance_ids array
@@ -1313,7 +1119,7 @@ async fn evaluate_getters_handler(
                 .collect()
         });
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
 
     // Run synchronous getter evaluation on a blocking thread with timeout
     // to avoid blocking the async runtime.
@@ -1349,21 +1155,14 @@ async fn model_subscribe_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
 
     let connection_id = connection_id(&ctx)?;
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
 
     let reply = perspective
-        .model_subscribe_and_query(classes, query_json, connection_id)
+        .model_subscribe_and_query(classes, query_json, connection_id, subscriber(&ctx))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     subscribed(reply)
@@ -1373,19 +1172,14 @@ async fn run_interpretation_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    let uuid = crate::api::guards::UUID_PARAM.require(&params)?;
+    check_credits(ctx.user_did())?;
 
     let body: RunInterpretationRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
     // Interpretation writes via `create_subject`, so link status derives from each
     // class's SDNA `local` flags (same rule as app code) — there is no caller-facing
     // link-status knob on this path.
@@ -1597,7 +1391,7 @@ async fn run_interpretation_handler(
     }
 
     if !bases.is_empty() {
-        if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {
+        if let Err(e) = reserve_credits(ctx.user_did(), bases.len() as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
                 "Credit deduction failed for runInterpretation (operation already committed): {}",
                 e
@@ -1634,13 +1428,8 @@ async fn run_interpretation_with_harness_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    let uuid = crate::api::guards::UUID_PARAM.require(&params)?;
+    check_credits(ctx.user_did())?;
 
     let body: RunInterpretationWithHarnessRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -1655,8 +1444,8 @@ async fn run_interpretation_with_harness_handler(
         ));
     }
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     // Class resolution mirrors `run_interpretation_handler`: explicit
     // selection if provided, otherwise every registered subject class in
@@ -1708,17 +1497,10 @@ async fn run_interpretation_with_harness_handler(
         })
         .collect();
 
-    // Thread the caller's auth token into the harness so `Ad4mMcpHandler`'s
-    // tool dispatch executes with the caller's capabilities — same
-    // principle as the `/v1` openai-compat path. Empty string means an
-    // unauthenticated caller: don't propagate that as a phantom token
-    // (Ad4mMcpHandler treats `None` as "no user session; fall back to
-    // admin credential if configured").
-    let auth_token = if ctx.auth_token.is_empty() {
-        None
-    } else {
-        Some(ctx.auth_token.clone())
-    };
+    // The harness's `Ad4mMcpHandler` dispatches its tools as the caller's
+    // session, so the pass reaches what the caller reaches — same principle
+    // as the `/v1` openai-compat path (`interpretation::run::pass_mcp_context`).
+    let caller = Some(ctx.session.clone());
 
     // Live-debug event surface: same shape as the classic single-shot
     // handler. `observation_id` names both `processor_id` and `batch_key`
@@ -1756,7 +1538,7 @@ async fn run_interpretation_with_harness_handler(
     // exit accounting uses for each landed base) so the accounting
     // stays proportional to the mid-loop opportunity cost.
     let credit_gate: Option<std::sync::Arc<dyn crate::ai_service::harness::CreditGate>> = Some(
-        std::sync::Arc::new(WsHarnessCreditGate::new(ctx.user_email.clone())),
+        std::sync::Arc::new(WsHarnessCreditGate::new(ctx.user_did().map(str::to_string))),
     );
 
     let bases = match tokio::time::timeout(
@@ -1771,7 +1553,7 @@ async fn run_interpretation_with_harness_handler(
             body.existing_scope.as_ref(),
             None,
             body.max_tool_calls,
-            auth_token,
+            caller,
             emit_ctx.as_ref(),
             // WS-RPC is the one-shot path — dedup-on-drain stays off; the
             // caller reaches for the harness specifically to trust the LLM
@@ -1807,7 +1589,7 @@ async fn run_interpretation_with_harness_handler(
     };
 
     if !bases.is_empty() {
-        if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {
+        if let Err(e) = reserve_credits(ctx.user_did(), bases.len() as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
                 "Credit deduction failed for runInterpretationWithHarness (operation already committed): {}",
                 e
@@ -1923,13 +1705,6 @@ async fn add_auto_processor_handler(
 ) -> Result<Value, WsRpcError> {
     use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
 
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: PerspectiveAddAutoProcessorParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -1970,8 +1745,8 @@ async fn add_auto_processor_handler(
         return Err(WsRpcError::bad_request("`maxWaitMs` must be >= 0 when set"));
     }
 
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
 
     let emit_debug_events_write = body.emit_debug_events;
     let cfg = AutoProcessorConfig {
@@ -2028,14 +1803,8 @@ async fn remove_auto_processor_handler(
 
     let body: PerspectiveRemoveAutoProcessorParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![body.uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
     let removed = remove_processor(&mut perspective, &body.processor_id, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -2053,14 +1822,8 @@ async fn accept_interpretation_handler(
 
     let body: PerspectiveResolveInterpretationParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![body.uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
     accept_interpretation(
         &mut perspective,
         &body.base,
@@ -2082,14 +1845,8 @@ async fn reject_interpretation_handler(
 
     let body: PerspectiveResolveInterpretationParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![body.uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
     reject_interpretation(
         &mut perspective,
         &body.base,
@@ -2105,18 +1862,11 @@ async fn reject_interpretation_handler(
 /// perspective (read-only), for a UI to surface human accept/reject.
 async fn interpretation_overlays_handler(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     use crate::perspectives::interpretation::overlay::list_overlays;
 
-    let body: PerspectiveUuidParams = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![body.uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    let perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
     let overlays = list_overlays(&perspective)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -2129,15 +1879,9 @@ async fn accept_flow_proposal_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
     let proposal_uri = params.require_str("proposalUri")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
     let fired = crate::perspectives::flow_instance::accept::accept_flow_proposal(
         &mut perspective,
         &proposal_uri,
@@ -2152,15 +1896,9 @@ async fn reject_flow_proposal_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
     let proposal_uri = params.require_str("proposalUri")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
     let retracted = crate::perspectives::flow_instance::accept::reject_flow_proposal(
         &mut perspective,
         &proposal_uri,
@@ -2179,7 +1917,6 @@ async fn propose_flow_transition_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
     let instance_uri = params.require_str("instanceUri")?;
     let to_state = params.require_str("toState")?;
     let rationale = params
@@ -2199,13 +1936,8 @@ async fn propose_flow_transition_handler(
                 ))
             })?,
         };
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
     // A `ProposeOutcome`, not a bare outcome list: an empty list cannot say
     // whether the click queued a live proposal, re-pressed one this agent had
     // already voted on, or landed on a stalled instance — and those want
@@ -2225,14 +1957,8 @@ async fn propose_flow_transition_handler(
 
 async fn verify_flow_receipt_handler(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
     // The receipt travels as its stored JSON body. Anything that does not
     // parse as one is a bad request, not an "unverified receipt" — the
     // three-kind verdict is reserved for material that could be examined.
@@ -2243,7 +1969,7 @@ async fn verify_flow_receipt_handler(
             })?,
             None => return Err(WsRpcError::bad_request("`receipt` is required".to_string())),
         };
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
     let verdict =
         crate::perspectives::flow_instance::produced::verify_flow_receipt(&perspective, &receipt)
             .await
@@ -2269,17 +1995,11 @@ pub(crate) fn flow_valid_outputs_state(params: &Value) -> Result<Option<String>,
 
 async fn flow_valid_outputs_handler(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
     let flow = params.require_str("flow")?;
     let state = flow_valid_outputs_state(&params)?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
     let outputs = crate::perspectives::flow_instance::produced::flow_valid_outputs(
         &perspective,
         &flow,
@@ -2294,21 +2014,15 @@ async fn flow_valid_outputs_handler(
 /// session's agent, never one named in the params: these rows are private to
 /// the agent whose pass wrote them (#1424).
 fn flow_bookkeeping_agent(ctx: &RequestContext) -> Result<String, WsRpcError> {
-    crate::agent::did_for_context(&AgentContext::from_request(ctx))
+    crate::agent::did_for_context(&ctx.acts_as())
         .map_err(|e| WsRpcError::internal(format!("resolving the calling agent: {e}")))
 }
 
 async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
     let instances: Option<Vec<String>> = params
         .opt_str_set("instances")?
         .map(|set| set.into_iter().collect());
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
     let agent_did = flow_bookkeeping_agent(&ctx)?;
     let entries = crate::perspectives::flow_instance::replica_state::FlowReplicaState::entries(
         &perspective.uuid,
@@ -2320,14 +2034,8 @@ async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn flow_fired_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
     let instance = params.require_str("instance")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
     let agent_did = flow_bookkeeping_agent(&ctx)?;
     let fired =
         crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instance(
@@ -2343,15 +2051,9 @@ async fn mint_flow_receipt_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
     let instance_uri = params.require_str("instanceUri")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let mut perspective = guarded_perspective(&params).await?;
+    let agent_context = ctx.acts_as();
     let receipt = crate::perspectives::flow_instance::produced::mint_flow_receipt(
         &mut perspective,
         &instance_uri,
@@ -2494,15 +2196,8 @@ pub(crate) async fn resolve_shacl_target_class(
 /// Equivalent to the SDK's `PerspectiveProxy.getShaclNames()` but resolved
 /// in-process — one handler call replaces one `queryLinks` round trip, plus
 /// deduplication happens server-side.
-async fn get_shacl_names(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+async fn get_shacl_names(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let perspective = guarded_perspective(&params).await?;
     let names = resolve_shacl_names(&perspective).await?;
     Ok(serde_json::to_value(names)?)
 }
@@ -2512,17 +2207,10 @@ async fn get_shacl_names(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 /// in-process link reads instead of two WS-RPC round trips.
 async fn get_shacl_target_class(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
     let name = params.require_str("name")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
     let target_class = resolve_shacl_target_class(&perspective, &name).await?;
     // `null` when the shape (or its `sh://targetClass`) is absent — pins
     // the wire contract the TS client already relies on
@@ -2623,16 +2311,9 @@ pub(crate) async fn resolve_shacl_links(
 /// triples needed to reconstruct the shape via `SHACLShape.fromLinks()`.
 /// Equivalent to the SDK's `PerspectiveProxy.getShacl(name)` — one handler
 /// call replaces 3+N `queryLinks` round trips.
-async fn get_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
+async fn get_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let name = params.require_str("name")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
 
     match resolve_shacl_links(&perspective, &name).await? {
         Some((shape_uri, links)) => {
@@ -2650,17 +2331,10 @@ async fn get_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 ///
 /// Optional `names: string[]` restricts the reply to those shapes, in the
 /// perspective's order; unknown names are left out.
-async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_all_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let wanted = params.opt_str_set("names")?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = guarded_perspective(&params).await?;
 
     // Step 1: get all shape names
     let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
@@ -2738,204 +2412,266 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         replica_state::FlowStateEntry,
     };
     use crate::perspectives::interpretation::overlay::OverlayView;
+    let query = || Guard::perspective(perspective_query_capability);
+    let update = || Guard::perspective(perspective_update_capability);
 
+    // Neither names one perspective: `all` lists the caller's own, `create` makes one that the
+    // caller's user owns (no owner for the operator and apps).
     map.method::<NoParams, Vec<PerspectiveHandle>>("perspective.all", list_perspectives)
-        .read();
+        .read()
+        .guard(Guard::Cap(perspective_query_capability(vec![
+            WILD_CARD.to_string()
+        ])));
     map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>(
         "perspective.get",
         get_perspective_handler,
     )
-    .read();
+    .read()
+    .or_null()
+    .guard(query());
     map.method::<CreatePerspectiveRequest, PerspectiveHandle>(
         "perspective.create",
         create_perspective,
-    );
+    )
+    .guard(Guard::Cap(PERSPECTIVE_CREATE_CAPABILITY.clone()));
     map.method::<PerspectiveUpdateParams, PerspectiveHandle>(
         "perspective.update",
         update_perspective_handler,
-    );
-    map.method::<PerspectiveUuidParams, bool>("perspective.remove", delete_perspective);
+    )
+    .guard(update());
+    map.method::<PerspectiveUuidParams, bool>("perspective.remove", delete_perspective)
+        .guard(Guard::perspective(perspective_delete_capability));
     map.method::<PerspectiveUuidParams, Option<crate::types::domain::Perspective>>(
         "perspective.snapshot",
         get_snapshot,
     )
-    .read();
+    .read()
+    .or_null()
+    .guard(query());
     // Always answers 501; the result type is the snapshot URL it would return.
-    map.method::<PerspectiveUuidParams, String>("perspective.publishSnapshot", publish_snapshot);
+    map.method::<PerspectiveUuidParams, String>("perspective.publishSnapshot", publish_snapshot)
+        .guard(query());
     map.method::<PerspectiveQueryLinksParams, Vec<DecoratedLinkExpression>>(
         "perspective.queryLinks",
         query_links,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveAddLinkParams, DecoratedLinkExpression>(
         "perspective.addLink",
         add_link,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveAddLinkExpressionParams, DecoratedLinkExpression>(
         "perspective.addLinkExpression",
         add_link_expression,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveAddLinksParams, Vec<DecoratedLinkExpression>>(
         "perspective.addLinks",
         add_links_bulk,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveUpdateLinkParams, DecoratedLinkExpression>(
         "perspective.updateLink",
         update_link,
-    );
-    map.method::<PerspectiveRemoveLinkParams, bool>("perspective.removeLink", remove_link);
+    )
+    .guard(update());
+    map.method::<PerspectiveRemoveLinkParams, bool>("perspective.removeLink", remove_link)
+        .guard(update());
     map.method::<PerspectiveRemoveLinksParams, Vec<DecoratedLinkExpression>>(
         "perspective.removeLinks",
         remove_links_bulk,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveLinkMutationsParams, PerspectiveLinkDiff>(
         "perspective.linkMutations",
         link_mutations,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveQueryParams, String>("perspective.queryProlog", query_prolog)
-        .read();
+        .read()
+        .guard(query());
     map.method::<PerspectiveSparqlParams, String>("perspective.querySparql", query_sparql)
-        .read();
+        .read()
+        .guard(query());
     map.method::<PerspectiveAddSdnaParams, PerspectiveAddSdnaResult>(
         "perspective.addSdna",
         add_sdna,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveExecuteCommandsParams, ()>(
         "perspective.executeCommands",
         execute_commands,
-    );
-    map.method::<PerspectiveCreateSubjectParams, bool>("perspective.createSubject", create_subject);
-    map.method::<PerspectiveUpdateSubjectParams, bool>("perspective.updateSubject", update_subject);
-    map.method::<PerspectiveRemoveSubjectParams, bool>("perspective.removeSubject", remove_subject);
+    )
+    .guard(update());
+    map.method::<PerspectiveCreateSubjectParams, bool>("perspective.createSubject", create_subject)
+        .guard(update());
+    map.method::<PerspectiveUpdateSubjectParams, bool>("perspective.updateSubject", update_subject)
+        .guard(update());
+    map.method::<PerspectiveRemoveSubjectParams, bool>("perspective.removeSubject", remove_subject)
+        .guard(update());
     map.method::<PerspectiveGetSubjectDataParams, String>(
         "perspective.getSubjectData",
         get_subject_data,
     )
-    .read();
-    map.method::<PerspectiveUuidParams, String>("perspective.createBatch", create_batch);
+    .read()
+    .guard(query());
+    map.method::<PerspectiveUuidParams, String>("perspective.createBatch", create_batch)
+        .guard(update());
     map.method::<PerspectiveCommitBatchParams, PerspectiveLinkDiff>(
         "perspective.commitBatch",
         commit_batch,
-    );
-    map.method::<PerspectiveDiscardBatchParams, bool>("perspective.discardBatch", discard_batch);
+    )
+    .guard(update());
+    map.method::<PerspectiveDiscardBatchParams, bool>("perspective.discardBatch", discard_batch)
+        .guard(update());
     map.method::<PerspectiveQueryParams, PerspectiveSubscribed>(
         "perspective.subscribeQuery",
         subscribe_query,
-    );
+    )
+    .guard(query());
     map.method::<PerspectiveSubscriptionParams, PerspectiveResynced>(
         "perspective.resyncSubscription",
         resync_subscription,
-    );
-    map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeQuery", dispose_query);
+    )
+    .guard(query());
+    map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeQuery", dispose_query)
+        .guard(query());
     // Always answers 501; the result type mirrors `perspective.subscribeQuery`.
     map.method::<PerspectiveQueryParams, PerspectiveSubscribed>(
         "perspective.subscribeSparql",
         subscribe_sparql_query,
-    );
-    map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeSparql", dispose_query);
+    )
+    .guard(query());
+    map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeSparql", dispose_query)
+        .guard(query());
     map.method::<PerspectiveModelQueryParams, String>(
         "perspective.modelQuery",
         model_query_handler,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveSubjectClassesOfParams, std::collections::HashMap<String, Vec<String>>>(
         "perspective.subjectClassesOf",
         subject_classes_of_handler,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveModelQueryParams, PerspectiveSubscribed>(
         "perspective.modelSubscribe",
         model_subscribe_handler,
-    );
+    )
+    .guard(query());
     map.method::<PerspectiveEvaluateGettersParams, String>(
         "perspective.evaluateGetters",
         evaluate_getters_handler,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<RunInterpretationRequest, Vec<String>>(
         "perspective.runInterpretation",
         run_interpretation_handler,
     )
-    .long();
+    .long()
+    .guard(update());
     map.method::<RunInterpretationWithHarnessRequest, Vec<String>>(
         "perspective.runInterpretationWithHarness",
         run_interpretation_with_harness_handler,
     )
-    .long();
+    .long()
+    .guard(update());
     map.method::<PerspectiveAddAutoProcessorParams, String>(
         "perspective.addAutoProcessor",
         add_auto_processor_handler,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveRemoveAutoProcessorParams, bool>(
         "perspective.removeAutoProcessor",
         remove_auto_processor_handler,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveResolveInterpretationParams, bool>(
         "perspective.acceptInterpretation",
         accept_interpretation_handler,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveResolveInterpretationParams, bool>(
         "perspective.rejectInterpretation",
         reject_interpretation_handler,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveUuidParams, Vec<OverlayView>>(
         "perspective.interpretationOverlays",
         interpretation_overlays_handler,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveFlowProposalParams, Vec<FireOutcome>>(
         "perspective.acceptFlowProposal",
         accept_flow_proposal_handler,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveFlowProposalParams, PerspectiveRejectFlowProposalResult>(
         "perspective.rejectFlowProposal",
         reject_flow_proposal_handler,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveProposeFlowTransitionParams, ProposeOutcome>(
         "perspective.proposeFlowTransition",
         propose_flow_transition_handler,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveVerifyFlowReceiptParams, PerspectiveFlowReceiptVerdict>(
         "perspective.verifyFlowReceipt",
         verify_flow_receipt_handler,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveFlowValidOutputsParams, Vec<ValidOutput>>(
         "perspective.flowValidOutputs",
         flow_valid_outputs_handler,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveMintFlowReceiptParams, PerspectiveMintFlowReceiptResult>(
         "perspective.mintFlowReceipt",
         mint_flow_receipt_handler,
-    );
+    )
+    .guard(update());
     map.method::<PerspectiveFlowStatesParams, Vec<FlowStateEntry>>(
         "perspective.flowStates",
         flow_states_handler,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveFlowFiredParams, Vec<String>>(
         "perspective.flowFired",
         flow_fired_handler,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveUuidParams, Vec<String>>("perspective.getShaclNames", get_shacl_names)
-        .read();
+        .read()
+        .guard(query());
     map.method::<PerspectiveShaclNameParams, Option<String>>(
         "perspective.getShaclTargetClass",
         get_shacl_target_class,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveShaclNameParams, Option<PerspectiveShacl>>(
         "perspective.getShacl",
         get_shacl,
     )
-    .read();
+    .read()
+    .guard(query());
     map.method::<PerspectiveGetAllShaclParams, Vec<PerspectiveNamedShacl>>(
         "perspective.getAllShacl",
         get_all_shacl,
     )
-    .read();
+    .read()
+    .guard(query());
 }
 
 // ── Contracts ──
@@ -3443,4 +3179,25 @@ pub struct PerspectiveNamedShacl {
     pub name: String,
     pub shape_uri: String,
     pub links: Vec<ShaclLinkTriple>,
+}
+
+#[cfg(test)]
+mod credit_check_tests {
+    use super::*;
+
+    // On dev a closed database panicked these checks, so the write failed. The read error
+    // must not count as free hosting: the write would go through unchecked and uncharged.
+    #[test]
+    fn a_closed_database_is_not_free_hosting() {
+        let _closed = crate::test_utils::DbClosed::now();
+        let did = Some("did:key:z6MkClosedDbWriter");
+        assert!(check_credits(did).is_err(), "check_credits");
+        assert!(
+            reserve_credits(did, DEFAULT_LINK_WRITE).is_err(),
+            "reserve_credits"
+        );
+        // The main agent pays nothing and reads no setting.
+        assert!(check_credits(None).is_ok());
+        assert!(reserve_credits(None, DEFAULT_LINK_WRITE).is_ok());
+    }
 }

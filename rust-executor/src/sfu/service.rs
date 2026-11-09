@@ -202,7 +202,7 @@ impl SfuService {
             });
         }
 
-        // Pump pipe-renegotiation pubsub topics → gossip.  Phase F
+        // Pump the pipe-renegotiation bus → gossip.  Phase F
         // routes media negotiation across the cluster: when the SFU
         // event loop wants to add an outbound track to a pipe-bound
         // peer it publishes the offer to a dedicated topic and waits
@@ -257,26 +257,16 @@ impl SfuService {
         Ok(service)
     }
 
-    /// Subscribe to `SFU_PIPE_RENEGOTIATION_OFFER_TOPIC` and translate
+    /// Subscribe to the pipe bus's offers and translate
     /// each publish into a `CascadeSignal::PipeOffer` directed at the
     /// remote SFU.  Runs for the lifetime of the executor.
     async fn run_pipe_renegotiation_offer_bridge(self: Arc<Self>) {
-        let pubsub = crate::pubsub::get_global_pubsub().await;
-        let mut rx = pubsub
-            .subscribe(&crate::pubsub::SFU_PIPE_RENEGOTIATION_OFFER_TOPIC)
-            .await;
+        let mut rx = super::pipe_bus::subscribe_offers();
         loop {
-            let msg = match rx.recv().await {
+            let payload = match rx.recv().await {
                 Ok(m) => m,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            };
-            let payload: crate::sfu::SfuPipeRenegotiationOffer = match serde_json::from_str(&msg) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("SFU pipe-reneg offer bridge: parse error: {}", e);
-                    continue;
-                }
             };
             let signal = CascadeSignal::PipeOffer {
                 from_did: self.gossip.local_did().to_string(),
@@ -294,26 +284,16 @@ impl SfuService {
         }
     }
 
-    /// Subscribe to `SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC` and translate
+    /// Subscribe to the pipe bus's answers and translate
     /// each publish into a `CascadeSignal::PipeAnswer` directed at the
     /// remote SFU.  Runs for the lifetime of the executor.
     async fn run_pipe_renegotiation_answer_bridge(self: Arc<Self>) {
-        let pubsub = crate::pubsub::get_global_pubsub().await;
-        let mut rx = pubsub
-            .subscribe(&crate::pubsub::SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC)
-            .await;
+        let mut rx = super::pipe_bus::subscribe_answers();
         loop {
-            let msg = match rx.recv().await {
+            let payload = match rx.recv().await {
                 Ok(m) => m,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            };
-            let payload: crate::sfu::SfuPipeRenegotiationAnswer = match serde_json::from_str(&msg) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("SFU pipe-reneg answer bridge: parse error: {}", e);
-                    continue;
-                }
             };
             let signal = CascadeSignal::PipeAnswer {
                 from_did: self.gossip.local_did().to_string(),
@@ -358,7 +338,7 @@ impl SfuService {
             // resends a PipeOffer for an existing pipe (e.g. it added
             // outbound tracks for a freshly-joined peer), the event
             // loop applies the offer and publishes the answer back
-            // through the SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC bridge.
+            // through the pipe bus's answer bridge.
             // Tuple: (local pipe participant_id, sdp_offer_json,
             //         remote_did, room_id_str).
             let mut pipe_renegotiation_offers: Vec<(ParticipantId, String, String, String)> =
@@ -751,14 +731,7 @@ impl SfuService {
                                 evt.room_name,
                                 evt.migrate_to_did
                             );
-                            if let Ok(json) = serde_json::to_string(&evt) {
-                                pubsub
-                                    .publish(
-                                        &crate::pubsub::SFU_MIGRATE_TOPIC,
-                                        &json,
-                                    )
-                                    .await;
-                            }
+                            pubsub.publish_event(crate::events::Event::sfu_migrate(&evt));
                         }
                     }
                 }
@@ -804,8 +777,9 @@ impl SfuService {
 
     /// Tell everyone in `room_id` who is in it now. Called after every join
     /// and every departure, so clients follow membership without inferring it
-    /// from media.
-    async fn publish_roster(&self, room_id: &RoomId) {
+    /// from media. A departure also reaches the removed DID, including when the
+    /// room became empty; the payload still lists only current participants.
+    async fn publish_roster(&self, room_id: &RoomId, departed: Option<&str>) {
         let _order = self.roster_order.lock().await;
         let mut participants: Vec<String> = self
             .rooms
@@ -826,12 +800,9 @@ impl SfuService {
             room_name: room_id.room_name.clone(),
             participants,
         };
-        if let Ok(json) = serde_json::to_string(&roster) {
-            crate::pubsub::get_global_pubsub()
-                .await
-                .publish(&crate::pubsub::SFU_ROOM_ROSTER_TOPIC, &json)
-                .await;
-        }
+        crate::pubsub::get_global_pubsub()
+            .await
+            .publish_event(crate::events::Event::sfu_room_roster(&roster, departed));
     }
 
     /// Get the local address of the SFU server.
@@ -1103,7 +1074,7 @@ impl SfuService {
         };
 
         self.announce_room(&room_id.to_string(), local_count).await;
-        self.publish_roster(&room_id).await;
+        self.publish_roster(&room_id, None).await;
 
         Ok(CallSessionInfo {
             room_name: room_name.to_string(),
@@ -1199,7 +1170,7 @@ impl SfuService {
         // room will never come.
         let room_key = room_id.to_string();
         self.announce_room(&room_key, local_count).await;
-        self.publish_roster(room_id).await;
+        self.publish_roster(room_id, Some(agent_did)).await;
         if local_count == 0 {
             let signal = CascadeSignal::Leave {
                 did: self.gossip.local_did().to_string(),
@@ -1615,6 +1586,113 @@ mod tests {
             mode: mode.into(),
             ..Default::default()
         }
+    }
+
+    /// The production departure path publishes through the real event stream,
+    /// not a fake SDK API that bypasses audience filtering.
+    #[tokio::test]
+    async fn departed_session_receives_the_roster_without_itself() {
+        use crate::agent::capabilities::NEIGHBOURHOOD_READ_CAPABILITY;
+        use crate::agent::session::{Principal, Session};
+        use crate::agent::AgentContext;
+        use futures::StreamExt;
+
+        let session = |did: &str, read: bool| {
+            Arc::new(
+                Session::for_test(Principal::Agent(AgentContext::managed(did.to_string())))
+                    .with_did(did)
+                    .with_caps(if read {
+                        vec![NEIGHBOURHOOD_READ_CAPABILITY.clone()]
+                    } else {
+                        vec![]
+                    }),
+            )
+        };
+        // Keep this fixture local: registering the global service would make
+        // later executor tests inherit a server whose runtime already ended.
+        let server = SfuServer::start(SfuServerConfig::default()).await.unwrap();
+        let service = SfuService {
+            cascade_manager: Arc::new(RwLock::new(CascadeManager::new(
+                "did:node".into(),
+                server.local_addr,
+                8,
+            ))),
+            reachability: server.reachability.clone(),
+            server,
+            rooms: Arc::new(RwLock::new(RoomManager::new())),
+            gossip: Arc::new(super::super::gossip::NoopGossip::new("did:node".into(), 8)),
+            local_quality_preferences: RwLock::new(HashMap::new()),
+            preferred_node: None,
+            cascade_peer_dids: vec![],
+            roster_order: tokio::sync::Mutex::new(()),
+        };
+        for dead in [false, true] {
+            for last in [false, true] {
+                let room_id = RoomId::new("departure-delivery", format!("{dead}-{last}"));
+                {
+                    let mut rooms = service.rooms.write().await;
+                    rooms.create_room(room_id.clone(), None).unwrap();
+                    let room = rooms.get_room_mut(&room_id).unwrap();
+                    room.add_participant(ParticipantId(1), "did:departed".into())
+                        .unwrap();
+                    if !last {
+                        room.add_participant(ParticipantId(2), "did:remaining".into())
+                            .unwrap();
+                    }
+                }
+                let departed = session("did:departed", true);
+                let mut stream = crate::api::events_ws::build_event_stream(
+                    departed.clone(),
+                    crate::api::event_interest::watching_all(),
+                    None,
+                )
+                .await;
+                let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+                if dead {
+                    service
+                        .remove_dead_participant(super::super::server::DeadPeer {
+                            room_id: room_id.clone(),
+                            agent_did: "did:departed".into(),
+                            participant_id: ParticipantId(1),
+                            is_pipe: false,
+                        })
+                        .await;
+                } else {
+                    assert!(service
+                        .call_leave(
+                            &room_id.neighbourhood_url,
+                            &room_id.room_name,
+                            "did:departed"
+                        )
+                        .await
+                        .unwrap());
+                }
+                let event = events.try_recv().unwrap();
+                assert_eq!(event.topic, crate::events::Topic::SfuRoomRoster);
+                assert!(
+                    departed.may_receive(&event),
+                    "departure must reach the removed DID"
+                );
+                assert!(!session("did:outsider", true).may_receive(&event));
+                assert!(!session("did:departed", false).may_receive(&event));
+                assert_eq!(session("did:remaining", true).may_receive(&event), !last);
+                let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                    .await
+                    .expect("departed session receives the real stream event")
+                    .unwrap();
+                let message: serde_json::Value = serde_json::from_str(&message).unwrap();
+                assert_eq!(message["type"], "sfu-room-roster");
+                assert_eq!(
+                    message["participants"],
+                    if last {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::json!(["did:remaining"])
+                    }
+                );
+            }
+        }
+        service.shutdown().await;
     }
 
     #[test]

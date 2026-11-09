@@ -21,6 +21,8 @@ export * from "./perspectives/AutoProcessor";
 export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/FlowModels";
 export * from "./perspectives/TextContent";
+export * from "./perspectives/Mentioning";
+export * from "./perspectives/Container";
 // Also exports FlowFireOutcome / FlowProposeResult, the result shapes of the
 // flow write API — they live beside the `proposeTransition()` surface.
 export * from "./perspectives/FlowInstance";
@@ -42,6 +44,7 @@ export * from "./DID";
 export * from "./utils";
 export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
+export * from "./identity/IdentityClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeTypes"
 export { Model as AIModel, ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"

@@ -72,6 +72,13 @@ out to get its default.
 turn multi-user off on a data directory where it was enabled before: the
 executor records multi-user as on in its database and only ever sets it.
 
+Multi-user mode needs an admin credential. Without one, a caller with no
+token on a loopback listener is the operator, who could act as every user:
+`run` refuses `multi_user_config.enabled: true` (and a data directory whose
+database has multi-user on) when no admin credential is set, even with
+`--insecure-no-admin-credential`, and `user.setMultiUserEnabled(true)`
+answers 403.
+
 **`tls_config`** starts an HTTPS/WSS listener on `0.0.0.0:<tls_port>`. The
 plain RPC port then stays on `127.0.0.1`.
 
@@ -110,6 +117,27 @@ startup only: after the public IP changes, restart the executor.
 ```json
 { "sfu_bind_addr": "192.168.0.10", "sfu_udp_port": 40000,
   "sfu_stun_server": "stun.l.google.com:19302" }
+```
+
+**`identity`** (`storeUrl`, `storeKeys`, `allowPrivateSrc`; flags
+`--identity-store-url`, `--identity-store-keys`) names the `did:scid`
+identity store and the keys its signed heads must carry. Leave both out to
+use the store of the executor's network: the `identityStore` of the seed
+`ad4m-executor init` writes into the data folder (the seed this build
+carries names `https://store.ad4m.dev`; `--network-bootstrap-seed` gives
+another network's seed, whose `identityStore` names that network's store). A
+seed without `identityStore`, such as one an older `init` wrote, uses the
+store of the seed this build carries, so an upgraded executor keeps its store
+without re-running `init`. With no store at all, `did:scid` identities are
+off: `identity.status` answers `store: null`, and `identity.publish` /
+`identity.claimOffer` refuse `no-store-keys`. A `storeUrl` without
+`storeKeys` trusts no key for it. Errors and warnings about the store name
+where the bad value came from: `identity.storeUrl` / `identity.storeKeys`, or
+the seed's `identityStore`.
+
+```json
+{ "identity": { "storeUrl": "https://store.example.org",
+  "storeKeys": ["z6Mk…"] } }
 ```
 
 **`log_config`** sets a level (`error`, `warn`, `info`, `debug`, `trace`)
@@ -173,7 +201,7 @@ Environment=AD4M_UNLOCK_PASSPHRASE_FILE=%d/unlock-passphrase
 ### Unlocking at startup
 
 With `AD4M_UNLOCK_PASSPHRASE_FILE` set, the executor unlocks its agent
-itself once it has started, as `agent.unlock` would, so a restarted node
+itself once it has started, as `agent.unlock` would, so a restarted executor
 serves requests without anyone unlocking it. It logs
 `Agent unlocked at startup` on success. On a wrong passphrase it logs an
 error starting `Unlocking the agent at startup … failed`, keeps running

@@ -16,6 +16,8 @@
  *   initAdapters({ storage: new MockStorage() });
  */
 
+import type { SealedBox } from "./types.js";
+
 // ---------------------------------------------------------------------------
 // Transport (HTTP)
 // ---------------------------------------------------------------------------
@@ -54,13 +56,18 @@ export interface StorageAdapter {
  * Thin wrapper around the `agent*()` ad4m:host imports this language
  * actually needs. Deliberately narrow — the language never signs
  * commits itself (the runtime signs diffs upstream before they reach
- * `commit()`); it only needs its own DID (for auth + peer filtering)
- * and a deterministic signature primitive (for auth + X25519 key
- * derivation, see src/encryption.ts).
+ * `commit()`); it only needs its own DID (for auth + peer filtering),
+ * a signature primitive (for auth), and the executor's opening of boxes
+ * sealed to it (room keys, see src/encryption.ts).
  */
 export interface AgentAdapter {
     did(): string;
     signStringHex(payload: string): string;
+    /**
+     * `agentOpenSealed`: opens a box sealed to this agent, returns hex.
+     * Throws for a box sealed to any other DID.
+     */
+    openSealed(sealed: SealedBox): string;
 }
 
 // ---------------------------------------------------------------------------

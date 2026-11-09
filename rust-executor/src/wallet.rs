@@ -47,7 +47,7 @@ struct KeystoreEnvelope {
 const KEYSTORE_VERSION: u8 = 2;
 // Argon2id with the argon2 crate's defaults, OWASP's minimum: 19 MiB, 2 passes, 1 lane.
 // The legacy format paid exactly this cost on every save, without using the result, so
-// the fix changes no node's memory or CPU profile. The envelope records the parameters,
+// the fix changes no executor's memory or CPU profile. The envelope records the parameters,
 // so they can rise later without breaking existing files.
 const KDF_MEMORY_KIB: u32 = 19 * 1024;
 const KDF_PASSES: u32 = 2;
@@ -393,6 +393,21 @@ impl Wallet {
             .map(|keys| keys.by_name.keys().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Generate a new keypair, store it under its own DID and return the DID.
+    pub fn generate_keypair_named_by_did(&mut self) -> Result<String, AnyError> {
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or_else(|| anyhow!("wallet is locked"))?;
+        let key = did_key::generate::<Ed25519KeyPair>(None);
+        let did = key.get_did_document(DID_DOCUMENT_CONFIG).id;
+        if keys.by_name.contains_key(&did) {
+            return Err(anyhow!("a key named {} already exists", did));
+        }
+        keys.by_name.insert(did.clone(), Key::from(key));
+        Ok(did)
+    }
 }
 
 // ── Key name constants ─────────────────────────────────────────────────────
@@ -479,6 +494,20 @@ pub trait WalletBackend: Send + Sync {
     /// LocalWallet overrides this to resolve the DID and import its keys.
     fn initialize_keys(&self, _name: &str, _did: &str) -> Option<did_key::Document> {
         None
+    }
+
+    // ── Key naming: a managed agent's key is named by its DID ────────
+
+    /// Whether this backend can store a key under a name of its choosing, so that
+    /// `generate_keypair_named_by_did` works. Shared mode: false (the service creates keys
+    /// under a name it is given).
+    fn can_rename_keys(&self) -> bool {
+        false
+    }
+
+    /// Generate a new Ed25519 keypair, store it under its own DID, and return the DID.
+    fn generate_keypair_named_by_did(&self) -> Result<String, AnyError> {
+        Err(anyhow!("this wallet backend cannot name keys by DID"))
     }
 }
 
@@ -644,6 +673,15 @@ impl WalletBackend for LocalWallet {
     fn initialize_keys(&self, name: &str, did: &str) -> Option<did_key::Document> {
         let mut wallet = self.inner.lock().expect("wallet lock");
         wallet.initialize_keys(name.to_string(), did.to_string())
+    }
+
+    fn can_rename_keys(&self) -> bool {
+        true
+    }
+
+    fn generate_keypair_named_by_did(&self) -> Result<String, AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.generate_keypair_named_by_did()
     }
 }
 

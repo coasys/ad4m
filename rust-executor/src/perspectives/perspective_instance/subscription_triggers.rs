@@ -18,7 +18,9 @@
 //!
 //! 1. **`any`**: the predicate alone decides, as before. Used where the
 //!    query's reads cannot be told apart by node: `links`, `producedByFlow`,
-//!    property getters, transitive reads, and classes with no flag.
+//!    property getters, transitive reads, classes with no flag, and, when the
+//!    query has a window, the property a dotted `order` key sorts by (the
+//!    sort reads it on every linked target, flagged or not).
 //! 2. **`joins`**: a flag predicate written (or removed) with one of the
 //!    flag values of a class the subscription scans. This is how a new
 //!    record enters, and how a deleted one leaves the count.
@@ -27,11 +29,16 @@
 //!    in the last result this is a fast path: `scan` (a top-level record
 //!    carries its flag) or `via` (an included record is linked to its parent
 //!    in the result) matches the same write, after a store read.
-//! 4. **`scan`**: a predicate of a scanned class (the subscribed class and
+//! 4. **`holders`**: under a containment step in (`parent: { ids,
+//!    direction: "in" }` without a predicate), a predicate a holder class is
+//!    recognised by, written on a node that links an anchor through that
+//!    class's edge. This is how a node becomes a holder of an anchor when the
+//!    subscribed class does not read the holder's flag (#1461 review).
+//! 5. **`scan`**: a predicate of a scanned class (the subscribed class and
 //!    any class a `where` quantifier reads), written on a node that is an
 //!    instance of that class: it has one of the class's flag links. This is
 //!    how a record that is not in the result yet moves into a filter or a page.
-//! 5. **`via`**: a `near` predicate written on a node linked, through a
+//! 6. **`via`**: a `near` predicate written on a node linked, through a
 //!    relation the query includes, projects or orders by (`comments.text`),
 //!    to a node in the last result.
 //!    This is how an included record that was filtered out, or did not conform
@@ -50,7 +57,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::perspectives::model_query::types::ShapeProperty;
+use crate::perspectives::model_query::containment::{watched_predicates, ContainmentEdge};
+use crate::perspectives::model_query::types::{ScopeDirection, ShapeProperty};
 use crate::perspectives::model_query::{
     conformance_predicates, IncludeValue, ModelQueryInput, ModelShape, Scope, ShapeResolver,
     WhereCondition,
@@ -179,6 +187,15 @@ impl Predicates {
         }
     }
 
+    /// Every predicate either set holds.
+    fn extend(&mut self, other: Predicates) {
+        match other {
+            Predicates::All => *self = Predicates::All,
+            Predicates::None => {}
+            Predicates::Some(theirs) => theirs.iter().for_each(|p| self.add(p)),
+        }
+    }
+
     fn contains(&self, predicate: &str) -> bool {
         match self {
             Predicates::None => false,
@@ -218,6 +235,11 @@ pub(super) struct TriggerRules {
     /// A parent scope whose predicate is not known (`Scope::Model` without a
     /// `field`): any write touching an anchor re-runs.
     anchors_any_predicate: bool,
+    /// A containment step in from the anchors: predicate a holder class is
+    /// recognised by → the edge predicates that class holds through. A write
+    /// of one re-runs when its source links an anchor through one of them:
+    /// the node just became (or stopped being) a holder of an anchor.
+    holders: HashMap<String, Predicates>,
 }
 
 impl TriggerRules {
@@ -241,6 +263,7 @@ impl TriggerRules {
         let mut out: HashSet<&str> = self.any.iter().map(String::as_str).collect();
         out.extend(self.joins.keys().map(String::as_str));
         out.extend(self.scan.keys().map(String::as_str));
+        out.extend(self.holders.keys().map(String::as_str));
         for set in [&self.near, &self.via] {
             if let Predicates::Some(set) = set {
                 out.extend(set.iter().map(String::as_str));
@@ -258,13 +281,8 @@ impl TriggerRules {
         for (predicate, values) in other.joins {
             self.joins.entry(predicate).or_default().extend(values);
         }
-        for set in [(&mut self.near, other.near), (&mut self.via, other.via)] {
-            match set {
-                (mine, Predicates::All) => *mine = Predicates::All,
-                (_, Predicates::None) => {}
-                (mine, Predicates::Some(theirs)) => theirs.iter().for_each(|p| mine.add(p)),
-            }
-        }
+        self.near.extend(other.near);
+        self.via.extend(other.via);
         for (predicate, flags) in other.scan {
             let entry = self.scan.entry(predicate).or_default();
             for flag in flags {
@@ -275,6 +293,9 @@ impl TriggerRules {
         }
         self.anchors.extend(other.anchors);
         self.anchors_any_predicate |= other.anchors_any_predicate;
+        for (predicate, edges) in other.holders {
+            self.holders.entry(predicate).or_default().extend(edges);
+        }
     }
 }
 
@@ -290,7 +311,16 @@ impl super::PerspectiveInstance {
         query_json: &str,
         result: &str,
     ) -> ModelTrigger {
-        self.build_model_trigger_with(&self.shape_resolver(), class_names, query_json, result)
+        let query: ModelQueryInput = serde_json::from_str(query_json).unwrap_or_default();
+        let edges = crate::perspectives::model_query::containment::reads_containment(&query)
+            .then(|| self.containment_edges().expect("containment edges"));
+        self.build_model_trigger_with(
+            &self.shape_resolver(),
+            class_names,
+            query_json,
+            result,
+            edges.as_deref().map(Vec::as_slice),
+        )
     }
 
     /// [`Self::build_model_trigger`] reading shapes through `resolver`: the
@@ -302,6 +332,7 @@ impl super::PerspectiveInstance {
         class_names: impl IntoIterator<Item = &'a str>,
         query_json: &str,
         result: &str,
+        containment: Option<&[ContainmentEdge]>,
     ) -> ModelTrigger {
         let mut rules: Option<TriggerRules> = None;
         for class_name in class_names {
@@ -313,6 +344,7 @@ impl super::PerspectiveInstance {
                 resolver,
                 side,
                 &super::extract_predicates_from_sparql,
+                containment.unwrap_or_default(),
             );
             match &mut rules {
                 Some(rules) => rules.merge(class_rules),
@@ -340,9 +372,18 @@ impl super::PerspectiveInstance {
             .names()
             .iter()
             .flat_map(|class_name| {
-                self.build_model_trigger_predicates(class_name, Some(query_json))
+                let mut predicates =
+                    self.build_model_trigger_predicates(class_name, Some(query_json));
+                // A built-in's own rows (`Container`) have no stored shape.
+                if let Some(view) = targets.views.get(class_name) {
+                    predicates.extend(view.predicates());
+                }
+                predicates
             })
             .collect();
+        if let Some(edges) = &targets.containment {
+            trigger_predicates.extend(watched_predicates(edges));
+        }
         trigger_predicates.sort();
         trigger_predicates.dedup();
 
@@ -415,13 +456,15 @@ impl super::PerspectiveInstance {
 /// `extra_any` are predicates the query reads beside its classes' shapes
 /// (`links`, `producedByFlow`; see `model_query_side_predicates`), matched on
 /// the predicate alone. `getter_predicates` names the predicates a property
-/// getter's SPARQL reads.
+/// getter's SPARQL reads. `containment` is the edge set a containment scope
+/// reads.
 pub(super) fn build_rules(
     class_name: &str,
     query_json: &str,
     resolver: &dyn ShapeResolver,
     extra_any: impl IntoIterator<Item = String>,
     getter_predicates: &dyn Fn(&str) -> HashSet<String>,
+    containment: &[ContainmentEdge],
 ) -> TriggerRules {
     let Ok(shape) = resolver.get_shape(class_name) else {
         return TriggerRules::every_write();
@@ -433,6 +476,7 @@ pub(super) fn build_rules(
         rules: TriggerRules::default(),
         resolver,
         getter_predicates,
+        containment,
     };
     walk.rules.any.extend(extra_any);
     walk.scan_class(&shape, query.where_clause.as_ref());
@@ -447,6 +491,7 @@ struct Walk<'a> {
     rules: TriggerRules,
     resolver: &'a dyn ShapeResolver,
     getter_predicates: &'a dyn Fn(&str) -> HashSet<String>,
+    containment: &'a [ContainmentEdge],
 }
 
 impl Walk<'_> {
@@ -594,8 +639,17 @@ impl Walk<'_> {
         // Watch the target as an include one level down, without recursing:
         // only its own properties are read. A key naming no declared relation
         // sorts by nothing (the query falls back to the timestamp).
+        //
+        // Under a window (`limit` / `offset`) the last result holds only the
+        // page, so a target linked to a record off the page is near nothing
+        // in it, and `near` / `via` miss the edit that moves that record onto
+        // the page. Re-run on any write of the sorted property then: the sort
+        // reads it on every linked target, whether or not the target carries
+        // its class's flag, so `scan` would miss a target without one.
+        // Without a window every match is in the result already.
+        let windowed = query.limit.is_some() || query.offset.is_some();
         for key in query.order.iter().flatten().map(|(key, _)| key.as_str()) {
-            let Some((rel_name, _)) = key.split_once('.') else {
+            let Some((rel_name, prop_name)) = key.split_once('.') else {
                 continue;
             };
             let Some(rel) = shape.include_relations.iter().find(|r| r.name == rel_name) else {
@@ -606,7 +660,15 @@ impl Walk<'_> {
                 .then(|| self.resolver.get_shape(&rel.target_class_name).ok())
                 .flatten();
             match target {
-                Some(target) => self.watch_class(&target),
+                Some(target) => {
+                    self.watch_class(&target);
+                    if windowed {
+                        match target.properties.iter().find(|p| p.name == prop_name) {
+                            Some(p) => self.rules.any.extend([p.predicate.clone()]),
+                            None => self.rules.any.extend(target.predicates()),
+                        }
+                    }
+                }
                 // The targets' class is not known, so neither is the sorted
                 // property's predicate: any write on a target may move it.
                 None => self.rules.near = Predicates::All,
@@ -738,15 +800,58 @@ impl Walk<'_> {
                 predicate,
                 transitive,
                 levels,
+                direction,
                 ..
             } => {
+                // One step in: the rows hold an anchor. A node that becomes a
+                // holder is not an anchor and may be in no result yet (the
+                // subscribed class does not read the holder's flag), so its
+                // flag write is related back to the anchors (`holders`).
+                if predicate.is_none()
+                    && !*transitive
+                    && levels.is_none()
+                    && *direction == ScopeDirection::In
+                {
+                    for edge in self.containment {
+                        let Some(holder) = &edge.holder else {
+                            continue;
+                        };
+                        for recognised_by in holder.recognised_by() {
+                            self.rules
+                                .holders
+                                .entry(recognised_by)
+                                .or_default()
+                                .add(&edge.predicate);
+                        }
+                    }
+                }
                 self.rules.anchors.extend(ids.iter().cloned());
-                if *transitive || levels.is_some() {
-                    // Below the first level, a link's ends are neither anchors
-                    // nor (when a level limit cut them) result nodes.
-                    self.rules.any.insert(predicate.clone());
-                } else {
-                    self.rules.near.add(predicate);
+                // A containment traversal follows every edge's predicate, and
+                // a node that becomes a holder changes it too (see
+                // `Scope::Contained` below).
+                let followed: Vec<String> = match predicate {
+                    Some(predicate) => vec![predicate.clone()],
+                    None => watched_predicates(self.containment),
+                };
+                for predicate in &followed {
+                    if *transitive || levels.is_some() {
+                        // Below the first level, a link's ends are neither
+                        // anchors nor (when a level limit cut them) result
+                        // nodes.
+                        self.rules.any.insert(predicate.clone());
+                    } else {
+                        self.rules.near.add(predicate);
+                    }
+                }
+            }
+            // Every edge's predicate on the anchor, and the predicates its
+            // holder classes are recognised by: a flag written on the anchor
+            // turns its existing links on that class's predicate into
+            // containment.
+            Scope::Contained(c) => {
+                self.rules.anchors.insert(c.id.clone());
+                for predicate in watched_predicates(self.containment) {
+                    self.rules.near.add(&predicate);
                 }
             }
         }
@@ -838,6 +943,14 @@ impl ModelTrigger {
                 .any(|e| self.nodes.contains(*e) || rules.anchors.contains(*e))
         {
             return true;
+        }
+        // A holder's flag, on a node that links an anchor through that
+        // holder's edge. Read around the source only: the target is a flag
+        // value, which every instance links.
+        if let Some(edges) = rules.holders.get(predicate) {
+            if store.linked_through(source, edges, &rules.anchors) {
+                return true;
+            }
         }
         // The ends a write can change a record at. A target stored as an RDF
         // literal is a value on the source: no record carries a flag on it,

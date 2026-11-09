@@ -13,8 +13,8 @@
  *   TURN_USERNAME=...
  *   TURN_CREDENTIAL=...
  *
- * If `TURN_URL` is missing, the scenario reports `skipped=true` with a
- * note rather than failing — the rest of the wind tunnel still runs.
+ * If `TURN_URL` is missing, the scenario shows as skipped (pending)
+ * rather than failing — the rest of the wind tunnel still runs.
  *
  * Measures:
  *   - Connection time (TURN allocation + ICE check).
@@ -36,6 +36,12 @@ export const w5TurnFallback: Scenario = {
   name: "TURN fallback (relay-only ICE)",
   description: "Two peers with iceTransportPolicy=relay — verify TURN path works and quantify cost",
 
+  unavailable() {
+    return process.env.TURN_URL
+      ? null
+      : "TURN_URL env var not set — set TURN_URL=turn:host:port + TURN_USERNAME + TURN_CREDENTIAL to run.";
+  },
+
   async run(ctx: ScenarioContext): Promise<ScenarioResult> {
     const { branch } = ctx;
     const startTime = Date.now();
@@ -44,20 +50,8 @@ export const w5TurnFallback: Scenario = {
 
     const turnUrl = process.env.TURN_URL;
     if (!turnUrl) {
-      metrics["skipped"] = true;
-      metrics["skip_reason"] =
-        "TURN_URL env var not set — set TURN_URL=turn:host:port + TURN_USERNAME + TURN_CREDENTIAL to run.";
-      return {
-        scenario: "w5-turn-fallback",
-        branch,
-        startTime,
-        endTime: Date.now(),
-        durationMs: Date.now() - startTime,
-        passed: true,
-        metrics,
-        samples,
-        summary: `W5: SKIPPED — TURN_URL unset`,
-      };
+      // The harness skips the scenario first (see `unavailable`).
+      throw new Error("W5: TURN_URL env var not set");
     }
 
     const opts: PeerOptions = {

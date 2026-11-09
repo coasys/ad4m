@@ -96,11 +96,11 @@ export interface OnlineAgent {
 // ---------------------------------------------------------------------------
 
 /**
- * A LinkExpression as it travels over the wire. In a plaintext room this
- * is structurally identical to LinkExpression. In an E2E room, the `data`
- * field carries an `EncryptedLinkData` shape (`{ciphertext, nonce}`)
- * instead of a plaintext `Link` — there is no separate `encrypted` field.
- * See src/encryption.ts encryptLinkForWire / decryptLinkFromWire.
+ * A LinkExpression as it travels over the wire. Every room is end-to-end
+ * encrypted: `data` carries an `EncryptedLinkData` shape (`{ciphertext,
+ * nonce}`) and author, timestamp and proof are inside the ciphertext. A
+ * plaintext `Link` in `data` is what only a server could add; the language
+ * skips it. See src/encryption.ts encryptLinkForWire / decryptLinkFromWire.
  */
 export interface WireLinkExpression {
     author?: DID;
@@ -133,34 +133,29 @@ export interface CommitResponse {
     sequence?: number;
 }
 
-/**
- * One entry in the `/sync` response's `diffs[]` array. The exact shape
- * link-server uses for per-entry framing isn't nailed down by the
- * spec this language was built against, so both reasonable shapes are
- * accepted and normalized in src/sync.ts:
- *   - nested:  { diff: { additions, removals }, revision?, sequence? }
- *   - flat:    { additions, removals, revision?, sequence? }
- * Missing per-entry `revision`/`sequence` fall back to the response's
- * top-level values.
- */
+/** One entry in the `/sync` page's `diffs[]`: a diff and its sequence in the room's log. */
 export interface SyncDiffEntry {
-    diff?: WirePerspectiveDiff;
-    additions?: WireLinkExpression[];
-    removals?: WireLinkExpression[];
-    revision?: string;
-    sequence?: number;
+    additions: WireLinkExpression[];
+    removals: WireLinkExpression[];
+    sequence: number;
 }
 
 export interface SyncResponse {
     diffs: SyncDiffEntry[];
     revision: string;
     sequence: number;
+    /** The `since` of the next page; null on the last page. */
+    next: number | null;
 }
 
 export interface RenderResponse {
     links: WireLinkExpression[];
     revision: string;
     sequence: number;
+    /** The sequence the snapshot is pinned at: tail `/sync` from here. */
+    upto: number;
+    /** Cursor of the next page; null on the last page. */
+    next: string | null;
 }
 
 export interface PeersResponse {
@@ -169,8 +164,6 @@ export interface PeersResponse {
 
 export interface AclMember {
     did: DID;
-    x25519PublicKey: string | null;
-    x25519Signature: string | null;
 }
 
 export interface AclResponse {
@@ -179,22 +172,19 @@ export interface AclResponse {
 }
 
 export interface KeysResponseEntry {
-    encryptedKey: SealedRoomKeyEnvelope;
+    encryptedKey: SealedBox;
     version: number;
+    /** The rotation's commitment to the version's key; absent for a version from before commitments. */
+    commitment?: string;
 }
 
 export interface KeysResponse {
     keys: KeysResponseEntry[];
-    /** True when the room has E2E enabled (even if this agent has no keys
-     *  yet). Absent on 404 responses (room has no E2E at all). */
-    e2e_enabled?: boolean;
 }
 
 export interface MemberMissingKeys {
     did: string;
     missingVersions: number[];
-    x25519PublicKey: string;
-    x25519Signature: string | null;
 }
 
 export interface MissingKeysResponse {
@@ -213,6 +203,7 @@ export type ServerWsMessage =
     | { type: "peer-joined"; did: DID }
     | { type: "peer-left"; did: DID }
     | { type: "status-changed"; did: DID; status: unknown }
+    | { type: "keys-granted"; versions: number[] }
     | { type: "auth-error"; error: string };
 
 export type ClientWsMessage =
@@ -226,11 +217,12 @@ export type ClientWsMessage =
 // ---------------------------------------------------------------------------
 
 /**
- * Sealed-box style envelope used to deliver the room's shared symmetric
- * key to a single recipient, addressed to their X25519 public key.
- * See src/encryption.ts for the full scheme.
+ * A room key version sealed to one member's DID by `sealToDid`
+ * (src/encryption.ts: X25519 form of the DID's Ed25519 key, ECDH +
+ * HKDF-SHA256 + AES-256-GCM; docs-src/host-contract.md "Sealed boxes").
+ * Only that member's executor opens it (`agentOpenSealed`).
  */
-export interface SealedRoomKeyEnvelope {
+export interface SealedBox {
     /** Hex-encoded ephemeral X25519 public key used for this seal. */
     ephemeralPublicKey: string;
     /** Hex-encoded 12-byte AES-GCM nonce. */

@@ -1,3 +1,5 @@
+use crate::secret::Secret;
+use crate::types::ModelApiInput;
 use crate::types::{
     AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
     NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
@@ -23,6 +25,15 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
+
+mod grants;
+mod identity;
+mod tasks;
+pub use grants::GrantRow;
+#[cfg(test)]
+pub(crate) use identity::operator_record_in;
+pub(crate) use identity::set_operator_record_if_empty_in;
+pub use identity::{JoinRow, OperatorRecordRow, OperatorSetBy};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -57,10 +68,28 @@ impl std::fmt::Display for InvalidDefaultModel {
 
 impl std::error::Error for InvalidDefaultModel {}
 
+/// `update_model` was asked to keep a stored provider key while moving the model to
+/// another base URL. The key goes only to the endpoint it was set for, so the caller
+/// sends it again (or an empty key) with the new URL. A caller's mistake: a bad request.
+#[derive(Debug)]
+pub struct ApiKeyNotResent;
+
+impl std::fmt::Display for ApiKeyNotResent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "The model has a stored API key and the base URL changed: send apiKey again \
+             (an empty string for none) to move the model to another endpoint",
+        )
+    }
+}
+
+impl std::error::Error for ApiKeyNotResent {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentRequest {
     pub id: i64,
-    pub user_email: String,
+    /// The agent that asked to pay: the DID of a managed agent.
+    pub agent_did: String,
     pub amount_hot: String,
     pub proposal_action_hash: Option<String>,
     pub status: String,
@@ -122,6 +151,15 @@ fn flow_replica_row(row: &rusqlite::Row) -> rusqlite::Result<FlowReplicaStateRow
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+/// The key column for a sent `api`: the key, or empty for none. Reads the secret out
+/// because the database is where the executor keeps it.
+fn sent_api_key(api: &ModelApiInput) -> String {
+    api.api_key
+        .as_ref()
+        .map(|key| key.expose().to_string())
+        .unwrap_or_default()
+}
+
 lazy_static! {
     static ref AD4M_DB_INSTANCE: Arc<Mutex<Option<Ad4mDb>>> = Arc::new(Mutex::new(None));
 }
@@ -141,8 +179,9 @@ impl Ad4mDb {
         AD4M_DB_INSTANCE.clone()
     }
 
-    fn new(db_path: &str) -> Ad4mDbResult<Self> {
+    pub(crate) fn new(db_path: &str) -> Ad4mDbResult<Self> {
         let conn = Connection::open(db_path)?;
+        Self::refuse_data_from_before_did_keys(&conn)?;
 
         // Create tables if they don't exist
 
@@ -284,7 +323,8 @@ impl Ad4mDb {
                 prompt_examples TEXT NOT NULL,
                 metadata TEXT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                agent_did TEXT
              )",
             [],
         )?;
@@ -345,6 +385,11 @@ impl Ad4mDb {
              )",
             [],
         )?;
+
+        // The tokens the executor issued: see agent::grants.
+        Self::create_grants_table(&conn)?;
+        // The operator record and the identities local agents speak for: see identity::.
+        Self::create_identity_tables(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS email_verifications (
@@ -417,6 +462,12 @@ impl Ad4mDb {
         // `migrate_notification_owners` moves them to `owner_did` once the agent's DID is known.
         alter_add_column("ALTER TABLE notifications ADD COLUMN owner_did TEXT")?;
 
+        // Owner of each AI task: the DID of the managed agent whose session created it. NULL
+        // marks a task of the main agent, which includes every row created before this
+        // column (a v0.12.0 data folder). Appended last so its `SELECT *` position matches a
+        // fresh table.
+        alter_add_column("ALTER TABLE tasks ADD COLUMN agent_did TEXT")?;
+
         // Add hosting columns to users table
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
         alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
@@ -446,7 +497,7 @@ impl Ad4mDb {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS payment_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_email TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
                 amount_hot TEXT NOT NULL,
                 proposal_action_hash TEXT UNIQUE,
                 status TEXT NOT NULL DEFAULT 'pending',
@@ -488,7 +539,7 @@ impl Ad4mDb {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS compute_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_email TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
                 timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 operation TEXT NOT NULL,
                 summary TEXT,
@@ -496,8 +547,12 @@ impl Ad4mDb {
                 credits_after REAL NOT NULL
             )",
         )?;
+
+        // `users.did` is the key of a managed agent: one user per DID. Users without an agent
+        // (an empty DID) stay out of the index.
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_compute_log_user_time ON compute_log(user_email, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_compute_log_agent_time ON compute_log(agent_did, timestamp);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_did ON users(did) WHERE did != '';",
         )?;
 
         // The flow engine's per-replica bookkeeping (#1424): what each agent's
@@ -537,6 +592,29 @@ impl Ad4mDb {
         )?;
 
         Ok(Self { conn })
+    }
+
+    /// Refuses a database that a `dev` build wrote before agents were keyed by DID (D16):
+    /// its billing tables name users by `user_email`. No migration exists, so it stops here
+    /// with a message instead of failing later on a missing `agent_did` column.
+    fn refuse_data_from_before_did_keys(conn: &Connection) -> Ad4mDbResult<()> {
+        for table in ["compute_log", "payment_requests"] {
+            let has_user_email: bool = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = 'user_email'"
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            if has_user_email {
+                return Err(anyhow!(
+                    "This data folder was written by a dev build from before agents were keyed \
+                     by DID ({table}.user_email). It cannot be upgraded: start the executor with \
+                     a fresh data folder."
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn create_or_update_model_status(
@@ -585,6 +663,7 @@ impl Ad4mDb {
         }
     }
 
+    /// `agent_did` is the owning managed agent; `None` makes a task of the main agent.
     pub fn add_task(
         &self,
         name: String,
@@ -592,13 +671,14 @@ impl Ad4mDb {
         system_prompt: String,
         prompt_examples: Vec<AIPromptExamples>,
         metadata: Option<String>,
+        agent_did: Option<&str>,
     ) -> Result<String, rusqlite::Error> {
         let created_at = chrono::Utc::now().to_string();
         let updated_at = created_at.clone();
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, created_at, updated_at],
+            "INSERT INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, created_at, updated_at, agent_did],
         )?;
         Ok(id)
     }
@@ -863,7 +943,8 @@ impl Ad4mDb {
                 notification.trigger,
                 serde_json::to_string(&notification.perspective_ids).unwrap(),
                 notification.webhook_url,
-                notification.webhook_auth,
+                // The database is where the executor keeps the credential.
+                notification.webhook_auth.expose(),
                 owner_did,
             ],
         )?;
@@ -882,7 +963,7 @@ impl Ad4mDb {
             trigger: row.get(6)?,
             perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
             webhook_url: row.get(8)?,
-            webhook_auth: row.get(9)?,
+            webhook_auth: Secret::new(row.get::<_, String>(9)?),
             owner_did: row.get(10)?,
         })
     }
@@ -999,7 +1080,8 @@ impl Ad4mDb {
                 updated_notification.trigger,
                 serde_json::to_string(&updated_notification.perspective_ids).unwrap(),
                 updated_notification.webhook_url,
-                updated_notification.webhook_auth,
+                // The database is where the executor keeps the credential.
+                updated_notification.webhook_auth.expose(),
                 updated_notification.granted,
                 updated_notification.owner_did,
             ],
@@ -1348,8 +1430,8 @@ impl Ad4mDb {
     /// **Caller must enforce authorization.** This method trusts
     /// that the caller already verified the DID matches the
     /// authenticated identity (or holds admin privileges).
-    /// The `sfu.ensureMembership` WS handler gates this behind
-    /// `is_admin_credential`.
+    /// The `sfu.ensureMembership` WS handler allows only the executor's
+    /// operator (`RequestContext::is_operator`).
     pub fn ensure_neighbourhood_member(
         &self,
         neighbourhood_url: &str,
@@ -1955,7 +2037,7 @@ impl Ad4mDb {
         max_count: Option<usize>,
     ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
         let mut stmt = self.conn.prepare(
-            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
+            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2 ORDER BY id",
         )?;
         let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
             let additions: Vec<LinkExpression> =
@@ -2035,6 +2117,79 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// Take diffs out of the pending queue without deleting them: the commit
+    /// loop no longer sends them, and the rows stay for inspection, export and
+    /// recovery.
+    pub fn park_pending_diffs(&self, perspective_uuid: &str, ids: Vec<u64>) -> Ad4mDbResult<()> {
+        let id_list = ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<String>>()
+            .join(",");
+
+        self.conn.execute(
+            &format!(
+                "UPDATE perspective_diff SET is_pending = ?2 WHERE perspective = ?1 AND id IN ({})",
+                id_list
+            ),
+            params![perspective_uuid, false],
+        )?;
+        Ok(())
+    }
+
+    /// The additions of every diff of the perspective still in `perspective_diff`: queued
+    /// (`is_pending = 1`, the commit loop sends them) or parked (`is_pending = 0`, never
+    /// sent again). A sent diff's row is deleted. Their links stay in the store as
+    /// Shared, but the fallback sync must not send them: the queue owns them.
+    ///
+    /// An imported row is stored without a shape check. A row whose additions do not
+    /// read as links is skipped with a warning naming its id: failing the whole read
+    /// would stop the fallback sync on every attempt.
+    pub fn get_unsent_additions(
+        &self,
+        perspective_uuid: &str,
+    ) -> Ad4mDbResult<Vec<LinkExpression>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, additions FROM perspective_diff WHERE perspective = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![perspective_uuid], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)))
+        })?;
+        let mut additions = Vec::new();
+        for row in rows {
+            let (id, raw) = row?;
+            // Each addition on its own: one malformed entry must not take the row's
+            // readable links out of the exclusion set.
+            let elements = raw
+                .map_err(AnyError::from)
+                .and_then(|raw| Ok(serde_json::from_str::<Vec<serde_json::Value>>(&raw)?));
+            let elements = match elements {
+                Ok(elements) => elements,
+                Err(e) => {
+                    log::warn!(
+                        "perspective {}: skipping diff {}, its additions are not a list: {}",
+                        perspective_uuid,
+                        id,
+                        e
+                    );
+                    continue;
+                }
+            };
+            for element in elements {
+                match serde_json::from_value::<LinkExpression>(element) {
+                    Ok(link) => additions.push(link),
+                    Err(e) => log::warn!(
+                        "perspective {}: skipping an addition of diff {} that does not read as a link: {}",
+                        perspective_uuid,
+                        id,
+                        e
+                    ),
+                }
+            }
+        }
+        Ok(additions)
+    }
+
     // Expression Methods
 
     pub fn _add_expression<T: Serialize>(
@@ -2071,7 +2226,7 @@ impl Ad4mDb {
                 id,
                 model.name,
                 model.api.as_ref().map(|api| api.base_url.to_string()),
-                model.api.as_ref().map(|api| api.api_key.clone()),
+                model.api.as_ref().map(sent_api_key),
                 model.api.as_ref().map(|api| api.model.clone()),
                 model.api.as_ref().map(|api| serde_json::to_string(&api.api_type).unwrap()),
                 model.local.as_ref().map(|local| local.file_name.clone()),
@@ -2099,7 +2254,7 @@ impl Ad4mDb {
                 ) {
                     Some(ModelApi {
                         base_url: Url::parse(&base_url).unwrap(),
-                        api_key,
+                        api_key: Secret::new(api_key),
                         model,
                         api_type: ModelApiType::from_str(&api_type).unwrap(),
                         max_num_ctx: row.get::<_, Option<u32>>(13)?,
@@ -2158,7 +2313,7 @@ impl Ad4mDb {
             ) {
                 Some(ModelApi {
                     base_url: Url::parse(&base_url).unwrap(),
-                    api_key,
+                    api_key: Secret::new(api_key),
                     model,
                     api_type: ModelApiType::from_str(&api_type).unwrap(),
                     max_num_ctx: row.get::<_, Option<u32>>(13)?,
@@ -2209,9 +2364,14 @@ impl Ad4mDb {
         Ok(models)
     }
 
+    /// Replaces the model's settings with `model`. An `api` without a key keeps the stored
+    /// key, and fails with [`ApiKeyNotResent`] when that key is set and the base URL changes.
     pub fn update_model(&self, id: &str, model: &ModelInput) -> Ad4mDbResult<()> {
         let api_base_url = model.api.as_ref().map(|api| api.base_url.to_string());
-        let api_key = model.api.as_ref().map(|api| api.api_key.clone());
+        let api_key = match &model.api {
+            Some(api) if api.api_key.is_none() => Some(self.kept_api_key(id, &api.base_url)?),
+            api => api.as_ref().map(sent_api_key),
+        };
         let api_model = model.api.as_ref().map(|api| api.model.clone());
         let api_type = model.api.as_ref().map(|api| api.api_type.to_string());
         let api_max_num_ctx = model.api.as_ref().and_then(|api| api.max_num_ctx);
@@ -2265,6 +2425,32 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// The stored key an update without one keeps: empty when the model has none (or does
+    /// not exist), refused when it has one and `base_url` differs from the stored URL.
+    fn kept_api_key(&self, id: &str, base_url: &str) -> Ad4mDbResult<String> {
+        let stored: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT api_base_url, api_key FROM models WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((stored_url, Some(stored_key))) = stored else {
+            return Ok(String::new());
+        };
+        if stored_key.is_empty() {
+            return Ok(stored_key);
+        }
+        let same_endpoint = stored_url
+            .as_deref()
+            .is_some_and(|stored| crate::types::same_endpoint(stored, base_url));
+        if !same_endpoint {
+            return Err(ApiKeyNotResent.into());
+        }
+        Ok(stored_key)
+    }
+
     pub fn remove_model(&self, id: &str) -> Ad4mDbResult<()> {
         self.conn
             .execute("DELETE FROM models WHERE id = ?1", params![id])?;
@@ -2315,6 +2501,9 @@ impl Ad4mDb {
         }
     }
 
+    /// Runs `func` on the global instance. Tests only: executor code reaches the database
+    /// through `crate::db_backend::db_backend()`, so a shared-mode executor serves it too.
+    #[cfg(test)]
     pub fn with_global_instance<F, R>(func: F) -> R
     where
         F: FnOnce(&Ad4mDb) -> R,
@@ -2433,7 +2622,7 @@ impl Ad4mDb {
 
         // Export tasks
         let tasks: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at FROM tasks"
+            "SELECT id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did FROM tasks"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -2443,7 +2632,8 @@ impl Ad4mDb {
                 "prompt_examples": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(4)?).unwrap_or(serde_json::Value::Null),
                 "metadata": row.get::<_, Option<String>>(5)?,
                 "created_at": row.get::<_, String>(6)?,
-                "updated_at": row.get::<_, String>(7)?
+                "updated_at": row.get::<_, String>(7)?,
+                "agent_did": row.get::<_, Option<String>>(8)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert("tasks".to_string(), serde_json::to_value(tasks)?);
@@ -2568,11 +2758,11 @@ impl Ad4mDb {
         // Export payment_requests
         let payment_requests: Vec<serde_json::Value> = self
             .conn
-            .prepare("SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests")?
+            .prepare("SELECT id, agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests")?
             .query_map([], |row| {
                 Ok(serde_json::json!({
                     "id": row.get::<_, i64>(0)?,
-                    "user_email": row.get::<_, String>(1)?,
+                    "agent_did": row.get::<_, String>(1)?,
                     "amount_hot": row.get::<_, String>(2)?,
                     "proposal_action_hash": row.get::<_, Option<String>>(3)?,
                     "status": row.get::<_, String>(4)?,
@@ -2963,8 +3153,8 @@ impl Ad4mDb {
                             .and_then(|n| n.as_str())
                             .unwrap_or("<unknown>");
                         match self.conn.execute(
-                            "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) 
-                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did)
+                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                             params![
                                 task["id"].as_str().unwrap_or(""),
                                 task["name"].as_str().unwrap_or(""),
@@ -2973,7 +3163,8 @@ impl Ad4mDb {
                                 task["prompt_examples"].to_string(),
                                 task["metadata"].as_str(),
                                 task["created_at"].as_str().unwrap_or(""),
-                                task["updated_at"].as_str().unwrap_or("")
+                                task["updated_at"].as_str().unwrap_or(""),
+                                task["agent_did"].as_str()
                             ],
                         ) {
                             Ok(_) => result.tasks.imported += 1,
@@ -3260,14 +3451,22 @@ impl Ad4mDb {
                 log::debug!("Importing {} payment_requests", requests.len());
                 for req in requests {
                     if let Err(e) = self.conn.execute(
-                        "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash, status, created_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        // Exports from before agents were keyed by DID name the user by
+                        // email; `users` was imported above, so it resolves to the agent.
+                        "INSERT OR IGNORE INTO payment_requests (agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at)
+                         SELECT did, ?2, ?3, ?4, ?5, ?6 FROM (
+                             SELECT ?1 AS did WHERE ?1 IS NOT NULL
+                             UNION ALL
+                             SELECT NULLIF(did, '') FROM users WHERE ?1 IS NULL AND username = ?7
+                         ) WHERE did IS NOT NULL",
                         params![
-                            req["user_email"].as_str().unwrap_or(""),
+                            req["agent_did"].as_str(),
                             req["amount_hot"].as_str().unwrap_or("0"),
                             req["proposal_action_hash"].as_str(),
                             req["status"].as_str().unwrap_or("pending"),
                             req["created_at"].as_str().unwrap_or(""),
-                            req["completed_at"].as_str()
+                            req["completed_at"].as_str(),
+                            req["user_email"].as_str()
                         ],
                     ) {
                         log::warn!("Failed to import payment_request: {}", e);
@@ -3381,12 +3580,22 @@ impl Ad4mDb {
     pub fn get_username_by_did(&self, did: &str) -> Ad4mDbResult<Option<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username FROM users WHERE did = ?1")?;
+            .prepare("SELECT username FROM users WHERE did = ?1 AND did != ''")?;
         match stmt.query_row([did], |row| row.get::<_, String>(0)) {
             Ok(username) => Ok(Some(username)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Points the user `username` at the agent `did` (tests build stale or mismatched rows).
+    #[cfg(test)]
+    pub fn set_user_did(&self, username: &str, did: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE users SET did = ?2 WHERE username = ?1",
+            params![username, did],
+        )?;
+        Ok(())
     }
 
     pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
@@ -3396,6 +3605,34 @@ impl Ad4mDb {
             params![timestamp, email],
         )?;
         Ok(())
+    }
+
+    /// Records that the managed agent `agent_did` was just active (its account's last_seen).
+    pub fn update_agent_last_seen(&self, agent_did: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "UPDATE users SET last_seen = ?1 WHERE did = ?2 AND did != ''",
+            params![timestamp, agent_did],
+        )?;
+        Ok(())
+    }
+
+    /// The account that owns the managed agent `agent_did`.
+    pub fn get_user_by_did(&self, agent_did: &str) -> Ad4mDbResult<Option<UserInfo>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT username, did, last_seen FROM users WHERE did = ?1 AND did != ''",
+                [agent_did],
+                |row| {
+                    Ok(UserInfo {
+                        username: row.get(0)?,
+                        did: row.get(1)?,
+                        last_seen: row.get(2).ok(),
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn list_users(&self) -> Ad4mDbResult<Vec<UserInfo>> {
@@ -3518,6 +3755,21 @@ impl Ad4mDb {
         Self::require_user_row(rows, email)
     }
 
+    /// Adds credits to the account that owns the agent `agent_did`; returns the account's email.
+    pub fn add_agent_credits(&self, agent_did: &str, amount: f64) -> Ad4mDbResult<String> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = COALESCE(remaining_credits, 0) + ?1 WHERE did = ?2 AND did != ''",
+            params![amount, agent_did],
+        )?;
+        Self::require_user_row(rows, agent_did)?;
+        Ok(self.conn.query_row(
+            "SELECT username FROM users WHERE did = ?1",
+            [agent_did],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn deduct_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
         Self::validate_credit_amount(amount)?;
         let rows = self.conn.execute(
@@ -3551,106 +3803,138 @@ impl Ad4mDb {
         Ok(())
     }
 
-    /// Atomically deduct credits AND insert a compute log entry in a single transaction.
-    /// Returns the credits_after value on success.
+    /// [`Ad4mDb::deduct_user_credits_if_available`] for the account that owns the agent
+    /// `agent_did`; returns the account's email.
+    pub fn deduct_agent_credits_if_available(
+        &self,
+        agent_did: &str,
+        amount: f64,
+    ) -> Ad4mDbResult<String> {
+        let email = self
+            .get_username_by_did(agent_did)?
+            .filter(|_| !agent_did.is_empty())
+            .ok_or_else(|| anyhow!("User not found: {}", agent_did))?;
+        self.deduct_user_credits_if_available(&email, amount)?;
+        Ok(email)
+    }
+
+    /// Atomically deduct credits from the account that owns the agent `agent_did` AND insert a
+    /// compute log entry for the agent, in a single transaction.
+    /// Returns the log row id, the credits left, and the account's email (whose hosting info
+    /// changed).
     pub fn deduct_credits_and_log(
         &self,
-        email: &str,
+        agent_did: &str,
         amount: f64,
         operation: &str,
         summary: Option<&str>,
-    ) -> Ad4mDbResult<(i64, f64)> {
+    ) -> Ad4mDbResult<(i64, f64, String)> {
         Self::validate_credit_amount(amount)?;
         let tx = self.conn.unchecked_transaction()?;
 
         // Deduct credits, clamped to 0 (never negative).
         // Any user with credits > 0 is charged; the balance floors at 0.
         let rows = tx.execute(
-            "UPDATE users SET remaining_credits = MAX(remaining_credits - ?1, 0) WHERE username = ?2 AND COALESCE(remaining_credits, 0) > 0",
-            params![amount, email],
+            "UPDATE users SET remaining_credits = MAX(remaining_credits - ?1, 0) WHERE did = ?2 AND did != '' AND COALESCE(remaining_credits, 0) > 0",
+            params![amount, agent_did],
         )?;
         if rows == 0 {
             let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1)",
-                [email],
+                "SELECT EXISTS(SELECT 1 FROM users WHERE did = ?1 AND did != '')",
+                [agent_did],
                 |row| row.get(0),
             )?;
             // tx is dropped here → auto-rollback
             if !exists {
-                return Err(anyhow!("User not found: {}", email));
+                return Err(anyhow!("User not found: {}", agent_did));
             }
             return Err(anyhow!("Insufficient compute credits"));
         }
 
         // Read the resulting balance within the same transaction
-        let credits_after: f64 = tx.query_row(
-            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE username = ?1",
-            [email],
-            |row| row.get(0),
+        let (credits_after, email): (f64, String) = tx.query_row(
+            "SELECT COALESCE(remaining_credits, 0), username FROM users WHERE did = ?1",
+            [agent_did],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
 
         // Insert the audit log entry
         tx.execute(
-            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![email, operation, summary, amount, credits_after],
+            "INSERT INTO compute_log (agent_did, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![agent_did, operation, summary, amount, credits_after],
         )?;
         let row_id = tx.last_insert_rowid();
 
         tx.commit()?;
-        Ok((row_id, credits_after))
+        Ok((row_id, credits_after, email))
+    }
+
+    /// The credits of the account that owns the agent `agent_did`.
+    pub fn get_agent_credits(&self, agent_did: &str) -> Ad4mDbResult<f64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE did = ?1 AND did != ''",
+            [agent_did],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Whether the account that owns the agent `agent_did` computes for free.
+    pub fn get_agent_free_access(&self, agent_did: &str) -> Ad4mDbResult<bool> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(free_access, 0) FROM users WHERE did = ?1 AND did != ''",
+            [agent_did],
+            |row| row.get(0),
+        )?)
     }
 
     // ── Compute activity log ────────────────────────────────────────────
 
-    /// Insert a compute log entry after a billing event.
+    /// Insert a compute log entry after a billing event of the agent `agent_did`.
     pub fn insert_compute_log(
         &self,
-        email: &str,
+        agent_did: &str,
         operation: &str,
         summary: Option<&str>,
         cost: f64,
         credits_after: f64,
     ) -> Ad4mDbResult<i64> {
         self.conn.execute(
-            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![email, operation, summary, cost, credits_after],
+            "INSERT INTO compute_log (agent_did, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![agent_did, operation, summary, cost, credits_after],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Query compute log entries for a user, ordered newest-first.
+    /// The columns of a `ComputeLogEntry`. `userEmail` names the account that owns the agent,
+    /// for display; the row itself names the agent by DID.
+    const COMPUTE_LOG_SELECT: &'static str = "SELECT c.id, COALESCE(u.username, c.agent_did), c.timestamp, c.operation, c.summary, c.cost, c.credits_after FROM compute_log c LEFT JOIN users u ON u.did = c.agent_did";
+
+    fn compute_log_entry(row: &rusqlite::Row) -> rusqlite::Result<ComputeLogEntry> {
+        Ok(ComputeLogEntry {
+            id: row.get(0)?,
+            user_email: row.get(1)?,
+            timestamp: row.get(2)?,
+            operation: row.get(3)?,
+            summary: row.get(4)?,
+            cost: row.get(5)?,
+            credits_after: row.get(6)?,
+        })
+    }
+
+    /// Query compute log entries of the agent `agent_did`, ordered newest-first.
     /// If `since` is provided (ISO 8601), only entries after that timestamp are returned.
     pub fn get_compute_log(
         &self,
-        email: &str,
+        agent_did: &str,
         since: Option<&str>,
         limit: i64,
     ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
-        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
-            Some(ts) => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 AND timestamp > ?2 ORDER BY id DESC LIMIT ?3",
-                vec![Box::new(email.to_string()), Box::new(ts.to_string()), Box::new(limit)],
-            ),
-            None => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 ORDER BY id DESC LIMIT ?2",
-                vec![Box::new(email.to_string()), Box::new(limit)],
-            ),
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&format!(
+            "{} WHERE c.agent_did = ?1 AND (?2 IS NULL OR c.timestamp > ?2) ORDER BY c.id DESC LIMIT ?3",
+            Self::COMPUTE_LOG_SELECT
+        ))?;
         let entries = stmt
-            .query_map(params_refs.as_slice(), |row| {
-                Ok(ComputeLogEntry {
-                    id: row.get(0)?,
-                    user_email: row.get(1)?,
-                    timestamp: row.get(2)?,
-                    operation: row.get(3)?,
-                    summary: row.get(4)?,
-                    cost: row.get(5)?,
-                    credits_after: row.get(6)?,
-                })
-            })?
+            .query_map(params![agent_did, since, limit], Self::compute_log_entry)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(entries)
     }
@@ -3661,31 +3945,12 @@ impl Ad4mDb {
         since: Option<&str>,
         limit: i64,
     ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
-        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
-            Some(ts) => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE timestamp > ?1 ORDER BY id DESC LIMIT ?2",
-                vec![Box::new(ts.to_string()), Box::new(limit)],
-            ),
-            None => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log ORDER BY id DESC LIMIT ?1",
-                vec![Box::new(limit)],
-            ),
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&format!(
+            "{} WHERE (?1 IS NULL OR c.timestamp > ?1) ORDER BY c.id DESC LIMIT ?2",
+            Self::COMPUTE_LOG_SELECT
+        ))?;
         let entries = stmt
-            .query_map(params_refs.as_slice(), |row| {
-                Ok(ComputeLogEntry {
-                    id: row.get(0)?,
-                    user_email: row.get(1)?,
-                    timestamp: row.get(2)?,
-                    operation: row.get(3)?,
-                    summary: row.get(4)?,
-                    cost: row.get(5)?,
-                    credits_after: row.get(6)?,
-                })
-            })?
+            .query_map(params![since, limit], Self::compute_log_entry)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(entries)
     }
@@ -3785,13 +4050,13 @@ impl Ad4mDb {
 
     pub fn create_payment_request(
         &self,
-        email: &str,
+        agent_did: &str,
         amount_hot: &str,
         action_hash: &str,
     ) -> Ad4mDbResult<i64> {
         let rows = self.conn.execute(
-            "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
-            params![email, amount_hot, action_hash],
+            "INSERT OR IGNORE INTO payment_requests (agent_did, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
+            params![agent_did, amount_hot, action_hash],
         )?;
         if rows > 0 {
             Ok(self.conn.last_insert_rowid())
@@ -3826,13 +4091,13 @@ impl Ad4mDb {
         action_hash: &str,
     ) -> Ad4mDbResult<Option<PaymentRequest>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE proposal_action_hash = ?1",
+            "SELECT id, agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE proposal_action_hash = ?1",
         )?;
         let mut requests = stmt
             .query_map(params![action_hash], |row| {
                 Ok(PaymentRequest {
                     id: row.get(0)?,
-                    user_email: row.get(1)?,
+                    agent_did: row.get(1)?,
                     amount_hot: row.get(2)?,
                     proposal_action_hash: row.get(3)?,
                     status: row.get(4)?,
@@ -3846,13 +4111,13 @@ impl Ad4mDb {
 
     pub fn get_pending_payment_requests(&self) -> Ad4mDbResult<Vec<PaymentRequest>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE status = 'pending'",
+            "SELECT id, agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE status = 'pending'",
         )?;
         let requests = stmt
             .query_map([], |row| {
                 Ok(PaymentRequest {
                     id: row.get(0)?,
-                    user_email: row.get(1)?,
+                    agent_did: row.get(1)?,
                     amount_hot: row.get(2)?,
                     proposal_action_hash: row.get(3)?,
                     status: row.get(4)?,
@@ -3945,7 +4210,7 @@ impl Ad4mDb {
     /// Get all payment requests (for transaction history display)
     pub fn get_all_payment_requests(&self) -> Ad4mDbResult<Vec<(String, String, String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT user_email, amount_hot, status, created_at FROM payment_requests ORDER BY created_at DESC",
+            "SELECT agent_did, amount_hot, status, created_at FROM payment_requests ORDER BY created_at DESC",
         )?;
         let requests = stmt
             .query_map([], |row| {
@@ -3955,13 +4220,17 @@ impl Ad4mDb {
         Ok(requests)
     }
 
-    pub fn get_user_by_hot_wallet_address(&self, address: &str) -> Ad4mDbResult<Option<String>> {
+    /// The account whose mHOT wallet is `address`: its email and its agent's DID.
+    pub fn get_user_by_hot_wallet_address(
+        &self,
+        address: &str,
+    ) -> Ad4mDbResult<Option<(String, String)>> {
         let result = self
             .conn
             .query_row(
-                "SELECT username FROM users WHERE hot_wallet_address = ?1",
+                "SELECT username, did FROM users WHERE hot_wallet_address = ?1",
                 [address],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
         Ok(result)
@@ -4419,7 +4688,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec![perspective1.uuid.clone()],
             webhook_url: "http://test.webhook".to_string(),
-            webhook_auth: "test-auth".to_string(),
+            webhook_auth: "test-auth".into(),
         };
         let notification_id = db
             .add_notification(notification, "did:key:main", false)
@@ -4437,6 +4706,7 @@ mod tests {
                 "test system prompt".to_string(),
                 vec![task],
                 Some("test metadata".to_string()),
+                Some("did:key:task-owner"),
             )
             .unwrap();
 
@@ -4447,7 +4717,7 @@ mod tests {
             model_type: ModelType::Llm,
             api: Some(ModelApiInput {
                 base_url: "http://localhost:11434".to_string(),
-                api_key: "test-key".to_string(),
+                api_key: Some("test-key".into()),
                 model: "qwen3:32b".to_string(),
                 api_type: ModelApiType::Ollama.to_string(),
                 max_num_ctx: Some(16_384),
@@ -4496,6 +4766,11 @@ mod tests {
         let imported_task = tasks.first().unwrap();
         assert_eq!(imported_task.task_id, task_id);
         assert_eq!(imported_task.name, "Test Task");
+        // Without the owner, a restore would hand the user's task to the operator.
+        assert_eq!(
+            import_db.get_task_owner(&task_id).unwrap(),
+            Some(Some("did:key:task-owner".to_string()))
+        );
 
         // Verify models
         let models = import_db.get_models().unwrap();
@@ -4563,7 +4838,7 @@ mod tests {
             model_type: ModelType::Llm,
             api: Some(ModelApiInput {
                 base_url: "http://localhost:11434".to_string(),
-                api_key: String::new(),
+                api_key: None,
                 model: "qwen3:32b".to_string(),
                 api_type: ModelApiType::Ollama.to_string(),
                 max_num_ctx: None,
@@ -4815,6 +5090,54 @@ mod tests {
         assert_eq!(diff.removals.len(), 0);
     }
 
+    /// An imported row is stored without a shape check, so one parked row may not
+    /// parse. It must not hide the readable parked rows: the fallback sync reads
+    /// them on every attempt and gives up when the read fails.
+    #[test]
+    fn an_unreadable_parked_row_does_not_hide_the_readable_ones() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        db.conn
+            .execute(
+                "INSERT INTO perspective_diff (perspective, additions, removals, is_pending) VALUES (?1, ?2, ?3, ?4)",
+                params![p_uuid, "{\"not\": \"a list of links\"}", "[]", false],
+            )
+            .unwrap();
+        let parked = construct_dummy_link_expression(LinkStatus::Shared);
+        db.add_pending_diff(
+            &p_uuid,
+            &PerspectiveDiff {
+                additions: vec![parked.clone()],
+                removals: vec![],
+            },
+        )
+        .unwrap();
+        let (_, ids) = db.get_pending_diffs(&p_uuid, None).unwrap();
+        db.park_pending_diffs(&p_uuid, ids).unwrap();
+
+        assert_eq!(db.get_unsent_additions(&p_uuid).unwrap(), vec![parked]);
+    }
+
+    #[test]
+    fn a_malformed_addition_does_not_hide_the_readable_links_of_its_row() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        let good = construct_dummy_link_expression(LinkStatus::Shared);
+        let additions = serde_json::to_string(&vec![
+            serde_json::to_value(&good).unwrap(),
+            serde_json::json!({"not": "a link"}),
+        ])
+        .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO perspective_diff (perspective, additions, removals, is_pending) VALUES (?1, ?2, ?3, ?4)",
+                params![p_uuid, additions, "[]", false],
+            )
+            .unwrap();
+
+        assert_eq!(db.get_unsent_additions(&p_uuid).unwrap(), vec![good]);
+    }
+
     /// The notifications table of executors that named the owner by email.
     fn legacy_notifications_db() -> Ad4mDb {
         let db = Ad4mDb::new(":memory:").unwrap();
@@ -4866,6 +5189,41 @@ mod tests {
         db.migrate_notification_owners("did:key:other").unwrap();
         assert_eq!(owners(&db).len(), 2);
         assert_eq!(owners(&db)[1].1, "did:key:main");
+    }
+
+    /// A data folder from a `dev` build before D16 names billing rows by `user_email`. No
+    /// migration exists: start-up stops with a message that says so, not with a missing
+    /// column error from a later statement.
+    #[test]
+    fn a_data_folder_from_before_did_keys_is_refused_with_a_message() {
+        for table in ["compute_log", "payment_requests"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ad4m.db");
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TABLE {table} (id INTEGER PRIMARY KEY, user_email TEXT NOT NULL)"
+                ))
+                .unwrap();
+            let err = Ad4mDb::new(path.to_str().unwrap())
+                .err()
+                .expect(table)
+                .to_string();
+            assert!(
+                err.contains("fresh data folder") && err.contains(table),
+                "{table}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_did_names_one_user() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.add_user("a@test", "did:key:same", "pw").unwrap();
+        assert!(db.add_user("b@test", "did:key:same", "pw").is_err());
+        // Users without an agent are not indexed.
+        db.add_user("c@test", "", "pw").unwrap();
+        db.add_user("d@test", "", "pw").unwrap();
     }
 
     #[test]
@@ -4949,7 +5307,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
-            webhook_auth: "Test Webhook Auth".to_string(),
+            webhook_auth: "Test Webhook Auth".into(),
         };
 
         // Add the test notification
@@ -4980,7 +5338,9 @@ mod tests {
             vec!["Test Perspective ID".to_string()]
         );
         assert_eq!(test_notification.webhook_url, "Test Webhook URL");
-        assert_eq!(test_notification.webhook_auth, "Test Webhook Auth");
+        assert!(test_notification
+            .webhook_auth
+            .expose_for_compare("Test Webhook Auth"));
 
         // Modify the test notification
         let updated_notification = Notification {
@@ -4993,7 +5353,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE predicate = 'test://updated'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
-            webhook_auth: "Test Webhook Auth".to_string(),
+            webhook_auth: "Test Webhook Auth".into(),
             owner_did: "did:key:main".to_string(),
         };
 
@@ -5036,7 +5396,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE data = 'DELETE this'".to_string(),
             perspective_ids: vec!["test".to_string()],
             webhook_url: "".to_string(),
-            webhook_auth: "".to_string(),
+            webhook_auth: "".into(),
         };
 
         let result1 = db.add_notification(notification1, "did:key:main", false);
@@ -5051,7 +5411,7 @@ mod tests {
             trigger: "DELETE FROM link WHERE id = 123".to_string(),
             perspective_ids: vec!["test".to_string()],
             webhook_url: "".to_string(),
-            webhook_auth: "".to_string(),
+            webhook_auth: "".into(),
         };
 
         let result2 = db.add_notification(notification2, "did:key:main", false);
@@ -5067,7 +5427,7 @@ mod tests {
             trigger: r#"SELECT * FROM link WHERE data = "Don\'t DELETE this""#.to_string(),
             perspective_ids: vec!["test".to_string()],
             webhook_url: "".to_string(),
-            webhook_auth: "".to_string(),
+            webhook_auth: "".into(),
         };
 
         let result3 = db.add_notification(notification3, "did:key:main", false);
@@ -5093,6 +5453,7 @@ mod tests {
                 model_id.clone(),
                 system_prompt.clone(),
                 prompt_examples.clone(),
+                None,
                 None,
             )
             .unwrap();
@@ -5129,7 +5490,7 @@ mod tests {
             name: "Test Model API".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.com".to_string(),
-                api_key: "test_api_key".to_string(),
+                api_key: Some("test_api_key".into()),
                 model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5172,10 +5533,12 @@ mod tests {
             retrieved_model_api.api.as_ref().unwrap().base_url,
             Url::parse("https://api.example.com").unwrap()
         );
-        assert_eq!(
-            retrieved_model_api.api.as_ref().unwrap().api_key,
-            "test_api_key"
-        );
+        assert!(retrieved_model_api
+            .api
+            .as_ref()
+            .unwrap()
+            .api_key
+            .expose_for_compare("test_api_key"));
         assert_eq!(retrieved_model_api.api.as_ref().unwrap().model, "llama3");
         assert_eq!(
             retrieved_model_api.api.as_ref().unwrap().api_type,
@@ -5234,7 +5597,7 @@ mod tests {
             name: "Test Model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.com".to_string(),
-                api_key: "test_key".to_string(),
+                api_key: Some("test_key".into()),
                 model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5251,7 +5614,7 @@ mod tests {
             name: "Updated Model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.org".to_string(),
-                api_key: "test_key".to_string(),
+                api_key: Some("test_key".into()),
                 model: "llama4".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5272,7 +5635,7 @@ mod tests {
 
         let api = retrieved_model.api.unwrap();
         assert_eq!(api.base_url, Url::parse("https://api.example.org").unwrap());
-        assert_eq!(api.api_key, "test_key");
+        assert!(api.api_key.expose_for_compare("test_key"));
         assert_eq!(api.model, "llama4");
         assert_eq!(api.api_type, ModelApiType::OpenAi);
 
@@ -5288,7 +5651,7 @@ mod tests {
             name: "Capped Ollama".to_string(),
             api: Some(ModelApiInput {
                 base_url: "http://localhost:11434".to_string(),
-                api_key: "".to_string(),
+                api_key: Some("".into()),
                 model: "qwen3:32b".to_string(),
                 api_type: ModelApiType::Ollama.to_string(),
                 max_num_ctx: Some(32_768),
@@ -5332,7 +5695,7 @@ mod tests {
             name: "Test LLM Model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.com".to_string(),
-                api_key: "llm_key".to_string(),
+                api_key: Some("llm_key".into()),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5361,7 +5724,7 @@ mod tests {
             name: "Test Transcription Model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.transcribe.com".to_string(),
-                api_key: "transcribe_key".to_string(),
+                api_key: Some("transcribe_key".into()),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5461,7 +5824,7 @@ mod tests {
             name: "test-model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.test.com".to_string(),
-                api_key: "test-key".to_string(),
+                api_key: Some("test-key".into()),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5525,7 +5888,7 @@ mod tests {
             name: "an-llm".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.test.com".to_string(),
-                api_key: "test-key".to_string(),
+                api_key: Some("test-key".into()),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5976,14 +6339,14 @@ mod tests {
 
         // Create payment request
         let id = db
-            .create_payment_request("alice@example.com", "100.5", "uhCAkABC123")
+            .create_payment_request("did:test:alice", "100.5", "uhCAkABC123")
             .unwrap();
         assert!(id > 0);
 
         // Should appear in pending list
         let pending = db.get_pending_payment_requests().unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].user_email, "alice@example.com");
+        assert_eq!(pending[0].agent_did, "did:test:alice");
         assert_eq!(pending[0].amount_hot, "100.5");
         assert_eq!(
             pending[0].proposal_action_hash.as_deref(),
@@ -6024,7 +6387,13 @@ mod tests {
 
         // Should find alice
         let result = db.get_user_by_hot_wallet_address("uhCAkXYZ").unwrap();
-        assert_eq!(result, Some("alice@example.com".to_string()));
+        assert_eq!(
+            result,
+            Some((
+                "alice@example.com".to_string(),
+                "did:test:alice".to_string()
+            ))
+        );
 
         // Bob's wallet not set
         let result = db.get_user_by_hot_wallet_address("uhCAkOther").unwrap();
@@ -6041,11 +6410,11 @@ mod tests {
             .unwrap();
 
         // Create multiple requests
-        db.create_payment_request("alice@example.com", "50", "hash1")
+        db.create_payment_request("did:test:alice", "50", "hash1")
             .unwrap();
-        db.create_payment_request("alice@example.com", "75", "hash2")
+        db.create_payment_request("did:test:alice", "75", "hash2")
             .unwrap();
-        db.create_payment_request("alice@example.com", "100", "hash3")
+        db.create_payment_request("did:test:alice", "100", "hash3")
             .unwrap();
 
         let pending = db.get_pending_payment_requests().unwrap();
