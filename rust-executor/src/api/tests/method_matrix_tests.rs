@@ -1382,7 +1382,6 @@ fn anonymous_callers_reach_only_the_anonymous_capabilitys_methods() {
             "user.loginWithKey",
             "user.multiUserEnabled",
             "user.requestVerification",
-            "user.sessionChallenge",
             "user.verifyEmail",
         ]
     );
@@ -1734,6 +1733,7 @@ fn only_methods_that_check_no_capability_are_open() {
             "user.endAllSessions",
             "user.logout",
             "user.renewSession",
+            "user.sessionChallenge",
         ]
     );
 }

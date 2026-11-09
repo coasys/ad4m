@@ -40,6 +40,29 @@ fn a_request_lives_at_most_seven_days() {
     assert_eq!(ok(now), Err(RequestError::Expires));
 }
 
+/// The lifetime a poster gives its request ([`REQUEST_POST_TTL_S`]) is accepted by a store
+/// whose clock is behind the poster's by up to [`MAX_CLOCK_SKEW_S`]: a phone a moment ahead of
+/// its store must not have its asks refused.
+#[test]
+fn a_posted_lifetime_survives_a_poster_clock_ahead_of_the_store() {
+    let log = devices_log();
+    let (state, head) = (log.chain.state(), log.seq());
+    let store_now = LINK_NOW;
+    let poster_now = store_now + MAX_CLOCK_SKEW_S;
+    assert_eq!(
+        check_post(
+            &post(
+                DeviceRequestBody::SendMaster {},
+                poster_now + REQUEST_POST_TTL_S
+            ),
+            state,
+            head,
+            store_now,
+        ),
+        Ok(())
+    );
+}
+
 #[test]
 fn confirm_revoke_names_distinct_device_keys_valid_at_the_head() {
     let mut log = devices_log();

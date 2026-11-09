@@ -250,7 +250,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'user.verifyEmail': 'verified-token',
     'user.logout': true,
     'user.revokeAllSessions': true,
-    'user.sessionChallenge': { challenge: 'c'.repeat(43), executor: 'did:key:z6MkExecutor', expiresAt: 1060 },
+    'user.sessionChallenge': (() => {
+        let n = 0
+        return () => ({ challenge: `challenge-${++n}`.padEnd(43, 'x'), executor: 'did:key:z6MkExecutor', expiresAt: 1060 })
+    })(),
     'user.loginWithKey': { token: 'key-jwt', expiresAt: 4600, grantId: 'grant-1', role: 'operator', did: 'did:key:z6MkMain', scid: 'did:scid:coasys:1:QmS' },
     'user.renewSession': { token: 'renewed-jwt', expiresAt: 8200 },
     'user.currentSession': { role: 'operator', did: 'did:key:z6MkMain', scid: 'did:scid:coasys:1:QmS', keyId: 'd2', grantId: 'grant-1', expiresAt: 4600, operatorSource: 'key' },
@@ -1521,8 +1524,19 @@ describe('User and Auth', () => {
         expect(session.role).toBe('operator');
         expect(session.grantId).toBe('grant-1');
 
-        expect((await ad4m.agent.renewSession(proof)).token).toBe('renewed-jwt');
-        expect(lastRpcCall).toEqual({ type: 'user.renewSession', params: { proof } });
+        // A renewal proves with a fresh challenge and a `renew` statement naming the grant,
+        // not the login proof again.
+        const renewalChallenge = await ad4m.agent.sessionChallenge();
+        expect(renewalChallenge.challenge).not.toBe(challenge.challenge);
+        const unsignedRenewal = {
+            v: 1, purpose: 'renew' as const, executor: renewalChallenge.executor,
+            audience: 'http://127.0.0.1:12000', challenge: renewalChallenge.challenge,
+            client: { kind: 'native' as const }, grant: session.grantId, issuedAt: 2000,
+        };
+        const renewalProof = await ad4m.agent.signSessionStatement(unsignedRenewal);
+        expect(renewalProof.statement.grant).toBe('grant-1');
+        expect((await ad4m.agent.renewSession(renewalProof)).token).toBe('renewed-jwt');
+        expect(lastRpcCall).toEqual({ type: 'user.renewSession', params: { proof: renewalProof } });
     });
 
     test('currentSession() answers the caller\'s own session', async () => {

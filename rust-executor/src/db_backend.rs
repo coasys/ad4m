@@ -178,7 +178,11 @@ macro_rules! ad4m_db_methods {
                 expires_at: u64,
                 head_seq: u64,
                 checked_at: u64
-            ) -> Ad4mDbResult<()>;
+            ) -> Ad4mDbResult<usize>;
+            fn note_key_check(&self, id: &str, head_seq: u64, checked_at: u64) -> Ad4mDbResult<usize>;
+            fn note_pending_grant_writes(&self, ids: &[String], op: &str) -> Ad4mDbResult<()>;
+            fn pending_grant_writes(&self) -> Ad4mDbResult<Vec<(String, String)>>;
+            fn clear_pending_grant_writes(&self, ids: &[String], op: &str) -> Ad4mDbResult<()>;
 
             // AI: model status, tasks, models
             fn create_or_update_model_status(

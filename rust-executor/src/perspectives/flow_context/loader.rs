@@ -435,10 +435,14 @@ pub async fn load_shacl_flows(
         limit: None,
         include_unverified: None,
     };
-    let type_links = perspective
+    let mut type_links = perspective
         .get_links(&type_query)
         .await
         .map_err(|e| anyhow::anyhow!("load_shacl_flows: get_links(type) failed: {e:#}"))?;
+    // Only a link that counts defines a flow — the same `proof.valid` cut
+    // model queries make. A `cantCheck`, `flagged` or `invalid` link must
+    // not enumerate a flow, name its children, or enter the bag.
+    type_links.retain(|link| link.proof.valid == Some(true));
 
     let mut bag: Vec<Link> = Vec::with_capacity(type_links.len());
     for tl in &type_links {
@@ -459,7 +463,7 @@ pub async fn load_shacl_flows(
             limit: None,
             include_unverified: None,
         };
-        let flow_links = match perspective.get_links(&flow_query).await {
+        let mut flow_links = match perspective.get_links(&flow_query).await {
             Ok(l) => l,
             Err(e) => {
                 log::warn!(
@@ -468,6 +472,7 @@ pub async fn load_shacl_flows(
                 continue;
             }
         };
+        flow_links.retain(|link| link.proof.valid == Some(true));
         let child_uris: Vec<String> = flow_links
             .iter()
             .filter(|d| {
@@ -491,7 +496,12 @@ pub async fn load_shacl_flows(
                 include_unverified: None,
             };
             match perspective.get_links(&child_query).await {
-                Ok(child_links) => bag.extend(child_links.into_iter().map(|d| d.data)),
+                Ok(child_links) => bag.extend(
+                    child_links
+                        .into_iter()
+                        .filter(|link| link.proof.valid == Some(true))
+                        .map(|d| d.data),
+                ),
                 Err(e) => log::warn!(
                     "load_shacl_flows: get_links(child of {flow_uri}) failed, skipping child: {e:#}"
                 ),

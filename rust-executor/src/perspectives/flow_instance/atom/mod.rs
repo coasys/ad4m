@@ -124,6 +124,17 @@ pub const LEGACY_RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
 pub struct Vote {
     pub did: String,
     pub at: String,
+    /// Who the vote counts as when quorum is pooled: the person the signer's stored verdict
+    /// names, when it names one. `None`: the DID itself. Absent in read-sets written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voter: Option<String>,
+}
+
+impl Vote {
+    /// The participant this vote counts as: its person, else its DID.
+    pub fn voter(&self) -> &str {
+        self.voter.as_deref().unwrap_or(&self.did)
+    }
 }
 
 /// One identity-checked, sealed proposal together with its valid votes.
@@ -319,9 +330,18 @@ pub fn valid_votes(
     proposer: &str,
     proposed_at: &str,
 ) -> Vec<Vote> {
+    // Who a vote counts as when quorum is pooled: the person its signer's verdict names (the
+    // stored `person`), else the DID the vote names. The atom keeps one vote per DID, since
+    // role grants are per DID and the fold filters by them first; the pool then counts one
+    // voter per person (`Vote::voter`), so a person's two devices are one voter there.
+    let voter_of = |l: &DecoratedLinkExpression| l.person.clone();
+    let proposer_voter = links_on(links, PROPOSER_PREDICATE)
+        .find(|l| signed_by(l, &l.data.target))
+        .and_then(voter_of);
     let mut votes: Vec<(chrono::DateTime<chrono::Utc>, Vote)> = std::iter::once(Vote {
         did: proposer.to_string(),
         at: proposed_at.to_string(),
+        voter: proposer_voter,
     })
     .chain(
         links_on(links, ACCEPTED_BY_PREDICATE)
@@ -329,6 +349,7 @@ pub fn valid_votes(
             .map(|l| Vote {
                 did: l.data.target.clone(),
                 at: l.timestamp.clone(),
+                voter: voter_of(l),
             }),
     )
     .filter_map(|v| match parse_link_timestamp(&v.at) {
@@ -343,8 +364,8 @@ pub fn valid_votes(
         }
     })
     .collect();
-    // Keep one vote per DID, the earliest — grouping by DID first, because
-    // `dedup_by` only ever drops neighbours.
+    // Keep one vote per signer, the earliest — grouping by signer first,
+    // because `dedup_by` only ever drops neighbours.
     votes.sort_by(|(a_at, a), (b_at, b)| (&a.did, a_at, &a.at).cmp(&(&b.did, b_at, &b.at)));
     votes.dedup_by(|(_, later), (_, kept)| later.did == kept.did);
     votes.sort_by(|(a_at, a), (b_at, b)| (a_at, &a.did, &a.at).cmp(&(b_at, &b.did, &b.at)));
@@ -619,7 +640,8 @@ mod tests {
             atom.votes,
             vec![Vote {
                 did: ALICE.into(),
-                at: T1.into()
+                at: T1.into(),
+                voter: None,
             }],
             "minting is voting: the proposer votes at the moment they propose"
         );
@@ -654,7 +676,8 @@ mod tests {
             atom_of(&forged_votes).expect("atom").votes,
             vec![Vote {
                 did: ALICE.into(),
-                at: T1.into()
+                at: T1.into(),
+                voter: None,
             }],
             "neither shape may add a voter"
         );
@@ -677,6 +700,35 @@ mod tests {
         assert!(
             !signed_by(&not_counted, person),
             "a link that does not count speaks for no one"
+        );
+    }
+
+    /// One person signing `acceptedBy` from two of its devices: the atom keeps one vote per
+    /// DID (role grants are per DID), each counting as the person (`Vote::voter`), so the
+    /// pool counts them once; a voter the key map does not resolve counts as its DID.
+    #[test]
+    fn two_devices_of_one_person_are_one_voter() {
+        let person = "did:scid:coasys:1:zPerson";
+        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        for (target, author, at) in [("did:key:d1", "did:key:d1", T2), (person, "did:key:d2", T3)] {
+            let mut vote = link(ACCEPTED_BY_PREDICATE, target, author, true, at);
+            vote.person = Some(person.to_string());
+            links.push(vote);
+        }
+        links.push(link(ACCEPTED_BY_PREDICATE, BOB, BOB, true, T3));
+        let votes = valid_votes(&links, ALICE, T1);
+        assert_eq!(
+            votes
+                .iter()
+                .map(|v| (v.did.as_str(), v.voter()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ALICE, ALICE),
+                ("did:key:d1", person),
+                (BOB, BOB),
+                (person, person)
+            ],
+            "one vote per DID, the person's two counting as the person"
         );
     }
 
@@ -742,11 +794,13 @@ mod tests {
             vec![
                 Vote {
                     did: MALLORY.into(),
-                    at: "2020-01-01T00:00:00.000Z".into()
+                    at: "2020-01-01T00:00:00.000Z".into(),
+                    voter: None,
                 },
                 Vote {
                     did: ALICE.into(),
-                    at: T2.into()
+                    at: T2.into(),
+                    voter: None,
                 },
             ],
             "Mallory may back-date their OWN vote, and only their own"
@@ -768,11 +822,13 @@ mod tests {
             vec![
                 Vote {
                     did: ALICE.into(),
-                    at: T1.into()
+                    at: T1.into(),
+                    voter: None,
                 },
                 Vote {
                     did: BOB.into(),
-                    at: T2.into()
+                    at: T2.into(),
+                    voter: None,
                 },
             ]
         );

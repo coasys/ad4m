@@ -316,3 +316,68 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
         "another agent's gather never sees this agent's record"
     );
 }
+
+/// Only links whose stored verdict counts may define a flow — the same
+/// `proof.valid` cut model queries make. A definition link that does not
+/// count must neither enumerate the flow (a forged `rdf://type`) nor read
+/// into its fields (a forged `ad4m://flowName`).
+#[tokio::test(flavor = "multi_thread")]
+async fn load_shacl_flows_ignores_links_that_do_not_count() {
+    use super::loader::load_shacl_flows;
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::perspective_instance::PerspectiveInstance;
+    use crate::types::LinkExpression;
+
+    let (perspective, _, _) = setup_perspective_no_llm(&[]).await;
+    let signer = TestSigner::generate();
+
+    // `name`'s definition on the store, with the signature of every link
+    // under `forged` tampered so the store judges it `invalid`.
+    async fn store_flow(
+        perspective: &PerspectiveInstance,
+        name: &str,
+        namespace: &str,
+        forged: &[&str],
+        signer: &TestSigner,
+    ) {
+        let json = serde_json::json!({
+            "name": name,
+            "namespace": namespace,
+            "start_action": [],
+            "states": [{
+                "name": "identified",
+                "value": 0.0,
+                "state_check": {
+                    "source": null,
+                    "predicate": format!("{namespace}state"),
+                    "target": format!("{namespace}identified"),
+                },
+            }],
+            "transitions": [],
+            "inputTypes": [],
+            "outputTypes": [],
+        })
+        .to_string();
+        for link in parse_flow_to_links(&json, name).expect("parse_flow_to_links") {
+            let mut expr = LinkExpression::from(signer.sign(link.normalize()));
+            expr.status = Some(LinkStatus::Shared);
+            if forged.contains(&expr.data.predicate.as_deref().unwrap_or("")) {
+                expr.proof.signature = "ab".repeat(64);
+            }
+            perspective.sparql_store.add_link(&expr).unwrap();
+        }
+    }
+
+    store_flow(&perspective, "Delivery", "delivery://", &[], &signer).await;
+    store_flow(&perspective, "Other", "other://", &["rdf://type"], &signer).await;
+
+    let flows = load_shacl_flows(&perspective).await.unwrap();
+    assert!(
+        flows.contains_key("delivery://DeliveryFlow"),
+        "control flow loads: {flows:?}"
+    );
+    assert!(
+        !flows.keys().any(|u| u.contains("other://")),
+        "a flow whose type link does not count is not loaded: {flows:?}"
+    );
+}

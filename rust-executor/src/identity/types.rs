@@ -985,7 +985,9 @@ pub struct KeyStatement {
     /// chosen by the client, never taken from the server's answers. The executor accepts the
     /// statement only when this is one of its configured `public_origins`, or, with none
     /// configured, one of its own loopback origins (`http://127.0.0.1:<port>`,
-    /// `http://localhost:<port>`, `http://[::1]:<port>`); so a server that relays the
+    /// `http://localhost:<port>`, `http://[::1]:<port>`) — and only on a loopback-only
+    /// listener, since a network listener without `public_origins` accepts none; so a
+    /// server that relays the
     /// statement to another executor gets a refusal. Compared after normalising: `ws`/`wss`
     /// read as `http`/`https`, the host lowercase, a default port left out.
     pub audience: String,

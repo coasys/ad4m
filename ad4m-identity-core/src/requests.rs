@@ -12,6 +12,11 @@ use crate::{KeyId, KeyState};
 
 /// Every request lives at most 7 days.
 pub const REQUEST_TTL_S: u64 = 7 * 86_400;
+/// How far a poster's clock may run ahead of the store's.
+pub const MAX_CLOCK_SKEW_S: u64 = 300;
+/// The lifetime a poster gives a request it posts: [`REQUEST_TTL_S`] less [`MAX_CLOCK_SKEW_S`],
+/// so a store whose clock is behind the poster's still accepts it.
+pub const REQUEST_POST_TTL_S: u64 = REQUEST_TTL_S - MAX_CLOCK_SKEW_S;
 /// Open requests per identity.
 pub const MAX_OPEN_REQUESTS: usize = 16;
 /// Key ids one `confirm-revoke` names, at most.

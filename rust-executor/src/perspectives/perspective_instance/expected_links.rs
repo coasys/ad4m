@@ -196,6 +196,10 @@ impl PerspectiveInstance {
             if changed {
                 self.write_link_diff(&persist_diff)?
                     .fold_into(&mut combined_diff);
+                // The reply and the link-added event carry the judgement the
+                // store wrote; `prepare_link_signers` ran above.
+                combined_diff.additions =
+                    self.stored_judgements(std::mem::take(&mut combined_diff.additions));
             }
         }
 

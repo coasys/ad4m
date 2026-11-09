@@ -228,6 +228,19 @@ impl LinkExpression {
         self.check().verdict.counts()
     }
 
+    /// Whether this link's signature holds under its author's `did:key`, over its normalized
+    /// form and the bytes its proof names ([`crate::agent::signatures::signature_holds`]).
+    /// Reads no log: unlike [`Self::compute_proof_valid`], no revocation, freshness or expiry
+    /// enters it.
+    pub fn signature_holds(&self) -> bool {
+        crate::agent::signatures::signature_holds(&Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        })
+    }
+
     /// The verdict of this link and its person ([`crate::identity::check_signed`]).
     /// Normalizing `data` first is not optional: the signature was produced over the
     /// normalized link.
@@ -248,6 +261,21 @@ impl LinkExpression {
             proof: self.proof.clone(),
         };
         crate::identity::check_signed_entered(&link_expr, entered_after_revoke)
+    }
+
+    /// [`LinkExpression::check_entered`] for a link this executor writes itself
+    /// ([`crate::identity::check_signed_own`]): the local write path only.
+    pub fn check_own_entered(
+        &self,
+        entered_after_revoke: Option<bool>,
+    ) -> crate::identity::resolver::CheckedLink {
+        let link_expr = Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        };
+        crate::identity::check_signed_own(&link_expr, entered_after_revoke)
     }
 }
 
@@ -303,6 +331,16 @@ pub struct DecoratedLinkExpression {
 }
 
 impl DecoratedLinkExpression {
+    /// Whether this link counts: its stored verdict is `valid`
+    /// (`proof.valid == Some(true)` — the same `proofValid` a model query
+    /// requires on the reifier). `invalid`, `cantCheck` and `flagged` do not
+    /// count. This is the one cut every logic read of stored links makes —
+    /// schema discovery, property metadata, action lookup — so no reader
+    /// invents a second notion of "counts".
+    pub fn counts(&self) -> bool {
+        self.proof.valid == Some(true)
+    }
+
     /// Derive the verdict for this link, without touching `self.proof.valid`: `true` only
     /// when it counts ([`DecoratedLinkExpression::check`]).
     ///
