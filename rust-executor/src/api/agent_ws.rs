@@ -120,11 +120,14 @@ async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     apps_of(&ctx)
 }
 
-/// The app list of the agent the caller acts as, as clients see it: no tokens.
+/// The app list of the agent the caller acts as, as clients see it: no tokens. An
+/// operator-role grant shows to the operator alone; an app on the main agent it sits on
+/// must not learn its request id (`Owns` refuses it there too).
 fn apps_of(ctx: &RequestContext) -> Result<Value, WsRpcError> {
     let apps: Vec<crate::types::Apps> = Grants::global()
         .list(&ctx.acts_as())
         .iter()
+        .filter(|grant| !grant.is_operator() || ctx.is_operator())
         .map(|grant| grant.as_app())
         .collect();
     Ok(serde_json::to_value(apps)?)

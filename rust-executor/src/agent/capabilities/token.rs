@@ -43,6 +43,30 @@ pub(crate) fn sign_token_with_id(
     sub: Option<String>,
     nonce: Option<String>,
 ) -> Result<(String, Claims), AnyError> {
+    sign_claims(nonce, |issuer| {
+        Claims::new(issuer, audience, expiration_time, sub)
+    })
+}
+
+/// [`sign_token_with_id`] for a token expiring at `expires_at` (Unix seconds) exactly: a
+/// renewal signs the expiry the grant got, so the token and the answered `expiresAt` are one
+/// value whatever the renewal's store read took.
+pub(crate) fn sign_token_expiring_at(
+    audience: String,
+    expires_at: u64,
+    sub: Option<String>,
+    nonce: Option<String>,
+) -> Result<(String, Claims), AnyError> {
+    sign_claims(nonce, |issuer| {
+        Claims::expiring_at(issuer, audience, expires_at, sub)
+    })
+}
+
+/// Signs claims built from the issuer DID, with `nonce` as the id (`None`: a fresh one).
+fn sign_claims(
+    nonce: Option<String>,
+    claims: impl FnOnce(String) -> Claims,
+) -> Result<(String, Claims), AnyError> {
     let backend = wallet_backend();
     let name = signing_key_name();
 
@@ -63,7 +87,7 @@ pub(crate) fn sign_token_with_id(
         name
     ))?;
 
-    let mut claims = Claims::new(did_document.id, audience, expiration_time, sub);
+    let mut claims = claims(did_document.id);
     if let Some(nonce) = nonce {
         claims = claims.with_nonce(nonce);
     }

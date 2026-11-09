@@ -126,6 +126,10 @@ pub struct IdentitySettings {
     /// The API port: without `public_origins`, a key statement's `audience` must be one of the
     /// loopback origins on it.
     pub api_port: Option<u16>,
+    /// Whether the API answers on a listener the network reaches
+    /// (`Ad4mConfig::listens_on_network`): with it and no `public_origins`, `audiences`
+    /// accepts no origin — key login is refused until `public_origins` names them.
+    pub network_listener: bool,
 }
 
 impl IdentitySettings {
@@ -169,6 +173,7 @@ impl IdentitySettings {
             allow_private_src: config.identity_allow_private_src.unwrap_or(false),
             public_origins: config.public_origins.clone().unwrap_or_default(),
             api_port: config.port,
+            network_listener: config.listens_on_network(),
         }
     }
 
@@ -181,9 +186,11 @@ impl IdentitySettings {
     }
 
     /// The origins a key statement may name here: `public_origins` normalised, else the
-    /// loopback origins of the API port. Fails on a configured value that is no origin.
+    /// loopback origins of the API port — and none at all on a network listener without
+    /// `public_origins` (`key_login::Audiences::None`). Fails on a configured value that is
+    /// no origin.
     pub fn audiences(&self) -> Result<key_login::Audiences, String> {
-        key_login::Audiences::new(&self.public_origins, self.api_port)
+        key_login::Audiences::new(&self.public_origins, self.api_port, self.network_listener)
     }
 }
 
@@ -248,6 +255,14 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         settings.store_url.as_deref(),
         settings.allow_private_src,
     );
+    // `check` refused a bad origin at start; past it, none is accepted.
+    let audiences = settings.audiences().unwrap_or_default();
+    if audiences == key_login::Audiences::None {
+        log::warn!(
+            "identity: key login is off: this executor listens on the network and has no \
+             public_origins (--public-origin)"
+        );
+    }
     let service = IdentityService {
         backend,
         cache,
@@ -256,8 +271,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         resolver: Arc::new(resolver),
         challenges: Default::default(),
         inbox: Default::default(),
-        // `check` refused a bad origin at start; past it, none is accepted.
-        audiences: settings.audiences().unwrap_or_default(),
+        audiences,
     };
     let service = Arc::new(service);
     if SERVICE.set(service.clone()).is_err() {
@@ -266,9 +280,14 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
     }
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
-            handle.spawn(run_recheck(service.clone()));
+            // Subscribed here, so no change the cache fires before the task runs is lost.
+            let changes = service.cache.subscribe();
+            handle.spawn(run_recheck(service.clone(), changes));
             handle.spawn(inbox::run_pull(service.clone()));
-            handle.spawn(key_login::run_key_session_watch(service));
+            // The key sessions' watcher too: `load_local_identities` replays the held
+            // verdicts before the spawned task may first run.
+            let changes = service.cache.subscribe();
+            handle.spawn(key_login::run_key_session_watch(service, changes));
         }
         Err(_) => log::error!(
             "identity: no runtime for the re-check of links, the inbox pull and key sessions"
@@ -285,12 +304,26 @@ pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
 /// that could not be checked and those of each bot key whose scope expired since the last
 /// tick (since start on the first). Each re-check judges a link again from the key map and
 /// rewrites it only when its verdict or person changed, so it is idempotent.
-async fn run_recheck(service: Arc<IdentityService>) {
+async fn run_recheck(
+    service: Arc<IdentityService>,
+    mut changes: tokio::sync::broadcast::Receiver<verdict::VerdictChange>,
+) {
     use tokio::sync::broadcast::error::{RecvError, TryRecvError};
-    let mut changes = service.cache.subscribe();
+    // The stored links are there to re-judge once the perspectives are open. Every log the
+    // cache holds is read into the key map then: each key that no longer counts fires a change
+    // (a log the map did not hold), so a link stored `valid` by a bot whose scope expired, or
+    // a device revoked, while this executor was down is re-judged though its log may never be
+    // read again otherwise.
+    crate::perspectives::opened().await;
+    match service.cache.load_held().await {
+        Ok(read) => log::debug!("identity: read {read} key logs for the re-check"),
+        Err(e) => log::warn!("identity: could not list the cached key logs: {e}"),
+    }
     let mut tick = tokio::time::interval(RECHECK_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut expired_until = 0;
+    // Signers whose re-check failed in some perspective: asked again on the next tick.
+    let mut failed: BTreeSet<String> = BTreeSet::new();
     loop {
         tokio::select! {
             change = changes.recv() => {
@@ -314,18 +347,25 @@ async fn run_recheck(service: Arc<IdentityService>) {
                     Err(RecvError::Lagged(_)) => signers.extend(listed_signers(&service)),
                     Err(RecvError::Closed) => return,
                 }
-                crate::perspectives::recheck_links(&crate::perspectives::Recheck::Signers(signers))
-                    .await;
+                let scope = crate::perspectives::Recheck::Signers(signers);
+                if !crate::perspectives::recheck_links(&scope).await {
+                    if let crate::perspectives::Recheck::Signers(signers) = scope {
+                        failed.extend(signers);
+                    }
+                }
             }
             _ = tick.tick() => {
                 let now = service::now();
-                let expired = expired_signers(service.cache.key_map(), expired_until, now);
+                let mut signers = expired_signers(service.cache.key_map(), expired_until, now);
                 expired_until = now;
-                if !expired.is_empty() {
-                    crate::perspectives::recheck_links(
-                        &crate::perspectives::Recheck::Signers(expired),
-                    )
-                    .await;
+                signers.append(&mut failed);
+                if !signers.is_empty() {
+                    let scope = crate::perspectives::Recheck::Signers(signers);
+                    if !crate::perspectives::recheck_links(&scope).await {
+                        if let crate::perspectives::Recheck::Signers(signers) = scope {
+                            failed = signers;
+                        }
+                    }
                 }
                 crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
             }
@@ -372,6 +412,41 @@ pub fn check_signed_entered<T: serde::Serialize>(
         entered_after_revoke,
         service::now(),
     )
+}
+
+/// [`check_signed_entered`] for a link written on this executor's local write path
+/// (`perspective.addLink` and the other local writes): a link one of this executor's own
+/// agents signed ([`is_local_agent`]) needs no head the store confirmed within the window,
+/// since no revocation this executor has not seen can be at stake for a link it signs now. A
+/// link a local caller hands in signed by anyone else (`addLinkExpression`, an import) is
+/// checked as one from a peer, as is every link that arrives from a peer, whichever key
+/// signed it.
+pub fn check_signed_own<T: serde::Serialize>(
+    expr: &Expression<T>,
+    entered_after_revoke: Option<bool>,
+) -> CheckedLink {
+    resolver::check_signed_with_provenance(
+        expr,
+        &cache::global_key_map(),
+        entered_after_revoke,
+        service::now(),
+        is_local_agent,
+    )
+}
+
+/// Whether `did` is one of this executor's agents: the main agent, or a managed user's. Reads
+/// no lock that panics: before the agent service or the database opens, `false`.
+pub(crate) fn is_local_agent(did: &str) -> bool {
+    let main = crate::agent::AgentService::global_instance()
+        .lock()
+        .ok()
+        .and_then(|agent| agent.as_ref().and_then(|agent| agent.did.clone()));
+    main.as_deref() == Some(did)
+        || crate::db_backend::db_backend()
+            .get_username_by_did(did)
+            .ok()
+            .flatten()
+            .is_some()
 }
 
 /// Fills the key map for the signers of `links` before they are checked and stored: the key
@@ -455,13 +530,10 @@ pub fn anchor_for(agent_did: &str) -> Option<u64> {
 /// not bound to its owner's identity, but its links are anchored in its owner's log like a
 /// device's, so a reader judges them by the scope in force at the anchor, not at the key's add.
 fn signer_identity(agent_did: &str) -> Option<String> {
-    let bound = {
-        let db = crate::db::Ad4mDb::global_instance();
-        let db = db.lock().ok();
-        db.as_ref()
-            .and_then(|db| db.as_ref())
-            .and_then(|db| db.agent_identity(agent_did).ok().flatten())
-    };
+    let bound = crate::db_backend::db_backend()
+        .agent_identity(agent_did)
+        .ok()
+        .flatten();
     bound.or_else(|| crate::bots::registered(agent_did).map(|bot| bot.owner))
 }
 
@@ -1095,6 +1167,53 @@ mod tests {
             assert!(written.is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
             assert!(temp_files_in(&lang).is_empty());
+        }
+    }
+
+    /// With no `public_origins` on a listener the network reaches (`localhost` off, or
+    /// TLS — that listener binds 0.0.0.0), `audiences` accepts no origin: key login is
+    /// refused until `public_origins` names the origins clients reach the executor at.
+    /// Loopback-only executors keep their own loopback origins, and a configured
+    /// `public_origins` counts on a network listener too.
+    #[test]
+    fn on_a_network_listener_without_public_origins_key_login_accepts_no_audience() {
+        let mut network = config(None, None);
+        network.port = Some(12000);
+        network.localhost = Some(false);
+        let settings = IdentitySettings::from_config(&network, None);
+        assert_eq!(settings.audiences(), Ok(key_login::Audiences::None));
+
+        // The TLS listener binds 0.0.0.0 even when `localhost` stays on.
+        network.localhost = Some(true);
+        network.tls = Some(crate::config::TlsConfig {
+            cert_file_path: "/cert".into(),
+            key_file_path: "/key".into(),
+            tls_port: 12001,
+        });
+        assert_eq!(
+            IdentitySettings::from_config(&network, None).audiences(),
+            Ok(key_login::Audiences::None)
+        );
+
+        // With `public_origins` they alone are the audiences, on a network listener too.
+        network.public_origins = Some(vec!["https://a.example".into()]);
+        assert_eq!(
+            IdentitySettings::from_config(&network, None).audiences(),
+            Ok(key_login::Audiences::Public(vec![
+                "https://a.example".into()
+            ]))
+        );
+
+        // A loopback-only executor keeps its own loopback origins on the API port.
+        let mut local = config(None, None);
+        local.port = Some(12000);
+        for localhost in [None, Some(true)] {
+            local.localhost = localhost;
+            assert_eq!(
+                IdentitySettings::from_config(&local, None).audiences(),
+                Ok(key_login::Audiences::loopback(12000)),
+                "{localhost:?}"
+            );
         }
     }
 

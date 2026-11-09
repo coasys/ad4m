@@ -662,12 +662,16 @@ fn is_stored_local(tx: &Transaction<'_>, link: &LinkExpression) -> Result<bool, 
 /// Write all quads of `link` with `status` in `tx`: the direct triple, its
 /// reifier, and the reifier's annotations, each replacing what the reifier
 /// held for it. The proof annotations are written as [`proof_write`] allows.
+/// `own`: this executor writes the link itself (the local write path), so its verdict needs
+/// no head the store confirmed within the window ([`crate::identity::check_signed_own`]).
+/// A link from a peer and a stored link judged again are not `own`, whichever key signed them.
 fn write_link_quads(
     tx: &mut Transaction<'_>,
     link: &LinkExpression,
     status: &LinkStatus,
+    own: bool,
 ) -> Result<(), Error> {
-    write_link_quads_proof(tx, link, status, false)
+    write_link_quads_proof(tx, link, status, false, own)
 }
 
 /// [`write_link_quads`], but with `repair` the whole proof is rewritten
@@ -681,6 +685,7 @@ fn write_link_quads_proof(
     link: &LinkExpression,
     status: &LinkStatus,
     repair: bool,
+    own: bool,
 ) -> Result<(), Error> {
     let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
     let reifier_iri = make_reifier_iri(link);
@@ -736,7 +741,12 @@ fn write_link_quads_proof(
     let counted_before = annotation_values(tx, &reifier_iri, ONT_LINK_VERDICT)?
         .iter()
         .any(|v| v == "valid");
-    let checked = link.check_entered(counted_before.then_some(false));
+    let entered = counted_before.then_some(false);
+    let checked = if own {
+        link.check_own_entered(entered)
+    } else {
+        link.check_entered(entered)
+    };
     let incoming_valid = checked.verdict.counts();
     let valid_str = incoming_valid.to_string();
     let verdict_str = checked.verdict.stored();
@@ -903,7 +913,10 @@ fn signed_link_of(
         anchors.push(None);
     }
     // A signature verifies against the author's DID whatever key it names,
-    // so the key the link was stored with is the one naming the author.
+    // so the key the link was stored with is the one naming the author. The
+    // candidate is chosen by its signature alone: the verdict (revocation
+    // order, freshness, expiry) is judged afterwards from the restored proof,
+    // and a genuine proof whose verdict does not count is still the one.
     keys.sort_by_key(|key| !key.starts_with(author.as_str()));
     let verified = targets.iter().find_map(|target| {
         keys.iter().find_map(|key| {
@@ -913,7 +926,7 @@ fn signed_link_of(
                         .iter()
                         .map(move |anchor| link_with(author, timestamp, target, key, sig, *anchor))
                 })
-                .find(|link| link.compute_proof_valid())
+                .find(|link| link.signature_holds())
         })
     });
     let link = verified.unwrap_or_else(|| {
@@ -1107,14 +1120,19 @@ impl SparqlStore {
     /// store holds comes through here, so this is where a link in the store's
     /// own metadata vocabulary is refused ([`is_link_metadata`]).
     fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
-        self.write_link(link, false).map(|_| ())
+        self.write_link(link, false, true).map(|_| ())
     }
 
     /// [`Self::insert_link_triples`]; with `skip_local`, a link this store
     /// holds as `Local` is left alone and `false` returned (#1146). The
     /// check and the write are one transaction under the writer lock, so no
     /// other write lands between them.
-    fn write_link(&self, link: &LinkExpression, skip_local: bool) -> Result<bool, Error> {
+    fn write_link(
+        &self,
+        link: &LinkExpression,
+        skip_local: bool,
+        own: bool,
+    ) -> Result<bool, Error> {
         // Status must be decided by the caller, not defaulted here. A silent
         // `None => Shared` fallback would let any write path that forgot to
         // set it mislabel a local link as shared — the kind of quiet
@@ -1139,7 +1157,7 @@ impl SparqlStore {
         if skip_local && is_stored_local(&tx, link)? {
             return Ok(false);
         }
-        write_link_quads(&mut tx, link, status)?;
+        write_link_quads(&mut tx, link, status, own)?;
         tx.commit()?;
         Ok(true)
     }
@@ -1152,7 +1170,14 @@ impl SparqlStore {
     /// A link language's addition: insert `link` unless this store holds it
     /// as `Local` (#1146). Returns whether it was inserted.
     pub(crate) fn add_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
-        self.write_link(link, true)
+        self.write_link(link, true, false)
+    }
+
+    /// A stored link judged again (the re-check): written as [`Self::add_link`] writes it,
+    /// but not as this executor's own, since the key that signed it says nothing about where
+    /// it came from.
+    pub(crate) fn rejudge_link(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.write_link(link, false, false).map(|_| ())
     }
 
     /// A link language's removal: remove `link` unless this store holds it
@@ -2366,7 +2391,7 @@ impl SparqlStore {
             ));
         }
         for (link, status) in &restored {
-            write_link_quads_proof(&mut tx, link, status, true)?;
+            write_link_quads_proof(&mut tx, link, status, true, false)?;
         }
         tx.commit()?;
         Ok(metadata_links.len())
@@ -2390,7 +2415,7 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
-        write_link_quads(&mut tx, link, link.status.as_ref().unwrap())?;
+        write_link_quads(&mut tx, link, link.status.as_ref().unwrap(), true)?;
         tx.commit()?;
         Ok(())
     }
@@ -3654,6 +3679,61 @@ mod tests {
         check(&svc);
         assert_eq!(svc.purge_link_metadata_links().unwrap(), 0, "idempotent");
         check(&svc);
+    }
+
+    /// The sweep picks a link's proof by its signature, not its verdict: a
+    /// genuine anchored link the key map cannot check yet (`cantCheck`) gets
+    /// its own signature back, not a forged one a metadata link stated beside
+    /// it.
+    #[test]
+    fn the_sweep_restores_a_genuine_signature_whose_verdict_does_not_count() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+        let member = TestSigner::generate();
+        let log = TestLog::new(68);
+        // The cached log is at seq 0; the link is anchored at 1: it cannot be checked yet.
+        global_key_map().publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let key = log.device.key();
+        let data = Link {
+            source: "ad4m://post".into(),
+            predicate: Some("we://mention".into()),
+            target: "ad4m://someone".into(),
+        };
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, T1, 1).unwrap();
+        let genuine = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp: T1.into(),
+            data,
+            proof: crate::types::ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(1),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        assert!(genuine.signature_holds());
+        assert!(!genuine.compute_proof_valid());
+        let svc = new_service();
+        svc.add_link(&genuine).unwrap();
+        let g = make_reifier_iri(&genuine).as_str().to_string();
+        // "0" sorts before any hex signature: the first stated one.
+        let forged = make_link(&member, &g, &ontology("proofSignature"), "literal:string:0");
+        svc.add_link_unguarded(&forged).unwrap();
+
+        assert_eq!(svc.purge_link_metadata_links().unwrap(), 1);
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].proof.signature, genuine.proof.signature);
+        assert_eq!(links[0].proof.anchor, Some(1));
+        assert_eq!(links[0].verdict, Some(LinkVerdict::CantCheck));
+        global_key_map().forget(&log.scid());
     }
 
     /// A link stating, in the store's bookkeeping vocabulary, that the store

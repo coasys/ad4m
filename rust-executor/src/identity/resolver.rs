@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -56,6 +57,10 @@ const MAP_BOUND: usize = 4096;
 /// How long the resolver stops asking the key index after it failed to answer, so an outage
 /// fails fast into `Unavailable`.
 pub const BREAKER: Duration = Duration::from_secs(30);
+/// How long a failed admission read of one identity's log backs off before the next
+/// [`Resolver::session_key`] tries the store again: a few seconds, per identity, so an
+/// unreachable store is not paid a read timeout per login attempt.
+const SESSION_READ_BACKOFF: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------------------------
 // Keys that speak for an identity
@@ -320,6 +325,20 @@ pub fn check_signed_with<T: serde::Serialize>(
     entered_after_revoke: Option<bool>,
     now: u64,
 ) -> CheckedLink {
+    check_signed_with_provenance(expr, map, entered_after_revoke, now, |_| false)
+}
+
+/// [`check_signed_with`]; `own(author)`: this executor signs `expr` itself, now (the local
+/// write path, by one of its own agents), so no head the store confirmed within the window is
+/// asked of it. Never for a link that arrived from a peer, whichever key signed it. Asked only
+/// when the head is stale, so the local write pays for it only then.
+pub fn check_signed_with_provenance<T: serde::Serialize>(
+    expr: &crate::types::Expression<T>,
+    map: &KeyMap,
+    entered_after_revoke: Option<bool>,
+    now: u64,
+    own: impl Fn(&str) -> bool,
+) -> CheckedLink {
     let signature_holds = crate::agent::signatures::signature_holds(expr);
     let signer = multikey_of(&expr.author);
     let lookup = signer.map_or(KeyLookup::NoLog, |key| map.lookup(key));
@@ -343,11 +362,17 @@ pub fn check_signed_with<T: serde::Serialize>(
     // `ADMIT_FRESHNESS`, whatever its anchor: an older head may miss a revocation of its key.
     // A stale head says `CantCheck` until a refresh lands (the periodic re-check reads those
     // links again). A link already counted keeps its order (`Some(false)`).
-    let verdict = match (&verdict, &lookup, signer) {
-        (LinkVerdict::Valid, KeyLookup::Listed { scid, .. }, Some(key))
+    let verdict = match (&verdict, &lookup) {
+        (LinkVerdict::Valid, KeyLookup::Listed { scid, .. })
             if entered_after_revoke != Some(false)
-                && !map.admits(scid, key, now, ADMIT_FRESHNESS) =>
+                && !map.admits(scid, now, ADMIT_FRESHNESS)
+                && !own(&expr.author) =>
         {
+            LinkVerdict::CantCheck
+        }
+        // Asked about and unanswered (the discovery cap, an index not answering): not a key
+        // no log lists, so its unanchored link waits too.
+        (LinkVerdict::Valid, KeyLookup::Unknown) if signer.is_some_and(|k| map.is_pending(k)) => {
             LinkVerdict::CantCheck
         }
         _ => verdict,
@@ -832,6 +857,20 @@ pub struct Resolver {
     keys: StdMutex<HashMap<String, String>>,
     /// Until when the key index is not asked, after it failed to answer ([`BREAKER`]).
     index_down_until: StdMutex<Option<Instant>>,
+    /// Failed admission reads of a log, by SCID, backing off per identity
+    /// ([`SESSION_READ_BACKOFF`]): a failure is remembered briefly and `session_key`
+    /// answers `StoreUnavailable` during it without another store call — and never
+    /// counts the cached head as a fresh read.
+    admission_failed: StdMutex<HashMap<String, Instant>>,
+    /// Signers the key map does not know → the discovery pass that last asked about them
+    /// ([`Resolver::discovery_turn`]).
+    discovery_tried: StdMutex<HashMap<String, u64>>,
+    /// The number of the current discovery pass (one per [`Resolver::prepare_at`]).
+    discovery_pass: AtomicU64,
+    /// The last key-index call met an agent language that does not serve the index
+    /// ([`IdentityError::NotServed`]): a lookup costs no store call and answers "no log", so
+    /// the discovery cap defers no signer.
+    key_index_absent: AtomicBool,
 }
 
 impl Resolver {
@@ -857,6 +896,10 @@ impl Resolver {
             misses: StdMutex::new(HashMap::new()),
             keys: StdMutex::new(HashMap::new()),
             index_down_until: StdMutex::new(None),
+            admission_failed: StdMutex::new(HashMap::new()),
+            discovery_tried: StdMutex::new(HashMap::new()),
+            discovery_pass: AtomicU64::new(0),
+            key_index_absent: AtomicBool::new(false),
         }
     }
 
@@ -899,9 +942,14 @@ impl Resolver {
             return KeyLookup::NoLog;
         }
         if self.index_down() {
+            map.note_pending(key);
             return KeyLookup::Unknown;
         }
-        let scid = match self.backend.key_owner(key, 0).await {
+        let answer = self.backend.key_owner(key, 0).await;
+        if matches!(answer, Ok(_) | Err(IdentityError::NotFound)) {
+            self.key_index_absent.store(false, Ordering::Relaxed);
+        }
+        let scid = match answer {
             Ok(Some(entry)) => match scid_of(&entry.did) {
                 Some(scid) => scid.to_string(),
                 None => {
@@ -917,9 +965,18 @@ impl Resolver {
                 map.note_no_log(key);
                 return KeyLookup::NoLog;
             }
+            Err(IdentityError::NotServed(call)) => {
+                // No key index behind the agent language (one without the identity interface):
+                // as with no store, no log speaks for anyone, so nothing waits for an answer.
+                log::debug!("identity: the agent language does not serve {call}");
+                self.key_index_absent.store(true, Ordering::Relaxed);
+                map.note_no_log(key);
+                return KeyLookup::NoLog;
+            }
             Err(e) => {
                 log::info!("identity: the key index did not answer for did:key:{key} ({e})");
                 self.index_failed();
+                map.note_pending(key);
                 return KeyLookup::Unknown;
             }
         };
@@ -936,6 +993,7 @@ impl Resolver {
             Err(CacheError::Unavailable(e)) => {
                 log::info!("identity: refresh of {} failed ({e})", did_of(&scid));
                 self.index_failed();
+                map.note_pending(key);
                 return KeyLookup::Unknown;
             }
             Err(e) => log::info!("identity: refresh of {} failed ({e})", did_of(&scid)),
@@ -949,6 +1007,7 @@ impl Resolver {
         };
         if listed_at_all {
             // Listed past its store-signed head: it may count once the head reaches it.
+            map.note_pending(key);
             return KeyLookup::Unknown;
         }
         log::warn!(
@@ -988,9 +1047,22 @@ impl Resolver {
 
     /// [`Resolver::prepare`] at the unix time `now` (tests move the clock).
     pub(crate) async fn prepare_at(&self, signers: &[(String, Option<u64>)], now: u64) {
+        let map = self.cache.key_map();
+        // Signers the key map does not know: each may cost the key index a call. Which of them
+        // this pass asks about: those asked about longest ago first.
+        let unknown: Vec<&str> = signers
+            .iter()
+            .filter_map(|(did, _)| multikey_of(did))
+            .filter(|key| matches!(map.lookup(key), KeyLookup::Unknown))
+            .collect();
+        let asked = self.discovery_turn(&unknown);
+        // Asked in turn order, so a signer the index fails on (tripping the breaker) holds back
+        // only those after it in this turn, which the next turn asks first.
+        for key in &asked {
+            self.lookup_signer(key).await;
+        }
+        let asked: std::collections::HashSet<&str> = asked.into_iter().collect();
         let mut seen = std::collections::HashSet::new();
-        // Signers the key map does not know: each may cost the key index a call.
-        let mut discovered = std::collections::HashSet::new();
         for (did, anchor) in signers {
             if !seen.insert((did.as_str(), *anchor)) {
                 continue;
@@ -998,16 +1070,26 @@ impl Resolver {
             let Some(key) = multikey_of(did) else {
                 continue;
             };
-            if matches!(self.cache.key_map().lookup(key), KeyLookup::Unknown)
-                && !discovered.contains(key)
-            {
-                if discovered.len() >= DISCOVERY_PER_BATCH {
+            let lookup = match map.lookup(key) {
+                // No key index: the lookup costs no store call, so the cap does not apply.
+                KeyLookup::Unknown
+                    if !asked.contains(key) && self.key_index_absent.load(Ordering::Relaxed) =>
+                {
+                    self.lookup_signer(key).await
+                }
+                known => known,
+            };
+            let scid = match lookup {
+                KeyLookup::Listed { scid, .. } => scid,
+                KeyLookup::NoLog => continue,
+                KeyLookup::Unknown => {
+                    if !asked.contains(key) {
+                        // Not asked about in this batch: its links wait (`CantCheck`) rather
+                        // than count as a key no log lists.
+                        map.note_pending(key);
+                    }
                     continue;
                 }
-                discovered.insert(key);
-            }
-            let KeyLookup::Listed { scid, .. } = self.lookup_signer(key).await else {
-                continue;
             };
             if !self.cache.refreshed_within(&scid, now, ADMIT_FRESHNESS) {
                 if let Err(e) = self
@@ -1036,24 +1118,62 @@ impl Resolver {
         max_age: u64,
     ) -> Result<SessionKey, SessionKeyError> {
         let scid = scid_from(scid);
+        // Only a read the store answered counts as fresh: a failed refresh marks the
+        // attempt (`refreshed`) but leaves `read_ok`, so an outage never ages a stale
+        // head into an admissible one. A failed read also backs off per identity for
+        // [`SESSION_READ_BACKOFF`] — an unreachable store is not paid a timeout per
+        // login attempt — and never notes the cached head as read.
         if !self
             .cache
-            .refreshed_within(scid, super::service::now(), max_age)
+            .read_ok_within(scid, super::service::now(), max_age)
         {
+            if self.admission_down(scid) {
+                return Err(SessionKeyError::StoreUnavailable);
+            }
             match self
                 .cache
                 .refresh(self.backend.as_ref(), &did_of(scid))
                 .await
             {
-                Ok(_) => {}
-                Err(CacheError::NotFound) => return Err(SessionKeyError::NotListed),
+                Ok(_) => {
+                    if let Ok(mut failed) = self.admission_failed.lock() {
+                        failed.remove(scid);
+                    }
+                }
+                Err(CacheError::NotFound) => {
+                    if let Ok(mut failed) = self.admission_failed.lock() {
+                        failed.remove(scid);
+                    }
+                    return Err(SessionKeyError::NotListed);
+                }
                 Err(e) => {
                     log::info!("identity: refresh of {} failed ({e})", did_of(scid));
+                    if let Ok(mut failed) = self.admission_failed.lock() {
+                        failed.insert(scid.to_string(), Instant::now());
+                    }
                     return Err(SessionKeyError::StoreUnavailable);
                 }
             }
         }
         self.cached_session_key(scid, key).await
+    }
+
+    /// Whether a failed admission read of `scid`'s log is still within its backoff.
+    fn admission_down(&self, scid: &str) -> bool {
+        self.admission_failed
+            .lock()
+            .ok()
+            .and_then(|failed| failed.get(scid).copied())
+            .is_some_and(|at| at.elapsed() < SESSION_READ_BACKOFF)
+    }
+
+    /// Test seam: drops every recorded admission-read failure, so the next
+    /// `session_key` reads the store again.
+    #[cfg(test)]
+    pub(crate) fn forget_admission_failures(&self) {
+        if let Ok(mut failed) = self.admission_failed.lock() {
+            failed.clear();
+        }
     }
 
     /// [`Resolver::session_key`] from the cached log only, whatever its age.
@@ -1067,6 +1187,35 @@ impl Resolver {
             .await
             .ok_or(SessionKeyError::NotListed)?;
         session_key_in(scid, chain.state(), trusted, key, super::service::now())
+    }
+
+    /// Which of the `unknown` signers this pass asks the key index about, at most
+    /// [`DISCOVERY_PER_BATCH`], in the order they are to be asked: those never asked first,
+    /// then those asked about longest ago, in batch order among equals. So signers the index
+    /// keeps failing on (or that keep coming first in a batch) do not hold the others back for
+    /// good: each pass moves on.
+    fn discovery_turn<'a>(&self, unknown: &[&'a str]) -> Vec<&'a str> {
+        let pass = self.discovery_pass.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut keys: Vec<&str> = Vec::with_capacity(unknown.len());
+        let mut distinct = std::collections::HashSet::new();
+        for key in unknown {
+            if distinct.insert(*key) {
+                keys.push(key);
+            }
+        }
+        let Ok(mut tried) = self.discovery_tried.lock() else {
+            return keys.into_iter().take(DISCOVERY_PER_BATCH).collect();
+        };
+        // A stable sort: never asked (0) first, then by the pass that last asked.
+        keys.sort_by_key(|key| tried.get(*key).copied().unwrap_or(0));
+        keys.truncate(DISCOVERY_PER_BATCH);
+        if tried.len() >= MAP_BOUND {
+            tried.clear();
+        }
+        for key in &keys {
+            tried.insert(key.to_string(), pass);
+        }
+        keys
     }
 
     fn index_down(&self) -> bool {
@@ -1760,7 +1909,7 @@ fn failure(e: ResolveError, mut meta: DidResolutionMetadata) -> DidResolutionRes
 mod tests {
     use super::*;
     use crate::identity::cache::tests::{
-        accept_signed, add_device, in_memory, trusting, FakeStore, TestLog,
+        accept_signed, add_device, in_memory, store_key, trusting, FakeStore, TestLog,
     };
     use crate::identity::src_fetch::test_host::{from_of, response, TestHost};
     use crate::identity::types::DidDocument;
@@ -2574,6 +2723,35 @@ mod tests {
         cosign(&mut event, "m0", &log.master).unwrap();
         log.events.push(event);
         bot
+    }
+
+    /// At start the re-check reads every log the cache holds ([`KelCache::load_held`]), so a
+    /// bot scope that ended while the executor was down is reported, and the links stored
+    /// `valid` by it are judged again, though no link or lookup asks for its log again.
+    #[tokio::test]
+    async fn the_start_load_reports_bot_keys_that_expired_while_down() {
+        use super::super::cache::KeyMap;
+        use super::super::verdict::KeyVerdict;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let mut log = TestLog::new(86);
+        let bot = add_bot_until(&mut log, 87, super::super::service::now() - 10);
+        let keys = vec![store_key().multikey()];
+        {
+            let cache =
+                KelCache::open_with_map(&path, keys.clone(), Arc::new(KeyMap::new())).unwrap();
+            accept_signed(&cache, &log.events).await;
+        }
+        // The restart: a key map that holds nothing.
+        let cache = KelCache::open_with_map(&path, keys, Arc::new(KeyMap::new())).unwrap();
+        let mut changes = cache.subscribe();
+        assert_eq!(cache.load_held().await.unwrap(), 1);
+        let change = changes
+            .try_recv()
+            .expect("a change for the expired bot key");
+        assert_eq!(change.key, bot.key());
+        assert_eq!(change.verdict, KeyVerdict::Expired);
+        assert!(cache.key_map().log(&log.scid()).is_some());
     }
 
     #[tokio::test]
@@ -3970,5 +4148,107 @@ mod link_check_tests {
                 "stale head, anchor {anchor:?}"
             );
         }
+    }
+
+    /// `DISCOVERY_PER_BATCH` signers the key index fails on every time stand before one it
+    /// knows, in every batch. Each pass trips the breaker on a failing one; the signers not
+    /// asked yet go first on the next pass, so the known one is found within a few passes,
+    /// not never.
+    #[tokio::test]
+    async fn discovery_reaches_a_signer_behind_ones_the_index_keeps_failing_on() {
+        let log = TestLog::new(75);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let resolver = resolver_on(store.clone());
+        let failing: Vec<String> = (0..DISCOVERY_PER_BATCH)
+            .map(|_| TestSigner::generate().did)
+            .collect();
+        store.key_index_down_for.lock().unwrap().extend(
+            failing
+                .iter()
+                .map(|did| multikey_of(did).unwrap().to_string()),
+        );
+        let device = format!("did:key:{}", log.device.key());
+        let signers: Vec<(String, Option<u64>)> = failing
+            .iter()
+            .cloned()
+            .chain([device])
+            .map(|did| (did, Some(0)))
+            .collect();
+        for _ in 0..3 {
+            // The breaker's pause is over.
+            *resolver.index_down_until.lock().unwrap() = None;
+            resolver.prepare(&signers).await;
+            if matches!(
+                resolver.cache.key_map().lookup(&log.device.key()),
+                KeyLookup::Listed { .. }
+            ) {
+                return;
+            }
+        }
+        panic!("the signer the index knows was never discovered");
+    }
+
+    /// A signer past the discovery cap stays unknown until a later batch. Its unanchored
+    /// link must not count meanwhile: "unknown" is not "no log", and a revoked device's
+    /// unanchored link would otherwise be stored `valid` and never looked at again.
+    #[tokio::test]
+    async fn an_unanchored_link_by_a_signer_past_the_discovery_cap_is_not_counted() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        let resolver = resolver_on(store);
+        let mut signers: Vec<(String, Option<u64>)> = (0..DISCOVERY_PER_BATCH)
+            .map(|_| (TestSigner::generate().did, Some(0)))
+            .collect();
+        let link: Expression<Link> = TestSigner::generate().sign(link());
+        signers.push((link.author.clone(), None));
+        resolver.prepare(&signers).await;
+        let judge = || check_signed_with(&link, resolver.cache.key_map(), None, NOW);
+        assert_eq!(
+            judge().verdict,
+            LinkVerdict::CantCheck,
+            "not asked about yet"
+        );
+        // The next batch asks about it: no log, so it counts as before key logs.
+        resolver.prepare(&signers).await;
+        assert_eq!(judge(), valid_for(None));
+    }
+
+    /// An agent language without the key index (a local test language, the server-link suite's
+    /// executors): no store answers through it, so a plain did:key signer is a key no log lists,
+    /// as with no store. Its links count with no person, past the discovery cap too; nothing
+    /// waits for an answer that cannot come. The same signer while the index is merely down
+    /// does wait (`CantCheck`).
+    #[tokio::test]
+    async fn without_a_key_index_a_did_key_signer_counts_as_one_no_log_lists() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        store.key_index_not_served.store(true, Ordering::SeqCst);
+        let resolver = resolver_on(store.clone());
+        let mut signers: Vec<(String, Option<u64>)> = (0..DISCOVERY_PER_BATCH)
+            .map(|_| (TestSigner::generate().did, None))
+            .collect();
+        let past_cap: Expression<Link> = TestSigner::generate().sign(link());
+        signers.push((past_cap.author.clone(), None));
+        resolver.prepare(&signers).await;
+        assert_eq!(
+            check_signed_with(&past_cap, resolver.cache.key_map(), None, NOW),
+            valid_for(None),
+            "past the cap, with no index to ask"
+        );
+        let first: Expression<Link> = TestSigner::generate().sign(link());
+        resolver.prepare(&[(first.author.clone(), None)]).await;
+        assert_eq!(
+            check_signed_with(&first, resolver.cache.key_map(), None, NOW),
+            valid_for(None),
+            "asked: the language does not serve the index"
+        );
+
+        // An index that is there but does not answer: the signer waits.
+        store.key_index_not_served.store(false, Ordering::SeqCst);
+        store.key_index_down.store(true, Ordering::SeqCst);
+        let waiting: Expression<Link> = TestSigner::generate().sign(link());
+        resolver.prepare(&[(waiting.author.clone(), None)]).await;
+        assert_eq!(
+            check_signed_with(&waiting, resolver.cache.key_map(), None, NOW).verdict,
+            LinkVerdict::CantCheck
+        );
     }
 }
