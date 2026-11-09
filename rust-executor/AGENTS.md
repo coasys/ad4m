@@ -43,15 +43,16 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `tool_bundles/` | Tool bundles: an app's JS for its agents' tools, one bare `JsRuntime` per bundle with two ops (random bytes, a log line); time limit on load and every call, memory cap on heap and ArrayBuffers. `builtin.rs` compiles in WE's template tools (`template_read` / `template_update` in `mcp/`), downloaded from a WE release by `build.rs` (version and sha256 pinned there) | `src/tool_bundles/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
 | `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
-| `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
-| `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
+| `identity/` | `did:scid:coasys:1` on the executor: `KelCache` (key logs on `ad4m-hash-chain`'s `SqliteChainStore` in `ad4m_db.sqlite`), the agent-language backend, the operator record and first-link rule, `ClaimService`, the `identity.*` calls (handlers in `api/identity_ws.rs`), the `identity-fork` event | `src/identity/AGENTS.md` |
+| `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`. Executor code reaches it through `db_backend::db_backend()`, never `Ad4mDb` directly. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
+| `db_backend.rs` | `DbBackend`: the executor's database, one domain method per `Ad4mDb` method that executor code calls (`ad4m_db_methods!`), plus key-value methods for the shared records. `LocalDb` runs on SQLite; `SharedDb` (`config.db_backend == "shared"`) serves the key-value methods from the platform Worker over HTTP and every domain method from SQLite | `src/db/AGENTS.md` |
 | `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event (live query updates too, as `Event::for_connection`); feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
 | `types/` | `core.rs` = domain types (Link, Expression, Perspective…), `domain.rs` = wire/input types; some duplicates, see spec item 5 | — |
 | `runtime_service/`, `entanglement_service/`, `neighbourhoods.rs`, `billing.rs`, `email_service.rs`, `user_management.rs`, `unyt_service.rs`, `wallet.rs`, `perspective_snapshot.rs`, `logging.rs` | Smaller services; `unyt_service.rs` = Unyt/mHOT currency DNA + payments | — |
 
 ## Cross-cutting facts you need before editing
 
-- **Services are global singletons** (`lazy_static`), e.g. `Ad4mDb::with_global_instance`,
+- **Services are global singletons** (`lazy_static`), e.g. `db_backend::db_backend()`,
   `AgentService::with_global_instance`, `LanguageController::global_instance()`,
   `AIService::global_instance().await`, `get_global_pubsub()`, `perspectives::get_perspective(uuid)`.
   Do not add new ones; spec item 11 introduces `AppContext`.
@@ -148,6 +149,31 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `keystoreFingerprint` (the saved keys) into `agent.json`, and the fallback to the backup runs
   only while the backup holds exactly those keys. Write the agent file only through
   `AgentService::save` / `try_save`.
+- **Identity** (`identity/`): an agent's device key (the wallet key) may speak
+  for a `did:scid` whose log lists it; the master key and the 12 words never reach the executor
+  (apps hold them through `ad4m-identity-client`). The configured store's logs come through the
+  agent language (`Capability::Identity*`, refused on any other language); a DID URL's foreign
+  `src` is read by the executor itself (`identity/src_fetch.rs`, public addresses only at
+  connect). The configured store's logs are kept after `fold` in `KelCache`; a foreign `src`
+  log is folded in memory only, never stored, and a conflict it shows is reported in the
+  resolution metadata (`coasys:skipped`), never recorded as a fork. A head counts only under a key of the
+  config's `identity.storeKeys`, authorship reads a log only up to that head, and
+  `identity.storeUrl` and `identity.storeKeys` become the agent language's `storeUrl` and
+  `storeKeys` settings at every start (unset removes them; with neither set, the store and
+  keys are the network seed's `identityStore` (the compiled-in `mainnet_seed.json` names
+  `https://store.ad4m.dev`, today's staging network; a seed file without one, as an older
+  `init` wrote, gets the compiled-in seed's), and without one there is no store; a
+  `storeUrl` without `storeKeys` has no key; without a key the executor warns at start: no
+  `did:scid` record verifies). A different event at a held seq that holds on the prefix
+  records a fork, keeps the history and fires `identity-fork`; a store answering a shorter log
+  is behind (or an unverified conflict), records nothing, and the cache answers.
+  `ad4m-executor init --operator <did:scid>` records the operator (`operator_record`, never
+  replaced by `init`); `identity.claimOffer` (operator only) claims with the main wallet key and
+  refuses `already-linked` / `no-operator` / `first-link` inside
+  `ClaimService::claim_for_main`. `agent.status` and `agent.get` gain `identity`; `did` stays the
+  device `did:key`. `identity.resolve` (`identity/resolver.rs`) answers a DID Core resolution
+  result for a `did:scid:coasys:1` DID URL or a device `did:key`; a URL's `src` must name a
+  public HTTPS host unless `identity.allowPrivateSrc` is set.
 
 ## Do / don't
 

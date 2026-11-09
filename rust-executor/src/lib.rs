@@ -11,6 +11,7 @@ pub mod fd_limit;
 mod globals;
 pub mod helpers;
 pub mod holochain_service;
+pub mod identity;
 pub mod js_core;
 pub mod mcp;
 pub mod perspective_snapshot;
@@ -580,11 +581,42 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     )
     .expect("Failed to initialize Ad4mDb");
 
+    // The seed names the network's identity store, which the identity module reads below.
+    info!("Initializing Runtime service...");
+    RuntimeService::init_global_instance(
+        std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
+            .join("mainnet_seed.seed")
+            .to_string_lossy()
+            .into_owned(),
+    );
+
+    // The key-log cache lives in the same database file.
+    {
+        let db_path = std::path::Path::new(
+            config
+                .app_data_path
+                .as_ref()
+                .expect("App data path not set in Ad4mConfig"),
+        )
+        .join("ad4m_db.sqlite");
+        let settings = crate::identity::IdentitySettings::from_config(
+            &config,
+            RuntimeService::seed_identity_store().as_ref(),
+        );
+        if let Err(e) = settings.check() {
+            return failed_start(e);
+        }
+        if let Err(e) = crate::identity::init(&db_path, &settings) {
+            return failed_start(format!("Could not open the key-log cache: {e}"));
+        }
+    }
+
     // Set multi-user mode before starting services to avoid race condition
     if let Some(enable_multi_user) = config.enable_multi_user {
         if enable_multi_user {
             info!("Enabling multi-user mode...");
-            Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
+            crate::db_backend::db_backend()
+                .set_multi_user_enabled(true)
                 .expect("Failed to enable multi-user mode");
         }
     }
@@ -618,7 +650,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     // Notifications of older executors name their owner by email; move them to DIDs.
     if let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) {
-        Ad4mDb::with_global_instance(|db| db.migrate_notification_owners(&main_agent_did))
+        crate::db_backend::db_backend()
+            .migrate_notification_owners(&main_agent_did)
             .expect("Failed to migrate notification owners");
     }
 
@@ -626,21 +659,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     tokio::spawn(async {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
-            if let Err(e) = Ad4mDb::with_global_instance(|db| db.cleanup_expired_codes()) {
+            if let Err(e) = crate::db_backend::db_backend().cleanup_expired_codes() {
                 error!("Failed to cleanup expired verification codes: {}", e);
             } else {
                 info!("Cleaned up expired verification codes");
             }
         }
     });
-
-    info!("Initializing Runtime service...");
-    RuntimeService::init_global_instance(
-        std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
-            .join("mainnet_seed.seed")
-            .to_string_lossy()
-            .into_owned(),
-    );
 
     // Grants are the allowlist of tokens: load them before the API serves.
     if let Err(e) = agent::grants::load_at_start() {
@@ -775,6 +800,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 info!("No Unyt membrane proof stored — skipping eager DNA install");
                 return;
             }
+            // Wait for the conductor without a limit: the agent unlock may take a while.
+            while !crate::holochain_service::maybe_get_holochain_service()
+                .await
+                .is_some_and(|service| !service.is_stopped())
+            {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            }
             match unyt_service::ensure_installed().await {
                 Ok(()) => info!("Unyt alliance DNA ready"),
                 Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
@@ -799,7 +831,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // When any credit mutation marks a user dirty, this drains the set
     // and publishes updated HostingUserInfo only for affected users.
     tokio::spawn(async {
-        use crate::db::Ad4mDb;
         use crate::events::Event;
         use crate::pubsub::{get_global_pubsub, DIRTY_CREDIT_USERS};
 
@@ -823,8 +854,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
 
             let pubsub = get_global_pubsub().await;
-            let global_free = match Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
-            {
+            let global_free = match crate::db_backend::db_backend().get_free_hosting_enabled() {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Credit flush: get_free_hosting_enabled failed: {}", e);
@@ -835,7 +865,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 let free_access = if global_free {
                     true
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
+                    match crate::db_backend::db_backend().get_user_free_access(email) {
                         Ok(v) => v,
                         Err(e) => {
                             error!(
@@ -849,7 +879,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 let remaining_credits = if free_access {
                     "unlimited".to_string()
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_credits(email)) {
+                    match crate::db_backend::db_backend().get_user_credits(email) {
                         Ok(credits) => format!("{}", credits),
                         Err(e) => {
                             error!("Credit flush: get_user_credits failed for {}: {}", email, e);
@@ -858,7 +888,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     }
                 };
                 let hot_wallet_address =
-                    match Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email)) {
+                    match crate::db_backend::db_backend().get_user_hot_wallet(email) {
                         Ok(v) => v,
                         Err(e) => {
                             error!(
