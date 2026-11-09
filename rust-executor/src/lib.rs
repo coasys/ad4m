@@ -398,12 +398,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 while std::os::unix::process::parent_id() == parent {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                warn!(
-                    "The process that started the executor (PID {parent}) is gone, shutting down"
-                );
+                // Shutdown first, then the log line: a stderr nobody drains must not hold it up.
                 if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
                     let _ = tx.send(());
                 }
+                warn!(
+                    "The process that started the executor (PID {parent}) is gone, shutting down"
+                );
                 std::thread::sleep(SHUTDOWN_DEADLINE);
                 warn!(
                     "Cleanup did not finish within {:?}, exiting without it",
