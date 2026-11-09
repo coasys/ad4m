@@ -941,10 +941,16 @@ mod tests {
         }
     }
 
-    fn setup() {
+    /// Opens the shared test database, held behind the one test lock for the whole
+    /// test: the `grants`/`pending_grant_writes` tables and the `FAIL_NEXT_GRANT_*`
+    /// seams are process-global, so these tests never run beside one another — nor
+    /// beside `identity` tests minting or ending grants on the same tables.
+    fn setup() -> tokio::sync::MutexGuard<'static, ()> {
+        let seam = crate::test_utils::OPERATOR_RECORD.blocking_lock();
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
+        seam
     }
 
     fn user(name: &str) -> AgentContext {
@@ -959,7 +965,7 @@ mod tests {
     // main agent on a shared wallet (`platform`), so a session must never take it as its DID.
     #[test]
     fn a_main_agent_grant_names_the_same_did_minted_and_reloaded() {
-        setup();
+        let _seam = setup();
         let (_, grant) = mint(AgentContext::main_agent(), auth("app", vec![]), None, 3600).unwrap();
         let reloaded = LiveGrant::from_row(grant.row().unwrap()).unwrap();
         assert_eq!(grant.did, reloaded.did);
@@ -971,7 +977,7 @@ mod tests {
 
     #[test]
     fn a_minted_token_has_an_active_grant_with_the_apps_capabilities() {
-        setup();
+        let _seam = setup();
         let (token, grant) = mint(
             AgentContext::main_agent(),
             auth("grants-mint", vec![AGENT_READ_CAPABILITY.clone()]),
@@ -993,7 +999,7 @@ mod tests {
 
     #[test]
     fn an_unknown_token_id_has_no_grant() {
-        setup();
+        let _seam = setup();
         assert!(Grants::global()
             .get(&TokenId("never-issued".into()))
             .is_none());
@@ -1001,7 +1007,7 @@ mod tests {
 
     #[test]
     fn a_revoked_grant_is_gone_from_get_and_fires_its_token() {
-        setup();
+        let _seam = setup();
         let (_, grant) = mint(
             AgentContext::main_agent(),
             auth("grants-revoke", vec![ALL_CAPABILITY.clone()]),
@@ -1023,7 +1029,7 @@ mod tests {
 
     #[test]
     fn a_removed_grant_refuses_its_token_and_leaves_the_list() {
-        setup();
+        let _seam = setup();
         let (_, grant) = mint(
             AgentContext::main_agent(),
             auth("grants-remove", vec![ALL_CAPABILITY.clone()]),
@@ -1040,7 +1046,7 @@ mod tests {
 
     #[test]
     fn find_takes_a_request_id_or_the_token_itself() {
-        setup();
+        let _seam = setup();
         let request_id = format!("req-{}", uuid::Uuid::new_v4());
         let (token, grant) = mint(
             AgentContext::main_agent(),
@@ -1060,7 +1066,7 @@ mod tests {
 
     #[test]
     fn revoke_agent_ends_every_grant_of_that_agent_only() {
-        setup();
+        let _seam = setup();
         let (alice, bob) = (user("alice"), user("bob"));
         let insert = |agent: &AgentContext, name: &str| {
             let id = uuid::Uuid::new_v4().to_string();
@@ -1091,7 +1097,7 @@ mod tests {
 
     #[test]
     fn grants_and_their_state_survive_a_reload() {
-        setup();
+        let _seam = setup();
         let (_, kept) = mint(
             AgentContext::main_agent(),
             auth("grants-kept", vec![AGENT_READ_CAPABILITY.clone()]),
@@ -1124,7 +1130,7 @@ mod tests {
     /// restart loads.
     #[test]
     fn revoking_an_agent_again_writes_grants_already_ended_in_memory() {
-        setup();
+        let _seam = setup();
         let alice = user("alice");
         let insert = |name: &str| {
             let id = uuid::Uuid::new_v4().to_string();
@@ -1189,7 +1195,7 @@ mod tests {
     // renewal is refused rather than answering a token that cannot work.
     #[test]
     fn a_renewal_of_a_grant_that_just_ended_is_refused() {
-        setup();
+        let _seam = setup();
         let (_, grant) = mint_key_grant(
             KeyGrant::Agent {
                 agent: AgentContext::main_agent(),
@@ -1222,7 +1228,10 @@ mod tests {
     // is written by the retry: the next grants call, or the retry task, persists it.
     #[tokio::test]
     async fn a_revocation_whose_write_failed_is_written_by_the_retry() {
-        setup();
+        let _seam = crate::test_utils::OPERATOR_RECORD.lock().await;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_test_db();
         let (_, grant) = mint(
             AgentContext::main_agent(),
             auth("revocation-retry", vec![]),
@@ -1252,7 +1261,7 @@ mod tests {
     // the write.
     #[test]
     fn a_revocation_pending_at_a_restart_keeps_the_token_refused() {
-        setup();
+        let _seam = setup();
         let (_, grant) = mint(
             AgentContext::main_agent(),
             auth("pending-restart", vec![]),
@@ -1261,7 +1270,7 @@ mod tests {
         )
         .unwrap();
         // The table's write fails: the grant is ended in memory but the row stays active.
-        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
             Grants::global().revoke(std::slice::from_ref(&grant)),
             Err(GrantError::Store(_))
@@ -1291,7 +1300,7 @@ mod tests {
     // stops showing it.
     #[test]
     fn a_delete_that_lands_on_retry_removes_the_grant() {
-        setup();
+        let _seam = setup();
         let grants = Grants::default();
         let grant = grants
             .insert(LiveGrant::new(
@@ -1304,7 +1313,7 @@ mod tests {
                 now(),
             ))
             .unwrap();
-        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
             grants.remove(std::slice::from_ref(&grant)),
             Err(GrantError::Store(_))
@@ -1322,12 +1331,12 @@ mod tests {
         assert!(grants.pending_is_empty());
     }
 
-    /// A grant ends in memory before any persistence attempt or retry: a call that owes
-    /// retries ends the grants it is given first, and a failed write still leaves them
-    /// ended.
+    /// A grant ends in memory before any persistence attempt or retry: while the
+    /// owed delete's retry is still blocked on the database, the new grant the
+    /// revoke names is already ended — before its own or any pending write lands.
     #[test]
     fn a_grant_ends_before_pending_writes_are_driven() {
-        setup();
+        let _seam = setup();
         let grants = Grants::default();
         let insert = |name: &str| {
             grants
@@ -1343,20 +1352,37 @@ mod tests {
                 .unwrap()
         };
         let (failed, grant) = (insert("failed-remove"), insert("revoked"));
-        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
             grants.remove(std::slice::from_ref(&failed)),
             Err(GrantError::Store(_))
         ));
-        // The failed remove's delete is still owed when the revoke runs: both grants
-        // are ended in memory before either pending op is driven.
-        assert!(grants.revoke(std::slice::from_ref(&grant)).is_ok());
-        assert!(grant.is_ended());
+        // The database's lock stands between the revoke and every pending write:
+        // hold it, and the grant must read as ended while no write can land — a
+        // revoke that drove the old writes first would leave it live here.
+        let db_instance = crate::db::Ad4mDb::global_instance();
+        let held_db = db_instance
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::thread::scope(|scope| {
+            let revoke = scope.spawn(|| grants.revoke(std::slice::from_ref(&grant)));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !grant.is_ended() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the grant ends while its write is still blocked"
+                );
+                std::thread::yield_now();
+            }
+            // The grant is ended before any pending write lands: release the writes.
+            drop(held_db);
+            assert!(revoke.join().unwrap().is_ok());
+        });
         assert!(failed.is_ended());
         assert!(grants.get(&grant.id).is_none());
         assert!(grants.get(&failed.id).is_none());
-        // The one drive lands both: the owed delete and the revoke. The revoked grant
-        // stays listed, ended; the deleted one is gone.
+        // The one drive landed both: the owed delete and the revoke. The revoked
+        // grant stays listed, ended; the deleted one is gone.
         assert!(grants.pending_is_empty());
         let listed = grants.list(&AgentContext::main_agent());
         assert_eq!(listed.len(), 1);
@@ -1367,7 +1393,7 @@ mod tests {
     /// the strongest write still unlanded.
     #[test]
     fn a_landed_revoke_keeps_a_pending_delete_noted() {
-        setup();
+        let _seam = setup();
         let db = crate::db_backend::db_backend();
         // Two in-memory grant lists over the one table, as a load makes: `a` owes a
         // delete, `b` revokes the same grant.
@@ -1387,7 +1413,7 @@ mod tests {
                 .unwrap()
         };
         let (ga, gb) = (grant(&a), grant(&b));
-        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
             a.remove(std::slice::from_ref(&ga)),
             Err(GrantError::Store(_))
@@ -1408,7 +1434,7 @@ mod tests {
     /// ended, until the retry converges note, write and clear.
     #[test]
     fn a_failed_note_clear_keeps_the_op_queued() {
-        setup();
+        let _seam = setup();
         let db = crate::db_backend::db_backend();
         let grants = Grants::default();
         let grant = grants
@@ -1422,7 +1448,7 @@ mod tests {
                 now(),
             ))
             .unwrap();
-        crate::db::FAIL_NEXT_GRANT_CLEAR.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_CLEAR.store(true, std::sync::atomic::Ordering::SeqCst);
         grants.remove(std::slice::from_ref(&grant)).unwrap();
         assert!(
             !grants.pending_is_empty(),
@@ -1439,7 +1465,7 @@ mod tests {
     /// write both failed once, a restart after the next pass still finds the grant ended.
     #[test]
     fn a_failed_note_is_retried_so_a_restart_finds_the_end() {
-        setup();
+        let _seam = setup();
         let grants = Grants::default();
         let grant = grants
             .insert(LiveGrant::new(
@@ -1453,8 +1479,8 @@ mod tests {
             ))
             .unwrap();
         // The note insert and the grant's write both fail: nothing durable of the end.
-        crate::db::FAIL_NEXT_GRANT_NOTE.store(true, std::sync::atomic::Ordering::SeqCst);
-        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_NOTE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
             grants.revoke(std::slice::from_ref(&grant)),
             Err(GrantError::Store(_))
@@ -1465,7 +1491,7 @@ mod tests {
             .is_empty());
         // The retry writes the note again; the grant's write still fails, and the note
         // is what a restart reads.
-        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
         grants.retry_pending();
         assert_eq!(
             crate::db_backend::db_backend()
@@ -1492,7 +1518,7 @@ mod tests {
     /// the pending op lands the delete, not the revoke.
     #[test]
     fn a_revoke_never_downgrades_a_pending_delete() {
-        setup();
+        let _seam = setup();
         let db = crate::db_backend::db_backend();
         let grants = Grants::default();
         let grant = grants
@@ -1506,7 +1532,7 @@ mod tests {
                 now(),
             ))
             .unwrap();
-        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
             grants.remove(std::slice::from_ref(&grant)),
             Err(GrantError::Store(_))
@@ -1521,7 +1547,7 @@ mod tests {
     /// and the retry's delete takes the row out.
     #[test]
     fn a_pending_delete_at_a_restart_removes_the_grant() {
-        setup();
+        let _seam = setup();
         let grants = Grants::default();
         let grant = grants
             .insert(LiveGrant::new(
@@ -1534,7 +1560,7 @@ mod tests {
                 now(),
             ))
             .unwrap();
-        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::grants::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
             grants.remove(std::slice::from_ref(&grant)),
             Err(GrantError::Store(_))

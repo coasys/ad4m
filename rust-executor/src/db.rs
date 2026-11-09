@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
-mod grants;
+pub(crate) mod grants;
 mod identity;
 mod rekey;
 mod tasks;
@@ -168,24 +168,6 @@ lazy_static! {
 pub struct Ad4mDb {
     conn: Connection,
 }
-
-/// Test seam: the next end-of-grant write (`revoke_grants`, `delete_grants`) fails, so
-/// `agent::grants` sees a write the table did not take.
-#[cfg(test)]
-pub(crate) static FAIL_NEXT_GRANT_WRITE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Test seam: the next note of a pending grant write (`note_pending_grant_writes`) fails,
-/// so a restart finds no durable note of the end a caller was writing.
-#[cfg(test)]
-pub(crate) static FAIL_NEXT_GRANT_NOTE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Test seam: the next clear of a pending grant write (`clear_pending_grant_writes`)
-/// fails, so the note of a landed change stays behind.
-#[cfg(test)]
-pub(crate) static FAIL_NEXT_GRANT_CLEAR: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 impl Ad4mDb {
     pub fn init_global_instance(db_path: &str) -> Ad4mDbResult<()> {

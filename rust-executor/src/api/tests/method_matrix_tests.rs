@@ -1675,10 +1675,11 @@ fn every_registered_method_has_a_guard() {
     assert_eq!(unguarded, Vec::<&str>::new());
 }
 
-/// The methods that check no capability: any caller, anonymous included, reaches the
-/// handler.
+/// The methods whose REGISTERED GUARD checks no capability (`Guard::Open`): any caller,
+/// anonymous included, reaches the handler — which may still refuse. `user.sessionChallenge`
+/// is one: its handler asks AGENT_AUTH of a caller with no key-bound grant.
 #[test]
-fn only_methods_that_check_no_capability_are_open() {
+fn only_methods_whose_guard_checks_no_capability_are_open() {
     let map = build_handler_map();
     let open: Vec<&str> = map
         .guards()
