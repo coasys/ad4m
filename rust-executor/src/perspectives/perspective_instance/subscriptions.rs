@@ -5,8 +5,11 @@
 //! subscription registry without widening its visibility.
 
 use deno_core::error::AnyError;
+use futures::future::BoxFuture;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Semaphore;
 
 use super::{PerspectiveInstance, SubscribedQuery};
 use crate::agent::{did_for_context, AgentContext};
@@ -53,14 +56,25 @@ impl PerspectiveInstance {
             .lock()
             .await
             .insert(id.clone(), query);
-        let result = match first_result.await {
+        // A call the client cancels (`request.cancel`, or its connection closing) drops this
+        // future while the first result computes. Take the subscription out again then, or it
+        // stays registered and re-runs on every change for a query nobody holds (#1595).
+        let mut unregister = UnregisterOnDrop {
+            queries: self.subscribed_queries.clone(),
+            id: Some(id.clone()),
+        };
+        let first = first_result.await;
+        // Disarm only with the lock held: a call dropped while it waits for the lock gets no
+        // reply either, so nobody would ever hold its subscription.
+        let mut queries = self.subscribed_queries.lock().await;
+        unregister.id = None;
+        let result = match first {
             Ok(result) => result,
             Err(e) => {
-                self.subscribed_queries.lock().await.remove(&id);
+                queries.remove(&id);
                 return Err(e);
             }
         };
-        let mut queries = self.subscribed_queries.lock().await;
         Ok(match queries.get_mut(&id) {
             Some(q) if q.revision > 0 => (id, q.revision, q.last_result.clone()),
             Some(q) => {
@@ -237,6 +251,89 @@ fn rows_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
         ("added".into(), json!(added)),
         ("removed".into(), json!(removed)),
     ]))
+}
+
+/// Removes subscription `id` from `queries` when dropped, unless `id` was taken
+/// first: what `open_subscription` leaves behind when its caller drops it before
+/// the first result is in.
+struct UnregisterOnDrop {
+    queries: std::sync::Arc<tokio::sync::Mutex<HashMap<String, SubscribedQuery>>>,
+    id: Option<String>,
+}
+
+impl Drop for UnregisterOnDrop {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else { return };
+        // Drop cannot await the lock: take it if free, else remove from a task.
+        if let Ok(mut queries) = self.queries.try_lock() {
+            queries.remove(&id);
+            return;
+        }
+        let queries = self.queries.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                queries.lock().await.remove(&id);
+            });
+        }
+    }
+}
+
+/// The most subscription re-checks that run at once in the executor.
+const MAX_CONCURRENT_RECHECKS: usize = 8;
+
+/// How many re-checks run at once across all perspectives: one per core,
+/// at most [`MAX_CONCURRENT_RECHECKS`]. A perspective can hold many
+/// subscriptions, each perspective runs its own passes, and each running
+/// re-check holds a thread of the blocking pool the executor shares.
+fn recheck_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(MAX_CONCURRENT_RECHECKS)
+}
+
+/// The executor's re-check slots, shared by every perspective's passes.
+pub(super) static RECHECK_SLOTS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(recheck_concurrency())));
+
+/// Run one pass's subscription re-checks off the async workers, each
+/// holding a permit of `slots` while it runs, and return their outputs in
+/// the order they finish.
+///
+/// A re-check reads the SPARQL store synchronously: a raw SPARQL
+/// subscription through `query_arbitrary`, a model subscription in parts
+/// of `execute_model_query`. Each re-check runs on a blocking-pool thread
+/// that drives its future with `Handle::block_on`, so the store work never
+/// holds an async worker, nor the task that runs the perspective's
+/// background loops (`start_background_tasks` joins them on one task).
+/// A re-check is spawned only once it holds a permit, so all passes of all
+/// perspectives together run at most `slots`' permits of re-checks; one
+/// that panics is logged and yields nothing.
+pub(super) async fn run_rechecks<T: Send + 'static>(
+    checks: Vec<BoxFuture<'static, T>>,
+    slots: &Arc<Semaphore>,
+) -> Vec<T> {
+    let runtime = tokio::runtime::Handle::current();
+    let mut running = tokio::task::JoinSet::new();
+    let mut outputs = Vec::with_capacity(checks.len());
+    for check in checks {
+        let permit = slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the re-check semaphore is never closed");
+        let runtime = runtime.clone();
+        running.spawn_blocking(move || {
+            let _permit = permit;
+            runtime.block_on(check)
+        });
+    }
+    while let Some(joined) = running.join_next().await {
+        match joined {
+            Ok(output) => outputs.push(output),
+            Err(e) => log::error!("❌ 🔗 subscription re-check failed: {}", e),
+        }
+    }
+    outputs
 }
 
 #[cfg(test)]
@@ -474,5 +571,151 @@ mod tests {
             .expect_err("a Prolog live query is refused");
         assert_eq!(err.to_string(), super::super::PROLOG_LIVE_QUERY_UNSUPPORTED);
         assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subscribe_dropped_before_its_first_result_is_not_left_registered() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let query = super::SubscribedQuery::new(
+            "SELECT ?s ?o WHERE { ?s <test://p> ?o }".into(),
+            "c".into(),
+            None,
+        );
+        // The client cancels (or its connection closes) while the first
+        // result is still being computed: the call future is dropped (#1595).
+        let never = std::future::pending::<Result<String, deno_core::error::AnyError>>();
+        let opening = p.open_subscription(query, never);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), opening)
+                .await
+                .is_err(),
+            "still computing when dropped"
+        );
+        tokio::task::yield_now().await;
+        assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subscribe_dropped_while_it_stores_its_first_result_is_not_left_registered() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let query = super::SubscribedQuery::new(
+            "SELECT ?s ?o WHERE { ?s <test://p> ?o }".into(),
+            "c".into(),
+            None,
+        );
+        let (computed, first_result) = tokio::sync::oneshot::channel();
+        let mut opening =
+            Box::pin(p.open_subscription(query, async move { first_result.await.unwrap() }));
+        let short = std::time::Duration::from_millis(20);
+        assert!(tokio::time::timeout(short, opening.as_mut()).await.is_err());
+        // A check of the live queries holds the registry as the first result comes in,
+        // and the client cancels while the call waits for it.
+        let held = p.subscribed_queries.lock().await;
+        computed.send(Ok("[]".to_string())).unwrap();
+        assert!(
+            tokio::time::timeout(short, opening.as_mut()).await.is_err(),
+            "waiting for the registry"
+        );
+        drop(opening);
+        drop(held);
+        tokio::time::sleep(short).await;
+        assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    // ── Re-check passes ─────────────────────────────────────────────────
+
+    /// A pass never runs more re-checks at once than its semaphore has
+    /// permits, and every re-check's output comes back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_runs_at_most_its_limit_of_rechecks_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let checks = (0..20usize)
+            .map(|i| {
+                let (running, peak) = (running.clone(), peak.clone());
+                Box::pin(async move {
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    running.fetch_sub(1, Ordering::SeqCst);
+                    i
+                }) as futures::future::BoxFuture<'static, usize>
+            })
+            .collect();
+
+        let slots = Arc::new(tokio::sync::Semaphore::new(3));
+        let mut outputs = super::run_rechecks(checks, &slots).await;
+
+        outputs.sort();
+        assert_eq!(outputs, (0..20).collect::<Vec<_>>());
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+    }
+
+    /// Two passes running at once share one semaphore: together they never
+    /// run more re-checks than it has permits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn passes_together_run_at_most_the_semaphore_s_permits_of_rechecks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let pass = |first: usize| {
+            (first..first + 10)
+                .map(|i| {
+                    let (running, peak) = (running.clone(), peak.clone());
+                    Box::pin(async move {
+                        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        running.fetch_sub(1, Ordering::SeqCst);
+                        i
+                    }) as futures::future::BoxFuture<'static, usize>
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let slots = Arc::new(tokio::sync::Semaphore::new(3));
+        let (a, b) = tokio::join!(
+            super::run_rechecks(pass(0), &slots),
+            super::run_rechecks(pass(10), &slots)
+        );
+
+        let mut outputs = [a, b].concat();
+        outputs.sort();
+        assert_eq!(outputs, (0..20).collect::<Vec<_>>());
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+    }
+
+    /// A re-check runs on a blocking-pool thread, not on an async worker.
+    #[tokio::test]
+    async fn a_recheck_runs_off_the_async_workers() {
+        let caller = std::thread::current().id();
+        let check = Box::pin(async { std::thread::current().id() })
+            as futures::future::BoxFuture<'static, std::thread::ThreadId>;
+
+        let ran_on = super::run_rechecks(vec![check], &super::RECHECK_SLOTS).await;
+
+        assert_eq!(ran_on.len(), 1);
+        assert_ne!(ran_on[0], caller);
+    }
+
+    /// A re-check that panics yields nothing; the rest of the pass is kept.
+    #[tokio::test]
+    async fn a_panicking_recheck_drops_only_its_own_output() {
+        let checks: Vec<futures::future::BoxFuture<'static, u8>> = vec![
+            Box::pin(async { 1 }),
+            Box::pin(async { panic!("re-check failed") }),
+            Box::pin(async { 3 }),
+        ];
+
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
+        let mut outputs = super::run_rechecks(checks, &slots).await;
+
+        outputs.sort();
+        assert_eq!(outputs, vec![1, 3]);
     }
 }

@@ -1,4 +1,4 @@
-import { applyUpdate, LiveQuery, QueryLagged, QueryUpdate, Subscribed } from './LiveQuery';
+import { applyUpdate, LiveQuery, LiveQueryStatus, QueryLagged, QueryUpdate, reopenDelay, Subscribed } from './LiveQuery';
 
 describe('applyUpdate', () => {
     it('keys model results by instance id and takes the new order', () => {
@@ -193,5 +193,177 @@ describe('LiveQuery', () => {
         await tick();
         expect(onResult).not.toHaveBeenCalled();
         expect(open).toHaveBeenCalledTimes(1);
+    });
+
+    describe('re-open after a reconnect (#1595)', () => {
+        beforeEach(() => {
+            jest.useFakeTimers();
+            // The top of each backoff window: 1 s, 2 s, 4 s, ...
+            jest.spyOn(Math, 'random').mockReturnValue(1);
+            jest.spyOn(console, 'error').mockImplementation(() => {});
+        });
+        afterEach(() => {
+            jest.useRealTimers();
+            jest.restoreAllMocks();
+        });
+
+        it('retries a failed re-open with backoff until the perspective is back, and reports it', async () => {
+            const { client, update, reconnect } = fakeClient();
+            const notFound = new Error('Perspective 9995ba16 not found');
+            const open = jest.fn()
+                .mockResolvedValueOnce({ subscriptionId: 's1', result: ['a'], revision: 0 })
+                .mockRejectedValueOnce(notFound)
+                .mockRejectedValueOnce(notFound)
+                .mockResolvedValueOnce({ subscriptionId: 's2', result: ['a', 'b'], revision: 0 });
+            const onResult = jest.fn();
+            const live = new LiveQuery(client as any, 'p', open, onResult);
+            const statuses: LiveQueryStatus[] = [];
+            live.onStatus(s => statuses.push(s));
+            await live.start();
+
+            reconnect();
+            await jest.advanceTimersByTimeAsync(0);
+            expect(open).toHaveBeenCalledTimes(2);
+            expect(live.reopening).toBe(true);
+            expect(statuses).toEqual([{ state: 'reopening', error: notFound, retryInMs: 1000 }]);
+
+            await jest.advanceTimersByTimeAsync(999);
+            expect(open).toHaveBeenCalledTimes(2);
+            await jest.advanceTimersByTimeAsync(1);
+            expect(open).toHaveBeenCalledTimes(3);
+            expect(statuses[1]).toEqual({ state: 'reopening', error: notFound, retryInMs: 2000 });
+
+            await jest.advanceTimersByTimeAsync(2000);
+            expect(open).toHaveBeenCalledTimes(4);
+            expect(live.reopening).toBe(false);
+            expect(statuses[2]).toEqual({ state: 'open' });
+            expect(live.id).toBe('s2');
+            expect(onResult).toHaveBeenLastCalledWith(['a', 'b']);
+
+            // Live again: updates to the new subscription apply.
+            update('s2', 1, ['c']);
+            expect(onResult).toHaveBeenLastCalledWith(['a', 'b', 'c']);
+
+            // No retry is left over.
+            await jest.advanceTimersByTimeAsync(120_000);
+            expect(open).toHaveBeenCalledTimes(4);
+        });
+
+        it('stops retrying once disposed', async () => {
+            const { client, reconnect } = fakeClient();
+            const open = jest.fn()
+                .mockResolvedValueOnce({ subscriptionId: 's1', result: [], revision: 0 })
+                .mockRejectedValue(new Error('Perspective p not found'));
+            const live = new LiveQuery(client as any, 'p', open, jest.fn());
+            await live.start();
+            reconnect();
+            await jest.advanceTimersByTimeAsync(0);
+            expect(open).toHaveBeenCalledTimes(2);
+            live.dispose();
+            await jest.advanceTimersByTimeAsync(120_000);
+            expect(open).toHaveBeenCalledTimes(2);
+        });
+
+        it('a new reconnect starts the backoff over', async () => {
+            const { client, reconnect } = fakeClient();
+            const open = jest.fn()
+                .mockResolvedValueOnce({ subscriptionId: 's1', result: [], revision: 0 })
+                .mockRejectedValue(new Error('Perspective p not found'));
+            const live = new LiveQuery(client as any, 'p', open, jest.fn());
+            const statuses: LiveQueryStatus[] = [];
+            live.onStatus(s => statuses.push(s));
+            await live.start();
+            reconnect();
+            await jest.advanceTimersByTimeAsync(1000 + 2000);
+            expect(open).toHaveBeenCalledTimes(4);
+            reconnect();
+            await jest.advanceTimersByTimeAsync(0);
+            expect(open).toHaveBeenCalledTimes(5);
+            expect(statuses.map(s => s.state === 'reopening' && s.retryInMs)).toEqual([1000, 2000, 4000, 1000]);
+            // Only the newest chain of retries is left.
+            await jest.advanceTimersByTimeAsync(1000);
+            expect(open).toHaveBeenCalledTimes(6);
+        });
+
+        it('a re-open that fails after a newer one took over leaves the newer one alone', async () => {
+            const { client, reconnect } = fakeClient();
+            let failLate!: (e: Error) => void;
+            const open = jest.fn()
+                .mockResolvedValueOnce({ subscriptionId: 's1', result: [], revision: 0 })
+                // The first re-open hangs (the old socket), and fails only after the next reconnect.
+                .mockReturnValueOnce(new Promise((_, reject) => { failLate = reject; }))
+                .mockResolvedValueOnce({ subscriptionId: 's2', result: ['x'], revision: 0 });
+            const live = new LiveQuery(client as any, 'p', open, jest.fn());
+            const statuses: LiveQueryStatus[] = [];
+            live.onStatus(s => statuses.push(s));
+            await live.start();
+            reconnect();
+            reconnect();
+            await jest.advanceTimersByTimeAsync(0);
+            expect(live.id).toBe('s2');
+
+            failLate(new Error('socket closed'));
+            await jest.advanceTimersByTimeAsync(120_000);
+            expect(statuses).toEqual([]);
+            expect(live.reopening).toBe(false);
+            expect(open).toHaveBeenCalledTimes(3);
+            expect(live.id).toBe('s2');
+        });
+
+        it('retries a re-open after a failed resync too', async () => {
+            const { client, update } = fakeClient();
+            client.resyncSubscription.mockRejectedValue(new Error('gone'));
+            const open = jest.fn()
+                .mockResolvedValueOnce({ subscriptionId: 's1', result: [], revision: 0 })
+                .mockRejectedValueOnce(new Error('Perspective p not found'))
+                .mockResolvedValueOnce({ subscriptionId: 's2', result: ['x'], revision: 0 });
+            const onResult = jest.fn();
+            const live = new LiveQuery(client as any, 'p', open, onResult);
+            await live.start();
+            update('s1', 2, ['x']);
+            await jest.advanceTimersByTimeAsync(0);
+            expect(open).toHaveBeenCalledTimes(2);
+            await jest.advanceTimersByTimeAsync(1000);
+            expect(open).toHaveBeenCalledTimes(3);
+            expect(live.id).toBe('s2');
+            expect(onResult).toHaveBeenLastCalledWith(['x']);
+        });
+    });
+
+    it('dispose with cancelOpening aborts the subscribe call still in flight', async () => {
+        const { client } = fakeClient();
+        let signal: AbortSignal | undefined;
+        const open = jest.fn((s: AbortSignal) => {
+            signal = s;
+            return new Promise<Subscribed>((_resolve, reject) =>
+                s.addEventListener('abort', () => reject(new Error('Aborted'))));
+        });
+        const live = new LiveQuery(client as any, 'p', open, jest.fn());
+        const started = live.start();
+        expect(signal?.aborted).toBe(false);
+        live.dispose({ cancelOpening: true });
+        expect(signal?.aborted).toBe(true);
+        await expect(started).rejects.toThrow('Aborted');
+        expect(client.disposeQuerySubscription).not.toHaveBeenCalled();
+    });
+
+    it('a plain dispose leaves the subscribe call to finish', async () => {
+        const { client } = fakeClient();
+        const reply = deferred<Subscribed>();
+        let signal: AbortSignal | undefined;
+        const live = new LiveQuery(client as any, 'p', (s: AbortSignal) => { signal = s; return reply.promise; }, jest.fn());
+        const started = live.start();
+        live.dispose();
+        expect(signal?.aborted).toBe(false);
+        reply.resolve({ subscriptionId: 's1', result: [1], revision: 0 });
+        expect(await started).toEqual([1]);
+    });
+});
+
+describe('reopenDelay', () => {
+    it('doubles from 1 s to a 60 s cap, between half and all of each step', () => {
+        expect([1, 2, 3, 6, 7, 20].map(n => reopenDelay(n, () => 1))).toEqual([1000, 2000, 4000, 32000, 60000, 60000]);
+        expect(reopenDelay(1, () => 0)).toBe(500);
+        expect(reopenDelay(20, () => 0)).toBe(30000);
     });
 });

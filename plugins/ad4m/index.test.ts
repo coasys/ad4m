@@ -2150,7 +2150,7 @@ describe("ad4mPlugin", () => {
       expect(text).toMatch(
         /^Error: Waker subscription mention-persp-uuid-1 failed: subscribe handshake timed out after 50ms/,
       );
-      expect(text).toContain("re-attempting every 60s");
+      expect(text).toContain("re-attempting within 60s");
       expect(text).toContain("(waker executor: http://marvin.example:12200)");
 
       // ...and it is not in limbo: the list tool shows it as Pending.
@@ -3734,7 +3734,7 @@ describe("WakerSubscriptionManager", () => {
       channel: "",
       ...MENTION_CONFIG,
     };
-    await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting every/);
+    await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting within/);
     expect(manager.getPending()).toHaveLength(1);
 
     // Wait for the scheduled re-attempt to run.
@@ -3804,7 +3804,7 @@ describe("WakerSubscriptionManager", () => {
       ...MENTION_CONFIG,
     };
     await expect(manager.subscribe(sub)).rejects.toThrow(
-      /timed out after 50ms[\s\S]*re-attempting every/,
+      /timed out after 50ms[\s\S]*re-attempting within/,
     );
 
     expect(manager.has("mention-hang")).toBe(false);

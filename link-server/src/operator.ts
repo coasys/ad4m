@@ -154,7 +154,6 @@ function roomDetail(ctx: OperatorContext, roomId: string) {
   return {
     id: room.id,
     admin: room.admin_did,
-    e2e: !!room.e2e_enabled,
     createdAt: room.created_at,
     members: ctx.db.getAcl(roomId).map((a) => ({
       did: a.did,
@@ -283,7 +282,6 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
       rooms: ctx.db.listRooms().map((r) => ({
         id: r.id,
         admin: r.admin_did,
-        e2e: !!r.e2e_enabled,
         createdAt: r.created_at,
         memberCount: r.member_count,
       })),
