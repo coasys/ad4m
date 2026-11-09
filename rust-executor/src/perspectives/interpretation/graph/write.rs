@@ -538,8 +538,9 @@ fn apply_relation_constraints(
 /// Links on a record that already exists — an `Update`, or a dedup match onto a
 /// stored record, which emits `AddLinks` alone — keep the record and lose only
 /// the links that would make a disjoint pair overlap, with each other or with
-/// what is stored. A base whose class is not known, from this batch or from
-/// `existing`, passes through unchecked.
+/// what is stored. A stored base whose class is not known, from this batch or
+/// from `existing`, is held to each shape whose disjoint pair it has a stored
+/// link on; one with no such link passes through unchecked.
 pub(crate) fn enforce_relation_constraints(
     ops: Vec<InterpretationOp>,
     shapes: &[ModelShape],
@@ -580,6 +581,14 @@ pub(crate) fn enforce_relation_constraints(
                     .map(|e| e.class.clone())
             })
         })
+    };
+    let stored_on_a_disjoint_pair = |shape: &ModelShape, base: &str| {
+        shape
+            .include_relations
+            .iter()
+            .filter(|r| r.direction == "forward" && !r.disjoint.is_empty())
+            .flat_map(|r| std::iter::once(&r.predicate).chain(&r.disjoint))
+            .any(|p| existing_links.iter().any(|(s, sp, _)| s == base && sp == p))
     };
     let surviving = |links: &[Link], refused: &HashSet<String>| -> Vec<Link> {
         links
@@ -630,6 +639,19 @@ pub(crate) fn enforce_relation_constraints(
                 }
                 None => links,
             },
+            // A stored record neither the batch nor `existing` names a class
+            // for: `existing` skips classes without an identity property (an
+            // edge, usually) and records outside the pass's scope, and a
+            // harness link op carries no class. Hold it to every shape whose
+            // disjoint pair it already has a stored link on.
+            (false, None) => shapes
+                .iter()
+                .filter(|shape| stored_on_a_disjoint_pair(shape, base))
+                .fold(links, |links, shape| {
+                    let class = class_label(&shape.target_class, shapes);
+                    apply_relation_constraints(shape, &class, base, false, links, existing_links)
+                        .unwrap_or_default()
+                }),
             _ => links,
         };
         allowed.insert(
@@ -1557,6 +1579,43 @@ mod tests {
         assert_eq!(creates_of(&ops, "Connection"), 1, "{ops:#?}");
         assert!(addlinks_for(&ops, "soa://ext/connection/loop").is_empty());
         assert_eq!(nth_create_base(&ops, 0), "soa://ext/connection/edge");
+    }
+
+    #[test]
+    fn enforce_holds_a_harness_link_on_a_stored_edge_of_unknown_class() {
+        // lal-bot on #1473: `existing_instance_context` skips a class with no
+        // identity property, so a stored Connection is not in `existing`, and
+        // the harness's `_propose_link_child` names the edge without its class.
+        // A link pointing the edge's `to` at the task its stored `from` names
+        // is still dropped; a link to another record still lands.
+        let a = "soa://ext/task/a";
+        let c = "soa://ext/task/c";
+        let edge = "soa://ext/connection/stored";
+        let to = |target: &str| Link {
+            source: edge.to_string(),
+            predicate: Some("ns://to".to_string()),
+            target: target.to_string(),
+        };
+        let ops = vec![InterpretationOp::AddLinks {
+            source: edge.to_string(),
+            links: vec![to(a), to(c)],
+        }];
+        let known = existing_map(vec![existing_task(a, "A"), existing_task(c, "C")]);
+        let mut stored = ExistingLinks::new();
+        stored.insert((edge.to_string(), "ns://from".to_string(), a.to_string()));
+        stored.insert((
+            edge.to_string(),
+            "ns://to".to_string(),
+            "soa://ext/task/b".to_string(),
+        ));
+
+        let ops = enforce_relation_constraints(ops, &connection_shapes(), &known, &stored);
+
+        assert_eq!(
+            targets_of(addlinks_for(&ops, edge), "ns://to"),
+            vec![c.to_string()],
+            "{ops:#?}"
+        );
     }
 
     #[test]
