@@ -194,7 +194,7 @@ impl PerspectiveInstance {
             // The SPARQL store must be updated first so any subscription re-checks
             // triggered by update_prolog_engines() see the committed batch state.
             if changed {
-                self.write_link_diff(&persist_diff)?
+                self.write_link_diff(&persist_diff, true)?
                     .fold_into(&mut combined_diff);
                 // The reply and the link-added event carry the judgement the
                 // store wrote; `prepare_link_signers` ran above.
