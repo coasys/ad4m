@@ -2228,7 +2228,10 @@ mod tests {
             if via_recheck {
                 *world.store.events.lock().unwrap() = world.log.events.clone();
                 world.service.cache.note_refreshed(&world.log.scid(), 0);
-                assert_eq!(recheck_key_grants(&world.service, now(), &RecheckAttempts::default()).await, 1);
+                assert_eq!(
+                    recheck_key_grants(&world.service, now(), &RecheckAttempts::default()).await,
+                    1
+                );
             } else {
                 let mut changes = world.service.cache.subscribe();
                 accept_signed(&world.service.cache, &world.log.events).await;
