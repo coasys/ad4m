@@ -43,6 +43,7 @@ use deno_core::anyhow::Error;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+use super::model_query::sparql_builder::LinkGuard;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::model_query::utils::looks_like_absolute_iri;
 use super::shacl_parser::ABSTRACT_PREDICATE;
@@ -53,13 +54,24 @@ use super::sparql_store::SparqlStore;
 /// The SHACL writer records each one as
 /// `<namespace://ClassName> rdf://type <ad4m://SubjectClass>`, so the class
 /// names are the local parts of those subjects.
+///
+/// The registration triple joins a *counting* reifier, as every schema read
+/// does: a link whose stored verdict does not count registers no class.
 pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
-    let query = r#"
-        SELECT ?targetClass WHERE {
-            ?targetClass <rdf://type> <ad4m://SubjectClass> .
-        }
-    "#;
-    let rows: Vec<Value> = serde_json::from_str(&store.query(query)?)?;
+    let query = format!(
+        r#"
+        SELECT ?targetClass WHERE {{
+            ?targetClass <rdf://type> <ad4m://SubjectClass> .{type_guard}
+        }}
+    "#,
+        type_guard = LinkGuard::default().join(
+            "?_ga_type",
+            "?targetClass",
+            "<rdf://type>",
+            "<ad4m://SubjectClass>"
+        ),
+    );
+    let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
 
     let mut names: Vec<String> = rows
         .iter()
@@ -75,17 +87,36 @@ pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error
 /// Every registered class that is not abstract (#1435): the classes a record
 /// can be classified as. An abstract class names what a record has, not what
 /// it is, so it is never one of a record's classes.
+///
+/// Every triple joins a counting reifier, inside the `FILTER NOT EXISTS` too
+/// (the abstract index's rule): a marker that does not count makes no class
+/// abstract, and a shape link that does not count marries the class to no
+/// marked shape — neither one hides it from this list.
 pub fn concrete_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
+    let guard = LinkGuard::default();
     let query = format!(
         r#"
         SELECT ?targetClass WHERE {{
-            ?targetClass <rdf://type> <ad4m://SubjectClass> .
+            ?targetClass <rdf://type> <ad4m://SubjectClass> .{type_guard}
             FILTER NOT EXISTS {{
-                ?targetClass <ad4m://shape> ?shape .
-                ?shape <{ABSTRACT_PREDICATE}> ?marker .
+                ?targetClass <ad4m://shape> ?shape .{shape_guard}
+                ?shape <{ABSTRACT_PREDICATE}> ?marker .{marker_guard}
             }}
         }}
-    "#
+    "#,
+        type_guard = guard.join(
+            "?_gc_type",
+            "?targetClass",
+            "<rdf://type>",
+            "<ad4m://SubjectClass>"
+        ),
+        shape_guard = guard.join("?_gc_shape", "?targetClass", "<ad4m://shape>", "?shape"),
+        marker_guard = guard.join(
+            "?_gc_marker",
+            "?shape",
+            &format!("<{ABSTRACT_PREDICATE}>"),
+            "?marker"
+        ),
     );
     let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
     let mut names: Vec<String> = rows
@@ -351,6 +382,11 @@ pub fn subject_classes_of_with_pending(
 /// `with_object` selects the object as well, which flag matching needs and a
 /// presence test does not — a required property's value can be an arbitrarily
 /// long literal, and none of it is read.
+///
+/// Each triple joins a *counting* reifier: an instance triple whose stored
+/// verdict does not count makes the record conform to nothing — the cut that
+/// keeps a peer's non-counting flag or required-property link from routing a
+/// write to a class's setter or destructor.
 fn fetch(
     store: &SparqlStore,
     values_clause: &str,
@@ -363,13 +399,16 @@ fn fetch(
         .collect::<Vec<_>>()
         .join(" ");
 
+    let guard = LinkGuard::default();
     let query = if with_object {
         format!(
-            "SELECT DISTINCT ?s ?p ?o WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o . }}"
+            "SELECT DISTINCT ?s ?p ?o WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o .{guard} }}",
+            guard = guard.join("?_r", "?s", "?p", "?o")
         )
     } else {
         format!(
-            "SELECT DISTINCT ?s ?p WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?_o . }}"
+            "SELECT DISTINCT ?s ?p WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?_o .{guard} }}",
+            guard = guard.join("?_r", "?s", "?p", "?_o")
         )
     };
 

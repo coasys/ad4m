@@ -1,7 +1,11 @@
 use super::shape::parse_shape_from_json;
 use super::types::{InstanceLinks, ModelShape, ShapeProperty, ShapeResolver};
+use crate::agent::signatures::TestSigner;
+use crate::types::{Link, LinkExpression, LinkStatus};
+use chrono::{DateTime, SecondsFormat, Utc};
 use deno_core::anyhow::{anyhow, Error};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 /// Helper: build a minimal ShapeProperty for a scalar (non-collection) field.
@@ -186,6 +190,54 @@ pub fn evaluate_getters_batch_from_json(
 ) -> Result<serde_json::Value, Error> {
     let shape = parse_shape_from_json(shape_json, class_name)?;
     super::getters::evaluate_getters_batch(store, &shape, instance_ids, property_names)
+}
+
+/// A link signed for real ([`TestSigner`]), stored with `ts` as its timestamp.
+///
+/// Reads that count only verified links — the classifier
+/// (`subject_classes_of`), every read a `LinkGuard` joins — see a fixture's
+/// links the same way the unguarded reads always did only when their
+/// signature holds, and the signature covers the stored timestamp, so it must
+/// name a date. `ts` stays verbatim when it parses (tests read the timestamp
+/// back) and maps to epoch millis for a bare number, the forms the
+/// classifier's fixtures use — different `ts` values still mint different
+/// links. Anything else stays verbatim too: signed or not its timestamp never
+/// parses, so it never counts, exactly as a fake proof never did.
+pub fn signed_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+    let (at, timestamp) = match DateTime::<Utc>::from_str(ts) {
+        Ok(at) => (at, ts.to_string()),
+        Err(_) => match ts.parse::<i64>() {
+            Ok(ms) => {
+                let at = DateTime::<Utc>::from_timestamp_millis(ms).expect("epoch millis");
+                (at, at.to_rfc3339_opts(SecondsFormat::Millis, true))
+            }
+            Err(_) => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                ts.hash(&mut h);
+                (
+                    DateTime::<Utc>::from_timestamp_millis((h.finish() % 10_000_000_000) as i64)
+                        .unwrap(),
+                    ts.to_string(),
+                )
+            }
+        },
+    };
+    let mut le = LinkExpression::from(
+        TestSigner::generate().sign_at(
+            Link {
+                source: source.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            }
+            .normalize(),
+            at,
+        ),
+    );
+    le.timestamp = timestamp;
+    // The store refuses status-less inserts.
+    le.status = Some(LinkStatus::Shared);
+    le
 }
 
 /// Helper: build an InstanceLinks entry with explicit per-link timestamps.

@@ -173,7 +173,8 @@ pub struct IdentityService {
     /// wake-up.
     pub inbox: super::inbox::Inbox,
     /// The origins a key statement's `audience` may name: `public_origins`, else this
-    /// executor's own loopback origins.
+    /// executor's own loopback origins — and none on a network listener without
+    /// `public_origins` (`Audiences::None`).
     pub audiences: super::key_login::Audiences,
 }
 

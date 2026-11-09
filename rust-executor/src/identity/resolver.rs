@@ -1101,9 +1101,12 @@ impl Resolver {
         max_age: u64,
     ) -> Result<SessionKey, SessionKeyError> {
         let scid = scid_from(scid);
+        // Only a read the store answered counts as fresh: a failed refresh marks the
+        // attempt (`refreshed`) but leaves `read_ok`, so an outage never ages a stale
+        // head into an admissible one.
         if !self
             .cache
-            .refreshed_within(scid, super::service::now(), max_age)
+            .read_ok_within(scid, super::service::now(), max_age)
         {
             match self
                 .cache

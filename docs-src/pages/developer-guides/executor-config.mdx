@@ -42,7 +42,7 @@ ignored, and the error names the key by its path, e.g.
 |---|---|---|---|
 | `app_data_path` | string | `~/.ad4m` | `--app-data-path` / `AD4M_APP_DATA_PATH` |
 | `port` | number | `12000` | `--port` / `AD4M_PORT` |
-| `public_origins` | list of origins | none: key login from this machine only | `--public-origin` (repeat it, or separate with `,`) / `AD4M_PUBLIC_ORIGINS` |
+| `public_origins` | list of origins | none: only this executor's loopback origins as a key statement's audience — and none on a network listener, so key login is refused there | `--public-origin` (repeat it, or separate with `,`) / `AD4M_PUBLIC_ORIGINS` |
 | `hc_admin_port` | number | first free from 2000 | `--hc-admin-port` / `AD4M_HC_ADMIN_PORT` |
 | `hc_app_port` | number | first free from 1337 | `--hc-app-port` / `AD4M_HC_APP_PORT` |
 | `localhost` | bool | `true` | `--localhost` / `AD4M_LOCALHOST` |
@@ -149,10 +149,16 @@ into its statement, and the executor accepts the statement only when that
 origin, normalised (`wss` reads as `https`, `ws` as `http`, the host in lower
 case, a default port left out), is one of these. So a server that passes this
 executor's challenge on to a person's app gets a statement for its own origin,
-which this executor refuses. Without `public_origins` the executor accepts only
-its own loopback origins (`http://127.0.0.1:<port>`, `http://localhost:<port>`,
-`http://[::1]:<port>`), and refuses a statement for any other origin with 403
-`no-public-origin`. Once the key is set, only the listed origins count: list a
+which this executor refuses. Without `public_origins` a loopback-only executor
+accepts only its own loopback origins (`http://127.0.0.1:<port>`,
+`http://localhost:<port>`, `http://[::1]:<port>`), and refuses a statement for
+any other origin with 403 `no-public-origin`. The check restricts the signed
+audience, not the caller's location: a remote key holder can sign a loopback
+audience just as easily as any other, so on a listener the network reaches (TLS,
+or `localhost` off) without `public_origins` no origin is accepted at all and
+key login is refused outright — `user.sessionChallenge`, `user.loginWithKey`
+and `user.renewSession` answer 403 `no-audience`, which names the setting.
+Set `public_origins` there to pin key logins to origins the operator names. Once the key is set, only the listed origins count: list a
 loopback origin too if local apps log in with a key. The executor never reads
 the origin from the connection's `Host` or `Origin` header, which a caller
 chooses. A value that is not an origin (a path, a query, no host) stops the
