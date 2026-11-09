@@ -5,6 +5,7 @@
 //! driven directly with the writes each step reports.
 
 use super::*;
+use crate::agent::signatures::TestSigner;
 use crate::perspectives::interpretation_test_support::{setup_perspective_no_llm, TASK_SDNA};
 use crate::perspectives::model_query::QueryClasses;
 use crate::pubsub::get_global_pubsub;
@@ -264,6 +265,70 @@ async fn writes_through_an_abstract_class_that_cannot_dispatch_are_refused() {
     let err = err.unwrap_err().to_string();
     assert!(err.contains("cannot be created"), "{err}");
     assert_eq!(links_on(&p, "ad4m://x", "ns://text"), 0);
+}
+
+/// A class a record reaches only through links that do not count is not one of
+/// its classes: an update through an abstract class does not run that class's
+/// setter, and a delete does not run its destructor. The forged links carry a
+/// real signature over a different claim, so their stored verdicts do not
+/// count — as a peer's unverifiable links arrive.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_class_reached_only_through_links_that_do_not_count_is_not_a_write_target() {
+    let (mut p, ctx) = dispatch_setup().await;
+    // m2 is a Message. Forge it Poll's flag and question.
+    let forged = |source: &str, predicate: &str, target: &str| {
+        let mut le = LinkExpression::from(
+            TestSigner::generate().sign(link(source, predicate, target).normalize()),
+        );
+        le.status = Some(LinkStatus::Shared);
+        le.proof.signature = "ab".repeat(64);
+        p.sparql_store.add_link(&le).unwrap();
+    };
+    forged("ad4m://m2", "ns://poll", "ns://open");
+    forged("ad4m://m2", "ns://question", "literal://string:rigged");
+
+    // The flag that does not count makes m2 no Poll: it is still a Message only.
+    let classes = p.subject_classes_of(&["ad4m://m2".to_string()]).unwrap();
+    assert_eq!(
+        classes["ad4m://m2"],
+        vec!["Message".to_string()],
+        "{classes:?}"
+    );
+
+    let text = json!({"text": "new"});
+    update(&mut p, &ctx, "TextContent", "ad4m://m2", text.clone())
+        .await
+        .unwrap();
+    assert_eq!(read(&p, "Message", "ad4m://m2", "body").await, "new");
+    // Poll's setter would have replaced the forged `question`; it never ran.
+    assert_eq!(
+        targets_on(&p, "ad4m://m2", "ns://question"),
+        vec!["literal://string:rigged".to_string()]
+    );
+
+    // The control: m1 is a real Poll, so its setter ran.
+    update(&mut p, &ctx, "TextContent", "ad4m://m1", text)
+        .await
+        .unwrap();
+    assert_eq!(read(&p, "Poll", "ad4m://m1", "question").await, "new");
+
+    // The delete: Message's destructor runs (its flag goes), Poll's does not
+    // (the forged flag stays).
+    p.remove_subject(class("TextContent"), "ad4m://m2".into(), None, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(links_on(&p, "ad4m://m2", "ns://entry_type"), 0);
+    assert_eq!(
+        links_on(&p, "ad4m://m2", "ns://poll"),
+        1,
+        "the forged flag stays: Poll's destructor never ran"
+    );
+    // And m1's real Poll is destructed alongside its Message.
+    p.remove_subject(class("TextContent"), "ad4m://m1".into(), None, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(links_on(&p, "ad4m://m1", "ns://entry_type"), 0);
+    assert_eq!(links_on(&p, "ad4m://m1", "ns://poll"), 0);
 }
 
 /// Anything with `children`. Its adder and remover write `ns://children`,

@@ -546,6 +546,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .into_owned(),
     );
 
+    // Grants are the allowlist of tokens: load them before the identity module starts its
+    // watchers, so a verdict change they answer acts on the loaded grants (a revoked row is
+    // cancelled here before any replay reaches it).
+    if let Err(e) = agent::grants::load_at_start() {
+        // Without its grants the API would refuse every token: it does not start.
+        return failed_start(format!("Could not load the grants: {e}"));
+    }
+
     // The key-log cache lives in the same database file.
     {
         let db_path = std::path::Path::new(
@@ -567,6 +575,17 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
         // Before any agent signs: a link's anchor is read from the key map with no I/O.
         crate::identity::load_local_identities().await;
+        // Before the API serves a session: a key the persisted log already shows revoked
+        // ends its loaded grants here — the write that ended them may never have landed,
+        // and the watcher's first pass has not run. The cached logs alone decide: the
+        // store may be down.
+        if let Ok(service) = crate::identity::service() {
+            crate::identity::key_login::end_key_grants_revoked_in_cache(
+                &service,
+                crate::agent::grants::Grants::global(),
+            )
+            .await;
+        }
     }
 
     // Set multi-user mode before starting services to avoid race condition
@@ -633,12 +652,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
         }
     });
-
-    // Grants are the allowlist of tokens: load them before the API serves.
-    if let Err(e) = agent::grants::load_at_start() {
-        // Without its grants the API would refuse every token: it does not start.
-        return failed_start(format!("Could not load the grants: {e}"));
-    }
 
     if config.admin_credential.is_none() {
         // Only reachable with insecure_no_admin_credential (checked above).

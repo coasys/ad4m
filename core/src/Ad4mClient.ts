@@ -129,7 +129,9 @@ export class Ad4mClient {
     /**
      * Use `token` from now on, for every call and the next connection: the
      * token `agent.renewSession` answers, so a socket that reconnects after the
-     * old token expired still opens. A socket already open goes on.
+     * old token expired still opens. A socket opened with a different token is
+     * replaced — its session is that token's principal's — while calls in
+     * flight on it finish there.
      */
     setToken(token: string): void {
         this.#token = token

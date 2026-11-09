@@ -750,4 +750,145 @@ mod tests {
             .expect("two twins with one commitment are one group and reach quorum");
         assert!(verdict.is_verified(), "got: {verdict}");
     }
+
+    // ---- quorum counts persons, not device keys ----------------------------
+
+    /// The end-to-end form of the fold's
+    /// `one_person_on_two_devices_is_one_voter_across_atoms`: two device keys
+    /// listed in ONE person's key log each sign a vote on a different twin
+    /// proposal for the same edge — every link judged by the real resolver
+    /// (the key map holds the log's trusted head, so each stored link earns
+    /// `valid` and carries the same `person`). Under `{n: 2}` the pool holds
+    /// one voter and `mint` refuses; a device of a second person's log is the
+    /// second voter, the run mints, and the receipt's voters are the two
+    /// persons — not four device keys.
+    ///
+    /// Red when `settle_pool` dedups on `Vote::did` instead of
+    /// [`Vote::voter`]: the two devices then read as two voters and the
+    /// first `mint` succeeds.
+    #[test]
+    fn two_devices_of_one_person_are_one_voter_end_to_end() {
+        use crate::identity::cache::tests::{add_device, TestLog};
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::verdict::LinkVerdict;
+        use crate::perspectives::flow_instance::ProposalLinks;
+
+        // Person A's log: `d1` in the incept, `d2` added at seq 1 — one
+        // person, two device keys. Person B's: one device. The key map the
+        // link check reads holds each log's trusted head, confirmed by the
+        // store just now — the state `check_signed` sees for a stored link.
+        let mut log_a = TestLog::new(120);
+        let device_a2 = ed25519_dalek::SigningKey::from_bytes(&[121; 32]);
+        let chain = log_a.chain();
+        log_a.events.push(add_device(&chain, &log_a.master, 121));
+        let log_b = TestLog::new(122);
+        let map = global_key_map();
+        let now = chrono::Utc::now().timestamp() as u64;
+        for (log, trusted) in [(&log_a, 1u64), (&log_b, 0)] {
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted,
+                },
+            );
+            map.note_confirmed(&log.scid(), now);
+        }
+        let person_a = ad4m_identity_core::did_of(&log_a.scid());
+        let person_b = ad4m_identity_core::did_of(&log_b.scid());
+
+        // Twin terminal proposals for `open → done` committing to the same
+        // outputs (so both atoms land in one commitment group): `d1`
+        // proposes one, `d2` the other, and each device co-signs the other's
+        // proposal — a vote link per device on a different proposal.
+        let (uri_a1, mut links_a1) = device_terminal_proposal(
+            "p-laptop",
+            &log_a.device,
+            1,
+            "open",
+            "done",
+            &delivered().seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T1,
+        );
+        let (uri_a2, mut links_a2) = device_terminal_proposal(
+            "p-desktop",
+            &device_a2,
+            1,
+            "open",
+            "done",
+            &delivered().seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T2,
+        );
+        links_a1.push(device_vote(&uri_a1, &device_a2, 1, T2));
+        links_a2.push(device_vote(&uri_a2, &log_a.device, 1, T3));
+
+        // Premise: every device-signed link earned `valid` and the same
+        // `person` — the resolver judged each against the log in the key map.
+        for link in links_a1.iter().chain(links_a2.iter()) {
+            assert_eq!(link.verdict, Some(LinkVerdict::Valid), "{link:?}");
+            assert_eq!(link.person.as_deref(), Some(person_a.as_str()), "{link:?}");
+        }
+
+        let err = FlowReceipt::mint(
+            &n2_terminal_flow(),
+            read_set(
+                "open",
+                vec![
+                    ProposalLinks {
+                        uri: uri_a1.clone(),
+                        links: links_a1.clone(),
+                    },
+                    ProposalLinks {
+                        uri: uri_a2.clone(),
+                        links: links_a2.clone(),
+                    },
+                ],
+            ),
+            outs(&[OUTPUT]),
+            vec![delivered()],
+        )
+        .expect_err("one person's two devices are one voter — `{n: 2}` is not met");
+        assert!(
+            format!("{err:#}").contains("can still transition out"),
+            "the fold must leave the run at `open`, got: {err:#}"
+        );
+
+        // A device of a second person votes on the first proposal: the pool
+        // now holds two voters, the edge settles, and the receipt's voters
+        // are the two persons — not four device keys.
+        links_a1.push(device_vote(&uri_a1, &log_b.device, 0, T3));
+        let verdict = mint_and_verify(
+            n2_terminal_flow(),
+            read_set(
+                "open",
+                vec![
+                    ProposalLinks {
+                        uri: uri_a1,
+                        links: links_a1,
+                    },
+                    ProposalLinks {
+                        uri: uri_a2,
+                        links: links_a2,
+                    },
+                ],
+            ),
+            outs(&[OUTPUT]),
+        )
+        .expect("a second person's vote reaches quorum");
+        let crate::perspectives::flow_instance::verify::ReceiptVerdict::Verified { voters, .. } =
+            &verdict
+        else {
+            panic!("expected Verified, got: {verdict}");
+        };
+        let mut expected = vec![person_a, person_b];
+        expected.sort();
+        assert_eq!(voters, &expected, "the quorum is two persons, once each");
+
+        map.forget(&log_a.scid());
+        map.forget(&log_b.scid());
+    }
 }

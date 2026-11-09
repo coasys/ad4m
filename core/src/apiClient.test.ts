@@ -809,17 +809,83 @@ describe('ApiClient.reconnectNow', () => {
 describe('ApiClient.setToken', () => {
     const tokenOf = (ws: TestSocket) => new URL(ws.url).searchParams.get('token')
 
-    it('dials the next connection with the new token and leaves the open one alone', async () => {
+    it('replaces a socket opened with a different token: the open socket\'s session is the old principal\'s', async () => {
         client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
         open()
         await flush()
         expect(tokenOf(socket(0))).toBe('old')
         client.setToken('new')
-        expect(TestSocket.instances).toHaveLength(1) // the open socket goes on
+        await flush()
+        // Nothing went out on the old socket, so it is let go; the new one carries the token.
+        expect(socket(0).readyState).toBe(3)
+        expect(tokenOf(socket(1))).toBe('new')
         expect(client.getToken()).toBe('new')
+    })
+
+    it('lets a call in flight on the replaced socket finish there, then lets it go', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const promise = call('agent.get')
+        await flush()
+        expect(socket(0).sent[0].type).toBe('agent.get')
+        client.setToken('new')
+        // The call stays in flight on the socket it went out on; the new socket still dials.
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ id: socket(0).sent[0].id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+        await flush()
+        expect(socket(0).readyState).toBe(3) // drained: let go
+    })
+
+    it('does not count a replaced socket\'s 1008 against the token it is now on', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        open()
+        await flush()
+        client.setToken('new')
+        // The socket dialed with the old token is refused: a verdict on 'old', not on 'new'.
+        socket(0).drop(1008, 'token expired')
+        await flush()
+        expect(failed).not.toHaveBeenCalled()
+        const promise = call('agent.status')
+        await flush()
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'agent.status')!.id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+    })
+
+    it('does not count a 401 reply on the replaced socket against the new token', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        const stale = call('agent.get')
+        await flush()
+        client.setToken('new')
+        await flush()
+        // The call went out on the old token's socket: its 401 is that token's verdict.
+        socket(0).reply({ id: socket(0).sent[0].id, error: { code: 401, message: 'token expired' } })
+        await expect(stale).rejects.toMatchObject({ status: 401 })
+        expect(failed).not.toHaveBeenCalled()
+        // Calls made now go out on the new token's socket.
+        const promise = call<string>('agent.status')
+        await flush()
+        expect(tokenOf(socket(1))).toBe('new')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'agent.status')!.id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+    })
+
+    it('sends a read the replaced socket carried on its successor when the old socket closes', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const read = call<string[]>('perspective.all')
+        await flush()
+        client.setToken('new')
+        await flush()
+        expect(socket(1).readyState).toBe(1)
+        // The old socket closes before answering: the read it carried goes out on the new one.
         socket(0).drop()
-        await sleep(600) // the first reconnect waits 500 ms
-        expect(tokenOf(socket(TestSocket.instances.length - 1))).toBe('new')
+        expect(socket(1).sent.map(m => m.type)).toContain('perspective.all')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
     })
 
     it('connects again with a new token after the executor refused the old one', async () => {

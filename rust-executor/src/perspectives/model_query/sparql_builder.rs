@@ -458,7 +458,7 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static s
 /// links only. A missing annotation fails closed: both checks are required
 /// triples, so a link with no status or no verdict does not pass.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct LinkGuard<'a> {
+pub(crate) struct LinkGuard<'a> {
     pub(super) status: Option<&'a LinkStatus>,
     pub(super) include_unverified: Option<bool>,
 }
@@ -514,7 +514,7 @@ impl<'a> LinkGuard<'a> {
     /// Two passing links over one triple yield the solution twice, so every
     /// consumer of these patterns deduplicates: `COUNT(DISTINCT ?source)`, the
     /// id phase's `GROUP BY ?source`, and the single plan's `SELECT DISTINCT`.
-    pub(super) fn join(
+    pub(crate) fn join(
         &self,
         reifier: &str,
         subject: &str,

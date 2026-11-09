@@ -30,6 +30,13 @@ fn now() -> u64 {
 }
 
 async fn session_challenge(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    // A key session's challenge is its grant's own slot, whatever the session's capabilities:
+    // the binding proves the key. Every other caller needs AGENT_AUTH, which the anonymous set
+    // holds too (`key_login::may_ask_challenge`).
+    if !key_login::may_ask_challenge(&ctx.session) {
+        ctx.require(&AGENT_AUTH_CAPABILITY)
+            .map_err(WsRpcError::forbidden)?;
+    }
     let service = crate::identity::service()?;
     let source = key_login::ChallengeSource::of(&ctx.session, ctx.peer);
     answer(key_login::challenge(&service, &source, now())?)
@@ -71,12 +78,14 @@ async fn sign_session_statement(
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    // A challenge for a key login. AGENT_AUTH, which every caller holds (the anonymous set
-    // included, in single-user and multi-user mode alike): every executor answers a key login.
-    // Each address holds at most `CHALLENGES_PER_SOURCE` open; a key session gets its grant's
-    // one renewal challenge, outside that pool.
+    // A challenge for a key login or a key session's renewal. Open: a key session asks for
+    // its grant's own challenge whatever its capabilities (an agent-role key session need
+    // not hold AGENT_AUTH); the handler asks AGENT_AUTH of every other caller, which the
+    // anonymous set holds too, in single-user and multi-user mode alike. Each address holds
+    // at most `CHALLENGES_PER_SOURCE` open; a key session gets its grant's one renewal
+    // challenge, outside that pool.
     map.method::<NoParams, SessionChallenge>("user.sessionChallenge", session_challenge)
-        .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
+        .guard(Guard::Open);
     // A login signed by a device key: the handler checks the statement, the key and the role
     // (operator record, or the local agent that speaks for the identity) and refuses with one
     // stable reason. AGENT_AUTH, as `user.sessionChallenge`.
@@ -111,8 +120,9 @@ mod tests {
     use crate::agent::session::{Principal, Session};
     use crate::agent::AgentContext;
 
-    /// Each call carries its guard: the challenge and the login AGENT_AUTH (the anonymous set),
-    /// the calls on the caller's own session `Open`, the statement signature the operator.
+    /// Each call carries its guard: the login AGENT_AUTH (the anonymous set), the challenge
+    /// and the calls on the caller's own session `Open` (the challenge handler asks
+    /// AGENT_AUTH of every caller but a key session), the statement signature the operator.
     #[test]
     fn every_key_session_call_has_its_guard() {
         let mut map = HandlerMap::new();
@@ -127,8 +137,8 @@ mod tests {
             ("user.currentSession", open.clone()),
             ("user.endAllSessions", open.clone()),
             ("user.loginWithKey", auth.clone()),
-            ("user.renewSession", open),
-            ("user.sessionChallenge", auth),
+            ("user.renewSession", open.clone()),
+            ("user.sessionChallenge", open),
         ];
         let got: Vec<(String, String)> = map
             .guards()

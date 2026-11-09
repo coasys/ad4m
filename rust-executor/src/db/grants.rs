@@ -93,7 +93,13 @@ impl Ad4mDb {
                 expires_at INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
              );
-             DROP TABLE IF EXISTS revoked_tokens;",
+             DROP TABLE IF EXISTS revoked_tokens;
+             -- Writes a failed call left pending, so a restart finds the grant ended:
+             -- noted before the change itself and cleared when the change lands.
+             CREATE TABLE IF NOT EXISTS pending_grant_writes (
+                 grant_id TEXT PRIMARY KEY,
+                 op TEXT NOT NULL CHECK (op IN ('revoke', 'delete'))
+             );",
         )?;
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_grants_agent_did ON grants(agent_did);",
@@ -188,6 +194,10 @@ impl Ad4mDb {
 
     /// Marks the grants `ids` revoked.
     pub fn revoke_grants(&self, ids: &[String]) -> Ad4mDbResult<()> {
+        #[cfg(test)]
+        if super::FAIL_NEXT_GRANT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(rusqlite::Error::InvalidQuery.into());
+        }
         for id in ids {
             self.conn.execute(
                 "UPDATE grants SET state = 'revoked' WHERE id = ?1",
@@ -198,24 +208,42 @@ impl Ad4mDb {
     }
 
     /// A renewal of the key-bound grant `id`: its new expiry and the verdict it was renewed
-    /// on. A revoked grant stays as it is.
+    /// on. A revoked grant stays as it is, and so do the values a later renewal already
+    /// wrote: the fields only move forward, as they do in memory. Returns the rows changed.
     pub fn renew_grant(
         &self,
         id: &str,
         expires_at: u64,
         head_seq: u64,
         checked_at: u64,
-    ) -> Ad4mDbResult<()> {
-        self.conn.execute(
-            "UPDATE grants SET expires_at = ?2, head_seq = ?3, checked_at = ?4
+    ) -> Ad4mDbResult<usize> {
+        Ok(self.conn.execute(
+            "UPDATE grants SET expires_at = MAX(expires_at, ?2),
+                head_seq = MAX(COALESCE(head_seq, 0), ?3),
+                checked_at = MAX(COALESCE(checked_at, 0), ?4)
              WHERE id = ?1 AND state = 'active'",
             params![id, to_sql(expires_at), to_sql(head_seq), to_sql(checked_at)],
-        )?;
-        Ok(())
+        )?)
+    }
+
+    /// A periodic check of a key-bound grant's key: the verdict it was checked at (`head_seq`)
+    /// and when (`checked_at`); the expiry is untouched. Monotonic, as a renewal is.
+    /// Returns the rows changed.
+    pub fn note_key_check(&self, id: &str, head_seq: u64, checked_at: u64) -> Ad4mDbResult<usize> {
+        Ok(self.conn.execute(
+            "UPDATE grants SET head_seq = MAX(COALESCE(head_seq, 0), ?2),
+                checked_at = MAX(COALESCE(checked_at, 0), ?3)
+             WHERE id = ?1 AND state = 'active'",
+            params![id, to_sql(head_seq), to_sql(checked_at)],
+        )?)
     }
 
     /// Deletes the grants `ids`.
     pub fn delete_grants(&self, ids: &[String]) -> Ad4mDbResult<()> {
+        #[cfg(test)]
+        if super::FAIL_NEXT_GRANT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(rusqlite::Error::InvalidQuery.into());
+        }
         for id in ids {
             self.conn
                 .execute("DELETE FROM grants WHERE id = ?1", params![id])?;
@@ -229,6 +257,45 @@ impl Ad4mDb {
             "DELETE FROM grants WHERE expires_at < ?1",
             params![to_sql(cutoff)],
         )?;
+        Ok(())
+    }
+
+    /// Notes the writes `ids` still have to land (`op` is `revoke` or `delete`): what a
+    /// caller writes before the change itself, so a restart between them finds the
+    /// grants ended. A pending `delete` covers a `revoke` of the same grant.
+    pub fn note_pending_grant_writes(&self, ids: &[String], op: &str) -> Ad4mDbResult<()> {
+        #[cfg(test)]
+        if super::FAIL_NEXT_GRANT_NOTE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(rusqlite::Error::InvalidQuery.into());
+        }
+        for id in ids {
+            self.conn.execute(
+                "INSERT INTO pending_grant_writes (grant_id, op) VALUES (?1, ?2)
+                 ON CONFLICT(grant_id) DO UPDATE SET op = ?2
+                 WHERE pending_grant_writes.op != 'delete'",
+                params![id, op],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The writes a failed call left pending, `(grant id, op)`.
+    pub fn pending_grant_writes(&self) -> Ad4mDbResult<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT grant_id, op FROM pending_grant_writes")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Drops the pending notes of `ids`: their writes landed.
+    pub fn clear_pending_grant_writes(&self, ids: &[String]) -> Ad4mDbResult<()> {
+        for id in ids {
+            self.conn.execute(
+                "DELETE FROM pending_grant_writes WHERE grant_id = ?1",
+                params![id],
+            )?;
+        }
         Ok(())
     }
 }
@@ -320,6 +387,35 @@ mod tests {
         db.revoke_grants(&["k".to_string()]).unwrap();
         db.renew_grant("k", 9_000, 5, 100).unwrap();
         assert_eq!(db.grants().unwrap()[0].expires_at, 5_000);
+    }
+
+    // Two renewals finishing out of order: the earlier one's write must not overwrite the
+    // later one's expiry or check, as the grant in memory keeps the maxima.
+    #[test]
+    fn a_late_landing_earlier_renewal_does_not_overwrite_a_later_ones_values() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.add_grant(&key_row("k")).unwrap();
+        db.renew_grant("k", 5_000, 4, 90).unwrap();
+        db.renew_grant("k", 3_000, 2, 50).unwrap();
+        let row = db.grants().unwrap().remove(0);
+        assert_eq!(row.expires_at, 5_000);
+        let key = row.key.unwrap();
+        assert_eq!((key.head_seq, key.checked_at), (4, 90));
+    }
+
+    // A periodic check moves only the check fields: the expiry is untouched, and an ended
+    // grant takes none.
+    #[test]
+    fn a_check_notes_the_verdict_and_never_the_expiry() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.add_grant(&key_row("k")).unwrap();
+        assert_eq!(db.note_key_check("k", 5, 91).unwrap(), 1);
+        let row = db.grants().unwrap().remove(0);
+        assert_eq!(row.expires_at, 2_000);
+        let key = row.key.unwrap();
+        assert_eq!((key.head_seq, key.checked_at), (5, 91));
+        db.revoke_grants(&["k".to_string()]).unwrap();
+        assert_eq!(db.note_key_check("k", 6, 92).unwrap(), 0);
     }
 
     // A `grants` table from before key login gains the columns once, and its rows read back as

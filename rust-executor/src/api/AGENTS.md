@@ -135,8 +135,10 @@ Notes on some methods:
   (any session a token opened, a key session's operator role included; 400 without a grant),
   `user.renewSession` needs a key-bound grant, `user.endAllSessions` a key-bound session or a
   session on a managed agent, `user.currentSession` answers every caller.
-  `user.sessionChallenge` and `user.loginWithKey` are `Cap(agent:AUTHENTICATE)`, which the
-  anonymous set holds in single-user mode too. `agent.signSessionStatement` is `Operator` and
+  `user.loginWithKey` is `Cap(agent:AUTHENTICATE)`, which the anonymous set holds in
+  single-user mode too. `user.sessionChallenge` is `Open`: a key session asks for its grant's
+  own challenge whatever its capabilities, and its handler asks AGENT_AUTH of every other
+  caller (the anonymous set included). `agent.signSessionStatement` is `Operator` and
   local only: only the operator on this machine signs as this device, never an operator from a
   key login. `user.revokeAllSessions` is
   `Cap(agent:UPDATE)`, as `agent.removeApp`: since #1399 an app a user approved acts as the
@@ -172,7 +174,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-217 methods: Cap 81, Executor 33, Open 8, Operator 25, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 6.
+217 methods: Cap 80, Executor 33, Open 9, Operator 25, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 6.
 
 | Method | Guard |
 |---|---|
@@ -389,7 +391,7 @@ the guard checked:
 | `user.renewSession` | `Open` |
 | `user.requestVerification` | `Cap(runtime.user_management:VERIFY)` |
 | `user.revokeAllSessions` | `Cap(agent:UPDATE)` |
-| `user.sessionChallenge` | `Cap(agent:AUTHENTICATE)` |
+| `user.sessionChallenge` | `Open` |
 | `user.setMultiUserEnabled` | `Operator` |
 | `user.verifyEmail` | `Cap(runtime.user_management:VERIFY)` |
 | `user.wallet` | `Executor(runtime.user_management:READ)` |
