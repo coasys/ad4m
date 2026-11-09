@@ -84,17 +84,17 @@ impl ExpressionCapability for TestLang {
         // objects; the raw import with serde_wasm_bindgen::to_value
         // would serialize maps as JS Map instances, which the runtime's
         // JSON.stringify path then loses silently.
-        let signed = rt::agent_create_signed_expression_typed(&content);
+        let signed = rt::agent_create_signed_expression_typed(&content)?;
 
         // Derive a content address by hex-signing the serialized content.
         let serialized = serde_json::to_string(&content)?;
-        let addr = rt::agent_sign_string_hex(&serialized);
+        let addr = rt::agent_sign_string_hex(&serialized)?;
         let addr = format!("test:{}", &addr[..addr.len().min(32)]);
 
         // Persist via the storage KV import.
         let stored: serde_json::Value = serde_wasm_bindgen::from_value(signed)
             .unwrap_or(serde_json::Value::Null);
-        rt::storage_put(&addr, &serde_json::to_string(&stored)?);
+        rt::storage_put(&addr, &serde_json::to_string(&stored)?)?;
 
         rt::emit_signal(::wasm_bindgen::JsValue::from_str(&format!(
             "[test-wasm-language] created: {}",
@@ -105,20 +105,22 @@ impl ExpressionCapability for TestLang {
     }
 
     async fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>> {
-        let raw = rt::storage_get(&address);
+        let raw = rt::storage_get(&address)?;
         if raw.is_null() || raw.is_undefined() {
             return Ok(None);
         }
         // The KV stub returns a JS string; parse it as an Expression envelope.
         let s: String = raw.as_string().unwrap_or_default();
         if s.is_empty() { return Ok(None); }
-        let exp: Expression = serde_json::from_str(&s)
-            .unwrap_or_else(|_| Expression {
-                author: rt::agent_did(),
+        let exp: Expression = match serde_json::from_str(&s) {
+            Ok(exp) => exp,
+            Err(_) => Expression {
+                author: rt::agent_did()?,
                 timestamp: String::new(),
                 data: serde_json::Value::String(s),
                 proof: ExpressionProof::default(),
-            });
+            },
+        };
         Ok(Some(exp))
     }
 }

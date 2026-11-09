@@ -1,7 +1,8 @@
-import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import { PerspectiveClient } from "./PerspectiveClient";
+import type { EventMap, ScopedEventName } from "../generated/api/Events";
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
-    FlowReceiptVerdict, FlowValidOutput,
+    FlowReceiptVerdict, FlowStateEntry, FlowValidOutput,
 } from "./FlowInstance";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
@@ -17,12 +18,16 @@ import { AIClient } from "../ai/AIClient";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
+import { LiveQuery, LiveQueryStatus, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
+import type { AgentMessage } from "../generated/api/AgentMessage";
+import type { AgentReply } from "../generated/api/AgentReply";
+import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
 import { Ad4mModel } from "../model/Ad4mModel";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -38,431 +43,92 @@ function extractNamespaceFromUri(uri: string): string {
 }
 
 
-// Generic unsubscribe interface for event subscriptions
-interface Unsubscribable {
-    unsubscribe(): void;
-}
-
-/** Proxy object for a subscribed Prolog query that provides real-time updates
- * 
- * This class handles:
- * - Keeping the subscription alive by sending periodic keepalive signals
- * - Managing callbacks for result updates
- * - Subscribing to query updates via WebSocket subscriptions
- * - Maintaining the latest query result
- * - Ensuring subscription is fully initialized before allowing access
- * - Cleaning up resources when disposed
- * 
- * The subscription will remain active as long as keepalive signals are sent.
- * Make sure to call dispose() when you're done with the subscription to clean up
- * resources, stop keepalive signals, and notify the backend to remove the subscription.
- * 
- * The subscription goes through an initialization process where it waits for the first
- * result to come through the subscription channel. You can await the `initialized` 
- * promise to ensure the subscription is ready. The initialization will timeout after
- * 30 seconds if no result is received.
- * 
- * Example usage:
+/** A live SPARQL or model query with its latest result.
+ *
+ * `subscribe()` opens the query and resolves once the first result is in;
+ * `onResult()` callbacks then get every later result. The executor sends
+ * only changes; `LiveQuery` applies them, recovers from a missed update and
+ * re-opens the query after a reconnect. Call `dispose()` when done.
+ *
  * ```typescript
- * const subscription = await perspective.subscribeInfer("my_query(X)");
- * // At this point the subscription is already initialized since subscribeInfer waits
- * 
- * // Set up callback for future updates
- * const removeCallback = subscription.onResult(result => {
- *     console.log("New result:", result);
- * });
- * 
- * // Later: clean up subscription and notify backend
+ * const subscription = await perspective.subscribeQuery("SELECT ?s WHERE { ?s ?p ?o }");
+ * const remove = subscription.onResult(result => console.log(result));
  * subscription.dispose();
  * ```
  */
 export class QuerySubscriptionProxy {
-    #uuid: string;
-    #subscriptionId: string;
-    #client: PerspectiveClient;
-    #callbacks: Set<QueryCallback>;
-    #keepaliveTimer: number;
-    #unsubscribe?: () => void;
-    #reconnectUnsub?: () => void;
-    #latestResult: AllInstancesResult|null;
-    #disposed: boolean = false;
+    #live: LiveQuery;
+    #callbacks = new Set<QueryCallback>();
     #initialized: Promise<boolean>;
     #initResolve?: (value: boolean) => void;
     #initReject?: (reason?: any) => void;
-    #initTimeoutId?: NodeJS.Timeout;
-    #query: string;
-    // Monotonic token guarding the three concurrent writers of
-    // `#unsubscribe`/`#subscriptionId` (full subscribe() from the keepalive
-    // and init-timeout retry paths, and the reconnect swap handler). Each
-    // writer bumps it on entry and re-checks after every await; a mismatch
-    // means a newer writer took over while we were suspended, so the stale
-    // continuation must back out instead of clobbering the newer state
-    // (worst case otherwise: an overwritten-but-never-called unsubscribe
-    // leaks its callback in ApiClient._wsCallbacks for the client lifetime).
-    #generation: number = 0;
 
-    /** Creates a new query subscription
-     * @param uuid - The UUID of the perspective
-     * @param query - The Prolog query to subscribe to
-     * @param client - The PerspectiveClient instance to use for communication
-     */
-    constructor(uuid: string, query: string, client: PerspectiveClient) {
-        this.#uuid = uuid;
-        this.#query = query;
-        this.#client = client;
-        this.#callbacks = new Set();
-        this.#latestResult = null;
-        
-        // Create the promise once and store its resolve/reject
+    /** With `className`, `query` is a model query (JSON) over that class or
+     *  union of classes, opened with `modelSubscribe`; results are
+     *  `{ instances, totalCount }`. Without it, `query` is SPARQL. */
+    constructor(uuid: string, query: string, client: PerspectiveClient, className?: string | string[]) {
+        const open = className === undefined
+            ? (signal: AbortSignal) => client.subscribeQuery(uuid, query, { signal })
+            : (signal: AbortSignal) => client.modelSubscribe(uuid, className, query, { signal });
+        this.#live = new LiveQuery(client, uuid, open, result => this.#deliver(result));
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             this.#initResolve = resolve;
             this.#initReject = reject;
         });
+        // `subscribe()` throws the same error, so a caller who never reads
+        // `initialized` must not get an unhandled rejection from it.
+        this.#initialized.catch(() => {});
     }
 
+    /** Open the query; resolves with the first result delivered. */
     async subscribe() {
-        // Invalidate any suspended writer (older subscribe() or reconnect
-        // swap parked on an await) — see #generation.
-        const generation = ++this.#generation;
-
-        // Remove any prior reconnect listener FIRST — before we touch
-        // `#unsubscribe`. Rationale: `#unsubscribe()` calls into
-        // `ApiClient.subscribe()`'s deleter, which closes the WebSocket
-        // whenever this query owned the last `_wsCallbacks` entry (and no
-        // RPCs are pending). The subsequent `subscribeQuery()` below then
-        // re-opens a fresh socket, and that fresh `onopen` fires the
-        // reconnect callback set. If the OLD reconnect listener is still
-        // in that set, it re-enters this method, closes the socket again,
-        // reopens again … an endless resubscribe loop. Clearing the
-        // listener up-front breaks the cycle; a fresh listener is
-        // installed at the end of a successful subscribe(), and a
-        // full-retry recovery listener in the catch block on failure.
-        if (this.#reconnectUnsub) {
-            this.#reconnectUnsub();
-            this.#reconnectUnsub = undefined;
-        }
-
-        // Clean up previous subscription attempt if retrying
-        if (this.#unsubscribe) {
-            this.#unsubscribe();
-            this.#unsubscribe = undefined;
-        }
-
-        // Clear any existing timeout
-        if (this.#initTimeoutId) {
-            clearTimeout(this.#initTimeoutId);
-            this.#initTimeoutId = undefined;
-        }
-
-        // Clear any existing keepalive timer to prevent accumulation
-        if (this.#keepaliveTimer) {
-            clearTimeout(this.#keepaliveTimer);
-            this.#keepaliveTimer = undefined;
-        }
-
         try {
-            // Initialize the query subscription
-            let initialResult;
-            initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
-
-            // A newer writer (another subscribe() or a reconnect swap) took
-            // over while we awaited — back out without touching shared state,
-            // and release the now-orphaned server-side subscription so it
-            // doesn't linger until its keepalive TTL expires.
-            if (this.#disposed || this.#generation !== generation) {
-                this.#client.disposeQuerySubscription(this.#uuid, initialResult.subscriptionId)
-                    .catch(e => console.error('Error disposing superseded query subscription:', e));
-                return;
-            }
-
-            this.#subscriptionId = initialResult.subscriptionId;
-
-            // Process the initial result immediately for fast UX.
-            // The subscribeQuery() RPC call already returns the initial result,
-            // so treat that as successful initialization instead of waiting for a
-            // follow-up WebSocket update that may never arrive until the query changes.
-            if (initialResult.result !== undefined) {
-                this.#deliverResult(initialResult.result);
-            } else {
-                console.warn('⚠️ No initial result returned from subscribeQuery!');
-
-                // Only keep the initialization timeout when the backend did not
-                // provide an initial result up front.
-                this.#initTimeoutId = setTimeout(() => {
-                    console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
-                    // Recursively retry subscription, catching any errors
-                    this.subscribe().catch(error => {
-                        console.error('Error during subscription retry after timeout:', error);
-                    });
-                }, 30000);
-            }
-            
-            // Subscribe to query updates
-            this.#unsubscribe = this.#client.subscribeToQueryUpdates(
-                this.#subscriptionId,
-                (updateResult) => this.#deliverResult(updateResult)
-            );
+            this.#deliver(await this.#live.start());
         } catch (error) {
-            console.error('Error setting up subscription:', error);
-
-            // Reject the promise if this is the first attempt
-            if (this.#initReject) {
-                this.#initReject(error);
-                this.#initResolve = undefined;
-                this.#initReject = undefined;
-            }
-
-            // Restore reconnect recovery before rethrowing. The listener was
-            // removed at the top of this method; without re-installing one
-            // here, a single failed resubscribe (e.g. subscribeQuery timing
-            // out during a network flap) would leave the proxy permanently
-            // dead: the keepalive loop stops itself on resubscribe failure,
-            // and nothing else retries. The recovery listener runs the FULL
-            // subscribe() (not the swap-in-place handler) because after a
-            // failed attempt there is no keepalive loop left to feed the new
-            // server subscription — subscribe() restarts it. This is
-            // loop-safe: in this failed state the proxy owns no
-            // `_wsCallbacks` entry (the old one was unsubscribed at the top
-            // of this method and no new one got registered), so the
-            // subscribe() it triggers has nothing to unsubscribe → the
-            // socket never closes/reopens under it → no re-entrant onopen.
-            if (!this.#disposed && this.#generation === generation && this.#client.onReconnect) {
-                this.#reconnectUnsub = this.#client.onReconnect(() => {
-                    if (this.#disposed) return;
-                    console.log('WebSocket reconnected — retrying failed subscription for query:', this.#query);
-                    this.subscribe().catch(e => {
-                        console.error('Error during subscription retry after reconnect:', e);
-                    });
-                });
-            }
-
-            throw error; // Re-throw so caller knows it failed
-        }
-
-        // Start keepalive loop
-        this.#startKeepalive(generation);
-
-        // Register for reconnect notification — on WebSocket reconnect,
-        // immediately re-establish a fresh server-side subscription instead
-        // of waiting up to 30s for the keepalive to fail.
-        //
-        // We deliberately do NOT call `this.subscribe()` here. Full subscribe
-        // runs `#unsubscribe` first, which delegates to `ApiClient.subscribe`'s
-        // deleter — that closes the WebSocket when this query owned the LAST
-        // `_wsCallbacks` entry. The subsequent `subscribeQuery` reopens the
-        // socket, whose fresh `onopen` fires every registered reconnect
-        // callback again → recursion (CodeRabbit's original finding). And
-        // during that close→reopen gap, RPCs in flight from OTHER proxies
-        // fail with `503 WebSocket not connected` (observed in
-        // integration-tests-mcp `should fire onWake when mention uses agent DID`
-        // after PR #899's initial fix — the WakerSubscriptionManager tests
-        // share a wakerClient across cases, so any dying reconnect handler
-        // interferes with sibling subscriptions).
-        //
-        // The correct shape is a swap-in-place: get a new server-side
-        // subscription ID via `subscribeQuery`, register a new client-side
-        // callback FIRST, and only then unsubscribe the old one. That way
-        // `_wsCallbacks.size` never dips to 0 during the transition, so the
-        // socket doesn't close, no reconnect loop, and no cross-proxy 503s.
-        // Any prior listener was already removed at the top of this method
-        // (see the note there for why cleanup must run before `#unsubscribe`,
-        // not here).
-        if (this.#client.onReconnect) {
-            this.#reconnectUnsub = this.#client.onReconnect(async () => {
-                if (this.#disposed) return;
-                // The handler is a writer of `#unsubscribe`/`#subscriptionId`
-                // too, so it takes its own generation — see #generation.
-                const swapGeneration = ++this.#generation;
-                console.log(
-                    'WebSocket reconnected — re-establishing server subscription for query:',
-                    this.#query,
-                );
-                try {
-                    const newInitial = await this.#client.subscribeQuery(this.#uuid, this.#query);
-                    if (this.#disposed || this.#generation !== swapGeneration) {
-                        // A newer writer took over while we awaited — back out
-                        // and release the orphaned server-side subscription.
-                        this.#client.disposeQuerySubscription(this.#uuid, newInitial.subscriptionId)
-                            .catch(e => console.error('Error disposing superseded query subscription:', e));
-                        return;
-                    }
-                    const newSubId = newInitial.subscriptionId;
-
-                    // Register the NEW client-side callback BEFORE removing the
-                    // old one — keeps `_wsCallbacks.size >= 1` across the swap.
-                    const newUnsub = this.#client.subscribeToQueryUpdates(
-                        newSubId,
-                        (updateResult) => this.#deliverResult(updateResult),
-                    );
-                    const oldUnsub = this.#unsubscribe;
-                    this.#unsubscribe = newUnsub;
-                    this.#subscriptionId = newSubId;
-                    if (oldUnsub) oldUnsub();
-
-                    // Our generation bump invalidated the running keepalive
-                    // loop — restart it under our generation so the new
-                    // server subscription keeps receiving keepalives.
-                    clearTimeout(this.#keepaliveTimer);
-                    this.#startKeepalive(swapGeneration);
-
-                    // Deliver the fresh initial result if the server included one
-                    // (matches the eager-delivery path in the main subscribe() body).
-                    // #deliverResult also clears a still-pending init timeout and
-                    // resolves #initialized, keeping this path symmetric with the
-                    // update callback in subscribe() — without it, a swap landing
-                    // while initialization was pending would leave the 30s init
-                    // timer armed and trigger a spurious full resubscribe.
-                    if (newInitial.result !== undefined) {
-                        this.#deliverResult(newInitial.result);
-                    }
-                } catch (error) {
-                    console.error(
-                        'Error re-establishing subscription after reconnect:',
-                        error,
-                    );
-                    // Our generation bump invalidated the running keepalive
-                    // loop; if nothing newer superseded us, restart it so
-                    // liveness is preserved — its keepAliveQuery against the
-                    // dead old subscription will fail and fall back to a
-                    // full subscribe(). The reconnect listener also remains
-                    // installed, so a later reconnect retries this handler.
-                    if (!this.#disposed && this.#generation === swapGeneration) {
-                        clearTimeout(this.#keepaliveTimer);
-                        this.#startKeepalive(swapGeneration);
-                    }
-                }
-            });
+            this.#initReject?.(error);
+            this.#initResolve = this.#initReject = undefined;
+            throw error;
         }
     }
 
-    /** Get the subscription ID for this query subscription
-     * 
-     * This is a unique identifier assigned when the subscription was created.
-     * It can be used to reference this specific subscription, for example when
-     * sending keepalive signals.
-     * 
-     * @returns The subscription ID string
-     */
+    /** The executor's id for this subscription. */
     get id(): string {
-        return this.#subscriptionId;
+        return this.#live.id;
     }
 
-/** Promise that resolves when the subscription has received its first result
- * through the subscription channel. This ensures the subscription is fully
- * set up before allowing access to results or updates.
- * 
- * If no result is received within 30 seconds, the subscription will automatically
- * retry. The promise will remain pending until a subscription message successfully
- * arrives, or until a fatal error occurs during subscription setup.
- * 
- * Note: You typically don't need to await this directly since the subscription
- * creation methods (like subscribeInfer) already wait for initialization.
- */
+    /** Resolves once the first result has arrived. */
     get initialized(): Promise<boolean> {
         return this.#initialized;
     }
 
-    /** Get the latest query result
-     * 
-     * This returns the most recent result from the query, which could be either:
-     * - The initial result from when the subscription was created
-     * - The latest update received through the subscription
-     * 
-     * @returns The latest query result as a string (usually a JSON array of bindings)
-     */
+    /** The latest result. */
     get result(): AllInstancesResult {
-        return this.#latestResult;
+        return this.#live.result;
     }
 
-    /** Add a callback that will be called whenever new results arrive
-     * 
-     * The callback will be called immediately with the current result,
-     * and then again each time the query results change.
-     * 
-     * @param callback - Function that takes a result string and processes it
-     * @returns A function that can be called to remove this callback
-     * 
-     * Example:
-     * ```typescript
-     * const removeCallback = subscription.onResult(result => {
-     *     const bindings = JSON.parse(result);
-     *     console.log("New bindings:", bindings);
-     * });
-     * 
-     * // Later: stop receiving updates
-     * removeCallback();
-     * ```
-     */
+    /** Call `callback` with every later result. Returns a remover. */
     onResult(callback: QueryCallback): () => void {
         this.#callbacks.add(callback);
         return () => this.#callbacks.delete(callback);
     }
 
-    /** Deliver a result to consumers: complete a still-pending
-     *  initialization (clear the 30s init timeout, resolve #initialized),
-     *  record the result as latest, and notify all callbacks. Shared by the
-     *  initial-result path, the update callback, and the reconnect swap
-     *  handler so all three stay lifecycle-symmetric. */
-    #deliverResult(result: AllInstancesResult) {
-        if (this.#initTimeoutId) {
-            clearTimeout(this.#initTimeoutId);
-            this.#initTimeoutId = undefined;
-        }
-        // Resolve the initialization promise (only resolves once)
-        if (this.#initResolve) {
-            this.#initResolve(true);
-            this.#initResolve = undefined;  // Prevent double-resolve
-            this.#initReject = undefined;
-        }
-        this.#latestResult = result;
-        this.#notifyCallbacks(result);
+    /** Whether the query lost its subscription (a reconnect, a failed
+     *  resync), could not open it again yet and is retrying: `result` is then
+     *  not live. */
+    get reopening(): boolean {
+        return this.#live.reopening;
     }
 
-    /** Start the keepalive loop for the given generation. The loop runs
-     *  every 30s until it is superseded (generation mismatch — a newer
-     *  subscribe() or reconnect swap took over) or the proxy is disposed.
-     *  On a keepalive error it falls back to a full subscribe(). */
-    #startKeepalive(generation: number) {
-        const keepaliveLoop = async () => {
-            // Generation check kills orphaned loops: a loop whose
-            // keepAliveQuery was in flight while a newer writer ran is not
-            // cancelled by clearTimeout and would otherwise reschedule
-            // itself alongside the newer loop.
-            if (this.#disposed || this.#generation !== generation) return;
-
-            try {
-                await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
-            } catch (e) {
-                if (this.#disposed || this.#generation !== generation) return;
-                console.error('Error in keepalive:', e);
-                // try to reinitialize the subscription
-                console.log('Reinitializing subscription for query:', this.#query);
-                try {
-                    await this.subscribe();
-                    console.log('Subscription reinitialized');
-                } catch (resubscribeError) {
-                    console.error('Error during resubscription from keepalive:', resubscribeError);
-                    // Don't schedule another keepalive on resubscribe failure.
-                    // Recovery is not lost: the failed subscribe() installed a
-                    // reconnect listener that retries the full subscribe.
-                    return;
-                }
-                // subscribe() succeeded and started its own keepalive loop
-                // under a new generation — this loop is done.
-                return;
-            }
-
-            // Schedule next keepalive if still the active generation
-            if (!this.#disposed && this.#generation === generation) {
-                this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
-            }
-        };
-
-        this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+    /** Call `listener` on each failed re-open of the subscription and when a
+     *  re-open succeeds after one failed (see {@link LiveQueryStatus}).
+     *  Returns a remover. */
+    onStatus(listener: (status: LiveQueryStatus) => void): () => void {
+        return this.#live.onStatus(listener);
     }
 
-    /** Internal method to notify all callbacks of a new result */
-    #notifyCallbacks(result: AllInstancesResult) {
+    #deliver(result: AllInstancesResult) {
+        this.#initResolve?.(true);
+        this.#initResolve = this.#initReject = undefined;
         for (const callback of this.#callbacks) {
             try {
                 callback(result);
@@ -472,47 +138,18 @@ export class QuerySubscriptionProxy {
         }
     }
 
-    /** Clean up the subscription and stop keepalive signals
-     * 
-     * This method:
-     * 1. Stops the keepalive timer
-     * 2. Unsubscribes from subscription updates
-     * 3. Clears all registered callbacks
-     * 4. Cleans up any pending initialization timeout
-     * 
-     * After calling this method, the subscription is no longer active and
-     * will not receive any more updates. The instance should be discarded.
-     */
-    dispose() {
-        this.#disposed = true;
-        // Invalidate any suspended writer so a mid-flight subscribe() or
-        // reconnect swap backs out instead of resurrecting state.
-        this.#generation++;
-        clearTimeout(this.#keepaliveTimer);
-        if (this.#unsubscribe) {
-            this.#unsubscribe();
-        }
-        if (this.#reconnectUnsub) {
-            this.#reconnectUnsub();
-            this.#reconnectUnsub = undefined;
-        }
+    /** End the subscription on the executor and drop all callbacks. With
+     *  `cancelOpening`, a `subscribe()` still waiting on the executor is
+     *  cancelled too, and rejects. */
+    dispose(options: { cancelOpening?: boolean } = {}) {
+        this.#live.dispose(options);
         this.#callbacks.clear();
-        if (this.#initTimeoutId) {
-            clearTimeout(this.#initTimeoutId);
-            this.#initTimeoutId = undefined;
-        }
-
-        // Tell the backend to dispose of the subscription
-        if (this.#subscriptionId) {
-            this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
-                .catch(e => console.error('Error disposing query subscription:', e));
-        }
     }
 }
 
-type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
-
-export type LinkStatus = "shared" | "local"
+/** Link status argument. The executor accepts either case and returns links
+ *  with the upper-case form (`LinkExpression.status`). */
+export type LinkStatus = "shared" | "local" | "SHARED" | "LOCAL"
 interface Parameter {
     name: string
     value: string
@@ -552,7 +189,7 @@ interface Parameter {
  * const todo = await perspective.createSubject("Todo", "expression://123");
  * 
  * // Subscribe to changes
- * perspective.addListener("link-added", (link) => {
+ * perspective.on("link-added", ({ link }) => {
  *   console.log("New link added:", link);
  * });
  * ```
@@ -583,10 +220,8 @@ export class PerspectiveProxy {
     /** @internal Exposed for ModelQueryBuilder subscription management */
     get client(): PerspectiveClient { return this.#client; }
 
-    #perspectiveLinkAddedCallbacks: LinkCallback[]
-    #perspectiveLinkRemovedCallbacks: LinkCallback[]
-    #perspectiveLinkUpdatedCallbacks: LinkCallback[]
-    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
+    /** Releases of the handlers `on()` registered and has not released yet. */
+    #releases = new Set<() => void>()
     #ensuredSubjectClasses = new Set<string>()
     /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
     #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
@@ -596,10 +231,6 @@ export class PerspectiveProxy {
      * Note: Don't create this directly, use ad4m.perspective.add() instead.
      */
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
-        this.#perspectiveLinkAddedCallbacks = []
-        this.#perspectiveLinkRemovedCallbacks = []
-        this.#perspectiveLinkUpdatedCallbacks = []
-        this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
         this.uuid = this.#handle.uuid;
@@ -608,10 +239,6 @@ export class PerspectiveProxy {
         this.sharedUrl = this.#handle.sharedUrl;
         this.neighbourhood = this.#handle.neighbourhood;
         this.state = this.#handle.state;
-        this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
-        this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
-        this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#perspectiveLinkUpdatedCallbacks)
-        this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
     }
 
     /** Update the proxy's internal handle and public fields in-place.
@@ -748,12 +375,14 @@ export class PerspectiveProxy {
      * @param transcript ordered `{ speaker, text }` turns
      * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
      * @param classes local names of the subject classes to extract into; omit for all
+     * @param options scopes, progress reporting, and `signal` / `timeoutMs`
+     *   (default {@link LONG_TIMEOUT_MS})
      */
     async runInterpretation(
         transcript: TranscriptTurn[],
         basePrefix: string,
         classes?: string[],
-        options?: {
+        options?: CallOptions & {
             existingScope?: RawScope,
             mintScope?: RawScope,
             /** Report progress while the pass runs — see {@link RunInterpretationObserveOptions}. */
@@ -764,14 +393,16 @@ export class PerspectiveProxy {
         // The scopes were already unreachable from here for that reason, and a fourth, fifth and
         // sixth positional parameter would have made `undefined, undefined, { … }` the normal way
         // to ask for the only one of them most callers want.
+        const { existingScope, mintScope, observe, ...callOptions } = options ?? {}
         return await this.#client.runInterpretation(
             this.#handle.uuid,
             transcript,
             basePrefix,
             classes,
-            options?.existingScope,
-            options?.mintScope,
-            options?.observe,
+            existingScope,
+            mintScope,
+            observe,
+            callOptions,
         )
     }
 
@@ -790,6 +421,7 @@ export class PerspectiveProxy {
      *   classic single-shot path)
      * @param classes local names of the subject classes to extract into; omit for all
      * @param modelOverride optional model override; omit for the default LLM
+     * @param options `signal` / `timeoutMs` (default {@link LONG_TIMEOUT_MS})
      */
     async runInterpretationWithHarness(
         transcript: TranscriptTurn[],
@@ -801,10 +433,11 @@ export class PerspectiveProxy {
         // `emitDebugEvents` are supplied, every dispatched tool call fires
         // `ToolCall` + `ToolResult` events on the `auto-processor-event`
         // topic keyed by `observationId`. Subscribe with
-        // {@link addAutoProcessorEventListener} to render the harness loop
+        // `on('auto-processor-event')` to render the harness loop
         // live in a UI. Absent = fast headless path (no telemetry cost).
         observationId?: string,
         emitDebugEvents?: boolean,
+        options?: CallOptions,
     ): Promise<string[]> {
         return await this.#client.runInterpretationWithHarness(
             this.#handle.uuid,
@@ -816,14 +449,33 @@ export class PerspectiveProxy {
             undefined,
             observationId,
             emitDebugEvents,
+            options,
         )
+    }
+
+    /**
+     * Ask a model something about this perspective, or ask it to change something, with the
+     * executor's own tools — including the tools apps install for their records. It reads freely;
+     * it writes only with the tools named in `settings.writeTools`, as you. Answers with the
+     * model's final reply.
+     *
+     * @param messages the conversation so far, the person's request last
+     * @param settings `context` (what the person is looking at), `writeTools`, `model`, `maxToolCalls`
+     * @param options `signal` / `timeoutMs` (default {@link LONG_TIMEOUT_MS})
+     */
+    async runAgent(
+        messages: AgentMessage[],
+        settings?: Parameters<PerspectiveClient['runAgent']>[2],
+        options?: CallOptions,
+    ): Promise<AgentReply> {
+        return await this.#client.runAgent(this.#handle.uuid, messages, settings, options)
     }
 
     /**
      * Register a neighbourhood auto-processor on this perspective. The executor
      * then runs interpretation automatically over new source items (like Flux
      * per channel), coordinating which peer processes each batch. Returns the
-     * processor id. Subscribe to progress via {@link addAutoProcessorEventListener}.
+     * processor id. Subscribe to progress via `on('auto-processor-event')`.
      */
     async addAutoProcessor(config: AddAutoProcessorConfig): Promise<string> {
         return await this.#client.addAutoProcessor(this.#handle.uuid, config)
@@ -927,7 +579,7 @@ export class PerspectiveProxy {
      * The verdict is three-way — see {@link FlowReceiptVerdict}: branch on
      * `outcome`, never on a boolean you derive from it.
      */
-    async verifyFlowReceipt(receipt: object): Promise<FlowReceiptVerdict> {
+    async verifyFlowReceipt(receipt: JsonValue): Promise<FlowReceiptVerdict> {
         return await this.#client.verifyFlowReceipt(this.#handle.uuid, receipt)
     }
 
@@ -949,27 +601,52 @@ export class PerspectiveProxy {
         return await this.#client.flowValidOutputs(this.#handle.uuid, flow, state)
     }
 
-    /** Mint and store the receipt for a completed flow run. */
-    async mintFlowReceipt(instanceUri: string): Promise<FlowMintedReceipt> {
-        return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
-    }
-
-    /** Subscribe to this perspective's auto-processor step signals. */
-    async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
-        return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+    /**
+     * The state each flow instance is in, as **this agent's** executor last
+     * derived it — one entry per instance it has derived, optionally narrowed
+     * to `instances`. An instance missing from the answer has not been
+     * derived here yet; it stands at its flow's first state.
+     *
+     * The state is not stored on the graph: the engine derives it from the
+     * signed proposals and keeps what it derived per agent, outside the
+     * perspective. So no other agent — a co-owner on the same executor included —
+     * can read or write your entries, and a link query never sees them.
+     * `FlowInstance.findAll` / `start` call this for you.
+     */
+    async flowStates(instances?: string[]): Promise<FlowStateEntry[]> {
+        return await this.#client.flowStates(this.#handle.uuid, instances)
     }
 
     /**
-     * Subscribe to this perspective's auto-processor neighbourhood-state
-     * events — fires when this executor claims / finishes / abandons a
-     * batch. Perspective-scoped, so a UI can render "someone is
-     * auto-processing this" without receiving the batch payload. See
-     * `AutoProcessorNeighbourhoodStateEvent`.
+     * The proposals of `instance` whose votes settled an edge, as this
+     * agent's executor recorded them — the flow's history, sorted by URI.
+     * Replaces the `resolvedAs` property proposals used to carry.
      */
-    async addAutoProcessorNeighbourhoodStateListener(
-        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
-    ): Promise<void> {
-        return await this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb)
+    async flowFired(instance: string): Promise<string[]> {
+        return await this.#client.flowFired(this.#handle.uuid, instance)
+    }
+
+    /**
+     * Called whenever a flow instance on this perspective changes state on
+     * this agent's executor, or an edge settles: `{ instance, from, to,
+     * firedProposals, caughtUp }`. Only this agent's sockets receive it.
+     *
+     * When the executor first derives an instance that already has history
+     * (it synced in, or the executor was upgraded) it is called once with
+     * `caughtUp: true`, `from: null` and no `firedProposals`: the settles
+     * before that are history, but `to` is the state to show for a run that
+     * read as not derived (`FlowInstance.currentStateName === undefined`).
+     *
+     * Returns a function that removes the handler; {@link dispose} removes
+     * it too.
+     */
+    onFlowStateChanged(handler: (event: EventMap["flow-state-changed"]) => void): () => void {
+        return this.on("flow-state-changed", handler)
+    }
+
+    /** Mint and store the receipt for a completed flow run. */
+    async mintFlowReceipt(instanceUri: string): Promise<FlowMintedReceipt> {
+        return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
     }
 
     /**
@@ -1036,11 +713,13 @@ export class PerspectiveProxy {
      * triples (written by `addSdna`).  Callers no longer ship shape
      * metadata with the query; the perspective is the source of truth.
      *
-     * @param className - The model class name (e.g. "Recipe")
+     * @param className - The model class name (e.g. "Recipe"), or several: one
+     *   query over their union, whose rows carry `__subjectClass` and
+     *   `__subjectClasses` (#1238)
      * @param queryJson - Structured query as JSON string
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: string, queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
@@ -1102,18 +781,16 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Subscribe to model query changes. Builds trigger SPARQL from the model shape
-     * internally in Rust, registers a subscription, runs the initial query, and
-     * pushes updated results when relevant links change.
+     * Open a live model query on the executor. Later changes arrive as
+     * updates; `LiveQuery` (or `ModelQueryBuilder.subscribe()`) applies them.
+     * The subscription ends with `disposeQuerySubscription()` or when the
+     * socket closes.
      *
-     * The subscription reuses the same WS-RPC subscription channel as subscribeQuery().
-     * Use keepAliveQuery() / disposeQuerySubscription() with the returned subscriptionId.
-     *
-     * @param className - The model class name
+     * @param className - The model class name, or several (same as modelQuery)
      * @param queryJson - JSON-serialized query parameters (same as modelQuery)
-     * @returns Object with `subscriptionId` and initial `result`
+     * @returns `subscriptionId`, initial `result` and `revision` (0)
      */
-    async modelSubscribe(className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
+    async modelSubscribe(className: string | string[], queryJson: string): Promise<Subscribed> {
         return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson);
     }
 
@@ -1192,6 +869,12 @@ export class PerspectiveProxy {
 
         /**
      * Adds a pre-signed LinkExpression to the perspective.
+     *
+     * The executor checks the signature against `link.author` and stores the
+     * verdict as `proof.valid`. If the same link (author, source, predicate,
+     * target and timestamp) is already stored with a signature that verifies,
+     * its stored proof is kept. The expression passed here is still returned
+     * and, when Shared, committed to the neighbourhood as given.
      * 
      * @param link - The signed LinkExpression to add
      * @param status - Whether the link should be shared
@@ -1298,78 +981,31 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Subscribes to link changes in the perspective.
-     * 
-     * @param type - Type of change to listen for
-     * @param cb - Callback function
-     * 
+     * Call `handler` with every `type` event about this perspective, until the
+     * returned function or {@link dispose} releases it.
+     *
      * @example
      * ```typescript
-     * // Listen for new links
-     * perspective.addListener("link-added", (link) => {
-     *   console.log("New link:", link);
-     * });
-     * 
-     * // Listen for removed links
-     * perspective.addListener("link-removed", (link) => {
-     *   console.log("Link removed:", link);
-     * });
+     * perspective.on("link-added", ({ link }) => console.log("New link:", link));
+     * perspective.on("link-updated", ({ oldLink, newLink }) => console.log(oldLink, "->", newLink));
+     * perspective.on("sync-state-change", ({ state }) => console.log("Sync state:", state));
      * ```
      */
-    async addListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
-        if (type === 'link-added') {
-            this.#perspectiveLinkAddedCallbacks.push(cb);
-        } else if (type === 'link-removed') {
-            this.#perspectiveLinkRemovedCallbacks.push(cb);
-        } else if (type === 'link-updated') {
-            this.#perspectiveLinkUpdatedCallbacks.push(cb);
+    on<K extends ScopedEventName>(type: K, handler: (event: EventMap[K]) => void): () => void {
+        // A registration of this proxy's own, so dispose() cannot release another proxy's
+        // registration of the same function (on() treats equal handlers as one).
+        const release = this.#client.on(type, (event: EventMap[K]) => handler(event), { perspective: this.#handle.uuid })
+        const releaseOnce = () => {
+            if (this.#releases.delete(releaseOnce)) release()
         }
+        this.#releases.add(releaseOnce)
+        return releaseOnce
     }
 
-    /**
-     * Subscribes to sync state changes if this perspective is shared.
-     * 
-     * @param cb - Callback function
-     * 
-     * @example
-     * ```typescript
-     * perspective.addSyncStateChangeListener((state) => {
-     *   console.log("Sync state:", state);
-     * });
-     * ```
-     */
-    async addSyncStateChangeListener(cb: SyncStateChangeCallback) {
-        this.#perspectiveSyncStateChangeCallbacks.push(cb)
-    }
-
-    /**
-     * Unsubscribes from link changes.
-     * 
-     * @param type - Type of change to stop listening for
-     * @param cb - The callback function to remove
-     */
-    async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
-        if (type === 'link-added') {
-            const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
-            if (index >= 0) this.#perspectiveLinkAddedCallbacks.splice(index, 1);
-        } else if (type === 'link-removed') {
-            const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
-            if (index >= 0) this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
-        } else if (type === 'link-updated') {
-            const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
-            if (index >= 0) this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
-        }
-    }
-
-    /** Clean up all subscriptions registered by this proxy.
-     *  Call this when the proxy is no longer needed to prevent subscription leaks.
-     *  After calling dispose(), the proxy should not be used. */
+    /** Removes every handler this proxy registered. Other proxies for the same
+     *  perspective keep theirs. */
     dispose(): void {
-        this.#client.removeAllListeners(this.#handle.uuid)
-        this.#perspectiveLinkAddedCallbacks.length = 0
-        this.#perspectiveLinkRemovedCallbacks.length = 0
-        this.#perspectiveLinkUpdatedCallbacks.length = 0
-        this.#perspectiveSyncStateChangeCallbacks.length = 0
+        for (const release of [...this.#releases]) release()
     }
 
     /**
@@ -1443,17 +1079,8 @@ export class PerspectiveProxy {
      */
     async setSingleTarget(link: Link, status: LinkStatus = 'shared') {
         const query = new LinkQuery({source: link.source, predicate: link.predicate})
-        const foundLinks = await this.get(query)
-        const removals = [];
-        for(const l of foundLinks){
-            delete l.__typename
-            delete l.data.__typename
-            delete l.proof.__typename
-            removals.push(l);
-        }
-        const additions = [link];
-
-        await this.linkMutations({additions, removals}, status)
+        const removals = await this.get(query)
+        await this.linkMutations({additions: [link], removals}, status)
     }
 
     /** Returns all the Social DNA flows defined in this perspective */
@@ -1627,6 +1254,8 @@ export class PerspectiveProxy {
     async ensureSubjectClasses(jsClasses: any[]): Promise<void> {
         const entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[] = [];
         for (const jsClass of jsClasses) {
+            // Built-in classes (`TextContent`) live in the executor, not here.
+            if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) continue;
             const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
             if (this.#ensuredSubjectClasses.has(className)) continue;
 
@@ -1650,18 +1279,11 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Adds a subject class to the perspective.
-     * Alias for addSdna() with sdnaType='subject_class'.
-     */
-    async addSubjectClass(name: string, shaclJson: string) {
-        return this.addSdna(name, '', 'subject_class', shaclJson);
-    }
-
-    /**
      * **Recommended way to add SDNA schemas.**
      * 
-     * Store a SHACL shape in this Perspective using the type-safe `SHACLShape` class.
-     * The shape is serialized as RDF triples (links) for native AD4M storage and querying.
+     * Store a SHACL shape in this Perspective. The executor writes it as links, as it
+     * does for `@Model` classes. The shape needs a `targetClass` and keeps its
+     * `nodeShapeUri`, which must end with `{name}Shape`.
      * 
      * @param name - Unique name for this schema (e.g., 'Recipe', 'Task')
      * @param shape - SHACLShape instance defining the schema
@@ -1685,31 +1307,7 @@ export class PerspectiveProxy {
      * await perspective.addShacl('Recipe', shape);
      */
     async addShacl(name: string, shape: SHACLShape): Promise<void> {
-        // Serialize shape to links
-        const shapeLinks = shape.toLinks();
-        
-        // Create name -> shape mapping links
-        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
-        const allLinks: Link[] = [
-            ...shapeLinks.map(l => new Link({
-                source: l.source,
-                predicate: l.predicate,
-                target: l.target
-            })),
-            new Link({
-                source: "ad4m://self",
-                predicate: "ad4m://has_shacl",
-                target: nameMapping.toUrl()
-            }),
-            new Link({
-                source: nameMapping.toUrl(),
-                predicate: "ad4m://shacl_shape_uri",
-                target: shape.nodeShapeUri
-            })
-        ];
-        
-        // Batch add all links at once
-        await this.addLinks(allLinks);
+        await this.addSdna(name, '', 'subject_class', JSON.stringify(shape.toJSON()));
     }
     
     /**
@@ -1745,15 +1343,20 @@ export class PerspectiveProxy {
     /**
      * Get all SHACL shapes stored in this Perspective (one RPC call).
      * The executor resolves all shapes in-process and returns them in bulk.
+     * A shape that fails to decode is skipped with a `console.warn`, so it
+     * does not hide the others.
      */
     async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
         const entries = await this.#client.getAllShacl(this.#handle.uuid);
-        return entries
-            .map(({ name, shapeUri, links }) => {
-                const shape = SHACLShape.fromLinks(links as any, shapeUri);
-                return shape ? { name, shape } : null;
-            })
-            .filter((s): s is { name: string; shape: SHACLShape } => s !== null);
+        const shapes: Array<{name: string, shape: SHACLShape}> = [];
+        for (const { name, shapeUri, links } of entries) {
+            try {
+                shapes.push({ name, shape: SHACLShape.fromLinks(links as any, shapeUri) });
+            } catch (e) {
+                console.warn(`getAllShacl: skipping SHACL shape "${name}" that cannot be decoded:`, e);
+            }
+        }
+        return shapes;
     }
 
     /**
@@ -1790,33 +1393,59 @@ export class PerspectiveProxy {
      *
      * await perspective.addFlow('Delivery', deliveryFlow);
      * ```
+     *
+     * Rejects, storing nothing, when a `consensusRule` carries a key the
+     * executor does not know or a key written twice (#1144): the error names
+     * the state and the key.
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
-        // Serialize flow to links
-        const flowLinks = flow.toLinks();
-        
-        // Create registration and mapping links
         const flowNameLiteral = Literal.from(name).toUrl();
-        const allLinks: Link[] = [
-            ...flowLinks.map(l => new Link({
-                source: l.source,
-                predicate: l.predicate,
-                target: l.target
-            })),
-            new Link({
-                source: "ad4m://self",
-                predicate: "ad4m://has_flow",
-                target: flowNameLiteral
-            }),
-            new Link({
-                source: flowNameLiteral,
-                predicate: "ad4m://flow_uri",
-                target: flow.flowUri
-            })
+        const wanted = [
+            ...flow.toLinks(),
+            { source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral },
+            { source: flowNameLiteral, predicate: "ad4m://flow_uri", target: flow.flowUri },
         ];
-        
-        // Batch add all links at once
-        await this.addLinks(allLinks);
+
+        // Re-adding a flow replaces its definition. Adding alone would leave
+        // a changed consensus rule beside the old one, and a state holding two
+        // rules refuses every move into it. What is stored is found through
+        // the flow's own links, since state and transition URIs may use an
+        // older scheme. Only definition predicates are taken, from the flow's
+        // URI and from each state and transition URI: all of them can carry
+        // links the definition does not own.
+        const flowLevel = new Set(SHACLFlow.FLOW_LEVEL_PREDICATES);
+        const childLevel = new Set(SHACLFlow.STATE_AND_TRANSITION_PREDICATES);
+        const ownLinks = (await this.get(new LinkQuery({ source: flow.flowUri })))
+            .filter(l => flowLevel.has(l.data.predicate));
+        const children = ownLinks
+            .filter(l => l.data.predicate === "ad4m://hasState" || l.data.predicate === "ad4m://hasTransition")
+            .map(l => l.data.target);
+        const childLinks = (await Promise.all(children.map(uri => this.get(new LinkQuery({ source: uri })))))
+            .flat()
+            .filter(l => childLevel.has(l.data.predicate));
+        // A name points at one flow: getFlow reads the first flow_uri link,
+        // and FlowInstance.findAll drops records of any other flow URI. So
+        // every flow_uri link of this name is taken, and one left from an
+        // earlier namespace is removed rather than kept beside the new one.
+        const registration = [
+            ...await this.get(new LinkQuery({ source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral })),
+            ...await this.get(new LinkQuery({ source: flowNameLiteral, predicate: "ad4m://flow_uri" })),
+        ];
+        const stored = [...ownLinks, ...childLinks, ...registration];
+
+        // Only the difference is written, so an unchanged definition writes
+        // nothing and a changed one touches only what changed.
+        const key = (l: { source: string; predicate?: string; target: string }) =>
+            JSON.stringify([l.source, l.predicate ?? "", l.target]);
+        const wantedKeys = new Set(wanted.map(key));
+        const storedKeys = new Set(stored.map(l => key(l.data)));
+        const additions = wanted
+            .filter((l, i, all) => !storedKeys.has(key(l)) && all.findIndex(o => key(o) === key(l)) === i)
+            .map(l => new Link(l));
+        const removals = stored.filter(l => !wantedKeys.has(key(l.data)));
+
+        if (additions.length === 0 && removals.length === 0) return;
+        await this.linkMutations({ additions, removals });
     }
 
     /**
@@ -1868,27 +1497,25 @@ export class PerspectiveProxy {
      * Uses SHACL-based lookup (Prolog-free implementation).
      */
     async subjectClasses(): Promise<string[]> {
-        try {
-            // Query SHACL class links directly — no need for a separate RPC endpoint
-            const classLinks = await this.get(new LinkQuery({
-                predicate: "rdf://type",
-                target: "ad4m://SubjectClass"
-            }));
-            const classNames = classLinks
-                .map(l => {
-                    const source = l.data.source;
-                    // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
-                    const parts = source.split("://");
-                    const lastPart = parts[parts.length - 1];
-                    return lastPart.split('/').pop() || '';
-                })
-                .filter(name => name.length > 0);
-            // Deduplicate
-            return [...new Set(classNames)];
-        } catch (e) {
-            console.warn('subjectClasses: SHACL lookup failed:', e);
-            return [];
-        }
+        // A failed lookup rejects. Answering `[]` would read as "no classes are
+        // registered", which a caller deciding whether to register its own
+        // classes acts on.
+        // Query SHACL class links directly — no need for a separate RPC endpoint
+        const classLinks = await this.get(new LinkQuery({
+            predicate: "rdf://type",
+            target: "ad4m://SubjectClass"
+        }));
+        const classNames = classLinks
+            .map(l => {
+                const source = l.data.source;
+                // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
+                const parts = source.split("://");
+                const lastPart = parts[parts.length - 1];
+                return lastPart.split('/').pop() || '';
+            })
+            .filter(name => name.length > 0);
+        // Deduplicate
+        return [...new Set(classNames)];
     }
 
     /**
@@ -1905,36 +1532,29 @@ export class PerspectiveProxy {
      * registered should call this once and test membership against the returned
      * set, rather than issuing one `queryLinks` per model.
      *
-     * One `queryLinks` round trip, no executor-side changes.
+     * One `queryLinks` round trip, no executor-side changes. A failed lookup
+     * rejects rather than answering `[]`, which would read as "nothing is
+     * registered" and lead such a caller to register everything again.
      */
     async subjectClassTargetClasses(): Promise<string[]> {
-        try {
-            const classLinks = await this.get(new LinkQuery({
-                predicate: "rdf://type",
-                target: "ad4m://SubjectClass"
-            }));
-            const uris = classLinks
-                .map(l => l.data.source)
-                .filter(source => source.length > 0);
-            return [...new Set(uris)];
-        } catch (e) {
-            console.warn('subjectClassTargetClasses: lookup failed:', e);
-            return [];
-        }
+        const classLinks = await this.get(new LinkQuery({
+            predicate: "rdf://type",
+            target: "ad4m://SubjectClass"
+        }));
+        const uris = classLinks
+            .map(l => l.data.source)
+            .filter(source => source.length > 0);
+        return [...new Set(uris)];
     }
 
     async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
         if(typeof subjectClass === "string")
             return subjectClass
-        else {
-            let subjectClasses = await this.subjectClassesByTemplate(subjectClass as object)
-            if(subjectClasses[0]) {
-                return subjectClasses[0]
-            } else {
-                //@ts-ignore
-                return subjectClass.className
-            }
-        }
+        // The @Model decorator names the class, as in createSubject: no lookup.
+        // Only an undecorated object is matched by its properties.
+        const obj = subjectClass as any;
+        return obj.className || obj.constructor?.className || obj.constructor?.prototype?.className
+            || (await this.subjectClassesByTemplate(obj))[0]
     }
 
     /**
@@ -2000,6 +1620,14 @@ export class PerspectiveProxy {
         return exprAddr as unknown as B extends undefined ? T : string;
     }
 
+    /** Sets properties of an existing instance in the executor. Through an
+     *  abstract class (#1435), each value is written by every class of the
+     *  record that the abstract class reads, under its own name. */
+    async updateSubject(className: string, exprAddr: string, values: Record<string, any>, batchId?: string) {
+        await this.#client.updateSubject(this.#handle.uuid, className, exprAddr, JSON.stringify(values), batchId);
+        invalidatePerspectiveCache(this.#handle.uuid);
+    }
+
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
         if (typeof subjectClass === "string") {
             return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: subjectClass}), exprAddr))
@@ -2057,7 +1685,25 @@ export class PerspectiveProxy {
      * and won't be executed until the batch is committed.
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
+        // A built-in abstract class (`TextContent`, #1446) is never stored,
+        // so it has no marker: the executor dispatches it by its URI.
+        const ctor = (subjectClass as any)?.constructor;
+        if (typeof subjectClass === "object" && ctor && Object.prototype.hasOwnProperty.call(ctor, 'builtinUri')) {
+            await this.#client.removeSubject(this.#handle.uuid, ctor.builtinUri, exprAddr, batchId);
+            invalidatePerspectiveCache(this.#handle.uuid);
+            return;
+        }
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
+
+        // An abstract class (#1435) is never a record's class: the executor
+        // runs the destructors of the record's classes it reads.
+        const shapePattern = new RegExp(`[/:#]${this.escapeRegExp(className)}Shape$`);
+        const markers = await this.get(new LinkQuery({ predicate: "ad4m://abstract" }));
+        if (markers.some((link) => shapePattern.test(link.data.source))) {
+            await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
+            invalidatePerspectiveCache(this.#handle.uuid);
+            return;
+        }
 
         // Get destructor actions from SHACL links (Prolog-free)
         let actions = await this.getActionsFromSHACL(className, "ad4m://destructor");
@@ -2408,6 +2054,9 @@ export class PerspectiveProxy {
 
     /** Takes a JS class (its constructor) and ensures the SHACL subject class exists. */
     async ensureSubjectClass(jsClass: any): Promise<void> {
+        // Built-in classes (`TextContent`) live in the executor, not here.
+        if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) return;
+
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         
@@ -2662,95 +2311,20 @@ export class PerspectiveProxy {
         return this.#client.aiClient
     }
 
-    /**
-     * Creates a subscription for a Prolog query that updates in real-time.
-     * 
-     * This method:
-     * 1. Creates the subscription on the Rust side
-     * 2. Sets up the subscription callback
-     * 3. Waits for the initial result to come through the subscription channel
-     * 4. Returns a fully initialized QuerySubscriptionProxy
-     * 
-     * The returned subscription is guaranteed to be ready to receive updates,
-     * as this method waits for the initialization process to complete.
-     * 
-     * The subscription will be automatically cleaned up on both frontend and backend
-     * when dispose() is called. Make sure to call dispose() when you're done to
-     * prevent memory leaks and ensure proper cleanup of resources.
-     * 
-     * @param query - Prolog query string
-     * @returns Initialized QuerySubscriptionProxy instance
-     * 
-     * @example
-     * ```typescript
-     * // Subscribe to active todos
-     * const subscription = await perspective.subscribeInfer(`
-     *   instance(Todo, "Todo"),
-     *   property_getter("Todo", Todo, "state", "active")
-     * `);
-     * 
-     * // Subscription is already initialized here
-     * console.log("Initial result:", subscription.result);
-     * 
-     * // Set up callback for future updates
-     * subscription.onResult((todos) => {
-     *   console.log("Active todos:", todos);
-     * });
-     * 
-     * // Clean up subscription when done
-     * subscription.dispose();
-     * ```
-     */
-    async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
-        const subscriptionProxy = new QuerySubscriptionProxy(
-            this.uuid,
-            query,
-            this.#client
-        );
-
-        // Start the subscription on the Rust side first to get the real subscription ID
-        await subscriptionProxy.subscribe();
-
-        // Wait for the initial result
-        await subscriptionProxy.initialized;
-
-        return subscriptionProxy;
-    }
-
-    /**
-     * Creates a subscription for a SPARQL query that updates in real-time.
-     * 
-     * This method:
-     * 1. Creates the subscription on the Rust side
-     * 2. Sets up the subscription callback
-     * 3. Waits for the initial result to come through the subscription channel
-     * 4. Returns a fully initialized QuerySubscriptionProxy
-     * 
-     * The returned subscription is guaranteed to be ready to receive updates,
-     * as this method waits for the initialization process to complete.
-     * 
-     * The subscription will be automatically cleaned up on both frontend and backend
-     * when dispose() is called. Make sure to call dispose() when you're done to
-     * prevent memory leaks and ensure proper cleanup of resources.
-     * 
-    /** Subscribe to a query with live updates via the SPARQL subscription endpoint.
-     * @param query - Query string
-     * @returns Initialized QuerySubscriptionProxy instance
-     */
+    /** Live SPARQL query: resolves once the first result is in.
+     *  Call `dispose()` on the returned proxy when done. The executor
+     *  refuses a Prolog query (400): Prolog live queries are not supported. */
     async subscribeQuery(query: string): Promise<QuerySubscriptionProxy> {
-        const subscriptionProxy = new QuerySubscriptionProxy(
-            this.uuid,
-            query,
-            this.#client
-        );
-
-        // Start the subscription on the Rust side first to get the real subscription ID
-        await subscriptionProxy.subscribe();
-
-        // Wait for the initial result
-        await subscriptionProxy.initialized;
-
-        return subscriptionProxy;
+        const subscription = new QuerySubscriptionProxy(this.uuid, query, this.#client);
+        try {
+            await subscription.subscribe();
+        } catch (e) {
+            // Nobody gets the proxy, so nobody can dispose it: left as is, it
+            // would re-open on every reconnect and retry for good (#1595).
+            subscription.dispose({ cancelOpening: true });
+            throw e;
+        }
+        return subscription;
     }
 
 }

@@ -14,8 +14,10 @@
 //! - Each test returns early when `ANTHROPIC_API_KEY` is unset, so a developer
 //!   without a key sees a skip and not a failure.
 //!
-//! These cost real money, unlike the nightly `llm-e2e` suite, which runs
-//! against a local Ollama. That is why they are not wired into the nightly.
+//! These cost real money, unlike the rest of the nightly `llm-e2e` suite,
+//! which runs against a local Ollama. They run in that nightly too, with
+//! `ANTHROPIC_API_KEY` from its CircleCI context, because a change in how the
+//! API accepts `cache_control` would otherwise show up only as a larger bill.
 //! Keep the prompts tiny and the `max_tokens` low.
 //!
 //! ```sh

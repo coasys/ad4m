@@ -128,7 +128,7 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     await admin.agent.createUser("alice@propose.local", "pass");
     await admin.runtime.setUserFreeAccess("alice@propose.local", true);
     const aliceToken = await admin.agent.loginUser("alice@propose.local", "pass");
-    alice = new Ad4mClient(baseUrl(agent.apiPort), aliceToken, false);
+    alice = new Ad4mClient(baseUrl(agent.apiPort), aliceToken);
     aliceDid = (await alice.agent.me()).did;
 
     // Use the admin client as the second signer: admin has ALL_CAPABILITY so it

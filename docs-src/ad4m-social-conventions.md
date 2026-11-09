@@ -293,7 +293,7 @@ Alice wants to DM Bob:
 ```
 1. Alice resolves Bob's agent (agent language lookup).
 2. Alice queries Bob's public perspective for `ad4m://inbox`.
-3. Alice instantiates the referenced Language on her node (if she
+3. Alice instantiates the referenced Language on her executor (if she
    doesn't already have it installed). The Language hash uniquely
    identifies Bob's inbox.
 4. Alice encrypts the message content to Bob's public key.
@@ -328,7 +328,7 @@ telepresence:
 2. If Bob is online, Alice ALSO calls `telepresence.sendSignal`
    on Bob's inbox Language (or on Bob's presence Language, depending
    on how the template wires it) with the same encrypted payload.
-3. Bob's inbox Language, running on Bob's node, receives the
+3. Bob's inbox Language, running on Bob's executor, receives the
    telepresence signal and emits it to subscribers.
 4. Alice's `perspectiveCommit` still happens — telepresence is the
    fast path, commit is the durable path.
@@ -344,8 +344,8 @@ comes online.
 
 ### 5.1 The problem
 
-If Alice's DM inbox commit relies on direct delivery to Bob's node,
-and Bob is offline, the message sits on Alice's node until Bob
+If Alice's DM inbox commit relies on direct delivery to Bob's executor,
+and Bob is offline, the message sits on Alice's executor until Bob
 reappears. This is bad for delivery latency — Alice has to stay
 online until Bob does. DHT-backed transports (Holochain, IPFS-PubSub,
 …) mitigate this by gossiping commits to nearby nodes, but
@@ -358,12 +358,12 @@ Bob's inbox Language is instantiated:
 
 1. The Language's `init()` queries Bob's social perspective for
    `ad4m://friend-of` links where Bob is the source.
-2. For each friend DID, the Language asks the friend's node to join
+2. For each friend DID, the Language asks the friend's executor to join
    the inbox's peer membrane as a relay node.
 3. When Alice commits a message to Bob's inbox and Bob is offline,
-   one of Bob's friends' nodes holds the commit in its local
+   one of Bob's friends' executors holds the commit in its local
    replica of the inbox perspective (via `perspective-sync`).
-4. When Bob comes back online, his node's `perspectiveSyncSync`
+4. When Bob comes back online, his executor's `perspectiveSyncSync`
    pulls the backlog from friend relays.
 
 This is entirely a **template implementation detail**. The Language
@@ -468,7 +468,7 @@ privacy is too:
 - Friends in the **public perspective** → visible to everyone who
   can read the agent.
 - Friends in a **private local perspective** → visible only to the
-  agent's own nodes.
+  agent's own executors.
 - Friends in a **shared perspective between two parties** →
   mutually visible but not publicly broadcast.
 

@@ -1,6 +1,10 @@
 import { Ad4mClient } from './Ad4mClient';
+import { ApiClient } from './apiClient';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
+import type { EventMap, EventName } from './generated/api/Events';
+import type { DecoratedLinkExpression } from './generated/api/DecoratedLinkExpression';
+import type { PerspectiveHandle } from './generated/api/PerspectiveHandle';
 
 // Save original WebSocket so we can restore it after the suite
 const originalWebSocket = (global as any).WebSocket;
@@ -32,8 +36,18 @@ type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 
 const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Agent ──
-    'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
-    'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true },
+    'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm', identity: 'did:scid:coasys:1:QmTest' },
+    'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' },
+    // ── Identity ──
+    'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true } },
+    'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, echo: p }),
+    'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
+    'identity.devices': [],
+    'identity.resolve': (p: Record<string, unknown>) => ({
+        didDocument: { '@context': ['https://www.w3.org/ns/did/v1'], id: p.didUrl, controller: p.didUrl, verificationMethod: [], authentication: [], assertionMethod: [], keyAgreement: [], capabilityInvocation: [] },
+        didDocumentMetadata: { versionId: '2', deactivated: false },
+        didResolutionMetadata: { contentType: 'application/did+ld+json', 'coasys:source': 'cache', 'coasys:headTrusted': true },
+    }),
     'agent.generate': { did: 'did:test:generated', didDocument: 'doc', isInitialized: true, isUnlocked: true },
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
@@ -42,7 +56,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
-    'agent.requestCapability': 'request-id-123',
+    'agent.requestCapability': (p: Record<string, unknown>) =>
+        'agent' in p ? `request-for-${p.agent}` : 'request-id-123',
     'agent.permitCapability': 'permitted-token',
     'agent.generateJwt': 'jwt-token-abc',
     'agent.getApps': [{ requestId: 'app1', auth: {}, token: 'tok', revoked: false }],
@@ -104,8 +119,9 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },
-    'perspective.subscribeQuery': true,
-    'perspective.keepAliveQuery': true,
+    'perspective.subscribeQuery': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
+    'perspective.resyncSubscription': { revision: 3, result: [{ s: 'c' }] },
+    'events.watch': true,
     'perspective.disposeQuery': true,
 
     // ── Languages ──
@@ -131,18 +147,26 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.publish': 'neighbourhood://published',
     'neighbourhood.join': {
         uuid: 'uuid-joined', name: 'joined-neighbourhood', sharedUrl: 'neighbourhood://url',
-        neighbourhood: {}, state: 'Synced',
+        neighbourhood: {
+            author: 'did:test:123', timestamp: '2024-01-01',
+            data: { linkLanguage: 'lang://link', meta: { links: [] } },
+            proof: { key: 'key', signature: 'sig', valid: true, invalid: false },
+        },
+        state: 'SYNCED',
     },
     'neighbourhood.otherAgents': ['did:other:1', 'did:other:2'],
     'neighbourhood.hasTelepresence': true,
     'neighbourhood.onlineAgents': [{ did: 'did:test:1', status: new Perspective() }],
+    'sfu.status': { reachability: 'nat', isPublic: false, bindAddress: '127.0.0.1:9000', detail: 'nat' },
+    'sfu.servesAllMembers': true,
+    'neighbourhood.ownOnlineStatus': null,
     'neighbourhood.setOnlineStatus': true,
     'neighbourhood.sendSignal': true,
     'neighbourhood.sendBroadcast': true,
 
     // ── Expressions ──
-    'expression.get': (p: Record<string, unknown>) => {
-        if (p.raw === true) return 'raw-expression-data';
+    'expression.getRaw': 'raw-expression-data',
+    'expression.get': () => {
         return {
             author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
             language: { address: 'lang://test' }, proof: { valid: true },
@@ -161,7 +185,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'expression.interact': 'interaction-result',
 
     // ── Runtime ──
-    'runtime.info': { ad4mExecutorVersion: '0.1.0', isUnlocked: true, isInitialized: true },
+    'runtime.info': { ad4mExecutorVersion: '0.1.0', ad4mExecutorCommit: null, isUnlocked: true, isInitialized: true },
     'runtime.tlsDomain': 'test.domain.com',
     'runtime.quit': true,
     'runtime.openLink': true,
@@ -180,7 +204,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.grantNotification': true,
     'runtime.deleteNotification': true,
     'runtime.setStatus': true,
-    'runtime.linkLanguageTemplates': ['lang://template1'],
+    'runtime.linkLanguageTemplates': [{ address: 'template1', name: 'Template 1', possibleTemplateParams: ['uid', 'name'] }],
     'runtime.addLinkLanguageTemplates': ['lang://template1', 'lang://template2'],
     'runtime.removeLinkLanguageTemplates': ['lang://template1'],
     'runtime.hcAgentInfos': ['hc-agent-info-1', 'hc-agent-info-2'],
@@ -204,7 +228,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'ai.tasks': [{ taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] }],
     'ai.addTask': { taskId: 'task-new', name: 'new-task', modelId: 'model-1', systemPrompt: 'Do stuff', promptExamples: [] },
     'ai.updateTask': { taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: [] },
-    'ai.removeTask': { taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] },
+    'ai.removeTask': true,
     'ai.prompt': 'This is the AI response',
     'ai.modelLoadingStatus': { model: 'model-1', progress: 100, status: 'loaded' },
 
@@ -212,6 +236,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'user.create': { success: true, did: 'did:test:new-user' },
     'user.login': 'login-jwt-token',
     'user.verifyEmail': 'verified-token',
+    'user.logout': true,
+    'user.revokeAllSessions': true,
     'user.requestVerification': { success: true, message: 'Verification email sent', requiresPassword: false, isExistingUser: true },
     'user.list': [{ email: 'user@test.com', credits: 100, freeAccess: false }],
     'user.multiUserEnabled': false,
@@ -225,19 +251,23 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     },
 
     // ── Hosting ──
-    'hosting.info': { email: 'test@test.com' },
+    'hosting.info': {
+        userInfo: { email: 'test@test.com', credits: 5, hotWalletAddress: null, freeAccess: false },
+        rates: null,
+        version: { dnaHash: null, buildVersion: 'test' },
+    },
     'hosting.setHotWallet': true,
     'hosting.requestPayment': { paymentUrl: 'https://pay.test' },
 
     // ── Runtime: host rates & Unyt ──
-    'runtime.getHostRates': JSON.stringify([{ description: 'Link write', priceInHOT: 0.001 }]),
+    'runtime.hostRates': [{ description: 'Link write', priceInHOT: 0.001 }],
     'runtime.setHostRates': true,
     'runtime.unytAgentKey': 'unyt-agent-key-123',
     'runtime.unytHotAgentPubkey': 'unyt-hot-pubkey-456',
     'runtime.unytWalletBalance': '1000.50',
     'runtime.unytWalletHistory': '[]',
-    'runtime.unytVersionInfo': '{"version":"0.1.0"}',
-    'runtime.unytSetMembraneProof': { success: true, message: 'ok' },
+    'runtime.unytVersionInfo': { installed: null, bundled: '0.61.0', installError: 'install failed' },
+    'runtime.setUnytMembraneProof': true,
     'runtime.unytReinstallDna': { success: true, message: 'reinstalled' },
     'runtime.unytSendHot': { success: true, message: 'sent' },
 };
@@ -261,6 +291,8 @@ class MockWebSocket {
     readyState: number = MockWebSocket.CONNECTING;
     closed = false;
     url: string;
+    /** RPC calls sent on this socket. */
+    rpc: { type: string; params: Record<string, unknown> }[] = [];
 
     close() {
         this.closed = true;
@@ -288,6 +320,7 @@ class MockWebSocket {
 
             // Track for assertions
             lastRpcCall = { type: msgType, params };
+            this.rpc.push(lastRpcCall);
 
             const handler = MOCK_RESPONSES[msgType];
             if (handler === undefined) {
@@ -301,9 +334,11 @@ class MockWebSocket {
                 ? (handler as (p: Record<string, unknown>) => unknown)(params)
                 : handler;
 
-            setTimeout(() => {
-                this.onmessage?.({ data: JSON.stringify({ id, result }) });
+            const reply = (value: unknown) => setTimeout(() => {
+                this.onmessage?.({ data: JSON.stringify({ id, result: value }) });
             }, 0);
+            if (result instanceof Promise) result.then(reply);
+            else reply(result);
         } catch { /* malformed JSON — ignore */ }
     }
 
@@ -336,19 +371,62 @@ function lastOf<T>(arr: T[]): T {
     return arr[arr.length - 1];
 }
 
+// ===================== WIRE EVENTS =====================
+// Events exactly as the executor sends them; the payload type is checked against the event table.
+
+function event<K extends EventName>(type: K, payload: EventMap[K]): { type: K } & EventMap[K] {
+    return { type, ...payload };
+}
+
+function wireLink(source: string, target = 'test://value'): DecoratedLinkExpression {
+    return {
+        author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z',
+        data: { source, predicate: 'test://has', target },
+        proof: { key: 'key', signature: 'sig', valid: true, invalid: false },
+        status: 'SHARED',
+    };
+}
+
+function wireHandle(uuid: string): PerspectiveHandle {
+    return { uuid, name: 'test-perspective', neighbourhood: null, sharedUrl: null, state: 'SYNCED', owners: null };
+}
+
+const linkAdded = (perspectiveUuid: string, source: string) => event('link-added', { perspectiveUuid, link: wireLink(source) });
+const linkRemoved = (perspectiveUuid: string, source: string) => event('link-removed', { perspectiveUuid, link: wireLink(source) });
+const linkUpdated = (perspectiveUuid: string, oldSource: string, newSource: string) =>
+    event('link-updated', { perspectiveUuid, oldLink: wireLink(oldSource), newLink: wireLink(newSource) });
+const perspectiveAdded = (uuid: string) => event('perspective-added', { perspectiveUuid: uuid, perspective: wireHandle(uuid) });
+
 // ===================== TEST SETUP =====================
 
 let ad4m: Ad4mClient;
 
+/** Clients a test creates; closed after each test so no socket or timer outlives it. */
+let clients: { close(): void }[] = [];
+
+function newClient(token = 'test-token'): Ad4mClient {
+    const client = new Ad4mClient('http://127.0.0.1:12000', token);
+    clients.push(client);
+    return client;
+}
+
+function closeClients() {
+    for (const client of clients) client.close();
+    clients = [];
+}
+
 beforeAll(() => {
     (global as any).WebSocket = MockWebSocket as any;
     // Ad4mClient takes an HTTP base URL; apiClient converts to ws:// internally
-    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
 });
 
 afterAll(() => {
+    ad4m.close();
     (global as any).WebSocket = originalWebSocket;
 });
+
+afterEach(closeClients);
 
 beforeEach(() => {
     lastRpcCall = null;
@@ -364,6 +442,8 @@ describe('AgentClient', () => {
         const agent = await ad4m.agent.me();
         expect(agent.did).toBe('did:test:123');
         expect(agent.directMessageLanguage).toBe('lang://dm');
+        // agent.get's identity reaches the Agent, as IdentityClient documents.
+        expect(agent.identity).toBe('did:scid:coasys:1:QmTest');
     });
 
     test('status() returns agent status', async () => {
@@ -435,6 +515,13 @@ describe('AgentClient', () => {
         expect(id).toBe('request-id-123');
     });
 
+    // #1399: the request names the agent the app asks to act as; without one, no `agent`
+    // param goes out (the executor's main agent).
+    test('requestCapability() passes the requested agent', async () => {
+        const id = await ad4m.agent.requestCapability({ appName: 'test', appDesc: 'test', appDomain: 'test', appUrl: 'test', capabilities: [] } as any, 'alice@example.org');
+        expect(id).toBe('request-for-alice@example.org');
+    });
+
     test('permitCapability() returns token', async () => {
         const token = await ad4m.agent.permitCapability('auth-string');
         expect(token).toBe('permitted-token');
@@ -461,44 +548,26 @@ describe('AgentClient', () => {
         expect(result).toEqual([]);
     });
 
-    test('agent-updated event unwraps nested agent payload', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+    test('an agent-updated handler receives the agent under `agent`', async () => {
+        const freshClient = newClient();
         const callback = jest.fn();
-        freshClient.agent.addUpdatedListener(callback);
-        freshClient.agent.subscribeAgentUpdated();
+        freshClient.on('agent-updated', ({ agent }) => callback(agent));
 
-        const ws = lastOf(MockWebSocket.instances);
+        const agent = { did: 'did:test:updated', directMessageLanguage: 'lang://dm2', perspective: null };
+        lastOf(MockWebSocket.instances).emit(event('agent-updated', { agent }));
 
-        ws.emit({
-            type: 'agent-updated',
-            agent: { did: 'did:test:updated', directMessageLanguage: 'lang://dm2', perspective: null, isInitialized: true, isUnlocked: true },
-        });
-
-        expect(callback).toHaveBeenCalledTimes(1);
-        const received = callback.mock.calls[0][0];
-        expect(received.did).toBe('did:test:updated');
-        expect(received.directMessageLanguage).toBe('lang://dm2');
-        expect(received).not.toHaveProperty('type');
+        expect(callback.mock.calls).toEqual([[agent]]);
     });
 
-    test('agent-status-changed event unwraps nested agent payload', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+    test('an agent-status-changed handler receives the status under `agent`', async () => {
+        const freshClient = newClient();
         const callback = jest.fn();
-        freshClient.agent.addAgentStatusChangedListener(callback);
-        freshClient.agent.subscribeAgentStatusChanged();
+        freshClient.on('agent-status-changed', ({ agent }) => callback(agent));
 
-        const ws = lastOf(MockWebSocket.instances);
+        const status = { did: 'did:test:status', didDocument: null, error: null, isInitialized: true, isUnlocked: false, identity: null };
+        lastOf(MockWebSocket.instances).emit(event('agent-status-changed', { agent: status }));
 
-        ws.emit({
-            type: 'agent-status-changed',
-            agent: { did: 'did:test:status', isInitialized: true, isUnlocked: false },
-        });
-
-        expect(callback).toHaveBeenCalledTimes(1);
-        const received = callback.mock.calls[0][0];
-        expect(received.did).toBe('did:test:status');
-        expect(received.isUnlocked).toBe(false);
-        expect(received).not.toHaveProperty('type');
+        expect(callback.mock.calls).toEqual([[status]]);
     });
 });
 
@@ -524,7 +593,7 @@ describe('PerspectiveClient', () => {
 
     test('add() creates a new perspective', async () => {
         const p = await ad4m.perspective.add('new-perspective');
-        expect(lastRpcCall!.params.name).toBe('new-perspective');
+        expect(p.name).toBe('new-perspective'); // the mock echoes the name sent
         expect(p.uuid).toBe('uuid-new');
     });
 
@@ -608,135 +677,239 @@ describe('PerspectiveClient', () => {
         expect(result).toEqual([{ X: 'test' }]);
     });
 
-    test('subscribeToQueryUpdates() routes through the WebSocket endpoint', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
-        const callback = jest.fn();
-        const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
+    test('the last unsubscribe closes the socket', async () => {
+        const freshClient = newClient();
+        const unsubscribe = freshClient.perspective.onQueryUpdate(jest.fn());
         const ws = lastOf(MockWebSocket.instances);
-
-        expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
 
         unsubscribe();
         expect(ws.closed).toBe(true);
     });
 
     test('perspective lifecycle subscriptions use the WebSocket endpoint', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
-        freshClient.perspective.addPerspectiveAddedListener(jest.fn());
-        freshClient.perspective.subscribePerspectiveAdded();
+        const freshClient = newClient();
+        freshClient.on('perspective-added', jest.fn());
 
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
     });
 
     test('perspective-scoped link subscriptions ignore events for other perspectives', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = newClient();
         const linkAddedCallback = jest.fn();
         const linkRemovedCallback = jest.fn();
         const linkUpdatedCallback = jest.fn();
 
-        await freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [linkAddedCallback]);
-        await freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
-        await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
+        freshClient.on('link-added', ({ link }) => linkAddedCallback(link), { perspective: 'uuid-1' });
+        freshClient.on('link-removed', ({ link }) => linkRemovedCallback(link), { perspective: 'uuid-1' });
+        freshClient.on('link-updated', ({ oldLink, newLink }) => linkUpdatedCallback({ oldLink, newLink }), { perspective: 'uuid-1' });
 
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
 
         // Events for a different perspective should be ignored
-        ws.emit({
-            type: 'link-added',
-            perspectiveUuid: 'uuid-2',
-            link: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-added', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-        });
-        ws.emit({
-            type: 'link-removed',
-            perspectiveUuid: 'uuid-2',
-            link: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-removed', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-        });
-        ws.emit({
-            type: 'link-updated',
-            perspectiveUuid: 'uuid-2',
-            oldLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-old', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-            newLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-new', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-        });
+        ws.emit(linkAdded('uuid-2', 'test://other-added'));
+        ws.emit(linkRemoved('uuid-2', 'test://other-removed'));
+        ws.emit(linkUpdated('uuid-2', 'test://other-old', 'test://other-new'));
 
         expect(linkAddedCallback).not.toHaveBeenCalled();
         expect(linkRemovedCallback).not.toHaveBeenCalled();
         expect(linkUpdatedCallback).not.toHaveBeenCalled();
 
         // Events for the correct perspective should fire
-        const addedLink = {
-            author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z',
-            data: { source: 'test://added', predicate: 'test://has', target: 'test://value' }, proof: { valid: true },
-        };
-        const removedLink = {
-            author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z',
-            data: { source: 'test://removed', predicate: 'test://has', target: 'test://value' }, proof: { valid: true },
-        };
+        ws.emit(linkAdded('uuid-1', 'test://added'));
+        ws.emit(linkRemoved('uuid-1', 'test://removed'));
+        ws.emit(linkUpdated('uuid-1', 'test://updated-old', 'test://updated-new'));
 
-        ws.emit({ type: 'link-added', perspectiveUuid: 'uuid-1', link: addedLink });
-        ws.emit({ type: 'link-removed', perspectiveUuid: 'uuid-1', link: removedLink });
-        ws.emit({
-            type: 'link-updated',
-            perspectiveUuid: 'uuid-1',
-            oldLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://updated-old', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-            newLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://updated-new', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-        });
-
-        expect(linkAddedCallback).toHaveBeenCalledWith(addedLink);
-        expect(linkRemovedCallback).toHaveBeenCalledWith(removedLink);
-        expect(linkUpdatedCallback).toHaveBeenCalledTimes(1);
+        expect(linkAddedCallback).toHaveBeenCalledWith(wireLink('test://added'));
+        expect(linkRemovedCallback).toHaveBeenCalledWith(wireLink('test://removed'));
+        expect(linkUpdatedCallback).toHaveBeenCalledWith({ oldLink: wireLink('test://updated-old'), newLink: wireLink('test://updated-new') });
     });
 
-    test('runtime exception subscriptions normalize PascalCase exception types', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
-        const callback = jest.fn(() => null);
-        freshClient.runtime.addExceptionCallback(callback);
-        freshClient.runtime.subscribeExceptionOccurred();
-
-        const ws = lastOf(MockWebSocket.instances);
-        ws.emit({
-            type: 'exception-occurred',
-            exception: {
-                title: 'Request to authenticate application',
-                message: 'demo-app is waiting for authentication',
-                type: 'CapabilityRequested',
-                addon: '{}',
-            },
-        });
-
-        expect(callback).toHaveBeenCalledWith({
-            title: 'Request to authenticate application',
-            message: 'demo-app is waiting for authentication',
-            type: 'CAPABILITY_REQUESTED',
-            addon: '{}',
-        });
-    });
-
-    test('subscribeToQueryUpdates() ignores unrelated events and accepts object results', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+    test('onQueryUpdate() gets every live query update and lag signal on the socket', async () => {
+        const freshClient = newClient();
         const callback = jest.fn();
-        const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
+        const unsubscribe = freshClient.perspective.onQueryUpdate(callback);
         const ws = lastOf(MockWebSocket.instances);
+        const update = {
+            perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId: 'sub-1', revision: 1,
+            added: [{ id: 'community://1' }], removed: [],
+        };
 
-        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
-        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', result: { ignored: true } });
+        ws.emit(perspectiveAdded('uuid-ignored'));
         expect(callback).not.toHaveBeenCalled();
 
-        ws.emit({
-            type: 'query-subscription-update',
-            subscriptionId: 'sub-1',
-            result: [{ id: 'community://1', name: 'REST Smoke Community' }],
-        });
-        expect(callback).toHaveBeenCalledWith([{ id: 'community://1', name: 'REST Smoke Community' }]);
+        ws.emit(event('query-subscription-update', update));
+        ws.emit(event('query-subscription-update', { lagged: true }));
+        expect(callback).toHaveBeenNthCalledWith(1, expect.objectContaining(update));
+        expect(callback).toHaveBeenNthCalledWith(2, expect.objectContaining({ lagged: true }));
 
         unsubscribe();
-        ws.emit({
-            type: 'query-subscription-update',
-            subscriptionId: 'sub-1',
-            result: [{ id: 'community://2', name: 'Should not arrive' }],
-        });
-        expect(callback).toHaveBeenCalledTimes(1);
+        ws.emit(event('query-subscription-update', { ...update, revision: 2 }));
+        expect(callback).toHaveBeenCalledTimes(2);
+    });
+
+    test('a client asks the executor for the events its listeners need', async () => {
+        jest.useFakeTimers();
+        try {
+            const freshClient = newClient();
+            const watches = (ws: MockWebSocket) => ws.rpc.filter(c => c.type === 'events.watch').map(c => c.params);
+            // Lets each events.watch go out and get its reply.
+            const settle = async () => { for (let i = 0; i < 3; i++) await jest.advanceTimersByTimeAsync(10); };
+
+            const releaseAddedA = freshClient.on('link-added', jest.fn(), { perspective: 'A' });
+            freshClient.on('link-added', jest.fn(), { perspective: 'B' });
+            const releaseRemovedA = freshClient.on('link-removed', jest.fn(), { perspective: 'A' });
+            await settle();
+            const ws = lastOf(MockWebSocket.instances);
+            expect(lastOf(watches(ws))).toEqual(expect.objectContaining({ 'link-added': ['A', 'B'], 'link-removed': ['A'] }));
+
+            releaseAddedA();
+            releaseRemovedA();
+            await settle();
+            expect(lastOf(watches(ws))).toEqual(expect.objectContaining({ 'link-added': ['B'] }));
+            expect(lastOf(watches(ws))).not.toHaveProperty('link-removed');
+
+            // A new socket starts with no interest: the client registers again.
+            ws.close();
+            await jest.advanceTimersByTimeAsync(1_000);
+            await settle();
+            const reopened = lastOf(MockWebSocket.instances);
+            expect(reopened).not.toBe(ws);
+            expect(watches(reopened)).toEqual([expect.objectContaining({ 'link-added': ['B'] })]);
+            expect(watches(reopened)[0]).not.toHaveProperty('link-removed');
+        } finally {
+            closeClients();
+            jest.useRealTimers();
+        }
+    });
+
+    test('a call made right after adding a listener is sent after the events.watch it needs', async () => {
+        // First use: the listener and the call both wait for the socket.
+        const freshClient = newClient();
+        freshClient.on('link-added', jest.fn(), { perspective: 'A' });
+        await freshClient.perspective.snapshotByUUID('A');
+        const ws = lastOf(MockWebSocket.instances);
+        expect(ws.rpc.map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
+
+        // Open socket: a listener added in the same tick as the call.
+        freshClient.on('link-removed', jest.fn(), { perspective: 'A' });
+        await freshClient.perspective.snapshotByUUID('A');
+        expect(ws.rpc.slice(2).map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
+    });
+
+    test('watchApplied() settles only after the events.watch reply', async () => {
+        const watchReply = MOCK_RESPONSES['events.watch'];
+        let acceptWatch!: (ok: boolean) => void;
+        MOCK_RESPONSES['events.watch'] = () => new Promise<boolean>(r => { acceptWatch = r; });
+        const api = new ApiClient('http://127.0.0.1:12000', 'test-token');
+        clients.push({ close: () => api.closeAll() });
+        try {
+            api.on('link-added', () => {}, { perspective: 'A' });
+            let settled = false;
+            const waiting = api.watchApplied().then(() => { settled = true; });
+            await new Promise(r => setTimeout(r, 20));
+            expect(lastOf(MockWebSocket.instances).rpc.map(c => c.type)).toEqual(['events.watch']);
+            expect(settled).toBe(false);
+
+            acceptWatch(true);
+            await waiting;
+        } finally {
+            MOCK_RESPONSES['events.watch'] = watchReply;
+        }
+    });
+
+    test('a failed events.watch is sent again, a bounded number of times', async () => {
+        jest.useFakeTimers();
+        const watchReply = MOCK_RESPONSES['events.watch'];
+        const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
+        const watchCount = (ws: MockWebSocket) => ws.rpc.filter(c => c.type === 'events.watch').length;
+        // Open the socket first, so that only the listener sends a watch.
+        const opened = async (client: Ad4mClient) => {
+            const snapshot = client.perspective.snapshotByUUID('A');
+            await jest.advanceTimersByTimeAsync(10);
+            await snapshot;
+            return client;
+        };
+        try {
+            // The executor rejects the watch once (404: not a closed socket), then accepts it.
+            delete MOCK_RESPONSES['events.watch'];
+            const recovering = await opened(newClient());
+            recovering.on('link-added', jest.fn(), { perspective: 'A' });
+            await jest.advanceTimersByTimeAsync(10);
+            const ws = lastOf(MockWebSocket.instances);
+            expect(watchCount(ws)).toBe(1);
+            MOCK_RESPONSES['events.watch'] = watchReply;
+            await jest.advanceTimersByTimeAsync(1_010);
+            expect(watchCount(ws)).toBe(2);
+            for (let i = 0; i < 10; i++) await jest.advanceTimersByTimeAsync(1_000);
+            expect(watchCount(ws)).toBe(2);
+
+            // An executor that keeps rejecting it gets some retries, then no more.
+            delete MOCK_RESPONSES['events.watch'];
+            const failing = await opened(newClient());
+            failing.on('link-added', jest.fn(), { perspective: 'A' });
+            for (let i = 0; i < 20; i++) await jest.advanceTimersByTimeAsync(1_000);
+            const sent = watchCount(lastOf(MockWebSocket.instances));
+            expect(sent).toBeGreaterThan(1);
+            for (let i = 0; i < 120; i++) await jest.advanceTimersByTimeAsync(1_000);
+            expect(watchCount(lastOf(MockWebSocket.instances))).toBe(sent);
+        } finally {
+            closeClients();
+            MOCK_RESPONSES['events.watch'] = watchReply;
+            errors.mockRestore();
+            jest.useRealTimers();
+        }
+    });
+
+    test('sync-state and signal listeners only fire for their perspective', async () => {
+        const freshClient = newClient();
+        const syncState = jest.fn();
+        freshClient.on('sync-state-change', ({ state }) => syncState(state), { perspective: 'A' });
+        const signal = jest.fn();
+        await freshClient.neighbourhood.addSignalHandler('A', signal);
+        const ws = lastOf(MockWebSocket.instances);
+        expect(lastOf(ws.rpc.filter(c => c.type === 'events.watch')).params)
+            .toEqual({ 'signal': ['A'], 'sync-state-change': ['A'] });
+
+        const syncStateChange = (uuid: string) => event('sync-state-change', { perspectiveUuid: uuid, state: 'SYNCED', perspective: wireHandle(uuid) });
+        ws.emit(syncStateChange('B'));
+        ws.emit(syncStateChange('A'));
+        expect(syncState.mock.calls).toEqual([['SYNCED']]);
+
+        const payload = { author: 'did:x', timestamp: 't', data: { links: [] }, proof: { key: 'k', signature: 's', valid: true, invalid: false } };
+        const signalEvent = (uuid: string) => event('signal', { perspectiveUuid: uuid, perspective: wireHandle(uuid), signal: payload, recipient: null });
+        ws.emit(signalEvent('B'));
+        ws.emit(signalEvent('A'));
+        expect(signal).toHaveBeenCalledTimes(1);
+    });
+
+    test('a live query applies updates and resyncs on a revision gap', async () => {
+        const freshClient = newClient();
+        const subscription = await freshClient.perspective.byUUID('uuid-1')
+            .then(p => p!.subscribeQuery('SELECT ?s WHERE { ?s ?p ?o }'));
+        const results: unknown[] = [];
+        subscription.onResult(r => results.push(r));
+        const ws = lastOf(MockWebSocket.instances);
+        expect(subscription.result).toEqual([{ s: 'a' }]);
+
+        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', revision: 1, added: [{ s: 'x' }], removed: [] });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [{ s: 'a' }] });
+        expect(results).toEqual([[{ s: 'b' }]]);
+
+        // Revision 2 never arrives: the client asks for the current state.
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 3, added: [{ s: 'z' }], removed: [] });
+        await new Promise(r => setTimeout(r, 10));
+        expect(lastRpcCall).toEqual({ type: 'perspective.resyncSubscription', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
+        expect(subscription.result).toEqual([{ s: 'c' }]);
+
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 4, added: [{ s: 'd' }], removed: [] });
+        expect(subscription.result).toEqual([{ s: 'c' }, { s: 'd' }]);
+
+        subscription.dispose();
+        await new Promise(r => setTimeout(r, 10));
+        expect(lastRpcCall).toEqual({ type: 'perspective.disposeQuery', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
     });
 
     test('publishSnapshotByUUID() publishes a snapshot', async () => {
@@ -814,7 +987,7 @@ describe('NeighbourhoodClient', () => {
             'uuid-1', 'lang://link', new Perspective(),
         );
         expect(url).toBe('neighbourhood://published');
-        expect(lastRpcCall!.params.perspectiveUUID).toBe('uuid-1');
+        expect(lastRpcCall!.params.perspectiveUuid).toBe('uuid-1');
     });
 
     test('joinFromUrl() joins a neighbourhood', async () => {
@@ -853,6 +1026,48 @@ describe('NeighbourhoodClient', () => {
         const result = await ad4m.neighbourhood.sendBroadcast('uuid-1', new Perspective(), true);
         expect(result).toBe(true);
         expect(lastRpcCall!.params.loopback).toBe(true);
+    });
+
+    test('ownOnlineStatus() returns null when the agent has set none', async () => {
+        expect(await ad4m.neighbourhood.ownOnlineStatus('uuid-1')).toBeNull();
+        expect(lastRpcCall!.type).toBe('neighbourhood.ownOnlineStatus');
+        expect(lastRpcCall!.params).toEqual({ uuid: 'uuid-1' });
+    });
+
+    test('sfuServesAllMembers() asks the executor about the perspective', async () => {
+        expect(await ad4m.neighbourhood.sfuServesAllMembers('uuid-1')).toBe(true);
+        expect(lastRpcCall!.type).toBe('sfu.servesAllMembers');
+        expect(lastRpcCall!.params).toEqual({ uuid: 'uuid-1' });
+    });
+
+    test('SFU event subscriptions get only their events and are watched before the next call', async () => {
+        const freshClient = newClient();
+        const offers = jest.fn();
+        const migrations = jest.fn();
+        const data = jest.fn();
+        const releaseOffers = freshClient.neighbourhood.subscribeSfuCallRenegotiationOffer('did:me', offers);
+        freshClient.neighbourhood.subscribeSfuMigrateEvent('did:me', migrations);
+        freshClient.neighbourhood.subscribeSfuDataChannel(data);
+        await freshClient.neighbourhood.sfuStatus();
+        const ws = lastOf(MockWebSocket.instances);
+        expect(ws.rpc.map(c => c.type)).toEqual(['events.watch', 'sfu.status']);
+        expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
+
+        const room = { neighbourhoodUrl: 'neighbourhood://n', roomName: 'r' };
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{"x":1}' }));
+        ws.emit(event('sfu-migrate', { targetDid: 'did:me', ...room, migrateToDid: 'did:node' }));
+        const message = { senderDid: 'did:other', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
+        ws.emit(event('sfu-data', message));
+
+        expect(offers).toHaveBeenCalledTimes(1);
+        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
+        expect(migrations).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, migrateToDid: 'did:node' });
+        expect(data).toHaveBeenCalledWith(expect.objectContaining(message));
+
+        releaseOffers();
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{}' }));
+        expect(offers).toHaveBeenCalledTimes(1);
     });
 });
 
@@ -941,9 +1156,9 @@ describe('RuntimeClient', () => {
         expect(result).toEqual(['did:trusted:1']);
     });
 
-    test('knownLinkLanguageTemplates() returns templates', async () => {
+    test('knownLinkLanguageTemplates() returns each template with its meta', async () => {
         const templates = await ad4m.runtime.knownLinkLanguageTemplates();
-        expect(templates).toEqual(['lang://template1']);
+        expect(templates.map(t => [t.address, t.possibleTemplateParams])).toEqual([['template1', ['uid', 'name']]]);
     });
 
     test('hcAgentInfos() returns agent infos list', async () => {
@@ -989,6 +1204,22 @@ describe('RuntimeClient', () => {
         expect(notifications).toEqual([]);
     });
 
+    test('updateNotification() without webhookAuth sends none, so the stored one stays', async () => {
+        const result = await ad4m.runtime.updateNotification('notif-1', {
+            description: 'd',
+            appName: 'a',
+            appUrl: 'https://app.test',
+            appIconPath: '',
+            trigger: 'SELECT ?s WHERE { ?s ?p ?o }',
+            perspectiveIds: ['p1'],
+            webhookUrl: 'https://webhook.test',
+        });
+        expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.updateNotification');
+        expect(lastRpcCall!.params.id).toBe('notif-1');
+        expect('webhookAuth' in lastRpcCall!.params).toBe(false);
+    });
+
     test('grantNotification() grants a notification', async () => {
         const result = await ad4m.runtime.grantNotification('notif-1');
         expect(result).toBe(true);
@@ -1012,6 +1243,54 @@ describe('RuntimeClient', () => {
     test('restartHolochain() restarts holochain', async () => {
         const result = await ad4m.runtime.restartHolochain();
         expect(result).toBe(true);
+    });
+});
+
+// ===================== IDENTITY TESTS =====================
+describe('IdentityClient', () => {
+    test('status() calls identity.status', async () => {
+        const status = await ad4m.identity.status();
+        expect(lastRpcCall!.type).toBe('identity.status');
+        expect(status.did).toBe('did:scid:coasys:1:QmTest');
+        expect(status.keyId).toBe('d1');
+        expect(status.store).toEqual({ url: 'https://store.ad4m.dev', trusted: true });
+    });
+
+    test('claimOffer() sends the offer and the hint', async () => {
+        const claimed = await ad4m.identity.claimOffer('coasys:offer:1:abc', 'server');
+        expect(lastRpcCall!.type).toBe('identity.claimOffer');
+        expect(lastRpcCall!.params.offer).toBe('coasys:offer:1:abc');
+        expect(lastRpcCall!.params.hint).toBe('server');
+        expect(claimed.matchCode).toBe('R7K Q2M');
+    });
+
+    test('log() sends the did, from and fresh', async () => {
+        await ad4m.identity.log('did:scid:coasys:1:QmTest', 2, true);
+        expect(lastRpcCall!.params).toMatchObject({ did: 'did:scid:coasys:1:QmTest', from: 2, fresh: true });
+    });
+
+    test('resolve() sends the DID URL and fresh, and returns the resolution result', async () => {
+        const url = 'did:scid:coasys:1:QmTest?src=store.example&versionId=2';
+        const result = await ad4m.identity.resolve(url, { fresh: true });
+        expect(lastRpcCall!.type).toBe('identity.resolve');
+        expect(lastRpcCall!.params).toMatchObject({ didUrl: url, fresh: true });
+        expect(result.didDocument!.id).toBe(url);
+        expect(result.didDocumentMetadata.versionId).toBe('2');
+        expect(result.didResolutionMetadata['coasys:source']).toBe('cache');
+        expect(result.didResolutionMetadata['coasys:headTrusted']).toBe(true);
+    });
+
+    test('resolve() without options leaves fresh unset', async () => {
+        await ad4m.identity.resolve('did:key:z6MkTest');
+        expect(lastRpcCall!.type).toBe('identity.resolve');
+        expect(lastRpcCall!.params.didUrl).toBe('did:key:z6MkTest');
+        expect(lastRpcCall!.params.fresh).toBeUndefined();
+    });
+
+    test('agent.status() carries the identity beside the device did', async () => {
+        const status = await ad4m.agent.status();
+        expect(status.did).toBe('did:test:123');
+        expect(status.identity).toBe('did:scid:coasys:1:QmTest');
     });
 });
 
@@ -1054,8 +1333,8 @@ describe('AIClient', () => {
     });
 
     test('removeTask() removes a task', async () => {
-        const task = await ad4m.ai.removeTask('task-1');
-        expect(task.name).toBe('summarize');
+        expect(await ad4m.ai.removeTask('task-1')).toBe(true);
+        expect(lastRpcCall!.params).toEqual({ id: 'task-1' });
     });
 
     test('prompt() sends a prompt', async () => {
@@ -1091,6 +1370,21 @@ describe('User and Auth', () => {
     test('verifyEmailCode() returns token', async () => {
         const token = await ad4m.agent.verifyEmailCode('test@test.com', '123456', 'login');
         expect(token).toBe('verified-token');
+    });
+
+    test('logout() revokes the session token', async () => {
+        expect(await ad4m.agent.logout()).toBe(true);
+        expect(lastRpcCall).toEqual({ type: 'user.logout', params: {} });
+    });
+
+    test('revokeAllSessions() revokes the caller\'s sessions when no email is given', async () => {
+        expect(await ad4m.agent.revokeAllSessions()).toBe(true);
+        expect(lastRpcCall).toEqual({ type: 'user.revokeAllSessions', params: {} });
+    });
+
+    test('revokeAllSessions(email) names the user', async () => {
+        expect(await ad4m.agent.revokeAllSessions('test@test.com')).toBe(true);
+        expect(lastRpcCall).toEqual({ type: 'user.revokeAllSessions', params: { email: 'test@test.com' } });
     });
 
     test('hostingUserInfo() returns user info', async () => {
@@ -1162,16 +1456,20 @@ describe('Multi-user and Hosting', () => {
         expect(lastRpcCall!.params.action).toBe('clear-codes');
     });
 
-    test('getHostRates() returns parsed rates', async () => {
-        const rates = await ad4m.runtime.getHostRates();
+    test('hostRates() returns the rates', async () => {
+        const rates = await ad4m.runtime.hostRates();
+        expect(lastRpcCall!.type).toBe('runtime.hostRates');
         expect(rates).toHaveLength(1);
         expect(rates[0].description).toBe('Link write');
         expect(rates[0].priceInHOT).toBe(0.001);
     });
 
-    test('setHostRates() sends rates JSON', async () => {
-        const result = await ad4m.runtime.setHostRates(JSON.stringify([{ description: 'test', priceInHOT: 1 }]));
+    test('setHostRates() sends the rates', async () => {
+        const rates = [{ description: 'test', priceInHOT: 1 }];
+        const result = await ad4m.runtime.setHostRates(rates);
         expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.setHostRates');
+        expect(lastRpcCall!.params).toEqual({ rates });
     });
 });
 
@@ -1197,14 +1495,16 @@ describe('Unyt Integration', () => {
         expect(history).toBe('[]');
     });
 
-    test('unytVersionInfo() returns version info', async () => {
+    test('unytVersionInfo() returns version info and the install error', async () => {
         const info = await ad4m.runtime.unytVersionInfo();
-        expect(info).toContain('version');
+        expect(lastRpcCall!.type).toBe('runtime.unytVersionInfo');
+        expect(info).toEqual({ installed: null, bundled: '0.61.0', installError: 'install failed' });
     });
 
-    test('unytSetMembraneProof() sets proof', async () => {
-        const result = await ad4m.runtime.unytSetMembraneProof('proof-data');
-        expect(result.success).toBe(true);
+    test('setUnytMembraneProof() sets proof', async () => {
+        const result = await ad4m.runtime.setUnytMembraneProof('proof-data');
+        expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.setUnytMembraneProof');
         expect(lastRpcCall!.params.proof).toBe('proof-data');
     });
 
@@ -1234,10 +1534,142 @@ describe('Ad4mClient', () => {
     });
 
     test('token is passed via WebSocket URL query param', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'my-secret-token', false);
+        const freshClient = newClient('my-secret-token');
         await freshClient.agent.me();
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=my-secret-token');
+    });
+
+    test('calls go through the injected webSocketImpl', async () => {
+        class InjectedWebSocket extends MockWebSocket {}
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', { webSocketImpl: InjectedWebSocket as any });
+
+        const agent = await freshClient.agent.me();
+
+        expect(agent.did).toBeDefined();
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+        for (const ws of MockWebSocket.instances) expect(ws).toBeInstanceOf(InjectedWebSocket);
+        freshClient.close();
+    });
+
+    test('a handler on a new client receives each client-wide event exactly once', async () => {
+        const freshClient = newClient();
+        const handlers = {
+            agentUpdated: jest.fn(), agentStatus: jest.fn(), apps: jest.fn(),
+            hosting: jest.fn(),
+            added: jest.fn(), updated: jest.fn(), removed: jest.fn(),
+            exception: jest.fn(), notification: jest.fn(),
+        };
+        freshClient.on('agent-updated', ({ agent }) => handlers.agentUpdated(agent));
+        freshClient.on('agent-status-changed', ({ agent }) => handlers.agentStatus(agent));
+        freshClient.on('apps-changed', () => handlers.apps());
+        freshClient.on('hosting-user-info-changed', (info) => handlers.hosting(info));
+        freshClient.on('perspective-added', ({ perspective }) => handlers.added(perspective));
+        freshClient.on('perspective-updated', ({ perspective }) => handlers.updated(perspective));
+        freshClient.on('perspective-removed', ({ perspectiveUuid }) => handlers.removed(perspectiveUuid));
+        freshClient.on('exception-occurred', ({ exception }) => handlers.exception(exception));
+        freshClient.on('notification-triggered', ({ notification }) => handlers.notification(notification));
+        await freshClient.agent.me(); // wait for the socket to open
+
+        const exception = { addon: null, title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' as const };
+        const notification = {
+            notification: {
+                id: 'n-1', granted: true, description: 'd', appName: 'a', appUrl: 'u', appIconPath: 'i',
+                trigger: 'q', perspectiveIds: ['uuid-a'], webhookUrl: '', hasWebhookAuth: false, ownerDid: 'did:key:owner',
+            },
+            perspectiveId: 'uuid-a', triggerMatch: '[]',
+        };
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit(event('agent-updated', { agent: { did: 'did:test:upd', directMessageLanguage: null, perspective: null } }));
+        ws.emit(event('agent-status-changed', { agent: { did: 'did:test:upd', didDocument: null, error: null, isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' } }));
+        ws.emit(event('apps-changed', {
+            requestId: 'app1', token: 'tok', revoked: null,
+            auth: { appName: 'a', appDesc: 'd', appDomain: null, appUrl: null, appIconPath: null, capabilities: null, userEmail: null },
+        }));
+        ws.emit(event('hosting-user-info-changed', { email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false }));
+        ws.emit(perspectiveAdded('uuid-a'));
+        ws.emit(event('perspective-updated', { perspectiveUuid: 'uuid-a', perspective: wireHandle('uuid-a') }));
+        ws.emit(event('perspective-removed', { perspectiveUuid: 'uuid-a', uuid: 'uuid-a' }));
+        ws.emit(event('exception-occurred', { exception }));
+        ws.emit(event('notification-triggered', { perspectiveUuid: 'uuid-a', notification }));
+
+        for (const handler of Object.values(handlers)) {
+            expect(handler).toHaveBeenCalledTimes(1);
+        }
+        expect(handlers.added).toHaveBeenCalledWith(wireHandle('uuid-a'));
+        expect(handlers.removed).toHaveBeenCalledWith('uuid-a');
+        expect(handlers.exception).toHaveBeenCalledWith(exception);
+        expect(handlers.notification).toHaveBeenCalledWith(notification);
+        freshClient.close();
+    });
+
+    test('the agent client offers no compute-log listener (the executor sends no such event)', () => {
+        const freshClient = newClient();
+        // @ts-expect-error removed: compute-log-updated never reaches the socket
+        expect(freshClient.agent.addComputeLogUpdatedListener).toBeUndefined();
+    });
+
+    test('the function on() returns removes the handler', async () => {
+        const freshClient = newClient();
+        const hosting = jest.fn();
+        const exception = jest.fn();
+        freshClient.on('hosting-user-info-changed', hosting)();
+        freshClient.on('exception-occurred', exception)();
+        await freshClient.agent.me();
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit(event('hosting-user-info-changed', { email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false }));
+        ws.emit(event('exception-occurred', { exception: { addon: null, title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' } }));
+
+        expect(hosting).not.toHaveBeenCalled();
+        expect(exception).not.toHaveBeenCalled();
+        freshClient.close();
+    });
+
+    test('a handler added after close() receives events again', async () => {
+        const freshClient = newClient();
+        freshClient.on('perspective-added', jest.fn());
+        freshClient.close();
+        const added = jest.fn();
+        freshClient.on('perspective-added', added);
+        await freshClient.agent.me();
+
+        lastOf(MockWebSocket.instances).emit(perspectiveAdded('uuid-c'));
+
+        expect(added).toHaveBeenCalledTimes(1);
+        freshClient.close();
+    });
+
+    test('a client without handlers opens no event subscription', async () => {
+        const freshClient = newClient();
+        expect(MockWebSocket.instances).toHaveLength(0);
+        freshClient.close();
+    });
+
+    test('a throwing handler does not stop later handlers for the same event', async () => {
+        const freshClient = newClient();
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+        const first = jest.fn();
+        const third = jest.fn();
+        freshClient.on('perspective-added', first);
+        freshClient.on('perspective-added', () => { throw new Error('handler bug'); });
+        freshClient.on('perspective-added', ({ perspective }) => third(perspective));
+        const linkThird = jest.fn();
+        freshClient.on('link-added', () => { throw new Error('link handler bug'); }, { perspective: 'uuid-1' });
+        freshClient.on('link-added', linkThird, { perspective: 'uuid-1' });
+        await freshClient.agent.me();
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit(perspectiveAdded('uuid-d'));
+        ws.emit(linkAdded('uuid-1', 's'));
+
+        expect(first).toHaveBeenCalledTimes(1);
+        expect(third).toHaveBeenCalledTimes(1);
+        expect(third).toHaveBeenCalledWith(wireHandle('uuid-d'));
+        expect(linkThird).toHaveBeenCalledTimes(1);
+        expect(errorSpy).toHaveBeenCalled();
+        errorSpy.mockRestore();
+        freshClient.close();
     });
 
     test('WS RPC message contains type and params', async () => {

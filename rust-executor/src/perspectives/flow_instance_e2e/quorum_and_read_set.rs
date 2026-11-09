@@ -1,4 +1,5 @@
 use super::*;
+use crate::perspectives::flow_instance::atom::PROPOSER_PREDICATE;
 // ---------------------------------------------------------------------------
 // Quorum, accept, and the read-set
 // ---------------------------------------------------------------------------
@@ -68,6 +69,59 @@ async fn n2_second_signer_accept_settles_and_replays() {
         .await
         .expect_err("a settled edge must not accept more votes");
     assert!(format!("{err:#}").contains("stale"), "got {err:#}");
+}
+
+/// The settling accept must return the fire even when this replica has never
+/// derived the instance: no `FlowReplicaState` row, so the pass after the vote
+/// would otherwise be a silent catch-up and return nothing. That is Bob's
+/// accept in CI job 43034 — the debounced sync pass had not written his row
+/// yet, and Alice's later sync pass was the one that logged the settle.
+///
+/// Red without the catch-up before the vote: `fired` is empty. No sleep.
+/// The minter's row the mint wrote is deleted. Deleting it does not queue a
+/// pass that could rewrite it before the accept. This is not
+/// `a_second_agents_first_vote_reports_what_it_settles`: that one uses a
+/// second agent who never had a row. Here the minter accepts, after that row
+/// is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn settling_accept_with_no_local_cache_returns_the_fire() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let proposal = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+    // Let any definition sweep the rule change queued finish, then delete the
+    // minter's row it (or the mint) wrote. Accept is then this replica's first
+    // derivation of the instance. Do not remove Local links: on this tree
+    // "no state yet" is a missing FlowReplicaState row.
+    f.perspective.settle_flow_passes().await;
+    let did = acting_did(&f);
+    let uuid = f.perspective.uuid.clone();
+    let instance = f.instance_uri.clone();
+    assert!(
+        FlowReplicaState::has_derived(&uuid, &did, &instance).expect("row"),
+        "precondition: the mint left a FlowReplicaState row to drop"
+    );
+    forget_bookkeeping(&f);
+    assert!(
+        !FlowReplicaState::has_derived(&uuid, &did, &instance).expect("row"),
+        "precondition: the minter has no FlowReplicaState row"
+    );
+
+    let fired = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect("accept must land this replica's vote and sweep");
+    assert_eq!(
+        fired.len(),
+        1,
+        "the settling vote's call returns the fire, not the later sync pass: {fired:?}"
+    );
+    assert_eq!(fired[0].from_state, "identified");
+    assert_eq!(fired[0].to_state, "scoped");
+    assert!(fired[0].voters.contains(&bob.did));
+    assert!(fired[0].voters.contains(&acting_did(&f)));
+    assert_eq!(f.derived().await.state, "scoped");
 }
 
 /// The read-set travels: serialise everything the engine read, fold the JSON
@@ -158,5 +212,171 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
         parsed.as_record(flow),
         FlowInstance::from_record(&records[0], flow).as_record(),
         "the record rebuilt from carried fields must equal the live one"
+    );
+}
+
+/// The proposal model's `acceptedBy` lists exactly the votes the fold counts,
+/// and the voters it documents, `{ proposer } ∪ acceptedBy`, are the fold's.
+/// A vote is an authorship claim with a valid signature, counted once per DID,
+/// so each of these is on the graph and must not show up twice or at all:
+/// a vote for Carol that Bob signed, a vote whose signature fails, Bob voting
+/// twice, the proposer accepting their own proposal, and a `proposer` link
+/// naming Bob that Mallory signed. The model carries no fired mark at all
+/// since #1424 — not a peer's legacy link, not this replica's own mark, which
+/// lives in its table.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":4}"#).await;
+    let minted = f.mint_one().await;
+    let proposer = acting_did(&f);
+
+    let sync_signed =
+        |link: Link, signer: &TestSigner, at: Option<chrono::DateTime<chrono::Utc>>| {
+            let expr = match at {
+                Some(at) => signer.sign_at(link.normalize(), at),
+                None => signer.sign(link.normalize()),
+            };
+            LinkExpression::from(expr)
+        };
+    let vote = |did: &str| Link {
+        source: minted.clone(),
+        predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+        target: did.to_string(),
+    };
+
+    let bob = TestSigner::generate();
+    let carol = TestSigner::generate();
+    let eve = TestSigner::generate();
+    let mallory = TestSigner::generate();
+    sync_vote_from(&mut f, &bob, &minted).await;
+    let later = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let mut synced = vec![
+        // Bob again, a second later: a second device, or a re-sync.
+        sync_signed(vote(&bob.did), &bob, Some(later)),
+        // Bob names Carol: a valid signature, but not Carol's.
+        sync_signed(vote(&carol.did), &bob, None),
+        // Mallory names Bob as the proposer: a valid signature, but not Bob's.
+        sync_signed(
+            Link {
+                source: minted.clone(),
+                predicate: Some(PROPOSER_PREDICATE.to_string()),
+                target: bob.did.clone(),
+            },
+            &mallory,
+            None,
+        ),
+        // A peer's legacy `resolved_as`: says nothing about what happened here.
+        sync_signed(
+            Link {
+                source: minted.clone(),
+                predicate: Some(LEGACY_RESOLVED_AS_PREDICATE.to_string()),
+                target: literal("fired"),
+            },
+            &bob,
+            None,
+        ),
+    ];
+    // Eve names herself, but the signature does not cover what is stored.
+    let mut tampered = eve.sign(vote(&eve.did).normalize());
+    tampered.timestamp = (chrono::Utc::now() + chrono::Duration::seconds(5)).to_rfc3339();
+    synced.push(LinkExpression::from(tampered));
+    for link in synced {
+        f.perspective
+            .add_link_expression(link, LinkStatus::Shared, None)
+            .await
+            .expect("sync a link in");
+    }
+    // The proposer accepts their own proposal as well.
+    let ctx = f.ctx.clone();
+    accept_flow_proposal(&mut f.perspective, &minted, &ctx)
+        .await
+        .expect("the proposer may accept too");
+
+    let proposal = |raw: String| -> serde_json::Value {
+        let result: serde_json::Value = serde_json::from_str(&raw).expect("model_query JSON");
+        result["instances"]
+            .as_array()
+            .expect("instances")
+            .iter()
+            .find(|i| i["id"].as_str() == Some(minted.as_str()))
+            .cloned()
+            .expect("the minted proposal is listed")
+    };
+    let accepted = |p: &serde_json::Value| -> Vec<String> {
+        p["acceptedBy"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let p = proposal(
+        f.perspective
+            .model_query("FlowTransitionProposal", "{}")
+            .await
+            .expect("query proposals"),
+    );
+    let mut listed = accepted(&p);
+    listed.sort();
+    let mut expected = vec![bob.did.clone(), proposer.clone()];
+    expected.sort();
+    assert_eq!(
+        listed, expected,
+        "Bob once and the proposer; not Carol, not Eve"
+    );
+
+    // Held to the fold, not to a list written here.
+    let atom = f
+        .read_set()
+        .await
+        .atoms()
+        .into_iter()
+        .find(|a| a.uri == minted)
+        .expect("the proposal is an atom");
+    let counted: std::collections::BTreeSet<String> =
+        atom.votes.iter().map(|v| v.did.clone()).collect();
+    // The formula as a reader applies it: the model's own `proposer`.
+    assert_eq!(
+        p["proposer"].as_str(),
+        Some(proposer.as_str()),
+        "the model shows the real proposer, not the one Mallory named"
+    );
+    let documented: std::collections::BTreeSet<String> = p["proposer"]
+        .as_str()
+        .map(str::to_string)
+        .into_iter()
+        .chain(accepted(&p))
+        .collect();
+    assert_eq!(
+        documented, counted,
+        "{{ proposer }} ∪ acceptedBy is the fold's voter set"
+    );
+    assert!(
+        p["resolvedAs"].is_null(),
+        "the model has no fired-mark property; a peer's legacy link does not surface"
+    );
+
+    for _ in 0..2 {
+        let signer = TestSigner::generate();
+        sync_vote_from(&mut f, &signer, &minted).await;
+    }
+    consensus_pass(&mut f).await;
+    let p = proposal(
+        f.perspective
+            .model_query("FlowTransitionProposal", "{}")
+            .await
+            .expect("query proposals"),
+    );
+    assert!(
+        p["resolvedAs"].is_null(),
+        "the mark is not on the model either"
+    );
+    assert!(
+        f.marked().await.contains(&minted),
+        "the pass marked the edge it fired — in this agent's table"
     );
 }

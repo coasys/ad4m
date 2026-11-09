@@ -7948,11 +7948,12 @@ fn traverse_scope(
 ) -> Scope {
     Scope::Traverse {
         ids: ids.iter().map(|s| s.to_string()).collect(),
-        predicate: "we://comment".to_string(),
+        predicate: Some("we://comment".to_string()),
         transitive,
         direction,
         limit_per_anchor,
         levels: None,
+        max_depth: None,
     }
 }
 
@@ -8225,11 +8226,12 @@ async fn walk(store: &SparqlStore, levels: Vec<usize>) -> Vec<String> {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(levels),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8325,11 +8327,12 @@ async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![3, 2, 1]),
+            max_depth: None,
         }),
         where_clause: Some(where_clause),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
@@ -8451,11 +8454,12 @@ async fn the_window_applies_to_the_walks_union_not_to_each_level() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![3, 2]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         offset: Some(1),
@@ -8487,11 +8491,12 @@ async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
     let with_transitive = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: true,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![3]),
+            max_depth: None,
         }),
         ..Default::default()
     };
@@ -8503,11 +8508,12 @@ async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
     let with_limit = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: Some(2),
             levels: Some(vec![3]),
+            max_depth: None,
         }),
         ..Default::default()
     };
@@ -8538,11 +8544,12 @@ async fn a_level_walk_through_a_cycle_terminates_and_excludes_the_anchor() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://a".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![10, 10, 10]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8577,11 +8584,12 @@ async fn an_anchor_named_below_another_is_not_also_reported_as_its_child() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string(), "we://c1".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![10, 10]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8653,11 +8661,12 @@ async fn a_per_anchor_limit_counts_instances_not_timestamp_rows() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: Some(2),
             levels: None,
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8723,11 +8732,12 @@ async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
             // A space cannot appear in an IRI term.
-            predicate: "we://comment oops".to_string(),
+            predicate: Some("we://comment oops".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: None,
+            max_depth: None,
         }),
         ..Default::default()
     };
@@ -8860,11 +8870,12 @@ async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![1, 1]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8896,11 +8907,12 @@ async fn a_count_only_walk_totals_the_walk_too() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![1, 1]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         limit: Some(0),
@@ -8955,11 +8967,12 @@ async fn a_node_reached_twice_does_not_consume_the_second_anchor_s_slot() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![2, 1]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -9178,9 +9191,48 @@ async fn a_revocation_tombstone_is_reachable_through_links() {
     // deserialize it and check the signature, which is what the flow engine's
     // revocation rule does.
     let parsed: LinkExpression = serde_json::from_value(rows[0].clone()).expect("LinkExpression");
-    let mut expected = link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2);
-    expected.status = None;
-    assert_eq!(parsed, expected);
+    assert_eq!(parsed, link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2));
+}
+
+/// A `__links` row carries the link's status, spelled as `perspective.get`
+/// spells it, so a row is the whole `LinkExpression` (`LinkRow.status`) and
+/// not one missing a field (#1103).
+#[tokio::test]
+async fn a_links_row_carries_the_status_of_its_link() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let member = "did:key:zMember";
+    let local_member = "did:key:zLocalMember";
+    seed_role(&store, role, member, true);
+    let mut local = link_by(ROLE_ADMIN, role, REVOKED, local_member, ROLE_T2);
+    local.status = Some(crate::types::LinkStatus::Local);
+    store.add_link(&local).unwrap();
+
+    let result = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&[REVOKED]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let rows = result.instances[0]["__links"][REVOKED]
+        .as_array()
+        .expect("rows");
+    let status_of = |target: &str| {
+        rows.iter()
+            .find(|r| r["data"]["target"] == target)
+            .unwrap_or_else(|| panic!("no row for {target}: {rows:?}"))["status"]
+            .clone()
+    };
+    assert_eq!(status_of(member), json!("SHARED"), "{rows:?}");
+    assert_eq!(status_of(local_member), json!("LOCAL"), "{rows:?}");
+
+    let parsed: Vec<crate::types::DecoratedLinkExpression> =
+        serde_json::from_value(Value::Array(rows.clone())).expect("DecoratedLinkExpression");
+    assert!(parsed.iter().any(
+        |l| l.data.target == local_member && l.status == Some(crate::types::LinkStatus::Local)
+    ));
 }
 
 /// The additive half of #1111: asking for `links` adds `__links` and changes
@@ -9610,5 +9662,363 @@ async fn links_inside_an_include_sub_query() {
     assert!(
         result.instances[0].get("__links").is_none(),
         "the parent did not ask"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A to-one reference to a record of any type, read in one query: an untyped
+// `hasOne` hydrated through `include`, with a projection evaluated against each
+// member's own class.
+// ---------------------------------------------------------------------------
+
+/// Two placements: one points at a task carrying two signals (one `like`, one
+/// `flag`), one at a note whose class declares no `signals` relation at all.
+async fn placement_fixture() -> (SparqlStore, StaticShapeResolver, std::sync::Arc<ModelShape>) {
+    let store = SparqlStore::new(None).unwrap();
+    for uri in [
+        "we://models/Placement",
+        "we://models/TaskBlock",
+        "we://models/NoteBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+    for (p, target, ts) in [
+        ("we://p/1", "we://task/1", "2"),
+        ("we://p/2", "we://note/1", "3"),
+    ] {
+        store
+            .add_link(&make_link(p, "we://flag", "we://placement", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(p, "we://placed_node", target, ts))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://task/1",
+            "we://flag",
+            "we://task_block",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://task/1",
+            "we://title",
+            "literal:string:ship",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://task/1", "we://signal", "we://sig/1", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://task/1", "we://signal", "we://sig/2", "6"))
+        .unwrap();
+    for (sig, kind) in [("we://sig/1", "like"), ("we://sig/2", "flag")] {
+        store
+            .add_link(&make_link(
+                sig,
+                "we://kind",
+                &format!("literal:string:{kind}"),
+                "6",
+            ))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://note/1",
+            "we://flag",
+            "we://note_block",
+            "7",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://note/1",
+            "we://text",
+            "literal:string:hello",
+            "7",
+        ))
+        .unwrap();
+
+    let (resolver, placement_shape) = StaticShapeResolver::from_json(
+        "Placement",
+        r#"{"className":"Placement","properties":{
+             "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://placement"}
+           },"relations":{
+             "node":{"predicate":"we://placed_node","kind":"hasOne","maxCount":1,"targetClassName":""}
+           }}"#,
+    )
+    .unwrap();
+    resolver.register(
+        "TaskBlock",
+        parse_shape_from_json(
+            r#"{"className":"TaskBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://task_block"},
+                 "title":{"predicate":"we://title","resolveLanguage":"literal"}
+               },"relations":{
+                 "signals":{"predicate":"we://signal","kind":"hasMany","targetClassName":"Signal"}
+               }}"#,
+            "TaskBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Signal",
+        parse_shape_from_json(
+            r#"{"className":"Signal","properties":{
+                 "kind":{"predicate":"we://kind","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Signal",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "NoteBlock",
+        parse_shape_from_json(
+            r#"{"className":"NoteBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://note_block"},
+                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "NoteBlock",
+        )
+        .unwrap(),
+    );
+    (store, resolver, placement_shape)
+}
+
+fn placed<'a>(result: &'a ModelQueryResult, placement: &str) -> &'a Value {
+    let row = result
+        .instances
+        .iter()
+        .find(|r| r["id"] == placement)
+        .unwrap_or_else(|| panic!("placement {placement} missing: {:?}", result.instances));
+    &row["node"]
+}
+
+/// An untyped to-one comes back as one record, hydrated as the class it is.
+///
+/// The polymorphic path was only exercised through `hasMany` relations; a
+/// `hasOne` takes the same path and is unwrapped to a single object afterwards.
+#[tokio::test]
+async fn test_polymorphic_has_one_hydrates_as_one_record_of_its_own_class() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput =
+        serde_json::from_value(json!({ "include": { "node": { "polymorphic": true } } })).unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let task = placed(&result, "we://p/1");
+    let note = placed(&result, "we://p/2");
+    assert!(
+        task.is_object(),
+        "a to-one hydrates as one object, got {task}"
+    );
+    assert_eq!(task["__subjectClass"], "TaskBlock");
+    assert_eq!(task["title"], "ship");
+    assert_eq!(note["__subjectClass"], "NoteBlock");
+    assert_eq!(note["text"], "hello");
+}
+
+/// A projection on a polymorphic include is computed against each member's own
+/// class, and is absent, not an error, on a member whose class lacks the relation.
+#[tokio::test]
+async fn test_projection_on_a_polymorphic_include_is_read_per_member_class() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput = serde_json::from_value(json!({ "include": { "node": {
+        "polymorphic": true,
+        "projections": { "$signalsCount": { "from": "signals", "count": true } }
+    } } }))
+    .unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(placed(&result, "we://p/1")["$signalsCount"], 2);
+    assert!(placed(&result, "we://p/2").get("$signalsCount").is_none());
+}
+
+/// A projection's `where` on a polymorphic include is read against the target
+/// each member's own class declares for `from`.
+///
+/// The SDK leaves such a projection untagged: the members are of several
+/// classes, so there is no one target to name. Without a target the property
+/// filter matched no predicate and was dropped, and the count came back 2.
+/// A list stays a list of IRIs: only the filter reads the target.
+#[tokio::test]
+async fn test_projection_where_on_a_polymorphic_include_reads_the_member_class_target() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput = serde_json::from_value(json!({ "include": { "node": {
+        "polymorphic": true,
+        "projections": {
+            "$likes": { "from": "signals", "count": true, "where": { "kind": "like" } },
+            "$liked": { "from": "signals", "where": { "kind": "like" } }
+        }
+    } } }))
+    .unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let task = placed(&result, "we://p/1");
+    assert_eq!(task["$likes"], 1, "the `kind` filter applies: {task}");
+    assert_eq!(task["$liked"], json!(["we://sig/1"]));
+    assert!(placed(&result, "we://p/2").get("$likes").is_none());
+}
+
+// ── PERF-15: a page that is not full already tells the total ──
+//
+// A paged query used to run a `COUNT(DISTINCT ?source)` over the whole scope after every page.
+// When the page comes back shorter than `limit`, the scope ran out inside it, so the total is
+// `offset + rows` and the COUNT is a second pass over the same set for a number already known.
+
+/// Five `Scored` items, one second apart, so the timestamp order is item-0 … item-4.
+fn five_scored_items() -> (SparqlStore, &'static str) {
+    let store = SparqlStore::new(None).unwrap();
+    for i in 0..5 {
+        let item = format!("test://paged-{i}");
+        let ts = format!("170000000000{i}");
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://scored", &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                &item,
+                "ns://score",
+                &signed_literal_number(i as f64),
+                &ts,
+            ))
+            .unwrap();
+    }
+    let shape_json = r#"{
+        "className": "Scored",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+            "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+    (store, shape_json)
+}
+
+/// Runs one paged query on a fresh fixture; returns (ids, totalCount, whether a COUNT ran).
+async fn paged(offset: Option<usize>, limit: usize) -> (Vec<String>, usize, bool) {
+    let (store, shape_json) = five_scored_items();
+    let before = store.queries_run().len();
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            offset,
+            limit: Some(limit),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    let counted = store.queries_run()[before..]
+        .iter()
+        .any(|q| q.contains("AS ?cnt)"));
+    let ids = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    (ids, result.total_count, counted)
+}
+
+fn paged_ids(range: std::ops::Range<usize>) -> Vec<String> {
+    range.map(|i| format!("test://paged-{i}")).collect()
+}
+
+#[tokio::test]
+async fn a_short_first_page_is_its_own_total_and_runs_no_count() {
+    let (ids, total, counted) = paged(None, 10).await;
+    assert_eq!(ids, paged_ids(0..5));
+    assert_eq!(total, 5, "the total COUNT would have returned");
+    assert!(
+        !counted,
+        "a page shorter than its limit must not run the COUNT"
+    );
+
+    let (ids, total, counted) = paged(Some(0), 10).await;
+    assert_eq!(ids, paged_ids(0..5));
+    assert_eq!(total, 5);
+    assert!(!counted, "an explicit offset 0 is the same first page");
+}
+
+#[tokio::test]
+async fn a_full_page_still_counts() {
+    let (ids, total, counted) = paged(None, 2).await;
+    assert_eq!(ids, paged_ids(0..2));
+    assert_eq!(total, 5, "a full page says nothing about the rest");
+    assert!(counted, "a full page must run the COUNT");
+
+    // A page that exactly fits the scope is full too: there could be more.
+    let (ids, total, counted) = paged(None, 5).await;
+    assert_eq!(ids, paged_ids(0..5));
+    assert_eq!(total, 5);
+    assert!(counted, "a page exactly `limit` long cannot tell the total");
+}
+
+#[tokio::test]
+async fn a_short_page_after_an_offset_totals_offset_plus_rows() {
+    let (ids, total, counted) = paged(Some(3), 10).await;
+    assert_eq!(ids, paged_ids(3..5));
+    assert_eq!(total, 5, "offset 3 + 2 rows");
+    assert!(
+        !counted,
+        "a non-empty short page after an offset must not run the COUNT"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_page_after_an_offset_still_counts() {
+    let (ids, total, counted) = paged(Some(10), 5).await;
+    assert!(ids.is_empty());
+    assert_eq!(
+        total, 5,
+        "an offset past the end says only that the total is at most the offset"
+    );
+    assert!(counted, "an empty page after an offset must run the COUNT");
+}
+
+/// A per-anchor limit slices the id phase in the executor, so its window is not pushed and its
+/// short page says nothing about the total: the store's count stays, "1 shown of 3 under root".
+#[tokio::test]
+async fn a_short_page_sliced_per_anchor_keeps_the_stores_count() {
+    let store = comment_tree_store();
+    let result = fixture_query_from_json(
+        &store,
+        "Comment",
+        &ModelQueryInput {
+            parent: Some(traverse_scope(
+                &["we://root"],
+                false,
+                ScopeDirection::Out,
+                Some(1),
+            )),
+            order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        COMMENT_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["we://c1"], "one per anchor, oldest first");
+    assert_eq!(
+        result.total_count, 3,
+        "the page is short because of the slice, not because the scope ran out"
     );
 }

@@ -56,6 +56,10 @@ export class AutoProcessorConfig extends Ad4mModel {
   @HasMany({ through: "ad4m://interpretation_class", datatype: "xsd:string" })
   interpretationClasses: string[] = [];
 
+  /** Flow URIs (`{namespace}{name}Flow`) this processor runs flow features on; empty = off. */
+  @HasMany({ through: "ad4m://flow", datatype: "xsd:string" })
+  flows: string[] = [];
+
   /** Quiet-window (ms) after the last new item before a pass runs. */
   @Property({ through: "ad4m://debounce_ms", required: true })
   debounceMs: string = "200";

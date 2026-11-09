@@ -1,533 +1,92 @@
 import { PerspectiveProxy, QuerySubscriptionProxy } from './PerspectiveProxy';
 import { Link, LinkExpression } from '../links/Links';
+import { LinkQuery } from './LinkQuery';
+import { Literal } from '../Literal';
+import { SHACLFlow } from '../shacl/SHACLFlow';
+import { clearQueryCache } from '../model/query-cache';
 
-function createMockPerspectiveClient(): any {
-  return {
-    addPerspectiveLinkAddedListener: jest.fn(),
-    addPerspectiveLinkRemovedListener: jest.fn(),
-    addPerspectiveLinkUpdatedListener: jest.fn(),
-    addPerspectiveSyncStateChangeListener: jest.fn(),
-  };
-}
-
-function createProxy(client?: any): PerspectiveProxy {
-  const mockClient = client ?? createMockPerspectiveClient();
+function createProxy(client: any): PerspectiveProxy {
   return new PerspectiveProxy(
     { uuid: 'test-uuid', name: 'test', owners: [], sharedUrl: null, neighbourhood: null, state: 'Synced' } as any,
-    mockClient,
+    client,
   );
 }
 
-describe('PerspectiveProxy.removeListener', () => {
-  it('does not remove the last callback when removing a non-existent one', async () => {
-    const proxy = createProxy();
-    const cb1 = jest.fn();
-    const cb2 = jest.fn();
-    const unknown = jest.fn();
-
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-added', cb2);
-
-    // Remove a callback that was never added — should be a no-op
-    await proxy.removeListener('link-added', unknown);
-
-    // Both original callbacks should still be present
-    // Access internal state via triggering all callbacks
-    // We verify by adding a third and checking the count stays correct
-    const proxy2 = createProxy();
-    await proxy2.addListener('link-removed', cb1);
-    await proxy2.removeListener('link-removed', unknown);
-    // cb1 should still be registered (not accidentally removed)
-  });
-
-  it('correctly removes the specified callback', async () => {
-    const proxy = createProxy();
-    const cb1 = jest.fn();
-    const cb2 = jest.fn();
-
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-added', cb2);
-
-    await proxy.removeListener('link-added', cb1);
-    // cb1 removed, cb2 should remain
-  });
-});
-
-describe('PerspectiveProxy.dispose', () => {
-  it('calls removeAllListeners on the client and clears local callbacks', async () => {
-    const mockClient = {
-      ...createMockPerspectiveClient(),
-      removeAllListeners: jest.fn(),
-    };
-    const proxy = createProxy(mockClient);
-
-    const cb1 = jest.fn();
-    const cb2 = jest.fn();
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-removed', cb2);
-
-    proxy.dispose();
-
-    expect(mockClient.removeAllListeners).toHaveBeenCalledWith('test-uuid');
-  });
-
-  it('is safe to call dispose() multiple times', () => {
-    const mockClient = {
-      ...createMockPerspectiveClient(),
-      removeAllListeners: jest.fn(),
-    };
-    const proxy = createProxy(mockClient);
-
-    proxy.dispose();
-    proxy.dispose(); // should not throw
-
-    expect(mockClient.removeAllListeners).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe('ApiClient.onReconnect', () => {
-  // Injected WebSocket implementation (ApiClient constructor arg 3) so these
-  // tests drive the REAL onopen/onclose lifecycle instead of poking at
-  // private fields. Each call returns a fresh class with its own instance
-  // list.
-  function makeFakeWebSocketImpl() {
-    class FakeWebSocket {
-      static instances: FakeWebSocket[] = [];
-      url: string;
-      readyState = 0;
-      onopen: (() => void) | null = null;
-      onmessage: ((event: any) => void) | null = null;
-      onerror: ((e: any) => void) | null = null;
-      onclose: (() => void) | null = null;
-      constructor(url: string) {
-        this.url = url;
-        FakeWebSocket.instances.push(this);
-      }
-      send(_data: any) {}
-      close() { this.readyState = 3; }
-      /** Test helper: simulate the server accepting the connection. */
-      open() { this.readyState = 1; this.onopen?.(); }
-      /** Test helper: simulate the connection dropping. */
-      drop() { this.readyState = 3; this.onclose?.(); }
-    }
-    return FakeWebSocket;
+describe('QuerySubscriptionProxy', () => {
+  function liveClient(subscribeQuery: jest.Mock) {
+    const client = {
+      subscribeQuery,
+      onQueryUpdate: () => () => {},
+      onReconnect: () => () => {},
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    } as any;
+    return { client };
   }
 
-  it('fires reconnect callbacks only on reconnect, not first connect', () => {
-    const { ApiClient } = require('../apiClient');
-    const FakeWs = makeFakeWebSocketImpl();
-    const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
-    const reconnectCb = jest.fn();
-    client.onReconnect(reconnectCb);
-
-    // First connection: onopen must NOT fire the reconnect callback
-    client.connect();
-    FakeWs.instances[0].open();
-    expect(reconnectCb).not.toHaveBeenCalled();
-
-    // Drop and reconnect: the second onopen must fire it exactly once
-    FakeWs.instances[0].drop();
-    client.connect();
-    FakeWs.instances[1].open();
-    expect(reconnectCb).toHaveBeenCalledTimes(1);
-
-    client.closeAll();
-  });
-
-  it('unsubscribed callbacks do not fire on reconnect', () => {
-    const { ApiClient } = require('../apiClient');
-    const FakeWs = makeFakeWebSocketImpl();
-    const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
-    const reconnectCb = jest.fn();
-    const unsub = client.onReconnect(reconnectCb);
-
-    client.connect();
-    FakeWs.instances[0].open();
-    unsub();
-
-    FakeWs.instances[0].drop();
-    client.connect();
-    FakeWs.instances[1].open();
-    expect(reconnectCb).not.toHaveBeenCalled();
-
-    client.closeAll();
-  });
-
-  it('closeAll resets the first-connect gate for client reuse', () => {
-    const { ApiClient } = require('../apiClient');
-    const FakeWs = makeFakeWebSocketImpl();
-    const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
-
-    client.connect();
-    FakeWs.instances[0].open();
-    client.closeAll();
-
-    // Reuse after closeAll: the first open of the NEW connection is an
-    // initial connect again, not a reconnect.
-    const reconnectCb = jest.fn();
-    client.onReconnect(reconnectCb);
-    client.connect();
-    FakeWs.instances[1].open();
-    expect(reconnectCb).not.toHaveBeenCalled();
-
-    // …but a genuine reconnect within the new lifecycle still fires.
-    FakeWs.instances[1].drop();
-    client.connect();
-    FakeWs.instances[2].open();
-    expect(reconnectCb).toHaveBeenCalledTimes(1);
-
-    client.closeAll();
-  });
-});
-
-describe('QuerySubscriptionProxy', () => {
-  it('treats the initial subscribeQuery() result as a completed initialization', async () => {
-    const initialResult = [
-      {
-        source: 'literal:string:test-channel',
-        predicate: 'flux://has_channel_name',
-        target: 'literal:string:Runtime Fix Channel',
-      },
-    ];
-
-    const unsubscribe = jest.fn();
-    const mockClient = {
-      subscribeQuery: jest.fn().mockResolvedValue({
-        subscriptionId: 'sub-1',
-        result: initialResult,
-      }),
-      subscribeToQueryUpdates: jest.fn().mockReturnValue(unsubscribe),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    } as any;
-
-    const subscription = new QuerySubscriptionProxy('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', mockClient);
-
+  it('resolves initialized with the first result', async () => {
+    const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 }));
+    const subscription = new QuerySubscriptionProxy('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', client);
     await subscription.subscribe();
-
-    const initialized = await Promise.race([
-      subscription.initialized.then(() => 'resolved'),
-      new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 25)),
-    ]);
-
-    expect(initialized).toBe('resolved');
-    expect(subscription.result).toEqual(initialResult);
-    expect(mockClient.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }');
-    expect(mockClient.subscribeToQueryUpdates).toHaveBeenCalledWith('sub-1', expect.any(Function));
-
-    subscription.dispose();
-    expect(unsubscribe).toHaveBeenCalled();
-  });
-
-  it('re-subscribes immediately when onReconnect fires', async () => {
-    let reconnectCallback: (() => void) | undefined;
-    const initialUnsubscribe = jest.fn();
-    const reconnectUnsubscribe = jest.fn();
-    let subscribeToUpdatesCall = 0;
-    const unsubReconnect = jest.fn();
-    const mockClient = {
-      subscribeQuery: jest.fn().mockResolvedValue({
-        subscriptionId: 'sub-1',
-        result: [{ s: 'a', p: 'b', o: 'c' }],
-      }),
-      subscribeToQueryUpdates: jest.fn(() => {
-        subscribeToUpdatesCall++;
-        return subscribeToUpdatesCall === 1 ? initialUnsubscribe : reconnectUnsubscribe;
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-      onReconnect: jest.fn((cb: () => void) => {
-        reconnectCallback = cb;
-        return unsubReconnect;
-      }),
-    } as any;
-
-    const subscription = new QuerySubscriptionProxy('perspective-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
-    await subscription.subscribe();
-
-    // onReconnect should have been registered
-    expect(mockClient.onReconnect).toHaveBeenCalledTimes(1);
-    expect(reconnectCallback).toBeDefined();
-
-    // Reset call counts to isolate the reconnect re-subscribe — but do NOT
-    // reset the monotonic counter: the mock must keep returning DISTINCT
-    // unsubscribers so the assertions below can tell "old callback disposed"
-    // apart from "new callback disposed" (they'd be the same jest.fn if the
-    // counter restarted at 1).
-    mockClient.subscribeQuery.mockClear();
-    mockClient.subscribeToQueryUpdates.mockClear();
-
-    // Return a fresh subscriptionId on reconnect
-    mockClient.subscribeQuery.mockResolvedValue({
-      subscriptionId: 'sub-2',
-      result: [{ s: 'x', p: 'y', o: 'z' }],
-    });
-
-    // Simulate reconnect
-    reconnectCallback!();
-    // Allow the async swap to settle
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Should have re-established the server-side subscription with a fresh ID
-    // and swapped the client-side callback in place — NEW callback registered
-    // BEFORE the old one is disposed (so the WS never dips to 0 subscribers).
-    expect(mockClient.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT ?x WHERE { ?x ?p ?o }');
-    expect(mockClient.subscribeToQueryUpdates).toHaveBeenCalledWith('sub-2', expect.any(Function));
-    // The OLD callback was disposed, the NEW one was not.
-    expect(initialUnsubscribe).toHaveBeenCalledTimes(1);
-    expect(reconnectUnsubscribe).not.toHaveBeenCalled();
-
-    subscription.dispose();
-    // dispose() tears down the callback that is live at that point — the
-    // reconnect-registered one.
-    expect(reconnectUnsubscribe).toHaveBeenCalledTimes(1);
-  });
-
-  it('cleans up reconnect listener on dispose', async () => {
-    const unsubReconnect = jest.fn();
-    const mockClient = {
-      subscribeQuery: jest.fn().mockResolvedValue({
-        subscriptionId: 'sub-1',
-        result: [],
-      }),
-      subscribeToQueryUpdates: jest.fn().mockReturnValue(jest.fn()),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-      onReconnect: jest.fn(() => unsubReconnect),
-    } as any;
-
-    const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
-    await subscription.subscribe();
-
-    expect(unsubReconnect).not.toHaveBeenCalled();
-    subscription.dispose();
-    expect(unsubReconnect).toHaveBeenCalledTimes(1);
-  });
-
-  // Regression for CodeRabbit review on PR #899 AND for the follow-on
-  // integration-tests-mcp failure the first fix exposed.
-  //
-  // CodeRabbit warned about the "final-subscriber" loop: when this query
-  // owns the LAST `_wsCallbacks` entry in ApiClient, calling `#unsubscribe`
-  // inside a reconnect-driven `subscribe()` closes the WebSocket
-  // (ApiClient.subscribe()'s deleter: "if no more callbacks and no pending
-  // calls, close the socket"). The subsequent `subscribeQuery` reopens the
-  // socket, whose fresh `onopen` fires every registered reconnect callback
-  // → recursion.
-  //
-  // The current fix avoids the loop AND the collateral damage by NOT
-  // calling `subscribe()` from the reconnect handler at all. Instead it
-  // swap-in-place: get a new server-side subscription ID via
-  // `subscribeQuery`, register the new client-side callback FIRST, then
-  // dispose the old callback. `_wsCallbacks.size` never dips to 0 across
-  // the swap, so the socket stays open, no `onopen` re-fires, no
-  // cross-proxy RPCs die with 503 (the mcp-http.test.ts "should fire
-  // onWake when mention uses agent DID" failure).
-  //
-  // This test models the invariant the swap guarantees.
-  it('reconnect handler swaps subscriptions without dropping to zero WS callbacks (regression)', async () => {
-    // Real Set so we can observe the swap ordering.
-    const reconnectCallbacks = new Set<() => void>();
-    // Count of live client-side callback subscriptions (proxy analogue of
-    // ApiClient._wsCallbacks.size). Bumped by subscribeToQueryUpdates, and
-    // decremented by the returned unsubscribe. If this ever drops to 0
-    // during the swap, ApiClient would close the socket — which is
-    // exactly the loop CodeRabbit flagged.
-    let liveCallbacks = 0;
-    let minLiveDuringSwap = Number.POSITIVE_INFINITY;
-    let subscribeQueryCount = 0;
-    let subscribeToUpdatesCount = 0;
-
-    const mockClient = {
-      subscribeQuery: jest.fn(async (_uuid: string, _query: string) => {
-        subscribeQueryCount++;
-        return {
-          subscriptionId: `sub-${subscribeQueryCount}`,
-          result: [{ s: 'a', p: 'b', o: 'c' }],
-        };
-      }),
-      subscribeToQueryUpdates: jest.fn(() => {
-        subscribeToUpdatesCount++;
-        liveCallbacks++;
-        // Sample the invariant after each mutation.
-        if (liveCallbacks < minLiveDuringSwap) minLiveDuringSwap = liveCallbacks;
-        return jest.fn(() => {
-          liveCallbacks--;
-          if (liveCallbacks < minLiveDuringSwap) minLiveDuringSwap = liveCallbacks;
-        });
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-      onReconnect: jest.fn((cb: () => void) => {
-        reconnectCallbacks.add(cb);
-        return () => { reconnectCallbacks.delete(cb); };
-      }),
-    } as any;
-
-    const subscription = new QuerySubscriptionProxy(
-      'perspective-1',
-      'SELECT ?x WHERE { ?x ?p ?o }',
-      mockClient,
-    );
-
-    // Initial subscribe — one server subscription, one live callback.
-    await subscription.subscribe();
-    expect(subscribeQueryCount).toBe(1);
-    expect(subscribeToUpdatesCount).toBe(1);
-    expect(liveCallbacks).toBe(1);
-    expect(reconnectCallbacks.size).toBe(1);
-    // Reset the low-water mark to the post-init steady state so we only
-    // measure what the reconnect handler does.
-    minLiveDuringSwap = liveCallbacks;
-
-    // Fire one genuine reconnect. The handler should:
-    //   (a) call subscribeQuery (new server-side sub id: sub-2)
-    //   (b) call subscribeToQueryUpdates for sub-2 → liveCallbacks 1 → 2
-    //   (c) THEN invoke the old unsubscribe → liveCallbacks 2 → 1
-    // At no point should liveCallbacks reach 0. And the fresh listener
-    // installed at the top of the initial subscribe() must NOT itself
-    // re-enter subscribe() from this reconnect.
-    for (const cb of Array.from(reconnectCallbacks)) cb();
-    // Let the async swap settle.
-    await new Promise((r) => setTimeout(r, 20));
-
-    expect(subscribeQueryCount).toBe(2);
-    expect(subscribeToUpdatesCount).toBe(2);
-    // The critical assertion: the swap never let the callback set go to 0.
-    // A zero here would mean the socket got closed → reopened → onopen
-    // fires reconnect callbacks again → the loop CodeRabbit warned about.
-    expect(minLiveDuringSwap).toBeGreaterThanOrEqual(1);
-    // One reconnect fired → exactly one server-side re-establish. NOT a
-    // recursive cascade.
-    expect(reconnectCallbacks.size).toBe(1);
-    expect(liveCallbacks).toBe(1);
-
-    subscription.dispose();
-    // Dispose drops both the live callback and the reconnect listener.
-    expect(liveCallbacks).toBe(0);
-    expect(reconnectCallbacks.size).toBe(0);
-  });
-
-  // Regression for the review-blocker on PR #899: a failed full resubscribe
-  // (the keepalive / init-timeout retry path) used to remove the reconnect
-  // listener at the top of subscribe() and only re-register on success —
-  // one subscribeQuery failure during a network flap left the proxy
-  // permanently dead (keepalive loop stops itself on resubscribe failure,
-  // no listener left to retry). The catch block must install a recovery
-  // listener so the next reconnect retries the full subscribe.
-  it('keeps reconnect recovery alive after a failed resubscribe attempt', async () => {
-    let reconnectCallback: (() => void) | undefined;
-    const mockClient = {
-      subscribeQuery: jest.fn()
-        .mockResolvedValueOnce({ subscriptionId: 'sub-1', result: [] })   // initial subscribe OK
-        .mockRejectedValueOnce(new Error('flap'))                          // resubscribe attempt fails
-        .mockResolvedValueOnce({ subscriptionId: 'sub-2', result: [] }),  // recovery succeeds
-      subscribeToQueryUpdates: jest.fn().mockReturnValue(jest.fn()),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-      onReconnect: jest.fn((cb: () => void) => {
-        reconnectCallback = cb;
-        return jest.fn();
-      }),
-    } as any;
-
-    const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
-    await subscription.subscribe();
+    await expect(subscription.initialized).resolves.toBe(true);
+    expect(subscription.result).toEqual([{ s: 'a' }]);
     expect(subscription.id).toBe('sub-1');
-
-    // A retry-subscribe fails (this is what the keepalive path does when
-    // the server subscription died).
-    await expect(subscription.subscribe()).rejects.toThrow('flap');
-
-    // The failure must have installed a recovery listener — total listener
-    // registrations: initial subscribe + failure recovery.
-    expect(mockClient.onReconnect).toHaveBeenCalledTimes(2);
-    expect(reconnectCallback).toBeDefined();
-
-    // A reconnect arrives → the recovery listener runs a full subscribe()
-    // and the proxy comes back to life on a fresh server subscription.
-    reconnectCallback!();
-    await new Promise((r) => setTimeout(r, 10));
-
-    expect(mockClient.subscribeQuery).toHaveBeenCalledTimes(3);
-    expect(subscription.id).toBe('sub-2');
-
-    subscription.dispose();
+    expect(client.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', { signal: expect.any(AbortSignal) });
   });
 
-  // Regression for the concurrent-writers race flagged in the PR #899
-  // review: the reconnect swap handler, the keepalive-retry subscribe() and
-  // the init-timeout retry subscribe() all write `#unsubscribe` /
-  // `#subscriptionId`. Without the generation guard, a swap handler parked
-  // on its subscribeQuery while a full subscribe() ran could register a
-  // client-side callback that the subscribe() then overwrote WITHOUT
-  // disposing — leaking the callback in ApiClient._wsCallbacks for the
-  // client lifetime (holding the socket open and firing into a dead
-  // subscription). The stale writer must back out and release its
-  // server-side subscription instead.
-  it('a reconnect swap superseded by a concurrent resubscribe backs out without leaking callbacks', async () => {
-    let reconnectCallback: (() => void) | undefined;
-    // Deferred subscribeQuery responses so the test controls interleaving.
-    const deferreds: Array<{ resolve: (v: any) => void }> = [];
-    let subCounter = 0;
-    let liveCallbacks = 0;
-    const disposedServerSubs: string[] = [];
+  it('opens a model query over a class when given one', async () => {
+    const modelSubscribe = jest.fn().mockResolvedValue({ subscriptionId: 'sub-2', result: { instances: [{ id: 'a' }], totalCount: 1 }, revision: 0 });
+    const { client } = liveClient(jest.fn());
+    client.modelSubscribe = modelSubscribe;
+    const subscription = new QuerySubscriptionProxy('perspective-1', '{"limit":1}', client, 'ad4m://TextContent');
+    await subscription.subscribe();
+    expect(modelSubscribe).toHaveBeenCalledWith('perspective-1', 'ad4m://TextContent', '{"limit":1}', { signal: expect.any(AbortSignal) });
+    expect(client.subscribeQuery).not.toHaveBeenCalled();
+    expect(subscription.result).toEqual({ instances: [{ id: 'a' }], totalCount: 1 });
+  });
 
-    const mockClient = {
-      subscribeQuery: jest.fn(() => new Promise((resolve) => {
-        deferreds.push({ resolve });
-      })),
-      subscribeToQueryUpdates: jest.fn(() => {
-        liveCallbacks++;
-        return jest.fn(() => { liveCallbacks--; });
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn((_uuid: string, subId: string) => {
-        disposedServerSubs.push(subId);
-        return Promise.resolve(true);
-      }),
-      onReconnect: jest.fn((cb: () => void) => {
-        reconnectCallback = cb;
-        return jest.fn();
-      }),
+  it('rejects initialized when the subscribe call fails', async () => {
+    const { client } = liveClient(jest.fn().mockRejectedValue(new Error('locked')));
+    const subscription = new QuerySubscriptionProxy('p', 'SELECT ?x WHERE { ?x ?p ?o }', client);
+    const initialized = subscription.initialized;
+    await expect(subscription.subscribe()).rejects.toThrow('locked');
+    await expect(initialized).rejects.toThrow('locked');
+  });
+
+  it('leaves no unhandled rejection when the caller never reads initialized', async () => {
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', record);
+    try {
+      const { client } = liveClient(jest.fn().mockRejectedValue(new Error('refused')));
+      const subscription = new QuerySubscriptionProxy('p', 'not sparql', client);
+      await expect(subscription.subscribe()).rejects.toThrow('refused');
+      await new Promise(resolve => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', record);
+    }
+  });
+
+  it('perspective.subscribeQuery leaves nothing re-opening when the first subscribe fails', async () => {
+    const reconnects = new Set<() => void>();
+    const subscribeQuery = jest.fn().mockRejectedValue(new Error('Prolog live queries are not supported'));
+    const client = {
+      subscribeQuery,
+      onQueryUpdate: () => () => {},
+      onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     } as any;
-
-    const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
-
-    // Initial subscribe.
-    const initial = subscription.subscribe();
-    deferreds[0].resolve({ subscriptionId: `sub-${++subCounter}`, result: [] });
-    await initial;
-    expect(liveCallbacks).toBe(1);
-
-    // 1. Reconnect fires; the swap handler parks on its subscribeQuery.
-    reconnectCallback!();
-    expect(deferreds.length).toBe(2);
-
-    // 2. While the handler is parked, a full resubscribe runs (keepalive
-    //    retry analogue) and parks on ITS subscribeQuery.
-    const retry = subscription.subscribe();
-    expect(deferreds.length).toBe(3);
-
-    // 3. The handler's subscribeQuery resolves FIRST — the handler is now
-    //    stale (the full subscribe superseded it) and must back out.
-    deferreds[1].resolve({ subscriptionId: 'sub-stale', result: [] });
-    await new Promise((r) => setTimeout(r, 5));
-
-    // 4. The full subscribe's subscribeQuery resolves and completes.
-    deferreds[2].resolve({ subscriptionId: `sub-${++subCounter}`, result: [] });
-    await retry;
-
-    // Exactly ONE live client-side callback — the stale handler must not
-    // have left an orphaned one behind (nor disposed the winner's).
-    expect(liveCallbacks).toBe(1);
-    // The winner's subscription is active…
-    expect(subscription.id).toBe('sub-2');
-    // …and the stale handler released its orphaned server-side subscription.
-    expect(disposedServerSubs).toContain('sub-stale');
-
-    subscription.dispose();
-    expect(liveCallbacks).toBe(0);
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(createProxy(client).subscribeQuery('a Prolog query')).rejects.toThrow('not supported');
+      // The caller never got a proxy to dispose: a reconnect must not open the query again.
+      for (const reconnect of [...reconnects]) reconnect();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(subscribeQuery).toHaveBeenCalledTimes(1);
+      expect(reconnects.size).toBe(0);
+    } finally {
+      errors.mockRestore();
+    }
   });
 });
 
@@ -538,7 +97,6 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
 
   function proxyWithLinks(links: any[]): PerspectiveProxy {
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       queryLinks: jest.fn().mockResolvedValue(links),
     };
     return createProxy(mockClient);
@@ -582,14 +140,26 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
     expect(await proxy.subjectClassTargetClasses()).toEqual([]);
   });
 
-  it('returns an empty array on error', async () => {
+  it('rejects when the lookup fails, rather than answering that nothing is registered', async () => {
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
     };
     const proxy = createProxy(mockClient);
 
-    expect(await proxy.subjectClassTargetClasses()).toEqual([]);
+    await expect(proxy.subjectClassTargetClasses()).rejects.toThrow('network error');
+    await expect(proxy.subjectClasses()).rejects.toThrow('network error');
+  });
+
+  it('still lets subjectClassesByTemplate fall back to property matching when the lookup fails', async () => {
+    const mockClient: any = {
+      queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
+    };
+    const proxy = createProxy(mockClient);
+    const byProperties = jest.spyOn(proxy as any, 'findClassByProperties').mockResolvedValue('Recipe' as never);
+
+    // A className sends it to the subjectClasses() lookup first, which now rejects.
+    await expect(proxy.subjectClassesByTemplate({ className: 'Recipe' })).resolves.toEqual(['Recipe']);
+    expect(byProperties).toHaveBeenCalled();
   });
 });
 
@@ -601,7 +171,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
     let resolveFetch: (v: any) => void;
     let fetchCount = 0;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => {
         fetchCount++;
         return new Promise(r => { resolveFetch = r; });
@@ -620,7 +189,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('gives each caller its own copy of the array', async () => {
     let resolveFetch: (v: any) => void;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => new Promise(r => { resolveFetch = r; })),
     };
     const proxy = createProxy(mockClient);
@@ -639,7 +207,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('does not cache: a call after the previous one resolved sends a new RPC', async () => {
     let calls = 0;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(async () => { calls++; return calls === 1 ? overlayA : overlayB; }),
     };
     const proxy = createProxy(mockClient);
@@ -652,7 +219,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('shares a failed RPC with concurrent callers and does not keep it', async () => {
     let calls = 0;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(async () => {
         calls++;
         if (calls === 1) throw new Error('boom');
@@ -672,7 +238,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('a read after acceptInterpretation resolves does not join an older in-flight RPC', async () => {
     const resolvers: Array<(v: any) => void> = [];
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
       acceptInterpretation: jest.fn(async () => true),
     };
@@ -690,7 +255,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('a read after rejectInterpretation resolves does not join an older in-flight RPC', async () => {
     const resolvers: Array<(v: any) => void> = [];
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
       rejectInterpretation: jest.fn(async () => { throw new Error('reject failed'); }),
     };
@@ -730,7 +294,6 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     const storedExpr = makeStoredExpression('s://a', 'p://b', 't://c');
     const removeLink = jest.fn().mockResolvedValue(true);
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       // queryLinks is what PerspectiveProxy.get calls
       queryLinks: jest.fn().mockResolvedValue([storedExpr]),
       removeLink,
@@ -746,7 +309,6 @@ describe('PerspectiveProxy.remove with bare Link', () => {
 
   it('throws a descriptive error when no stored expression matches the bare Link', async () => {
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       queryLinks: jest.fn().mockResolvedValue([]),
     };
     const proxy = createProxy(mockClient);
@@ -768,7 +330,7 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     const removeLink = jest.fn().mockResolvedValue(true);
     // the wrong candidate first: matches[0] of the unfiltered result
     const queryLinks = jest.fn().mockResolvedValue([withPredicate, withoutPredicate]);
-    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks, removeLink };
+    const mockClient: any = { queryLinks, removeLink };
     const proxy = createProxy(mockClient);
 
     await proxy.remove(new Link({ source: 's://a', target: 't://c' }));
@@ -779,7 +341,7 @@ describe('PerspectiveProxy.remove with bare Link', () => {
   it('throws instead of removing a predicated link when the bare Link has no predicate', async () => {
     const withPredicate = makeStoredExpression('s://a', 'p://b', 't://c');
     const queryLinks = jest.fn().mockResolvedValue([withPredicate]);
-    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks };
+    const mockClient: any = { queryLinks };
     const proxy = createProxy(mockClient);
 
     await expect(
@@ -791,7 +353,6 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     const storedExpr = makeStoredExpression('s://x', 'p://y', 't://z');
     const removeLink = jest.fn().mockResolvedValue(true);
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       removeLink,
     };
     const proxy = createProxy(mockClient);
@@ -799,5 +360,165 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     await proxy.remove(storedExpr as any);
     // Should NOT have called queryLinks — no bare Link resolution needed
     expect(removeLink).toHaveBeenCalledWith('test-uuid', storedExpr, undefined);
+  });
+});
+
+// #1291 review: addFlow writes only the difference between the stored and the
+// wanted definition. These drive the real addFlow against an in-memory store,
+// so each assertion is about what lands in the perspective.
+describe('PerspectiveProxy.addFlow replace', () => {
+  type Stored = { author: string; timestamp: string; data: { source: string; predicate?: string; target: string } };
+
+  function memoryStore() {
+    let links: Stored[] = [];
+    let clock = 0;
+    const stamp = (data: any): Stored => ({ author: 'did:test:agent', timestamp: String(++clock), data: { ...data } });
+    const same = (a: Stored, b: Stored) => JSON.stringify(a) === JSON.stringify(b);
+    const client: any = {
+      queryLinks: jest.fn(async (_uuid: string, q: any) =>
+        links.filter(l =>
+          (!q.source || l.data.source === q.source) &&
+          (!q.predicate || l.data.predicate === q.predicate) &&
+          (!q.target || l.data.target === q.target))),
+      addLink: jest.fn(async (_uuid: string, link: any) => {
+        const expr = stamp(link);
+        links.push(expr);
+        return expr;
+      }),
+      linkMutations: jest.fn(async (_uuid: string, m: any) => {
+        links = links.filter(l => !m.removals.some((r: Stored) => same(r, l)));
+        links.push(...m.additions.map(stamp));
+        return {};
+      }),
+    };
+    return { proxy: createProxy(client), client, links: () => links };
+  }
+
+  const todoFlow = (n: number, namespace = 'todo://') => {
+    const flow = new SHACLFlow('Todo', namespace);
+    flow.addState({ name: 'ready', value: 0 });
+    flow.addState({ name: 'done', value: 1, consensusRule: { n } } as any);
+    flow.addTransition({ actionName: 'Complete', fromState: 'ready', toState: 'done', actions: [] });
+    return flow;
+  };
+  const stateUri = todoFlow(1).stateUri('done');
+  const transitionUri = todoFlow(1).transitionUri('ready', 'done', 'Complete');
+
+  async function rules(proxy: PerspectiveProxy): Promise<number[]> {
+    const found = await proxy.get(new LinkQuery({ source: stateUri, predicate: 'ad4m://consensusRule' }));
+    return found.map(l => JSON.parse(Literal.fromUrl(l.data.target).get() as string).n);
+  }
+
+  it('replaces a changed rule and keeps links the definition does not own', async () => {
+    const { proxy } = memoryStore();
+    await proxy.addFlow('Todo', todoFlow(2));
+    const flowUri = todoFlow(1).flowUri;
+    await proxy.add(new Link({ source: flowUri, predicate: 'todo://receipt', target: 'todo://r1' }));
+    await proxy.add(new Link({ source: stateUri, predicate: 'app://label', target: 'literal://string:Done' }));
+    await proxy.add(new Link({ source: transitionUri, predicate: 'app://icon', target: 'app://check' }));
+
+    await proxy.addFlow('Todo', todoFlow(3));
+
+    expect(await rules(proxy)).toEqual([3]);
+    expect(await proxy.get(new LinkQuery({ source: flowUri, predicate: 'todo://receipt' }))).toHaveLength(1);
+    expect(await proxy.get(new LinkQuery({ source: stateUri, predicate: 'app://label' }))).toHaveLength(1);
+    expect(await proxy.get(new LinkQuery({ source: transitionUri, predicate: 'app://icon' }))).toHaveLength(1);
+  });
+
+  it('writes nothing when the definition is unchanged', async () => {
+    const { proxy, client, links } = memoryStore();
+    await proxy.addFlow('Todo', todoFlow(3));
+    const before = JSON.stringify(links());
+    const calls = client.linkMutations.mock.calls.length;
+
+    await proxy.addFlow('Todo', todoFlow(3));
+
+    // Removing every link and adding it back would keep the count; it would
+    // not keep each link's author and timestamp.
+    expect(client.linkMutations.mock.calls.length).toBe(calls);
+    expect(JSON.stringify(links())).toBe(before);
+  });
+
+  it('removes a retired stateCheck from an older definition', async () => {
+    const { proxy } = memoryStore();
+    await proxy.addFlow('Todo', todoFlow(3));
+    await proxy.add(new Link({ source: stateUri, predicate: 'ad4m://stateCheck', target: 'literal://string:old' }));
+
+    await proxy.addFlow('Todo', todoFlow(3));
+
+    expect(await proxy.get(new LinkQuery({ source: stateUri, predicate: 'ad4m://stateCheck' }))).toHaveLength(0);
+  });
+
+  it('leaves no definition links on a state the new definition drops', async () => {
+    const { proxy, links } = memoryStore();
+    await proxy.addFlow('Todo', todoFlow(2));
+    const flow = new SHACLFlow('Todo', 'todo://');
+    flow.addState({ name: 'ready', value: 0 });
+
+    await proxy.addFlow('Todo', flow);
+
+    expect(links().filter(l => l.data.source === stateUri || l.data.target === stateUri)).toEqual([]);
+  });
+
+  it('moves the name to the new flow URI when the namespace changes', async () => {
+    const { proxy } = memoryStore();
+    await proxy.addFlow('Todo', todoFlow(2, 'old://'));
+
+    await proxy.addFlow('Todo', todoFlow(2, 'new://'));
+
+    const registered = await proxy.get(new LinkQuery({ source: Literal.from('Todo').toUrl(), predicate: 'ad4m://flow_uri' }));
+    expect(registered.map(l => l.data.target)).toEqual([todoFlow(2, 'new://').flowUri]);
+    expect((await proxy.getFlow('Todo'))?.flowUri).toBe(todoFlow(2, 'new://').flowUri);
+  });
+});
+
+// A read right after an awaited write must not be served from the query
+// cache: `updateSubject` and `removeSubject` through an abstract class (#1435)
+// write in the executor, so they invalidate it like the other writes.
+describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
+  const query = 'SELECT ?v WHERE { <ad4m://m/1> <test://text> ?v }';
+
+  function client() {
+    const marker = new LinkExpression();
+    marker.data = new Link({ source: 'test://ReadableShape', predicate: 'ad4m://abstract', target: 'literal:true' });
+    return {
+      querySparql: jest.fn()
+        .mockResolvedValueOnce([{ v: 'old' }])
+        .mockResolvedValueOnce([{ v: 'new' }]),
+      updateSubject: jest.fn().mockResolvedValue(true),
+      removeSubject: jest.fn().mockResolvedValue(true),
+      queryLinks: jest.fn().mockResolvedValue([marker]),
+    } as any;
+  }
+
+  beforeEach(() => clearQueryCache());
+
+  it('after updateSubject', async () => {
+    const proxy = createProxy(client());
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
+    await proxy.updateSubject('Readable', 'ad4m://m/1', { text: 'new' });
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
+  });
+
+  it('after removeSubject through an abstract class', async () => {
+    const c = client();
+    const proxy = createProxy(c);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
+    await proxy.removeSubject('Readable', 'ad4m://m/1');
+    expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'Readable', 'ad4m://m/1', undefined);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
+  });
+
+  it('after delete of a built-in TextContent row', async () => {
+    const now = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(now);
+    const c = client();
+    const proxy = createProxy(c);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
+    const row = { constructor: { builtinUri: 'ad4m://TextContent' } };
+    await proxy.removeSubject(row, 'ad4m://m/1');
+    expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'ad4m://TextContent', 'ad4m://m/1', undefined);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
+    jest.spyOn(Date, 'now').mockRestore();
   });
 });

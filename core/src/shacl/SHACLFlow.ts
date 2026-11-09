@@ -180,6 +180,14 @@ export interface ConsensusRule {
    * query are counted. Two evaluation shapes (design §7.2):
    *   Shape 1 — `didProperty` present: run once, extract DIDs from matches.
    *   Shape 2 — `$did` templated in `where`: run per candidate.
+   *
+   * The executor refuses a rule with a key it does not know, anywhere in
+   * the rule (a misspelt `fromRole`, or `grantedByFlow` inside it), and a
+   * key written twice. `addFlow` rejects such a definition before storing
+   * it, with an error naming the state and the key. A definition that
+   * arrived by sync is refused when read: the edge fires for nobody and the
+   * executor log names the key. It does not drop the key and read a wider
+   * gate.
    */
   fromRole?: ModelQuery;
 }
@@ -309,10 +317,13 @@ export interface FlowTransition {
  * - What states exist and their per-state guards (via `requires`)
  * - How to transition between states (via transitions + consensus rules)
  *
- * State lives on the on-graph `FlowInstanceRecord.currentState` and is
- * read/written through the `FlowInstance` wrapper class
- * ({@link FlowInstance.start} / {@link FlowInstance.findAll}) — see design
- * doc §4.3/§5.
+ * A running instance's state is not stored on the graph: the executor
+ * derives it from the signed transition proposals and keeps what it derived
+ * per agent, outside the perspective (#1424). Read it through the
+ * `FlowInstance` wrapper ({@link FlowInstance.start} /
+ * {@link FlowInstance.findAll}, `currentStateName`) or
+ * `PerspectiveProxy.flowStates`, and follow it with
+ * `PerspectiveProxy.onFlowStateChanged` — see design doc §4.3/§5.
  *
  * @example
  * ```typescript
@@ -338,6 +349,47 @@ export interface FlowTransition {
  * ```
  */
 export class SHACLFlow {
+  /**
+   * Every predicate {@link toLinks} writes from the flow's own URI. The
+   * flow's URI also carries links the definition does not own (a receipt
+   * index, for one), so replacing a definition removes only these from it.
+   * Keep in step with `toLinks`.
+   */
+  static readonly FLOW_LEVEL_PREDICATES: readonly string[] = [
+    "rdf://type",
+    "ad4m://flowName",
+    "ad4m://interpretationHint",
+    "ad4m://inputTypes",
+    "ad4m://outputTypes",
+    "ad4m://creationHint",
+    "ad4m://context",
+    "ad4m://consensusRule",
+    "ad4m://hasState",
+    "ad4m://hasTransition",
+  ];
+
+  /**
+   * Every predicate {@link toLinks} writes from a state's or a transition's
+   * URI, plus the retired `ad4m://stateCheck`, so a re-add still clears it
+   * from an older definition. These URIs can carry links the definition does
+   * not own too (an app's label on a state, for one), so replacing a
+   * definition removes only these from them. Keep in step with `toLinks`.
+   */
+  static readonly STATE_AND_TRANSITION_PREDICATES: readonly string[] = [
+    "rdf://type",
+    "ad4m://stateName",
+    "ad4m://stateValue",
+    "ad4m://interpretationHint",
+    "ad4m://requires",
+    "ad4m://semanticCheck",
+    "ad4m://consensusRule",
+    "ad4m://stateCheck",
+    "ad4m://actionName",
+    "ad4m://fromState",
+    "ad4m://toState",
+    "ad4m://transitionActions",
+  ];
+
   /** Flow name (e.g., "TODO") */
   public name: string;
 
@@ -488,10 +540,14 @@ export class SHACLFlow {
   }
 
   /**
-   * Get a transition URI
+   * Get a transition URI: `{namespace}{name}.transition/{from}/{to}/{action}`.
+   * Each part is RFC 3986-encoded, so the URI is unique per transition. The
+   * executor's flow writer (`parse_flow_to_links`) builds the same URI.
    */
-  transitionUri(fromState: string, toState: string): string {
-    return `${this.namespace}${this.name}.${fromState}To${toState}`;
+  transitionUri(fromState: string, toState: string, actionName: string): string {
+    const part = (s: string) =>
+      encodeURIComponent(s).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    return `${this.namespace}${this.name}.transition/${part(fromState)}/${part(toState)}/${part(actionName)}`;
   }
 
   /**
@@ -660,7 +716,7 @@ export class SHACLFlow {
 
     // Transitions
     for (const transition of this._transitions) {
-      const transitionUri = this.transitionUri(transition.fromState, transition.toState);
+      const transitionUri = this.transitionUri(transition.fromState, transition.toState, transition.actionName);
       const fromStateUri = this.stateUri(transition.fromState);
       const toStateUri = this.stateUri(transition.toState);
 
@@ -764,7 +820,7 @@ export class SHACLFlow {
     if (inputTypesLink) {
       try {
         const jsonStr = inputTypesLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -782,7 +838,7 @@ export class SHACLFlow {
     if (outputTypesLink) {
       try {
         const jsonStr = outputTypesLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -819,7 +875,7 @@ export class SHACLFlow {
     if (contextLink) {
       try {
         const jsonStr = contextLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -840,7 +896,7 @@ export class SHACLFlow {
     if (consensusRuleLink) {
       try {
         const jsonStr = consensusRuleLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -906,7 +962,7 @@ export class SHACLFlow {
       if (requiresLink) {
         try {
           const jsonStr = requiresLink.target.replace(
-            /^literal:\/\/string:|^literal:string:/,
+            /^literal:string:/,
             ""
           );
           const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -944,7 +1000,7 @@ export class SHACLFlow {
       if (stateConsensusLink) {
         try {
           const jsonStr = stateConsensusLink.target.replace(
-            /^literal:\/\/string:|^literal:string:/,
+            /^literal:string:/,
             ""
           );
           const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -1009,7 +1065,7 @@ export class SHACLFlow {
       let actions: AD4MAction[] = [];
       if (actionsLink) {
         try {
-          const jsonStr = actionsLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          const jsonStr = actionsLink.target.replace(/^literal:string:/, '');
           actions = JSON.parse(decodeURIComponent(jsonStr));
         } catch {
           // Ignore parse errors
@@ -1107,6 +1163,8 @@ export class SHACLFlow {
       }
       flow.addState(sanitized);
     }
+    // Same "states[0] is the initial state" ordering as fromLinks.
+    flow._states.sort((a, b) => a.value - b.value);
     for (const transition of json.transitions || []) {
       flow.addTransition(transition);
     }

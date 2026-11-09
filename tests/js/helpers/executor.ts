@@ -47,6 +47,9 @@ export type AgentHandle = {
   client: Ad4mClient;
   /** apiPort — useful if a second client needs to connect to the same executor */
   apiPort: number;
+  /** The executor's admin credential: a second client needs it, since a tokenless client is
+   *  anonymous once the executor has one. */
+  adminCredential: string;
   /** Kills the executor process; safe to call multiple times */
   stop(): Promise<void>;
 };
@@ -66,9 +69,13 @@ export async function startAgent(
   opts: {
     passphrase?: string;
     bootstrapSeedPath?: string;
-    /** When set, starts the executor in admin-credential mode and connects
-     *  the returned client using that credential as the bearer token. */
+    /** The executor's admin credential; the returned client connects with it.
+     *  Defaults to one derived from `agentName`: every agent turns multi-user
+     *  mode on, which an executor without an admin credential refuses. */
     adminCredential?: string;
+    /** Start the Holochain conductor. Defaults to false when
+     *  LOCAL_MODE=true, true otherwise. */
+    runHolochain?: boolean;
   } = {},
 ): Promise<AgentHandle> {
   const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
@@ -83,6 +90,8 @@ export async function startAgent(
   fs.rmSync(appDataPath, { recursive: true, force: true });
 
   const bootstrapSeedPath = opts.bootstrapSeedPath ?? BOOTSTRAP_SEED;
+  const runHolochain = opts.runHolochain ?? (process.env.LOCAL_MODE !== 'true');
+  const adminCredential = opts.adminCredential ?? `${agentName}-test-admin`;
 
   const executorProcess = await startExecutor(
     appDataPath,
@@ -91,11 +100,18 @@ export async function startAgent(
     hcAdminPort,
     hcAppPort,
     false,
-    opts.adminCredential,
+    adminCredential,
+    undefined,   // proxyUrl
+    undefined,   // bootstrapUrl
+    undefined,   // relayUrl
+    false,       // enableMcp
+    undefined,   // mcpPort
+    undefined,   // dynamicClassTools
+    runHolochain,
   );
   _activeExecutors.add(executorProcess);
 
-  const client = new Ad4mClient(baseUrl(apiPort), opts.adminCredential);
+  const client = new Ad4mClient(baseUrl(apiPort), adminCredential);
   await client.agent.generate(opts.passphrase ?? "test-passphrase");
   await client.runtime.setMultiUserEnabled(true);
 
@@ -117,7 +133,7 @@ export async function startAgent(
     // suites (prolog-and-literals, app, etc.) already use and falls back
     // to SIGTERM → SIGKILL on its own.
     try {
-      await quitExecutor(executorProcess, apiPort, opts.adminCredential);
+      await quitExecutor(executorProcess, apiPort, adminCredential);
     } catch {
       // quitExecutor already escalates internally; the only way to land here
       // is a programming error, in which case kill is still the right thing.
@@ -127,7 +143,7 @@ export async function startAgent(
     }
   }
 
-  return { client, apiPort, stop };
+  return { client, apiPort, adminCredential, stop };
 }
 
 /**

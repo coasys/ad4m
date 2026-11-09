@@ -260,9 +260,9 @@ describe("MCP static instance tools (dynamicClassTools off)", function() {
         mcpBaseUrl = `http://127.0.0.1:${mcpPort}/mcp`;
         registerPorts([apiPort, hcAdminPort, hcAppPort, mcpPort]);
 
-        if (fs.existsSync(appDataPath)) {
-            fs.rmSync(appDataPath, { recursive: true });
-        }
+        // rmSync with force also removes a dangling symlink, which existsSync reports as absent:
+        // startExecutor links appDataPath to /tmp/ad4m-<hash>, and CI deletes old /tmp dirs.
+        fs.rmSync(appDataPath, { recursive: true, force: true });
         fs.mkdirSync(appDataPath, { recursive: true });
 
         executorProcess = await startExecutor(
@@ -281,7 +281,7 @@ describe("MCP static instance tools (dynamicClassTools off)", function() {
 
         await sleep(3000);
 
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
         await adminClient.agent.generate("test-passphrase");
     });
 

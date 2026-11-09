@@ -101,10 +101,14 @@ describe("FlowTransitionProposal — @Model", function () {
       predicate: "ad4m://flow/to_state",
       target: "literal:string:tensionIdentified",
     }));
+    // The engine writes the proposer as the acting agent's own DID, signed by
+    // that agent; a `proposer` link naming anyone else is a claim the model
+    // (like the engine) does not read.
+    const me = (await ad4m.agent.me()).did;
     await p.add(new Link({
       source: proposal,
       predicate: "ad4m://flow/proposer",
-      target: "literal:string:did:example:alice",
+      target: `literal:string:${me}`,
     }));
     await p.add(new Link({
       source: proposal,
@@ -117,7 +121,7 @@ describe("FlowTransitionProposal — @Model", function () {
     expect(proposals[0].flowInstance).to.equal(flowInstance);
     expect(proposals[0].fromState).to.equal("collectingPerspectives");
     expect(proposals[0].toState).to.equal("tensionIdentified");
-    expect(proposals[0].proposer).to.equal("did:example:alice");
+    expect(proposals[0].proposer).to.equal(me);
     expect(proposals[0].evidenceHashes).to.equal("{}");
     // "When was this proposed?" is answered by Ad4mModel's built-in
     // `createdAt`, synthesised on hydration from the earliest link
@@ -254,6 +258,36 @@ describe("FlowTransitionProposal — @Model", function () {
       .to.equal(rust!.min_count);
     expect(outputsHash.setter, "setter must match the Rust SDNA's setSingleTarget")
       .to.deep.equal(rust!.setter);
+
+    // Votes are read, never written, through the model; and the vote getter
+    // restates the engine's rule, so both sides must carry the same one.
+    const rustProps = (JSON.parse(raw) as {
+      properties: Array<{ path: string; writable?: boolean; getter?: string; local?: boolean }>;
+    }).properties;
+    for (const path of ["ad4m://acceptedBy"]) {
+      const ts = shape.properties.find((prop: any) => prop.path === path);
+      const rs = rustProps.find((prop) => prop.path === path);
+      expect(ts, `TS shape must declare ${path}`).to.exist;
+      expect(ts.writable, `${path} is read-only on both sides`).to.equal(false);
+      expect(rs!.writable).to.equal(false);
+      expect(ts.adder ?? ts.setter, `${path} has no writer`).to.be.undefined;
+    }
+    expect(
+      shape.properties.find((prop: any) => prop.path === "ad4m://acceptedBy").getter,
+      "the vote getter must be the Rust SDNA's, byte for byte",
+    ).to.equal(rustProps.find((prop) => prop.path === "ad4m://acceptedBy")!.getter);
+    // `proposer` is read with the engine's rule too, so a forged proposer link
+    // neither replaces the real proposer nor drops their vote from the set.
+    expect(
+      shape.properties.find((prop: any) => prop.path === "ad4m://flow/proposer").getter,
+      "the proposer getter must be the Rust SDNA's, byte for byte",
+    ).to.equal(rustProps.find((prop) => prop.path === "ad4m://flow/proposer")!.getter);
+    // The fired mark left the graph (#1424): it is the executor's per-agent
+    // bookkeeping, read through `perspective.flowFired`. Neither shape may
+    // still declare it, or hydration would surface dead `Local` links.
+    expect(shape.properties.find((prop: any) => prop.path === "ad4m://flow/resolved_as")).to.be
+      .undefined;
+    expect(rustProps.find((prop) => prop.path === "ad4m://flow/resolved_as")).to.be.undefined;
   });
 });
 
@@ -303,11 +337,8 @@ describe("FlowInstanceRecord — @Model", function () {
       predicate: "ad4m://flow/base",
       target: "literal:string:ad4m%3A%2F%2Fsome-subject",
     }));
-    // `currentState` is declared `local: true`, so #1028's status filter
-    // hydrates it from `Local` links and from nothing else: a Shared link on
-    // this predicate is a peer asserting what state *this* replica is in, and
-    // is withheld on purpose. `write_local_current_state` writes `Local`, so
-    // this is also the status the engine really produces.
+    // What the pre-#1424 engine left on disk: a `Local` state cache link.
+    // The record no longer declares it, so it does not surface.
     await p.add(new Link({
       source: instance,
       predicate: "ad4m://flow/current_state",
@@ -318,7 +349,7 @@ describe("FlowInstanceRecord — @Model", function () {
     expect(all.length).to.equal(1);
     expect(all[0].flowUri).to.equal("delivery://DeliveryFlow");
     expect(all[0].subject).to.equal("ad4m://some-subject");
-    expect(all[0].currentState).to.equal("Scoped");
+    expect((all[0] as any).currentState, "the state is not on the record").to.be.undefined;
     // `createdAt` is Ad4mModel's synthesised earliest-link timestamp
     // (ms since epoch after hydration); presence is enough for parity.
     expect(all[0].createdAt).to.be.a("number");
@@ -436,6 +467,15 @@ describe("FlowInstance.start — v5 API", function () {
     expect(all.length).to.equal(2);
     const bases = all.map((i) => i.subject).sort();
     expect(bases).to.deep.equal(["ad4m://task/a", "ad4m://task/b"]);
+  });
+
+  it("returns the running instance rather than minting a second on the same base", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const first = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
+    const again = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
+
+    expect(again.id).to.equal(first.id);
+    expect(await FlowInstance.findAll(p, { subject: "ad4m://task/1" })).to.have.length(1);
   });
 
   it("throws when the named flow is not registered on the perspective", async () => {
@@ -702,7 +742,7 @@ describe("FlowInstance wrapper — read + stub API", function () {
     await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
     const inst = await FlowInstance.start(p, "Delivery", "ad4m://task/currentstate");
 
-    const state = inst.currentState;
+    const state = inst.currentState!;
     expect(state.name).to.equal("Identified");
     // Object identity: same reference as the one on the shape.
     expect(state).to.equal(inst.shape.states[0]);
@@ -723,11 +763,10 @@ describe("FlowInstance wrapper — read + stub API", function () {
     await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
     const inst = await FlowInstance.start(p, "Delivery", "ad4m://task/terminal");
 
-    // Simulate consensus firing by mutating the underlying record directly —
-    // slice 10.6 wires this properly; today we exercise the wrapper's
-    // filter logic in isolation.
-    (inst.record as any).currentState = "Done";
-    expect(inst.availableTransitions).to.deep.equal([]);
+    // A wrapper whose recorded state is terminal — the wrapper's filter
+    // logic in isolation, without driving consensus to Done.
+    const done = FlowInstance.wrap(p, inst.shape, inst.record, "Done");
+    expect(done.availableTransitions).to.deep.equal([]);
   });
 
   it("proposals() returns an empty array when no transitions have been proposed", async () => {
@@ -757,7 +796,8 @@ describe("FlowInstance wrapper — read + stub API", function () {
     expect(inst.record.flowUri).to.equal(flow.flowUri);
     expect(inst.flowName).to.equal("Delivery");
     expect(inst.record.subject).to.equal("ad4m://task/record-access");
-    expect(inst.record.currentState).to.equal("Identified");
+    // The state is the wrapper's, read from the executor — not the record's.
+    expect(inst.currentStateName).to.equal("Identified");
   });
 });
 

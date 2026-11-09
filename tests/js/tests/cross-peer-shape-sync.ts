@@ -22,11 +22,11 @@
 import { PerspectiveProxy, Perspective, Link, LinkQuery } from "@coasys/ad4m";
 import { Ad4mModel, Model, Property } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
-import { sleep } from "../utils/utils";
 import { waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
+import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils/linkLangConfig";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
@@ -39,7 +39,12 @@ class CrossPeerNote extends Ad4mModel {
   body: string = "";
 }
 
-export default function crossPeerShapeSyncTests(testContext: TestContext) {
+export default function crossPeerShapeSyncTests(
+  testContext: TestContext,
+  // Which link language carries the sync. Defaults to p-diff-sync; the
+  // local suite passes the server-link-language config.
+  getLinkLang: () => LinkLangConfig = () => holochainLinkLang(DIFF_SYNC_OFFICIAL),
+) {
   return () => {
     describe("Cross-peer SHACL shape sync", function () {
       // Wait budgets sized for Holochain gossip on CI:
@@ -55,82 +60,43 @@ export default function crossPeerShapeSyncTests(testContext: TestContext) {
         // cross-peer barrier so we're not measuring carry-over from
         // any prior test's shared perspective.
         const aliceHandle = await alice.perspective.add(`shape-sync-${uuidv4()}`);
-        const socialContext = await alice.languages.applyTemplateAndPublish(
-          DIFF_SYNC_OFFICIAL,
-          JSON.stringify({ uid: uuidv4(), name: "cross-peer shape sync" }),
-        );
+        const socialContext = await publishLinkLanguage(alice, getLinkLang(), "cross-peer shape sync");
         const url = await alice.neighbourhood.publishFromPerspective(
           aliceHandle.uuid,
           socialContext.address,
           new Perspective(),
         );
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
-        await testContext.makeAllNodesKnown();
-        await sleep(2000);
+        await testContext.makeAllNodesKnown([alice, aliceHandle.uuid], [bob, bobHandle.uuid]);
 
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
 
-        // Prove the sync path is live BEFORE the assertions run. A cold
-        // gossip peer failing to warm up manifests as a shape-sync
-        // timeout downstream, which would be misdiagnosed.
-        const marker = `warmup://${uuidv4()}`;
+        // Alice registers the SHACL and creates one instance. Registration
+        // writes `LinkStatus::Shared` links (see `add_sdna_inner`) which
+        // the link language delivers to Bob.
+        await CrossPeerNote.register(aliceP);
+        const note = new CrossPeerNote(aliceP);
+        note.body = "hello from Alice";
+        await note.save();
+        // Written last: once Bob holds it, he holds the shape and the note.
+        const marker = `marker://${uuidv4()}`;
         await aliceP.add(
           new Link({ source: marker, predicate: "ns://ping", target: "literal:string:ok" }),
         );
         await waitUntil(
           async () => (await bobP.get(new LinkQuery({ source: marker }))).length > 0,
           180_000,
-          "gossip warm-up: Alice's marker link to reach Bob",
+          "Alice's shape, note and marker to reach Bob",
         );
-
-        // Alice registers the SHACL and creates one instance. Registration
-        // writes `LinkStatus::Shared` links (see `add_sdna_inner`) which
-        // p-diff-sync will deliver to Bob.
-        await CrossPeerNote.register(aliceP);
-        const note = new CrossPeerNote(aliceP);
-        note.body = "hello from Alice";
-        await note.save();
 
         // Bob does NOT call `CrossPeerNote.register(bobP)` — this is the
         // whole point. Without the engine fix, this findAll throws
-        // `No SHACL shape stored for class 'CrossPeerNote'` immediately.
-        // With the fix, `model_query` polls up to `MODEL_QUERY_SHAPE_WAIT`
-        // (20s) for Alice's SDNA to arrive over sync, then succeeds.
-        //
-        // Extra tolerance beyond the engine's 20s wait so a cold
-        // Holochain gossip cycle can still land: retry the query in a
-        // waitUntil loop. Any single call may throw "no shape" if the
-        // shape hasn't arrived within the engine budget — that's the
-        // caller's cue to try again.
-        const notes = await waitUntilFindAllSucceeds(bobP);
+        // `No SHACL shape stored for class 'CrossPeerNote'`.
+        const notes = await CrossPeerNote.findAll(bobP);
         expect(notes.length, "Bob should see Alice's note").to.equal(1);
         expect(notes[0].body).to.equal("hello from Alice");
       });
-
-      /**
-       * Wrap `findAll` in a bounded retry loop. Each `model_query` call
-       * already waits up to 20s internally; here we tolerate one full
-       * engine budget expiry then retry, up to a 90s ceiling.
-       */
-      async function waitUntilFindAllSucceeds(p: PerspectiveProxy): Promise<CrossPeerNote[]> {
-        const deadline = Date.now() + 90_000;
-        let lastError: unknown = null;
-        while (Date.now() < deadline) {
-          try {
-            const results = await CrossPeerNote.findAll(p);
-            if (results.length > 0) return results;
-          } catch (e) {
-            lastError = e;
-          }
-          await sleep(2000);
-        }
-        throw new Error(
-          `CrossPeerNote.findAll on the non-registering peer never succeeded within 90s. Last error: ${
-            lastError ? String(lastError) : "empty result set"
-          }`,
-        );
-      }
     });
   };
 }

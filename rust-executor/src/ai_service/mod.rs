@@ -1,16 +1,15 @@
 use self::error::AIServiceError;
-use crate::pubsub::AI_MODEL_LOADING_STATUS;
-#[allow(unused_imports)]
-use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::get_global_pubsub;
 use crate::types::ModelInput;
+use crate::types::RequestContext;
 #[allow(unused_imports)]
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
-use crate::types::{AITask, LocalModel, Model, ModelApi, ModelApiType, ModelType};
-use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
-use anyhow::anyhow;
+use crate::types::{AITask, LocalModel, ModelApi, ModelApiType, ModelType};
+use anyhow::{anyhow, Context};
 use candle_core::Device;
 use deno_core::error::AnyError;
-use futures::{FutureExt, SinkExt};
+use futures::SinkExt;
 use holochain::test_utils::itertools::Itertools;
 use kalosm::language::*;
 use kalosm::sound::TextStream;
@@ -25,6 +24,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
+mod default_embedding;
 mod error;
 pub mod harness;
 pub mod providers;
@@ -103,8 +103,9 @@ struct TranscriptionSession {
     // stored here for potential close-stream reconciliation)
     #[allow(dead_code)]
     model_id: String,
-    #[allow(dead_code)]
-    user_email: Option<String>,
+    /// The managed agent that opened the stream, by DID: it pays, and only it reaches the
+    /// stream. `None`: the main agent.
+    agent_did: Option<String>,
 }
 
 #[derive(Clone)]
@@ -118,6 +119,7 @@ pub struct AIService {
     /// Cloning Arc is cheap (just increments ref count), model weights stay in memory once
     /// Saves 500MB-1.5GB per stream!
     shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
+    default_embedding: Arc<default_embedding::DefaultEmbedding>,
 }
 
 impl Drop for AIService {
@@ -327,24 +329,20 @@ async fn publish_model_status(
         loaded,
     };
 
-    let _ = Ad4mDb::with_global_instance(|db| {
-        let model = model.clone();
-        db.create_or_update_model_status(
-            &model.model,
-            model.progress,
-            &model.status,
-            model.downloaded,
-            model.loaded,
-        )
-    });
+    let _ = crate::db_backend::db_backend().create_or_update_model_status(
+        &model.model,
+        model.progress,
+        &model.status,
+        model.downloaded,
+        model.loaded,
+    );
 
-    get_global_pubsub()
-        .await
-        .publish(
-            &AI_MODEL_LOADING_STATUS,
-            &serde_json::to_string(&model).expect("AIModelLoading must be serializable"),
-        )
-        .await;
+    // Model names and progress only: every session sees them.
+    get_global_pubsub().await.publish_event(Event::new(
+        Topic::AiModelLoadingStatus,
+        Audience::Everyone,
+        &model,
+    ));
 }
 
 async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
@@ -413,14 +411,35 @@ pub struct VoiceActivityParams {
     pub time_before_speech: Option<u64>,
 }
 
+/// The owner of a new transcription stream: the managed agent's DID (billing, ownership;
+/// `None` for the main agent) and the DID of the agent the caller acts as (event filtering).
+/// A caller whose agent does not resolve owns nothing and opens no stream: text without an
+/// owner DID would reach every session.
+fn transcription_stream_owner(
+    context: crate::agent::AgentContext,
+) -> Result<(Option<String>, String)> {
+    if let Some(managed) = context.managed_did() {
+        crate::agent::AgentService::wallet_key_for_did(managed)?;
+    }
+    let did = crate::agent::did_for_context(&context)?;
+    Ok((context.managed_did().map(str::to_string), did))
+}
+
 impl AIService {
     pub fn new() -> Result<Self> {
+        Self::with_embedding_loader(Arc::new(|model| {
+            Box::pin(Self::load_embedding_worker(model))
+        }))
+    }
+
+    fn with_embedding_loader(loader: default_embedding::EmbeddingLoader) -> Result<Self> {
         let service = AIService {
             embedding_channel: Arc::new(Mutex::new(HashMap::new())),
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
             cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
             shared_whisper_models: Arc::new(Mutex::new(HashMap::new())), // Models loaded on demand per size
+            default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(loader)),
         };
 
         let clone = service.clone();
@@ -478,28 +497,14 @@ impl AIService {
 
     pub async fn load(&self) -> Result<()> {
         // Get all models
-        let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
+        let models = crate::db_backend::db_backend().get_models()?;
 
         // Create a future for each, initialzing that model
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
 
         if models.is_empty() {
-            // No models configured — auto-load Bert for embedding support
-            futures.push(Box::pin(
-                self.init_model(Model {
-                    id: "bert-id".to_string(),
-                    name: "bert".to_string(),
-                    model_type: ModelType::Embedding,
-                    local: Some(LocalModel {
-                        file_name: "bert".to_string(),
-                        tokenizer_source: None,
-                        huggingface_repo: None,
-                        revision: None,
-                    }),
-                    api: None,
-                })
-                .map(|_| ()),
-            ));
+            // No models configured: serve Bert for embeddings, loaded by the first embed call
+            self.enable_default_embedding().await;
         } else {
             for model in models.into_iter() {
                 futures.push(Box::pin(async move {
@@ -522,7 +527,8 @@ impl AIService {
         // caller that just spawned a worker + Spawn'd a task into it can wipe
         // that task_descriptions entry mid-flight when `load()` re-spawns
         // the worker via `init_model` and then bails before re-registering.
-        let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        let tasks = crate::db_backend::db_backend()
+            .get_tasks()
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         for task in tasks {
             let task_name = task.name.clone();
@@ -547,22 +553,24 @@ impl AIService {
     }
 
     pub async fn add_model(&self, model: ModelInput) -> Result<String> {
-        let model = Ad4mDb::with_global_instance(|db| {
-            let id = db.add_model(&model)?;
-            db.get_model(id)
-        })
-        .map_err(|e| anyhow::anyhow!("{}", e))?
-        .expect("since we just added it");
+        let db = crate::db_backend::db_backend();
+        let model = db
+            .add_model(&model)
+            .and_then(|id| db.get_model(id))
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .ok_or_else(|| anyhow::anyhow!("Model disappeared after add — concurrent removal?"))?;
         self.init_model(model.clone()).await?;
         Ok(model.id)
     }
 
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
-        if ModelType::Llm == model_type {
-            Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))?;
+        // Every model type has a default. Only an LLM default has tasks to move.
+        crate::db_backend::db_backend().set_default_model(model_type.clone(), &model_id)?;
 
+        if ModelType::Llm == model_type {
             // Respawn task on new default model
-            let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            let tasks = crate::db_backend::db_backend()
+                .get_tasks()
                 .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
             for task in tasks.into_iter().filter(|t| t.model_id == "default") {
@@ -573,7 +581,8 @@ impl AIService {
     }
 
     pub async fn model_status(model_id: String) -> Result<AIModelLoadingStatus> {
-        let status = Ad4mDb::with_global_instance(|db| db.get_model_status(&model_id))
+        let status = crate::db_backend::db_backend()
+            .get_model_status(&model_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
             .ok_or(AIServiceError::ModelNotFound)?;
 
@@ -782,17 +791,18 @@ impl AIService {
         }
 
         publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
+        // The provider client is the key's one receiver: it sends the key to the provider.
+        let api_key = api.api_key.expose_once();
         let client: Box<dyn RemoteChat> = match api.api_type {
-            ModelApiType::OpenAi => Box::new(providers::openai::OpenAiChat::new(
-                &api.api_key,
-                api.base_url,
-            )),
+            ModelApiType::OpenAi => {
+                Box::new(providers::openai::OpenAiChat::new(&api_key, api.base_url))
+            }
             ModelApiType::Anthropic => Box::new(providers::anthropic::AnthropicChat::new(
-                &api.api_key,
+                &api_key,
                 api.base_url,
             )),
             ModelApiType::Ollama => Box::new(providers::ollama::OllamaChat::new(
-                &api.api_key,
+                &api_key,
                 api.base_url,
                 api.max_num_ctx,
             )),
@@ -1188,14 +1198,16 @@ impl AIService {
     // -------------------------------------
 
     pub fn get_tasks() -> Result<Vec<AITask>> {
-        let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        let tasks = crate::db_backend::db_backend()
+            .get_tasks()
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         Ok(tasks)
     }
 
-    pub async fn add_task(&self, task: AITaskInput) -> Result<AITask> {
-        let task_id = Ad4mDb::with_global_instance(|db| {
-            db.add_task(
+    /// `agent_did` is the owning managed agent's DID; `None` makes a task of the main agent.
+    pub async fn add_task(&self, task: AITaskInput, agent_did: Option<&str>) -> Result<AITask> {
+        let task_id = crate::db_backend::db_backend()
+            .add_task(
                 task.name.clone(),
                 task.model_id.clone(),
                 task.system_prompt.clone(),
@@ -1204,11 +1216,12 @@ impl AIService {
                     .map(|p| p.clone().into())
                     .collect(),
                 task.meta_data.clone(),
+                agent_did,
             )
-        })
-        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
+        let task = crate::db_backend::db_backend()
+            .get_task(task_id)?
             .expect("to get task that we just created");
 
         self.spawn_task(task.clone()).await?;
@@ -1217,7 +1230,8 @@ impl AIService {
 
     fn replace_model_variables(model_id: &String) -> Result<String> {
         Ok(if model_id == "default" {
-            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?
+            crate::db_backend::db_backend()
+                .get_default_model(ModelType::Llm)?
                 .ok_or_else(|| anyhow::anyhow!("Task needs default model but no default set"))?
         } else {
             model_id.clone()
@@ -1258,8 +1272,8 @@ impl AIService {
 
     pub async fn update_task(&self, task: AITask) -> Result<AITask> {
         let task_id = task.task_id.clone();
-        Ad4mDb::with_global_instance(|db| {
-            db.update_task(
+        crate::db_backend::db_backend()
+            .update_task(
                 task.task_id,
                 task.name,
                 task.model_id,
@@ -1267,12 +1281,12 @@ impl AIService {
                 task.prompt_examples,
                 task.meta_data,
             )
-        })
-        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
         self.remove_task(task_id.clone()).await?;
 
-        let updated_task = Ad4mDb::with_global_instance(|db| db.get_task(task_id.clone()))
+        let updated_task = crate::db_backend::db_backend()
+            .get_task(task_id.clone())
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
             .ok_or(AIServiceError::TaskNotFound)?;
 
@@ -1283,7 +1297,8 @@ impl AIService {
 
     pub async fn delete_task(&self, task_id: String) -> Result<bool> {
         self.remove_task(task_id.clone()).await?;
-        Ad4mDb::with_global_instance(|db| db.remove_task(task_id))
+        crate::db_backend::db_backend()
+            .remove_task(task_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         Ok(true)
     }
@@ -1380,7 +1395,7 @@ impl AIService {
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
         constraint: Option<ArcParser<()>>,
     ) -> Result<PromptResult> {
         let resolved = Self::replace_model_variables(&model_id)?;
@@ -1447,7 +1462,7 @@ impl AIService {
         // a no-op. InsufficientCredits is returned to the caller so /v1
         // can propagate 429; other errors are logged and swallowed.
         Self::bill_prompt_if_authed(
-            auth_token.as_deref(),
+            bill_to.as_deref(),
             &resolved,
             prompt_tokens,
             completion_tokens,
@@ -1474,7 +1489,8 @@ impl AIService {
             Err(_) => return false,
         };
 
-        Ad4mDb::with_global_instance(|db| db.get_model(resolved))
+        crate::db_backend::db_backend()
+            .get_model(resolved)
             .ok()
             .flatten()
             .and_then(|model| model.api)
@@ -1498,7 +1514,7 @@ impl AIService {
         model_id: String,
         turns: Vec<ChatTurn>,
         tools: Vec<ToolSpec>,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
     ) -> Result<ChatReply> {
         let resolved = Self::replace_model_variables(&model_id)?;
 
@@ -1541,7 +1557,7 @@ impl AIService {
         );
 
         Self::bill_prompt_if_authed(
-            auth_token.as_deref(),
+            bill_to.as_deref(),
             &resolved,
             prompt_tokens,
             completion_tokens,
@@ -1562,7 +1578,7 @@ impl AIService {
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
         constraint: Option<ArcParser<()>>,
     ) -> Result<(
         mpsc::UnboundedReceiver<String>,
@@ -1613,8 +1629,7 @@ impl AIService {
                 Ok(inner) => inner,
                 Err(_) => Err(anyhow!("LLM stream ended without a final result")),
             };
-            Self::bill_and_forward_stream_result(auth_token, &billing_model_id, result, done_tx)
-                .await;
+            Self::bill_and_forward_stream_result(bill_to, &billing_model_id, result, done_tx).await;
         });
 
         // Schedule a Remove for after the prompt completes — best-effort
@@ -1648,12 +1663,13 @@ impl AIService {
         &self,
         task_id: String,
         prompt: String,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
     ) -> Result<PromptResult> {
         let (result_sender, rx) = oneshot::channel();
 
         // Retrieve the task to find the associated model_id
-        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id.clone()))
+        let task = crate::db_backend::db_backend()
+            .get_task(task_id.clone())
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
 
@@ -1733,7 +1749,7 @@ impl AIService {
 
         // Bill via the shared host_rates helper. See prompt_messages.
         Self::bill_prompt_if_authed(
-            auth_token.as_deref(),
+            bill_to.as_deref(),
             &model_id,
             prompt_tokens,
             completion_tokens,
@@ -1755,14 +1771,14 @@ impl AIService {
     /// so the streaming billing behaviour is unit-testable without a live
     /// LLM channel.
     pub(crate) async fn bill_and_forward_stream_result(
-        auth_token: Option<String>,
+        bill_to: Option<String>,
         model_id: &str,
         result: Result<PromptResult>,
         done_tx: oneshot::Sender<Result<PromptResult>>,
     ) {
         if let Ok(pr) = &result {
             Self::bill_prompt_if_authed(
-                auth_token.as_deref(),
+                bill_to.as_deref(),
                 model_id,
                 pr.prompt_tokens,
                 pr.completion_tokens,
@@ -1777,17 +1793,16 @@ impl AIService {
     /// length estimate that estimate_token_count() computes (chars/4).
     /// This mirrors what the transcription worker does with word_count,
     /// so every AI billing path routes through the same shape.
+    ///
+    /// `bill_to` is the managed agent the request acts as, by DID; the main agent pays
+    /// nothing.
     fn bill_prompt_if_authed(
-        auth_token: Option<&str>,
+        bill_to: Option<&str>,
         model_id: &str,
         prompt_tokens: usize,
         completion_tokens: usize,
     ) {
-        let Some(token) = auth_token else {
-            return;
-        };
-        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
-        else {
+        let Some(agent_did) = bill_to else {
             return;
         };
         let total_tokens = prompt_tokens.saturating_add(completion_tokens);
@@ -1795,7 +1810,7 @@ impl AIService {
         // inside bill_ai_operation. Prompt has already run so we don't
         // want to fail the caller on a bookkeeping-only issue.
         let _ = crate::billing::bill_ai_operation(
-            &email,
+            agent_did,
             model_id,
             "ai_prompt",
             total_tokens,
@@ -1804,16 +1819,12 @@ impl AIService {
     }
 
     /// Shared post-compute billing hook for embed paths.
-    fn bill_embed_if_authed(auth_token: Option<&str>, model_id: &str, token_count: usize) {
-        let Some(token) = auth_token else {
-            return;
-        };
-        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
-        else {
+    fn bill_embed_if_authed(bill_to: Option<&str>, model_id: &str, token_count: usize) {
+        let Some(agent_did) = bill_to else {
             return;
         };
         let _ = crate::billing::bill_ai_operation(
-            &email,
+            agent_did,
             model_id,
             "ai_embedding",
             token_count,
@@ -1826,32 +1837,69 @@ impl AIService {
     // -------------------------------------
 
     async fn spawn_embedding_model(&self, model_config: crate::types::Model) {
-        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
         let model_name = model_config.name.clone();
+        let (bert_tx, _ready) = Self::start_embedding_worker(model_config);
+        self.embedding_channel
+            .lock()
+            .await
+            .insert(model_name, bert_tx);
+    }
+
+    /// Starts a worker thread that loads the model, then answers embedding requests from
+    /// the returned channel. The receiver resolves once the model has loaded or failed to.
+    fn start_embedding_worker(
+        model_config: crate::types::Model,
+    ) -> (
+        mpsc::UnboundedSender<EmbeddingRequest>,
+        oneshot::Receiver<Result<()>>,
+    ) {
+        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
+        let (ready_tx, ready_rx) = oneshot::channel();
         thread::spawn({
             let model_id = model_config.id.clone();
             move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
 
-                let model = rt
-                    .block_on(async {
-                        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
+                let model = rt.block_on(async {
+                    publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
-                        let bert = Bert::builder()
-                            .with_device(Self::new_candle_device())
-                            .build_with_loading_handler({
-                                let model_id = model_id.clone();
-                                move |progress| {
-                                    tokio::spawn(handle_progress(model_id.clone(), progress));
-                                }
-                            })
-                            .await;
+                    let bert = Bert::builder()
+                        .with_device(Self::new_candle_device())
+                        .build_with_loading_handler({
+                            let model_id = model_id.clone();
+                            move |progress| {
+                                tokio::spawn(handle_progress(model_id.clone(), progress));
+                            }
+                        })
+                        .await;
 
-                        publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
-
-                        bert
-                    })
-                    .expect("couldn't build Bert model");
+                    bert
+                });
+                let model = match model {
+                    Ok(model) => {
+                        rt.block_on(publish_model_status(
+                            model_id.clone(),
+                            100.0,
+                            "Loaded",
+                            true,
+                            true,
+                        ));
+                        let _ = ready_tx.send(Ok(()));
+                        model
+                    }
+                    Err(e) => {
+                        error!("couldn't build Bert model {model_id}: {e:?}");
+                        rt.block_on(publish_model_status(
+                            model_id.clone(),
+                            0.0,
+                            "Not loaded",
+                            false,
+                            false,
+                        ));
+                        let _ = ready_tx.send(Err(anyhow!("couldn't build Bert model: {e:?}")));
+                        return;
+                    }
+                };
 
                 // Block on the channel — zero CPU while idle.
                 loop {
@@ -1868,18 +1916,14 @@ impl AIService {
                 }
             }
         });
-
-        self.embedding_channel
-            .lock()
-            .await
-            .insert(model_name, bert_tx);
+        (bert_tx, ready_rx)
     }
 
     pub async fn embed(
         &self,
         model_id: String,
         text: String,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
     ) -> Result<EmbedResult> {
         let token_count = estimate_token_count(&text);
         let text_chars = text.chars().count();
@@ -1894,6 +1938,7 @@ impl AIService {
             token_count
         );
         let started = std::time::Instant::now();
+        self.ensure_default_embedding(&model_id).await?;
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get(&model_id) {
@@ -1919,7 +1964,7 @@ impl AIService {
         );
 
         // Bill via the shared host_rates helper.
-        Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count);
+        Self::bill_embed_if_authed(bill_to.as_deref(), &model_id, token_count);
 
         Ok(EmbedResult {
             embeddings,
@@ -1962,7 +2007,7 @@ impl AIService {
         }
 
         // Try to get model from DB by ID
-        if let Ok(Some(model)) = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone())) {
+        if let Ok(Some(model)) = crate::db_backend::db_backend().get_model(model_id.clone()) {
             if model.model_type != ModelType::Transcription {
                 return Err(anyhow!("Model '{}' is not a transcription model", model_id));
             }
@@ -1974,7 +2019,7 @@ impl AIService {
 
         // if nothing above works, see if we have a transcription model in the DB and use that
         // Try to find first transcription model in DB
-        if let Ok(models) = Ad4mDb::with_global_instance(|db| db.get_models()) {
+        if let Ok(models) = crate::db_backend::db_backend().get_models() {
             if let Some(model) = models
                 .into_iter()
                 .find(|m| m.model_type == ModelType::Transcription)
@@ -1993,12 +2038,10 @@ impl AIService {
         &self,
         model_id: String,
         _params: Option<VoiceActivityParams>,
-        auth_token: String,
+        caller: &RequestContext,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
-
-        // Extract user email from token for billing and ownership tracking
-        let user_email = crate::agent::capabilities::user_email_from_token(auth_token.clone());
+        let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
@@ -2046,13 +2089,10 @@ impl AIService {
         let text_broadcast_tx_clone = text_broadcast_tx.clone();
 
         // Clone billing context for the async task
-        let billing_email = user_email.clone();
+        let billing_agent = agent_did.clone();
         let billing_model_id = model_id.clone();
 
-        // Resolve user DID for SSE event filtering (multi-user isolation)
-        let user_did =
-            crate::agent::did_for_context(&crate::agent::AgentContext::from_auth_token(auth_token))
-                .ok();
+        let user_did = Some(user_did);
 
         // Clone the streams map so the thread can remove itself on exit
         let streams_map = self.transcription_streams.clone();
@@ -2159,26 +2199,22 @@ impl AIService {
                             // Bill for transcribed words
                             let word_count = text.split_whitespace().count();
                             if word_count > 0 {
-                                if let Some(ref email) = billing_email {
+                                if let Some(ref billed_did) = billing_agent {
                                     let rate_key =
-                                        crate::db::Ad4mDb::with_global_instance(|db| {
-                                            db.get_model(billing_model_id.clone())
-                                        })
+                                        crate::db_backend::db_backend().get_model(billing_model_id.clone())
                                         .ok()
                                         .flatten()
                                         .map(|m| m.name)
                                         .unwrap_or_else(|| billing_model_id.clone());
 
                                     let rate =
-                                        crate::db::Ad4mDb::with_global_instance(|db| {
-                                            db.get_host_rate(&rate_key)
-                                        })
+                                        crate::db_backend::db_backend().get_host_rate(&rate_key)
                                         .ok()
                                         .flatten()
                                         .unwrap_or(0.0);
                                     let cost = word_count as f64 * rate;
                                     match crate::billing::bill_compute(
-                                        email,
+                                        billed_did,
                                         cost,
                                         "ai_transcription",
                                         Some(&format!(
@@ -2189,7 +2225,7 @@ impl AIService {
                                         Err(
                                             crate::billing::BillingError::InsufficientCredits,
                                         ) => {
-                                            log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
+                                            log::warn!("Transcription: insufficient credits for agent {} — delivering already-computed text, future feeds will be rejected", billed_did);
                                         }
                                         Err(e) => {
                                             log::warn!(
@@ -2208,22 +2244,18 @@ impl AIService {
                             let stream_id_for_pubsub = stream_id_clone.clone();
                             let user_did_for_pubsub = user_did.clone();
                             rt.spawn(async move {
-                                let _ = get_global_pubsub()
-                                    .await
-                                    .publish(
-                                        &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                        &serde_json::to_string(
-                                            &TranscriptionTextFilter {
-                                                stream_id: stream_id_for_pubsub,
-                                                text: text_for_pubsub,
-                                                user_did: user_did_for_pubsub,
-                                            },
-                                        )
-                                        .expect(
-                                            "TranscriptionTextFilter must be serializable",
-                                        ),
-                                    )
-                                    .await;
+                                // The stream owner's sessions only.
+                                let audience = Audience::agent(user_did_for_pubsub.as_deref());
+                                let text = TranscriptionTextFilter {
+                                    stream_id: stream_id_for_pubsub,
+                                    text: text_for_pubsub,
+                                    user_did: user_did_for_pubsub,
+                                };
+                                get_global_pubsub().await.publish_event(Event::new(
+                                    Topic::AiTranscriptionText,
+                                    audience,
+                                    text,
+                                ));
                             });
 
                             // Also broadcast via per-stream channel for SSE feed responses
@@ -2259,7 +2291,7 @@ impl AIService {
                 last_activity,
                 text_broadcast_tx,
                 model_id: model_id.clone(),
-                user_email,
+                agent_did,
             },
         );
 
@@ -2270,13 +2302,13 @@ impl AIService {
         &self,
         stream_id: &String,
         audio_samples: Vec<f32>,
-        auth_token: &str,
+        caller: &RequestContext,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
 
         if let Some(stream) = map_lock.get_mut(stream_id) {
             // Verify the caller owns this stream
-            Self::verify_stream_ownership(stream, auth_token)?;
+            Self::verify_stream_ownership(stream, caller)?;
             // Update last activity time
             *stream.last_activity.lock().await = std::time::Instant::now();
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
@@ -2294,12 +2326,12 @@ impl AIService {
         &self,
         stream_id: &String,
         audio_samples: Vec<f32>,
-        auth_token: &str,
+        caller: &RequestContext,
     ) -> Result<tokio::sync::broadcast::Receiver<String>> {
         let mut map_lock = self.transcription_streams.lock().await;
 
         if let Some(stream) = map_lock.get_mut(stream_id) {
-            Self::verify_stream_ownership(stream, auth_token)?;
+            Self::verify_stream_ownership(stream, caller)?;
             *stream.last_activity.lock().await = std::time::Instant::now();
             let rx = stream.text_broadcast_tx.subscribe();
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
@@ -2322,17 +2354,17 @@ impl AIService {
         &self,
         model_id: String,
         samples: Vec<f32>,
-        auth_token: String,
+        caller: &RequestContext,
     ) -> Result<String> {
         let stream_id = self
-            .open_transcription_stream(model_id, None, auth_token.clone())
+            .open_transcription_stream(model_id, None, caller)
             .await?;
 
         // Subscribe to the broadcast BEFORE feeding so we don't drop any
         // partial events the whisper thread emits during the first
         // window.
         let mut rx = self
-            .feed_transcription_stream_with_broadcast(&stream_id, samples, &auth_token)
+            .feed_transcription_stream_with_broadcast(&stream_id, samples, caller)
             .await?;
 
         // Drain until the receiver lags or no message arrives within a
@@ -2354,22 +2386,20 @@ impl AIService {
             }
         }
 
-        let _ = self
-            .close_transcription_stream(&stream_id, &auth_token)
-            .await;
+        let _ = self.close_transcription_stream(&stream_id, caller).await;
         Ok(transcript)
     }
 
     pub async fn close_transcription_stream(
         &self,
         stream_id: &String,
-        auth_token: &str,
+        caller: &RequestContext,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
 
         // Verify ownership before removing
         if let Some(stream) = map_lock.get(stream_id) {
-            Self::verify_stream_ownership(stream, auth_token)?;
+            Self::verify_stream_ownership(stream, caller)?;
         }
 
         if let Some(stream) = map_lock.remove(stream_id) {
@@ -2384,65 +2414,34 @@ impl AIService {
         }
     }
 
-    /// Verify that the caller (identified by auth_token) owns the given transcription session.
-    /// In single-user mode, ownership is not enforced.
-    /// In multi-user mode, both the session and the caller must have valid emails that match.
-    fn verify_stream_ownership(session: &TranscriptionSession, auth_token: &str) -> Result<()> {
-        let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.get_multi_user_enabled().unwrap_or(false)
-        });
+    /// Verify that the caller (the agent its request acts as) owns the given transcription
+    /// session. In single-user mode, ownership is not enforced. In multi-user mode the rule
+    /// of every owned resource (`api::guards::owns`): the operator reaches every stream; any
+    /// other authenticated session only the streams of the agent it acts as (a grant on the
+    /// main agent only the main agent's, owner `None`; a user only their own); an anonymous
+    /// caller none.
+    fn verify_stream_ownership(
+        session: &TranscriptionSession,
+        caller: &RequestContext,
+    ) -> Result<()> {
+        let multi_user_enabled = crate::db_backend::db_backend()
+            .get_multi_user_enabled()
+            .map_err(|e| anyhow!("Failed to read the multi-user setting: {}", e))?;
 
         if !multi_user_enabled {
             // Single-user mode — no ownership enforcement
             return Ok(());
         }
 
-        // Multi-user mode: require valid token
-        let caller_email =
-            crate::agent::capabilities::user_email_from_token(auth_token.to_string());
-
-        // If caller has no email, they must still have a valid token (admin/main user)
-        if caller_email.is_none() {
-            if crate::agent::capabilities::decode_jwt(auth_token.to_string()).is_err() {
-                return Err(anyhow!(
-                    "Authorization error: valid token required in multi-user mode"
-                ));
-            }
-            // Admin user (valid token, no email) — allow access to any stream
-            return Ok(());
-        }
-
-        let caller_email = caller_email.unwrap();
-
-        // Session must also have an owner email to enforce ownership
-        let owner_email = match session.user_email.as_ref() {
-            Some(email) => email,
-            // Session has no owner email (created by admin) — only admin can access,
-            // but we already handled the admin case above, so reject.
-            None => {
-                return Err(anyhow!(
-                    "Authorization error: caller does not own this transcription stream"
-                ))
-            }
-        };
-
-        if caller_email == *owner_email {
+        let agent = caller.acts_as();
+        let owned = caller.session.is_authenticated()
+            && session.agent_did.as_deref() == agent.managed_did();
+        if caller.is_operator() || owned {
             Ok(())
         } else {
             Err(anyhow!(
                 "Authorization error: caller does not own this transcription stream"
             ))
-        }
-    }
-
-    /// Verify that a caller (identified by auth_token) is allowed to subscribe to a given stream.
-    /// Returns Ok(()) if access is allowed, or an error if not.
-    pub async fn verify_stream_access(&self, stream_id: &str, auth_token: &str) -> Result<()> {
-        let map_lock = self.transcription_streams.lock().await;
-        if let Some(session) = map_lock.get(stream_id) {
-            Self::verify_stream_ownership(session, auth_token)
-        } else {
-            Err(anyhow!("Transcription stream not found: {}", stream_id))
         }
     }
 
@@ -2470,16 +2469,20 @@ impl AIService {
     pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
         log::info!("Updating model: {} with: {:?}", model_id, model_config);
         // First get the existing model to determine its type
-        let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let existing_model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
 
         // Update the model in the database
-        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model_config))
-            .map_err(|e| anyhow!("Failed to update model in database: {}", e))?;
+        // `context`, not a new error, so the API can still tell an `ApiKeyNotResent`.
+        crate::db_backend::db_backend()
+            .update_model(&model_id, &model_config)
+            .context("Failed to update model in database")?;
 
         // Get the updated model from the database
-        let updated_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let updated_model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
 
@@ -2524,7 +2527,8 @@ impl AIService {
                 model_ready_rx.await?;
 
                 // Respawn all tasks for this model
-                let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+                let tasks = crate::db_backend::db_backend()
+                    .get_tasks()
                     .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
                 for task in tasks.into_iter().filter(|t| t.model_id == model_id) {
@@ -2544,7 +2548,8 @@ impl AIService {
 
     pub async fn remove_model(&self, model_id: String) -> Result<()> {
         // First get the existing model to determine its type
-        let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let existing_model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
 
@@ -2582,7 +2587,8 @@ impl AIService {
         }
 
         // Remove the model from the database
-        Ad4mDb::with_global_instance(|db| db.remove_model(&model_id))
+        crate::db_backend::db_backend()
+            .remove_model(&model_id)
             .map_err(|e| anyhow!("Failed to remove model from database: {}", e))?;
 
         Ok(())
@@ -2592,6 +2598,7 @@ impl AIService {
 #[cfg(test)]
 mod tests {
     use super::providers::{ChatTurn, ToolCall};
+    use crate::db::Ad4mDb;
 
     fn call(arguments: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -2677,7 +2684,7 @@ mod tests {
     fn remote_at(base_url: &str, api_key: &str) -> ModelApi {
         ModelApi {
             base_url: url::Url::parse(base_url).expect("test URL parses"),
-            api_key: api_key.to_string(),
+            api_key: api_key.into(),
             model: "claude-test".to_string(),
             api_type: ModelApiType::Anthropic,
             max_num_ctx: None,
@@ -2793,7 +2800,7 @@ mod tests {
                     output: "Yes, I'm working!".into()
                 }],
                 meta_data: None
-            }).await.expect("add_task to work without error");
+            }, None).await.expect("add_task to work without error");
 
         let response = service
             .prompt(task.task_id, "Test string".into(), None)
@@ -2834,7 +2841,7 @@ mod tests {
                     input: "Test string super loong".into(),
                     output: "Yes, I'm working! This is an extremely long response to thoroughly test the system's capacity for handling extensive outputs. In real-world scenarios, AI models often need to generate lengthy and detailed responses to complex queries. This test string is designed to push the limits of our system, ensuring it can process and store large amounts of text without issues. It's crucial to verify that our AI service can maintain coherence and relevance even in prolonged responses. By including various sentence structures, punctuation, and a mix of short and long phrases, we're also testing the linguistic versatility of our model. Furthermore, this extended output allows us to assess the performance impact of processing large text blocks, which is essential for optimizing our system's efficiency. It's worth noting that in practical applications, responses of this length might be common in scenarios such as content generation, detailed explanations, or comprehensive analyses. Therefore, ensuring our system can handle such verbose outputs is paramount for its real-world applicability and robustness.".into()
                 }],
-        }).await.expect("add_task to work without error");
+        }, None).await.expect("add_task to work without error");
 
         let futures = (0..10)
             .map(|_| service.prompt(task.task_id.clone(), "Test string".into(), None))
@@ -2890,7 +2897,8 @@ mod tests {
             .expect("model to be updated");
 
         // Verify the update
-        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .expect("to get model");
         assert_eq!(model.unwrap().name, "Updated Test Model");
 
@@ -2901,7 +2909,8 @@ mod tests {
             .expect("model to be removed");
 
         // Verify removal
-        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .expect("to get model");
         assert!(model.is_none());
     }
@@ -2932,13 +2941,16 @@ mod tests {
 
         // Create a task using this model
         let task = service
-            .add_task(AITaskInput {
-                name: "Test task".into(),
-                model_id: model_id.clone(),
-                system_prompt: "Test prompt".into(),
-                prompt_examples: vec![],
-                meta_data: None,
-            })
+            .add_task(
+                AITaskInput {
+                    name: "Test task".into(),
+                    model_id: model_id.clone(),
+                    system_prompt: "Test prompt".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
             .await
             .expect("task to be created");
 
@@ -3062,5 +3074,210 @@ mod tests {
         assert!(0.32 < 0.33, "Below threshold should be rejected");
         assert!(!(0.33 < 0.33), "At threshold should pass");
         assert!(!(0.50 < 0.33), "Above threshold should pass");
+    }
+}
+
+#[cfg(test)]
+mod stream_ownership_tests {
+    use super::*;
+    use crate::agent::session::Principal;
+    use crate::test_utils::MultiUserMode;
+
+    fn stream_of(owner: Option<&str>) -> TranscriptionSession {
+        let (samples_tx, _) = futures_channel::mpsc::unbounded();
+        let (drop_tx, _) = oneshot::channel();
+        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
+        TranscriptionSession {
+            samples_tx,
+            drop_tx,
+            last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+            text_broadcast_tx,
+            model_id: "m".to_string(),
+            agent_did: owner.map(str::to_string),
+        }
+    }
+
+    // The operator's admin credential is not a JWT, so the old token decode refused it: in
+    // multi-user mode it could open a stream but not feed or close it.
+    #[test]
+    fn in_multi_user_mode_the_session_decides_who_reaches_a_stream() {
+        let _multi_user = MultiUserMode::on();
+        let alice = RequestContext::user_for_test("did:key:alice", vec![]);
+        let bob = RequestContext::user_for_test("did:key:bob", vec![]);
+        let operator = RequestContext::operator_for_test();
+        let app = RequestContext::app_for_test(vec![]);
+        let anonymous = RequestContext::for_test(Principal::Anonymous);
+
+        let alices = stream_of(Some("did:key:alice"));
+        let main_agents = stream_of(None);
+        let reaches = |stream, caller| AIService::verify_stream_ownership(stream, caller).is_ok();
+
+        assert!(reaches(&alices, &alice), "a user reaches their own stream");
+        assert!(!reaches(&alices, &bob), "not another user's");
+        assert!(!reaches(&main_agents, &bob), "nor the main agent's");
+        assert!(
+            reaches(&alices, &operator),
+            "the operator reaches any stream"
+        );
+        assert!(reaches(&main_agents, &operator));
+        assert!(
+            reaches(&main_agents, &app),
+            "a grant on the main agent reaches the main agent's streams"
+        );
+        assert!(
+            !reaches(&main_agents, &anonymous),
+            "an anonymous caller reaches none"
+        );
+        assert!(!reaches(&alices, &anonymous));
+    }
+
+    // On dev a closed database panicked the check. The read error must not count as
+    // single-user mode, which enforces no ownership: another user's stream would be reachable.
+    #[test]
+    fn a_closed_database_is_not_single_user_mode() {
+        let bob = RequestContext::user_for_test("did:key:bob", vec![]);
+        let alices = stream_of(Some("did:key:alice"));
+        let _closed = crate::test_utils::DbClosed::now();
+        assert!(AIService::verify_stream_ownership(&alices, &bob).is_err());
+    }
+
+    // An app on the main agent is not the operator: it reaches the main agent's streams, not
+    // a user's, whatever id it knows. Feeding (`feed_transcription_stream`, both forms) and
+    // closing (`close_transcription_stream`) all check this rule.
+    #[test]
+    fn a_main_agent_app_cannot_feed_or_close_a_users_stream() {
+        let _multi_user = MultiUserMode::on();
+        let alice = RequestContext::user_for_test("did:key:alice", vec![]);
+        let operator = RequestContext::operator_for_test();
+        let app =
+            RequestContext::app_for_test(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]);
+        let alices = stream_of(Some("did:key:alice"));
+        let reaches = |caller| AIService::verify_stream_ownership(&alices, caller).is_ok();
+
+        assert!(
+            !reaches(&app),
+            "an app on the main agent, even with every capability, reached a user's stream"
+        );
+        assert!(reaches(&alice), "the user reaches their own stream");
+        assert!(reaches(&operator), "the operator reaches every stream");
+    }
+
+    // The feed and close paths themselves: a main-agent app is refused on a user's stream and
+    // the stream stays open; the user then closes it.
+    #[tokio::test]
+    async fn feed_and_close_refuse_a_main_agent_app_on_a_users_stream() {
+        let _multi_user = MultiUserMode::on();
+        // No models and no cleanup task: only the stream map is used.
+        let service = AIService {
+            embedding_channel: Arc::new(Mutex::new(HashMap::new())),
+            llm_channel: Arc::new(Mutex::new(HashMap::new())),
+            transcription_streams: Arc::new(Mutex::new(HashMap::new())),
+            cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
+            shared_whisper_models: Arc::new(Mutex::new(HashMap::new())),
+            default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(Arc::new(|_| {
+                Box::pin(async { Err(anyhow!("no embedding models in this test")) })
+            }))),
+        };
+        let alice = RequestContext::user_for_test("did:key:alice", vec![]);
+        let app =
+            RequestContext::app_for_test(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]);
+        // The stream's receivers stay alive, as the Whisper thread's would: a feed and a
+        // close by its owner reach them.
+        let (samples_tx, mut samples_rx) = futures_channel::mpsc::unbounded();
+        let (drop_tx, mut drop_rx) = oneshot::channel();
+        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
+        let id = "alices-stream".to_string();
+        service.transcription_streams.lock().await.insert(
+            id.clone(),
+            TranscriptionSession {
+                samples_tx,
+                drop_tx,
+                last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+                text_broadcast_tx,
+                model_id: "m".to_string(),
+                agent_did: Some("did:key:alice".to_string()),
+            },
+        );
+
+        assert!(service
+            .feed_transcription_stream(&id, vec![0.0], &app)
+            .await
+            .is_err());
+        assert!(service.close_transcription_stream(&id, &app).await.is_err());
+        assert!(service.transcription_streams.lock().await.contains_key(&id));
+        assert!(
+            samples_rx.try_recv().is_err(),
+            "the app's samples reached the user's stream"
+        );
+        assert!(
+            drop_rx.try_recv().is_err(),
+            "the app closed the user's stream"
+        );
+
+        service
+            .feed_transcription_stream(&id, vec![0.5], &alice)
+            .await
+            .expect("the user feeds their own stream");
+        assert_eq!(samples_rx.try_recv().unwrap(), vec![0.5]);
+        service
+            .close_transcription_stream(&id, &alice)
+            .await
+            .expect("the user closes their own stream");
+        assert!(!service.transcription_streams.lock().await.contains_key(&id));
+        assert!(drop_rx.try_recv().is_ok(), "the close reached the stream");
+    }
+}
+
+#[cfg(test)]
+mod transcription_owner_tests {
+    use super::transcription_stream_owner;
+    use crate::agent::AgentContext;
+    use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
+
+    // A stream whose owner did not resolve used to open with a null owner DID, and the event
+    // filter delivers such text to every session.
+    #[test]
+    fn a_user_without_a_key_opens_no_stream() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let owner = AgentContext::managed("did:key:z6MkNoKeyStreamOwner".to_string());
+        assert!(transcription_stream_owner(owner).is_err());
+    }
+
+    #[test]
+    fn a_user_owns_their_stream_and_the_operator_owns_as_the_main_agent() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let user_did = crate::test_utils::create_test_user("stream.owner@example.org");
+        let (agent_did, did) =
+            transcription_stream_owner(AgentContext::managed(user_did.clone())).unwrap();
+        assert_eq!(agent_did.as_deref(), Some(user_did.as_str()));
+        assert_eq!(did, user_did);
+
+        let (admin_agent, admin_did) =
+            transcription_stream_owner(AgentContext::main_agent()).unwrap();
+        assert!(admin_agent.is_none());
+        assert_eq!(admin_did, crate::agent::did());
+    }
+
+    // An expired token opens no session, so the caller is refused before a transcription
+    // handler runs and before a stream has an owner.
+    #[test]
+    fn a_caller_whose_token_expired_is_refused() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token = crate::test_utils::expired_user_token("expired@example.org");
+        let refused = crate::types::RequestContext::open(
+            &token,
+            &Some("the-admin-credential".into()),
+            crate::agent::capabilities::ListenerReach::Network,
+        );
+        assert_eq!(
+            refused.err(),
+            Some(crate::agent::session::AuthError::Expired)
+        );
     }
 }

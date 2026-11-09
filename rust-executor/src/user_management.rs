@@ -3,10 +3,9 @@
 //! Extracted to avoid code duplication between MCP tools and REST handlers.
 
 use crate::agent::capabilities::{
-    get_user_default_capabilities, token::generate_jwt as generate_jwt_token, AuthInfo,
-    DEFAULT_TOKEN_VALID_PERIOD,
+    get_user_default_capabilities, AuthInfo, DEFAULT_TOKEN_VALID_PERIOD,
 };
-use crate::agent::AgentService;
+use crate::agent::{AgentContext, AgentService};
 use crate::db::Ad4mDb;
 use crate::wallet::wallet_backend;
 
@@ -39,25 +38,21 @@ fn check_executor_unlocked() -> Result<(), String> {
 
 /// Check if multi-user mode is enabled.
 pub fn is_multi_user_enabled() -> bool {
-    Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false))
+    crate::db_backend::db_backend()
+        .get_multi_user_enabled()
+        .unwrap_or(false)
 }
 
 /// Create a verification code for the given email and type ("signup" or "login").
 pub fn create_verification_code(email: &str, verification_type: &str) -> Result<String, String> {
-    let db = Ad4mDb::global_instance();
-    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-    db_ref
+    crate::db_backend::db_backend()
         .create_verification_code(email, verification_type)
         .map_err(|e| format!("Failed to create verification code: {}", e))
 }
 
 /// Verify a code for the given email and type.
 pub fn verify_code(email: &str, code: &str, verification_type: &str) -> Result<bool, String> {
-    let db = Ad4mDb::global_instance();
-    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-    db_ref
+    crate::db_backend::db_backend()
         .verify_code(email, code, verification_type)
         .map_err(|e| format!("Verification failed: {}", e))
 }
@@ -103,27 +98,14 @@ pub async fn send_verification_email(
     Ok(())
 }
 
-/// Create a new user: ensure key, get DID, save wallet, add to DB.
+/// Create a new user: create its managed agent's key, save the wallet, add the user to the DB.
+/// Returns the agent's DID.
 pub fn create_user(email: &str, password: &str) -> Result<String, String> {
     check_executor_unlocked()?;
 
-    // Ensure user key exists
-    AgentService::ensure_user_key_exists(email)
-        .map_err(|e| format!("Failed to create user key: {}", e))?;
-
-    // Get DID
-    let did = AgentService::get_user_did_by_email(email)
-        .map_err(|e| format!("Failed to get user DID: {}", e))?;
-
-    // Save wallet
-    AgentService::with_global_instance(|s| {
-        if let Some(p) = &s.passphrase {
-            s.save(p.clone());
-        }
-    });
-
-    // Check if user already exists (local DB or shared DB)
-    let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+    // Check if user already exists (local DB or shared DB) before creating a key: a key made
+    // for an email that is taken would be an orphan in the wallet.
+    let user_exists = crate::db_backend::db_backend().get_user(email).is_ok();
     if user_exists {
         return Err("User already exists".to_string());
     }
@@ -139,19 +121,25 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
         }
     }
 
+    // The agent's key, named by its DID
+    let did = AgentService::create_managed_agent_key(email)
+        .map_err(|e| format!("Failed to create user key: {}", e))?;
+
+    // Save wallet
+    AgentService::with_global_instance(|s| {
+        if let Some(p) = &s.passphrase {
+            s.save(p.clone());
+        }
+    });
+
     // Hash password once — use the same hash for both local and shared DB
     let password_hash =
         Ad4mDb::hash_password(password).map_err(|e| format!("Failed to hash password: {}", e))?;
 
     // Add user to local DB
-    {
-        let db = Ad4mDb::global_instance();
-        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-        db_ref
-            .add_user_prehashed(email, &did, &password_hash)
-            .map_err(|e| format!("Failed to add user: {}", e))?;
-    }
+    crate::db_backend::db_backend()
+        .add_user_prehashed(email, &did, &password_hash)
+        .map_err(|e| format!("Failed to add user: {}", e))?;
 
     // Also store in shared DB for cross-executor access
     if config.db_backend.as_deref() == Some("shared") {
@@ -169,7 +157,9 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
     Ok(did)
 }
 
-/// Generate a JWT token for a user with default capabilities.
+/// A token for the user `email` with the default user capabilities, for the app `app_name`,
+/// and its grant: a login is an auto-approved grant on the user's managed agent, which the
+/// user lists and revokes like any other (`agent.getApps`, `agent.revokeToken`).
 pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> {
     let auth_info = AuthInfo {
         app_name: app_name.to_string(),
@@ -181,11 +171,16 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
         user_email: Some(email.to_string()),
     };
 
-    generate_jwt_token(
-        auth_info.app_name.clone(),
-        DEFAULT_TOKEN_VALID_PERIOD,
+    // The login names the user by email; the grant and the token's `sub` name the agent's DID.
+    let did = crate::agent::AgentService::did_for_email(email)
+        .map_err(|e| format!("Failed to generate token: {}", e))?;
+    crate::agent::grants::mint(
+        AgentContext::managed(did),
         auth_info,
+        None,
+        DEFAULT_TOKEN_VALID_PERIOD,
     )
+    .map(|(token, _)| token)
     .map_err(|e| format!("Failed to generate token: {}", e))
 }
 
@@ -195,12 +190,12 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
     check_executor_unlocked()?;
 
     // Try local DB first
-    let local_result = Ad4mDb::with_global_instance(|db| db.verify_user_password(email, password));
+    let local_result = crate::db_backend::db_backend().verify_user_password(email, password);
 
     match local_result {
         Ok(true) => {
             // Local verification succeeded
-            if !AgentService::user_exists(email) {
+            if AgentService::managed_agent_for_email(email).is_err() {
                 return Err("User key not found on executor".to_string());
             }
             return Ok(());
@@ -215,16 +210,9 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
     }
 
     // Shared DB fallback: user was created on another executor
-    let config = crate::config::get_global_config();
-    if config.db_backend.as_deref() != Some("shared") {
+    let Some(user_data) = shared_user_record(email)? else {
         return Err("Invalid credentials".to_string());
-    }
-
-    let backend = crate::db_backend::db_backend();
-    let user_data = backend
-        .get("shared:platform", "users", email)
-        .map_err(|e| format!("Shared DB lookup failed: {}", e))?
-        .ok_or_else(|| "Invalid credentials".to_string())?;
+    };
 
     // Extract password_hash from shared record and verify
     let stored_hash = user_data
@@ -238,24 +226,100 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
         return Err("Invalid credentials".to_string());
     }
 
-    // Ensure the user key exists in the shared wallet
-    if !AgentService::user_exists(email) {
-        AgentService::ensure_user_key_exists(email)
-            .map_err(|e| format!("Failed to create user key: {}", e))?;
-    }
-
-    // Import user to local DB for future logins
-    let user_did = user_data.get("did").and_then(|d| d.as_str()).unwrap_or("");
-    {
-        let db = Ad4mDb::global_instance();
-        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-        if let Err(e) = db_ref.add_user_prehashed(email, user_did, stored_hash) {
-            log::warn!("Failed to import user to local DB: {}", e);
-        }
+    // Import user to local DB for future logins, then check its agent's key is reachable.
+    import_user_from_shared_db(email).map_err(|e| e.to_string())?;
+    if AgentService::managed_agent_for_email(email).is_err() {
+        return Err("User key not found on executor".to_string());
     }
 
     Ok(())
+}
+
+/// The record of `email` in the shared database, on an executor that has one.
+fn shared_user_record(email: &str) -> Result<Option<serde_json::Value>, String> {
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() != Some("shared") {
+        return Ok(None);
+    }
+    crate::db_backend::db_backend()
+        .get("shared:platform", "users", email)
+        .map_err(|e| format!("Shared DB lookup failed: {}", e))
+}
+
+/// The DID of the user `email` in the shared database, read without adopting the user: for
+/// lookups on behalf of callers who may not write, such as an anonymous capability request.
+/// `None` without a shared database or a record there. The user is adopted later, on login
+/// ([`import_user_from_shared_db`]).
+pub fn shared_did_for_email(email: &str) -> Option<String> {
+    let record = shared_user_record(email).unwrap_or_else(|e| {
+        log::warn!("{e}");
+        None
+    });
+    shared_record_did(email, record.as_ref())
+}
+
+/// The DID that the shared `record` of `email` names, if adopting it would act as that DID:
+/// `None` without a record or a DID, or when a local user of another email owns the DID
+/// ([`adopt_shared_user`] refuses such a record). Reads only.
+fn shared_record_did(email: &str, record: Option<&serde_json::Value>) -> Option<String> {
+    let did = record?.get("did")?.as_str().filter(|did| !did.is_empty())?;
+    match AgentService::email_for_did(did) {
+        Ok(owner) if owner != email => None,
+        _ => Some(did.to_string()),
+    }
+}
+
+/// Copies the user `email` from the shared database into the local `users` table, on an
+/// executor with a shared database, and returns the DID of the user's agent. `None` when
+/// there is no shared database or no such user there. A user created on another executor
+/// reaches this one only this way.
+pub fn import_user_from_shared_db(
+    email: &str,
+) -> Result<Option<String>, deno_core::error::AnyError> {
+    let Some(user_data) = shared_user_record(email).map_err(deno_core::anyhow::Error::msg)? else {
+        return Ok(None);
+    };
+    let did = user_data.get("did").and_then(|d| d.as_str()).unwrap_or("");
+    let stored_hash = user_data
+        .get("password_hash")
+        .and_then(|h| h.as_str())
+        .unwrap_or("");
+    if did.is_empty() {
+        return Ok(None);
+    }
+    adopt_shared_user(email, did, stored_hash).map(Some)
+}
+
+/// Writes the shared record `(email, did)` into the local `users` table and returns the DID
+/// the local row holds. The insert keeps an existing row and skips one whose DID another
+/// local user owns, so the record's DID is the agent only if the row now says so: a shared
+/// record that names a local user's DID under another email must not act as that user.
+fn adopt_shared_user(
+    email: &str,
+    did: &str,
+    stored_hash: &str,
+) -> Result<String, deno_core::error::AnyError> {
+    if let Err(e) = crate::db_backend::db_backend().add_user_prehashed(email, did, stored_hash) {
+        log::warn!("Failed to import user to local DB: {}", e);
+    }
+    let local = crate::db_backend::db_backend()
+        .get_user(email)
+        .map_err(|_| {
+            deno_core::anyhow::anyhow!(
+                "The shared record of {} names the agent {}, which is not this user's here",
+                email,
+                did
+            )
+        })?;
+    if local.did != did {
+        return Err(deno_core::anyhow::anyhow!(
+            "The shared record of {} names the agent {}, but the local account holds {}",
+            email,
+            did,
+            local.did
+        ));
+    }
+    Ok(local.did)
 }
 
 /// Full login flow: check multi-user, verify credentials, generate JWT.
@@ -267,7 +331,38 @@ pub fn login_user(email: &str, password: &str, app_name: &str) -> Result<String,
     generate_user_jwt(email, app_name)
 }
 
-/// Full signup flow: check multi-user, create user, generate verification code, send email.
+/// Stores the empty profile a new managed agent starts with and publishes it to the agent
+/// language. Without a stored profile every read of the agent fails with "User profile not
+/// found", the mention waker config included, until the agent sets one.
+///
+/// The publish runs in the background and returns the task: it is best-effort (a failure is
+/// only logged) and serialized behind every other agent's publish, on an agent language that
+/// may still be installing its DNA. Awaited, it made `user.create` take as long as all of
+/// that (past the client's 30 s RPC timeout on a loaded node). The stored profile is what
+/// reads of the agent need; `publish_agent_to_language` reads it under its lock, so a profile
+/// update made right after still wins.
+pub fn init_user_profile(did: &str) -> Result<tokio::task::JoinHandle<()>, String> {
+    use crate::agent::{AgentContext, AgentService};
+    use crate::types::domain::{Agent, Perspective as DomainPerspective};
+
+    let agent = Agent {
+        did: did.to_string(),
+        direct_message_language: None,
+        perspective: Some(DomainPerspective { links: vec![] }),
+    };
+    AgentService::store_managed_agent_profile(did, &agent)
+        .map_err(|e| format!("Failed to store user agent profile: {}", e))?;
+
+    let ctx = AgentContext::managed(did.to_string());
+    Ok(tokio::spawn(async move {
+        if let Err(e) = AgentService::publish_agent_to_language(&ctx).await {
+            log::warn!("Failed to publish new user to agent language: {}", e);
+        }
+    }))
+}
+
+/// Full signup flow: check multi-user, create user and its profile, generate verification
+/// code, send email.
 pub async fn signup_user(
     email: &str,
     password: &str,
@@ -277,6 +372,8 @@ pub async fn signup_user(
         return Err("Multi-user mode is not enabled".to_string());
     }
     let did = create_user(email, password)?;
+    // Detached: signup does not wait for the publish (see `init_user_profile`).
+    let _publish = init_user_profile(&did)?;
     let code = create_verification_code(email, "signup")?;
     send_verification_email(email, &code, "signup", app_name).await?;
     Ok(did)
@@ -289,7 +386,8 @@ pub async fn request_login_code(email: &str, app_name: Option<&str>) -> Result<(
     }
     user_exists(email)?;
 
-    Ad4mDb::with_global_instance(|db| db.check_and_update_rate_limit(email))
+    crate::db_backend::db_backend()
+        .check_and_update_rate_limit(email)
         .map_err(|e| e.to_string())?;
 
     let code = create_verification_code(email, "login")?;
@@ -312,7 +410,7 @@ pub fn verify_and_login(
     if !verified {
         return Err("Invalid verification code".to_string());
     }
-    if !AgentService::user_exists(email) {
+    if AgentService::managed_agent_for_email(email).is_err() {
         return Err("User key not found on executor".to_string());
     }
     generate_user_jwt(email, app_name)
@@ -321,11 +419,11 @@ pub fn verify_and_login(
 /// Check if a user exists in both DB and AgentService.
 pub fn user_exists(email: &str) -> Result<(), String> {
     check_executor_unlocked()?;
-    let db_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+    let db_exists = crate::db_backend::db_backend().get_user(email).is_ok();
     if !db_exists {
         return Err("User not found".to_string());
     }
-    if !AgentService::user_exists(email) {
+    if AgentService::managed_agent_for_email(email).is_err() {
         return Err("User key not found on executor".to_string());
     }
     Ok(())
@@ -344,7 +442,7 @@ mod tests {
     /// long before `create_user` reaches it. Without it the *negative* direction —
     /// the run with the guard deleted, which is what proves the guard is
     /// load-bearing — panics on "AgentService not initialized" inside
-    /// `ensure_user_key_exists` and never reaches the row assertion. It would
+    /// `create_managed_agent_key` and never reaches the row assertion. It would
     /// still go red, but for the wrong reason, and a test that goes red for the
     /// wrong reason does not defend the claim in #982.
     fn setup() {
@@ -354,6 +452,77 @@ mod tests {
         // try_init is idempotent: if another test already set the backend it is a no-op.
         let _ = try_init_wallet_backend(Arc::new(LocalWallet::new()) as Arc<dyn WalletBackend>);
         crate::test_utils::setup_agent();
+    }
+
+    /// D16: a shared record's DID is the agent only if the local row says so. A record that
+    /// names a local user's DID under another email is skipped by the insert (`users.did` is
+    /// unique) and must not act as that user; a record for a local email with another DID
+    /// keeps the local agent.
+    #[test]
+    fn a_shared_record_acts_only_as_the_agent_its_local_row_holds() {
+        setup();
+        let victim = "did:key:z6MkSharedVictim";
+        crate::db_backend::db_backend()
+            .add_user("victim@example.org", victim, "pw")
+            .unwrap();
+
+        assert!(adopt_shared_user("other@example.org", victim, "hash").is_err());
+        assert!(crate::db_backend::db_backend()
+            .get_user("other@example.org")
+            .is_err());
+        assert!(
+            adopt_shared_user("victim@example.org", "did:key:z6MkSomeoneElse", "hash").is_err()
+        );
+
+        assert_eq!(
+            adopt_shared_user("new@example.org", "did:key:z6MkSharedNew", "hash").unwrap(),
+            "did:key:z6MkSharedNew"
+        );
+    }
+
+    /// D15: a capability request may come from anyone, so resolving the email it names reads
+    /// the shared record without adopting it: the local `users` table gets no row.
+    #[test]
+    fn reading_a_shared_record_adds_no_local_user() {
+        setup();
+        let victim = "did:key:z6MkPeekVictim";
+        crate::db_backend::db_backend()
+            .add_user("peek-victim@example.org", victim, "pw")
+            .unwrap();
+        let users = || crate::db_backend::db_backend().list_users().unwrap().len();
+        let before = users();
+
+        let record = serde_json::json!({ "did": "did:key:z6MkPeekNew", "password_hash": "h" });
+        assert_eq!(
+            shared_record_did("peek-new@example.org", Some(&record)).as_deref(),
+            Some("did:key:z6MkPeekNew")
+        );
+        assert!(crate::db_backend::db_backend()
+            .get_user("peek-new@example.org")
+            .is_err());
+        assert_eq!(users(), before, "reading a shared record wrote a user");
+
+        // A record naming a local user's DID under another email names no agent.
+        let stolen = serde_json::json!({ "did": victim });
+        assert_eq!(
+            shared_record_did("peek-other@example.org", Some(&stolen)),
+            None
+        );
+        assert_eq!(
+            shared_record_did("peek-victim@example.org", Some(&stolen)).as_deref(),
+            Some(victim)
+        );
+        assert_eq!(shared_record_did("peek-new@example.org", None), None);
+        assert_eq!(
+            shared_record_did(
+                "peek-new@example.org",
+                Some(&serde_json::json!({ "did": "" }))
+            ),
+            None
+        );
+        // Without a shared database there is no record to read.
+        assert_eq!(shared_did_for_email("peek-new@example.org"), None);
+        assert_eq!(users(), before);
     }
 
     /// Invariant: create_user on a locked executor must return Err before writing any DB row.
@@ -393,7 +562,7 @@ mod tests {
         // value and never observe the row that actually bricks the account. In
         // that order it also stays a real guard if a future refactor moves the
         // check somewhere that still returns Err but writes the row anyway.
-        let row_written = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+        let row_written = crate::db_backend::db_backend().get_user(email).is_ok();
         assert!(
             !row_written,
             "create_user must not write a user row when the executor is locked — \
@@ -416,5 +585,98 @@ mod tests {
         if was_unlocked {
             backend.unlock(test_pass).expect("restore wallet unlock");
         }
+    }
+
+    /// An agent that signed up through MCP had no stored profile, unlike one made by
+    /// `user.create`, so the mention waker config failed with "User profile not found"
+    /// until the agent set a profile (found in the waker live test on ba49d15).
+    #[tokio::test]
+    async fn signup_stores_the_new_agents_profile() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let _multi_user = crate::test_utils::MultiUserMode::on();
+
+        let did = signup_user("signup-profile@example.org", "a-password", None)
+            .await
+            .expect("signup");
+
+        let profile = crate::agent::AgentService::load_managed_agent_profile(&did)
+            .expect("profile lookup")
+            .expect("signup leaves a profile");
+        assert_eq!(profile.did, did);
+        let context = crate::agent::AgentContext::managed(did.clone());
+        assert!(crate::agent::AgentService::get_agent_for_context(&context).is_ok());
+    }
+
+    /// `user.create` timed out after the client's 30 s on a loaded CI node (multi-user-simple,
+    /// node 2's setup): it awaited the new user's agent-language publish, which waits behind
+    /// every other publish and on an agent language still installing its DNA. With the agent
+    /// language answering nothing, `user.create` still replies with the stored profile, and the
+    /// publish reaches the agent language on its own and ends once it answers.
+    #[tokio::test]
+    async fn user_create_replies_while_the_agent_language_does_not_answer() {
+        use crate::languages::language_runtime_handle::LanguageRuntimeHandle;
+        use crate::languages::LanguageController;
+        use std::time::Duration;
+
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let _multi_user = crate::test_utils::MultiUserMode::on();
+
+        let controller = LanguageController::global_instance();
+        let address = format!(
+            "QmUnansweringAgentLanguage{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        controller
+            .set_runtime_for_test(
+                &address,
+                Some(LanguageRuntimeHandle::from_channel(address.clone(), tx)),
+            )
+            .await;
+        let previous = controller
+            .system_addresses
+            .lock()
+            .await
+            .agent_language
+            .replace(address.clone());
+
+        let email = format!("slow-publish-{}@example.org", uuid::Uuid::new_v4().simple());
+        let created = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::api::ws_handler::build_handler_map().dispatch(
+                "user.create",
+                serde_json::json!({ "email": email, "password": "a-password" }),
+                std::sync::Arc::new(crate::types::RequestContext::operator_for_test()),
+            ),
+        )
+        .await;
+        // The publish asks the agent language, which holds the request unanswered.
+        let publish = tokio::time::timeout(Duration::from_secs(10), requests.recv()).await;
+
+        controller.system_addresses.lock().await.agent_language = previous;
+        controller.set_runtime_for_test(&address, None).await;
+
+        let created = created
+            .expect("user.create waited for the agent language")
+            .expect("user.create");
+        assert_eq!(created["success"], serde_json::json!(true), "{created}");
+        let did = created["did"].as_str().expect("a DID").to_string();
+        let profile = crate::agent::AgentService::load_managed_agent_profile(&did)
+            .expect("profile lookup")
+            .expect("user.create stores the profile before replying");
+        assert_eq!(profile.did, did);
+
+        let publish = publish
+            .expect("the publish never reached the agent language")
+            .expect("the agent language's channel closed");
+        assert!(
+            publish
+                .response_tx
+                .send(Ok(serde_json::to_string(&did).unwrap()))
+                .is_ok(),
+            "the publish stopped waiting for the agent language"
+        );
     }
 }

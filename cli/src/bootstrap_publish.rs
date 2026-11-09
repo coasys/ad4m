@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::process::exit;
 
+/// The seed type the executor reads, so a written seed always parses there.
+pub use rust_executor::runtime_service::{BootstrapSeed, IdentityStoreSeed};
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SeedProto {
     #[serde(rename = "languageLanguageRef")]
@@ -18,6 +21,64 @@ pub struct SeedProto {
     pub perspective_language: LanguageInstance,
     #[serde(rename = "alsoPublish")]
     pub also_publish: Vec<LanguageInstance>,
+    /// The seed's `trustedAgents`. The publishing agent must be one of them.
+    /// Without the field the seed trusts only the publishing agent.
+    #[serde(rename = "trustedAgents", default)]
+    pub trusted_agents: Vec<String>,
+    /// The files the seed is written to, relative to the working directory.
+    #[serde(rename = "seedOutputs", default = "default_seed_outputs")]
+    pub seed_outputs: Vec<String>,
+    /// The seed's `identityStore`: the network's identity store, copied into the seed as
+    /// given. Absent: the network has no store.
+    #[serde(
+        rename = "identityStore",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub identity_store: Option<IdentityStoreSeed>,
+}
+
+fn default_seed_outputs() -> Vec<String> {
+    vec!["mainnet_seed.json".to_string()]
+}
+
+/// A publish has to write the seed somewhere: the languages it publishes can't
+/// be taken back, so a proto with an empty `seedOutputs` is an error.
+pub fn check_seed_outputs(outputs: &[String]) -> Result<(), String> {
+    if outputs.is_empty() {
+        return Err(
+            "the seed proto's seedOutputs is empty: the published languages would be in no seed"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The text of the seed a publish writes: the `published` languages and trusted agents, with
+/// the proto's `identityStore`.
+pub fn seed_text(proto: &SeedProto, published: &BootstrapSeed) -> String {
+    let seed = BootstrapSeed {
+        identity_store: proto.identity_store.clone(),
+        ..published.clone()
+    };
+    serde_json::to_string_pretty(&seed).expect("a seed serialises")
+}
+
+/// The seed's `trustedAgents` for a publish signed by `publisher`. Every
+/// language in the seed is signed by the publisher, and a node installs only
+/// languages signed by a trusted agent, so a list without the publisher is an
+/// error.
+pub fn seed_trusted_agents(proto: &[String], publisher: &str) -> Result<Vec<String>, String> {
+    if proto.is_empty() {
+        return Ok(vec![publisher.to_string()]);
+    }
+    if !proto.iter().any(|did| did == publisher) {
+        return Err(format!(
+            "the publishing agent {publisher} is not in the seed proto's trustedAgents {proto:?}: \
+             nodes would refuse every language it publishes"
+        ));
+    }
+    Ok(proto.to_vec())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,32 +97,15 @@ pub struct LanguageInstance {
     resource: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BootstrapSeed {
-    #[serde(rename = "trustedAgents")]
-    pub trusted_agents: Vec<String>,
-    #[serde(rename = "knownLinkLanguages")]
-    pub known_link_languages: Vec<String>,
-    #[serde(rename = "directMessageLanguage")]
-    pub direct_message_language: String,
-    #[serde(rename = "agentLanguage")]
-    pub agent_language: String,
-    #[serde(rename = "perspectiveLanguage")]
-    pub perspective_language: String,
-    #[serde(rename = "neighbourhoodLanguage")]
-    pub neighbourhood_language: String,
-    #[serde(rename = "languageLanguageBundle")]
-    pub language_language_bundle: String,
-}
-
 //Generates an ad4m client, unlocks the agent and then publishes the languages found in the seed proto.
 //After that it will generate a new bootstrap seed and save to the current directory
 pub async fn start_publishing(
+    admin_credential: String,
     passphrase: String,
     seed_proto: SeedProto,
     language_language_bundle: String,
 ) {
-    let ad4m_client = Ad4mClient::connect("http://localhost:12000".to_string(), "".to_string())
+    let ad4m_client = Ad4mClient::connect("http://localhost:12000".to_string(), admin_credential)
         .await
         .expect("could not connect to executor");
 
@@ -78,20 +122,38 @@ pub async fn start_publishing(
 
     green_ln!("Unlocked agent\n");
 
+    // Checked before anything is published: a published language can't be
+    // taken back.
+    if let Err(error) = check_seed_outputs(&seed_proto.seed_outputs) {
+        colour::red_ln!("Not publishing: {}", error);
+        exit(1);
+    }
+    let trusted_agents = match seed_trusted_agents(
+        &seed_proto.trusted_agents,
+        &agent.did.expect("an unlocked agent has a DID"),
+    ) {
+        Ok(trusted_agents) => trusted_agents,
+        Err(error) => {
+            colour::red_ln!("Not publishing: {}", error);
+            exit(1);
+        }
+    };
+
     let languages = vec![
-        seed_proto.agent_language,
-        seed_proto.perspective_language,
-        seed_proto.neighbourhood_language,
+        seed_proto.agent_language.clone(),
+        seed_proto.perspective_language.clone(),
+        seed_proto.neighbourhood_language.clone(),
     ];
 
     let mut bootstrap_seed = BootstrapSeed {
-        trusted_agents: vec![agent.did.unwrap()],
+        trusted_agents,
         known_link_languages: vec![],
         language_language_bundle,
         direct_message_language: String::from(""),
         agent_language: String::from(""),
         perspective_language: String::from(""),
         neighbourhood_language: String::from(""),
+        identity_store: None,
     };
 
     //Publish the core bootstrap languages
@@ -128,7 +190,7 @@ pub async fn start_publishing(
     }
 
     //Publish the link languages
-    for language in seed_proto.link_languages {
+    for language in seed_proto.link_languages.clone() {
         let publish_result = ad4m_client
             .languages
             .publish(
@@ -151,7 +213,7 @@ pub async fn start_publishing(
     }
 
     //Publish other supplied languages
-    for language in seed_proto.also_publish {
+    for language in seed_proto.also_publish.clone() {
         let publish_result = ad4m_client
             .languages
             .publish(
@@ -171,8 +233,97 @@ pub async fn start_publishing(
     }
 
     //Save the bootstrap seed
-    let bootstrap_seed_json = serde_json::to_string_pretty(&bootstrap_seed).unwrap();
-    fs::write("mainnet_seed.json", bootstrap_seed_json).unwrap();
-    green_ln!("\n\nBootstrap seed generated and saved to mainnet_seed.json.. Finishing...");
+    let bootstrap_seed_json = seed_text(&seed_proto, &bootstrap_seed);
+    for output in &seed_proto.seed_outputs {
+        fs::write(output, &bootstrap_seed_json).unwrap();
+        green_ln!("Bootstrap seed saved to {}", output);
+    }
+    green_ln!("\n\nBootstrap seed generated. Finishing...");
     exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PUBLISHER: &str = "did:key:publisher";
+
+    fn repo_proto() -> SeedProto {
+        serde_json::from_str(include_str!("../seed_proto.json")).unwrap()
+    }
+
+    #[test]
+    fn an_empty_seed_outputs_list_is_refused() {
+        assert!(check_seed_outputs(&[]).is_err());
+        assert!(check_seed_outputs(&["mainnet_seed.json".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn a_proto_without_trusted_agents_trusts_the_publisher() {
+        assert_eq!(
+            seed_trusted_agents(&[], PUBLISHER).unwrap(),
+            vec![PUBLISHER]
+        );
+    }
+
+    #[test]
+    fn the_proto_list_is_kept_whole_when_it_holds_the_publisher() {
+        let proto = vec!["did:key:other".to_string(), PUBLISHER.to_string()];
+        assert_eq!(seed_trusted_agents(&proto, PUBLISHER).unwrap(), proto);
+    }
+
+    #[test]
+    fn a_publisher_outside_the_proto_list_is_refused() {
+        let proto = vec!["did:key:other".to_string()];
+        let error = seed_trusted_agents(&proto, PUBLISHER).unwrap_err();
+        assert!(error.contains(PUBLISHER), "{error}");
+    }
+
+    /// The repo's seed proto writes both seed copies with the trusted agents
+    /// and the identity store of the committed seed, so a publish keeps them.
+    /// `globals.rs` compiles the `rust-executor/src` copy into the binary.
+    #[test]
+    fn the_repo_seed_proto_matches_the_committed_seed() {
+        let proto = repo_proto();
+        let seed: BootstrapSeed =
+            serde_json::from_str(include_str!("../../rust-executor/src/mainnet_seed.json"))
+                .unwrap();
+        assert_eq!(proto.trusted_agents, seed.trusted_agents);
+        assert_eq!(proto.identity_store, seed.identity_store);
+        assert_eq!(
+            proto.identity_store,
+            Some(IdentityStoreSeed {
+                url: "https://store.ad4m.dev".into(),
+                keys: vec!["z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj".into()],
+            })
+        );
+        assert_eq!(
+            proto.seed_outputs,
+            vec![
+                "mainnet_seed.json",
+                "../rust-executor/src/mainnet_seed.json"
+            ]
+        );
+    }
+
+    /// The committed seed is exactly what a publish of its languages writes from the proto
+    /// ([`seed_text`]), `identityStore` included; a seed whose languages came from an earlier
+    /// publish gets the proto's `identityStore` in place of its own.
+    #[test]
+    fn the_committed_seed_is_what_the_proto_writes() {
+        let committed = include_str!("../../rust-executor/src/mainnet_seed.json");
+        let published = BootstrapSeed {
+            identity_store: None,
+            ..serde_json::from_str::<BootstrapSeed>(committed).unwrap()
+        };
+        assert_eq!(seed_text(&repo_proto(), &published), committed);
+    }
+
+    #[test]
+    fn both_seed_copies_are_the_same() {
+        assert_eq!(
+            include_str!("../mainnet_seed.json"),
+            include_str!("../../rust-executor/src/mainnet_seed.json")
+        );
+    }
 }

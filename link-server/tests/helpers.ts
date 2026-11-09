@@ -1,26 +1,23 @@
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as ed from "@noble/ed25519";
+import { gcm } from "@noble/ciphers/aes.js";
 import WebSocket from "ws";
-import { edwardsToMontgomeryPriv, edwardsToMontgomeryPub } from "@noble/curves/ed25519";
 import { hashMessageForVerify, publicKeyToDid, signHex } from "../src/auth.js";
-import {
-  encryptRoomKeyForRecipient,
-  generateRoomKey,
-  type EncryptedKeyPayload,
-} from "../src/encryption.js";
+import { generateRoomKey, roomKeyCommitment, sealToDid } from "./sealed-box.js";
 import { buildServer, type ServerOptions } from "../src/server.js";
 import {
   canonicalLinkPayload,
+  isEncryptedLinkData,
   linkHash as computeLinkHash,
-  type EncryptedLinkData,
+  sha256Hex,
   type LinkData,
   type LinkExpression,
 } from "../src/types.js";
 
-const { hexToBytes } = ed.etc;
 
 /** Everything needed to act as an AD4M agent in tests: identity + signing key. */
 export interface TestAgent {
@@ -43,33 +40,43 @@ export async function signChallenge(agent: TestAgent, challenge: string): Promis
   return signHex(agent.privateKey, hashed);
 }
 
-/** Derives the X25519 public key from a test agent's Ed25519 public key
- *  via the Edwards-to-Montgomery conversion. Used to register the agent's
- *  E2E public key with the server during auth step 2. */
-export function testAgentX25519PublicKey(agent: TestAgent): string {
-  const x25519Pub = edwardsToMontgomeryPub(agent.publicKey);
-  return Buffer.from(x25519Pub).toString("hex");
-}
+/** The room key the helpers encrypt links with, for tests that do not rotate their own. The server never sees it. */
+export const TEST_ROOM_KEY = generateRoomKey();
 
-/** Derives the X25519 private key from a test agent's Ed25519 private key.
- *  Matches the public key registered by `testAgentX25519PublicKey`. */
-export function testAgentX25519PrivateKey(agent: TestAgent): Uint8Array {
-  return edwardsToMontgomeryPriv(agent.privateKey);
-}
+/** A LinkExpression as an agent holds it, before encryption or after `openLink`. */
+export type PlainLink = LinkExpression & { data: LinkData };
 
-/** Builds a fully-signed LinkExpression as a real AD4M client would. */
+/**
+ * Builds a signed LinkExpression and encrypts it for the wire, as the server link language does
+ * (`encryptLinkForWire`): the server receives only `{data: {ciphertext, nonce}, link_hash, key_version}`,
+ * where `link_hash` is the SHA-256 of the canonical plaintext fields. Open it with `openLink`.
+ */
 export async function createSignedLink(
   agent: TestAgent,
-  data: LinkData | EncryptedLinkData,
-  timestamp: string = new Date().toISOString()
+  data: LinkData,
+  timestamp: string = new Date().toISOString(),
+  roomKey: Uint8Array = TEST_ROOM_KEY,
+  keyVersion = 1
 ): Promise<LinkExpression> {
-  const unsigned = { author: agent.did, timestamp, data } as LinkExpression;
+  const unsigned: PlainLink = { author: agent.did, timestamp, data };
   const payload = canonicalLinkPayload(unsigned);
   const signature = await signHex(agent.privateKey, payload);
+  const signed: PlainLink = { ...unsigned, proof: { signature, key: `${agent.did}#primary` } };
+  const nonce = new Uint8Array(randomBytes(12));
+  const ciphertext = gcm(roomKey, nonce).encrypt(new TextEncoder().encode(JSON.stringify(signed)));
   return {
-    ...unsigned,
-    proof: { signature, key: `${agent.did}#primary` },
+    data: { ciphertext: Buffer.from(ciphertext).toString("base64"), nonce: Buffer.from(nonce).toString("base64") },
+    link_hash: sha256Hex(payload),
+    key_version: keyVersion,
   };
+}
+
+/** Decrypts a wire link `createSignedLink` built back to the signed LinkExpression. */
+export function openLink(link: LinkExpression, roomKey: Uint8Array = TEST_ROOM_KEY): PlainLink {
+  if (!isEncryptedLinkData(link.data)) throw new Error("openLink: not an encrypted link");
+  const nonce = new Uint8Array(Buffer.from(link.data.nonce, "base64"));
+  const plaintext = gcm(roomKey, nonce).decrypt(new Uint8Array(Buffer.from(link.data.ciphertext, "base64")));
+  return JSON.parse(new TextDecoder().decode(plaintext)) as PlainLink;
 }
 
 export function linkHashOf(link: LinkExpression): string {
@@ -155,12 +162,9 @@ export async function authenticateAgent(
     throw new Error(`challenge request failed: ${step1.status} ${JSON.stringify(step1.body)}`);
   }
   const signature = await signChallenge(agent, step1.body.challenge);
-  const x25519PublicKey = testAgentX25519PublicKey(agent);
-  // Sign the X25519 public key to prove it belongs to this DID
-  const x25519Signature = await signHex(agent.privateKey, hashMessageForVerify(x25519PublicKey));
   const step2 = await postJson<{ token?: string; error?: string }>(
     `${serverUrl}/rooms/${roomId}/auth`,
-    { did: agent.did, challenge: step1.body.challenge, signature, x25519PublicKey, x25519Signature }
+    { did: agent.did, challenge: step1.body.challenge, signature }
   );
   if (step2.status !== 200 || !step2.body.token) {
     throw new Error(`auth verify failed: ${step2.status} ${JSON.stringify(step2.body)}`);
@@ -267,17 +271,13 @@ export interface ClientRotateResult {
   version: number;
   recipients: string[];
   roomKey: Uint8Array;
-  membersNeedingHistoricalKeys?: Array<{
-    did: string;
-    missingVersions: number[];
-    x25519PublicKey: string;
-  }>;
+  membersNeedingHistoricalKeys?: Array<{ did: string; missingVersions: number[] }>;
 }
 
 /**
  * Performs a client-side key rotation: generates the room key locally,
- * fetches the ACL for X25519 public keys, seals the key to every member,
- * and POSTs only the sealed envelopes. The plaintext room key never
+ * seals it to the DID of every ACL member (whether or not it ever
+ * connected), and POSTs only the sealed boxes. The plaintext room key never
  * leaves this function's scope (returned for test assertions only).
  */
 export async function clientSideRotate(
@@ -287,32 +287,21 @@ export async function clientSideRotate(
 ): Promise<ClientRotateResult> {
   const roomKey = generateRoomKey();
 
-  // Fetch ACL to get member X25519 public keys.
-  const aclRes = await getJson<{
-    admin: string;
-    members: Array<{ did: string; x25519PublicKey: string | null }>;
-  }>(`${serverUrl}/rooms/${roomId}/acl`, adminToken);
+  const aclRes = await getJson<{ admin: string; members: Array<{ did: string }> }>(
+    `${serverUrl}/rooms/${roomId}/acl`,
+    adminToken
+  );
   if (aclRes.status !== 200) {
     throw new Error(`ACL fetch failed: ${aclRes.status} ${JSON.stringify(aclRes.body)}`);
   }
 
-  // Seal the room key to each member with a registered X25519 public key.
-  const keys = aclRes.body.members
-    .filter((m) => m.x25519PublicKey)
-    .map((m) => ({
-      did: m.did,
-      encryptedKey: encryptRoomKeyForRecipient(roomKey, hexToBytes(m.x25519PublicKey!)),
-    }));
+  const keys = aclRes.body.members.map((m) => ({ did: m.did, encryptedKey: sealToDid(m.did, roomKey) }));
 
   const rotateRes = await postJson<{
     version: number;
     recipients: string[];
-    membersNeedingHistoricalKeys?: Array<{
-      did: string;
-      missingVersions: number[];
-      x25519PublicKey: string;
-    }>;
-  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys }, adminToken);
+    membersNeedingHistoricalKeys?: Array<{ did: string; missingVersions: number[] }>;
+  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys, commitment: roomKeyCommitment(roomKey) }, adminToken);
 
   if (rotateRes.status !== 200) {
     throw new Error(`rotate failed: ${rotateRes.status} ${JSON.stringify(rotateRes.body)}`);

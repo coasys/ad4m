@@ -7,22 +7,32 @@
 //! synthetic module at the `ad4m:host` specifier (see
 //! `rust-executor/src/js_core/options.rs` and `host.js`) that bridges
 //! the runtime-provided globals to the canonical camelCase API surface.
+//!
+//! Every import that calls a host operation which can fail is declared
+//! `catch` and returns `Result<_, JsValue>`. A JS exception that crosses
+//! into WASM unwinds the module without running Rust destructors, so the
+//! call never releases the language's instance lock and every later call
+//! waits forever. `?` turns the error into a `LanguageError`.
 
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(module = "ad4m:host")]
 extern "C" {
     // ----- Agent (spec §7.1) -----
-    #[wasm_bindgen(js_name = "agentDid")]
-    pub fn agent_did() -> String;
-    #[wasm_bindgen(js_name = "agentSigningKeyId")]
-    pub fn agent_signing_key_id() -> String;
-    #[wasm_bindgen(js_name = "agentSign")]
-    pub fn agent_sign(payload: &[u8]) -> Vec<u8>;
-    #[wasm_bindgen(js_name = "agentSignStringHex")]
-    pub fn agent_sign_string_hex(payload: &str) -> String;
-    #[wasm_bindgen(js_name = "agentCreateSignedExpression")]
-    pub fn agent_create_signed_expression(data: JsValue) -> JsValue;
+    #[wasm_bindgen(js_name = "agentDid", catch)]
+    pub fn agent_did() -> Result<String, JsValue>;
+    #[wasm_bindgen(js_name = "agentSigningKeyId", catch)]
+    pub fn agent_signing_key_id() -> Result<String, JsValue>;
+    #[wasm_bindgen(js_name = "agentSign", catch)]
+    pub fn agent_sign(payload: &[u8]) -> Result<Vec<u8>, JsValue>;
+    #[wasm_bindgen(js_name = "agentSignStringHex", catch)]
+    pub fn agent_sign_string_hex(payload: &str) -> Result<String, JsValue>;
+    /// Opens a box sealed to the calling agent; returns the plaintext as hex.
+    /// Fails for a box sealed to any other DID.
+    #[wasm_bindgen(js_name = "agentOpenSealed", catch)]
+    pub fn agent_open_sealed(sealed: JsValue) -> Result<String, JsValue>;
+    #[wasm_bindgen(js_name = "agentCreateSignedExpression", catch)]
+    pub fn agent_create_signed_expression(data: JsValue) -> Result<JsValue, JsValue>;
 
     // ----- Holochain (spec §7.2) -----
     // These JS-side imports return Promises — `registerDNAs` installs an
@@ -49,8 +59,8 @@ extern "C" {
     // Canonical AD4M content-address hash: SHA-256 -> CIDv1 -> base58btc,
     // prefixed with "Qm". The deterministic address function used by
     // every content-addressed Language.
-    #[wasm_bindgen(js_name = "hash")]
-    pub fn hash(data: &str) -> String;
+    #[wasm_bindgen(js_name = "hash", catch)]
+    pub fn hash(data: &str) -> Result<String, JsValue>;
 
     // ----- HTTP fetch (spec §7.2b) -----
     // Thin wrapper around Deno's native fetch(). `headers_json` is a JSON
@@ -58,13 +68,29 @@ extern "C" {
     // headers), `body` is a raw request body string (empty for GET/HEAD).
     // Returns `{ status: number, body: string }` — the caller decides
     // how to handle non-2xx status codes. Only rejects on network-level
-    // failures (DNS, connection refused, etc.).
+    // failures (DNS, connection refused, etc.), when the call, body
+    // included, takes longer than 10 s (the error names the URL), and when
+    // the reply body passes the host's limit (32 MiB; the error's `code` is
+    // "too-large", see `http_fetch_too_large`).
     #[wasm_bindgen(js_name = "httpFetch", catch)]
     pub async fn http_fetch(
         url: &str,
         method: &str,
         headers_json: &str,
         body: &str,
+    ) -> Result<JsValue, JsValue>;
+    // `http_fetch` with a lower limit on the reply body: the host reads the
+    // body as a stream and refuses it ("too-large") as soon as it passes
+    // `max_bytes` (or the host's own limit, whichever is lower). A host
+    // older than the limit ignores `max_bytes`, so a caller still checks the
+    // length of what it gets.
+    #[wasm_bindgen(js_name = "httpFetch", catch)]
+    pub async fn http_fetch_capped(
+        url: &str,
+        method: &str,
+        headers_json: &str,
+        body: &str,
+        max_bytes: f64,
     ) -> Result<JsValue, JsValue>;
 
     // ----- Language context (spec §7.3) -----
@@ -76,14 +102,14 @@ extern "C" {
     pub fn language_storage_directory() -> String;
 
     // ----- Storage KV -- CORE (spec §7.4) -----
-    #[wasm_bindgen(js_name = "storageGet")]
-    pub fn storage_get(key: &str) -> JsValue;
-    #[wasm_bindgen(js_name = "storagePut")]
-    pub fn storage_put(key: &str, value: &str);
-    #[wasm_bindgen(js_name = "storageDelete")]
-    pub fn storage_delete(key: &str);
-    #[wasm_bindgen(js_name = "storageListKeys")]
-    pub fn storage_list_keys(prefix: Option<String>) -> Vec<JsValue>;
+    #[wasm_bindgen(js_name = "storageGet", catch)]
+    pub fn storage_get(key: &str) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = "storagePut", catch)]
+    pub fn storage_put(key: &str, value: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(js_name = "storageDelete", catch)]
+    pub fn storage_delete(key: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(js_name = "storageListKeys", catch)]
+    pub fn storage_list_keys(prefix: Option<String>) -> Result<Vec<JsValue>, JsValue>;
 
     // ----- Storage File I/O -- OPTIONAL EXTENSION (spec §7.6) -----
     // Raw read/write access to a filesystem-like storage layer.
@@ -152,6 +178,13 @@ pub fn emit_signal_typed<T: Serialize + ?Sized>(data: &T) {
     }
 }
 
+/// Report a token transfer (new, or a change of state) to the executor as
+/// the `token-transfer` language signal (section 5.9 of
+/// `docs-src/language-interface-spec.md`).
+pub fn emit_token_transfer(transfer: &crate::token::TokenTransfer) {
+    emit_signal_typed(&crate::token::TokenTransferSignal::new(transfer.clone()));
+}
+
 // ---------------------------------------------------------------------------
 // Typed wrappers for the remaining JsValue-shaped imports.
 //
@@ -188,11 +221,10 @@ pub async fn holochain_call_typed<T: Serialize + ?Sized>(
 /// Create a signed expression. Type-safe wrapper around
 /// `agent_create_signed_expression` — ensures the wrapped data crosses
 /// the boundary as a plain object, not a Map.
-pub fn agent_create_signed_expression_typed<T: Serialize + ?Sized>(data: &T) -> JsValue {
-    match crate::__serde::to_js(data) {
-        Ok(v) => agent_create_signed_expression(v),
-        Err(_) => JsValue::NULL,
-    }
+pub fn agent_create_signed_expression_typed<T: Serialize + ?Sized>(
+    data: &T,
+) -> crate::errors::LanguageResult<JsValue> {
+    Ok(agent_create_signed_expression(crate::__serde::to_js(data)?)?)
 }
 
 /// Response from `http_fetch_typed`.
@@ -209,7 +241,8 @@ impl HttpFetchResponse {
 }
 
 /// Typed wrapper around `http_fetch` — extracts `{ status, body }` from
-/// the JS response object. Only returns `Err` on network-level failures;
+/// the JS response object. Only returns `Err` on network-level failures
+/// and the host's 10 s timeout;
 /// HTTP error codes (4xx, 5xx) appear in the `Ok` variant's `status` field.
 pub async fn http_fetch_typed(
     url: &str,
@@ -218,15 +251,41 @@ pub async fn http_fetch_typed(
     body: &str,
 ) -> Result<HttpFetchResponse, JsValue> {
     let v = http_fetch(url, method, headers_json, body).await?;
-    let status = js_sys::Reflect::get(&v, &JsValue::from_str("status"))
+    Ok(fetch_response(&v))
+}
+
+/// [`http_fetch_typed`] over [`http_fetch_capped`]: the host refuses a reply body past
+/// `max_bytes` before reading it all ([`http_fetch_too_large`] tells that refusal apart).
+pub async fn http_fetch_typed_capped(
+    url: &str,
+    method: &str,
+    headers_json: &str,
+    body: &str,
+    max_bytes: usize,
+) -> Result<HttpFetchResponse, JsValue> {
+    let v = http_fetch_capped(url, method, headers_json, body, max_bytes as f64).await?;
+    Ok(fetch_response(&v))
+}
+
+/// True when `err`, from `http_fetch` or `http_fetch_capped`, is the host's refusal of a reply
+/// body over its limit (an error whose `code` is `"too-large"`).
+pub fn http_fetch_too_large(err: &JsValue) -> bool {
+    js_sys::Reflect::get(err, &JsValue::from_str("code"))
+        .ok()
+        .and_then(|code| code.as_string())
+        .is_some_and(|code| code == "too-large")
+}
+
+fn fetch_response(v: &JsValue) -> HttpFetchResponse {
+    let status = js_sys::Reflect::get(v, &JsValue::from_str("status"))
         .ok()
         .and_then(|s| s.as_f64())
         .unwrap_or(0.0) as u16;
-    let resp_body = js_sys::Reflect::get(&v, &JsValue::from_str("body"))
+    let resp_body = js_sys::Reflect::get(v, &JsValue::from_str("body"))
         .ok()
         .and_then(|b| b.as_string())
         .unwrap_or_default();
-    Ok(HttpFetchResponse { status, body: resp_body })
+    HttpFetchResponse { status, body: resp_body }
 }
 
 /// POST a JSON-serializable body to `url` and return the response body as

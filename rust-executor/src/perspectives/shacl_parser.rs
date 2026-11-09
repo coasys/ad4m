@@ -2,6 +2,8 @@ use crate::types::Link;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
+mod role_gate_keys;
+
 /// AD4M Action - represents a link operation (e.g., addLink, removeLink, setSingleTarget)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AD4MAction {
@@ -16,6 +18,10 @@ pub struct AD4MAction {
 /// SHACL Shape structure (from TypeScript)
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SHACLShape {
+    /// The shape's own URI (`SHACLShape.nodeShapeUri` in the SDK). Defaults
+    /// to `{namespace}{ClassName}Shape`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_shape_uri: Option<String>,
     pub target_class: String,
     pub properties: Vec<PropertyShape>,
     /// Natural-language hint describing what this class represents, used to steer
@@ -29,7 +35,29 @@ pub struct SHACLShape {
     /// Destructor actions for removing instances
     #[serde(default)]
     pub destructor_actions: Vec<AD4MAction>,
+    /// Parent shape URIs (model inheritance). Emitted as one `sh://node`
+    /// link per parent on the shape node.
+    #[serde(default)]
+    pub parent_shapes: Vec<String>,
+    /// An abstract class (#1435): queried as the union of every concrete
+    /// class that has its property names, never created, never chosen when a
+    /// record is classified. Emitted as one [`ABSTRACT_PREDICATE`] link on
+    /// the shape node. See `model_query::abstract_classes`.
+    #[serde(
+        default,
+        rename = "abstract",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_abstract: bool,
 }
+
+/// Marks a node shape as an abstract class (#1435).
+pub const ABSTRACT_PREDICATE: &str = "ad4m://abstract";
+
+/// A property's names for abstract classes (#1435): one link on the property
+/// shape, targeting `literal:string:` + the URL-encoded JSON map
+/// `{ abstractClassName: name }`.
+pub const ALIAS_PREDICATE: &str = "ad4m://alias";
 
 /// A single structured conformance condition for relation filtering.
 /// DB-agnostic representation that can be translated to any query language.
@@ -129,6 +157,20 @@ pub struct PropertyShape {
     /// Serialized as JSON and stored as a `literal:string:` link.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transform: Option<serde_json::Value>,
+    /// `sh:in` — allowed values with optional AD4M labels, stored as JSON.
+    #[serde(rename = "in", default, skip_serializing_if = "Option::is_none")]
+    pub in_values: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_inclusive: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inclusive: Option<f64>,
+    /// The name this property answers to when the class is read through an
+    /// abstract class (#1435), keyed by the abstract class's name:
+    /// `{ "TextContent": "text" }`. Emitted as one [`ALIAS_PREDICATE`] link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<std::collections::BTreeMap<String, String>>,
 }
 
 // ============================================================================
@@ -481,6 +523,20 @@ impl SHACLFlow {
     }
 }
 
+/// `{namespace}{flow}.transition/{from}/{to}/{action}` with each part
+/// percent-encoded, so every transition gets its own URI. The SDK's
+/// `SHACLFlow.transitionUri` builds the same string.
+fn transition_uri(namespace: &str, flow_name: &str, transition: &FlowTransition) -> String {
+    format!(
+        "{}{}.transition/{}/{}/{}",
+        namespace,
+        flow_name,
+        urlencoding::encode(&transition.from_state),
+        urlencoding::encode(&transition.to_state),
+        urlencoding::encode(&transition.action_name)
+    )
+}
+
 /// Parse Flow JSON to RDF links
 pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>, AnyError> {
     let flow: SHACLFlow = serde_json::from_str(flow_json)
@@ -665,10 +721,7 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
 
     // Transitions
     for transition in &flow.transitions {
-        let transition_uri = format!(
-            "{}{}.{}To{}",
-            flow.namespace, flow_name, transition.from_state, transition.to_state
-        );
+        let transition_uri = transition_uri(&flow.namespace, flow_name, transition);
         let from_state_uri = format!("{}{}.{}", flow.namespace, flow_name, transition.from_state);
         let to_state_uri = format!("{}{}.{}", flow.namespace, flow_name, transition.to_state);
 
@@ -733,24 +786,16 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
 // flows are declared on the perspective without a JS/RPC round-trip.
 // ---------------------------------------------------------------------------
 
-/// Strip a `literal:string:` / `literal://string:` prefix and url-decode
-/// the tail. Returns `None` when the target isn't a string literal or
-/// when the url-decoded tail isn't valid UTF-8.
+/// Strip a `literal:string:` prefix and url-decode the tail. Returns `None`
+/// when the target isn't a string literal or the tail isn't valid UTF-8.
 fn decode_literal_string(target: &str) -> Option<String> {
-    let payload = target
-        .strip_prefix("literal://string:")
-        .or_else(|| target.strip_prefix("literal:string:"))?;
+    let payload = target.strip_prefix("literal:string:")?;
     urlencoding::decode(payload).ok().map(|c| c.into_owned())
 }
 
-/// Strip a `literal:number:` / `literal://number:` prefix and parse
-/// the tail as f64. Both prefix shapes are accepted so wire-format
-/// migration doesn't require reprocessing every flow node.
+/// Strip a `literal:number:` prefix and parse the tail as f64.
 fn decode_literal_number(target: &str) -> Option<f64> {
-    let payload = target
-        .strip_prefix("literal://number:")
-        .or_else(|| target.strip_prefix("literal:number:"))?;
-    payload.parse().ok()
+    target.strip_prefix("literal:number:")?.parse().ok()
 }
 
 /// How much of an offending literal a warning quotes. Flow literals are
@@ -811,6 +856,59 @@ fn find_links<'a>(links: &'a [Link], source: &str, predicate: &str) -> Vec<&'a L
         .iter()
         .filter(|l| l.source == source && l.predicate.as_deref() == Some(predicate))
         .collect()
+}
+
+/// Decode one `consensusRule` literal. A key the reader does not know is an
+/// error, the same as a missing required field: serde would drop it, and on a
+/// role gate a dropped key widens the gate or removes it (#1144). See
+/// [`role_gate_keys`].
+///
+/// The rule is decoded from the string, not from the checked `Value`: a
+/// `Value` keeps only the last of duplicate keys, so decoding from it would
+/// read a rule the author did not write. The key check parses its own `Value`
+/// with duplicates refused at every level.
+fn decode_consensus_rule(target: &str) -> Result<ConsensusRule, String> {
+    let s = decode_literal_string(target)
+        .ok_or_else(|| "target is not a url-decodable `literal:string:`".to_string())?;
+    let value = role_gate_keys::parse_refusing_duplicate_keys(&s)?;
+    let errors = role_gate_keys::role_gate_key_errors(&value);
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    serde_json::from_str(&s).map_err(|e| e.to_string())
+}
+
+/// The predicate a flow definition's `consensusRule` is written on, at the
+/// flow URI and at each state URI (`parse_flow_to_links`, `SHACLFlow.toLinks`).
+pub const CONSENSUS_RULE_PREDICATE: &str = "ad4m://consensusRule";
+
+/// Refuse, before anything is written, a `consensusRule` link this replica
+/// could not read back (#1144): a key the reader does not know, a key written
+/// twice, or a literal that does not decode. The reader fails closed on such
+/// a rule ([`read_consensus_rule`]), so storing it would leave a gate that
+/// refuses every edge it governs and names the key only in the executor log.
+/// Every local write path (`add_link`, `add_links`, `link_mutations`,
+/// `update_link`) runs this on its additions, so `addFlow` gets the error
+/// instead, naming the state or flow URI and the key. Sync is not checked: a
+/// definition arriving from a peer is stored as written and still refused
+/// when it is read.
+pub fn check_consensus_rule_links<'a>(
+    links: impl IntoIterator<Item = &'a Link>,
+) -> Result<(), AnyError> {
+    for link in links {
+        if link.predicate.as_deref() != Some(CONSENSUS_RULE_PREDICATE) {
+            continue;
+        }
+        if let Err(e) = decode_consensus_rule(&link.target) {
+            return Err(anyhow::anyhow!(
+                "flow definition refused: the `consensusRule` on `{}` cannot be read ({e}). \
+                 Nothing was stored. A stored rule with an unknown or duplicate key would \
+                 refuse every edge it governs (#1144).",
+                link.source
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Read the `consensusRule` at ONE scope — a flow URI, or one state URI —
@@ -887,7 +985,7 @@ fn read_consensus_rule(links: &[Link], source: &str, scope: &str) -> (Option<Con
 
         // Exactly one authored rule. Unchanged #1079 behaviour: decode it,
         // and record a decode failure rather than erasing it.
-        [only] => match decode_json_literal::<ConsensusRule>(only) {
+        [only] => match decode_consensus_rule(only) {
             Ok(rule) => (Some(rule), false),
             Err(e) => {
                 log::warn!(
@@ -1393,6 +1491,67 @@ fn propagate_property_local(shape: &mut SHACLShape) {
     }
 }
 
+/// The name a property is stored under: its `name`, or its path's local part.
+fn property_name(prop: &PropertyShape) -> String {
+    prop.name
+        .clone()
+        .unwrap_or_else(|| extract_local_name(&prop.path))
+}
+
+/// Refuse what an abstract class or an alias cannot mean (#1435).
+///
+/// - An abstract class with no property or relation would match every class.
+/// - An alias must name something. It must not be a reserved name, and it
+///   must not be a name the class already uses: queried through the abstract
+///   class, both would answer to it.
+/// - Two properties of one class cannot take the same alias for the same
+///   abstract class.
+fn refuse_abstract_misuse(shape: &SHACLShape, class_name: &str) -> Result<(), AnyError> {
+    if shape.is_abstract && shape.properties.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Abstract class '{class_name}' declares no property and no relation: it would \
+             match every class. Declare the names a class must have."
+        ));
+    }
+    let names: Vec<String> = shape.properties.iter().map(property_name).collect();
+    let mut taken: std::collections::BTreeMap<(&str, &str), &str> = Default::default();
+    for (prop, own_name) in shape.properties.iter().zip(&names) {
+        for (abstract_class, alias) in prop.alias.iter().flatten() {
+            if abstract_class.is_empty() || alias.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': property '{own_name}' has an empty alias \
+                     {abstract_class:?}: {alias:?}. Name the abstract class and the name."
+                ));
+            }
+            if alias == own_name {
+                continue;
+            }
+            if RESERVED_PROPERTY_NAMES.contains(&alias.as_str()) {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': property '{own_name}' has alias '{alias}' for \
+                     '{abstract_class}', a name every instance already carries ({}).",
+                    RESERVED_PROPERTY_NAMES.join(", ")
+                ));
+            }
+            if names.contains(alias) {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': property '{own_name}' has alias '{alias}' for \
+                     '{abstract_class}', but the class already has a property named \
+                     '{alias}'. Read through '{abstract_class}', both would answer to it: \
+                     drop the alias or rename one of them."
+                ));
+            }
+            if let Some(other) = taken.insert((abstract_class, alias), own_name) {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': properties '{other}' and '{own_name}' both have \
+                     alias '{alias}' for '{abstract_class}'."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
 pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
     let mut shape: SHACLShape = serde_json::from_str(shacl_json)
@@ -1430,11 +1589,53 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         ));
     }
 
+    // `sh:datatype` makes a property's values encoded literals, which
+    // hydration decodes; `sh:class` / `target_class_name` make them instance
+    // URIs, which `include` hydrates against the target shape. One property
+    // cannot be both. The SDK refuses the pair at decoration time; this
+    // catches shapes written without the SDK (MCP `add_model`, raw WS-RPC).
+    let literal_and_instance: Vec<String> = shape
+        .properties
+        .iter()
+        .filter(|prop| {
+            prop.datatype.is_some() && (prop.class.is_some() || prop.target_class_name.is_some())
+        })
+        .map(|prop| {
+            prop.name
+                .clone()
+                .unwrap_or_else(|| extract_local_name(&prop.path))
+        })
+        .collect();
+    if !literal_and_instance.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Property {:?} declares both `datatype` (literal values) and a target class \
+             (`class` / `target_class_name`, model instances) — drop `datatype` to link \
+             instances, or drop the target class to store literals.",
+            literal_and_instance,
+        ));
+    }
+
+    refuse_abstract_misuse(&shape, class_name)?;
+
     let mut links = Vec::new();
 
     // Extract namespace from target_class (e.g., "recipe://Recipe" -> "recipe://")
     let namespace = extract_namespace(&shape.target_class)?;
-    let shape_uri = format!("{}{}Shape", namespace, class_name);
+    // Shape actions are found by the `{ClassName}Shape` suffix
+    // (`get_shape_actions_from_shacl`), so a given URI must keep it.
+    let shape_suffix = format!("{}Shape", class_name);
+    let shape_uri = match shape.node_shape_uri.take() {
+        Some(uri) if !uri.ends_with(&shape_suffix) => {
+            return Err(anyhow::anyhow!(
+                "node_shape_uri `{}` must end with `{}` for class `{}`",
+                uri,
+                shape_suffix,
+                class_name
+            ));
+        }
+        Some(uri) => uri,
+        None => format!("{}{}", namespace, shape_suffix),
+    };
 
     // Create name mapping for class lookup (needed by isSubjectInstance)
     let name_mapping = format!("literal:string:shacl://{}", class_name);
@@ -1479,6 +1680,14 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         target: shape.target_class.clone(),
     });
 
+    for parent_shape in &shape.parent_shapes {
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some("sh://node".to_string()),
+            target: parent_shape.clone(),
+        });
+    }
+
     // Natural-language interpretation hint (steers LLM interpretation)
     if let Some(hint) = &shape.interpretation_hint {
         links.push(Link {
@@ -1488,25 +1697,26 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         });
     }
 
-    // Constructor actions (stored as JSON in literal)
-    if !shape.constructor_actions.is_empty() {
-        let constructor_json =
-            serde_json::to_string(&shape.constructor_actions).unwrap_or_else(|_| "[]".to_string());
+    if shape.is_abstract {
         links.push(Link {
             source: shape_uri.clone(),
-            predicate: Some("ad4m://constructor".to_string()),
-            target: format!("literal:string:{}", constructor_json),
+            predicate: Some(ABSTRACT_PREDICATE.to_string()),
+            target: "literal:true".to_string(),
         });
     }
 
-    // Destructor actions (stored as JSON in literal)
-    if !shape.destructor_actions.is_empty() {
-        let destructor_json =
-            serde_json::to_string(&shape.destructor_actions).unwrap_or_else(|_| "[]".to_string());
+    // Constructor and destructor actions (JSON in a literal). Written even
+    // when empty: `create_subject` needs the constructor link to know the
+    // class exists, and an empty list is a valid no-op.
+    for (predicate, actions) in [
+        ("ad4m://constructor", &shape.constructor_actions),
+        ("ad4m://destructor", &shape.destructor_actions),
+    ] {
+        let json = serde_json::to_string(actions).unwrap_or_else(|_| "[]".to_string());
         links.push(Link {
             source: shape_uri.clone(),
-            predicate: Some("ad4m://destructor".to_string()),
-            target: format!("literal:string:{}", destructor_json),
+            predicate: Some(predicate.to_string()),
+            target: format!("literal:string:{}", json),
         });
     }
 
@@ -1552,6 +1762,15 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://interpretation_hint".to_string()),
                 target: format!("literal:string:{}", hint),
+            });
+        }
+
+        if let Some(alias) = prop.alias.as_ref().filter(|a| !a.is_empty()) {
+            let json = serde_json::to_string(alias).unwrap_or_else(|_| "{}".to_string());
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some(ALIAS_PREDICATE.to_string()),
+                target: format!("literal:string:{}", urlencoding::encode(&json)),
             });
         }
 
@@ -1774,6 +1993,38 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 predicate: Some("ad4m://transform".to_string()),
                 target: format!("literal:string:{}", json_str),
             });
+        }
+
+        if let Some(in_values) = prop.in_values.as_ref().filter(|v| !v.is_empty()) {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("sh://in".to_string()),
+                target: format!(
+                    "literal:string:{}",
+                    serde_json::to_string(in_values).unwrap_or_default()
+                ),
+            });
+        }
+
+        let plain_literals = [
+            ("sh://pattern", prop.pattern.clone()),
+            (
+                "sh://minInclusive",
+                prop.min_inclusive.map(|v| v.to_string()),
+            ),
+            (
+                "sh://maxInclusive",
+                prop.max_inclusive.map(|v| v.to_string()),
+            ),
+        ];
+        for (predicate, value) in plain_literals {
+            if let Some(value) = value {
+                links.push(Link {
+                    source: prop_shape_uri.clone(),
+                    predicate: Some(predicate.to_string()),
+                    target: format!("literal:{}", value),
+                });
+            }
         }
     }
 
@@ -2119,6 +2370,116 @@ mod tests {
     }
 
     #[test]
+    fn parse_shacl_to_links_refuses_datatype_with_a_target_class() {
+        for target in [
+            r#""class": "book://AuthorShape""#,
+            r#""target_class_name": "Author""#,
+        ] {
+            let shacl_json = format!(
+                r#"{{
+                    "target_class": "book://Post",
+                    "properties": [
+                        {{ "path": "book://title", "name": "title", "datatype": "xsd://string" }},
+                        {{ "path": "book://writer", "name": "writer",
+                           "datatype": "xsd://string", "relation_kind": "hasOne", {target} }}
+                    ]
+                }}"#
+            );
+            let err = parse_shacl_to_links(&shacl_json, "Post").unwrap_err();
+            assert!(err.to_string().contains(r#"["writer"]"#), "{target}: {err}");
+            assert!(err.to_string().contains("datatype"), "{target}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_shacl_to_links_keeps_a_literal_relation_and_an_instance_relation() {
+        let shacl_json = r#"{
+            "target_class": "book://Post",
+            "properties": [
+                { "path": "book://tag", "name": "tags", "datatype": "xsd://string",
+                  "node_kind": "Literal", "relation_kind": "hasMany", "collection": true },
+                { "path": "book://writer", "name": "writer", "node_kind": "IRI",
+                  "relation_kind": "hasOne", "class": "book://AuthorShape",
+                  "target_class_name": "Author" }
+            ]
+        }"#;
+        assert!(parse_shacl_to_links(shacl_json, "Post").is_ok());
+    }
+
+    #[test]
+    fn parse_shacl_to_links_keeps_the_given_node_shape_uri() {
+        let links = parse_shacl_to_links(
+            r#"{"node_shape_uri": "shapes://DogShape", "target_class": "zoo://Dog",
+                "properties": [{"path": "zoo://name", "name": "name"}]}"#,
+            "Dog",
+        )
+        .unwrap();
+        let has = |source: &str, predicate: &str, target: &str| {
+            links.iter().any(|l| {
+                l.source == source
+                    && l.predicate.as_deref() == Some(predicate)
+                    && l.target == target
+            })
+        };
+        assert!(has(
+            "literal:string:shacl://Dog",
+            "ad4m://shacl_shape_uri",
+            "shapes://DogShape"
+        ));
+        assert!(has("zoo://Dog", "ad4m://shape", "shapes://DogShape"));
+        assert!(has("shapes://DogShape", "sh://targetClass", "zoo://Dog"));
+        assert!(has("shapes://DogShape", "sh://property", "zoo://Dog.name"));
+        assert!(!links.iter().any(|l| l.source == "zoo://DogShape"));
+    }
+
+    #[test]
+    fn parse_shacl_to_links_refuses_a_node_shape_uri_without_the_class_suffix() {
+        let err = parse_shacl_to_links(
+            r#"{"node_shape_uri": "zoo://MemoShape", "target_class": "zoo://Memo", "properties": []}"#,
+            "Note",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("must end with `NoteShape`"),
+            "{err}"
+        );
+    }
+
+    /// Contract with the SDK: `fixtures/shacl_writer_golden.json` holds
+    /// shapes (one using every field `SHACLShape.toJSON()` sends, one with
+    /// empty action lists, one abstract class) and the exact links this
+    /// writer stores for each.
+    /// The SDK test "decodes the executor's golden links back to the shape it
+    /// sent" reads the same file through `SHACLShape.fromLinks`, so a field
+    /// this writer drops fails one side.
+    #[test]
+    fn parse_shacl_to_links_matches_the_golden_fixture() {
+        let fixture: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("fixtures/shacl_writer_golden.json")).unwrap();
+        for case in fixture {
+            let links =
+                parse_shacl_to_links(&case["shape"].to_string(), case["name"].as_str().unwrap())
+                    .unwrap();
+            let actual: Vec<serde_json::Value> = links
+                .iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "source": l.source,
+                        "predicate": l.predicate,
+                        "target": l.target,
+                    })
+                })
+                .collect();
+            assert_eq!(
+                serde_json::Value::from(actual),
+                case["links"],
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_shacl_basic() {
         let shacl_json = r#"{
             "target_class": "recipe://Recipe",
@@ -2141,7 +2502,7 @@ mod tests {
         // Note: ad4m://has_subject_class link is NOT created here - it's created by add_sdna()
         assert!(links.len() >= 11);
 
-        // Check for key links (note: ad4m://self -> literal://string:Recipe is NOT here)
+        // Check for key links (note: ad4m://self -> literal:string:Recipe is NOT here)
         assert!(links.iter().any(|l| l.source == "recipe://RecipeShape"
             && l.predicate == Some("sh://targetClass".to_string())));
         assert!(links
@@ -2246,8 +2607,7 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "recipe://RecipeShape"
                 && l.predicate == Some("ad4m://constructor".to_string())
-                && l.target.starts_with("literal://string:")
-                || l.target.starts_with("literal:string:")),
+                && l.target.starts_with("literal:string:")),
             "Missing constructor action link"
         );
 
@@ -2255,8 +2615,7 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "recipe://RecipeShape"
                 && l.predicate == Some("ad4m://destructor".to_string())
-                && l.target.starts_with("literal://string:")
-                || l.target.starts_with("literal:string:")),
+                && l.target.starts_with("literal:string:")),
             "Missing destructor action link"
         );
 
@@ -2264,8 +2623,7 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "recipe://Recipe.name"
                 && l.predicate == Some("ad4m://setter".to_string())
-                && l.target.starts_with("literal://string:")
-                || l.target.starts_with("literal:string:")),
+                && l.target.starts_with("literal:string:")),
             "Missing setter action link"
         );
 
@@ -2275,8 +2633,7 @@ mod tests {
                 .iter()
                 .any(|l| l.source == "recipe://Recipe.ingredients"
                     && l.predicate == Some("ad4m://adder".to_string())
-                    && l.target.starts_with("literal://string:")
-                    || l.target.starts_with("literal:string:")),
+                    && l.target.starts_with("literal:string:")),
             "Missing adder action link"
         );
 
@@ -2286,8 +2643,7 @@ mod tests {
                 .iter()
                 .any(|l| l.source == "recipe://Recipe.ingredients"
                     && l.predicate == Some("ad4m://remover".to_string())
-                    && l.target.starts_with("literal://string:")
-                    || l.target.starts_with("literal:string:")),
+                    && l.target.starts_with("literal:string:")),
             "Missing remover action link"
         );
     }
@@ -2343,14 +2699,16 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "todo://TODOFlow"
                 && l.predicate == Some("ad4m://hasTransition".to_string())
-                && l.target == "todo://TODO.readyTodone"),
+                && l.target == "todo://TODO.transition/ready/done/Complete"),
             "Missing transition link"
         );
 
         // Check for transition action name
         assert!(
-            links.iter().any(|l| l.source == "todo://TODO.readyTodone"
-                && l.predicate == Some("ad4m://actionName".to_string())),
+            links
+                .iter()
+                .any(|l| l.source == "todo://TODO.transition/ready/done/Complete"
+                    && l.predicate == Some("ad4m://actionName".to_string())),
             "Missing action name link"
         );
     }
@@ -2614,6 +2972,73 @@ mod tests {
         }
     }
 
+    /// Same fixture as the SDK test "encodes transition URI parts like the
+    /// executor flow writer" (core/src/shacl/SHACLFlow.test.ts): both writers
+    /// must name a transition identically.
+    #[test]
+    fn transition_uri_encodes_parts_like_the_sdk() {
+        let flow_json = r#"{
+            "name": "TODO",
+            "namespace": "todo://",
+            "states": [
+                {"name": "in review", "value": 0.0},
+                {"name": "a/b", "value": 1.0}
+            ],
+            "transitions": [
+                {"action_name": "Fast-track!*'()~._", "from_state": "in review", "to_state": "a/b", "actions": []}
+            ]
+        }"#;
+        let links = parse_flow_to_links(flow_json, "TODO").expect("writer");
+        let targets: Vec<&str> = links
+            .iter()
+            .filter(|l| {
+                l.source == "todo://TODOFlow"
+                    && l.predicate.as_deref() == Some("ad4m://hasTransition")
+            })
+            .map(|l| l.target.as_str())
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["todo://TODO.transition/in%20review/a%2Fb/Fast-track%21%2A%27%28%29~._"]
+        );
+    }
+
+    /// Two transitions between the same states (different actions), and
+    /// `"a" -> "Tob"` next to `"aTo" -> "b"`, used to share one
+    /// `{from}To{to}` URI, so the reader merged them into one.
+    #[test]
+    fn parse_flow_to_links_keeps_transitions_that_used_to_collide() {
+        let flow_json = r#"{
+            "name": "F",
+            "namespace": "f://",
+            "states": [
+                {"name": "a", "value": 0.0},
+                {"name": "Tob", "value": 1.0},
+                {"name": "aTo", "value": 2.0},
+                {"name": "b", "value": 3.0}
+            ],
+            "transitions": [
+                {"action_name": "Approve", "from_state": "a", "to_state": "Tob", "actions": []},
+                {"action_name": "Fast-track", "from_state": "a", "to_state": "Tob", "actions": []},
+                {"action_name": "Go", "from_state": "aTo", "to_state": "b", "actions": []}
+            ]
+        }"#;
+
+        let links = parse_flow_to_links(flow_json, "F").expect("writer");
+        let flow = parse_flow_from_links(&links, "f://FFlow").expect("reader");
+
+        let mut got: Vec<String> = flow
+            .transitions
+            .iter()
+            .map(|t| format!("{}->{}:{}", t.from_state, t.to_state, t.action_name))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["a->Tob:Approve", "a->Tob:Fast-track", "aTo->b:Go"]
+        );
+    }
+
     /// Full-shape read — hand-built links matching what
     /// `core/src/shacl/SHACLFlow.ts::toLinks()` emits when every field
     /// is set. Independent of the Rust writer (so a Rust-writer bug
@@ -2624,7 +3049,7 @@ mod tests {
     fn parse_flow_from_links_reads_all_predicates_from_hand_built_links() {
         let flow_uri = "coasys://DeliberationFlow";
         let state_uri = "coasys://Deliberation.Resolution";
-        let transition_uri = "coasys://Deliberation.OverlapToResolution";
+        let transition_uri = "coasys://Deliberation.transition/Overlap/Resolution/Resolve";
         let overlap_uri = "coasys://Deliberation.Overlap";
         let requires_json = r#"[{"className": "coasys://Perspective", "count": {"min": 3}}]"#;
         let context_json = r#"[{"className": "coasys://Proposal"}]"#;

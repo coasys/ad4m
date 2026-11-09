@@ -1,0 +1,12 @@
+# Checks origin/staging every 10 minutes. A check that finds nothing new
+# costs one git fetch.
+[Unit]
+Description=Check origin/staging for a new commit to deploy
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=10min
+Unit=ad4m-staging-update.service
+
+[Install]
+WantedBy=timers.target

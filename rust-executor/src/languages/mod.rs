@@ -1,12 +1,23 @@
 mod byte_array;
+#[cfg(test)]
+mod call_deadline_tests;
 pub mod capability;
 mod conductor_languages;
 pub mod error;
+#[cfg(test)]
+mod install_tests;
+/// How long one request to the language language may take before an install
+/// gives up on it. Its store is consistent, so this bounds a request that
+/// hangs, not a wait for a value to appear.
+const LANGUAGE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub mod language;
 pub mod language_context;
 pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
+mod metas;
+#[cfg(test)]
+mod signing_reach_tests;
 pub mod wasm_delegate;
 
 pub use literal::{literal_decode, literal_encode};
@@ -15,7 +26,9 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
+use crate::events::Event;
+use crate::logging::span;
+use crate::pubsub::get_global_pubsub;
 use crate::runtime_service::RuntimeService;
 use crate::types::Address;
 use crate::types::{
@@ -66,6 +79,19 @@ fn sorted_json_string(val: &JsonValue) -> String {
     }
 }
 
+/// Removes a directory tree when dropped: a temp dir that must go on every exit path.
+struct RemoveDirOnDrop(PathBuf);
+
+impl Drop for RemoveDirOnDrop {
+    fn drop(&mut self) {
+        if let Err(e) = fs::remove_dir_all(&self.0) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("Could not remove temp dir {}: {}", self.0.display(), e);
+            }
+        }
+    }
+}
+
 /// Tracks addresses of system languages (language language, agent, neighbourhood, perspective)
 #[derive(Debug, Clone, Default)]
 pub struct SystemLanguageAddresses {
@@ -94,6 +120,9 @@ pub struct LanguageController {
 
     // Cached language names (address -> name)
     language_names: Arc<TokioMutex<HashMap<String, String>>>,
+
+    // One lock per address `install_language` has seen: one install of a language at a time
+    installs: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
 }
 
 impl LanguageController {
@@ -119,6 +148,7 @@ impl LanguageController {
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
             language_names: Arc::new(TokioMutex::new(HashMap::new())),
+            installs: Arc::new(TokioMutex::new(HashMap::new())),
         }
     }
 
@@ -219,6 +249,7 @@ impl LanguageController {
         );
 
         // Spawn dedicated runtime in its own thread (sandboxed to storage_directory)
+        let starting = span(format!("loadLanguage.runtimeStart {}", language_address));
         let runtime_handle = LanguageRuntimeHandle::spawn(
             language_address.clone(),
             storage_directory.clone(),
@@ -240,10 +271,12 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to load language module: {}", e),
             })?;
+        drop(starting);
         info!("Module loaded for language {}", language_address);
 
         // Initialize the language with context
         info!("Initializing language {}", language_address);
+        let initializing = span(format!("loadLanguage.init {}", language_address));
         runtime_handle
             .load_language(language_context_json)
             .await
@@ -251,6 +284,7 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to initialize language: {}", e),
             })?;
+        drop(initializing);
 
         // Query the language name now that the constructor has run
         let mut runtime_handle = runtime_handle;
@@ -272,10 +306,13 @@ impl LanguageController {
         capability::register_capabilities(&language_address, capabilities);
         info!("Callbacks registered for {}", label);
 
-        // Cache the language name for use by other log sites
+        // Cache the language name for use by other log sites, unless one was
+        // set for it already (`set_language_name`, e.g. a templated name)
         if let Some(name) = &runtime_handle.language_name {
             let mut names = self.language_names.lock().await;
-            names.insert(language_address.clone(), name.clone());
+            names
+                .entry(language_address.clone())
+                .or_insert_with(|| name.clone());
         }
 
         // Store the runtime handle
@@ -285,6 +322,22 @@ impl LanguageController {
 
         info!("Successfully loaded language: {}", label);
         Ok(language_address)
+    }
+
+    /// Test-only: serve `address` from `handle` (see
+    /// `LanguageRuntimeHandle::from_channel`), or stop serving it with `None`.
+    /// No load, no teardown.
+    #[cfg(test)]
+    pub(crate) async fn set_runtime_for_test(
+        &self,
+        address: &str,
+        handle: Option<LanguageRuntimeHandle>,
+    ) {
+        let mut runtimes = self.runtimes.lock().await;
+        match handle {
+            Some(handle) => runtimes.insert(address.to_string(), handle),
+            None => runtimes.remove(address),
+        };
     }
 
     /// Unload a language and clean up
@@ -650,6 +703,30 @@ impl LanguageController {
         Ok(())
     }
 
+    /// Writes the identity store's URL and keys (the config's, else the network seed's) into
+    /// the agent language's settings, then installs and loads it. The language sends agent
+    /// profiles and every identity call to its `storeUrl`; when the settings cannot be written,
+    /// the language is not loaded at all, so profile and identity calls fail (the identity
+    /// calls as `unavailable`) instead of reaching an older store.
+    pub(crate) async fn install_agent_language(
+        &self,
+        languages_dir: &std::path::Path,
+        agent_language: &str,
+        settings: &crate::identity::IdentitySettings,
+    ) -> Result<(), LanguageError> {
+        crate::identity::write_agent_language_settings(languages_dir, agent_language, settings)
+            .map_err(|e| LanguageError::LoadError {
+                address: agent_language.to_string(),
+                message: format!(
+                    "identity.storeUrl and identity.storeKeys could not be written to the agent language's settings \
+                     ({e}); the agent language is not loaded, so no profile or identity call \
+                     reaches a store other than the configured one"
+                ),
+            })?;
+        self.install_language_from_address(agent_language, true)
+            .await
+    }
+
     /// Load the language language and, unless `language_language_only`, the agent,
     /// neighbourhood and perspective languages. With the default seed none of these touch
     /// Holochain, so this returns without waiting for the conductor; a seed whose system
@@ -683,6 +760,8 @@ impl LanguageController {
         if !language_language_only {
             // Step 2: Load other system languages
             let agent_language = RuntimeService::with_global_instance(|rs| rs.get_agent_language());
+            let identity_settings = crate::identity::settings_from_config();
+            let languages_dir = languages_directory();
             let neighbourhood_language =
                 RuntimeService::with_global_instance(|rs| rs.get_neighbourhood_language());
             let perspective_language =
@@ -694,7 +773,7 @@ impl LanguageController {
                 agent_language, neighbourhood_language, perspective_language
             );
             let (agent_result, neighbourhood_result, perspective_result) = tokio::join!(
-                self.install_language_from_address(&agent_language, true),
+                self.install_agent_language(&languages_dir, &agent_language, &identity_settings),
                 self.install_language_from_address(&neighbourhood_language, true),
                 self.install_language_from_address(&perspective_language, true),
             );
@@ -808,9 +887,20 @@ impl LanguageController {
         Ok(())
     }
 
+    /// Load `language`, fetching its bundle first if it is not on disk. One
+    /// install per address runs at a time: a caller that arrives during one
+    /// waits for it and then finds the language loaded.
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
         log::debug!("install_language called for: {}", language);
         let controller = Self::global_instance();
+        let lock = controller
+            .installs
+            .lock()
+            .await
+            .entry(language.clone())
+            .or_default()
+            .clone();
+        let _installing = lock.lock().await;
 
         // Check if the language is already loaded in Rust runtimes
         if controller.is_language_loaded(&language).await {
@@ -818,160 +908,131 @@ impl LanguageController {
             return Ok(());
         }
 
-        let language_dir = languages_directory().join(&language);
+        let bundle_path = controller.fetch_language(&language).await?;
+
+        // Load into a per-language Deno runtime
+        let _loading = span(format!("installLanguage.load {}", language));
+        controller
+            .load_language(bundle_path, false)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "install_language: failed to load language runtime for {}: {}",
+                    language,
+                    e
+                )
+            })?;
+        info!("install_language: loaded language runtime for {}", language);
+        Ok(())
+    }
+
+    /// Make sure `language`'s bundle is on disk and hashes to its address,
+    /// fetching it from the language language if it is not there; returns its
+    /// path. Does not load it.
+    async fn fetch_language(&self, language: &str) -> Result<PathBuf, AnyError> {
+        let language_dir = languages_directory().join(language);
         let meta_path = language_dir.join("meta.json");
         let bundle_path = language_dir.join("bundle.js");
 
-        // Check if the language language is loaded on the Rust side
+        // A bundle whose hash is not its address must not be installed: a
+        // neighbourhood published with it would name a link language that no
+        // executor can use.
+        let verify = |source: &str| {
+            let hash = self.calculate_language_hash(source);
+            if hash == language {
+                return Ok(());
+            }
+            error!(
+                "install_language: hash mismatch for {} (computed {}), not installing",
+                language, hash
+            );
+            Err(anyhow::anyhow!(
+                "install_language: hash mismatch for {} (computed {}). \
+                 The language language returned source that does not match \
+                 the requested content address; refusing to install.",
+                language,
+                hash
+            ))
+        };
+
+        if bundle_path.exists() {
+            verify(&fs::read_to_string(&bundle_path)?)?;
+            return Ok(bundle_path);
+        }
+
         let language_language_address = {
-            let sys = controller.system_addresses.lock().await;
+            let sys = self.system_addresses.lock().await;
             sys.language_language.clone()
         };
+        let Some(ll_addr) = language_language_address.as_ref() else {
+            return Err(anyhow::anyhow!(
+                "install_language: no source available for {}",
+                language
+            ));
+        };
+        let language_lit = serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
 
-        // Get meta: from disk or from language language with retry
-        let meta: Option<JsonValue> = if meta_path.exists() {
-            let content = fs::read_to_string(&meta_path)?;
-            Some(serde_json::from_str(&content)?)
-        } else if let Some(ref ll_addr) = language_language_address {
-            // Fetch from language language with retry logic (up to 10 retries)
-            let language_lit =
-                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
-            let meta_script = format!(
-                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
-                language_lit
-            );
-
-            let mut meta_result = None;
-            for retry in 0..10 {
-                match controller.execute_on_language(ll_addr, &meta_script).await {
-                    Ok(result) => {
-                        if let Ok(val) = serde_json::from_str::<JsonValue>(&result) {
-                            if !val.is_null() {
-                                meta_result = Some(val);
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "Error getting language meta from language language: {}\nRetrying...",
-                            e
-                        );
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
-            }
-
-            meta_result.and_then(|expr| expr.get("data").cloned())
-        } else {
-            None
+        // The language language's store is consistent, so one request decides:
+        // a miss means the language was never published. The timeout only ends
+        // a request that hangs; `ensure_link_language` tries a failed install
+        // again later.
+        let ask = |script: String| async move {
+            tokio::time::timeout(
+                LANGUAGE_FETCH_TIMEOUT,
+                self.execute_on_language(ll_addr, &script),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "install_language: the language language timed out after {:?}",
+                    LANGUAGE_FETCH_TIMEOUT
+                )
+            })?
+            .map_err(anyhow::Error::from)
         };
 
-        // Get bundle source: from disk or from language language
-        let source = if bundle_path.exists() {
-            Some(fs::read_to_string(&bundle_path)?)
-        } else if let Some(ref ll_addr) = language_language_address {
-            // Match the meta fetch retry policy: up to 10 attempts with
-            // linear backoff. Previously the source fetch was one-shot,
-            // which meant that if the language language was still warming
-            // up the meta call could succeed on retry N while the source
-            // call failed instantly on the first attempt, aborting the
-            // whole install with a confusing "no source available" error
-            // even though a retry would have succeeded.
-            let language_lit =
-                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
-            let source_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
-                language_lit
-            );
-
-            let mut source_result: Option<String> = None;
-            for retry in 0..10 {
-                match controller
-                    .execute_on_language(ll_addr, &source_script)
-                    .await
-                {
-                    Ok(s) => {
-                        // A language-language that returns null/undefined
-                        // for an unknown address stringifies to the literal
-                        // "null" / "undefined" here. Treat those as
-                        // "source not available" — but still retry in case
-                        // the LL is mid-warmup and hasn't yet materialized
-                        // the expression.
-                        let trimmed = s.trim();
-                        if !(trimmed.is_empty() || trimmed == "null" || trimmed == "undefined") {
-                            source_result = Some(s);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Error getting language source from language language: {}\nRetrying...",
-                            e
-                        );
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
-            }
-
-            source_result
-        } else {
-            None
-        };
-
-        // If we have source, save and load into a per-language runtime
-        if let Some(source) = source {
-            // Compute hash and verify it matches the expected address.
-            //
-            // Previously this returned Ok(()) on mismatch, which left
-            // callers (e.g. `neighbourhood_publish_from_perspective_with_context`
-            // in neighbourhoods.rs) believing the language had been
-            // installed even though nothing was loaded. The neighbourhood
-            // would then be published referencing a link_language that
-            // this node could not actually use, surfacing much later as
-            // a mysterious sync failure. Propagate the hash mismatch as
-            // a hard error so the caller knows the install did not
-            // happen.
-            let hash = controller.calculate_language_hash(&source);
-            if hash != language {
-                error!("install_language: COULDN'T VERIFY HASH OF LANGUAGE!");
-                error!("install_language: Address: {}", language);
-                error!("install_language: Computed hash: {}", hash);
-                error!("install_language: LANGUAGE WILL NOT BE INSTALLED");
-                return Err(anyhow::anyhow!(
-                    "install_language: hash mismatch for {} (computed {}). \
-                     The language language returned source that does not match \
-                     the requested content address; refusing to install.",
-                    language,
-                    hash
-                ));
-            }
-
-            // Save language bundle to disk
-            let (_saved_hash, saved_bundle_path) =
-                controller.save_language_bundle(&source, meta.as_ref())?;
-            info!("install_language: saved language bundle for {}", language);
-
-            // Load into a per-language Deno runtime
-            controller
-                .load_language(saved_bundle_path, false)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "install_language: failed to load language runtime for {}: {}",
-                        language,
-                        e
-                    )
-                })?;
-            info!("install_language: loaded language runtime for {}", language);
-        } else {
+        let fetching = span(format!("installLanguage.fetchSource {}", language));
+        let source = ask(format!(
+            r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
+            language_lit
+        ))
+        .await?;
+        drop(fetching);
+        // An unknown address comes back as null/undefined, stringified.
+        let trimmed = source.trim();
+        if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
             return Err(anyhow::anyhow!(
                 "install_language: no source available for {}",
                 language
             ));
         }
+        verify(&source)?;
 
-        Ok(())
+        // Meta is optional: it is only stored beside the bundle, so a failed
+        // read does not stop the install.
+        let meta: Option<JsonValue> = if meta_path.exists() {
+            Some(serde_json::from_str(&fs::read_to_string(&meta_path)?)?)
+        } else {
+            let _fetching = span(format!("installLanguage.fetchMeta {}", language));
+            match ask(format!(
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+                language_lit
+            ))
+            .await
+            {
+                Ok(result) => serde_json::from_str::<JsonValue>(&result)
+                    .ok()
+                    .and_then(|expression| expression.get("data").cloned()),
+                Err(e) => {
+                    warn!("install_language: no meta for {}: {}", language, e);
+                    None
+                }
+            }
+        };
+
+        let (_saved_hash, saved_bundle_path) = self.save_language_bundle(&source, meta.as_ref())?;
+        info!("install_language: saved language bundle for {}", language);
+        Ok(saved_bundle_path)
     }
 
     pub async fn create_neighbourhood(neighbourhood: Neighbourhood) -> Result<Address, AnyError> {
@@ -1089,6 +1150,23 @@ impl LanguageController {
         Err(LanguageError::NotFound {
             address: resolved_address,
         })
+    }
+
+    /// The value a bundle gives a template variable that must be filled before
+    /// the language can work (the server link language's `UID`).
+    const UNFILLED_TEMPLATE_VALUE: &'static str = "<to-be-filled>";
+
+    /// The marked template variables (`//!@ad4m-template-variable`) still at
+    /// [`Self::UNFILLED_TEMPLATE_VALUE`] after templating, in source order.
+    pub(crate) fn unfilled_template_variables(source_lines: &[String]) -> Vec<String> {
+        let declaration = Regex::new(r#"(?:var|const|let) ([a-zA-Z0-9_-]+)\s*=\s*"(.*)""#).unwrap();
+        source_lines
+            .windows(2)
+            .filter(|pair| pair[0].contains("//!@ad4m-template-variable"))
+            .filter_map(|pair| declaration.captures(&pair[1]))
+            .filter(|c| &c[2] == Self::UNFILLED_TEMPLATE_VALUE)
+            .map(|c| c[1].to_string())
+            .collect()
     }
 
     /// Apply template data to source language lines.
@@ -1215,16 +1293,13 @@ impl LanguageController {
         // `integration-tests-js` job.
         //
         // A per-call UUID suffix keeps each invocation on its own dir, so
-        // concurrent templates can't race on the same path. The cleanup at
-        // the end of the function still removes the per-call dir, and an
-        // earlier-failing call leaves a uniquely-named orphan rather than
-        // poisoning the next one.
+        // concurrent templates can't race on the same path. The guard removes
+        // the per-call dir on every way out of this function, failures
+        // included.
         let temp_templating_path =
             std::env::temp_dir().join(format!("{}-{}", source_language_hash, uuid::Uuid::new_v4()));
-        if temp_templating_path.exists() {
-            let _ = fs::remove_dir_all(&temp_templating_path);
-        }
         fs::create_dir_all(&temp_templating_path)?;
+        let _remove_temp_dir = RemoveDirOnDrop(temp_templating_path.clone());
 
         let temp_happ_path = temp_templating_path.join("happ.happ");
 
@@ -1397,9 +1472,6 @@ impl LanguageController {
         let happ_bytes = fs::read(&pack_happ_path)?;
         let base64_string = BASE64_STANDARD.encode(&happ_bytes);
 
-        // Cleanup temp directory
-        let _ = fs::remove_dir_all(&temp_templating_path);
-
         Ok(Some(base64_string))
     }
 
@@ -1427,9 +1499,11 @@ impl LanguageController {
             r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
             source_language_hash_lit
         );
+        let reading = span("applyTemplate.templateMeta");
         let meta_result = self
             .execute_on_language(&language_language_address, &meta_script)
             .await?;
+        drop(reading);
 
         let meta_expression: JsonValue =
             serde_json::from_str(&meta_result).map_err(|e| LanguageError::SerializationError {
@@ -1447,9 +1521,11 @@ impl LanguageController {
             r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
             source_language_hash_lit
         );
+        let reading = span("applyTemplate.templateSource");
         let source_language = self
             .execute_on_language(&language_language_address, &source_script)
             .await?;
+        drop(reading);
 
         // Same nullish-stringification guard as install_language_from_address:
         // a language language returning null/undefined for an unknown hash
@@ -1483,9 +1559,11 @@ impl LanguageController {
         template_data = sorted_data;
 
         // Read and template Holochain DNA
+        let templating = span("applyTemplate.dna");
         let happ_code = self
             .read_and_template_holochain_dna(&source_lines, &template_data, source_language_hash)
             .await?;
+        drop(templating);
 
         if let Some(happ_code) = happ_code {
             info!("setting happCode in templateData");
@@ -1508,6 +1586,23 @@ impl LanguageController {
 
         // Apply template data to source lines
         Self::apply_template_data(&mut source_lines, &template_data);
+
+        // A variable the bundle marks as required but the caller did not fill
+        // would publish a language that runs inert (no room, every commit
+        // failing). Refuse instead, naming what was sent.
+        let unfilled = Self::unfilled_template_variables(&source_lines);
+        if !unfilled.is_empty() {
+            return Err(LanguageError::InvalidBundle {
+                message: format!(
+                    "template variable(s) {} left unfilled; the template data has {:?}",
+                    unfilled.join(", "),
+                    template_data
+                        .keys()
+                        .filter(|k| *k != "happ")
+                        .collect::<Vec<_>>()
+                ),
+            });
+        }
 
         // Remove happ from template_data before storing in meta.
         // Use shift_remove (not remove/swap_remove) to preserve sorted key order.
@@ -1689,7 +1784,7 @@ impl LanguageController {
         }
 
         // Verify the expression proof (sets proof.valid / proof.invalid)
-        Self::verify_expression_proof(&mut language_meta);
+        Self::verify_expression_proof(&mut language_meta, false).await;
 
         // Validate proof
         let proof_valid = language_meta
@@ -1821,11 +1916,7 @@ impl LanguageController {
                 };
                 get_global_pubsub()
                     .await
-                    .publish(
-                        &EXCEPTION_OCCURRED_TOPIC,
-                        &serde_json::to_string(&exception).unwrap_or_default(),
-                    )
-                    .await;
+                    .publish_event(Event::exception(&exception));
 
                 return Err(LanguageError::LoadError {
                     address: resolved_address,
@@ -1867,11 +1958,7 @@ impl LanguageController {
                 };
                 get_global_pubsub()
                     .await
-                    .publish(
-                        &EXCEPTION_OCCURRED_TOPIC,
-                        &serde_json::to_string(&exception).unwrap_or_default(),
-                    )
-                    .await;
+                    .publish_event(Event::exception(&exception));
 
                 return Err(LanguageError::LoadError {
                     address: resolved_address,
@@ -2146,6 +2233,30 @@ impl LanguageController {
         Ok(Language::new(address))
     }
 
+    /// The language to call `cap` on, for a caller that names `address`.
+    /// Identity and token capabilities resolve only to the language at
+    /// `system_addresses.agent_language`; for any other
+    /// address they answer `NotAgentLanguage`. Other capabilities resolve to
+    /// `address` itself.
+    pub async fn language_for_capability(
+        &self,
+        address: &str,
+        cap: capability::Capability,
+    ) -> Result<Language, LanguageError> {
+        let agent_language = self.system_addresses.lock().await.agent_language.clone();
+        capability::check_capability_target(cap, address, agent_language.as_deref())?;
+        Ok(Language::new(address.to_string()))
+    }
+
+    /// The agent language, for an identity or token capability.
+    pub async fn agent_language_for(
+        &self,
+        cap: capability::Capability,
+    ) -> Result<Language, LanguageError> {
+        let agent = self.get_agent_language().await?;
+        self.language_for_capability(agent.address(), cap).await
+    }
+
     /// Get the language language
     pub async fn get_language_language(&self) -> Result<Language, LanguageError> {
         let sys = self.system_addresses.lock().await;
@@ -2396,9 +2507,11 @@ impl LanguageController {
         if lang_address == "literal" {
             let mut decoded = literal_decode(expression_address)?;
             // Verify signature on literal expressions too
-            Self::verify_expression_proof(&mut decoded);
+            Self::verify_expression_proof(&mut decoded, false).await;
             return Ok(Some(decoded));
         }
+
+        let record_admitted = self.honours_record(lang_address).await;
 
         // Check immutability for caching
         let immutable = self
@@ -2408,13 +2521,11 @@ impl LanguageController {
 
         // Check cache for immutable expressions
         if immutable {
-            let cached = crate::db::Ad4mDb::with_global_instance(|db| {
-                db._get_expression(expression_address)
-            });
+            let cached = crate::db_backend::db_backend()._get_expression(expression_address);
             if let Ok(Some(expr)) = cached {
                 let mut expr_json = serde_json::to_value(&expr).unwrap_or(JsonValue::Null);
                 // Verify and set proof.valid
-                Self::verify_expression_proof(&mut expr_json);
+                Self::verify_expression_proof(&mut expr_json, record_admitted).await;
                 return Ok(Some(expr_json));
             }
         }
@@ -2455,20 +2566,47 @@ impl LanguageController {
             if let Ok(expr) =
                 serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone())
             {
-                let _ = crate::db::Ad4mDb::with_global_instance(|db| {
-                    db._add_expression(expression_address, &expr)
-                });
+                let _ = crate::db_backend::db_backend()._add_expression(expression_address, &expr);
             }
         }
 
         // Verify signature
-        Self::verify_expression_proof(&mut expr_json);
+        Self::verify_expression_proof(&mut expr_json, record_admitted).await;
 
         Ok(Some(expr_json))
     }
 
-    /// Verify an expression's proof and set the `valid` field.
-    fn verify_expression_proof(expr_json: &mut JsonValue) {
+    /// Verify an expression's proof and set the `valid` field. A `did:scid` author's key is
+    /// checked against the identity module's key-log cache. `record_admitted`: the expression
+    /// came from the agent language, whose store admitted its `proof.record` (see
+    /// [`Self::honours_record`]); otherwise a `proof.record` is ignored.
+    async fn verify_expression_proof(expr_json: &mut JsonValue, record_admitted: bool) {
+        let service = crate::identity::service().ok();
+        Self::verify_expression_proof_with(
+            expr_json,
+            service.as_deref().map(|s| s.cache.as_ref()),
+            service.as_deref().map(|s| s.backend.as_ref()),
+            record_admitted,
+        )
+        .await
+    }
+
+    /// Whether a `proof.record` counts on an expression `lang_address` (a resolved address)
+    /// served: only the agent language's. The store refuses an agent record anchored before a
+    /// revocation of its key, so a record the agent language serves was admitted; anyone else
+    /// can wrap a fresh signature by a revoked key in a record naming an earlier anchor.
+    async fn honours_record(&self, lang_address: &str) -> bool {
+        self.system_addresses.lock().await.agent_language.as_deref() == Some(lang_address)
+    }
+
+    /// [`Self::verify_expression_proof`] with the key-log cache `cache` (`None`: no identity
+    /// module, so no `did:scid` author verifies).
+    async fn verify_expression_proof_with(
+        expr_json: &mut JsonValue,
+        cache: Option<&crate::identity::cache::KelCache>,
+        backend: Option<&dyn crate::identity::backend::IdentityBackend>,
+        record_admitted: bool,
+    ) {
         match serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone()) {
             Ok(mut expr) => {
                 // Sort the data keys to match the canonical order used during signing.
@@ -2476,7 +2614,31 @@ impl LanguageController {
                 // so deserialized key order depends on source (e.g. Holochain struct field order)
                 // while signing always uses alphabetically sorted keys.
                 expr.data = crate::js_core::utils::sort_json_value(&expr.data);
-                match crate::agent::signatures::verify(&expr) {
+                let verdict = if expr.author.starts_with(ad4m_identity_core::DID_PREFIX) {
+                    // The agent record a did:scid profile came in (the agent language adds it
+                    // as `proof.record`); the typed expression does not carry it. From any
+                    // other source it is ignored: the head rule judges.
+                    let record = expr_json
+                        .get("proof")
+                        .and_then(|proof| proof.get("record"))
+                        .filter(|record| record_admitted && !record.is_null())
+                        .cloned();
+                    match cache {
+                        Some(cache) => {
+                            crate::identity::verify_expression(
+                                cache,
+                                backend,
+                                &expr,
+                                record.as_ref(),
+                            )
+                            .await
+                        }
+                        None => Ok(false),
+                    }
+                } else {
+                    crate::agent::signatures::verify(&expr)
+                };
+                match verdict {
                     Ok(valid) => {
                         // Happy-path verification runs on every get_expression
                         // call, so logging at WARN flooded production logs with
@@ -2491,7 +2653,7 @@ impl LanguageController {
                             log::warn!(
                                 "verify_expression_proof: INVALID signature for author={}, sig={}",
                                 expr.author,
-                                &expr.proof.signature[..20.min(expr.proof.signature.len())]
+                                expr.proof.signature.chars().take(20).collect::<String>()
                             );
                         }
                         if let Some(proof) = expr_json.get_mut("proof") {
@@ -2841,6 +3003,36 @@ mod template_tests {
     use super::*;
     use serde_json::json;
 
+    /// The temp dir a DNA templating call works in goes on every exit, not only on
+    /// success: here the happ does not decode, before the conductor is needed.
+    #[tokio::test]
+    async fn a_failed_dna_template_leaves_no_temp_dir() {
+        let source_hash = format!("QmTemplateCleanup{}", uuid::Uuid::new_v4().simple());
+        let lines = make_source(&[r#"var happ = "not base64!";"#]);
+
+        let result = LanguageController::new()
+            .read_and_template_holochain_dna(&lines, &serde_json::Map::new(), &source_hash)
+            .await;
+
+        assert!(
+            matches!(result, Err(LanguageError::InvalidBundle { .. })),
+            "{:?}",
+            result
+        );
+        let left: Vec<_> = fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&source_hash)
+            })
+            .map(|entry| entry.path())
+            .collect();
+        assert!(left.is_empty(), "left behind: {:?}", left);
+    }
+
     fn make_source(lines: &[&str]) -> Vec<String> {
         lines.iter().map(|s| s.to_string()).collect()
     }
@@ -2857,6 +3049,35 @@ mod template_tests {
         data.insert("SERVER_URL".into(), json!("https://link.ad4m.dev"));
         LanguageController::apply_template_data(&mut lines, &data);
         assert_eq!(lines[2], r#"const SERVER_URL = "https://link.ad4m.dev""#);
+    }
+
+    #[test]
+    fn a_marked_variable_left_at_its_placeholder_is_reported() {
+        // A client that names the room ROOM_ID (WE builds before the language
+        // renamed it UID) leaves UID at its placeholder: the language would
+        // publish, run inert and never create a room.
+        let mut lines = make_source(&[
+            "//!@ad4m-template-variable",
+            r#"const SERVER_URL = "https://link.ad4m.dev";"#,
+            "//!@ad4m-template-variable",
+            r#"const UID = "<to-be-filled>";"#,
+        ]);
+        let mut data = serde_json::Map::new();
+        data.insert("ROOM_ID".into(), json!("abc-123"));
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(
+            LanguageController::unfilled_template_variables(&lines),
+            vec!["UID".to_string()]
+        );
+
+        let mut filled = make_source(&[
+            "//!@ad4m-template-variable",
+            r#"const UID = "<to-be-filled>";"#,
+        ]);
+        let mut data = serde_json::Map::new();
+        data.insert("UID".into(), json!("abc-123"));
+        LanguageController::apply_template_data(&mut filled, &data);
+        assert!(LanguageController::unfilled_template_variables(&filled).is_empty());
     }
 
     #[test]
@@ -2982,6 +3203,370 @@ mod template_tests {
         assert_eq!(
             lines[3], r#"const UID = "unique-id-123""#,
             "UID gets replaced"
+        );
+    }
+}
+
+#[cfg(test)]
+mod capability_routing_tests {
+    use super::capability::Capability;
+    use super::*;
+
+    async fn controller_with_agent_language(agent: Option<&str>) -> LanguageController {
+        let controller = LanguageController::new();
+        controller.system_addresses.lock().await.agent_language = agent.map(str::to_string);
+        controller
+    }
+
+    #[tokio::test]
+    async fn identity_and_token_calls_resolve_only_to_the_agent_language() {
+        let controller = controller_with_agent_language(Some("QmAgent")).await;
+        for cap in [
+            Capability::IdentityLog,
+            Capability::IdentityClaimOffer,
+            Capability::TokenSend,
+        ] {
+            let language = controller
+                .language_for_capability("QmAgent", cap)
+                .await
+                .unwrap();
+            assert_eq!(language.address(), "QmAgent");
+            assert_eq!(
+                controller.agent_language_for(cap).await.unwrap().address(),
+                "QmAgent"
+            );
+            match controller
+                .language_for_capability("QmLinkLanguage", cap)
+                .await
+            {
+                Err(LanguageError::NotAgentLanguage {
+                    address,
+                    capability,
+                }) => {
+                    assert_eq!(address, "QmLinkLanguage");
+                    assert_eq!(capability, cap.wire_name());
+                }
+                Err(other) => panic!("unexpected error {other}"),
+                Ok(_) => panic!("{} resolved to a link language", cap.wire_name()),
+            }
+        }
+        let link = controller
+            .language_for_capability("QmLinkLanguage", Capability::PerspectiveCommit)
+            .await
+            .unwrap();
+        assert_eq!(link.address(), "QmLinkLanguage");
+    }
+
+    #[tokio::test]
+    async fn identity_calls_fail_before_the_agent_language_is_known() {
+        let controller = controller_with_agent_language(None).await;
+        assert!(matches!(
+            controller
+                .agent_language_for(Capability::IdentityHead)
+                .await,
+            Err(LanguageError::NotFound { .. })
+        ));
+        assert!(matches!(
+            controller
+                .language_for_capability("QmAgent", Capability::IdentityHead)
+                .await,
+            Err(LanguageError::NotAgentLanguage { .. })
+        ));
+    }
+}
+
+/// The agent language's profile expressions on the executor's read path: every expression a
+/// language answers goes through `verify_expression_proof`, so the profile `expressionGet`
+/// answers has to carry the agent's own AD4M signature of that expression: for a `did:scid`
+/// person, a device key's signature, checked against the person's log in the key-log cache.
+#[cfg(test)]
+mod agent_language_profile_tests {
+    use super::*;
+    use crate::identity::cache::tests::{accept_signed, in_memory, trusting, TestLog};
+    use crate::identity::cache::KelCache;
+    use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
+    use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+    use ed25519_dalek::SigningKey;
+
+    const VALID: (JsonValue, JsonValue) = (JsonValue::Bool(true), JsonValue::Bool(false));
+    const INVALID: (JsonValue, JsonValue) = (JsonValue::Bool(false), JsonValue::Bool(true));
+
+    /// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
+    /// expression authored by `author`, signed by the device key `signer` the way
+    /// `create_signed_expression` signs, `proof.key` the signer's `did:key`.
+    fn scid_profile(author: &str, signer: &SigningKey) -> JsonValue {
+        crate::identity::resolver::test_profiles::signed_profile(author, signer)
+    }
+
+    /// Adds a bot key (`read`, never expiring) to `log`, signed by its master; its secret.
+    fn add_bot(log: &mut TestLog, seed: u8) -> SigningKey {
+        let bot = SigningKey::from_bytes(&[seed; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 4_000_000_000,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        bot
+    }
+
+    /// A cache holding `logs`, each under a head the configured store signed.
+    async fn cache_of(logs: &[&TestLog]) -> KelCache {
+        let cache = trusting();
+        for log in logs {
+            accept_signed(&cache, &log.events).await;
+        }
+        cache
+    }
+
+    fn did_of(log: &TestLog) -> String {
+        ad4m_identity_core::did_of(&log.scid())
+    }
+
+    #[tokio::test]
+    async fn a_did_scid_profile_signed_by_a_valid_device_key_of_its_log_verifies() {
+        let log = TestLog::new(31);
+        let cache = cache_of(&[&log]).await;
+        let profile = scid_profile(&did_of(&log), &log.device);
+        assert_eq!(verdict_with(profile.clone(), Some(&cache)).await, VALID);
+
+        let mut changed = profile.clone();
+        changed["data"]["directMessageLanguage"] = JsonValue::from("lang://other");
+        assert_eq!(verdict_with(changed, Some(&cache)).await, INVALID);
+
+        // proof.key must name the bare did:key of the listed key.
+        let mut fragment = profile.clone();
+        let key = profile["proof"]["key"].as_str().unwrap();
+        fragment["proof"]["key"] = JsonValue::from(format!("{key}#{}", &key["did:key:".len()..]));
+        assert_eq!(verdict_with(fragment, Some(&cache)).await, INVALID);
+
+        // Without the identity module no did:scid author verifies.
+        assert_eq!(verdict(profile).await, INVALID);
+    }
+
+    /// The warning for an invalid signature shows a prefix of `proof.signature`. A `did:scid`
+    /// author reaches it before the signature is hex-decoded (no identity module, a `proof.key`
+    /// that is no device key), so the prefix is cut by characters, not bytes: a peer's
+    /// non-ASCII signature reads invalid instead of panicking the read.
+    #[tokio::test]
+    async fn a_did_scid_expression_with_a_non_ascii_signature_reads_invalid_without_a_panic() {
+        // A running executor logs warnings; with no logger, `log::warn!` never builds its
+        // arguments, and the prefix is cut only when they are.
+        let level = log::max_level();
+        log::set_max_level(log::LevelFilter::Warn);
+        let log = TestLog::new(38);
+        let mut profile = scid_profile(&did_of(&log), &log.device);
+        profile["proof"]["signature"] =
+            JsonValue::from(format!("{}\u{e9}\u{2026}", "a".repeat(19)));
+        let without_module = verdict(profile.clone()).await;
+        let cache = cache_of(&[&log]).await;
+        let with_module = verdict_with(profile, Some(&cache)).await;
+        log::set_max_level(level);
+        assert_eq!(without_module, INVALID);
+        assert_eq!(with_module, INVALID);
+    }
+
+    #[tokio::test]
+    async fn a_did_scid_profile_verifies_once_its_log_is_fetched_from_the_store() {
+        let log = TestLog::new(36);
+        let store = crate::identity::cache::tests::FakeStore::new(log.events.clone());
+        let cache = in_memory(vec![store.key.multikey()]);
+        let profile = scid_profile(&did_of(&log), &log.device);
+
+        // The cache alone does not know the author.
+        assert_eq!(verdict_with(profile.clone(), Some(&cache)).await, INVALID);
+
+        // With the store behind it, a miss fetches the author's log once, then verifies.
+        let mut expression = profile;
+        LanguageController::verify_expression_proof_with(
+            &mut expression,
+            Some(&cache),
+            Some(&store),
+            true,
+        )
+        .await;
+        assert_eq!(
+            (
+                expression["proof"]["valid"].clone(),
+                expression["proof"]["invalid"].clone()
+            ),
+            VALID
+        );
+        assert_eq!(store.log_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn revoked_bot_or_foreign_keys_and_unknown_logs_do_not_verify_a_did_scid_profile() {
+        let mut revoked = TestLog::new(32);
+        revoked.revoke_d1();
+        let mut with_bot = TestLog::new(33);
+        let bot = add_bot(&mut with_bot, 77);
+        let other = TestLog::new(34);
+        let unknown = TestLog::new(35);
+        let cache = cache_of(&[&revoked, &with_bot, &other]).await;
+
+        let by_revoked = scid_profile(&did_of(&revoked), &revoked.device);
+        assert_eq!(verdict_with(by_revoked, Some(&cache)).await, INVALID);
+
+        // The log's standing device key still verifies; its bot key does not.
+        let by_device = scid_profile(&did_of(&with_bot), &with_bot.device);
+        assert_eq!(verdict_with(by_device, Some(&cache)).await, VALID);
+        let by_bot = scid_profile(&did_of(&with_bot), &bot);
+        assert_eq!(verdict_with(by_bot, Some(&cache)).await, INVALID);
+
+        // A valid key of another log, signing as this person.
+        let by_foreign = scid_profile(&did_of(&with_bot), &other.device);
+        assert_eq!(verdict_with(by_foreign, Some(&cache)).await, INVALID);
+
+        // An author whose log the cache does not hold.
+        let by_unknown = scid_profile(&did_of(&unknown), &unknown.device);
+        assert_eq!(verdict_with(by_unknown, Some(&cache)).await, INVALID);
+    }
+
+    /// The agent language answers a `did:scid` profile with its agent record as `proof.record`
+    /// (built here from a real `AgentRecord`): the controller checks the key at the record's
+    /// anchor, so a profile signed before a revocation reads valid after it.
+    #[tokio::test]
+    async fn a_did_scid_profile_with_its_record_verifies_at_the_records_anchor() {
+        use crate::identity::resolver::test_profiles::with_record;
+        let mut log = TestLog::new(37);
+        let cache = cache_of(&[&log]).await;
+        let profile = scid_profile(&did_of(&log), &log.device);
+        let answered = with_record(&profile, &log.device, 1, 0);
+        assert_eq!(verdict_with(answered.clone(), Some(&cache)).await, VALID);
+
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        assert_eq!(
+            verdict_with(answered.clone(), Some(&cache)).await,
+            VALID,
+            "anchored at seq 0, before the revoke"
+        );
+        // An expression a verification already flagged reads the same.
+        let mut flagged = answered.clone();
+        LanguageController::verify_expression_proof_with(&mut flagged, Some(&cache), None, true)
+            .await;
+        assert_eq!(verdict_with(flagged, Some(&cache)).await, VALID);
+
+        // The same profile without its record: the head rule, and d1 is revoked there.
+        assert_eq!(verdict_with(profile.clone(), Some(&cache)).await, INVALID);
+        // An anchor moved without the record signature.
+        let mut tampered = answered.clone();
+        tampered["proof"]["record"]["anchor"] = JsonValue::from(1);
+        assert_eq!(verdict_with(tampered, Some(&cache)).await, INVALID);
+        // A record signed anchored at the revoke.
+        let at_revoke = with_record(&profile, &log.device, 2, 1);
+        assert_eq!(verdict_with(at_revoke, Some(&cache)).await, INVALID);
+        // `proof.record: null` is no record: the head rule.
+        let mut null_record = profile.clone();
+        null_record["proof"]["record"] = JsonValue::Null;
+        assert_eq!(verdict_with(null_record, Some(&cache)).await, INVALID);
+    }
+
+    /// A `proof.record` counts only on what the agent language served (its store admitted the
+    /// record). The same anchored profile, signed before a revocation, served by another
+    /// language: its record is ignored and the head rule finds the key revoked.
+    #[tokio::test]
+    async fn a_record_counts_only_from_the_agent_language() {
+        use crate::identity::resolver::test_profiles::with_record;
+        let controller = LanguageController::new();
+        controller.system_addresses.lock().await.agent_language = Some("QmAgent".into());
+        let mut log = TestLog::new(38);
+        let cache = cache_of(&[&log]).await;
+        let profile = scid_profile(&did_of(&log), &log.device);
+        let answered = with_record(&profile, &log.device, 1, 0);
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+
+        let through = |address: &'static str| {
+            let controller = &controller;
+            let (answered, cache) = (answered.clone(), &cache);
+            async move {
+                let admitted = controller.honours_record(address).await;
+                served_verdict(answered, Some(cache), admitted).await
+            }
+        };
+        assert_eq!(
+            through("QmAgent").await,
+            VALID,
+            "the agent language's record"
+        );
+        assert_eq!(
+            through("QmOtherLanguage").await,
+            INVALID,
+            "another language's record is ignored: d1 is revoked at the head"
+        );
+    }
+
+    /// What the centralized agent language's `expressionGet` answers for a did:key agent's
+    /// profile; `bootstrap-languages/centralized-agent-language/rust-impl/tests/language.rs`
+    /// (`PROFILE_FIXTURE`) pins the same text as the language's output: change both together.
+    const PROFILE_FIXTURE: &str = r#"{"author":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","timestamp":"2027-01-15T08:00:00.123Z","data":{"did":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","directMessageLanguage":"lang://dm","perspective":{"links":[{"author":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","data":{"predicate":"sioc://likes","source":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","target":"literal://string:hi"},"proof":{"key":"k","signature":"ab"},"timestamp":"2027-01-15T08:00:00.000Z"}]}},"proof":{"signature":"01458e67b883f12668acf6a8bd17f12f1229f7526c48ff60ce3cda50719ec4fa559cca32a959eca1d0e9e15808ad92df1ab2115dded42138c4339f7f2645340d","key":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA#z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA"}}"#;
+
+    async fn verdict(expression: JsonValue) -> (JsonValue, JsonValue) {
+        verdict_with(expression, None).await
+    }
+
+    /// The verdict on `expression` as the agent language served it (its `proof.record` counts).
+    async fn verdict_with(
+        expression: JsonValue,
+        cache: Option<&KelCache>,
+    ) -> (JsonValue, JsonValue) {
+        served_verdict(expression, cache, true).await
+    }
+
+    async fn served_verdict(
+        mut expression: JsonValue,
+        cache: Option<&KelCache>,
+        record_admitted: bool,
+    ) -> (JsonValue, JsonValue) {
+        LanguageController::verify_expression_proof_with(
+            &mut expression,
+            cache,
+            None,
+            record_admitted,
+        )
+        .await;
+        (
+            expression["proof"]["valid"].clone(),
+            expression["proof"]["invalid"].clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_agent_languages_profile_expression_verifies() {
+        let expression: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+        assert_eq!(
+            verdict(expression).await,
+            (JsonValue::Bool(true), JsonValue::Bool(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_profile_or_a_record_signature_in_its_place_does_not_verify() {
+        let expression: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+
+        let mut changed = expression.clone();
+        changed["data"]["directMessageLanguage"] = JsonValue::from("lang://other");
+        assert_eq!(
+            verdict(changed).await,
+            (JsonValue::Bool(false), JsonValue::Bool(true))
+        );
+
+        // A store record's multibase `coasys:agent-record` signature is not an AD4M
+        // expression proof.
+        let mut record_sig = expression;
+        record_sig["proof"]["signature"] = JsonValue::from("z3Jx6Yb4rD9aQnL2");
+        assert_eq!(
+            verdict(record_sig).await,
+            (JsonValue::Bool(false), JsonValue::Bool(true))
         );
     }
 }

@@ -1,9 +1,12 @@
 use std::io::Read;
 use std::{fs::File, sync::Mutex};
+pub(crate) mod notification_access;
 pub mod runtime_service_extension;
 use std::sync::Arc;
 
-#[derive(Debug, Serialize, Deserialize)]
+/// A network's bootstrap seed (`mainnet_seed.seed` in the data folder, written by `init`): its
+/// system languages, the agents whose languages it installs, and its identity store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapSeed {
     #[serde(rename = "trustedAgents")]
     pub trusted_agents: Vec<String>,
@@ -19,16 +22,44 @@ pub struct BootstrapSeed {
     pub neighbourhood_language: String,
     #[serde(rename = "languageLanguageBundle")]
     pub language_language_bundle: String,
+    /// The network's identity store (`did:scid:coasys:1` key logs), used when the config names
+    /// none (`identity::IdentitySettings::from_config`). Absent: the store of the network this
+    /// executor was built for, the compiled-in seed's (`RuntimeService::identity_store`), so a
+    /// seed file written before the field existed keeps its store on upgrade without `init`.
+    #[serde(
+        rename = "identityStore",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub identity_store: Option<IdentityStoreSeed>,
+}
+
+/// A seed's `identityStore`: the store's base URL and the keys (bare Ed25519 multikeys, `z6Mk…`)
+/// its signed heads must carry. A list, so the store's key can rotate. Both are required; a
+/// field this build does not know (one a newer seed adds) is ignored, so a newer seed stays
+/// readable to an older executor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityStoreSeed {
+    pub url: String,
+    pub keys: Vec<String>,
 }
 
 use serde::{Deserialize, Serialize};
 
-use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
+use crate::events::Event;
+use crate::pubsub::get_global_pubsub;
 use crate::types::{ExceptionInfo, ExceptionType, NotificationInput};
-use crate::{agent::did, db::Ad4mDb, types::SentMessage};
+use crate::{agent::did, types::SentMessage};
 
 lazy_static! {
     static ref RUNTIME_INSTANCE: Arc<Mutex<Option<RuntimeService>>> = Arc::new(Mutex::new(None));
+    /// The identity store of the seed compiled in (`mainnet_seed.json`): the network this
+    /// executor was built for. Parsed once; the seed is tested to parse.
+    static ref EMBEDDED_IDENTITY_STORE: Option<IdentityStoreSeed> =
+        serde_json::from_str::<BootstrapSeed>(crate::globals::MAINNET_JSON)
+            .expect("the compiled-in mainnet_seed.json parses")
+            .identity_store;
 }
 
 pub struct RuntimeService {
@@ -77,6 +108,27 @@ impl RuntimeService {
         func(runtime_ref)
     }
 
+    /// The seed's identity store. A seed without `identityStore` (a seed file written before the
+    /// field existed, which an upgrade without `init` keeps) means the store of the network this
+    /// executor was built for: the compiled-in seed's. A seed for another network names its own
+    /// store. `None` only when neither names one.
+    pub fn identity_store(&self) -> Option<IdentityStoreSeed> {
+        self.seed
+            .identity_store
+            .clone()
+            .or_else(|| EMBEDDED_IDENTITY_STORE.clone())
+    }
+
+    /// The loaded seed's identity store ([`RuntimeService::identity_store`]); `None` when no
+    /// seed names one or no seed is loaded (the service did not start).
+    pub fn seed_identity_store() -> Option<IdentityStoreSeed> {
+        RUNTIME_INSTANCE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|service| service.identity_store())
+    }
+
     pub fn get_language_language_bundle(&self) -> String {
         self.seed.language_language_bundle.clone()
     }
@@ -99,7 +151,8 @@ impl RuntimeService {
 
     pub fn get_trusted_agents(&self) -> Vec<String> {
         let mut trusted_agents: Vec<String> = self.seed.trusted_agents.clone();
-        let mut stored_agents = Ad4mDb::with_global_instance(|db| db.get_all_trusted_agents())
+        let mut stored_agents = crate::db_backend::db_backend()
+            .get_all_trusted_agents()
             .map_err(|e| e.to_string())
             .unwrap_or_default();
         trusted_agents.push(did());
@@ -110,21 +163,23 @@ impl RuntimeService {
     }
 
     pub fn add_trusted_agent(&self, new_agents: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| db.add_trusted_agents(new_agents))
+        let _ = crate::db_backend::db_backend()
+            .add_trusted_agents(new_agents)
             .map_err(|e| e.to_string());
     }
 
     pub fn remove_trusted_agent(&self, agents_to_remove: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| db.remove_trusted_agents(agents_to_remove))
+        let _ = crate::db_backend::db_backend()
+            .remove_trusted_agents(agents_to_remove)
             .map_err(|e| e.to_string());
     }
 
     pub fn get_know_link_languages(&self) -> Vec<String> {
         let mut languages: Vec<String> = self.seed.known_link_languages.clone();
-        let mut stored_languages =
-            Ad4mDb::with_global_instance(|db| db.get_all_known_link_languages())
-                .map_err(|e| e.to_string())
-                .unwrap_or_default();
+        let mut stored_languages = crate::db_backend::db_backend()
+            .get_all_known_link_languages()
+            .map_err(|e| e.to_string())
+            .unwrap_or_default();
         languages.append(&mut stored_languages);
         languages.sort();
         languages.dedup();
@@ -132,74 +187,67 @@ impl RuntimeService {
     }
 
     pub fn add_know_link_language(&self, language: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| db.add_known_link_languages(language))
+        let _ = crate::db_backend::db_backend()
+            .add_known_link_languages(language)
             .map_err(|e| e.to_string());
     }
 
     pub fn remove_know_link_language(&self, language_to_remove: Vec<String>) {
-        let _ =
-            Ad4mDb::with_global_instance(|db| db.remove_known_link_languages(language_to_remove))
-                .map_err(|e| e.to_string());
+        let _ = crate::db_backend::db_backend()
+            .remove_known_link_languages(language_to_remove)
+            .map_err(|e| e.to_string());
     }
 
     pub fn get_friends(&self) -> Vec<String> {
-        Ad4mDb::with_global_instance(|db| db.get_all_friends())
+        crate::db_backend::db_backend()
+            .get_all_friends()
             .map_err(|e| e.to_string())
             .unwrap_or_default()
     }
 
     pub fn add_friend(&self, friends: Vec<String>) {
-        let _ =
-            Ad4mDb::with_global_instance(|db| db.add_friends(friends)).map_err(|e| e.to_string());
+        let _ = crate::db_backend::db_backend()
+            .add_friends(friends)
+            .map_err(|e| e.to_string());
     }
 
     pub fn remove_friend(&self, friend_to_remove: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| db.remove_friends(friend_to_remove))
+        let _ = crate::db_backend::db_backend()
+            .remove_friends(friend_to_remove)
             .map_err(|e| e.to_string());
     }
 
     pub fn get_outbox(&self) -> Vec<SentMessage> {
-        Ad4mDb::with_global_instance(|db| db.get_all_from_outbox())
+        crate::db_backend::db_backend()
+            .get_all_from_outbox()
             .map_err(|e| e.to_string())
             .unwrap_or_default()
     }
 
     pub fn add_message_to_outbox(&self, message: SentMessage) {
-        let _ = Ad4mDb::with_global_instance(|db| {
-            db.add_to_outbox(&message.message, message.recipient)
-        })
-        .map_err(|e| e.to_string());
+        let _ = crate::db_backend::db_backend()
+            .add_to_outbox(&message.message, message.recipient)
+            .map_err(|e| e.to_string());
     }
 
     pub async fn request_install_notification(
         notification_input: NotificationInput,
-        user_email: Option<String>,
+        owner_did: String,
+        managed_user: bool,
     ) -> Result<String, String> {
-        let notification_id = Ad4mDb::with_global_instance(|db| {
-            db.add_notification(notification_input, user_email.clone())
-        })
-        .map_err(|e| e.to_string())?;
-
-        // For managed users (user_email is Some), auto-grant the notification
-        // Only the main agent (user_email is None) needs manual approval
-        if user_email.is_some() {
-            let mut notification =
-                Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
-                    .map_err(|e| e.to_string())?
-                    .ok_or("Notification with given id not found")?;
-
-            notification.granted = true;
-
-            Ad4mDb::with_global_instance(|db| {
-                db.update_notification(notification_id.clone(), &notification)
-            })
+        // A managed user's notification is granted now: the caller has refused
+        // every perspective the user does not own (see `notification_access`).
+        // The main agent's notification waits for operator approval.
+        let notification_id = crate::db_backend::db_backend()
+            .add_notification(notification_input, &owner_did, managed_user)
             .map_err(|e| e.to_string())?;
-        } else {
+
+        if !managed_user {
             // Main agent needs manual approval via ADAM Launcher
-            let notification =
-                Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
-                    .map_err(|e| e.to_string())?
-                    .ok_or("Notification with given id not found")?;
+            let notification = crate::db_backend::db_backend()
+                .get_notification(notification_id.clone())
+                .map_err(|e| e.to_string())?
+                .ok_or("Notification with given id not found")?;
 
             let exception_info = ExceptionInfo {
                 title: "Request to install notifications for the app".to_string(),
@@ -208,18 +256,130 @@ impl RuntimeService {
                     notification.app_name
                 ),
                 r#type: ExceptionType::InstallNotificationRequest,
-                addon: Some(serde_json::to_string(&notification).unwrap()),
+                // The redacted view: the request goes to every approver's session.
+                addon: Some(serde_json::to_string(&notification.view()).unwrap()),
             };
 
+            // The main agent's sessions that may approve apps answer it.
+            let target = crate::agent::AgentContext::main_agent();
             get_global_pubsub()
                 .await
-                .publish(
-                    &EXCEPTION_OCCURRED_TOPIC,
-                    &serde_json::to_string(&exception_info).unwrap(),
-                )
-                .await;
+                .publish_event(Event::approval_request(&exception_info, &target));
         }
 
         Ok(notification_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The seed this build writes at `init` names its network's identity store
+    /// (`https://store.ad4m.dev`) with a key the executor can match against a signed head.
+    #[test]
+    fn the_embedded_seed_names_the_networks_identity_store() {
+        let seed: BootstrapSeed = serde_json::from_str(crate::globals::MAINNET_JSON).unwrap();
+        let store = seed
+            .identity_store
+            .expect("the seed names an identity store");
+        assert_eq!(
+            store,
+            IdentityStoreSeed {
+                url: "https://store.ad4m.dev".into(),
+                keys: vec!["z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj".into()],
+            }
+        );
+        let seed_source = crate::identity::StoreSource::Seed;
+        assert_eq!(
+            crate::identity::check_store_keys(&store.keys, seed_source),
+            Ok(())
+        );
+        assert_eq!(
+            crate::identity::check_store_url(Some(&store.url), seed_source),
+            Ok(())
+        );
+    }
+
+    /// A seed without `identityStore` (every seed written before the field) parses, names no
+    /// store itself, and writes no `identityStore` back.
+    #[test]
+    fn a_seed_without_an_identity_store_parses_and_round_trips() {
+        let json = serde_json::json!({
+            "trustedAgents": [], "knownLinkLanguages": [], "directMessageLanguage": "",
+            "agentLanguage": "", "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+            "languageLanguageBundle": "",
+        });
+        let parsed: BootstrapSeed = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(parsed.identity_store, None);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    /// An `identityStore` without its URL or its keys is refused: a seed must name the keys of
+    /// the store it names. A field this build does not know (a newer seed's) is ignored.
+    #[test]
+    fn an_identity_store_needs_its_url_and_keys() {
+        let seed = |store: serde_json::Value| {
+            serde_json::from_value::<BootstrapSeed>(serde_json::json!({
+                "trustedAgents": [], "knownLinkLanguages": [], "directMessageLanguage": "",
+                "agentLanguage": "", "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+                "languageLanguageBundle": "", "identityStore": store,
+            }))
+        };
+        assert!(seed(serde_json::json!({ "url": "https://s" })).is_err());
+        assert!(seed(serde_json::json!({ "keys": [] })).is_err());
+        assert_eq!(
+            seed(serde_json::json!({ "url": "https://s", "keys": ["z6MkA"], "since": 3 }))
+                .expect("a newer seed's identityStore parses")
+                .identity_store,
+            Some(IdentityStoreSeed {
+                url: "https://s".into(),
+                keys: vec!["z6MkA".into()],
+            })
+        );
+        assert_eq!(
+            seed(serde_json::json!({ "url": "https://s", "keys": ["z6MkA"] }))
+                .unwrap()
+                .identity_store,
+            Some(IdentityStoreSeed {
+                url: "https://s".into(),
+                keys: vec!["z6MkA".into()],
+            })
+        );
+    }
+
+    /// A seed file without `identityStore` (written by an `init` before the field existed and
+    /// kept on upgrade) gets the store of the network this executor was built for, the
+    /// compiled-in seed's; a seed that names its own store keeps it.
+    #[test]
+    fn a_seed_file_without_an_identity_store_gets_the_compiled_in_seeds() {
+        let embedded: BootstrapSeed = serde_json::from_str(crate::globals::MAINNET_JSON).unwrap();
+        let embedded = embedded
+            .identity_store
+            .expect("the compiled-in seed names a store");
+        let dir = tempfile::tempdir().unwrap();
+        let load = |name: &str, seed: serde_json::Value| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, seed.to_string()).unwrap();
+            RuntimeService::new(path.to_str().unwrap()).unwrap()
+        };
+        let mut seed = serde_json::json!({
+            "trustedAgents": [], "knownLinkLanguages": [], "directMessageLanguage": "",
+            "agentLanguage": "", "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+            "languageLanguageBundle": "",
+        });
+        assert_eq!(
+            load("old.seed", seed.clone()).identity_store(),
+            Some(embedded)
+        );
+
+        seed["identityStore"] = serde_json::json!({ "url": "https://other", "keys": ["z6MkO"] });
+        assert_eq!(
+            load("other.seed", seed).identity_store(),
+            Some(IdentityStoreSeed {
+                url: "https://other".into(),
+                keys: vec!["z6MkO".into()],
+            })
+        );
     }
 }

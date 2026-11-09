@@ -5,7 +5,9 @@ import { PerspectiveClient } from './perspectives/PerspectiveClient'
 import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
-import { ApiClient } from './apiClient'
+import { IdentityClient } from './identity/IdentityClient'
+import { ApiClient, EventFilter } from './apiClient'
+import type { EventMap, EventName } from './generated/api/Events'
 import { Ad4mModel } from './model/Ad4mModel'
 
 /**
@@ -16,6 +18,8 @@ import { Ad4mModel } from './model/Ad4mModel'
  * AgentClient, ExpressionClient, LanguageClient,
  * NeighbourhoodClient, PerspectiveClient and RuntimeClient
  * for the respective functionality.
+ *
+ * {@link Ad4mClient.on} receives executor events from the moment of registration.
  */
 export class Ad4mClient {
     #baseUrl: string
@@ -28,26 +32,27 @@ export class Ad4mClient {
     #perspectiveClient: PerspectiveClient
     #runtimeClient: RuntimeClient
     #aiClient: AIClient
+    #identityClient: IdentityClient
 
     constructor(
         baseUrl: string,
         token?: string,
-        subscribe: boolean = true,
         options?: { webSocketImpl?: new (url: string) => WebSocket; fetchImpl?: typeof fetch }
     ) {
         this.#baseUrl = baseUrl
         this.#token = token
         this.#apiClient = new ApiClient(baseUrl, token, options?.webSocketImpl, options?.fetchImpl)
-        this.#agentClient = new AgentClient(baseUrl, token, subscribe, this.#apiClient)
+        this.#agentClient = new AgentClient(baseUrl, token, this.#apiClient)
         this.#expressionClient = new ExpressionClient(baseUrl, token, this.#apiClient)
         this.#languageClient = new LanguageClient(baseUrl, token, this.#apiClient)
         this.#neighbourhoodClient = new NeighbourhoodClient(baseUrl, token, this.#apiClient)
-        this.#aiClient = new AIClient(baseUrl, token, subscribe, this.#apiClient)
-        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, subscribe, this.#apiClient)
+        this.#aiClient = new AIClient(baseUrl, token, this.#apiClient)
+        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, this.#apiClient)
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
-        this.#runtimeClient = new RuntimeClient(baseUrl, token, subscribe, this.#apiClient)
+        this.#runtimeClient = new RuntimeClient(baseUrl, token, this.#apiClient)
+        this.#identityClient = new IdentityClient(baseUrl, token, this.#apiClient)
 
         // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)
         try {
@@ -87,12 +92,38 @@ export class Ad4mClient {
         return this.#aiClient
     }
 
-    /** Start event subscriptions (agent-updated, agent-status-changed, apps-changed).
-     *  Safe to call if subscriptions were deferred at construction (subscribe=false). */
-    startSubscriptions(): void {
-        this.#agentClient.subscribeAgentUpdated()
-        this.#agentClient.subscribeAgentStatusChanged()
-        this.#agentClient.subscribeAppsChanged()
+    /** The executor's identity calls (`did:scid:coasys:1`). */
+    get identity(): IdentityClient {
+        return this.#identityClient
+    }
+
+    /**
+     * Call `handler` with every `type` event, or only those about
+     * `filter.perspective`. The payload is typed by the executor's event
+     * table (`generated/api/Events.ts`). Returns a function that removes the
+     * handler.
+     */
+    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+        return this.#apiClient.on(type, handler, filter)
+    }
+
+    /**
+     * Call `callback` once when the executor refuses this client's token
+     * (expired, revoked, or no session). Every call then fails with a 401
+     * `RpcError` and the client stops reconnecting: log in again and build a
+     * new client. Returns a function that removes the callback.
+     */
+    onAuthFailed(callback: (reason: string) => void): () => void {
+        return this.#apiClient.onAuthFailed(callback)
+    }
+
+    /**
+     * Reconnect now if the connection to the executor dropped and the client is
+     * waiting out its backoff: for a host that knows the executor is back (it
+     * restarted it, or the device woke). A no-op while connected or connecting.
+     */
+    reconnectNow(): void {
+        this.#apiClient.reconnectNow()
     }
 
     /** Close all event connections and clear in-memory caches */

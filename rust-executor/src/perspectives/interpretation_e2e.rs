@@ -1596,9 +1596,17 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         "both seeded turns should drain in one batch"
     );
 
-    let outcome = run_one_pass(&mut perspective, cfg_loaded, &batch, drain_at, &ctx, false)
-        .await
-        .expect("run_one_pass");
+    let outcome = run_one_pass(
+        &mut perspective,
+        cfg_loaded,
+        &batch,
+        drain_at,
+        &ctx,
+        false,
+        0,
+    )
+    .await
+    .expect("run_one_pass");
     let bases = match outcome {
         PassOutcome::Won { bases } => bases,
         other => panic!(
@@ -1807,7 +1815,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
             "each processor's batch must contain both turns; got {batch:?} for `{}`",
             cfg_ref.processor_id
         );
-        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx, false)
+        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx, false, 0)
             .await
             .expect("run_one_pass");
         let bases = match outcome {
@@ -2095,7 +2103,7 @@ async fn auto_processor_high_level_signal_driven_pass() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "llm-e2e"]
 async fn auto_processor_two_users_one_executor_no_double_processing() {
-    use crate::agent::{did_for_context, AgentContext, AgentService};
+    use crate::agent::{did_for_context, AgentContext};
     use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
     use crate::perspectives::auto_processor::events::{
         next_event_matching, subscribe, AutoProcessorStep,
@@ -2113,10 +2121,8 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
 
         // Two managed users on the one executor — distinct DIDs so the claim
         // election has two real candidates.
-        AgentService::ensure_user_key_exists("alice@e2e").expect("user A key");
-        AgentService::ensure_user_key_exists("bob@e2e").expect("user B key");
-        let ctx_a = AgentContext::for_user_email("alice@e2e".to_string());
-        let ctx_b = AgentContext::for_user_email("bob@e2e".to_string());
+        let ctx_a = AgentContext::managed(crate::test_utils::create_test_user("alice@e2e"));
+        let ctx_b = AgentContext::managed(crate::test_utils::create_test_user("bob@e2e"));
         let did_a = did_for_context(&ctx_a).expect("did A");
         let did_b = did_for_context(&ctx_b).expect("did B");
         assert_ne!(did_a, did_b, "two managed users must have distinct DIDs");
@@ -2248,7 +2254,7 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
 #[tokio::test]
 #[ignore = "llm-e2e"]
 async fn auto_processor_election_only_online_participants_process() {
-    use crate::agent::{did_for_context, AgentContext, AgentService};
+    use crate::agent::AgentContext;
     use crate::db::Ad4mDb;
     use crate::perspectives::auto_processor::config::AutoProcessorConfig;
     use crate::perspectives::auto_processor::watcher::{run_one_pass, PassOutcome, PendingTurn};
@@ -2260,11 +2266,8 @@ async fn auto_processor_election_only_online_participants_process() {
     // Four managed participants, each a real key + a listable user row (so the
     // co-located `online_agents` path can report their presence).
     let mk = |email: &str| -> (AgentContext, String) {
-        AgentService::ensure_user_key_exists(email).expect("user key");
-        let ctx = AgentContext::for_user_email(email.to_string());
-        let did = did_for_context(&ctx).expect("did");
-        Ad4mDb::with_global_instance(|db| db.add_user(email, &did, "pw")).expect("add_user");
-        (ctx, did)
+        let did = crate::test_utils::create_test_user(email);
+        (AgentContext::managed(did.clone()), did)
     };
     let (_ctx_carol, did_carol) = mk("carol@e2e");
     let (_ctx_bob, did_bob) = mk("bob@e2e");
@@ -2315,7 +2318,7 @@ async fn auto_processor_election_only_online_participants_process() {
             timestamp: "t2".into(),
         },
     ];
-    let out = run_one_pass(&mut perspective, &cfg, &batch, 1_000, &ctx_alice, false)
+    let out = run_one_pass(&mut perspective, &cfg, &batch, 1_000, &ctx_alice, false, 0)
         .await
         .expect("alice pass");
     assert!(
@@ -2332,7 +2335,7 @@ async fn auto_processor_election_only_online_participants_process() {
         text: "solo".into(),
         timestamp: "t".into(),
     }];
-    let out2 = run_one_pass(&mut perspective, &cfg, &batch2, 2_000, &ctx_dave, false)
+    let out2 = run_one_pass(&mut perspective, &cfg, &batch2, 2_000, &ctx_dave, false, 0)
         .await
         .expect("dave pass");
     assert!(

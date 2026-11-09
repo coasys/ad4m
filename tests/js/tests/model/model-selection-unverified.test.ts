@@ -30,6 +30,7 @@ import {
   Property,
 } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
+import { pollUntil } from "../../utils/utils.js";
 import { getSharedAgent } from "./hooks.js";
 
 @Model({ name: "SelectionGrant" })
@@ -64,9 +65,13 @@ describe("Ad4mModel — unverified links do not select instances", function () {
     return signed;
   };
 
-  /** A grant with only its signed flag link, so `save()` writes no defaults. */
+  /** A grant with only its signed flag link, so `save()` writes no defaults.
+   *  Returns once the clock has passed the link's timestamp, so grants made in
+   *  sequence sort in that order by `createdAt`. */
   const grant = async (id: string) => {
-    await perspective.add(new Link({ source: id, predicate: "sgt://type", target: "sgt://grant" }));
+    const flag = await perspective.add(new Link({ source: id, predicate: "sgt://type", target: "sgt://grant" }));
+    const created = new Date(flag.timestamp).getTime();
+    await pollUntil(() => Date.now() > created, { timeoutMs: 1000, intervalMs: 1, label: `clock past ${id}` });
     return id;
   };
 

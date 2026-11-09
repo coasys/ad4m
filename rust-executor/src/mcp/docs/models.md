@@ -40,7 +40,9 @@ So, in order:
    properties and lifetime.
 4. **Is it structure rather than schema?** Grouping things under a parent is
    what `ad4m://has_child` and `add_child` are for; you do not need a class to
-   express "these belong together".
+   express "these belong together". A class whose instances hold others names
+   that relation `children` (or aliases it: `"alias": {"Container":
+   "children"}`), and then every containment read follows it.
 
 Add a class when the thing has its own identity, its own properties, and its
 own lifecycle — when you would want to query for *it*, not for something that
@@ -161,7 +163,7 @@ stored two different ways. Declare it once on the property shape instead.
 
 `describe_perspective` reports a local property with `"local": true` and a
 `local_note` explaining the reach, so a client can tell before writing that the
-value will not leave this node.
+value will not leave this executor.
 
 Use it for per-replica derived state — caches, local marks, anything each agent
 should recompute for itself rather than receive. Do not use it for privacy
@@ -224,10 +226,9 @@ Line by line, the parts that are easy to get wrong:
   `"ns://Post"`. `add_model` rejects the mismatch, because registering under
   the URI form used to produce a class whose every property was silently
   read-only.
-- `constructor_actions` is **not optional in practice**. It is what mints the
-  instance's links. A shape registered without it registers fine and then
-  fails every `instance_create` with *"No SHACL constructor found for class:
-  Post"*.
+- `constructor_actions` is what mints the instance's links. It may be empty
+  (or omitted) for a class whose properties are all optional, but then
+  nothing but the supplied property values marks an instance as a `Post`.
 - `title` and `name` carry `min_count: 1`, so they are the conformance
   predicates as well as the required fields. That is not a coincidence — make
   the property that every instance genuinely has the required one.
@@ -340,7 +341,7 @@ announce breaking ones.
 ## Checklist before you call it done
 
 - [ ] `class_name` is the bare local name of `target_class`.
-- [ ] `constructor_actions` is non-empty.
+- [ ] `constructor_actions` writes the class marker or the required values.
 - [ ] At least one property is `min_count: 1`, or there is a class marker.
 - [ ] Every scalar you expect to write has a `setter`.
 - [ ] Every non-relation collection has `"collection": true` (not just a
