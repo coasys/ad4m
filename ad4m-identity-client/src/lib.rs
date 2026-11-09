@@ -159,6 +159,14 @@ pub enum ClientError {
     /// client already opened for the identity: a replayed older version, refused.
     #[error("the store served version {served} of the record, under version {seen} read before")]
     ServedRecordVersion { served: u64, seen: u64 },
+    /// Not written: the stored record's recovery key waits for the current master to re-attest
+    /// it — its attestation is by a master a rotation replaced — and a device write would seal
+    /// the record without it, which the store takes as no recovery key, so the words could no
+    /// longer open it. A device holding the current master re-attests it with a master-signed
+    /// write (`flows::master::reattest_recovery`, which `flows::master::refresh_master` makes
+    /// on its own), then the write goes through.
+    #[error("the record waits for the master to re-attest the recovery key")]
+    RecoveryNeedsReattest,
     /// The record's version moved under every write tried.
     #[error("the private record kept changing; try again")]
     RecordBusy,

@@ -28,6 +28,9 @@ pub enum MasterUse {
     Link,
     Revoke,
     SendMaster,
+    /// The master key signs the private record itself: re-attesting its recovery key after a
+    /// rotation, the write a device is refused until then.
+    Record,
 }
 
 impl MasterUse {
@@ -41,7 +44,7 @@ impl MasterUse {
             MasterUse::Link => {
                 ad4m_identity_core::link::OFFER_TTL_S + ad4m_identity_core::link::CONFIRM_GRACE_S
             }
-            MasterUse::Revoke | MasterUse::SendMaster => UNLOCK_TTL_S,
+            MasterUse::Revoke | MasterUse::SendMaster | MasterUse::Record => UNLOCK_TTL_S,
         }
     }
 }
