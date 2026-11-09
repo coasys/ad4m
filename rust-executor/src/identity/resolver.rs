@@ -57,6 +57,10 @@ const MAP_BOUND: usize = 4096;
 /// How long the resolver stops asking the key index after it failed to answer, so an outage
 /// fails fast into `Unavailable`.
 pub const BREAKER: Duration = Duration::from_secs(30);
+/// How long a failed admission read of one identity's log backs off before the next
+/// [`Resolver::session_key`] tries the store again: a few seconds, per identity, so an
+/// unreachable store is not paid a read timeout per login attempt.
+const SESSION_READ_BACKOFF: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------------------------
 // Keys that speak for an identity
@@ -846,6 +850,11 @@ pub struct Resolver {
     keys: StdMutex<HashMap<String, String>>,
     /// Until when the key index is not asked, after it failed to answer ([`BREAKER`]).
     index_down_until: StdMutex<Option<Instant>>,
+    /// Failed admission reads of a log, by SCID, backing off per identity
+    /// ([`SESSION_READ_BACKOFF`]): a failure is remembered briefly and `session_key`
+    /// answers `StoreUnavailable` during it without another store call — and never
+    /// counts the cached head as a fresh read.
+    admission_failed: StdMutex<HashMap<String, Instant>>,
     /// Signers the key map does not know → the discovery pass that last asked about them
     /// ([`Resolver::discovery_turn`]).
     discovery_tried: StdMutex<HashMap<String, u64>>,
@@ -880,6 +889,7 @@ impl Resolver {
             misses: StdMutex::new(HashMap::new()),
             keys: StdMutex::new(HashMap::new()),
             index_down_until: StdMutex::new(None),
+            admission_failed: StdMutex::new(HashMap::new()),
             discovery_tried: StdMutex::new(HashMap::new()),
             discovery_pass: AtomicU64::new(0),
             key_index_absent: AtomicBool::new(false),
@@ -1103,25 +1113,60 @@ impl Resolver {
         let scid = scid_from(scid);
         // Only a read the store answered counts as fresh: a failed refresh marks the
         // attempt (`refreshed`) but leaves `read_ok`, so an outage never ages a stale
-        // head into an admissible one.
+        // head into an admissible one. A failed read also backs off per identity for
+        // [`SESSION_READ_BACKOFF`] — an unreachable store is not paid a timeout per
+        // login attempt — and never notes the cached head as read.
         if !self
             .cache
             .read_ok_within(scid, super::service::now(), max_age)
         {
+            if self.admission_down(scid) {
+                return Err(SessionKeyError::StoreUnavailable);
+            }
             match self
                 .cache
                 .refresh(self.backend.as_ref(), &did_of(scid))
                 .await
             {
-                Ok(_) => {}
-                Err(CacheError::NotFound) => return Err(SessionKeyError::NotListed),
+                Ok(_) => {
+                    if let Ok(mut failed) = self.admission_failed.lock() {
+                        failed.remove(scid);
+                    }
+                }
+                Err(CacheError::NotFound) => {
+                    if let Ok(mut failed) = self.admission_failed.lock() {
+                        failed.remove(scid);
+                    }
+                    return Err(SessionKeyError::NotListed);
+                }
                 Err(e) => {
                     log::info!("identity: refresh of {} failed ({e})", did_of(scid));
+                    if let Ok(mut failed) = self.admission_failed.lock() {
+                        failed.insert(scid.to_string(), Instant::now());
+                    }
                     return Err(SessionKeyError::StoreUnavailable);
                 }
             }
         }
         self.cached_session_key(scid, key).await
+    }
+
+    /// Whether a failed admission read of `scid`'s log is still within its backoff.
+    fn admission_down(&self, scid: &str) -> bool {
+        self.admission_failed
+            .lock()
+            .ok()
+            .and_then(|failed| failed.get(scid).copied())
+            .is_some_and(|at| at.elapsed() < SESSION_READ_BACKOFF)
+    }
+
+    /// Test seam: drops every recorded admission-read failure, so the next
+    /// `session_key` reads the store again.
+    #[cfg(test)]
+    pub(crate) fn forget_admission_failures(&self) {
+        if let Ok(mut failed) = self.admission_failed.lock() {
+            failed.clear();
+        }
     }
 
     /// [`Resolver::session_key`] from the cached log only, whatever its age.

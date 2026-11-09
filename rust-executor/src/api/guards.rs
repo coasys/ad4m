@@ -369,7 +369,10 @@ mod tests {
         let app = RequestContext::app_for_test(vec![
             crate::agent::capabilities::AGENT_UPDATE_CAPABILITY.clone(),
         ]);
-        assert!(owns(&app, Owner::Grant, &grant.request_id).await.is_err());
+        let err = owns(&app, Owner::Grant, &grant.request_id)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, 404, "{}", err.message);
         let operator = RequestContext::operator_for_test();
         assert!(owns(&operator, Owner::Grant, &grant.request_id)
             .await

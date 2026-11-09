@@ -1209,12 +1209,10 @@ impl KelCache {
                 self.note_read(&scid, at);
                 self.note_behind(&scid, None);
             }
-            // A head the store signed below the cache's: an answer too, and the cached log
-            // stays the newer one.
-            Err(CacheError::Behind { store, .. }) => {
-                self.note_read(&scid, now());
-                self.note_behind(&scid, Some(*store))
-            }
+            // A head the store signed below the cache's is no read of the cached head:
+            // it does not mark it fresh (no `note_read`), so a session is not admitted
+            // on a head the store has not confirmed. The cached log stays the newer one.
+            Err(CacheError::Behind { store, .. }) => self.note_behind(&scid, Some(*store)),
             Err(_) => {}
         }
         let mut fetching = self.fetching.lock().await;
