@@ -12,13 +12,19 @@
 //! [`CancellationToken`] that fires when the grant ends: every socket of a session watches a
 //! child of it, so a revocation closes the grant's sockets at once.
 //!
-//! A revoke or a remove ends the grant in memory before any persistence, so its token stops
-//! at once. The end is then noted durably in `pending_grant_writes` before the table's
-//! write, so a restart between them reads the note at load, ends the grant again and retries
-//! the write (a pending `delete` then removes the row and the grant; a pending `revoke`
-//! leaves it ended until the revocation lands). What cannot survive is a crash before the
-//! note's own insert lands — between the in-memory end and it — where a restart finds the
-//! grant still active in the table.
+//! A revoke or a remove ends the grant in memory — its `ended` token fires, so its
+//! sessions and sockets close — before any persistence attempt or retry (i). The end
+//! is one pending operation per grant id — a `revoke`, or a `delete` — kept in the
+//! `pending` map and noted durably in `pending_grant_writes`; a delete outranks a
+//! revoke in both places, so a revoke never downgrades a pending delete (ii). Each
+//! pass over the pending ops writes the note (recording the grant's strongest pending
+//! op), then the grant's own change, then clears the note — and clears it only when
+//! that op, or a stronger one, has landed (iii). A pass retries the note's insert as
+//! well as the grant's write (iv), so a note that failed once is owed again rather
+//! than left for a restart to miss. [`load`] ends every grant that has a note and
+//! drives the ops again (v). What cannot survive is a crash between the in-memory
+//! end and the first landed note — a restart then finds the grant still active in
+//! the table.
 //!
 //! Three paths mint tokens, and all insert a grant through [`mint`] or [`mint_key_grant`]: the
 //! capability flow of an app (a grant on the main agent), a user's login (an auto-approved
@@ -360,12 +366,23 @@ impl std::fmt::Display for GrantError {
     }
 }
 
-/// A change to the `grants` table that a failed write left: the grant stays ended in memory,
-/// and the write is tried again until the table takes it.
-#[derive(Clone, Copy)]
+/// A change to the `grants` table that is still owed: the grant stays ended in memory,
+/// and the write is tried again until the table takes it. A `Delete` outranks a
+/// `Revoke`: a revoke never downgrades a pending delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingWrite {
     Revoke,
     Delete,
+}
+
+impl PendingWrite {
+    /// The `op` of `pending_grant_writes`.
+    fn name(self) -> &'static str {
+        match self {
+            PendingWrite::Revoke => PENDING_REVOKE,
+            PendingWrite::Delete => PENDING_DELETE,
+        }
+    }
 }
 
 /// The `op` values of the `pending_grant_writes` table: the write a revoke or a delete
@@ -442,32 +459,7 @@ impl Grants {
         if grants.is_empty() {
             return Err(GrantError::NotFound);
         }
-        self.retry_pending();
-        for grant in grants {
-            grant.ended.cancel();
-        }
-        let ids: Vec<String> = grants.iter().map(|g| g.id.0.clone()).collect();
-        // The pending write is noted before the change itself: a restart between the
-        // in-memory end and the table's write still finds the grants ended.
-        let db = crate::db_backend::db_backend();
-        if let Err(e) = db.note_pending_grant_writes(&ids, PENDING_REVOKE) {
-            log::error!("grants: noting the pending revocation failed: {e}");
-        }
-        let result = db.revoke_grants(&ids);
-        match &result {
-            Ok(()) => {
-                if let Err(e) = db.clear_pending_grant_writes(&ids) {
-                    log::error!("grants: clearing the pending revocation failed: {e}");
-                    self.note_pending(ids.iter().map(|id| (id.clone(), PendingWrite::Revoke)));
-                }
-            }
-            Err(_) => {
-                // The grants stay ended here; the table still holds them active, so the
-                // write is tried again until it lands.
-                self.note_pending(ids.iter().map(|id| (id.clone(), PendingWrite::Revoke)));
-            }
-        }
-        result.map_err(|e| GrantError::Store(e.to_string()))
+        self.end_pending(grants, PendingWrite::Revoke)
     }
 
     /// Revokes the grant of the token `id`.
@@ -509,33 +501,32 @@ impl Grants {
         if grants.is_empty() {
             return Err(GrantError::NotFound);
         }
-        self.retry_pending();
+        self.end_pending(grants, PendingWrite::Delete)
+    }
+
+    /// Ends `grants` in memory, then drives their `op` (`Revoke`, or the stronger
+    /// `Delete`) to the table: the pending-op journal of the module doc. Answers
+    /// `Store` when the grant's own write did not land; the op is then owed, noted
+    /// and retried.
+    fn end_pending(&self, grants: &[Arc<LiveGrant>], op: PendingWrite) -> Result<(), GrantError> {
+        // (i) the grants end in memory before any persistence attempt or retry:
+        // their tokens stop and their sockets close at once, whatever the store does.
         for grant in grants {
             grant.ended.cancel();
         }
         let ids: Vec<String> = grants.iter().map(|g| g.id.0.clone()).collect();
-        let db = crate::db_backend::db_backend();
-        if let Err(e) = db.note_pending_grant_writes(&ids, PENDING_DELETE) {
-            log::error!("grants: noting the pending delete failed: {e}");
+        // (ii) the strongest op still unlanded is what the map and the note keep.
+        self.mark_pending(ids.iter().map(|id| (id.clone(), op)));
+        let landed = self.drive_pending();
+        self.kick_if_pending();
+        match ids
+            .iter()
+            .filter_map(|id| landed.get(id))
+            .find_map(|result| result.as_ref().err().cloned())
+        {
+            Some(e) => Err(GrantError::Store(e)),
+            None => Ok(()),
         }
-        if let Err(e) = db.delete_grants(&ids) {
-            self.note_pending(ids.iter().map(|id| (id.clone(), PendingWrite::Delete)));
-            return Err(GrantError::Store(e.to_string()));
-        }
-        if let Err(e) = db.clear_pending_grant_writes(&ids) {
-            log::error!("grants: clearing the pending delete failed: {e}");
-            self.note_pending(ids.iter().map(|id| (id.clone(), PendingWrite::Delete)));
-        }
-        let mut live = write(&self.live);
-        if let Ok(mut pending) = self.pending.lock() {
-            for id in &ids {
-                pending.remove(id);
-            }
-        }
-        for grant in grants {
-            live.remove(&grant.id);
-        }
-        Ok(())
     }
 
     /// The unexpired grants on `agent`, active and revoked, oldest first.
@@ -680,30 +671,34 @@ impl Grants {
                 }
             }
         }
-        self.note_pending(pending.into_iter());
-        self.retry_pending();
+        // (v) every grant with a note ended above; the notes' ops are owed again now.
+        self.mark_pending(pending.into_iter());
+        self.drive_pending();
+        self.kick_if_pending();
         Ok(())
     }
 
-    /// Records the writes `ops` (`id`, what to write) left by a failed store call. Nothing
-    /// here reactivates a grant: it stays ended in memory while the write is retried.
-    fn note_pending(&self, ops: impl Iterator<Item = (String, PendingWrite)>) {
+    /// Merges the writes `ops` (`id`, what to write) into the pending map: the
+    /// strongest op still unlanded per grant, so a revoke never downgrades a
+    /// pending delete. Nothing here reactivates a grant: it stays ended in memory
+    /// while the write is retried.
+    fn mark_pending(&self, ops: impl Iterator<Item = (String, PendingWrite)>) {
         let Ok(mut pending) = self.pending.lock() else {
             return;
         };
         for (id, op) in ops {
-            // A pending delete covers a pending revoke: the row goes either way.
-            if matches!(op, PendingWrite::Revoke)
-                && matches!(pending.get(&id), Some(PendingWrite::Delete))
-            {
-                continue;
+            if !matches!(pending.get(&id), Some(PendingWrite::Delete)) {
+                pending.insert(id, op);
             }
-            pending.insert(id, op);
         }
-        drop(pending);
-        // The retry task runs only for the shared grants.
-        if std::ptr::eq(self, Grants::global()) {
-            self.kick_retry();
+    }
+
+    /// Drops `id`'s pending op once it landed; an op marked stronger meanwhile stays.
+    fn unpend(&self, id: &str, op: PendingWrite) {
+        if let Ok(mut pending) = self.pending.lock() {
+            if pending.get(id) == Some(&op) {
+                pending.remove(id);
+            }
         }
     }
 
@@ -712,48 +707,58 @@ impl Grants {
         self.pending.lock().map(|p| p.is_empty()).unwrap_or(true)
     }
 
-    /// Writes every change a failed store call left (a revocation, a delete). The retry task
-    /// calls it on [`REVOKE_RETRY_EVERY`]; the next grants call calls it too.
-    pub(crate) fn retry_pending(&self) {
-        let todo: Vec<(String, PendingWrite)> = match self.pending.lock() {
-            Ok(mut pending) => pending.drain().collect(),
-            Err(_) => return,
-        };
-        if todo.is_empty() {
-            return;
+    /// Starts the retry loop for the shared grants when an op is still owed.
+    fn kick_if_pending(&self) {
+        if std::ptr::eq(self, Grants::global()) && !self.pending_is_empty() {
+            self.kick_retry();
         }
+    }
+
+    /// One pass over the pending ops: for each, the durable note of its strongest
+    /// op, the grant's own write, then the note's clear — and it stays queued while
+    /// any of the three failed, so the next pass retries the note's insert too.
+    /// Returns each attempted id's write outcome for the caller's answer.
+    fn drive_pending(&self) -> HashMap<String, Result<(), String>> {
+        let todo: Vec<(String, PendingWrite)> = match self.pending.lock() {
+            Ok(pending) => pending.iter().map(|(id, op)| (id.clone(), *op)).collect(),
+            Err(_) => return HashMap::new(),
+        };
         let db = crate::db_backend::db_backend();
-        let mut failed: Vec<(String, PendingWrite)> = Vec::new();
+        let mut landed = HashMap::new();
         for (id, op) in todo {
+            if let Err(e) = db.note_pending_grant_writes(std::slice::from_ref(&id), op.name()) {
+                log::error!("grants: noting the pending write of {id} failed: {e}");
+            }
             let result = match op {
                 PendingWrite::Revoke => db.revoke_grants(std::slice::from_ref(&id)),
                 PendingWrite::Delete => db.delete_grants(std::slice::from_ref(&id)),
             };
-            // A write that lands drops its note; one that does not stays pending, as does
-            // a note that could not be dropped.
-            if result.is_err()
-                || db
-                    .clear_pending_grant_writes(std::slice::from_ref(&id))
-                    .is_err()
-            {
-                failed.push((id, op));
+            let Err(e) = result else {
+                // (iii) the note goes only when this op landed; a failed clear keeps
+                // the op queued so the next pass tries it all again.
+                match db.clear_pending_grant_writes(std::slice::from_ref(&id), op.name()) {
+                    Ok(()) => {
+                        self.unpend(&id, op);
+                        // A delete that lands takes the grant out of memory too, as
+                        // `remove` does: the app list stops showing it.
+                        if matches!(op, PendingWrite::Delete) {
+                            write(&self.live).remove(&TokenId(id.clone()));
+                        }
+                    }
+                    Err(e) => log::error!("grants: clearing the pending write of {id} failed: {e}"),
+                }
+                landed.insert(id, Ok(()));
                 continue;
-            }
-            // A delete that lands takes the grant out of memory too, as `remove` does:
-            // the app list stops showing it.
-            if matches!(op, PendingWrite::Delete) {
-                write(&self.live).remove(&TokenId(id));
-            }
+            };
+            landed.insert(id, Err(e.to_string()));
         }
-        if failed.is_empty() {
-            return;
-        }
-        let Ok(mut pending) = self.pending.lock() else {
-            return;
-        };
-        for (id, op) in failed {
-            pending.entry(id).or_insert(op);
-        }
+        landed
+    }
+
+    /// Writes every pending op once: the retry task calls it on [`REVOKE_RETRY_EVERY`];
+    /// the next grants call calls it too.
+    pub(crate) fn retry_pending(&self) {
+        self.drive_pending();
     }
 
     /// Starts the retry loop of [`REVOKE_RETRY_EVERY`] if none runs.
@@ -1315,6 +1320,237 @@ mod tests {
             "the landed delete leaves the list"
         );
         assert!(grants.pending_is_empty());
+    }
+
+    /// A grant ends in memory before any persistence attempt or retry: a call that owes
+    /// retries ends the grants it is given first, and a failed write still leaves them
+    /// ended.
+    #[test]
+    fn a_grant_ends_before_pending_writes_are_driven() {
+        setup();
+        let grants = Grants::default();
+        let insert = |name: &str| {
+            grants
+                .insert(LiveGrant::new(
+                    TokenId(uuid::Uuid::new_v4().to_string()),
+                    name.into(),
+                    AgentContext::main_agent(),
+                    String::new(),
+                    auth(name, vec![]),
+                    now() + 3600,
+                    now(),
+                ))
+                .unwrap()
+        };
+        let (failed, grant) = (insert("failed-remove"), insert("revoked"));
+        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            grants.remove(std::slice::from_ref(&failed)),
+            Err(GrantError::Store(_))
+        ));
+        // The failed remove's delete is still owed when the revoke runs: both grants
+        // are ended in memory before either pending op is driven.
+        assert!(grants.revoke(std::slice::from_ref(&grant)).is_ok());
+        assert!(grant.is_ended());
+        assert!(failed.is_ended());
+        assert!(grants.get(&grant.id).is_none());
+        assert!(grants.get(&failed.id).is_none());
+        // The one drive lands both: the owed delete and the revoke. The revoked grant
+        // stays listed, ended; the deleted one is gone.
+        assert!(grants.pending_is_empty());
+        let listed = grants.list(&AgentContext::main_agent());
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].is_ended());
+    }
+
+    /// A revoke that lands must not clear a pending delete's durable note: the note names
+    /// the strongest write still unlanded.
+    #[test]
+    fn a_landed_revoke_keeps_a_pending_delete_noted() {
+        setup();
+        let db = crate::db_backend::db_backend();
+        // Two in-memory grant lists over the one table, as a load makes: `a` owes a
+        // delete, `b` revokes the same grant.
+        let (a, b) = (Grants::default(), Grants::default());
+        let id = TokenId(uuid::Uuid::new_v4().to_string());
+        let grant = |grants: &Grants| {
+            grants
+                .insert(LiveGrant::new(
+                    id.clone(),
+                    "req".into(),
+                    AgentContext::main_agent(),
+                    String::new(),
+                    auth("gone", vec![]),
+                    now() + 3600,
+                    now(),
+                ))
+                .unwrap()
+        };
+        let (ga, gb) = (grant(&a), grant(&b));
+        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            a.remove(std::slice::from_ref(&ga)),
+            Err(GrantError::Store(_))
+        ));
+        assert!(b.revoke(std::slice::from_ref(&gb)).is_ok());
+        assert_eq!(
+            db.pending_grant_writes().unwrap(),
+            vec![(ga.id.0.clone(), PENDING_DELETE.to_string())],
+            "the delete is still unlanded: its note stays"
+        );
+        // The owed delete still lands on the retry.
+        a.retry_pending();
+        assert!(db.pending_grant_writes().unwrap().is_empty());
+        assert!(db.grants().unwrap().iter().all(|r| r.id != ga.id.0));
+    }
+
+    /// A failed clear of the durable note keeps the op queued: the grant stays listed,
+    /// ended, until the retry converges note, write and clear.
+    #[test]
+    fn a_failed_note_clear_keeps_the_op_queued() {
+        setup();
+        let db = crate::db_backend::db_backend();
+        let grants = Grants::default();
+        let grant = grants
+            .insert(LiveGrant::new(
+                TokenId(uuid::Uuid::new_v4().to_string()),
+                "req".into(),
+                AgentContext::main_agent(),
+                String::new(),
+                auth("gone", vec![]),
+                now() + 3600,
+                now(),
+            ))
+            .unwrap();
+        crate::db::FAIL_NEXT_GRANT_CLEAR.store(true, std::sync::atomic::Ordering::SeqCst);
+        grants.remove(std::slice::from_ref(&grant)).unwrap();
+        assert!(
+            !grants.pending_is_empty(),
+            "the op stays queued while its note is not cleared"
+        );
+        assert_eq!(grants.list(&AgentContext::main_agent()).len(), 1);
+        grants.retry_pending();
+        assert!(grants.pending_is_empty());
+        assert!(grants.list(&AgentContext::main_agent()).is_empty());
+        assert!(db.pending_grant_writes().unwrap().is_empty());
+    }
+
+    /// The retry writes the durable note again too: when the note insert and the grant's
+    /// write both failed once, a restart after the next pass still finds the grant ended.
+    #[test]
+    fn a_failed_note_is_retried_so_a_restart_finds_the_end() {
+        setup();
+        let grants = Grants::default();
+        let grant = grants
+            .insert(LiveGrant::new(
+                TokenId(uuid::Uuid::new_v4().to_string()),
+                "req".into(),
+                AgentContext::main_agent(),
+                String::new(),
+                auth("gone", vec![]),
+                now() + 3600,
+                now(),
+            ))
+            .unwrap();
+        // The note insert and the grant's write both fail: nothing durable of the end.
+        crate::db::FAIL_NEXT_GRANT_NOTE.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            grants.revoke(std::slice::from_ref(&grant)),
+            Err(GrantError::Store(_))
+        ));
+        assert!(crate::db_backend::db_backend()
+            .pending_grant_writes()
+            .unwrap()
+            .is_empty());
+        // The retry writes the note again; the grant's write still fails, and the note
+        // is what a restart reads.
+        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        grants.retry_pending();
+        assert_eq!(
+            crate::db_backend::db_backend()
+                .pending_grant_writes()
+                .unwrap(),
+            vec![(grant.id.0.clone(), PENDING_REVOKE.to_string())]
+        );
+        // The restart: the note ends the grant on load, and the retry lands the write.
+        let reloaded = Grants::default();
+        reloaded.load(crate::db_backend::db_backend()).unwrap();
+        assert!(reloaded.get(&grant.id).is_none());
+        assert!(
+            crate::db_backend::db_backend()
+                .grants()
+                .unwrap()
+                .iter()
+                .find(|r| r.id == grant.id.0)
+                .unwrap()
+                .revoked
+        );
+    }
+
+    /// A revoke never downgrades a pending delete, in the queue or in the notes: driving
+    /// the pending op lands the delete, not the revoke.
+    #[test]
+    fn a_revoke_never_downgrades_a_pending_delete() {
+        setup();
+        let db = crate::db_backend::db_backend();
+        let grants = Grants::default();
+        let grant = grants
+            .insert(LiveGrant::new(
+                TokenId(uuid::Uuid::new_v4().to_string()),
+                "req".into(),
+                AgentContext::main_agent(),
+                String::new(),
+                auth("gone", vec![]),
+                now() + 3600,
+                now(),
+            ))
+            .unwrap();
+        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            grants.remove(std::slice::from_ref(&grant)),
+            Err(GrantError::Store(_))
+        ));
+        assert!(grants.revoke(std::slice::from_ref(&grant)).is_ok());
+        assert!(grants.list(&AgentContext::main_agent()).is_empty());
+        assert!(db.grants().unwrap().iter().all(|r| r.id != grant.id.0));
+        assert!(db.pending_grant_writes().unwrap().is_empty());
+    }
+
+    /// A delete pending at a restart removes the grant: the durable note ends it on load
+    /// and the retry's delete takes the row out.
+    #[test]
+    fn a_pending_delete_at_a_restart_removes_the_grant() {
+        setup();
+        let grants = Grants::default();
+        let grant = grants
+            .insert(LiveGrant::new(
+                TokenId(uuid::Uuid::new_v4().to_string()),
+                "req".into(),
+                AgentContext::main_agent(),
+                String::new(),
+                auth("gone", vec![]),
+                now() + 3600,
+                now(),
+            ))
+            .unwrap();
+        crate::db::FAIL_NEXT_GRANT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            grants.remove(std::slice::from_ref(&grant)),
+            Err(GrantError::Store(_))
+        ));
+        let reloaded = Grants::default();
+        reloaded.load(crate::db_backend::db_backend()).unwrap();
+        assert!(reloaded.get(&grant.id).is_none());
+        assert!(reloaded
+            .list(&AgentContext::main_agent())
+            .iter()
+            .all(|g| g.id != grant.id));
+        assert!(crate::db_backend::db_backend()
+            .grants()
+            .unwrap()
+            .iter()
+            .all(|r| r.id != grant.id.0));
     }
 
     #[test]

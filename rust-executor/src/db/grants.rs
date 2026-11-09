@@ -288,12 +288,19 @@ impl Ad4mDb {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Drops the pending notes of `ids`: their writes landed.
-    pub fn clear_pending_grant_writes(&self, ids: &[String]) -> Ad4mDbResult<()> {
+    /// Drops the pending notes of `ids` that `op` (`revoke` or `delete`, the change
+    /// that landed) covers: a landed delete takes every note of the grant, a landed
+    /// revoke none of a pending delete's — the note always names the strongest write
+    /// still unlanded.
+    pub fn clear_pending_grant_writes(&self, ids: &[String], op: &str) -> Ad4mDbResult<()> {
+        #[cfg(test)]
+        if super::FAIL_NEXT_GRANT_CLEAR.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(rusqlite::Error::InvalidQuery.into());
+        }
         for id in ids {
             self.conn.execute(
-                "DELETE FROM pending_grant_writes WHERE grant_id = ?1",
-                params![id],
+                "DELETE FROM pending_grant_writes WHERE grant_id = ?1 AND (?2 = 'delete' OR op != 'delete')",
+                params![id, op],
             )?;
         }
         Ok(())
