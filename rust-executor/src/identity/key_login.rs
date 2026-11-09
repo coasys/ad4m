@@ -2422,7 +2422,10 @@ mod tests {
             world.log.events.push(revoke_bot);
             if via_recheck {
                 *world.store.events.lock().unwrap() = world.log.events.clone();
+                // Stale for both the refresh and the session read, so the re-check reads the
+                // store again (#1617 counts only a successful read as fresh).
                 world.service.cache.note_refreshed(&world.log.scid(), 0);
+                world.service.cache.note_read(&world.log.scid(), 0);
                 assert_eq!(
                     recheck_key_grants(&world.service, now(), &RecheckAttempts::default()).await,
                     1

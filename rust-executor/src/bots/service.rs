@@ -276,7 +276,8 @@ pub async fn create(params: CreateBotParams) -> Result<CreatedBot, WsRpcError> {
     let password = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
     let did =
         crate::user_management::create_user(&username, &password).map_err(WsRpcError::internal)?;
-    if let Err(e) = crate::user_management::init_user_profile(&did).await {
+    // The profile is stored now; its publish runs in the background, as for `user.create`.
+    if let Err(e) = crate::user_management::init_user_profile(&did) {
         ::log::warn!("bots: the profile of {did}: {e}");
     }
     let at = now();
