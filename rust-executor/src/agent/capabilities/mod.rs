@@ -602,14 +602,17 @@ mod tests {
         let did = "did:key:track-last-seen-throttle";
         let t0 = chrono::Utc::now().timestamp() - 10_000;
         Ad4mDb::with_global_instance(|db| {
-            db.import_from_json(serde_json::json!({
-                "users": [{
-                    "username": email,
-                    "did": did,
-                    "password_hash": "x",
-                    "last_seen": t0,
-                }]
-            }), None)
+            db.import_from_json(
+                serde_json::json!({
+                    "users": [{
+                        "username": email,
+                        "did": did,
+                        "password_hash": "x",
+                        "last_seen": t0,
+                    }]
+                }),
+                None,
+            )
         })
         .expect("seed user");
         let stored = || {
