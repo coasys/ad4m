@@ -2572,6 +2572,16 @@ impl PerspectiveInstance {
                 .await?
                 .fold_into(&mut decorated_diff);
 
+            // The reply and the link-updated event carry the judgement the
+            // store wrote; `persist_link_diff` discovered the signer, so a
+            // verdict computed before it can be stale.
+            decorated_diff.additions = self.stored_judgements(decorated_diff.additions);
+            let decorated_new_link_expression = decorated_diff
+                .additions
+                .first()
+                .cloned()
+                .unwrap_or(decorated_new_link_expression);
+
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
 
@@ -8798,6 +8808,80 @@ mod tests {
         let checked = LinkExpression::from(reply.clone()).check();
         assert_eq!(checked.verdict, LinkVerdict::CantCheck);
         assert_eq!(checked.person, None);
+        map.forget(&log.scid());
+    }
+
+    /// `update_link` reads back the judgement the store wrote, as every
+    /// other write path does through `stored_judgements`: on a stale head
+    /// the reply and the `link-updated` event carry the `valid` + person
+    /// the store wrote, not the `cantCheck` the decoration computed before
+    /// `persist_link_diff` ran signer discovery.
+    #[tokio::test]
+    async fn update_link_returns_the_stored_judgement() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+
+        let mut perspective = setup().await;
+
+        // The signer's log lists this executor's own key, so `update_link`
+        // signs for it: the store checks the link as this executor's own
+        // write (`valid` + person), while the head is stale for anything
+        // judged as a peer's.
+        let secret = crate::wallet::wallet_backend()
+            .get_secret_key(crate::wallet::KEY_NAME_MAIN)
+            .expect("the test wallet holds the main key");
+        let device = ed25519_dalek::SigningKey::from_bytes(
+            &secret[..32]
+                .try_into()
+                .expect("the wallet holds a 32-byte ed25519 secret"),
+        );
+        let log = TestLog::with_device(104, device);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+
+        let context = AgentContext::main_agent();
+        let added = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap();
+        let mut new_link = create_link();
+        new_link.target = "t://updated".to_string();
+        let updated = perspective
+            .update_link(LinkExpression::from(added), new_link, None, &context)
+            .await
+            .unwrap();
+
+        let stored = perspective
+            .sparql_store
+            .get_link(
+                &updated.data.source,
+                updated.data.predicate.as_deref(),
+                &updated.data.target,
+                &updated.author,
+                &updated.timestamp,
+            )
+            .unwrap()
+            .expect("the updated link is stored");
+        assert_eq!(
+            stored.verdict,
+            Some(LinkVerdict::Valid),
+            "the local write counts on the stale head"
+        );
+        assert_eq!(
+            updated.verdict, stored.verdict,
+            "the reply reports the stored judgement"
+        );
+        assert_eq!(updated.person, stored.person);
+        assert_eq!(updated.proof.valid, stored.proof.valid);
         map.forget(&log.scid());
     }
 

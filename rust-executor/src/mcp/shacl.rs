@@ -466,7 +466,11 @@ pub async fn load_class_properties_with_uri(
         // links. Read here as well as in `load_shape`, because this
         // link-walking path is what the dynamic per-class tools resolve
         // against; missing it would leave them writing Shared links for a
-        // property the shape declares local.
+        // property the shape declares local. Locality fails toward Local:
+        // a `true` from any link that is not `invalid` — `cantCheck`
+        // included — declares the property private; only an `invalid`
+        // declaration stays out, or a forged `true` could stop the
+        // victim's writes being shared.
         let local = match perspective
             .get_links(&LinkQuery {
                 source: Some(prop_uri.clone()),
@@ -475,10 +479,11 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) => first_counting(&links)
-                .and_then(|link| link.data.target.rsplit(':').next())
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+            Ok(links) => links
+                .iter()
+                .filter(|link| link.verdict.as_ref().is_none_or(|v| v.shown()))
+                .filter_map(|link| link.data.target.rsplit(':').next())
+                .any(|v| v.eq_ignore_ascii_case("true")),
             _ => false,
         };
 

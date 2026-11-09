@@ -2201,6 +2201,16 @@ impl SparqlStore {
 
     /// Clear the store and bulk-insert all provided links, except those in
     /// the store's own metadata vocabulary, which no store keeps.
+    ///
+    /// `reload` is for import and recovery only. Its one production caller
+    /// is boot rebuilding an empty store from the persisted link list, and
+    /// it keeps nothing of the store it replaces: no earlier admission
+    /// order survives it. Every re-inserted link is judged fresh, exactly
+    /// like a link arriving through `import_perspective` — a rebuilt link
+    /// waits for a store-confirmed head the way an imported one does; it is
+    /// not "the link that was already there" just because it stood in this
+    /// store before. Do not reach for it to reorder or re-admit links in a
+    /// live store.
     pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
         self.clear()?;
         for link in &links {

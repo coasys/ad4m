@@ -1153,10 +1153,12 @@ mod tests {
         assert!(memo.settled(&same_dna, &receipt).is_some());
     }
 
-    /// A second read of an unchanged set re-verifies nothing: three receipts
-    /// cost three verifications on the first enumeration and zero on the
-    /// next, whichever surface asks. A forgery beside them is memoised as
-    /// what it is — excluded on the first read and on every later one.
+    /// A second read of an unchanged set re-verifies the verified receipts
+    /// zero times: three receipts cost three verifications on the first
+    /// enumeration and none on the next, whichever surface asks. A forgery
+    /// beside them is excluded on the first read and on every later one —
+    /// its refusal is re-derived each time, never memoised, because a
+    /// fold-driven failure's cause can change under the same key.
     ///
     /// Red if the memo does not store, does not look up, or keys on
     /// something a repeat read does not reproduce.
@@ -1198,8 +1200,9 @@ mod tests {
         );
         assert_eq!(
             memo.verifications(),
-            4,
-            "an unchanged set is answered from the memo: zero re-verifies across three surfaces"
+            7,
+            "the three verified receipts are answered from the memo across three surfaces; \
+             the forgery's refusal is verified afresh each pass — never memoised"
         );
     }
 
@@ -1302,8 +1305,9 @@ mod tests {
         }
         assert_eq!(
             memo.verifications(),
-            3,
-            "each receipt is verified once, then every surface answers from the memo"
+            9,
+            "the verified receipt is verified once and answered from the memo; the two \
+             rejections are fold-driven, so each of the four surface calls re-verifies them"
         );
 
         let keys: usize = receipts

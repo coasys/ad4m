@@ -144,9 +144,12 @@ impl ReadSet {
     ///
     /// This function is the one place either claim is answered.
     ///
-    /// Pure — [`DecoratedLinkExpression::verify_signature`] is SHA256 plus an
-    /// Ed25519 check against the author's own `did:key`: no store, no clock,
-    /// no network.
+    /// No store and no network — but not store-free: the check reads the
+    /// executor's key map and clock, through
+    /// [`DecoratedLinkExpression::verify_signature_carried`]. A carried link
+    /// was admitted when it was stored, so the live-write admission window
+    /// (`ADMIT_FRESHNESS`) is not re-applied to it; what the held log says —
+    /// a revocation, a listing past the trusted seq — still decides.
     ///
     /// # Both sides run it, and that is the contract
     ///
@@ -251,7 +254,7 @@ impl ReadSet {
 /// that, every link in one had come off the local store.
 fn reverified_link(link: &DecoratedLinkExpression) -> DecoratedLinkExpression {
     let mut link = link.clone();
-    link.verify_signature();
+    link.verify_signature_carried();
     link.status = None;
     link
 }

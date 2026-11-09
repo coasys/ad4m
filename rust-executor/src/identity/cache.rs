@@ -234,6 +234,16 @@ impl KeyMap {
     /// cleared by the log that lists it or the store's "no log".
     pub fn note_pending(&self, key: &str) {
         if let Ok(mut inner) = self.inner.lock() {
+            // An expired "no log" answer is none: `lookup` already reads it
+            // as `Unknown`, so it must not keep the key out of `pending` —
+            // the key was asked about and has no fresh answer.
+            if inner
+                .no_log
+                .get(key)
+                .is_some_and(|at| at.elapsed() >= NO_LOG_TTL)
+            {
+                inner.no_log.remove(key);
+            }
             if !inner.keys.contains_key(key) && !inner.no_log.contains_key(key) {
                 if inner.pending.len() >= KEY_MAP_BOUND {
                     inner.pending.clear();
@@ -1453,6 +1463,40 @@ pub(crate) mod tests {
         assert!(cache.refreshed_within("junk0", now, 60));
         assert!(cache.refreshed_within("another", now, 60));
         assert_eq!(cache.refreshed.lock().unwrap().len(), REFRESHED_BOUND);
+    }
+
+    /// An expired "no log" answer is no answer — `lookup` already reads the
+    /// entry as Unknown once `NO_LOG_TTL` passes — so it must not keep a key
+    /// out of `pending`: the key was asked about and has no fresh answer. An
+    /// unanchored link by it is `cantCheck`, never `valid` with no person.
+    #[test]
+    fn an_expired_no_log_answer_does_not_block_a_pending_note() {
+        use crate::agent::signatures::TestSigner;
+        use crate::identity::resolver::check_signed_with;
+        use crate::identity::verdict::LinkVerdict;
+        use crate::types::Link;
+
+        let signer = TestSigner::generate();
+        let key = signer.multikey();
+        let map = KeyMap::new();
+        map.inner.lock().unwrap().no_log.insert(
+            key.clone(),
+            Instant::now() - NO_LOG_TTL - Duration::from_secs(1),
+        );
+        map.note_pending(&key);
+        assert!(map.is_pending(&key), "an expired no_log entry is absent");
+
+        // And the link check agrees: a `valid`-with-no-person the unanchored
+        // link would otherwise earn becomes `cantCheck` while the key waits.
+        let expr = signer.sign(Link {
+            source: "ad4m://s".into(),
+            predicate: Some("ad4m://p".into()),
+            target: "ad4m://t".into(),
+        });
+        assert_eq!(
+            check_signed_with(&expr, &map, None, 1_000).verdict,
+            LinkVerdict::CantCheck
+        );
     }
 
     /// The store key [`FakeStore`] signs its heads with.
