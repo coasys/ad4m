@@ -9732,7 +9732,10 @@ mod tests {
         let gone = LinkExpression::from(stored[0].clone());
         perspective.sparql_store.remove_link(&gone).unwrap();
         reach_seq_one(&log);
-        let rewrites = perspective.rejudge(stored).await.unwrap();
+        let rewrites = perspective
+            .rejudge(stored.into_iter().map(|link| (link, false)).collect())
+            .await
+            .unwrap();
         assert_eq!(rewrites.len(), 4, "the four links still stored");
         let held = perspective.sparql_store.get_all_links().unwrap();
         assert_eq!(held.len(), 4);
