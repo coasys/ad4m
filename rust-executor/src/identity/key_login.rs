@@ -1341,10 +1341,15 @@ pub async fn recheck_key_grants(
         let to_end: Vec<Arc<LiveGrant>> =
             match service.resolver.cached_session_key(&scid, &key).await {
                 // The cached verdict first: a revocation it already holds ends the
-                // grant now. A valid one is no fresh check — the outage grace still
-                // runs from the grant's own last check.
+                // grant now, as does a trusted log that does not list the key at
+                // all (a reset or repair moved the cache onto a branch without
+                // it) — the `NotListed` verdict the live read and `agent_speaks`
+                // end grants on too. A valid one is no fresh check — the outage
+                // grace still runs from the grant's own last check, for a key the
+                // log lists whose read only failed.
                 Ok(cached) if !cached.admits() => grants,
-                _ => {
+                Err(SessionKeyError::NotListed) => grants,
+                Ok(_) | Err(SessionKeyError::StoreUnavailable) => {
                     let mut to_end = Vec::new();
                     for g in grants {
                         let past_grace = g.key.as_ref().is_some_and(|b| {
@@ -1523,6 +1528,7 @@ mod tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
+        end_leftover_key_grants();
         let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let mut log = TestLog::new(seed);
         let phone = signing_key(seed.wrapping_add(1));
@@ -1634,6 +1640,7 @@ mod tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
+        end_leftover_key_grants();
         let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let mut log = TestLog::new(seed);
         let phone = signing_key(seed.wrapping_add(1));
@@ -1752,6 +1759,16 @@ mod tests {
     impl Drop for MainBound {
         fn drop(&mut self) {
             let _ = test_db(|db| db.clear_agent_identity_for_test(&self.0));
+        }
+    }
+
+    /// Ends every live key-bound grant, so a re-check's reads and its count of ended
+    /// grants — and every other pass's — are this test's alone: `Grants` is global,
+    /// and another test's leftovers would be read, ended and counted here.
+    fn end_leftover_key_grants() {
+        let leftovers = Grants::global().key_bound();
+        if !leftovers.is_empty() {
+            Grants::global().revoke(&leftovers).unwrap();
         }
     }
 
@@ -3438,6 +3455,39 @@ mod tests {
         no_operator();
     }
 
+    // A re-check whose store read fails asks the cached verdict next: a trusted log
+    // that does not list the key at all — a reset or repair moved the cache onto a
+    // branch without it — is the `NotListed` verdict the live read and `agent_speaks`
+    // end grants on, so the grant ends now. The outage grace holds only a key the
+    // log lists.
+    #[tokio::test]
+    async fn a_recheck_ends_the_grant_of_a_key_the_cached_log_does_not_list() {
+        let world = world(44).await;
+        world.operate();
+        // An operator grant (it can name no agent) bound to a key the world's log
+        // never listed, checked just now.
+        let grant = Grants::global()
+            .insert(
+                LiveGrant::for_test("never-listed", AgentContext::main_agent(), now() + 3600)
+                    .operator_role()
+                    .bound_to(KeyBinding::new(
+                        world.did.clone(),
+                        signing_key(99).key(),
+                        "d9".into(),
+                        0,
+                        now(),
+                    )),
+            )
+            .unwrap();
+        world.store.store_down.store(true, Ordering::SeqCst);
+        recheck_key_grants(&world.service, now(), &RecheckAttempts::default()).await;
+        assert!(
+            grant.is_ended(),
+            "a key the trusted log does not list ends its grants, outage or not"
+        );
+        no_operator();
+    }
+
     // The fresh read the post-mint check takes can age the selected agent's own key out too:
     // the login is refused, and no grant acts as an agent that no longer speaks for the
     // identity.
@@ -3644,18 +3694,21 @@ mod tests {
             "the pass took {:?}",
             started.elapsed()
         );
-        assert_eq!(ended, 1);
+        assert_eq!(ended, 3, "the session's grant and the two stalled reads'");
         assert_eq!(session.check(), Err(AuthError::Revoked));
-        // The stalled grants kept their fresh check.
+        // The stalled grants' keys name no cached log: the outage pass's
+        // `NotListed` verdict ends them — the outage grace holds only a key the
+        // trusted log lists.
         for scid in ["0-stall-a", "0-stall-b"] {
             assert!(
                 Grants::global()
                     .get(&crate::agent::session::TokenId(format!("stalled-{scid}")))
-                    .is_some(),
-                "{scid} is kept within the outage grace"
+                    .is_none(),
+                "{scid}: no cached log lists its key"
             );
         }
         world.store.stall_for.lock().unwrap().clear();
+        end_leftover_key_grants();
         no_operator();
     }
 
@@ -3817,11 +3870,8 @@ mod tests {
         let mut world = world(68).await;
         world.operate();
         // Earlier tests' leftover key-bound grants go, so the pass's reads and
-        // reads-at-once are this test's alone.
-        let leftovers = Grants::global().key_bound();
-        if !leftovers.is_empty() {
-            Grants::global().revoke(&leftovers).unwrap();
-        }
+        // reads-at-once are this test's alone (`world` just did the same).
+        end_leftover_key_grants();
         let result = world.login_as(&world.phone).await.unwrap();
         let session = open(&result.token).unwrap();
         // Stalled reads in the same pass, sorted after the session's DID so its key is
@@ -3884,10 +3934,7 @@ mod tests {
         assert_eq!(session.check(), Err(AuthError::Revoked));
         watch.abort();
         world.store.stall_for.lock().unwrap().clear();
-        let leftovers = Grants::global().key_bound();
-        if !leftovers.is_empty() {
-            Grants::global().revoke(&leftovers).unwrap();
-        }
+        end_leftover_key_grants();
         no_operator();
     }
 
@@ -4113,6 +4160,7 @@ mod tests {
         assert_eq!(ended.ended, 1, "the identity's other key grant only");
         assert!(other.is_ended());
         assert!(login_grant.holds().is_ok(), "the agent's login stands");
+        end_leftover_key_grants();
     }
 
     // A challenge is a key session's own, whatever its capabilities (the binding proves the
@@ -4246,8 +4294,9 @@ mod tests {
         assert!(
             Grants::global()
                 .get(&crate::agent::session::TokenId("stall-grant".into()))
-                .is_some(),
-            "the stalled grant kept its fresh check"
+                .is_none(),
+            "no cached log lists the stalled grant's key: the outage pass's \
+             NotListed verdict ends it"
         );
         world.store.stall_for.lock().unwrap().clear();
         no_operator();
@@ -4302,6 +4351,7 @@ mod tests {
         assert!(other.is_ended(), "the identity's other grant ended");
         assert!(app_grant.is_ended(), "the agent's grants were still ended");
         Grants::global().retry_pending();
+        end_leftover_key_grants();
     }
 
     // A grant acts as an agent only while the agent speaks for the identity: when the

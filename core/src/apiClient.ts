@@ -267,8 +267,10 @@ export class ApiClient {
      *  watch goes out on the next open instead. A failed `events.watch` waits on
      *  it so `watchApplied()` answers only an applied watch. */
     private _watchRetryDone: Promise<void> | null = null
-    /** Resolves `_watchRetryDone` when the retry it waits on is gone (the socket closed). */
-    private _watchRetryResolve: (() => void) | null = null
+    /** Rejects `_watchRetryDone` when the retry it waits on is gone for good (the
+     *  client closed the socket on purpose). A socket `setToken` replaced keeps
+     *  the wait: the armed retry settles it with the new socket's watch. */
+    private _watchRetryReject: ((reason: unknown) => void) | null = null
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -798,11 +800,11 @@ export class ApiClient {
     private _retryWatch(): Promise<void> {
         if (this._watchRetryDone) return this._watchRetryDone
         this._watchRetryDone = new Promise<void>((resolve, reject) => {
-            this._watchRetryResolve = resolve
+            this._watchRetryReject = reject
             this._watchRetryTimer = setTimeout(() => {
                 this._watchRetryTimer = null
                 this._watchRetryDone = null
-                this._watchRetryResolve = null
+                this._watchRetryReject = null
                 this._scheduleWatch()
                 this._watchDone.then(() => {
                     // The flush the timer queued sent a watch: its `_watchSent` is the
@@ -822,9 +824,12 @@ export class ApiClient {
             clearTimeout(this._watchRetryTimer)
             this._watchRetryTimer = null
         }
-        this._watchRetryResolve?.()
+        // An intentional close fails a pending watch retry: its waiter propagates
+        // the refusal rather than settling against a socket it would then open
+        // with no handlers left to serve.
+        this._watchRetryReject?.(new RpcError(499, 'Client closed'))
         this._watchRetryDone = null
-        this._watchRetryResolve = null
+        this._watchRetryReject = null
         this._cancelReconnect()
         const ws = this._ws
         this._ws = null
