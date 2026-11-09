@@ -108,15 +108,30 @@ interface PendingCall {
     sent: boolean
     /** The socket the message went out on — a superseded one keeps answering it. */
     ws?: WebSocket
+    /** The token of the socket the message went out on: the principal it executes
+     *  as. A retry may go out again only under that same principal. */
+    token?: string
     /** Sockets that closed before this call went out. */
     failedConnects: number
     /** True while a retryable read has its one retry left. */
     retry: boolean
     /** An `events.watch`: it serves the subscribers, so it does not keep the socket open. */
     watch: boolean
+    /** Opens state on the executor bound to the socket it goes out on (a live
+     *  query's subscription): a reply from a socket `setToken` replaced answers
+     *  with a handle that dies when that socket does. */
+    bound: boolean
     resolve: (value: unknown) => void
     reject: (reason: unknown) => void
 }
+
+/** Calls whose reply is bound to the socket they went out on: they open a live
+ *  query's subscription, which the executor ends with that connection. */
+const SOCKET_BOUND_METHODS: ReadonlySet<string> = new Set([
+    'perspective.subscribeQuery',
+    'perspective.subscribeSparql',
+    'perspective.modelSubscribe',
+])
 
 const closedError = (reason?: string) => new RpcError(503, reason || 'WebSocket connection closed')
 
@@ -296,7 +311,14 @@ export class ApiClient {
                 if (!pending) return // late reply to a timed-out or aborted call, or a cancel ack
                 const error = parsed.error as { code?: number; message?: string } | undefined
                 if (!error) {
-                    pending.resolve(parsed.result)
+                    // A socket-bound call's reply on a socket `setToken` replaced names
+                    // state that dies when this socket does: refuse it, so the caller's
+                    // open path answers on the current socket instead.
+                    if (pending.bound && this._superseded.has(ws)) {
+                        pending.reject(closedError())
+                    } else {
+                        pending.resolve(parsed.result)
+                    }
                     return
                 }
                 const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error')
@@ -379,7 +401,9 @@ export class ApiClient {
         for (const pending of this._pendingCalls.values()) {
             if (pending.ws !== ws) continue
             pending.ws = undefined
-            if (pending.retry) {
+            // A read gets its one retry only under the principal it went out as:
+            // answered under a different token it would serve the new principal's data.
+            if (pending.retry && pending.token === this.token) {
                 pending.sent = false
                 pending.retry = false
             } else {
@@ -396,9 +420,16 @@ export class ApiClient {
     private _flushCalls(ws: WebSocket): void {
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent) {
+                // A read armed for its retry under another principal does not go out
+                // on this token's session: its answer would be the new principal's.
+                if (pending.token !== undefined && pending.token !== this.token) {
+                    pending.reject(closedError())
+                    continue
+                }
                 this._send(ws, pending.message)
                 pending.sent = true
                 pending.ws = ws
+                pending.token = this._wsToken
             }
         }
     }
@@ -583,6 +614,7 @@ export class ApiClient {
                 failedConnects: 0,
                 retry: (READ_METHODS as ReadonlySet<string>).has(type),
                 watch: type === 'events.watch',
+                bound: SOCKET_BOUND_METHODS.has(type),
                 resolve: (value) => settle(() => resolve(value)),
                 reject: (reason) => settle(() => reject(reason)),
             }
@@ -599,6 +631,7 @@ export class ApiClient {
                 this._send(this._ws!, message)
                 pending.sent = true
                 pending.ws = this._ws!
+                pending.token = this._wsToken
             }
         })
     }
@@ -644,10 +677,19 @@ export class ApiClient {
      * need this: a call already sends the watch ahead of itself.
      */
     async watchApplied(): Promise<void> {
-        this._ensureWs()
-        if (this._ws!.readyState !== 1 /* OPEN */) await this._wsOpen
-        await this._watchDone
-        await this._watchSent
+        for (;;) {
+            this._ensureWs()
+            const ws = this._ws!
+            const open = this._wsOpen!
+            if (ws.readyState !== 1 /* OPEN */) await open
+            await this._watchDone
+            await this._watchSent
+            // The socket these settled on may not be the current one any more —
+            // `setToken` replaced it, or it dropped and a successor opened: what a
+            // waiter needs applied is the current socket's watch, so it waits on
+            // that one too. Its failure (a refused token, a close) propagates.
+            if (this._ws === ws) return
+        }
     }
 
     /** Event type → perspectives wanted (`null`: all), from every handler. */
