@@ -1031,6 +1031,57 @@ describe('ApiClient.setToken', () => {
         }
     })
 
+    it('rejects a watchApplied() waiter on closeAll while a watch retry is pending, and opens no socket', async () => {
+        jest.useFakeTimers()
+        try {
+            const error = jest.spyOn(console, 'error').mockImplementation(() => {})
+            open()
+            await jest.advanceTimersByTimeAsync(0)
+            const applied = outcomeOf(client.watchApplied())
+            // A failure that is no refusal and no close arms a retry: the waiter
+            // holds on for the retried watch.
+            const watch = socket(0).sent.find(m => m.type === 'events.watch')!
+            socket(0).reply({ id: watch.id, error: { code: 408, message: 'timed out' } })
+            await jest.advanceTimersByTimeAsync(0)
+            expect(applied()).toBe('pending')
+            client.closeAll()
+            await jest.advanceTimersByTimeAsync(0)
+            expect(applied()).toMatchObject({ name: 'RpcError', status: 499 })
+            expect(socket(0).readyState).toBe(3)
+            expect(TestSocket.instances).toHaveLength(1)
+            error.mockRestore()
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('keeps a watchApplied() waiter on the new socket when setToken lands during a watch retry', async () => {
+        jest.useFakeTimers()
+        try {
+            const error = jest.spyOn(console, 'error').mockImplementation(() => {})
+            client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+            open()
+            await jest.advanceTimersByTimeAsync(0)
+            const applied = outcomeOf(client.watchApplied())
+            const watch = socket(0).sent.find(m => m.type === 'events.watch')!
+            socket(0).reply({ id: watch.id, error: { code: 408, message: 'timed out' } })
+            await jest.advanceTimersByTimeAsync(0)
+            expect(applied()).toBe('pending')
+            client.setToken('new')
+            // Socket 1 opens and sends its own watch; the pending retry settles
+            // against it — the waiter follows the new socket.
+            await jest.advanceTimersByTimeAsync(1_000)
+            const watches = socket(1).sent.filter(m => m.type === 'events.watch')
+            expect(watches.length).toBeGreaterThan(0)
+            socket(1).reply({ id: watches.at(-1)!.id, result: {} })
+            await jest.advanceTimersByTimeAsync(0)
+            expect(applied()).toBe('resolved')
+            error.mockRestore()
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
     it('rejects a subscribeQuery reply that lands on the replaced socket', async () => {
         client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
         const sub = call('perspective.subscribeQuery', { uuid: 'u', query: 'q' })

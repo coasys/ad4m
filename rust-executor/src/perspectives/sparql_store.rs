@@ -662,9 +662,11 @@ fn is_stored_local(tx: &Transaction<'_>, link: &LinkExpression) -> Result<bool, 
 /// Write all quads of `link` with `status` in `tx`: the direct triple, its
 /// reifier, and the reifier's annotations, each replacing what the reifier
 /// held for it. The proof annotations are written as [`proof_write`] allows.
-/// `own`: this executor writes the link itself (the local write path), so its verdict needs
-/// no head the store confirmed within the window ([`crate::identity::check_signed_own`]).
-/// A link from a peer and a stored link judged again are not `own`, whichever key signed them.
+/// `own`: this executor created the link's proof during the call that writes it, so its
+/// verdict needs no head the store confirmed within the window
+/// ([`crate::identity::check_signed_own`]). A link that arrives already signed — a peer's,
+/// one a caller hands in (`perspective.addLinkExpression`, an import), or a stored link
+/// judged again — is not `own`, whichever key signed them.
 fn write_link_quads(
     tx: &mut Transaction<'_>,
     link: &LinkExpression,
@@ -1118,9 +1120,11 @@ impl SparqlStore {
     /// crash before the commit, leaves none of them, and readers never see a
     /// direct triple without its reifier and annotations. Every link the
     /// store holds comes through here, so this is where a link in the store's
-    /// own metadata vocabulary is refused ([`is_link_metadata`]).
-    fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
-        self.write_link(link, false, true).map(|_| ())
+    /// own metadata vocabulary is refused ([`is_link_metadata`]). `own`: as
+    /// [`write_link_quads`] takes it — true only for a proof this executor
+    /// created during the call that writes the link.
+    fn insert_link_triples(&self, link: &LinkExpression, own: bool) -> Result<(), Error> {
+        self.write_link(link, false, own).map(|_| ())
     }
 
     /// [`Self::insert_link_triples`]; with `skip_local`, a link this store
@@ -1162,9 +1166,22 @@ impl SparqlStore {
         Ok(true)
     }
 
-    /// Insert triples for a link into the store.
+    /// Insert triples for a link into the store, as this executor's own write:
+    /// the proof was created during the call that writes it (`addLink`,
+    /// `addLinks`, `linkMutations`, `updateLink`, a `commitBatch` — and every
+    /// path through them), so the link needs no head the store confirmed
+    /// within the window.
     pub fn add_link(&self, link: &LinkExpression) -> Result<(), Error> {
-        self.insert_link_triples(link)
+        self.insert_link_triples(link, true)
+    }
+
+    /// [`Self::add_link`] for a link that arrives already signed
+    /// (`perspective.addLinkExpression`, `import_perspective`, a store rebuild
+    /// or migration): the proof is the caller's, not one this executor created
+    /// now, so the link is judged as a peer's is — no fresh-head exemption,
+    /// whichever key signed it.
+    pub(crate) fn add_link_supplied(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.insert_link_triples(link, false)
     }
 
     /// A link language's addition: insert `link` unless this store holds it
@@ -2306,7 +2323,7 @@ impl SparqlStore {
                 );
                 continue;
             }
-            self.insert_link_triples(link)?;
+            self.insert_link_triples(link, false)?;
         }
         self.flush()?;
         Ok(())
