@@ -796,11 +796,16 @@ pub async fn import_perspective(
         })
         .collect();
 
+    // The proofs arrive with the file: the links are judged as a peer's are,
+    // not as this executor's own write.
     perspective
-        .persist_link_diff(&crate::types::PerspectiveDiff {
-            additions,
-            removals: vec![],
-        })
+        .persist_link_diff(
+            &crate::types::PerspectiveDiff {
+                additions,
+                removals: vec![],
+            },
+            false,
+        )
         .await
         .map_err(|e| format!("Failed to persist link diff to SPARQL store: {}", e))?;
 

@@ -427,14 +427,52 @@ struct Gate {
     succeeded: AtomicU64,
 }
 
+/// A caller's hold on one identity's fetch gate ([`KelCache::fetching`]). Its
+/// drop — the fetch answered, or the caller's future was cancelled — removes
+/// the map's entry, but only while the map still holds this very handle and no
+/// other caller does ([`Arc::strong_count`] `== 2`: the map's and the handle the
+/// drop took out of this guard): a stale generation's drop removes no newer
+/// caller's entry. The drop takes the handle before it counts and lets it go
+/// while the map's mutex is still held, so two guards dropped at once can never
+/// both count their own holds: the second one's check sees the first one's
+/// handle already gone.
+struct FetchGate<'a> {
+    fetching: &'a StdMutex<HashMap<String, Arc<Gate>>>,
+    scid: String,
+    gate: Option<Arc<Gate>>,
+}
+
+impl Drop for FetchGate<'_> {
+    fn drop(&mut self) {
+        let mut fetching = self
+            .fetching
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(gate) = self.gate.take() else {
+            return;
+        };
+        if fetching
+            .get(&self.scid)
+            .is_some_and(|held| Arc::ptr_eq(held, &gate))
+            && Arc::strong_count(&gate) == 2
+        {
+            fetching.remove(&self.scid);
+        }
+    }
+}
+
 /// The verified key logs, by SCID.
 pub struct KelCache {
     store: SqliteChainStore,
     /// `identity_heads`: the last signed head accepted per log.
     meta: StdMutex<Connection>,
     chains: Mutex<HashMap<String, KelChain>>,
-    /// One fetch per identity at a time, so concurrent callers share store round trips.
-    fetching: Mutex<HashMap<String, Arc<Gate>>>,
+    /// One fetch per identity at a time, so concurrent callers share store round
+    /// trips. Each caller holds the gate through a guard ([`FetchGate`]) whose
+    /// drop removes the entry once no other caller holds the handle — a refresh
+    /// cancelled mid-fetch leaves no gate a later refresh would find stale, and
+    /// the map holds exactly the identities with a fetch in flight.
+    fetching: StdMutex<HashMap<String, Arc<Gate>>>,
     /// When each log last refreshed from the configured store (unix seconds), in memory only:
     /// after a restart every log counts as stale ([`KelCache::refreshed_within`]). A failed
     /// refresh notes one too, so a link's read keeps its backoff; a session admission counts
@@ -661,7 +699,7 @@ impl KelCache {
             store,
             meta: StdMutex::new(meta),
             chains: Mutex::new(HashMap::new()),
-            fetching: Mutex::new(HashMap::new()),
+            fetching: StdMutex::new(HashMap::new()),
             refreshed: StdMutex::new(HashMap::new()),
             read_ok: StdMutex::new(HashMap::new()),
             behind: StdMutex::new(HashMap::new()),
@@ -1160,6 +1198,25 @@ impl KelCache {
         Ok(Some(ours))
     }
 
+    /// The gate one caller's [`KelCache::refresh`] runs under: the map's entry
+    /// for `scid` or a new one, handed back in a guard whose drop removes it
+    /// once no other caller holds the handle.
+    fn fetch_gate(&self, scid: &str) -> FetchGate<'_> {
+        let mut fetching = self
+            .fetching
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let gate = fetching
+            .entry(scid.to_string())
+            .or_insert_with(|| Arc::new(Gate::default()))
+            .clone();
+        FetchGate {
+            fetching: &self.fetching,
+            scid: scid.to_string(),
+            gate: Some(gate),
+        }
+    }
+
     /// Refreshes `did`'s log from the agent language: reads the pages from the cached head on
     /// (the head's own event included, so a different event there shows as a fork) and accepts
     /// them with [`KelCache::accept`]. One fetch per identity at a time; a caller that waited
@@ -1173,13 +1230,8 @@ impl KelCache {
         did: &str,
     ) -> Result<KelChain, CacheError> {
         let scid = scid_from(did).to_string();
-        let gate = {
-            let mut fetching = self.fetching.lock().await;
-            fetching
-                .entry(scid.clone())
-                .or_insert_with(|| Arc::new(Gate::default()))
-                .clone()
-        };
+        let one_fetch = self.fetch_gate(&scid);
+        let gate = one_fetch.gate.as_ref().unwrap();
         let asked = gate.begun.load(Ordering::SeqCst);
         let result = {
             let _one_fetch = gate.one_fetch.lock().await;
@@ -1213,11 +1265,8 @@ impl KelCache {
             Err(CacheError::Behind { store, .. }) => self.note_behind(&scid, Some(*store)),
             Err(_) => {}
         }
-        let mut fetching = self.fetching.lock().await;
-        // The map's handle and ours: nobody else waits on this gate.
-        if Arc::strong_count(&gate) <= 2 {
-            fetching.remove(&scid);
-        }
+        // `one_fetch`'s drop removes the map's entry once no other caller waits
+        // on the gate — the same cleanup a cancelled refresh's drop runs.
         result
     }
 
@@ -1535,8 +1584,14 @@ pub(crate) mod tests {
 
     impl TestLog {
         pub fn new(seed: u8) -> Self {
-            let master = SigningKey::from_bytes(&[seed; 32]);
             let device = SigningKey::from_bytes(&[seed.wrapping_add(100); 32]);
+            Self::with_device(seed, device)
+        }
+
+        /// [`TestLog::new`] with `d1`'s key given: a test identity that lists a key the test
+        /// did not mint here (this executor's own device key).
+        pub(crate) fn with_device(seed: u8, device: SigningKey) -> Self {
+            let master = SigningKey::from_bytes(&[seed; 32]);
             let next = ad4m_identity_core::commitment(&master.key(), "salt");
             let enc = ad4m_identity_core::encode_x25519_multikey(&[seed; 32]);
             let mut incept = incept_human(
@@ -2530,7 +2585,7 @@ pub(crate) mod tests {
         while cache
             .fetching
             .lock()
-            .await
+            .unwrap()
             .get(&log.scid())
             .map(Arc::strong_count)
             != Some(21)
@@ -2546,7 +2601,7 @@ pub(crate) mod tests {
         assert_eq!(cache.stored_events(&log.scid(), 0).await.unwrap().len(), 1);
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
         assert!(
-            cache.fetching.lock().await.is_empty(),
+            cache.fetching.lock().unwrap().is_empty(),
             "the last fetch drops the gate"
         );
     }
@@ -2563,7 +2618,46 @@ pub(crate) mod tests {
                 Err(CacheError::NotFound)
             ));
         }
-        assert!(cache.fetching.lock().await.is_empty());
+        assert!(cache.fetching.lock().unwrap().is_empty());
+    }
+
+    /// A refresh dropped mid-fetch — the caller's timeout cancelled it, as a
+    /// renewal's read bound does — leaves no gate behind: the next refresh of the
+    /// same identity reads the store again, not a stale gate, and the map holds
+    /// no entry for it once it is done.
+    #[tokio::test]
+    async fn a_refresh_dropped_mid_fetch_leaves_no_gate() {
+        let log = TestLog::new(1);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let cache = Arc::new(in_memory(vec![store.key.multikey()]));
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let first = tokio::spawn({
+            let (cache, store, did) = (cache.clone(), store.clone(), log.scid());
+            async move { cache.refresh(store.as_ref(), &did).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(60), entered.notified())
+            .await
+            .expect("the read reached the paused store");
+        first.abort();
+        assert!(first.await.is_err(), "the caller went away");
+        release.notify_one();
+        assert!(
+            cache.fetching.lock().unwrap().is_empty(),
+            "a dropped fetch leaves no gate in fetching"
+        );
+        let chain = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            cache.refresh(store.as_ref(), &log.scid()),
+        )
+        .await
+        .expect("a later refresh reads again")
+        .unwrap();
+        assert_eq!(chain.head(), log.chain().head());
+        assert!(
+            cache.fetching.lock().unwrap().is_empty(),
+            "the map holds no entry for it afterwards"
+        );
     }
 
     /// The trusted seq is the accepted, store-signed head's: events from `ingest` (any source)
