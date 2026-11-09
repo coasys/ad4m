@@ -251,6 +251,14 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         settings.store_url.as_deref(),
         settings.allow_private_src,
     );
+    // `check` refused a bad origin at start; past it, none is accepted.
+    let audiences = settings.audiences().unwrap_or_default();
+    if audiences == key_login::Audiences::None {
+        log::warn!(
+            "identity: key login is off: this executor listens on the network and has no \
+             public_origins (--public-origin)"
+        );
+    }
     let service = IdentityService {
         backend,
         cache,
@@ -258,8 +266,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         store_keys_source: settings.store_keys_source,
         resolver: Arc::new(resolver),
         challenges: Default::default(),
-        // `check` refused a bad origin at start; past it, none is accepted.
-        audiences: settings.audiences().unwrap_or_default(),
+        audiences,
     };
     let service = Arc::new(service);
     if SERVICE.set(service.clone()).is_err() {

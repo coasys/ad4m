@@ -530,9 +530,12 @@ impl Connection {
         // `request.cancel`, the racing future fires immediately and we
         // reply with an `AbortError` (code 499). A child of `session_over`: a revocation or
         // expiry cancels the calls in flight too. A call that opens a live query is a child
-        // of `closed`, so the connection closing cancels it as well.
+        // of `closed`, so the connection closing cancels it as well — and so is a key
+        // login: its minted grant needs the connection to reach its answer, so it is
+        // dropped (and the grant ended) with it rather than left live without one.
         let opens_live_query = OPENS_LIVE_QUERY.contains(&msg_type.as_str());
-        let cancel_token = if opens_live_query {
+        let ends_with_connection = opens_live_query || msg_type == "user.loginWithKey";
+        let cancel_token = if ends_with_connection {
             self.closed.child_token()
         } else {
             self.session_over.child_token()
