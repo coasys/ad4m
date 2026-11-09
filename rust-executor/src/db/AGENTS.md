@@ -48,7 +48,9 @@ never `Ad4mDb` directly: `Ad4mDb::with_global_instance` is `#[cfg(test)]`.
 
 ## Do not
 
-- Add a column without an `alter_add_column` migration in `Ad4mDb::new`. Append it last, so
-  `SELECT *` positions match on fresh and migrated tables.
+- Add a column without a migration: an `alter_add_column` in `Ad4mDb::new`, or the
+  table module's own migration that appends the columns last in one transaction (as
+  `add_key_login_columns` in `db/grants.rs` does), so `SELECT *` positions match on
+  fresh and migrated tables.
 - Make a `SharedDb` domain method fail because the Worker does not serve it. A shared-mode
   executor serves it from SQLite.
