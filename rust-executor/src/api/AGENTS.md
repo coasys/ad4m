@@ -123,11 +123,12 @@ capability and the admin credential on a network listener included. An operator 
 login is never on this machine, on a loopback listener too (a forwarded port makes a remote
 device key look local), so every local-only method refuses it. Every method that is not
 local only admits it as the operator, as its guard says. That is the rule for the calls
-that create, import or lock the executor's agent and move its data folder: `agent.generate`,
-`agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` are not local
+that create or lock the executor's agent and move its data folder: `agent.generate`,
+`agent.lock`, `runtime.exportData` and `runtime.importData` are not local
 only, so a remote operator (a key login, or the admin credential on a network listener) may
-move the whole data folder. The guard table marks the local-only methods "local only".
-`runtime.setConfig` is not local only as a whole: it refuses each `machine` key to a caller
+move the whole data folder. `agent.import` is not local only either — but it is not
+implemented: its handler answers "Agent import not yet implemented". The guard table marks
+the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each `machine` key to a caller
 off this machine (`config_rpc`). `identity.custodyStatus`, `identity.takeMaster` (the one
 call whose answer carries a master key) and, with the channel on, `identity.inboxAck` add the
 custody channel's own check (`identity::custody::admit`: the custody credential on a loopback

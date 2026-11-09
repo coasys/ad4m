@@ -112,6 +112,10 @@ interface PendingCall {
     message: string
     /** True once the message went out on a socket. */
     sent: boolean
+    /** True once the message went out at all: unlike `sent`, it stays set while a
+     *  retryable read is armed to go out again, so the retry may go out only
+     *  under the principal the first send ran as (a tokenless one included). */
+    wentOut: boolean
     /** The socket the message went out on — a superseded one keeps answering it. */
     ws?: WebSocket
     /** The token of the socket the message went out on: the principal it executes
@@ -192,6 +196,9 @@ export class ApiClient {
         this.token = token
         if (this._authFailed !== null) {
             this._authFailed = null
+            // The refused token's watch outcome is stale: a rejected `events.watch`
+            // (its 401) must not answer a later `watchApplied()` on the new socket.
+            this._watchSent = Promise.resolve()
             if (this._handlers.size > 0) this._ensureWs()
             return
         }
@@ -204,6 +211,7 @@ export class ApiClient {
         // watch it sent is re-sent on the new socket, so it keeps nothing open.
         this._stopPing()
         this._superseded.add(ws)
+        this._wasSuperseded.add(ws)
         this._ws = null
         this._wsOpen = null
         this._wsToken = undefined
@@ -234,6 +242,10 @@ export class ApiClient {
     private _wsToken?: string
     /** Sockets `setToken` replaced, kept open while calls they carry are in flight. */
     private _superseded = new Set<WebSocket>()
+    /** Sockets `setToken` ever replaced, remembered past their close (`_superseded`
+     *  forgets one then), so `watchApplied()` can tell a replaced socket's
+     *  open-rejection — its own verdict, never the wait's — from a live socket's. */
+    private _wasSuperseded = new WeakSet<WebSocket>()
     /** Settles when `_ws` opens (resolve) or closes first (reject). */
     private _wsOpen: Promise<void> | null = null
     /** `on()` handlers by event type; a type with none has no entry. */
@@ -261,10 +273,18 @@ export class ApiClient {
     private _watching: string | null = '{}'
     private _watchScheduled = false
     private _watchDone: Promise<void> = Promise.resolve()
-    // The last `events.watch` sent, settled once the executor replied.
+    // The last `events.watch` sent, settled once the executor replied — or, while
+    // a failed send waits out its retry delay, once the retried watch's reply is in.
     private _watchSent: Promise<void> = Promise.resolve()
     private _watchRetries = 0
     private _watchRetryTimer: ReturnType<typeof setTimeout> | null = null
+    /** Settles with the watch the pending retry's flush sends (its own retries
+     *  chain off it), or resolves when that flush sends none: a dropped socket's
+     *  watch goes out on the next open instead. A failed `events.watch` waits on
+     *  it so `watchApplied()` answers only an applied watch. */
+    private _watchRetryDone: Promise<void> | null = null
+    /** Resolves `_watchRetryDone` when the retry it waits on is gone (the socket closed). */
+    private _watchRetryResolve: (() => void) | null = null
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -400,7 +420,9 @@ export class ApiClient {
             if (!pending.sent && ++pending.failedConnects < MAX_CONNECT_ATTEMPTS) continue
             if (pending.sent && pending.ws !== ws) continue // a superseded socket's close decides
             pending.ws = undefined
-            if (pending.sent && pending.retry) {
+            // A read gets its one retry only under the principal it went out as:
+            // answered under a different token it would serve the new principal's data.
+            if (pending.sent && pending.retry && pending.token === this.token) {
                 pending.sent = false
                 pending.retry = false
             } else {
@@ -436,27 +458,39 @@ export class ApiClient {
     private _flushCalls(ws: WebSocket): void {
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent) {
-                // A read armed for its retry under another principal does not go out
-                // on this token's session: its answer would be the new principal's.
-                if (pending.token !== undefined && pending.token !== this.token) {
+                // A call that went out once does not go out again under another
+                // principal — a tokenless one included: its answer would be the
+                // new principal's. A call that never went out still may.
+                if (pending.wentOut && pending.token !== this.token) {
                     pending.reject(closedError())
                     continue
                 }
                 this._send(ws, pending.message)
                 pending.sent = true
+                pending.wentOut = true
                 pending.ws = ws
                 pending.token = this._wsToken
             }
         }
     }
 
-    /** The executor refused the token: fail every call with 401, stop
-     *  reconnecting and tell the `onAuthFailed` callbacks, once. */
+    /** The executor refused the token: fail the refused socket's calls and the
+     *  calls that never went out with 401, stop reconnecting and tell the
+     *  `onAuthFailed` callbacks, once. A call in flight on a superseded socket
+     *  keeps its own verdict — it settles there, and that socket closes when
+     *  they drain, as for any other close. */
     private _failAuth(reason: string): void {
         if (this._authFailed !== null) return
         this._authFailed = reason
         const error = new RpcError(401, reason)
-        for (const pending of this._pendingCalls.values()) pending.reject(error)
+        const refused = this._ws
+        for (const pending of this._pendingCalls.values()) {
+            // A call that went out on a socket `setToken` replaced answers on that
+            // socket: the refusal is the verdict of the refused socket's token, not
+            // of the token the call's socket dialed with.
+            if (pending.ws !== undefined && pending.ws !== refused) continue
+            pending.reject(error)
+        }
         this._closeWs()
         for (const cb of [...this._authFailedCallbacks]) callSafely(cb, 'Error in auth-failed callback:', reason)
     }
@@ -630,6 +664,7 @@ export class ApiClient {
             const pending: PendingCall = {
                 message,
                 sent: false,
+                wentOut: false,
                 failedConnects: 0,
                 retry: (READ_METHODS as ReadonlySet<string>).has(type),
                 watch: type === 'events.watch',
@@ -649,6 +684,7 @@ export class ApiClient {
             if (this._ws!.readyState === 1 /* OPEN */) {
                 this._send(this._ws!, message)
                 pending.sent = true
+                pending.wentOut = true
                 pending.ws = this._ws!
                 pending.token = this._wsToken
             }
@@ -700,7 +736,18 @@ export class ApiClient {
             this._ensureWs()
             const ws = this._ws!
             const open = this._wsOpen!
-            if (ws.readyState !== 1 /* OPEN */) await open
+            if (ws.readyState !== 1 /* OPEN */) {
+                try {
+                    await open
+                } catch (e) {
+                    // A rejection of a socket `setToken` replaced before it opened —
+                    // its close's verdict is that replaced socket's, not the wait's:
+                    // loop onto the current socket. Every other rejection propagates,
+                    // a still-current socket's close or a refusal among them.
+                    if (this._wasSuperseded.has(ws)) continue
+                    throw e
+                }
+            }
             await this._watchDone
             await this._watchSent
             // The socket these settled on may not be the current one any more —
@@ -755,16 +802,37 @@ export class ApiClient {
             // A closed socket (503) gets the watch again when the next one opens.
             if (e instanceof RpcError && e.status === 503) return
             console.error('events.watch failed:', e)
-            if (!this._watchRetryTimer && this._watchRetries++ < MAX_WATCH_RETRIES) {
-                this._watchRetryTimer = setTimeout(() => {
-                    this._watchRetryTimer = null
-                    this._scheduleWatch()
-                }, WATCH_RETRY_DELAY_MS)
-            }
+            if (this._watchRetries++ >= MAX_WATCH_RETRIES) throw e
+            return this._retryWatch()
         })
         // Only watchApplied() awaits this; a refused watch is not an unhandled rejection otherwise.
         sent.catch(() => {})
         this._watchSent = sent
+    }
+
+    /** The outcome of the watch a scheduled retry sends, awaited by the failed
+     *  send instead of resolving: a waiter's `_watchSent` stays unsettled across
+     *  the retry delay. Every failure while a retry is pending waits on the same
+     *  one. */
+    private _retryWatch(): Promise<void> {
+        if (this._watchRetryDone) return this._watchRetryDone
+        this._watchRetryDone = new Promise<void>((resolve, reject) => {
+            this._watchRetryResolve = resolve
+            this._watchRetryTimer = setTimeout(() => {
+                this._watchRetryTimer = null
+                this._watchRetryDone = null
+                this._watchRetryResolve = null
+                this._scheduleWatch()
+                this._watchDone.then(() => {
+                    // The flush the timer queued sent a watch: its `_watchSent` is the
+                    // outcome. It sent none when the socket is gone — the next open's
+                    // watch answers instead, which watchApplied() reaches through its loop.
+                    if (this._watching === null) resolve()
+                    else this._watchSent.then(resolve, reject)
+                })
+            }, WATCH_RETRY_DELAY_MS)
+        })
+        return this._watchRetryDone
     }
 
     private _closeWs(): void {
@@ -773,14 +841,23 @@ export class ApiClient {
             clearTimeout(this._watchRetryTimer)
             this._watchRetryTimer = null
         }
+        this._watchRetryResolve?.()
+        this._watchRetryDone = null
+        this._watchRetryResolve = null
         this._cancelReconnect()
         const ws = this._ws
         this._ws = null
         this._wsOpen = null
         this._wsToken = undefined
         ws?.close()
-        for (const old of this._superseded) old.close()
-        this._superseded.clear()
+        // A superseded socket still carrying calls drains as designed; the rest
+        // can go now.
+        for (const old of this._superseded) {
+            if (![...this._pendingCalls.values()].some(p => p.ws === old)) {
+                this._superseded.delete(old)
+                old.close()
+            }
+        }
     }
 
     /** Register a callback that fires after a successful WebSocket reconnect.
