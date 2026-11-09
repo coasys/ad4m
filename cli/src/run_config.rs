@@ -270,6 +270,17 @@ pub struct RunArgs {
     /// run; five runs kept). Default: stdout.
     #[arg(long, env = "AD4M_LOG_DIR", value_parser = non_empty(StringValueParser::new()))]
     pub log_dir: Option<String>,
+    /// Shut down once the process that started the executor is gone, however it ended
+    /// (SIGKILLed, crashed, exited without stopping the executor). For launchers and test
+    /// harnesses. Linux and macOS only; no effect on Windows. Default: false
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        env = "AD4M_EXIT_WITH_PARENT",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub exit_with_parent: Option<bool>,
     /// Local DID for this SFU node in a cascade cluster. Required alongside
     /// --sfu-cascade-listen to enable cascade gossip.
     #[arg(long, env = "AD4M_SFU_LOCAL_DID", value_parser = non_empty(StringValueParser::new()))]
@@ -535,6 +546,7 @@ impl RunArgs {
         config.pid_file = self.pid_file;
         config.watch_stdin = self.watch_stdin;
         config.custody_channel = self.custody_channel;
+        config.exit_with_parent = self.exit_with_parent;
         config.config_file = self.config.clone();
         config.pinned_config_keys = pinned;
         rust_executor::config::refuse_custody_channel_with_multi_user(
@@ -1271,7 +1283,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 45, "every flag of run has a variable");
+        assert_eq!(checked, 46, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
