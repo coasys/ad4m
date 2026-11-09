@@ -294,6 +294,9 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             Err(e) => return Err(e.into()),
         };
         let key_id = self.link_this(&this_device).await?;
+        // The mark the hand-over makes is fenced by the custody epoch the promote or store
+        // just produced.
+        let fence_epoch = self.vault.custody_epoch(&scid)?;
         let signer = master_of(&self.seed, index)?;
         let secret = words::recovery_secret(&self.seed);
         let reader = Reader::Recovery {
@@ -312,6 +315,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
                 entry: Some(this_device),
                 kept: Some(kept),
             }),
+            Some(fence_epoch),
             &recovery_key_of(&self.seed),
             self.clock,
             self.random,

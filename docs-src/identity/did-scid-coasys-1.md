@@ -746,7 +746,13 @@ rotation (its receipt names a seq where the writer was valid), but does not trus
 key. A reader refuses outright a record whose attestation no master of the log signed. So a
 rotation is followed promptly by a master-signed write that attests the recovery key with the
 new master and rewraps the record to the log's readers at the new head; until then the words
-still open the stored record, and a device write waits on the new master's attestation. The record
+still open the stored record, and a device write waits on the new master's attestation. A
+revocation published while the pair is stale stands all the same; only the record rewrite
+after it is refused until the re-attestation. The re-attesting master-signed write carries the
+recovery pair only: it marks no device as holding the master key, since custody is asserted
+only by the operation that keeps the key, never by an earlier unlock — a vault unlock's signer
+outlives the kept slot it was taken from, so a mark written from it could re-advertise a copy
+a removal on the shared vault already took. The record
 key is sealed (above) with `info = "coasys:record" ‖ 0x00 ‖ scid` to the `enc` key of every
 device key valid at the head without the bot mark (`wrapped[keyId]`), and to `recoveryKey` when
 set (`wrapped["recovery"]`). A writer reads the `enc` keys from the log, so a removed or revoked
@@ -842,7 +848,14 @@ current master key:
   app keeps the push on a retry list of its own; it forgets it once the host takes it, or when
   the host refuses it for good, or when the device key has left the log, and retries what is
   left at each start and unlock. The holder marks the device `holdsMaster: "offered"`; the
-  device marks itself `true` with the key's `masterIndex` once its vault keeps the key. An
+  device marks itself `true` with the key's `masterIndex` once its vault keeps the key, and
+  only the operation that keeps it does so, fenced by the vault's custody epoch: the mark
+  names the index the vault keeps, and once it lands the epoch is read again — moved, a
+  removal won and the entry is written to `false` (or to the index the vault keeps then).
+  A take whose mark is refused while the recovery pair waits on the new master is owed the
+  mark still: the key is stored and the message acknowledged either way, and the caller
+  completes it — there is no persistent repair queue, and a later refresh that finds the
+  current key kept repairs nothing on its own. An
   `"offered"` never replaces `true`: the holder writes it only on a version where the device's
   entry is not `true`, and checks again on every newer version it reads after a stale one, so
   a device that took the key before the holder's write landed stays `true`. At a first link

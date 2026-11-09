@@ -12,8 +12,8 @@ use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
 use ad4m_identity_client::flows::create::{resume, CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::{Claimed, LinkFlow};
 use ad4m_identity_client::flows::master::{
-    reattest_recovery, refresh_master, remove_master, retry_pushes, send_master, take_master,
-    Refreshed, Taken,
+    complete_pending_mark, reattest_recovery, refresh_master, remove_master, retry_pushes,
+    send_master, take_master, Refreshed, Taken,
 };
 use ad4m_identity_client::flows::requests::{
     answer, answer_with_words, ask_confirm_revoke, ask_for_master, check_poster, Answered,
@@ -6926,8 +6926,9 @@ async fn a_take_while_the_record_waits_for_reattestation_keeps_the_key() {
         "the message was acked"
     );
 
-    // The desk re-attests with the master it now holds; the record names it holding #1.
-    reattest_recovery(&b, &b_vault, &did, &SystemClock, &OsRandom)
+    // The desk re-attests with the master it now holds and lands the mark; the record
+    // names it holding #1.
+    complete_pending_mark(&b, &b_vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap();
     let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
@@ -7294,5 +7295,271 @@ async fn a_late_holds_never_lowers_a_newer_master_index() {
         (mine.holds_master, mine.master_index),
         (HoldsMaster::Yes, Some(1)),
         "the late take's record write lowered the index"
+    );
+}
+
+/// An executor whose first `identity.record` (the read inside a record write, after the
+/// caller's vault unlock and store) is preceded by another app on the same shared vault
+/// finishing `remove_master` on its own handle: it writes this device `holdsMaster: false`
+/// and deletes the kept key under its unchanged custody epoch — the removal a
+/// re-attestation or a take's holder mark can race (Lal's P2 at 0ca8e4d5f).
+struct RemovalInsideRecordWrite<'a> {
+    inner: &'a TestExecutor,
+    other_vault: SharedVault,
+    did: String,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for RemovalInsideRecordWrite<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.record" && !self.done.replace(true) {
+            remove_master(
+                &ViaExecutor::new(Yielding(self.inner)),
+                &self.other_vault,
+                &self.did,
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Lal's P2 at 0ca8e4d5f. A and B both hold master #0. A begins a re-attestation of the
+/// record's recovery pair and unlocks; another app on A's shared vault removes the master
+/// key between the unlock and the record write — an unlocked signer outlives its kept slot.
+/// The re-attestation must attest the recovery pair only: a `holdsMaster: true` it writes
+/// now advertises a copy that is gone, and B's only-copy check would trust it and delete
+/// the last copy. Afterwards the record still says `false` for A and B's removal is
+/// refused `OnlyCopy`: B keeps the master key.
+#[tokio::test]
+async fn a_reattestation_marks_no_custody_a_removal_took() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &shared, 71).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &b_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+
+    let racing = ViaExecutor::new(RemovalInsideRecordWrite {
+        inner: a.rpc(),
+        other_vault: SharedVault(shared.clone()),
+        did: did.clone(),
+        done: Cell::new(false),
+    });
+    reattest_recovery(
+        &racing,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(
+        racing.rpc().done.get(),
+        "the removal ran inside the re-attestation"
+    );
+    assert_eq!(
+        shared.master_index(&scid).unwrap(),
+        None,
+        "the removal took this computer's copy"
+    );
+
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"].holds_master,
+        HoldsMaster::No,
+        "the re-attestation re-marked a key the removal took"
+    );
+    // B's removal sees no other copy and is refused: B keeps the master key.
+    let refused = remove_master(&b, &b_vault, &did, &OsRandom).await;
+    assert!(
+        matches!(refused, Err(ClientError::OnlyCopy)),
+        "B removed the last copy on a stale mark: {refused:?}"
+    );
+    assert_eq!(
+        b_vault.master_index(&scid).unwrap(),
+        Some(0),
+        "no device holds the master key any more"
+    );
+}
+
+/// A re-attestation attests the recovery pair only: it writes no `holdsMaster` mark, so a
+/// caller's `false` stands — the holder mark comes only from the operation that keeps the
+/// key.
+#[tokio::test]
+async fn a_reattestation_writes_no_holder_mark() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 72).await;
+    holding_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        &b_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+
+    // As a removal's record write leaves it: this device does not hold the master key.
+    record::write(
+        &a,
+        &vault,
+        &did,
+        &[Change::HoldsMaster {
+            key_id: "d1".into(),
+            holds: HoldsMaster::No,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    reattest_recovery(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"].holds_master,
+        HoldsMaster::No,
+        "a bare re-attestation asserted custody"
+    );
+    assert!(opened.recovery.is_some(), "the recovery pair still counts");
+}
+
+/// The same schedule through a take's own mark: a duplicate delivery of master #0 is taken
+/// on this computer, and another app's `remove_master` on the shared vault finishes after
+/// the take's store, before its mark. The mark is fenced by the custody epoch: it lands,
+/// the epoch has moved, and the entry is written back to `false`, so B's removal is
+/// refused and keeps the last copy.
+#[tokio::test]
+async fn a_takes_mark_writes_back_no_when_a_removal_won() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &shared, 73).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &b_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    // A duplicate #0 reaches this device's inbox (delivery is at least once).
+    send_master(&b, &b_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+
+    let racing = ViaExecutor::new(RemovalInsideRecordWrite {
+        inner: a.rpc(),
+        other_vault: SharedVault(shared.clone()),
+        did: did.clone(),
+        done: Cell::new(false),
+    });
+    let taken = take_master(&racing, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("the duplicate waits in the inbox");
+    taken.record.as_ref().unwrap();
+    assert!(
+        racing.rpc().done.get(),
+        "the removal ran between the take's store and its mark"
+    );
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"].holds_master,
+        HoldsMaster::No,
+        "the take's mark stands over a removal that won"
+    );
+    let refused = remove_master(&b, &b_vault, &did, &OsRandom).await;
+    assert!(
+        matches!(refused, Err(ClientError::OnlyCopy)),
+        "B removed the last copy on a stale mark: {refused:?}"
+    );
+    assert_eq!(
+        b_vault.master_index(&scid).unwrap(),
+        Some(0),
+        "no device holds the master key any more"
+    );
+}
+
+/// The same schedule through the repair a pending take owes (`complete_pending_mark`): the
+/// master-signed mark re-attests the pair and mirrors the vault's custody — the removal won
+/// — so this device ends `holdsMaster: false` and B's removal is refused `OnlyCopy`.
+#[tokio::test]
+async fn a_pending_marks_repair_writes_back_no_when_a_removal_won() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &shared, 74).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &b_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+
+    let racing = ViaExecutor::new(RemovalInsideRecordWrite {
+        inner: a.rpc(),
+        other_vault: SharedVault(shared.clone()),
+        did: did.clone(),
+        done: Cell::new(false),
+    });
+    complete_pending_mark(
+        &racing,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(racing.rpc().done.get(), "the removal ran inside the repair");
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"].holds_master,
+        HoldsMaster::No,
+        "the repair's mark stands over a removal that won"
+    );
+    let refused = remove_master(&b, &b_vault, &did, &OsRandom).await;
+    assert!(
+        matches!(refused, Err(ClientError::OnlyCopy)),
+        "B removed the last copy on a stale mark: {refused:?}"
+    );
+    assert_eq!(
+        b_vault.master_index(&scid).unwrap(),
+        Some(0),
+        "no device holds the master key any more"
     );
 }

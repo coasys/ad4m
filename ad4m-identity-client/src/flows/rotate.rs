@@ -318,8 +318,11 @@ pub(crate) struct ThisDevice {
 /// writes the record, attesting the recovery key again and marking `this`, before any key is
 /// pushed: until that write lands the stored pair is stale, and every device write — a take's
 /// among them — is refused [`ClientError::RecoveryNeedsReattest`] rather than seal the record
-/// without it. Then master `signer` (now current) to every kept holder, then the pushes'
-/// marks. Answers the pushes and the last record write.
+/// without it. `fence_epoch` is the custody epoch the caller's store or promote of the key
+/// produced ([`Vault::custody_epoch`], read right after it): when `this` marks the device
+/// holding it and the epoch moved under the write — a removal won — the entry is written to
+/// the vault's custody again ([`master::hold_mark`]). Then master `signer` (now current) to
+/// every kept holder, then the pushes' marks. Answers the pushes and the last record write.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn hand_over<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
@@ -328,6 +331,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     signer: &KeySigner,
     reader: &Reader<'_>,
     this: Option<ThisDevice>,
+    fence_epoch: Option<u64>,
     recovery_key: &Multikey,
     clock: &dyn Clock,
     random: &dyn Random,
@@ -335,6 +339,10 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     Vec<(KeyId, Result<String, ClientError>)>,
     Result<u64, ClientError>,
 ) {
+    let scid = match scid_of(did) {
+        Ok(scid) => scid,
+        Err(e) => return (Vec::new(), Err(e)),
+    };
     // Read after the rotation landed: the keeper check sees the post-rotation log.
     let (events, chain) = match request::log_of(executor, did).await {
         Ok(log) => log,
@@ -352,6 +360,11 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     // The master-signed write comes before the pushes: it re-attests the recovery key with
     // the new master — while the stored pair is stale, a device that took the key could not
     // write the record at all — and it lists `this` device.
+    // `this`'s mark asserts the custody `fence_epoch` produced, when it kept the key.
+    let fence = match (&this, fence_epoch) {
+        (Some(this), Some(epoch)) if this.kept.is_some() => Some((this.key_id.clone(), epoch)),
+        _ => None,
+    };
     let mut changes = Vec::new();
     match this {
         Some(ThisDevice {
@@ -385,7 +398,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         }),
         None => {}
     }
-    let written = record::write_as(
+    let mut written = record::write_as(
         executor,
         vault,
         did,
@@ -395,6 +408,18 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         random,
     )
     .await;
+    // Custody moved under the mark — a removal won — so the entry is set to what the vault
+    // keeps now (`holdsMaster: false` when it keeps none).
+    if let (Ok(_), Some((key_id, epoch))) = (&written, fence) {
+        match vault.custody_epoch(&scid) {
+            Ok(now) if now == epoch => {}
+            Ok(_) => {
+                written =
+                    master::hold_mark(executor, vault, did, &scid, &key_id, reader, random).await;
+            }
+            Err(e) => written = Err(e.into()),
+        }
+    }
     if written.is_err() {
         return (Vec::new(), written);
     }
@@ -500,7 +525,9 @@ pub async fn rotate<R: ExecutorRpc>(
         Err(e) => Err(e.into()),
     };
     // The record's rewrite is the new master's: it re-attests the recovery key, which a
-    // device-signed write cannot install.
+    // device-signed write cannot install. The mark this write makes is fenced by the
+    // custody epoch the promote or store just produced.
+    let fence_epoch = vault.custody_epoch(&scid)?;
     let secret = words::recovery_secret(&seed);
     let reader = Reader::Recovery {
         secret: &secret,
@@ -518,6 +545,7 @@ pub async fn rotate<R: ExecutorRpc>(
             entry: None,
             kept: kept.as_ref().ok().copied(),
         }),
+        Some(fence_epoch),
         &recovery_key_of(&seed),
         clock,
         random,
