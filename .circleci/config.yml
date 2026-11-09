@@ -368,7 +368,9 @@ jobs:
           name: Clean up stale local artifact stashes (older than 12 hours)
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -mmin +720 -exec rm -rf {} + 2>/dev/null || true
+            # deno-snapshot/ prunes its own entries by last use (build-deno-snapshot.sh);
+            # its directory's mtime moves only when an entry is added or removed.
+            find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 ! -name deno-snapshot -mmin +720 -exec rm -rf {} + 2>/dev/null || true
       - run:
           # Local git repo + fake cargo, no network; about a second.
           name: Test install-hc-toolchain.sh

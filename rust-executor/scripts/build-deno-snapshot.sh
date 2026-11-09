@@ -63,17 +63,22 @@ have_outputs() {
 cache=${CI_ARTIFACT_DIR:+$CI_ARTIFACT_DIR/deno-snapshot}
 
 # Puts the outputs in the host-wide cache (CI only) and drops the entries that
-# no build used for a day (about 6 MB each).
+# no build used for a day (about 6 MB each). A cache that cannot be written
+# (disk full) costs the next run a build, never this one: the snapshot is
+# already made.
 store() {
   [[ -n "$cache" ]] || return 0
   if [[ -d "$cache/$hash" ]]; then
-    touch "$cache/$hash"
+    touch "$cache/$hash" || true
   else
     local tmp=$cache/$hash.tmp.$$
-    mkdir -p "$tmp"
-    cp "${outputs[@]}" "$tmp/"
     # Another runner may have stored the same hash first; its copy is as good.
-    mv -T "$tmp" "$cache/$hash" 2>/dev/null || rm -rf "$tmp"
+    # A partial copy is never published: only a complete $tmp is renamed.
+    if mkdir -p "$tmp" && cp "${outputs[@]}" "$tmp/"; then
+      mv -T "$tmp" "$cache/$hash" 2>/dev/null || rm -rf "$tmp"
+    else
+      rm -rf "$tmp"
+    fi
   fi
   find "$cache" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
 }
