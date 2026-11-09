@@ -657,8 +657,10 @@ async fn agent_speaks(service: &IdentityService, grant: &LiveGrant, scid: &str) 
     let Ok(agent_did) = did_for_context(&grant.agent) else {
         return false;
     };
-    // An agent bound to another identity cannot speak for this one. An agent the
-    // table does not bind at all, and a key the cache cannot judge, keep it: a
+    // An agent bound to another identity cannot speak for this one; an agent the
+    // table does not bind at all keeps the grant — the table binds, it does not
+    // revoke. A key the trusted log does not list is a verdict (`NotListed`), as
+    // `role_for` reads it at login; only a cache that cannot read keeps it: a
     // check that cannot read is no revocation, as for the bound key's own outage.
     // `identity_agents` holds the bare SCID; a grant's binding names the identity's DID.
     let bound = db(|db| db.agent_identity(&agent_did)).unwrap_or_default();
@@ -667,8 +669,9 @@ async fn agent_speaks(service: &IdentityService, grant: &LiveGrant, scid: &str) 
     }
     match multikey_of(&agent_did) {
         Some(agent_key) => match service.resolver.cached_session_key(scid, agent_key).await {
-            Err(_) => true,
             Ok(key) => key.admits(),
+            Err(SessionKeyError::NotListed) => false,
+            Err(SessionKeyError::StoreUnavailable) => true,
         },
         None => false,
     }
@@ -3599,6 +3602,7 @@ mod tests {
                             AgentContext::main_agent(),
                             now() + 3600,
                         )
+                        .operator_role()
                         .bound_to(KeyBinding::new(
                             scid.to_string(),
                             format!("z6Mk{scid}"),
@@ -4180,6 +4184,7 @@ mod tests {
         Grants::global()
             .insert(
                 LiveGrant::for_test("stall-grant", AgentContext::main_agent(), now() + 3600)
+                    .operator_role()
                     .bound_to(KeyBinding::new(
                         "0-stall".into(),
                         "z6Mk0-stall".into(),
@@ -4346,6 +4351,128 @@ mod tests {
             session.check(),
             Err(AuthError::Revoked),
             "the grant ends as its agent lost the key"
+        );
+        no_operator();
+    }
+
+    // The trusted log no longer lists the agent's device key at all — a fork
+    // repair moved the cache onto a branch that keeps the phone's add and never
+    // held the agent's: `NotListed` is a verdict, as `role_for` reads it at
+    // login — so a renewal is refused, the start-up pass ends such a grant and
+    // the re-check does too.
+    #[tokio::test]
+    async fn an_agent_dropped_from_the_trusted_log_ends_the_key_bound_grant() {
+        let mut world = world(113).await;
+        no_operator();
+        let main = did_for_context(&AgentContext::main_agent()).unwrap();
+        add_key(
+            &mut world.log,
+            device_multikey(&main).unwrap(),
+            enc_key_of(&device_multikey(&main).unwrap()).unwrap(),
+            KeyLife::Standing,
+        );
+        let mut world = world.with_store();
+        accept_signed(&world.service.cache, &world.log.events).await;
+        let _bound = MainBound::to(&world.log.scid());
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        let binding =
+            || KeyBinding::new(world.did.clone(), world.phone.key(), "d2".into(), 1, now());
+
+        // The repair: the cache and the store now hold the log to the bot's add —
+        // the phone's key stands, the agent's was never added.
+        let repaired = world.log.events[..world.log.events.len() - 1].to_vec();
+        world.service.cache.reset(&world.log.scid()).await.unwrap();
+        accept_signed(&world.service.cache, &repaired).await;
+        *world.store.events.lock().unwrap() = repaired;
+
+        // A renewal reads the store: the phone's key still admits, but the agent
+        // no longer speaks — refused, and the grant ends.
+        let at = now() + 30;
+        let mut statement = world.statement(&world.phone);
+        statement.purpose = KeyPurpose::Renew;
+        statement.grant = Some(result.grant_id.clone());
+        statement.challenge = world
+            .service
+            .challenges
+            .issue(&ChallengeSource::Grant(result.grant_id.clone()), at)
+            .unwrap()
+            .0;
+        statement.issued_at = at;
+        assert_eq!(
+            renew(
+                &world.service,
+                &session,
+                signed(statement, &world.phone),
+                at
+            )
+            .await
+            .unwrap_err(),
+            KeyLoginError::NotKnown,
+            "a NotListed agent does not speak"
+        );
+        assert_eq!(session.check(), Err(AuthError::Revoked));
+
+        // The start-up pass, on the cached verdict alone, ends one the same way.
+        let startup = Grants::global()
+            .insert(
+                LiveGrant::for_test("repaired-startup", AgentContext::main_agent(), now() + 3600)
+                    .bound_to(binding()),
+            )
+            .unwrap();
+        end_key_grants_revoked_in_cache(&world.service, Grants::global()).await;
+        assert!(startup.is_ended());
+
+        // The re-check, reading the store, ends one too.
+        let rechecked = Grants::global()
+            .insert(
+                LiveGrant::for_test("repaired-recheck", AgentContext::main_agent(), now() + 3600)
+                    .bound_to(binding()),
+            )
+            .unwrap();
+        recheck_key_grants(&world.service, now(), &RecheckAttempts::default()).await;
+        assert!(rechecked.is_ended(), "the agent not listed is no speaker");
+        no_operator();
+    }
+
+    // A cache that cannot read its log is an outage, not a verdict: the same
+    // agent the trusted log no longer lists keeps the grant while the read
+    // itself fails.
+    #[tokio::test]
+    async fn an_unreadable_cache_keeps_a_grant_whose_agent_cannot_be_judged() {
+        let mut world = world(123).await;
+        no_operator();
+        let main = did_for_context(&AgentContext::main_agent()).unwrap();
+        add_key(
+            &mut world.log,
+            device_multikey(&main).unwrap(),
+            enc_key_of(&device_multikey(&main).unwrap()).unwrap(),
+            KeyLife::Standing,
+        );
+        let mut world = world.with_store();
+        accept_signed(&world.service.cache, &world.log.events).await;
+        let _bound = MainBound::to(&world.log.scid());
+        let repaired = world.log.events[..world.log.events.len() - 1].to_vec();
+        world.service.cache.reset(&world.log.scid()).await.unwrap();
+        accept_signed(&world.service.cache, &repaired).await;
+
+        let grant =
+            LiveGrant::for_test("unreadable-agent", AgentContext::main_agent(), now() + 3600)
+                .bound_to(KeyBinding::new(
+                    world.did.clone(),
+                    world.phone.key(),
+                    "d2".into(),
+                    1,
+                    now(),
+                ));
+        crate::identity::cache::tests::FAIL_TRUSTED.store(true, Ordering::SeqCst);
+        assert!(
+            agent_speaks(&world.service, &grant, &world.did).await,
+            "an unreadable cache is an outage, not a verdict"
+        );
+        assert!(
+            !agent_speaks(&world.service, &grant, &world.did).await,
+            "the log's silence is a verdict"
         );
         no_operator();
     }
