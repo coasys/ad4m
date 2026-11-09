@@ -68,16 +68,21 @@ cache=${CI_ARTIFACT_DIR:+$CI_ARTIFACT_DIR/deno-snapshot}
 # already made.
 store() {
   [[ -n "$cache" ]] || return 0
-  if [[ -d "$cache/$hash" ]]; then
+  if have_outputs "$cache/$hash"; then
     touch "$cache/$hash" || true
   else
-    local tmp=$cache/$hash.tmp.$$
+    # An entry that lost an output (not one this script published) would
+    # otherwise stay, touched by every build that falls back to building.
+    rm -rf "${cache:?}/$hash" || true
+    local tmp
+    # mktemp: runners in separate containers can share a PID.
     # Another runner may have stored the same hash first; its copy is as good.
     # A partial copy is never published: only a complete $tmp is renamed.
-    if mkdir -p "$tmp" && cp "${outputs[@]}" "$tmp/"; then
+    if mkdir -p "$cache" && tmp=$(mktemp -d "$cache/$hash.tmp.XXXXXX") \
+      && cp "${outputs[@]}" "$tmp/"; then
       mv -T "$tmp" "$cache/$hash" 2>/dev/null || rm -rf "$tmp"
     else
-      rm -rf "$tmp"
+      rm -rf "${tmp:-}"
     fi
   fi
   find "$cache" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
