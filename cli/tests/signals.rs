@@ -1,0 +1,199 @@
+//! An executor whose launcher is gone must still end on a signal.
+//!
+//! When the process that started `ad4m-executor` dies without stopping it (a test runner killed
+//! by CI, a closed terminal, a crashed Electron), the executor's stdout is a pipe nobody reads.
+//! A signal that then reaches it must end it: a handler that prints to stdout first panics on the
+//! broken pipe and leaves an executor that only SIGKILL ends.
+#![cfg(unix)]
+
+use std::io::{BufRead, BufReader};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+const READY: &str = "API server starting on http://127.0.0.1:";
+/// The graceful shutdown's last line: the cleanup ran to its end.
+const SHUT_DOWN: &str = "Graceful shutdown complete, exiting.";
+const STARTUP: Duration = Duration::from_secs(120);
+/// How long the executor may take to end after the signal. Callers escalate to SIGKILL after 5 s
+/// (tests/js SFU harness) or 10 s (tests/js `gracefulShutdown`, WE's `stopProcess`).
+const EXIT_WITHIN: Duration = Duration::from_secs(10);
+
+struct Executor {
+    child: Child,
+    data_path: PathBuf,
+    /// Set once the log shows the graceful shutdown's last line.
+    shut_down: Arc<AtomicBool>,
+    /// Drains stderr; ends at the process's exit, once every line is read.
+    reader: Option<JoinHandle<()>>,
+}
+
+impl Drop for Executor {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.data_path);
+    }
+}
+
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Starts an executor without Holochain, waits until its API listens, then closes the read end of
+/// its stdout, as a launcher that died would have.
+fn start_with_stdout_reader_gone(name: &str) -> Executor {
+    start(name, false)
+}
+
+/// As `start_with_stdout_reader_gone`; with `sighup_ignored` the executor starts with SIGHUP
+/// ignored, as `nohup` starts it (`sh` sets it, `exec` keeps the PID and the disposition).
+fn start(name: &str, sighup_ignored: bool) -> Executor {
+    let data_path =
+        std::env::temp_dir().join(format!("ad4m-signal-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_path);
+    std::fs::create_dir_all(&data_path).unwrap();
+    let mut command = if sighup_ignored {
+        let mut sh = Command::new("sh");
+        sh.args(["-c", r#"trap '' HUP; exec "$@""#, "sh"]);
+        sh.arg(env!("CARGO_BIN_EXE_ad4m-executor"));
+        sh
+    } else {
+        Command::new(env!("CARGO_BIN_EXE_ad4m-executor"))
+    };
+    let mut child = command
+        .args(["run", "--app-data-path"])
+        .arg(&data_path)
+        .args(["--port", &free_port().to_string()])
+        .args(["--run-holochain", "false", "--run-dapp-server", "false"])
+        .args([
+            "--language-language-only",
+            "false",
+            "--insecure-no-admin-credential",
+        ])
+        // Readiness is an info line: an inherited RUST_LOG=warn would hide it.
+        .env("RUST_LOG", "rust_executor=info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ad4m-executor starts");
+
+    // The log goes to stderr: wait for the API line, then keep draining it, noting the shutdown's.
+    let stderr = child.stderr.take().unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let shut_down = Arc::new(AtomicBool::new(false));
+    let seen = shut_down.clone();
+    let reader = std::thread::spawn(move || {
+        let mut ready_tx = Some(ready_tx);
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if line.contains(READY) {
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+            if line.contains(SHUT_DOWN) {
+                seen.store(true, Ordering::SeqCst);
+            }
+        }
+    });
+    // Built before the wait, so a startup that times out still kills the process.
+    let mut executor = Executor {
+        child,
+        data_path,
+        shut_down,
+        reader: Some(reader),
+    };
+    ready_rx
+        .recv_timeout(STARTUP)
+        .expect("the executor's API listens");
+
+    drop(executor.child.stdout.take());
+    executor
+}
+
+fn signal(child: &Child, name: &str) {
+    let status = Command::new("kill")
+        .args([&format!("-{name}"), &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -{name} {}", child.id());
+}
+
+fn exit_within(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+    let started = Instant::now();
+    while started.elapsed() < limit {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+/// Sends the signal and expects the executor to end through its graceful shutdown: its log shows
+/// the shutdown's last line. Neither the deadline that ends a cleanup that hangs, nor the signal's
+/// default action (no handler), writes it. A rare crash inside `exit` after it still passes: the
+/// cleanup had finished.
+fn assert_signal_ends_it_gracefully(name: &str, sig: &str) {
+    let mut executor = start_with_stdout_reader_gone(name);
+    signal(&executor.child, sig);
+    let status = exit_within(&mut executor.child, EXIT_WITHIN);
+    assert!(
+        status.is_some(),
+        "the executor was still running {EXIT_WITHIN:?} after SIG{sig}"
+    );
+    // The reader ends once the exited process's stderr is drained.
+    executor.reader.take().unwrap().join().unwrap();
+    assert!(
+        executor.shut_down.load(Ordering::SeqCst),
+        "SIG{sig} ended the executor ({:?}) without its graceful shutdown",
+        status.unwrap()
+    );
+}
+
+#[test]
+fn sigterm_ends_an_executor_whose_launcher_is_gone() {
+    assert_signal_ends_it_gracefully("term", "TERM");
+}
+
+#[test]
+fn sigint_ends_an_executor_whose_launcher_is_gone() {
+    assert_signal_ends_it_gracefully("int", "INT");
+}
+
+/// A closed terminal sends SIGHUP.
+#[test]
+fn sighup_ends_an_executor_whose_launcher_is_gone() {
+    assert_signal_ends_it_gracefully("hup", "HUP");
+}
+
+/// `nohup ad4m-executor run &` must survive the terminal closing: an executor started with SIGHUP
+/// ignored keeps it ignored, and still shuts down on SIGTERM.
+#[test]
+fn sighup_leaves_an_executor_started_under_nohup_running() {
+    let mut executor = start("nohup", true);
+    signal(&executor.child, "HUP");
+    assert!(
+        exit_within(&mut executor.child, Duration::from_secs(3)).is_none(),
+        "an executor started with SIGHUP ignored ended on SIGHUP"
+    );
+    signal(&executor.child, "TERM");
+    assert!(
+        exit_within(&mut executor.child, EXIT_WITHIN).is_some(),
+        "the executor was still running {EXIT_WITHIN:?} after SIGTERM"
+    );
+    executor.reader.take().unwrap().join().unwrap();
+    assert!(
+        executor.shut_down.load(Ordering::SeqCst),
+        "SIGTERM ended the executor without its graceful shutdown"
+    );
+}
