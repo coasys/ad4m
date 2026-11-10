@@ -174,6 +174,9 @@ test("the local panel offers start, install, or says local AI runs", () => {
     [{ service: "embeddings", modelId: "nomic", model: "m2" }]
   );
   assert.equal(localAction(embeddingsOnly, all, false), "install");
+  // The chat model's runtime runs but its model row is not registered: install repairs it.
+  const unregistered = installed([llamaUp], [{ ...chatModel, model: null }]);
+  assert.equal(localAction(unregistered, all, false), "install");
   // Nothing installed, or files missing: install.
   assert.equal(localAction({ installed: false, runtimes: [], models: [] }, all, false), "install");
   assert.equal(localAction(installed([stopped], [chatModel]), planWith(["llm"], 10), false), "install");

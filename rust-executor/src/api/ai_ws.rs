@@ -405,8 +405,11 @@ async fn remove_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 /// the endpoints leave the message they get: a provider's "could not reach" error names
 /// the URL it called.
 fn upstream_failure(e: &anyhow::Error, ctx: &RequestContext) -> WsRpcError {
-    if e.downcast_ref::<crate::db::InvalidModel>().is_some() {
-        // The task's model is not an LLM: no endpoint was called.
+    if e.downcast_ref::<crate::db::InvalidModel>().is_some()
+        || e.downcast_ref::<local::LocalAiRefused>().is_some()
+    {
+        // The task's model is not an LLM, or first use needs the operator to set up local
+        // AI: no endpoint was called.
         return WsRpcError::bad_request(e.to_string());
     }
     let message = e.to_string();
@@ -498,7 +501,7 @@ async fn open_transcription_stream(
     let stream_id = service
         .open_transcription_stream(body.model_id, &ctx)
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| upstream_failure(&e, &ctx))?;
 
     Ok(Value::String(stream_id))
 }
@@ -1095,6 +1098,28 @@ mod model_view_tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, 400, "{}", err.message);
+    }
+}
+
+#[cfg(test)]
+mod upstream_failure_tests {
+    use super::*;
+
+    // First use on `default` without the operator (`ai.embed`, `ai.transcriptionOpen`): the
+    // caller can fix it, so it is a bad request, not a server fault.
+    #[test]
+    fn a_first_use_refusal_is_a_bad_request() {
+        let refused = anyhow::Error::new(local::LocalAiRefused(
+            "No default Embedding model on this executor: ask the operator to set up local AI"
+                .into(),
+        ));
+        let error = upstream_failure(&refused, &RequestContext::app_for_test(vec![]));
+        assert_eq!(error.code, 400);
+        assert!(
+            error.message.contains("ask the operator"),
+            "{}",
+            error.message
+        );
     }
 }
 

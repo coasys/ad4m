@@ -188,8 +188,9 @@ export function localChatReady(status: Pick<LocalAiStatus, "models" | "runtimes"
 /**
  * What the local AI panel offers: `running` when every runtime of the selection runs, `start`
  * when it is installed with its files in, else `install`. A selection without the chat model
- * the plan has (first-use setup installed only embeddings or transcription) offers the
- * install, also when the chat model's files are downloaded already: a start would not add it.
+ * the plan has (first-use setup installed only embeddings or transcription), or whose chat
+ * model is not registered, offers the install, also when the chat model's files are
+ * downloaded already: a start would not add it.
  */
 export function localAction(
   status: Pick<LocalAiStatus, "installed" | "models" | "runtimes"> | null,
@@ -198,7 +199,8 @@ export function localAction(
 ): "running" | "start" | "install" {
   if (!status?.installed || installing) return "install";
   const lacksChat =
-    plan.models.some((m) => m.service === "llm") && !status.models.some((m) => m.service === "llm");
+    plan.models.some((m) => m.service === "llm") &&
+    !status.models.some((m) => m.service === "llm" && !!m.model);
   if (lacksChat) return "install";
   const running = status.runtimes.filter((r) => r.phase === "running").length;
   if (running > 0 && running === status.runtimes.length) return "running";

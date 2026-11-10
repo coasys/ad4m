@@ -58,9 +58,16 @@ function gb(bytes: number): string {
 function describeDevice(hardware: LocalAiHardware): string {
   const gpu =
     hardware.gpus.find((g) => g.type === "discrete") ?? hardware.gpus[0];
-  const gpuText = gpu
-    ? `${gpu.name}${gpu.type === "discrete" && gpu.vramBytes ? ` (${gb(gpu.vramBytes)})` : gpu.type === "unified" ? " (unified memory)" : " (integrated)"}`
-    : "no GPU";
+  // A discrete GPU whose VRAM is not known gets no suffix.
+  const gpuSuffix =
+    gpu?.type === "discrete"
+      ? gpu.vramBytes
+        ? ` (${gb(gpu.vramBytes)})`
+        : ""
+      : gpu?.type === "unified"
+        ? " (unified memory)"
+        : " (integrated)";
+  const gpuText = gpu ? `${gpu.name}${gpuSuffix}` : "no GPU";
   const backends = hardware.backends.filter((b) => b !== "cpu");
   return `${hardware.cpu.brand || hardware.arch}, ${gb(hardware.ramBytes)} RAM, ${gpuText}${backends.length ? `, ${backends.join(" + ")}` : ""}`;
 }
@@ -166,15 +173,28 @@ export default function AISetup(props: {
   // that stops, or a setup that ends elsewhere, shows here.
   useEffect(() => {
     if (mode !== "Local" || installing) return;
+    // One refresh at a time, and none lands after the effect ends: an older answer must
+    // not overwrite a newer one, or the state an install or a mode change set.
+    let cancelled = false;
+    let inFlight = false;
     const timer = setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
       Promise.all([client.ai.localStatus(), client.ai.localPlan()])
         .then(([s, p]) => {
+          if (cancelled) return;
           setLocalStatus(s);
           setPlan(p);
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false;
+        });
     }, REFRESH_MS);
-    return () => clearInterval(timer);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [mode, installing, client]);
 
   const hasLlm = registered.some((r) => r.startsWith("LLM:"));
