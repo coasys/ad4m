@@ -4,7 +4,8 @@
 //! the link language's view of the remote is wrong (an empty or partial
 //! mirror), and sending would push the room's whole set again.
 
-use super::perspective_instance::PerspectiveInstance;
+use super::perspective_instance::{links_missing_remotely, PerspectiveInstance};
+use crate::types::{LinkExpression, LinkStatus, PerspectiveDiff};
 
 /// Who asks for the shared links the remote lacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,8 +39,72 @@ impl PerspectiveInstance {
 
     /// The creator's first push after publishing a perspective as a
     /// neighbourhood: every shared link the new room lacks, however many.
+    /// When that push fails (the language refuses the commit, or cannot say
+    /// yet what the room holds), the links go to the pending-diffs queue: the
+    /// background fallback refuses a push of the whole set, and the queue
+    /// retries with backoff, across restarts, until the language takes them.
     pub async fn share_links_after_publish(&self) -> bool {
         self.share_links_missing_remotely(ShareScope::Publish).await
+            || self.queue_unsent_shared_links()
+    }
+
+    /// Queues, as one pending diff, every Shared link that no queued or parked
+    /// diff holds. A link the room already has is sent again; the link
+    /// language drops the duplicate. False when the queue could not be written.
+    fn queue_unsent_shared_links(&self) -> bool {
+        let shared: Vec<(LinkExpression, LinkStatus)> = match self.sparql_store.get_all_links() {
+            Ok(links) => links
+                .into_iter()
+                .filter(|l| l.status == Some(LinkStatus::Shared))
+                .map(|l| (LinkExpression::from(l), LinkStatus::Shared))
+                .collect(),
+            Err(e) => {
+                log::error!(
+                    "share_links_after_publish: could not read the links of perspective {}: {}",
+                    self.uuid,
+                    e
+                );
+                return false;
+            }
+        };
+        let db = crate::db_backend::db_backend();
+        let unsent = match db.get_unsent_additions(&self.uuid) {
+            Ok(unsent) => unsent,
+            Err(e) => {
+                log::error!(
+                    "share_links_after_publish: could not read the queued diffs of perspective {}: {}",
+                    self.uuid, e
+                );
+                return false;
+            }
+        };
+        let additions = links_missing_remotely(&shared, &[], &unsent);
+        if additions.is_empty() {
+            return true;
+        }
+        let count = additions.len();
+        match db.add_pending_diff(
+            &self.uuid,
+            &PerspectiveDiff {
+                additions,
+                removals: vec![],
+            },
+        ) {
+            Ok(()) => {
+                log::warn!(
+                    "share_links_after_publish: the push to the new neighbourhood failed; queued {} shared links of perspective {} for the pending-diffs loop",
+                    count, self.uuid
+                );
+                true
+            }
+            Err(e) => {
+                log::error!(
+                    "share_links_after_publish: could not queue {} shared links of perspective {}: {}",
+                    count, self.uuid, e
+                );
+                false
+            }
+        }
     }
 }
 

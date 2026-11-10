@@ -935,3 +935,40 @@ async fn the_push_after_publish_sends_the_whole_shared_set() {
 
     assert_eq!(fake.committed().len(), 100);
 }
+
+/// The push after publish can fail: the language refuses the commit, or does
+/// not know the room yet (`render()` null while its first render is stored).
+/// The background fallback refuses a push of the whole set, so the creator's
+/// links go to the pending-diffs queue, which retries them (across restarts)
+/// until the language takes them.
+#[tokio::test(start_paused = true)]
+async fn a_failed_push_after_publish_leaves_the_shared_set_to_the_queue() {
+    for render_known in [true, false] {
+        let fake = Arc::new(FakeLanguage::default());
+        let perspective = neighbourhood_perspective(&fake).await;
+        store_many_shared(&perspective, "l", 100);
+        let language = if render_known {
+            fake.fail_next.store(1, Ordering::SeqCst);
+            rendering_language(&fake, vec![])
+        } else {
+            let f = fake.clone();
+            Language::with_test_commit(
+                "fake-link-language".to_string(),
+                Arc::new(move |diff| f.commit(diff)),
+            )
+            .with_test_render(Arc::new(|| Ok(None)))
+        };
+        *perspective.link_language.write().await = Some(language);
+
+        perspective.share_links_after_publish().await;
+        assert!(fake.committed().is_empty(), "render known: {render_known}");
+        assert_eq!(pending(&perspective), 1, "render known: {render_known}");
+
+        let task = start_loop(&perspective);
+        run_until(Duration::from_secs(60), || pending(&perspective) == 0)
+            .await
+            .expect("the queue sends the creator's links");
+        task.abort();
+        assert_eq!(fake.committed().len(), 100, "render known: {render_known}");
+    }
+}

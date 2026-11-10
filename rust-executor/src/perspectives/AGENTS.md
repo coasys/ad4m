@@ -66,7 +66,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   know the remote returns null from `render()` (skip). Only the creator's push at publish
   (`share_links_after_publish`: `publish` and `attach_link_language` in
   `NeighbourhoodCreationInitiated`) sends the whole set: the links made before the
-  neighbourhood existed were never sent.
+  neighbourhood existed were never sent. When that push fails (commit error, or `render()`
+  null while the language's first render runs), it queues them as one pending diff, so the
+  queue, not the refusing fallback, delivers them.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.

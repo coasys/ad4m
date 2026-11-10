@@ -723,7 +723,7 @@ pub struct PerspectiveInstance {
 /// queue still holds (queued or parked). Links compare by author, timestamp, source,
 /// predicate (an empty predicate counts as none) and target; one set of those
 /// identities for remote and unsent keeps the pass linear.
-fn links_missing_remotely(
+pub(super) fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
     unsent: &[LinkExpression],
