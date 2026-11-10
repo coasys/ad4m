@@ -88,17 +88,23 @@ pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error
 /// can be classified as. An abstract class names what a record has, not what
 /// it is, so it is never one of a record's classes.
 ///
-/// Every triple joins a counting reifier, inside the `FILTER NOT EXISTS` too
-/// (the abstract index's rule): a marker that does not count makes no class
+/// Every triple joins a counting reifier, inside the `MINUS` too (the
+/// abstract index's rule): a marker that does not count makes no class
 /// abstract, and a shape link that does not count marries the class to no
 /// marked shape — neither one hides it from this list.
+///
+/// `MINUS`, not `FILTER NOT EXISTS`: the two agree here (the group shares
+/// `?targetClass` with the outer pattern), but Oxigraph evaluates a reifier
+/// join inside `NOT EXISTS` per class by scanning every reifier in the store
+/// — a second per call in a perspective of a few thousand links, against
+/// tens of milliseconds for `MINUS`.
 pub fn concrete_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
     let guard = LinkGuard::default();
     let query = format!(
         r#"
         SELECT ?targetClass WHERE {{
             ?targetClass <rdf://type> <ad4m://SubjectClass> .{type_guard}
-            FILTER NOT EXISTS {{
+            MINUS {{
                 ?targetClass <ad4m://shape> ?shape .{shape_guard}
                 ?shape <{ABSTRACT_PREDICATE}> ?marker .{marker_guard}
             }}
