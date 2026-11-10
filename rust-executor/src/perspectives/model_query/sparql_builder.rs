@@ -575,7 +575,7 @@ impl<'a> LinkGuard<'a> {
 }
 
 /// The `?var`s among `subject`, `predicate` and `object`, each once, for the
-/// `SELECT DISTINCT` of a `join_once`/`shown_link_join_once` wrapper.
+/// `SELECT DISTINCT` of a `join_once` wrapper.
 fn distinct_vars(subject: &str, predicate: &str, object: &str) -> String {
     let mut vars = Vec::new();
     for term in [subject, predicate, object] {
@@ -586,7 +586,7 @@ fn distinct_vars(subject: &str, predicate: &str, object: &str) -> String {
     vars.join(" ")
 }
 
-/// The `join_once` shape for the one read that must admit the verdicts a
+/// The [`LinkGuard::join`] for the one read that must admit the verdicts a
 /// *display* read shows rather than the ones that count: `valid`,
 /// `cantCheck`, `flagged` and a link with no verdict annotation at all —
 /// every stored verdict but `invalid:*`, where `proofValid` is not asked.
@@ -596,19 +596,22 @@ fn distinct_vars(subject: &str, predicate: &str, object: &str) -> String {
 /// sent whose judgement is still unresolved declares the property private
 /// just as a verified one does — and an `invalid` `true` stays out, or a
 /// forged declaration could stop the victim's writes being shared.
-pub(crate) fn shown_link_join_once(
+///
+/// A join, so two shown links over one triple yield the solution twice: the
+/// read deduplicates (`SELECT DISTINCT`). Never inside an `OPTIONAL` or a
+/// `FILTER NOT EXISTS`, where Oxigraph evaluates it per left row by scanning
+/// every reifier in the store.
+pub(crate) fn shown_link_join(
     reifier: &str,
     subject: &str,
     predicate: &str,
     object: &str,
 ) -> String {
     format!(
-        "{{ SELECT DISTINCT {} WHERE {{ {subject} {predicate} {object} . \
-         {reifier} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+        " {reifier} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
          <<( {subject} {predicate} {object} )>> . \
          OPTIONAL {{ {reifier} <ad4m://ontology/linkVerdict> {reifier}_lv . }} \
-         FILTER(!BOUND({reifier}_lv) || !STRSTARTS(STR({reifier}_lv), \"invalid:\")) }} }}",
-        distinct_vars(subject, predicate, object)
+         FILTER(!BOUND({reifier}_lv) || !STRSTARTS(STR({reifier}_lv), \"invalid:\"))"
     )
 }
 
