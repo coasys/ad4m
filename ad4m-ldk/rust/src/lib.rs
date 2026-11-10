@@ -45,7 +45,9 @@ pub mod __serde {
     use serde::Serialize;
     use wasm_bindgen::JsValue;
 
-    pub fn to_js<T: ?Sized + Serialize>(value: &T) -> Result<JsValue, serde_wasm_bindgen::Error> {
+    pub fn to_js<T: ?Sized + Serialize>(
+        value: &T,
+    ) -> Result<JsValue, serde_wasm_bindgen::Error> {
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         value.serialize(&serializer)
     }

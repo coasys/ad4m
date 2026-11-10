@@ -1974,8 +1974,16 @@ mod tests {
         let url = "neighbourhood://restart-ice";
         let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
         let laptop = join(&svc, url, "did:a", "laptop").await;
+        let replaced = join(&svc, url, "did:a", "phone").await;
         let phone = join(&svc, url, "did:a", "phone").await;
         let bobs = join(&svc, url, "did:b", "laptop").await;
+
+        // The phone's replaced session is gone: its id restarts nothing.
+        let refused = svc
+            .call_restart_ice(url, "r", "did:a", &replaced)
+            .await
+            .unwrap_err();
+        assert!(refused.contains("not in this call"), "{refused}");
 
         // Bob cannot restart Alice's laptop, nor Alice Bob's session.
         let refused = svc
