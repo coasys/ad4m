@@ -361,3 +361,100 @@ async fn the_watch_loop_sleeps_until_a_link_changes() {
         .expect("teardown ends the loop promptly")
         .expect("loop task");
 }
+
+/// Writes that add no turn (reactions, other agents' outputs, claims, a peer
+/// syncing) wake an idle loop, but they must not make it read more often than
+/// the idle back-off it replaced: a write-woken tick waits out the back-off
+/// (doubling from the base tick up to 4 s) since the last read that found the
+/// store changed. Here an unrelated link lands every 100 ms for 3 s; the
+/// reads must be at least the first back-off step (1 s) apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back_off() {
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("busy", 50, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let first = turn_ids(&p).await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    mint_run(
+        &mut p,
+        &ctx,
+        "run-1",
+        "busy",
+        vec![first[0].id.clone()],
+        now_ms,
+    )
+    .await;
+    let before = transcript_queries(&p);
+
+    let looping = p.clone();
+    let loop_ctx = ctx.clone();
+    let handle = tokio::spawn(async move { looping.auto_processor_watch_loop(loop_ctx).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while transcript_queries(&p) == before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the loop's first pass never read the transcript"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut reads = vec![tokio::time::Instant::now()];
+    let mut seen = transcript_queries(&p);
+
+    let start = tokio::time::Instant::now();
+    let mut i = 0;
+    while start.elapsed() < Duration::from_secs(3) {
+        p.add_link(
+            Link {
+                source: "note://reactions".into(),
+                predicate: Some("ns://reaction".into()),
+                target: format!("literal:string:r{i}"),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("unrelated link");
+        i += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let now = transcript_queries(&p);
+        if now > seen {
+            reads.extend(std::iter::repeat_n(tokio::time::Instant::now(), now - seen));
+            seen = now;
+        }
+    }
+
+    let gaps: Vec<u128> = reads
+        .windows(2)
+        .map(|w| (w[1] - w[0]).as_millis())
+        .collect();
+    assert!(
+        reads.len() <= 3,
+        "{} transcript reads in ~3 s of unrelated writes (gaps {gaps:?} ms); \
+         the back-off allows at most 3",
+        reads.len()
+    );
+    assert!(
+        gaps.iter().all(|g| *g >= 800),
+        "reads closer than the first back-off step: gaps {gaps:?} ms"
+    );
+
+    p.teardown_background_tasks().await;
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("teardown ends the loop promptly")
+        .expect("loop task");
+}
