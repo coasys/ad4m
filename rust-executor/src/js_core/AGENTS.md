@@ -13,13 +13,20 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
 | `host.js` | `ad4m:host` shim: ~28 functions (agent, holochain, http, hashing, language ctx, emit, storage) backed by ops. `httpFetch`: 10 s for headers and body; the body is read as a stream and refused (`code` `"too-large"`) past `HTTP_FETCH_MAX_BYTES` (32 MiB) or the call's lower `maxBytes` (5th argument). The limit counts decompressed bytes: Deno's fetch decompresses a `Content-Encoding: gzip` reply and the stream yields only those (`host_http_fetch_tests.rs`) |
 | `*_extension.rs` + `.js` | `#[op2]` ops per area: agent (16), languages (8), utils (5), signature (2), pubsub (1). Holochain (15), runtime (3), entanglement (5) ops live in their service dirs |
 | `string_module_loader.rs`, `options.rs`, `futures.rs`, `error.rs` | module loading from strings, worker options, future bridging |
-| `residual_lazy.rs`, `../../CUSTOM_DENO_SNAPSHOT.bin` | snapshot artifacts; rebuild with `pnpm build` after any `.js` change |
+| `residual_lazy.rs`, `../../CUSTOM_DENO_SNAPSHOT.bin` | snapshot artifacts; `pnpm build` in `rust-executor/` rebuilds them when an input changed |
 
 ## Rules
 
 - JS files here must be pure ASCII (`ascii_str_include!`). Non-ASCII fails const-eval.
 - Changing any op or `.js` requires `pnpm build` in `rust-executor/` (snapshot),
-  not just `cargo build`.
+  not just `cargo build`. `scripts/build-deno-snapshot.sh` hashes this directory's
+  `.rs` and `.js` files, the holochain and runtime service extensions,
+  `bin/generate_snapshot.rs`, `Cargo.lock` and the two `Cargo.toml`; when the hash
+  matches the stamp (`CUSTOM_DENO_SNAPSHOT.inputs`) it skips the build.
+  `FORCE_DENO_SNAPSHOT=1` builds anyway.
+- A new extension in `ad4m_language_extensions()`, or a file one of them reads
+  (`esm`, ops), outside this directory goes into that script's `inputs` list.
+  Otherwise a change to it keeps the old snapshot.
 - `main.js` is unreferenced (deleted in spec item 1). Do not add to it.
 - There is no `core.languageController` any more; Rust owns the controller, JS
   only runs bundles.

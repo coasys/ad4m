@@ -49,6 +49,12 @@ impl WsRpcError {
             message: msg.into(),
         }
     }
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            code: 409,
+            message: msg.into(),
+        }
+    }
     pub fn too_many_requests(msg: impl Into<String>) -> Self {
         Self {
             code: 429,

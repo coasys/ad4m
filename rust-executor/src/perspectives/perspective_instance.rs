@@ -4,7 +4,7 @@ use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
+use super::shacl_parser::{check_consensus_rule_links, parse_flow_to_links, parse_shacl_to_links};
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
@@ -367,6 +367,26 @@ impl SdnaType {
     }
 }
 
+/// Parse the `shacl_json` handed to `add_sdna` / `add_sdna_batch` into links.
+/// A flow definition (`SHACLFlow`: states, transitions, no `target_class`)
+/// goes through the flow parser; everything else is a class shape (#1650).
+/// A flow whose `consensusRule` could not be read back is refused here, before
+/// `add_sdna` / `add_sdna_batch` write anything (#1144).
+fn parse_sdna_json_to_links(
+    sdna_type: &SdnaType,
+    json: &str,
+    name: &str,
+) -> Result<Vec<Link>, AnyError> {
+    match sdna_type {
+        SdnaType::Flow => {
+            let links = parse_flow_to_links(json, name)?;
+            check_consensus_rule_links(&links)?;
+            Ok(links)
+        }
+        SdnaType::SubjectClass | SdnaType::Custom => parse_shacl_to_links(json, name),
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum Action {
     #[serde(rename = "addLink")]
@@ -700,8 +720,8 @@ pub struct PerspectiveInstance {
 
 /// The local Shared links the remote render lacks, without the links of the diffs the
 /// queue still holds (queued or parked). Links compare by author, timestamp, source,
-/// predicate and target; one set of those identities for remote and unsent keeps the
-/// pass linear.
+/// predicate (an empty predicate counts as none) and target; one set of those
+/// identities for remote and unsent keeps the pass linear.
 fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
@@ -712,7 +732,7 @@ fn links_missing_remotely(
             &l.author,
             &l.timestamp,
             &l.data.source,
-            l.data.predicate.as_deref(),
+            l.data.predicate.as_deref().filter(|p| !p.is_empty()),
             &l.data.target,
         )
     }
@@ -949,8 +969,9 @@ impl PerspectiveInstance {
 
     /// Multi-user auto-processor spawn loop. Every supervisor tick it
     /// re-computes the set of managed users whose `last_seen` falls inside
-    /// `MANAGED_USER_ONLINE_WINDOW_S` (twice the `last_seen` write-throttle,
-    /// so active users do not flap — #1070), spawns a per-user
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (see [`crate::presence`]: three times the
+    /// `last_seen` write-throttle, so active users do not flap — #1070), and
+    /// the same window `online_agents` elects authors with, spawns a per-user
     /// `auto_processor_watch_loop` for any newly-online user, and aborts the
     /// loop of any user who has aged out. Users that go offline are cheap to
     /// re-spawn on next activity, so the transient churn is bounded.
@@ -962,9 +983,7 @@ impl PerspectiveInstance {
     ///   forever and no pass ever runs — the exact symptom we hit on Marvin
     ///   with James in a live call.
     async fn managed_user_auto_processor_supervisor(&self) {
-        use crate::perspectives::auto_processor::watcher::{
-            select_online_managed_users, MANAGED_USER_ONLINE_WINDOW_S,
-        };
+        use crate::perspectives::auto_processor::watcher::select_online_managed_users;
         use std::collections::HashMap;
         use std::time::{SystemTime, UNIX_EPOCH};
         use tokio::task::JoinHandle;
@@ -1006,8 +1025,7 @@ impl PerspectiveInstance {
                 }
             };
 
-            let online =
-                select_online_managed_users(user_tuples, now_s, MANAGED_USER_ONLINE_WINDOW_S);
+            let online = select_online_managed_users(user_tuples, now_s);
             let online_set: std::collections::HashSet<&String> = online.iter().collect();
 
             // Reap: drop entries for users who finished, aged out, or are no
@@ -2851,7 +2869,7 @@ impl PerspectiveInstance {
         // Validate before touching the store: see `add_sdna_inner`.
         let shacl_links = shacl_json
             .as_deref()
-            .map(|shacl| parse_shacl_to_links(shacl, &name))
+            .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
             .transpose()?;
         let result = {
             let mutex = self.sdna_change_mutex.clone();
@@ -2981,7 +2999,7 @@ impl PerspectiveInstance {
             .map(|(name, sdna_code, sdna_type, shacl_json)| {
                 let shacl_links = shacl_json
                     .as_deref()
-                    .map(|shacl| parse_shacl_to_links(shacl, &name))
+                    .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
                     .transpose()?;
                 Ok((name, sdna_code, sdna_type, shacl_links))
             })
@@ -4339,16 +4357,39 @@ impl PerspectiveInstance {
         // pubsub/prolog, rather than decorating and converting back here.
 
         let effects = self.retraction_effects(&diff.additions)?;
-        let retracted = effects.retracted.iter().cloned().map(LinkExpression::from);
+        let removals: Vec<LinkExpression> = diff
+            .removals
+            .iter()
+            .cloned()
+            .chain(effects.retracted.iter().cloned().map(LinkExpression::from))
+            .collect();
+        let additions: Vec<LinkExpression> = diff
+            .additions
+            .iter()
+            .filter(|a| !effects.covers(a))
+            .cloned()
+            .collect();
+
+        // One store transaction for the whole diff, so a batch lands as one
+        // write. On failure nothing was written; fall back to one link at a
+        // time.
+        match self.sparql_store.apply_diff(&removals, &additions) {
+            Ok(()) => return Ok(effects),
+            Err(e) => log::warn!(
+                "Failed to apply link diff to SPARQL store in one transaction, \
+                 writing links one by one: {:?}",
+                e
+            ),
+        }
 
         // Removals first
-        for removal in diff.removals.iter().cloned().chain(retracted) {
-            if let Err(e) = self.sparql_store.remove_link(&removal) {
+        for removal in &removals {
+            if let Err(e) = self.sparql_store.remove_link(removal) {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
-        for addition in diff.additions.iter().filter(|a| !effects.covers(a)) {
+        for addition in &additions {
             if let Err(e) = self.sparql_store.add_link(addition) {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
@@ -4823,11 +4864,6 @@ impl PerspectiveInstance {
         }
     }
 
-    /// Seconds a locally-managed multi-tenancy user's `last_seen` may lag before
-    /// we treat them as offline for telepresence. Mirrors the 5-minute window
-    /// `agent::capabilities` already uses to throttle last-seen updates.
-    const LOCAL_ONLINE_THRESHOLD_SECS: i64 = 300;
-
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
         // Remote peers via the link language's telepresence adapter (when one is
         // present — i.e. a real multi-executor neighbourhood).
@@ -4878,18 +4914,16 @@ impl PerspectiveInstance {
         Ok(agents)
     }
 
-    /// DIDs of managed users who used any authed API within
-    /// [`Self::LOCAL_ONLINE_THRESHOLD_SECS`].
+    /// DIDs of managed users who are online by [`crate::presence::is_online`]:
+    /// the same predicate and window as the supervisor that runs their loops,
+    /// so a user is never "running" there yet absent from election here (#1070).
     fn recently_active_users() -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
         crate::db_backend::db_backend()
             .list_users()
             .unwrap_or_default()
             .into_iter()
-            .filter(|user| {
-                user.last_seen
-                    .map_or(false, |ls| now - ls < Self::LOCAL_ONLINE_THRESHOLD_SECS)
-            })
+            .filter(|user| crate::presence::is_online(user.last_seen, now))
             .map(|user| user.did)
             .collect()
     }
@@ -6705,6 +6739,7 @@ impl PerspectiveInstance {
             // to the claim (the min-DID claim still prevents doubles among peers
             // that escalate together).
             let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            let settle_ms = crate::perspectives::auto_processor::claim::claim_settle_ms(self).await;
             let outcome = match run_one_pass(
                 &mut perspective_clone,
                 cfg,
@@ -6712,7 +6747,7 @@ impl PerspectiveInstance {
                 now_ms,
                 context,
                 escalate,
-                crate::perspectives::auto_processor::claim::CLAIM_SETTLE_MS,
+                settle_ms,
             )
             .await
             {
@@ -6853,6 +6888,68 @@ mod tests {
     use crate::types::PerspectiveState;
     use fake::{Fake, Faker};
     use uuid::Uuid;
+
+    /// `online_agents` reports co-located managed users with the same
+    /// predicate and window as the auto-processor supervisor (#1070): a user
+    /// whose `last_seen` is inside `MANAGED_USER_ONLINE_WINDOW_S` is present for
+    /// author election, one just outside it is not. Before #1070 this reader
+    /// kept its own 300 s window, so a user whose loop the supervisor was
+    /// still running could be missing from election.
+    #[tokio::test]
+    async fn online_agents_uses_the_managed_user_online_window() {
+        use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+        use crate::presence::MANAGED_USER_ONLINE_WINDOW_S;
+
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+        let now = chrono::Utc::now().timestamp();
+        // 5 s either side of the boundary absorbs the clock read inside
+        // `online_agents`.
+        let users = [
+            ("presence-fresh@test", "did:key:presence-fresh", now),
+            (
+                "presence-inside@test",
+                "did:key:presence-inside",
+                now - MANAGED_USER_ONLINE_WINDOW_S + 5,
+            ),
+            (
+                "presence-outside@test",
+                "did:key:presence-outside",
+                now - MANAGED_USER_ONLINE_WINDOW_S - 5,
+            ),
+        ];
+        let rows: Vec<serde_json::Value> = users
+            .iter()
+            .map(|(email, did, last_seen)| {
+                serde_json::json!({
+                    "username": email, "did": did, "password_hash": "x", "last_seen": last_seen,
+                })
+            })
+            .collect();
+        Ad4mDb::with_global_instance(|db| {
+            db.import_from_json(serde_json::json!({ "users": rows }), None)
+        })
+        .expect("seed users");
+        {
+            let mut h = perspective.persisted.lock().await;
+            h.shared_url = Some("test://neighbourhood".into());
+            h.owners = Some(users.iter().map(|(_, did, _)| did.to_string()).collect());
+        }
+
+        let mut online: Vec<String> = perspective
+            .online_agents()
+            .await
+            .map(|agents| agents.into_iter().map(|a| a.did).collect())
+            .unwrap_or_default();
+        online.sort();
+        assert_eq!(
+            online,
+            vec![
+                "did:key:presence-fresh".to_string(),
+                "did:key:presence-inside".to_string()
+            ],
+            "online_agents must use the supervisor's {MANAGED_USER_ONLINE_WINDOW_S}s window"
+        );
+    }
 
     async fn setup() -> PerspectiveInstance {
         setup_wallet();
