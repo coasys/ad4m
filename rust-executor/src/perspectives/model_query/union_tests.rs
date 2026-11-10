@@ -281,6 +281,8 @@ async fn union_refuses_per_anchor_slicing_and_relation_order_keys() {
     for q in [
         serde_json::json!({"parent": {"ids": ["app://p"], "predicate": "app://has", "limitPerAnchor": 2}}),
         serde_json::json!({"order": {"owner.name": "ASC"}}),
+        // The keyset is one class's order in the store (P8).
+        serde_json::json!({"after": "", "limit": 2}),
     ] {
         let err = execute_union_query(&store, &classes(&["Task", "Note"]), &query(q), &resolver)
             .await
