@@ -36,6 +36,7 @@ pub mod secret;
 pub mod store;
 pub mod vault;
 
+pub use ad4m_identity_core::record::VaultId;
 pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
 #[cfg(feature = "store")]

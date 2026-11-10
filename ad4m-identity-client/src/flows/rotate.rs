@@ -413,6 +413,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
                 entry: DeviceEntry {
                     holds_master: HoldsMaster::No,
                     master_index: None,
+                    vault: None,
                     ..entry
                 },
             };

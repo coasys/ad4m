@@ -908,6 +908,50 @@ fn a_device_entry_names_the_master_index_it_holds() {
     assert_eq!(read.devices["d1"].holds_master, HoldsMaster::Yes);
 }
 
+/// A holder's entry names the physical vault that keeps its copy (`vault`, base58btc of 16
+/// bytes); an entry without one reads as `None` and is written back without the field.
+#[test]
+fn a_device_entry_names_the_vault_that_keeps_its_copy() {
+    let mut record = record_fixture();
+    let entry = record.devices.get_mut("d1").unwrap();
+    assert_eq!(entry.vault, None);
+    let value = serde_json::to_value(&*entry).unwrap();
+    assert!(value.get("vault").is_none(), "{value}");
+    let id = VaultId([7; 16]);
+    entry.master_index = Some(2);
+    entry.vault = Some(id);
+    let value = serde_json::to_value(&record).unwrap();
+    assert_eq!(
+        value["devices"]["d1"]["vault"],
+        json!(bs58::encode([7u8; 16]).into_string())
+    );
+    assert_eq!(
+        serde_json::from_value::<PrivateRecord>(value.clone()).unwrap(),
+        record
+    );
+    let mut without = value.clone();
+    without["devices"]["d1"]
+        .as_object_mut()
+        .unwrap()
+        .remove("vault");
+    let read: PrivateRecord = serde_json::from_value(without).unwrap();
+    assert_eq!(read.devices["d1"].vault, None);
+    assert_eq!(read.devices["d1"].master_index, Some(2));
+    // Only 16 bytes of base58btc are a vault id.
+    for bad in [
+        json!(bs58::encode([7u8; 15]).into_string()),
+        json!("0OIl"),
+        json!(7),
+    ] {
+        let mut wrong = value.clone();
+        wrong["devices"]["d1"]["vault"] = bad.clone();
+        assert!(
+            serde_json::from_value::<PrivateRecord>(wrong).is_err(),
+            "{bad} read as a vault id"
+        );
+    }
+}
+
 #[test]
 fn device_kinds_and_places_use_kebab_case() {
     assert_eq!(

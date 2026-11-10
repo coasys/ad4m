@@ -233,6 +233,7 @@ fn entry(name: &str, kind: DeviceKind) -> DeviceEntry {
         runs_executor: false,
         holds_master: HoldsMaster::No,
         master_index: None,
+        vault: None,
         operator: None,
     }
 }

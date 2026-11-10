@@ -1141,6 +1141,12 @@ impl Vault for RefusingVault {
     ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
         self.0.custody_note(scid, key_id)
     }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.0.vault_id(scid)
+    }
     fn swap_custody_note(
         &self,
         scid: &str,
@@ -2045,6 +2051,7 @@ fn entry(name: &str, kind: DeviceKind) -> DeviceEntry {
         runs_executor: true,
         holds_master: HoldsMaster::No,
         master_index: None,
+        vault: None,
         operator: None,
     }
 }
@@ -3637,6 +3644,7 @@ async fn a_holder_of_a_replaced_master_is_not_another_copy() {
         &[Change::Holds {
             key_id: d2.clone(),
             index: 0,
+            vault: vault_of(&desk_vault, &did),
         }],
         &OsRandom,
     )
@@ -4765,6 +4773,12 @@ impl Vault for PromotedFirst {
     ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
         self.0.custody_note(scid, key_id)
     }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.0.vault_id(scid)
+    }
     fn swap_custody_note(
         &self,
         scid: &str,
@@ -5089,6 +5103,12 @@ impl Vault for LaggingIndex {
     ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
         self.inner.custody_note(scid, key_id)
     }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.inner.vault_id(scid)
+    }
     fn swap_custody_note(
         &self,
         scid: &str,
@@ -5333,6 +5353,12 @@ impl Vault for SharedVault {
         key_id: &str,
     ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
         self.0.custody_note(scid, key_id)
+    }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.0.vault_id(scid)
     }
     fn swap_custody_note(
         &self,
@@ -6311,6 +6337,12 @@ impl Vault for InstallBeforeForget {
         key_id: &str,
     ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
         self.inner.custody_note(scid, key_id)
+    }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.inner.vault_id(scid)
     }
     fn swap_custody_note(
         &self,
@@ -7303,6 +7335,12 @@ impl Vault for CancelRecordUnlock<'_> {
     ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
         self.inner.custody_note(scid, key_id)
     }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.inner.vault_id(scid)
+    }
     fn swap_custody_note(
         &self,
         scid: &str,
@@ -7625,7 +7663,8 @@ async fn a_failed_take_is_enrolled_by_its_refresh_after_another_device_reatteste
 }
 
 /// Lal's finding (2) at 08973ff97. Two apps share one vault on a computer: A (`d1`, the
-/// creator) and B (`d2`). B took #0 and then removed it (its note says released; the shared
+/// creator) and B (`d2`); a third app keeps #0 on a vault of its own. B took #0 and then
+/// removed it (its note says released; the shared
 /// vault forgot the key). A rotates to #1 with the words; its hand-over write fails, so the
 /// record's recovery pair is stale and the shared vault keeps #1. B's refresh finds the vault
 /// keeping the current master and the pair stale: it must not re-mark B (nor prompt). A's own
@@ -7655,6 +7694,18 @@ async fn a_released_app_on_a_shared_vault_is_not_marked_by_the_stale_pair() {
         .unwrap()
         .expect("#0 waits in B's inbox");
     taken.record.as_ref().unwrap();
+    // A copy on a vault of its own: the shared vault is not the only copy, so B may remove it.
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let c_vault = MemoryVault::new();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
     remove_master(&b, &SharedVault(shared.clone()), &did, &OsRandom)
         .await
         .unwrap();
@@ -8355,6 +8406,7 @@ impl ExecutorRpc for NewerGenerationBeforeAck<'_> {
                 &[Change::Holds {
                     key_id: self.own.clone(),
                     index: 1,
+                    vault: vault_of(&self.vault, &self.did),
                 }],
                 &OsRandom,
             )
@@ -8938,6 +8990,12 @@ impl Vault for FaultVault {
     ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
         self.inner.custody_note(scid, key_id)
     }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.inner.vault_id(scid)
+    }
     fn swap_custody_note(
         &self,
         scid: &str,
@@ -9003,6 +9061,7 @@ impl ExecutorRpc for RemovalBeforeHandOver<'_> {
                 &[Change::Holds {
                     key_id: self.c_id.clone(),
                     index: 1,
+                    vault: vault_of(self.c_vault, &self.did),
                 }],
                 &OsRandom,
             )
@@ -9760,6 +9819,7 @@ impl ExecutorRpc for RemovalAfterPublish<'_> {
                 &[Change::Holds {
                     key_id: self.c_id.clone(),
                     index: 1,
+                    vault: vault_of(self.c_vault, &self.did),
                 }],
                 &OsRandom,
             )
@@ -10144,4 +10204,291 @@ async fn repeat_removals_keep_open_intents_and_retire_older_releases() {
         );
         assert_round_trips(&note);
     }
+}
+
+/// The vault id that `vault` gives the identity `did`.
+fn vault_of(vault: &dyn Vault, did: &str) -> ad4m_identity_client::VaultId {
+    vault
+        .vault_id(ad4m_identity_core::scid_of(did).unwrap())
+        .unwrap()
+}
+
+/// A device's whole entry in the record: its holding, its master index and its vault id.
+async fn holding_of(
+    executor: &ViaExecutor<TestExecutor>,
+    vault: &dyn Vault,
+    did: &str,
+    key_id: &str,
+) -> (
+    HoldsMaster,
+    Option<u32>,
+    Option<ad4m_identity_client::VaultId>,
+) {
+    let opened = record::read(executor, vault, did).await.unwrap().unwrap();
+    let entry = &opened.record.devices[key_id];
+    (entry.holds_master, entry.master_index, entry.vault)
+}
+
+/// Lal's root cause 1 (one deletable copy counted twice). Two apps on one computer speak
+/// through two executors (two device keys) and share one vault. Both take the master key and
+/// both are marked `holdsMaster: true`, each with the vault's id. They are one physical copy:
+/// a removal through either app is refused as the only copy, and the vault keeps the key.
+#[tokio::test]
+async fn two_apps_on_one_vault_are_one_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &shared, 141).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    let through_a = remove_master(&a, &*shared, &did, &OsRandom).await;
+    assert!(
+        matches!(through_a, Err(ClientError::OnlyCopy)),
+        "{through_a:?}"
+    );
+    let through_b = remove_master(&b, &theirs_again(&shared), &did, &OsRandom).await;
+    assert!(
+        matches!(through_b, Err(ClientError::OnlyCopy)),
+        "{through_b:?}"
+    );
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(0));
+    let id = Some(vault_of(&*shared, &did));
+    assert_eq!(
+        holding_of(&a, &*shared, &did, "d1").await,
+        (HoldsMaster::Yes, Some(0), id)
+    );
+    assert_eq!(
+        holding_of(&a, &*shared, &did, &d2).await,
+        (HoldsMaster::Yes, Some(0), id)
+    );
+}
+
+/// One copy on a shared vault V1 (two apps' entries) and one on another vault V2. A removal
+/// through an app on V1 is allowed: V2 is another copy. It forgets V1's key, so every entry
+/// that named V1 is marked `false` with it, not only the removing app's: the record stays true
+/// to the vaults. V2 is then the only copy, and its removal is refused.
+#[tokio::test]
+async fn a_copy_on_another_vault_lets_a_shared_vault_go_with_all_its_entries() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 142).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    let d3 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&a, &*shared, &did, &OsRandom).await.unwrap();
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, "d1").await,
+        (HoldsMaster::No, None, None)
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::No, None, None),
+        "the other app on the emptied vault is still listed holding"
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d3).await,
+        (HoldsMaster::Yes, Some(0), Some(vault_of(&c_vault, &did)))
+    );
+    let last = remove_master(&c, &c_vault, &did, &OsRandom).await;
+    assert!(matches!(last, Err(ClientError::OnlyCopy)), "{last:?}");
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// An entry that says `holdsMaster: true` with the current `masterIndex` but no vault id
+/// proves no copy, as one without `masterIndex`: the creator's removal is refused.
+#[tokio::test]
+async fn a_holder_entry_without_a_vault_id_proves_no_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 143).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    record::write(
+        &a,
+        &vault,
+        &did,
+        &[Change::Device {
+            key_id: d2.clone(),
+            entry: DeviceEntry {
+                holds_master: HoldsMaster::Yes,
+                master_index: Some(0),
+                vault: None,
+                ..entry("Desk", DeviceKind::DesktopApp)
+            },
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let removed = remove_master(&a, &vault, &did, &OsRandom).await;
+    assert!(matches!(removed, Err(ClientError::OnlyCopy)), "{removed:?}");
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// The repair window of a listed `true` (`Gate::Repair(None)`). B is listed holding master #0
+/// on its own vault V2. A rotates on vault V1 to #1. B's app then runs on V1 (which keeps #1,
+/// A's key) with no note of its own. Its refresh must not carry B's listed `true` forward to
+/// V1's #1: the entry names V2, so V1's key is no acquisition of B. B's entry stays as it was.
+#[tokio::test]
+async fn a_listed_holder_is_carried_forward_only_on_the_vault_it_names() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let v1 = Arc::new(MemoryVault::new());
+    let v2 = MemoryVault::new();
+    let did = create(&a, &v1, 144).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &v1,
+        &did,
+        &b,
+        &v2,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[144; 16]);
+    rotate(&a, &*v1, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(v1.master_index(&scid).unwrap(), Some(1));
+    let listed = (HoldsMaster::Yes, Some(0), Some(vault_of(&v2, &did)));
+    let mut b_entry = entry("Desk", DeviceKind::DesktopApp);
+    (b_entry.holds_master, b_entry.master_index, b_entry.vault) = listed;
+    record::write(
+        &a,
+        &*v1,
+        &did,
+        &[Change::Device {
+            key_id: d2.clone(),
+            entry: b_entry,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let refreshed = refresh_master(&b, &theirs_again(&v1), &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(holding_of(&a, &*v1, &did, &d2).await, listed);
+}
+
+/// The window of a listed `true` whose shared vault now keeps a newer key. Apps A and B share
+/// vault V and both hold #0; C holds #0 on its own vault and rotates to #1, handing it over.
+/// B's late mark lands `true` with #0 after the hand-over. A then takes #1 into V. V keeps #1
+/// now, so B's entry, which names V, is carried to #1 with A's mark: no entry names an index
+/// that its vault no longer keeps. C's copy and V's copy are two; once C's goes, V's is the
+/// only one, through either app.
+#[tokio::test]
+async fn a_newer_key_on_a_shared_vault_carries_every_entry_on_it() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 145).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[145; 16]);
+    rotate(&c, &c_vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let id = Some(vault_of(&*shared, &did));
+    let mut late = entry("Other app", DeviceKind::DesktopApp);
+    (late.holds_master, late.master_index, late.vault) = (HoldsMaster::Yes, Some(0), id);
+    record::write(
+        &c,
+        &c_vault,
+        &did,
+        &[Change::Device {
+            key_id: d2.clone(),
+            entry: late,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let refreshed = refresh_master(&a, &*shared, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Taken(_)), "{refreshed:?}");
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(1));
+    assert_eq!(
+        mark_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::Yes, Some(1)),
+        "B's entry names a key its vault no longer keeps"
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, "d1").await,
+        (HoldsMaster::Yes, Some(1), id)
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::Yes, Some(1), id)
+    );
+    remove_master(&c, &c_vault, &did, &OsRandom).await.unwrap();
+    for (app, vault) in [(&a, theirs_again(&shared)), (&b, theirs_again(&shared))] {
+        let removed = remove_master(app, &vault, &did, &OsRandom).await;
+        assert!(matches!(removed, Err(ClientError::OnlyCopy)), "{removed:?}");
+    }
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(1));
 }

@@ -75,7 +75,8 @@
 //!   ([`CustodyNote::landed`]: its standing is a receipt for the index the vault keeps). A note
 //!   that has not landed (open intents, a receipt for another index) is cleared and marks
 //!   nothing. A note that stands released never marks. With no note, only a device that the
-//!   record lists `holdsMaster: true` already is re-attested or carried forward. A device with
+//!   record lists `holdsMaster: true` on this vault already is re-attested or carried forward.
+//!   An entry on another vault, or without a vault id, is not carried. A device with
 //!   no note that the record does not list holding never unlocks or prompts.
 //!
 //! **Which layer wins.** A receipt removes the releases above it whose epoch is not later than
@@ -85,8 +86,9 @@
 //! that reads the epoch, and then sees it move, starts again: so its release never goes over a
 //! store that it did not see.
 //!
-//! **The mark** ([`hold_mark`]) writes `holdsMaster: true` only for a receipt whose index the
-//! vault keeps, and `false` for a release or for a vault that keeps no key. Otherwise it leaves
+//! **The mark** ([`hold_mark`]) writes `holdsMaster: true` with the vault id only for a
+//! receipt whose index the vault keeps, and `false` for a release or for a vault that keeps no
+//! key. Otherwise it leaves
 //! the device's holding unchanged: a key in a shared vault without a receipt of this device can
 //! be another device's.
 //!
@@ -108,20 +110,34 @@
 //! It forgets a key only when the vault's authenticated index ([`Vault::master_index`]) is
 //! known and behind the log's current master: never on an unknown index.
 //!
+//! **Copies are vaults.** Each `holdsMaster: true` entry names the vault that keeps the key
+//! ([`DeviceEntry::vault`], the id [`Vault::vault_id`] gives). Two apps on one shared vault
+//! are two device keys but one copy. Every mark of `true` writes the vault id. When a mark
+//! lists index *n* on vault V, every other `true` entry on V with a lower index or no index
+//! moves to *n*: V keeps one key, so it keeps no older one. A repair carries a listed `true`
+//! forward only when the entry names this vault.
+//!
 //! **Removing the master key from a device** ([`remove_master`]): refused when no other
-//! device valid at the head holds the current master key: one the record lists as
-//! `holdsMaster: true` with the log's current `masterIndex` and the log lets keep it
-//! ([`may_keep_master`], never the record's kind; a key only offered, an entry without an
-//! index or with a replaced one, or the 12 words, do not count). Otherwise the record marks
-//! this device `holdsMaster: false` first, then the vault forgets the key and its retry list
-//! for the identity. The check runs on the version the record write builds on, again after
-//! each stale version, so two holders removing it at once leave one copy.
+//! vault keeps the current master key: no entry the record lists as `holdsMaster: true` with
+//! the log's current `masterIndex`, a vault id that is not this device's vault, on a device
+//! key valid at the head that the log lets keep it ([`may_keep_master`], never the record's
+//! kind; a key only offered, an entry without an index, with a replaced one or without a vault
+//! id, another device key on this vault, or the 12 words, do not count). Otherwise the record
+//! marks this device `holdsMaster: false` and every other entry on this vault `false` in one
+//! write, then the vault forgets the key and its retry list for the identity. When the custody
+//! epoch moved between the release and that write (a store came between), the write marks only
+//! this device: the other entries can name the new key. After the forget, entries on this vault
+//! that a mark wrote in between go `false` while the vault keeps no key ([`sweep_emptied`]).
+//! The check runs on the version the record write builds on, again after each stale version,
+//! so two holders removing it at once leave one copy.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{InboxAddress, InboxError};
 use ad4m_identity_core::link::may_keep_master;
+use std::cell::Cell;
+
 use ad4m_identity_core::record::{
-    DeviceEntry, DeviceKind, HoldsMaster, PrivateRecord, RecordError,
+    DeviceEntry, DeviceKind, HoldsMaster, PrivateRecord, RecordError, VaultId,
 };
 use ad4m_identity_core::{Event, KelChain, KeyId, Multikey};
 use ad4m_ldk::identity::InboxWrite;
@@ -480,6 +496,7 @@ fn retry_entry(key_id: &str) -> DeviceEntry {
         runs_executor: true,
         holds_master: HoldsMaster::No,
         master_index: None,
+        vault: None,
         operator: None,
     }
 }
@@ -864,6 +881,8 @@ async fn hold_mark_gated<R: ExecutorRpc>(
     recovery_key: Option<&Multikey>,
     random: &dyn Random,
 ) -> Result<Marked, ClientError> {
+    // Written with every `true`: the copy this mark names is this vault's.
+    let here = vault.vault_id(scid)?;
     for _ in 0..record::MAX_WRITES {
         // The epoch first: a custody change after it lands in `held` or in the re-read.
         let fenced = vault.custody_epoch(scid)?;
@@ -906,6 +925,7 @@ async fn hold_mark_gated<R: ExecutorRpc>(
                             HoldsMaster::No
                         },
                         master_index: held,
+                        vault: held.map(|_| here),
                         ..entry.clone()
                     },
                 }]
@@ -922,6 +942,7 @@ async fn hold_mark_gated<R: ExecutorRpc>(
                         changes.push(Change::Holds {
                             key_id: key_id.clone(),
                             index: kept,
+                            vault: here,
                         });
                     }
                     changes
@@ -934,9 +955,13 @@ async fn hold_mark_gated<R: ExecutorRpc>(
             if vault.custody_note(scid, key_id)? != note {
                 return Err(ClientError::CustodyNoteMoved);
             }
+            // A listed `true` is carried only on the vault it names: on another vault the key
+            // kept here is no acquisition of this device.
             let listed_holding = record
                 .and_then(|r| r.devices.get(key_id))
-                .is_some_and(|entry| entry.holds_master == HoldsMaster::Yes);
+                .is_some_and(|entry| {
+                    entry.holds_master == HoldsMaster::Yes && entry.vault == Some(here)
+                });
             if matches!(&gate, Gate::Repair(None)) && !listed_holding {
                 return Err(ClientError::CustodyNoteMoved);
             }
@@ -1374,7 +1399,10 @@ async fn repair_mark<R: ExecutorRpc>(
             return Ok(None);
         };
         let stale = opened.recovery.is_none() && opened.recovery_key.is_some();
-        let holding = entry.holds_master == HoldsMaster::Yes;
+        // A listed `true` counts here only when it names this vault: one that names another
+        // vault says nothing about the key this vault keeps.
+        let holding =
+            entry.holds_master == HoldsMaster::Yes && entry.vault == Some(vault.vault_id(&scid)?);
         let marked = holding && entry.master_index == Some(current);
         // Here a note is a landed receipt.
         let gate = match note {
@@ -1502,11 +1530,16 @@ pub async fn remove_master<R: ExecutorRpc>(
         executor.status().await?.key_id.ok_or_else(|| {
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
+    // The physical vault this removal empties: the copy every entry naming it relies on.
+    let here = vault.vault_id(&scid)?;
     // Before the only-copy check: the forget below holds only while this custody state lasts.
     let (epoch, released) = release(vault, &scid, &own, random)?;
     let token = released.token();
     let removed = async {
         let (events, log_chain) = log_of(executor, did).await?;
+        // Set when a store on this vault came after the release: the forget will keep that
+        // key, so the other entries on this vault are left as they are.
+        let moved = Cell::new(false);
         let check = |record: Option<&PrivateRecord>, chain: &KelChain| {
             // An acquisition of this device put its note over the release: it wins, and its
             // mark follows this write. Nothing is released.
@@ -1514,24 +1547,31 @@ pub async fn remove_master<R: ExecutorRpc>(
                 return Err(ClientError::CustodyNoteMoved);
             }
             // The events may lag the chain the write read; a key `add`ed since is no copy yet.
-            if record.is_some_and(|r| another_copy(r, &events, chain, &own)) {
-                Ok(())
-            } else {
-                Err(ClientError::OnlyCopy)
+            if !record.is_some_and(|r| another_copy(r, &events, chain, &own, &here)) {
+                return Err(ClientError::OnlyCopy);
             }
+            // Read after the version this write builds on: a store since then is followed by
+            // its own mark, on a newer version, which this write never overwrites.
+            if !moved.get() && vault.custody_epoch(&scid)? != epoch {
+                moved.set(true);
+                return Err(ClientError::CustodyNoteMoved);
+            }
+            Ok(())
         };
-        let version = record::write_if(
-            executor,
-            vault,
-            did,
-            &[Change::HoldsMaster {
-                key_id: own.clone(),
-                holds: HoldsMaster::No,
-            }],
-            &check,
-            random,
-        )
-        .await?;
+        let own_false = Change::HoldsMaster {
+            key_id: own.clone(),
+            holds: HoldsMaster::No,
+        };
+        // Every entry on this vault named the copy the forget takes: all of them go `false`
+        // in the same write as this device's, before the forget, so no removal on another
+        // vault counts this one after it is gone.
+        let emptied = [own_false.clone(), Change::VaultEmptied { vault: here }];
+        let version = match record::write_if(executor, vault, did, &emptied, &check, random).await {
+            Err(ClientError::CustodyNoteMoved) if moved.get() => {
+                record::write_if(executor, vault, did, &[own_false], &check, random).await?
+            }
+            written => written?,
+        };
         Ok::<_, ClientError>((version, log_chain))
     }
     .await;
@@ -1556,6 +1596,13 @@ pub async fn remove_master<R: ExecutorRpc>(
                 version = hold_mark(executor, vault, did, &scid, &own, &Reader::Executor, random)
                     .await?
                     .version;
+                // The same for the other entries on this vault: a mark of theirs whose store
+                // came before the epoch read may have landed after the write above.
+                if let Some(swept) =
+                    sweep_emptied(executor, vault, did, &scid, here, random).await?
+                {
+                    version = swept;
+                }
             }
             // A key installed after the epoch was read stays, so this removal released
             // nothing: the note goes back to what it replaced (an owed mark the installing
@@ -1589,6 +1636,36 @@ pub async fn remove_master<R: ExecutorRpc>(
         }
     }
     Ok(version)
+}
+
+/// After a removal forgot the key of vault `here`: marks `false` every entry that still names
+/// `here` ([`Change::VaultEmptied`]), while the vault keeps no key of `scid`. Checked on the
+/// version the write builds on: a key stored since is followed by its own mark, which this
+/// write never overwrites. `None` when no entry names `here` or the vault keeps a key again:
+/// nothing written.
+async fn sweep_emptied<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    scid: &str,
+    here: VaultId,
+    random: &dyn Random,
+) -> Result<Option<u64>, ClientError> {
+    let idle = Cell::new(false);
+    let check = |record: Option<&PrivateRecord>, _: &KelChain| {
+        let named = record.is_some_and(|r| r.devices.values().any(|e| e.vault == Some(here)));
+        if !named || vault.master_index(scid)?.is_some() {
+            idle.set(true);
+            return Err(ClientError::CustodyNoteMoved);
+        }
+        Ok(())
+    };
+    let changes = [Change::VaultEmptied { vault: here }];
+    match record::write_if(executor, vault, did, &changes, &check, random).await {
+        Ok(version) => Ok(Some(version)),
+        Err(ClientError::CustodyNoteMoved) if idle.get() => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Puts a release on top of device `key_id`'s custody note for `scid`, bound to the custody
@@ -1644,15 +1721,19 @@ fn retire_below(
     Ok(())
 }
 
-/// Whether `record` lists a device other than `own` that holds the current master key of
-/// `chain`: valid at the head, `holdsMaster: true` with `masterIndex` the index of the log's
-/// current master (an entry without an index, or with an older one, proves no current copy),
-/// and let keep it by the log `events` ([`may_keep_master`]).
+/// Whether `record` lists a copy of the current master key of `chain` on a vault other than
+/// `own_vault`, the vault of the device `own` that asks: an entry of a device other than `own`,
+/// valid at the head, `holdsMaster: true` with `masterIndex` the index of the log's current
+/// master (an entry without an index, or with an older one, proves no current copy), with a
+/// vault id that is not `own_vault` (an entry without one proves no copy), and let keep it by
+/// the log `events` ([`may_keep_master`]). Copies are vaults, not entries: two entries on one
+/// vault are one copy, and an entry on `own_vault` is the copy the caller would forget.
 pub(crate) fn another_copy(
     record: &PrivateRecord,
     events: &[Event],
     chain: &KelChain,
     own: &str,
+    own_vault: &VaultId,
 ) -> bool {
     let state = chain.state();
     let head = chain.head().seq;
@@ -1666,6 +1747,7 @@ pub(crate) fn another_copy(
         id != own
             && entry.holds_master == HoldsMaster::Yes
             && entry.master_index == Some(current)
+            && entry.vault.is_some_and(|vault| vault != *own_vault)
             && state.keys.contains_key(id)
             && state.key_valid_at(id, head)
             && may_keep_master(events, id)

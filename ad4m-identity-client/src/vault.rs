@@ -9,6 +9,7 @@
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{seal, sign_payload, InboxAddress, InboxBody, InboxError};
 use ad4m_identity_core::link::SignedBy;
+use ad4m_identity_core::record::VaultId;
 use ad4m_identity_core::{Event, KeyId, Multikey};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -350,6 +351,27 @@ pub trait Vault: Send + Sync {
         expected: Option<&CustodyNote>,
         note: Option<&CustodyNote>,
     ) -> Result<bool, VaultError>;
+    /// The id of this physical vault for `scid` ([`VaultId`]): the record's device entries name
+    /// it beside every `holdsMaster: true`, and the only-copy check counts distinct ids, so
+    /// two apps that share this vault are one copy, never two. The contract:
+    ///
+    /// - **Random.** 16 bytes from the OS's secure random source, drawn the first time it is
+    ///   asked for `scid`. Never derived from a device, a user, a path or a hardware id.
+    /// - **Per identity.** One id per (`vault`, `scid`): two identities on one vault get two
+    ///   unrelated ids, so the records of two identities never link them.
+    /// - **Shared by every device key on the vault.** Every app, every handle and every process
+    ///   on the same store gets the same id for the same `scid`. The draw and its keeping are
+    ///   one step under the vault's cross-process lock: two first asks at once keep one id.
+    /// - **Durable and stable.** Kept in the same store as the master key, and answered `Ok`
+    ///   only once it is durable. It never changes while the store keeps anything of `scid`. A
+    ///   forget of the master key keeps it.
+    /// - **Lost only with the keys.** A store that loses the id has lost the master key too
+    ///   (the same store, wiped or restored without it). A store that keeps a master key of
+    ///   `scid` but cannot read its id answers an error, never a fresh id: a fresh id beside a
+    ///   kept key would count that one copy twice.
+    ///
+    /// Not secret, needs no unlock.
+    fn vault_id(&self, scid: &str) -> Result<VaultId, VaultError>;
 }
 
 /// What one device has decided about its custody of an identity's master key, kept in the vault
@@ -679,6 +701,8 @@ mod memory {
         record_seen: Mutex<HashMap<String, u64>>,
         /// Each (identity, device key id)'s custody note.
         notes: Mutex<HashMap<(String, String), CustodyNote>>,
+        /// Each identity's vault id, drawn at its first ask.
+        ids: Mutex<HashMap<String, VaultId>>,
     }
 
     impl MemoryVault {
@@ -925,6 +949,15 @@ mod memory {
                 None => notes.remove(&slot),
             };
             Ok(true)
+        }
+
+        fn vault_id(&self, scid: &str) -> Result<VaultId, VaultError> {
+            let mut ids = self.ids.lock().map_err(poisoned)?;
+            Ok(*ids.entry(scid.to_string()).or_insert_with(|| {
+                let mut bytes = [0u8; 16];
+                crate::Random::fill(&crate::OsRandom, &mut bytes);
+                VaultId(bytes)
+            }))
         }
     }
 

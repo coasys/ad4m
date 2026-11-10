@@ -485,6 +485,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                 key_id: key_id.clone(),
                 entry: DeviceEntry {
                     holds_master: HoldsMaster::No,
+                    vault: None,
                     ..device.clone()
                 },
             }],
@@ -555,6 +556,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                         key_id: key_id.clone(),
                         entry: DeviceEntry {
                             holds_master,
+                            vault: None,
                             ..device
                         },
                     }],

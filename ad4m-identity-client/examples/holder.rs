@@ -100,6 +100,7 @@ fn device_entry(
         runs_executor: true,
         holds_master: HoldsMaster::No,
         master_index: None,
+        vault: None,
         operator: None,
     })
 }

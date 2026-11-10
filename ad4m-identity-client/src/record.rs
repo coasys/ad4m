@@ -33,7 +33,7 @@
 
 use ad4m_identity_core::record::{
     attest_recovery_key, decrypt_record, open_record, recovery_of, seal_record, seal_unsigned,
-    DeviceEntry, HoldsMaster, PendingRevocation, PrivateRecord, RecordError, Recovery,
+    DeviceEntry, HoldsMaster, PendingRevocation, PrivateRecord, RecordError, Recovery, VaultId,
     RECOVERY_ENTRY,
 };
 use ad4m_identity_core::{KelChain, KeyId, Multikey, X25519Secret};
@@ -83,14 +83,27 @@ pub enum Change {
     Device { key_id: KeyId, entry: DeviceEntry },
     /// A new name for a listed device.
     Rename { key_id: KeyId, name: String },
-    /// Whether a listed device holds the master key. Clears the entry's `masterIndex`: a
-    /// device that keeps a master key says which with [`Change::Holds`].
+    /// Whether a listed device holds the master key. Clears the entry's `masterIndex` and
+    /// `vault`: a device that keeps a master key says which, and where, with [`Change::Holds`].
     HoldsMaster { key_id: KeyId, holds: HoldsMaster },
-    /// A listed device's vault keeps master `index`: `holdsMaster: true`, `masterIndex: index`.
-    /// Only the device itself (or the flow that put the key in its vault) writes it. Monotonic:
-    /// an entry that already says `true` with a higher index (another app of the device
-    /// finished a later generation first) stands, since the vault never goes back one either.
-    Holds { key_id: KeyId, index: u32 },
+    /// A listed device's vault `vault` keeps master `index`: `holdsMaster: true`,
+    /// `masterIndex: index`, `vault`. Only the device itself (or the flow that put the key in
+    /// its vault) writes it. Monotonic: an entry that already says `true` with a higher index on
+    /// the same vault (another app of the device finished a later generation first) stands,
+    /// since the vault never goes back one either.
+    ///
+    /// The vault keeps one key per identity, so every other entry that says `true` on the same
+    /// vault with a lower index is carried to `index` too: no entry names a key that its vault
+    /// replaced. They count as one copy all the same ([`crate::flows::master`]).
+    Holds {
+        key_id: KeyId,
+        index: u32,
+        vault: VaultId,
+    },
+    /// The vault `vault` forgot the identity's master key: every entry that names it is marked
+    /// `holdsMaster: false`, without `masterIndex` and `vault`. Written by a removal through any
+    /// device key on that vault, since all its entries named the one copy it forgot.
+    VaultEmptied { vault: VaultId },
     /// Master `index` was put into a listed device's inbox: `holdsMaster: "offered"`, unless the
     /// entry already says the device holds `index` or a later master ([`Change::Holds`], written
     /// by the device when it took it), which stands. So a hand-over's write, built on whatever
@@ -124,7 +137,12 @@ fn merge(record: &mut PrivateRecord, chain: &KelChain, changes: &[Change]) {
     for change in changes {
         match change {
             Change::Device { key_id, entry } => {
-                record.devices.insert(key_id.clone(), entry.clone());
+                let mut entry = entry.clone();
+                // A vault id goes only with a holding.
+                if entry.holds_master != HoldsMaster::Yes {
+                    entry.vault = None;
+                }
+                record.devices.insert(key_id.clone(), entry);
             }
             Change::Rename { key_id, name } => {
                 if let Some(entry) = record.devices.get_mut(key_id) {
@@ -135,15 +153,41 @@ fn merge(record: &mut PrivateRecord, chain: &KelChain, changes: &[Change]) {
                 if let Some(entry) = record.devices.get_mut(key_id) {
                     entry.holds_master = *holds;
                     entry.master_index = None;
+                    entry.vault = None;
                 }
             }
-            Change::Holds { key_id, index } => {
-                if let Some(entry) = record.devices.get_mut(key_id) {
-                    let newer = entry.holds_master == HoldsMaster::Yes
-                        && entry.master_index.is_some_and(|held| held > *index);
-                    if !newer {
-                        entry.holds_master = HoldsMaster::Yes;
+            Change::Holds {
+                key_id,
+                index,
+                vault,
+            } => {
+                let Some(entry) = record.devices.get_mut(key_id) else {
+                    continue;
+                };
+                let newer = entry.holds_master == HoldsMaster::Yes
+                    && entry.vault == Some(*vault)
+                    && entry.master_index.is_some_and(|held| held > *index);
+                if newer {
+                    continue;
+                }
+                entry.holds_master = HoldsMaster::Yes;
+                entry.master_index = Some(*index);
+                entry.vault = Some(*vault);
+                for entry in record.devices.values_mut() {
+                    if entry.holds_master == HoldsMaster::Yes
+                        && entry.vault == Some(*vault)
+                        && entry.master_index.is_none_or(|held| held < *index)
+                    {
                         entry.master_index = Some(*index);
+                    }
+                }
+            }
+            Change::VaultEmptied { vault } => {
+                for entry in record.devices.values_mut() {
+                    if entry.vault == Some(*vault) {
+                        entry.holds_master = HoldsMaster::No;
+                        entry.master_index = None;
+                        entry.vault = None;
                     }
                 }
             }
@@ -154,6 +198,7 @@ fn merge(record: &mut PrivateRecord, chain: &KelChain, changes: &[Change]) {
                     if !took_it {
                         entry.holds_master = HoldsMaster::Offered;
                         entry.master_index = None;
+                        entry.vault = None;
                     }
                 }
             }
