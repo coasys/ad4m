@@ -46,8 +46,8 @@ pub use store::{
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
 pub use vault::{
-    CustodyNote, Forgot, MasterSigner, MasterUse, PendingPush, StageToken, Stored, Unlocked, Vault,
-    VaultError,
+    CustodyNote, Forgot, MasterSigner, MasterUse, NoteToken, PendingPush, StageToken, Stored,
+    Unlocked, Vault, VaultError,
 };
 
 /// Unix seconds, from the surface.

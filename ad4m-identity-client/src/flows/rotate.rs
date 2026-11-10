@@ -318,11 +318,13 @@ pub(crate) struct ThisDevice {
 /// writes the record, attesting the recovery key again and marking `this`, before any key is
 /// pushed: until that write lands the stored pair is stale, and every device write — a take's
 /// among them — is refused [`ClientError::RecoveryNeedsReattest`] rather than seal the record
-/// without it. `fence_epoch` is the custody epoch the caller's store or promote of the key
-/// produced ([`Vault::custody_epoch`], read right after it): when `this` marks the device
-/// holding it and the epoch moved under the write — a removal won — the entry is written to
-/// the vault's custody again ([`master::hold_mark`]). Then master `signer` (now current) to
-/// every kept holder, then the pushes' marks. Answers the pushes and the last record write.
+/// without it. When `this` kept the key, its entry is written through the custody gate
+/// ([`master::mark_this`]): the index the vault keeps, fenced by the custody epoch and this
+/// device's custody note, so a removal that released the copy since leaves it
+/// `holdsMaster: false`. `owed` is the caller's intent ([`CustodyNote::MarkOwed`], written
+/// before its store or promote): cleared once the mark lands under it. Then master `signer`
+/// (now current) to every kept holder, then the pushes' marks. Answers the pushes and the
+/// last record write.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn hand_over<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
@@ -331,7 +333,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     signer: &KeySigner,
     reader: &Reader<'_>,
     this: Option<ThisDevice>,
-    fence_epoch: Option<u64>,
+    owed: Option<CustodyNote>,
     recovery_key: &Multikey,
     clock: &dyn Clock,
     random: &dyn Random,
@@ -360,99 +362,100 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     // The master-signed write comes before the pushes: it re-attests the recovery key with
     // the new master — while the stored pair is stale, a device that took the key could not
     // write the record at all — and it lists `this` device.
-    // `this`'s mark asserts the custody `fence_epoch` produced, when it kept the key.
-    let fence = match (&this, fence_epoch) {
-        (Some(this), Some(epoch)) if this.kept.is_some() => Some((this.key_id.clone(), epoch)),
-        _ => None,
-    };
-    // This device's rotation kept the key: a new acquisition. Its mark is noted owed before
-    // the write (a release older than the store is replaced, one that read the store's epoch
-    // or later stands), so a write that fails is made by the next refresh, and cleared once
-    // it lands.
-    let owed = match (&this, fence_epoch) {
-        (
-            Some(ThisDevice {
-                key_id,
-                kept: Some(kept),
-                ..
-            }),
-            Some(epoch),
-        ) => {
-            let owed = CustodyNote::MarkOwed {
-                index: *kept,
-                epoch,
-            };
-            match master::note_owed(vault, &scid, key_id, &owed) {
-                Ok(true) => Some((key_id.clone(), owed)),
-                Ok(false) => None,
-                Err(e) => return (Vec::new(), Err(e)),
+    let written = match this {
+        // This device kept the key: its mark goes through the custody gate like a take's
+        // ([`master::mark_this`]) — the vault's index, fenced by the custody epoch and this
+        // device's note, decided again on the version the write builds on. A release that won
+        // since the caller's intent leaves the entry `holdsMaster: false`: nothing here asserts
+        // a copy the release gave up.
+        Some(ThisDevice {
+            key_id,
+            entry,
+            kept: Some(_),
+        }) => {
+            match master::mark_this(
+                executor,
+                vault,
+                did,
+                &scid,
+                &key_id,
+                reader,
+                entry.as_ref(),
+                Some(recovery_key),
+                random,
+            )
+            .await
+            {
+                // Met when written under the caller's own intent; a note written since is
+                // its writer's.
+                Ok(marked) => match &owed {
+                    Some(owed) => master::clear_own(vault, &scid, &key_id, owed, &marked)
+                        .map(|()| marked.version),
+                    None => Ok(marked.version),
+                },
+                Err(e) => Err(e),
             }
         }
-        _ => None,
-    };
-    let mut changes = Vec::new();
-    match this {
+        // This device keeps no key: listed (or marked) `holdsMaster: false`.
         Some(ThisDevice {
             key_id,
             entry: Some(entry),
-            kept,
-        }) => changes.push(Change::Device {
-            key_id,
-            entry: DeviceEntry {
-                holds_master: if kept.is_some() {
-                    HoldsMaster::Yes
-                } else {
-                    HoldsMaster::No
+            kept: None,
+        }) => {
+            let change = Change::Device {
+                key_id,
+                entry: DeviceEntry {
+                    holds_master: HoldsMaster::No,
+                    master_index: None,
+                    ..entry
                 },
-                master_index: kept,
-                ..entry
-            },
-        }),
-        Some(ThisDevice {
-            key_id,
-            entry: None,
-            kept: Some(index),
-        }) => changes.push(Change::Holds { key_id, index }),
+            };
+            record::write_as(
+                executor,
+                vault,
+                did,
+                reader,
+                &[change],
+                Some(recovery_key),
+                random,
+            )
+            .await
+        }
         Some(ThisDevice {
             key_id,
             entry: None,
             kept: None,
-        }) => changes.push(Change::HoldsMaster {
-            key_id,
-            holds: HoldsMaster::No,
-        }),
-        None => {}
-    }
-    let mut written = record::write_as(
-        executor,
-        vault,
-        did,
-        reader,
-        &changes,
-        Some(recovery_key),
-        random,
-    )
-    .await;
-    // Custody moved under the mark — a removal won — so the entry is set to what the vault
-    // keeps now (`holdsMaster: false` when it keeps none).
-    if let (Ok(_), Some((key_id, epoch))) = (&written, fence) {
-        match vault.custody_epoch(&scid) {
-            Ok(now) if now == epoch => {}
-            Ok(_) => {
-                written =
-                    master::hold_mark(executor, vault, did, &scid, &key_id, reader, random).await;
-            }
-            Err(e) => written = Err(e.into()),
+        }) => {
+            let change = Change::HoldsMaster {
+                key_id,
+                holds: HoldsMaster::No,
+            };
+            record::write_as(
+                executor,
+                vault,
+                did,
+                reader,
+                &[change],
+                Some(recovery_key),
+                random,
+            )
+            .await
         }
-    }
+        None => {
+            record::write_as(
+                executor,
+                vault,
+                did,
+                reader,
+                &[],
+                Some(recovery_key),
+                random,
+            )
+            .await
+        }
+    };
     if written.is_err() {
         return (Vec::new(), written);
-    }
-    if let Some((key_id, owed)) = &owed {
-        // Met: cleared, unless another flow wrote the note since.
-        if let Err(e) = vault.swap_custody_note(&scid, key_id, Some(owed), None) {
-            return (Vec::new(), Err(e.into()));
-        }
     }
     let mut pushes = Vec::new();
     let mut marks = Vec::new();
@@ -498,6 +501,31 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     (pushes, record)
 }
 
+/// The vault keeps master `index` of `seed` for `scid` after the rotation to it landed:
+/// promoted here or by another app's refresh first ([`promote`]). Nothing staged at `index` and
+/// the vault keeping no master at or past it (another app's rotation re-staged the slot): the
+/// words make the same key, so it is stored under the vault's never-go-back rule
+/// ([`Vault::store_master`]; a key another app kept meanwhile wins). Answers the index the
+/// vault keeps — `index`, or a later one's.
+pub(crate) fn acquire(
+    vault: &dyn Vault,
+    scid: &str,
+    seed: &Seed,
+    index: u32,
+) -> Result<u32, ClientError> {
+    match promote(vault, scid, index) {
+        Ok(kept) => Ok(kept),
+        Err(VaultError::NotFound) => {
+            let key = words::master_key(seed, index)?;
+            match vault.store_master(scid, index, Secret::new(key.to_bytes()))? {
+                Stored::Stored => Ok(index),
+                Stored::AlreadyNewer { kept } => Ok(kept),
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Rotates the master key of `did`, the executor's identity, with the 12 `words`, revoking the
 /// device keys `revoke` in the same event; this device keeps master *n*+1, and every other app
 /// that kept the master key is sent it. Refused before anything is published when the words do
@@ -535,30 +563,22 @@ pub async fn rotate<R: ExecutorRpc>(
     let published = publish_rotation(executor, vault, &scid, did, &seed, revoke, random).await?;
     let index = published.signer.index();
     // The rotation is public from here: what fails after it is reported, not returned.
-    // Promoted here or by another app's refresh first ([`promote`]). Nothing staged at `index`
-    // and the vault keeping no master at or past it (another app's rotation re-staged the
-    // slot): the words make the same key, so it is stored under the vault's never-go-back
-    // rule ([`Vault::store_master`]; a key another app kept meanwhile wins, and `kept` names
-    // the index the vault keeps — this rotation's, or a later one's).
-    let kept = match promote(vault, &scid, index) {
-        Ok(kept) => Ok(kept),
-        Err(VaultError::NotFound) => words::master_key(&seed, index)
-            .map_err(ClientError::from)
-            .and_then(|key| {
-                vault
-                    .store_master(&scid, index, Secret::new(key.to_bytes()))
-                    .map_err(ClientError::from)
-            })
-            .map(|stored| match stored {
-                Stored::Stored => index,
-                Stored::AlreadyNewer { kept } => kept,
-            }),
-        Err(e) => Err(e.into()),
+    // The vault keeps the new master ([`acquire`]); `kept` names the index it keeps. The
+    // intent before the promote or store, with the epoch read before it: a crash right
+    // after them leaves the note that says this device owes its mark, and a release of this
+    // device's copy written after it wins over it ([`master::note_owed`]). A vault that
+    // refuses the note acquires nothing.
+    let owed = vault
+        .custody_epoch(&scid)
+        .map_err(ClientError::from)
+        .map(|epoch| CustodyNote::owed(index, epoch, random))
+        .and_then(|owed| master::note_owed(vault, &scid, &own, &owed).map(|_| owed));
+    let (kept, owed) = match owed {
+        Ok(owed) => (acquire(vault, &scid, &seed, index), Some(owed)),
+        Err(e) => (Err(e), None),
     };
     // The record's rewrite is the new master's: it re-attests the recovery key, which a
-    // device-signed write cannot install. The mark this write makes is fenced by the
-    // custody epoch the promote or store just produced.
-    let fence_epoch = vault.custody_epoch(&scid)?;
+    // device-signed write cannot install, and marks this device through the custody gate.
     let secret = words::recovery_secret(&seed);
     let reader = Reader::Recovery {
         secret: &secret,
@@ -576,7 +596,7 @@ pub async fn rotate<R: ExecutorRpc>(
             entry: None,
             kept: kept.as_ref().ok().copied(),
         }),
-        Some(fence_epoch),
+        owed,
         &recovery_key_of(&seed),
         clock,
         random,

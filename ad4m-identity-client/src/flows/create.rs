@@ -218,7 +218,8 @@ pub async fn create_from_seed<R: ExecutorRpc>(
             &reader,
             random,
         )
-        .await;
+        .await
+        .map(|marked| marked.version);
     }
     created.record = Some(written);
     Ok(created)

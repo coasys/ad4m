@@ -34,13 +34,13 @@ use ad4m_ldk::identity::SignedHead;
 
 use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::flows::link::LinkFlow;
+use crate::flows::master::note_owed;
 use crate::flows::rotate::{
-    current_index, hand_over, master_of, promote, publish_rotation, recovery_key_of, ThisDevice,
+    acquire, current_index, hand_over, master_of, publish_rotation, recovery_key_of, ThisDevice,
 };
 use crate::record::{self, Reader};
 use crate::request::{chain_of, scid_of};
-use crate::secret::Secret;
-use crate::vault::{MasterSigner, Stored, Vault, VaultError};
+use crate::vault::{CustodyNote, MasterSigner, Vault};
 use crate::{ClientError, Clock, Random};
 
 /// A device key of the log, as the lock-out screen shows it.
@@ -275,28 +275,32 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
                 "master #{index} of this restore was replaced; restore again with the words"
             )));
         }
-        // Promoted here or by another app's refresh first ([`promote`]); nothing staged at
-        // `index` and the vault keeping no master at or past it: current in the log, stored
-        // under the vault's never-go-back rule as a key taken from the inbox would be. `kept`
+        // The custody epoch before the acquisition: the intent names it, so it lands with the
+        // promote or store below ([`CustodyNote::landed`]). A device the log lists already
+        // writes the intent before them, so a crash right after leaves the note that owes its
+        // mark; a device linked only below has no key id until then, and writes it after its
+        // link (a crash before leaves the key kept and the device unmarked: an under-claim,
+        // never a copy the record names without one).
+        let epoch = self.vault.custody_epoch(&scid)?;
+        let status = self.executor.status().await?;
+        let listed = chain
+            .state()
+            .device_key_id_of(&status.device_key)
+            .filter(|id| chain.state().key_valid_at(id, chain.head().seq))
+            .cloned();
+        let owed = CustodyNote::owed(index, epoch, self.random);
+        if let Some(key_id) = &listed {
+            note_owed(self.vault, &scid, key_id, &owed)?;
+        }
+        // Promoted here or by another app's refresh first; nothing staged at `index` and the
+        // vault keeping no master at or past it: current in the log, stored under the vault's
+        // never-go-back rule as a key taken from the inbox would be ([`acquire`]). `kept`
         // names the index the vault keeps.
-        let kept = match promote(self.vault, &scid, index) {
-            Ok(kept) => kept,
-            Err(VaultError::NotFound) => {
-                let key = words::master_key(&self.seed, index)?;
-                match self
-                    .vault
-                    .store_master(&scid, index, Secret::new(key.to_bytes()))?
-                {
-                    Stored::Stored => index,
-                    Stored::AlreadyNewer { kept } => kept,
-                }
-            }
-            Err(e) => return Err(e.into()),
-        };
+        let kept = acquire(self.vault, &scid, &self.seed, index)?;
         let key_id = self.link_this(&this_device).await?;
-        // The mark the hand-over makes is fenced by the custody epoch the promote or store
-        // just produced.
-        let fence_epoch = self.vault.custody_epoch(&scid)?;
+        if listed.as_ref() != Some(&key_id) {
+            note_owed(self.vault, &scid, &key_id, &owed)?;
+        }
         let signer = master_of(&self.seed, index)?;
         let secret = words::recovery_secret(&self.seed);
         let reader = Reader::Recovery {
@@ -315,7 +319,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
                 entry: Some(this_device),
                 kept: Some(kept),
             }),
-            Some(fence_epoch),
+            Some(owed),
             &recovery_key_of(&self.seed),
             self.clock,
             self.random,

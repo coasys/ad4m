@@ -197,22 +197,28 @@ impl Unlocked {
 /// is the device's own account of its custody decisions, the one thing the vault and the record
 /// cannot tell afterwards:
 ///
-/// - [`CustodyNote::MarkOwed`]: this device took master `index` and owes the record its
-///   `holdsMaster: true` mark. A take writes it after its store and **before** it acknowledges
-///   the inbox message, and clears it only once the fenced mark has landed, so a crash, a
-///   cancelled unlock or a failed write between the two leaves the obligation here, never only
-///   in memory. Another holder re-attesting the record's recovery pair erases nothing of it.
+/// - [`CustodyNote::MarkOwed`]: this device is acquiring master `index` and owes the record
+///   its `holdsMaster: true` mark. A take, a promote and a rotation write it **before** they
+///   store or promote the key (an intent: the note exists before the key does), and so before
+///   a take acknowledges its inbox message; it is cleared only once the fenced mark has landed.
+///   A crash, a cancelled unlock or a failed write anywhere after the note leaves the
+///   obligation here, never only in memory. An intent whose store never landed is harmless:
+///   nothing marks from it until [`CustodyNote::landed`] says the vault keeps the key and its
+///   epoch moved since the note, and a refresh first takes again an inbox message still
+///   waiting. Another holder re-attesting the record's recovery pair erases nothing of it.
 /// - [`CustodyNote::Released`]: this device chose to give its copy up. `remove_master` writes it
 ///   **before** it publishes `holdsMaster: false`, and no refresh, repair or restart re-marks the
 ///   device while it stands — though the shared vault may keep the key another app installed.
 ///   Only a new acquisition by this device (its next take, its own rotation, a promote of a
-///   staged rotation) replaces it, and only when that acquisition's store moved the custody
-///   epoch past the one the release read (the removal's compare-and-delete cannot take the new
-///   key); a removal that forgot nothing (the epoch had moved) puts back the note it replaced.
+///   staged rotation) replaces it: that acquisition's intent comes before its store, the store
+///   moves the custody epoch, and the removal's compare-and-delete forget then cannot take the
+///   new key. A removal that forgot nothing (the epoch had moved) puts back the note it
+///   replaced, if its own release is still there.
 ///
 /// No note: nothing owed and nothing released. The writes are compare-and-swap
-/// ([`Vault::swap_custody_note`]) so that a take, a removal and a refresh of the same device
-/// never clear a note another one wrote since they read it.
+/// ([`Vault::swap_custody_note`]) on whole notes, and each note carries the [`NoteToken`] of the
+/// operation that wrote it, so a take, a removal and a refresh of the same device never clear
+/// or roll back a note another one wrote since they read it, even one that looks the same.
 pub trait Vault: Send + Sync {
     /// Stores master `index` for `scid` as the kept key, under the never-go-back rule: a key
     /// kept at a *higher* index is never replaced by a lower one — the call answers
@@ -334,17 +340,77 @@ pub trait Vault: Send + Sync {
 
 /// What one device has decided about its custody of an identity's master key, kept in the vault
 /// beside the key ([`Vault::custody_note`]); see the [`Vault`] docs for its lifecycle.
+///
+/// Every note carries the [`NoteToken`] of the operation that wrote it, drawn at random for
+/// that operation alone: two operations never write equal notes, even two removals of one
+/// device that read the same custody epoch. A compare-and-swap that expects a note an
+/// operation wrote (its rollback, its clear) therefore only ever changes that operation's own
+/// note, never an identical-looking one another operation wrote since.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum CustodyNote {
-    /// The device took master `index` (the index the vault kept after the take's store) and its
-    /// record mark has not landed yet. `epoch` is the custody epoch read right after that store:
-    /// it names this acquisition, so a clear removes only the note its own take wrote.
-    MarkOwed { index: u32, epoch: u64 },
-    /// The device released its copy (`remove_master`) after reading custody epoch `epoch`. A take
-    /// that stored its key before that read lost to the release; one that stored after it took
-    /// a new copy the removal will not forget, and replaces the note.
-    Released { epoch: u64 },
+    /// The device is acquiring master `index` (a take's store, a promote) and owes the record
+    /// its mark. Written **before** the store or promote it announces (an intent): `epoch` is
+    /// the custody epoch read before this note was written, so the acquisition has landed only
+    /// once the vault keeps `index` or a later key and its epoch is no longer `epoch`
+    /// ([`CustodyNote::landed`]). Cleared once the mark it owes has landed.
+    MarkOwed {
+        index: u32,
+        epoch: u64,
+        token: NoteToken,
+    },
+    /// The device released its copy (`remove_master`) after reading custody epoch `epoch`, the
+    /// epoch its compare-and-delete forget is bound to. Replaced by the device's next
+    /// acquisition, whose intent is written before its store: that store moves the epoch, so
+    /// this removal's forget can no longer take the new key.
+    Released { epoch: u64, token: NoteToken },
+}
+
+impl CustodyNote {
+    /// An owed mark for master `index`, the intent of an acquisition about to store or promote
+    /// it; `epoch` is the custody epoch read before it. A fresh token from `random`.
+    pub fn owed(index: u32, epoch: u64, random: &dyn Random) -> Self {
+        CustodyNote::MarkOwed {
+            index,
+            epoch,
+            token: NoteToken::new(random),
+        }
+    }
+
+    /// A release by a removal that read custody epoch `epoch`. A fresh token from `random`.
+    pub fn released(epoch: u64, random: &dyn Random) -> Self {
+        CustodyNote::Released {
+            epoch,
+            token: NoteToken::new(random),
+        }
+    }
+
+    /// Whether the acquisition an owed mark announces has landed in `vault` for `scid`: the
+    /// vault keeps master `index` or a later one, and the custody epoch moved since the epoch
+    /// read before the note (a store or promote moves it). `false` for a release, and for an
+    /// intent whose store or promote never ran (a crash or a refusal right after the note): such
+    /// an intent marks nothing.
+    pub fn landed(&self, vault: &dyn Vault, scid: &str) -> Result<bool, VaultError> {
+        let CustodyNote::MarkOwed { index, epoch, .. } = self else {
+            return Ok(false);
+        };
+        let kept = vault.master_index(scid)?;
+        Ok(kept.is_some_and(|kept| kept >= *index) && vault.custody_epoch(scid)? != *epoch)
+    }
+}
+
+/// The operation that wrote a [`CustodyNote`]: 16 random bytes, drawn once per take, promote,
+/// rotation, restore or removal. Not secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NoteToken(pub [u8; 16]);
+
+impl NoteToken {
+    /// A fresh token from `random`.
+    pub fn new(random: &dyn Random) -> Self {
+        let mut bytes = [0u8; 16];
+        random.fill(&mut bytes);
+        NoteToken(bytes)
+    }
 }
 
 /// Who staged a master key ([`Vault::stage_master`]): an opaque token a rotating flow draws at
@@ -905,8 +971,15 @@ mod memory {
         #[test]
         fn custody_notes_are_per_device_and_swapped_only_from_what_was_read() {
             let vault = MemoryVault::new();
-            let owed = CustodyNote::MarkOwed { index: 1, epoch: 4 };
-            let released = CustodyNote::Released { epoch: 3 };
+            let owed = CustodyNote::MarkOwed {
+                index: 1,
+                epoch: 4,
+                token: NoteToken([1; 16]),
+            };
+            let released = CustodyNote::Released {
+                epoch: 3,
+                token: NoteToken([2; 16]),
+            };
             assert_eq!(vault.custody_note("Qm", "d1").unwrap(), None);
             assert!(vault
                 .swap_custody_note("Qm", "d1", None, Some(&released))
@@ -926,6 +999,50 @@ mod memory {
                 .swap_custody_note("Qm", "d2", Some(&owed), None)
                 .unwrap());
             assert_eq!(vault.custody_note("Qm", "d2").unwrap(), None);
+            // Two releases at one epoch by two operations are two notes: a rollback that
+            // expects the first never touches the second.
+            let again = CustodyNote::Released {
+                epoch: 3,
+                token: NoteToken([3; 16]),
+            };
+            assert!(vault
+                .swap_custody_note("Qm", "d1", Some(&released), Some(&again))
+                .unwrap());
+            assert!(!vault
+                .swap_custody_note("Qm", "d1", Some(&released), None)
+                .unwrap());
+            assert_eq!(vault.custody_note("Qm", "d1").unwrap(), Some(again));
+        }
+
+        /// An owed mark has landed only once the vault keeps its index (or a later one) and
+        /// the custody epoch moved since the epoch read before it: an intent whose store never
+        /// ran marks nothing.
+        #[test]
+        fn an_owed_mark_lands_with_its_store_only() {
+            let vault = MemoryVault::new();
+            let epoch = vault.custody_epoch("Qm").unwrap();
+            let owed = CustodyNote::MarkOwed {
+                index: 1,
+                epoch,
+                token: NoteToken([1; 16]),
+            };
+            assert!(!owed.landed(&vault, "Qm").unwrap(), "nothing stored");
+            vault.store_master("Qm", 0, Secret::new([3; 32])).unwrap();
+            assert!(!owed.landed(&vault, "Qm").unwrap(), "an older key");
+            vault.store_master("Qm", 1, Secret::new([4; 32])).unwrap();
+            assert!(owed.landed(&vault, "Qm").unwrap());
+            // A key kept from before the intent, the epoch unchanged since: not landed.
+            let late = CustodyNote::MarkOwed {
+                index: 1,
+                epoch: vault.custody_epoch("Qm").unwrap(),
+                token: NoteToken([2; 16]),
+            };
+            assert!(!late.landed(&vault, "Qm").unwrap());
+            let released = CustodyNote::Released {
+                epoch: 0,
+                token: NoteToken([3; 16]),
+            };
+            assert!(!released.landed(&vault, "Qm").unwrap());
         }
     }
 }

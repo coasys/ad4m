@@ -42,16 +42,28 @@ master key for the person.
   and every answer and record write names the index the vault keeps.
 - **The custody note** (`CustodyNote`, `Vault::custody_note` / `swap_custody_note`, a
   compare-and-swap keyed by identity and device key id, so apps on one vault through one
-  executor share it): `MarkOwed {index, epoch}` is written after a take or promote stores the
-  key and before the inbox ack, and cleared once the mark landed; `Released {epoch}` is
-  written before a removal publishes `false`. `refresh_master` repairs a mark only from
-  `MarkOwed` (a listed holder with no note re-attests a stale pair and keeps its mark);
-  `Released` never marks; no note repairs nothing, so an unlisted device is never prompted.
-  Every `holdsMaster` write re-reads the note inside the record's version check
-  (`record::write_as_if`), so a removal racing a mark either lands first and the mark writes
-  `false`, or comes after it and writes its own `false`. An acquisition replaces a `Released`
-  only when its store moved the custody epoch past the one the release read. A vault outside
-  this crate (WE desktop, phone) must implement both methods with that compare-and-swap.
+  executor share it). Every note carries a random `NoteToken`, so a whole-note compare matches
+  only the note one operation wrote: a rollback or clear removes its own note and never a
+  later, identical-looking one. Intent first: a take, promote, rotate or restore reads the
+  custody epoch, writes `MarkOwed {index, epoch, token}`, and only then stores or promotes
+  (then acks the inbox and marks); the note is cleared once the mark landed under it. A crash
+  at any point leaves the intent. `refresh_master` resolves it: a master key still waiting
+  in the inbox is taken again (`Refreshed::Taken`); an intent whose acquisition landed
+  (`CustodyNote::landed`: the vault keeps the index and the epoch moved past the note's) is
+  marked; a stale one (nothing stored) is cleared and marks nothing. `Released {epoch, token}`
+  is written before a removal forgets the key and publishes `false`; a removal that fails
+  rolls back only its own note, and one that kept a later take (`Forgot::Kept`) leaves the
+  take's note and mark alone. `refresh_master` repairs a mark only from a landed `MarkOwed`
+  (a listed holder with no note re-attests a stale pair and keeps its mark); `Released` never
+  marks; no note repairs nothing, so an unlisted device is never prompted. Every `holdsMaster`
+  write, the rotation hand-over's included, goes through the note gate (`hold_mark_gated`):
+  it reads the epoch, then the note, and its precondition re-reads the note inside the
+  record's version check (`record::write_as_if`). The record's versions order the writes, so
+  a removal racing a mark either wrote its note before the mark's check (the mark writes
+  `false`) or after it (its own `false` write comes later on the record). An acquisition
+  replaces a `Released` only when its store moved the custody epoch past the one the release
+  read. A vault outside this crate (WE desktop, phone) must implement both methods with that
+  compare-and-swap and persist the note's token.
 - **One unlock per flow** (`Vault::unlock`): linking signs the offer, the list requests and the
   `add` under one unlock. A callback (`with_unlocked(callback)`) would fit a synchronous flow; the
   flows are async across network calls, so the unlock is a guard the flow holds instead.
