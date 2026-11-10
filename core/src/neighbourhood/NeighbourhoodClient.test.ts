@@ -76,6 +76,7 @@ describe("NeighbourhoodClient SFU calls", () => {
     await client.sfuAddIceCandidate(url, "r", "P1", "candidate:1");
     await client.sfuCallSetQualityPreference(url, "r", "P1", "low");
     await client.sfuSendData(url, "r", "P1", "chat", "hi");
+    await client.sfuCallRestartIce(url, "r", "P1");
 
     const sfu = FakeWebSocket.sent.filter((m) => m.type.startsWith("sfu."));
     expect(sfu).toEqual([
@@ -85,6 +86,7 @@ describe("NeighbourhoodClient SFU calls", () => {
       { type: "sfu.addIceCandidate", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", candidate: "candidate:1" } },
       { type: "sfu.callSetQualityPreference", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", preference: "low" } },
       { type: "sfu.sendData", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", channelLabel: "chat", data: "hi", binary: false } },
+      { type: "sfu.callRestartIce", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1" } },
     ]);
   });
 
@@ -103,5 +105,13 @@ describe("NeighbourhoodClient SFU calls", () => {
 
     expect(replaced).toEqual([expect.objectContaining(notice)]);
     expect(offers).toEqual([expect.objectContaining({ participantId: "P2" })]);
+  });
+
+  it("checks the client's socket through its ApiClient", () => {
+    const check = jest.spyOn(api, "checkConnection");
+    const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
+    client.checkConnection();
+    expect(check).toHaveBeenCalledTimes(1);
+    check.mockRestore();
   });
 });

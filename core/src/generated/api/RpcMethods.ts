@@ -179,6 +179,7 @@ import type { SfuNeighbourhoodParams } from "./SfuNeighbourhoodParams";
 import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPreference";
 import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
+import type { SfuRestartIceParams } from "./SfuRestartIceParams";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
 import type { SfuSendDataParams } from "./SfuSendDataParams";
@@ -386,6 +387,7 @@ export interface RpcMethods {
   "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
   "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
+  "sfu.callRestartIce": { params: SfuRestartIceParams; result: boolean };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };

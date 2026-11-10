@@ -1288,6 +1288,33 @@ impl SfuService {
         Ok(true)
     }
 
+    /// The client asks for an ICE restart of its own session `participant_id`,
+    /// e.g. after its network changed. The SFU offers new ICE credentials
+    /// over the server-offer path (`sfu-call-renegotiation-offer`); the client
+    /// answers with `call_answer_server_offer`. The same connection, DTLS
+    /// session and tracks carry on. Refused when the session is not
+    /// `agent_did`'s: a restart never touches another session, not even
+    /// another device of the same agent.
+    pub async fn call_restart_ice(
+        &self,
+        neighbourhood_url: &str,
+        room_name: &str,
+        agent_did: &str,
+        participant_id: &str,
+    ) -> Result<bool, String> {
+        let pid = self
+            .own_session(neighbourhood_url, room_name, agent_did, participant_id)
+            .await?;
+        self.server
+            .command_tx
+            .send(SfuCommand::RestartIce {
+                participant_id: pid,
+            })
+            .await
+            .map_err(|e| format!("Failed to send RestartIce command: {}", e))?;
+        Ok(true)
+    }
+
     /// Trickle ICE: add a remote ICE candidate to a participant's
     /// WebRTC connection.  The candidate arrives as the raw SDP
     /// candidate-attribute string (the `candidate:` line extracted from
@@ -1904,6 +1931,7 @@ mod tests {
                 .call_answer_server_offer(url, "r", did, pid, "{}")
                 .await
                 .is_err());
+            assert!(svc.call_restart_ice(url, "r", did, pid).await.is_err());
             assert!(svc
                 .add_ice_candidate(
                     url,
@@ -1935,6 +1963,70 @@ mod tests {
         let mut rest = vec![(laptop, "did:a".to_string()), (bobs, "did:b".to_string())];
         rest.sort();
         assert_eq!(sessions(&svc, url).await, rest);
+    }
+
+    /// An ICE restart is offered to the session that asked for it only: not
+    /// to the same agent's other device, and never for a session the caller
+    /// does not own.
+    #[tokio::test]
+    async fn an_ice_restart_reaches_only_the_session_that_asked() {
+        let svc = test_service().await;
+        let url = "neighbourhood://restart-ice";
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        let laptop = join(&svc, url, "did:a", "laptop").await;
+        let phone = join(&svc, url, "did:a", "phone").await;
+        let bobs = join(&svc, url, "did:b", "laptop").await;
+
+        // Bob cannot restart Alice's laptop, nor Alice Bob's session.
+        let refused = svc
+            .call_restart_ice(url, "r", "did:b", &laptop)
+            .await
+            .unwrap_err();
+        assert!(refused.contains("not in this call"), "{refused}");
+        assert!(svc
+            .call_restart_ice(url, "r", "did:a", &bobs)
+            .await
+            .is_err());
+        assert!(svc
+            .call_restart_ice("neighbourhood://no-such-room", "r", "did:a", &laptop)
+            .await
+            .is_err());
+
+        assert!(svc
+            .call_restart_ice(url, "r", "did:a", &phone)
+            .await
+            .unwrap());
+
+        let mut offered = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let seen = drain(&mut events);
+                offered.extend(
+                    published(&seen, Topic::SfuCallRenegotiationOffer, url)
+                        .into_iter()
+                        .map(|o| (o["participantId"].clone(), o["targetDid"].clone())),
+                );
+                if !offered.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("no restart offer in time");
+        // A round trip: the media loop has handled every command sent so far,
+        // so a stray offer to another session would have been published.
+        svc.get_quality_preferences().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        offered.extend(
+            published(&drain(&mut events), Topic::SfuCallRenegotiationOffer, url)
+                .into_iter()
+                .map(|o| (o["participantId"].clone(), o["targetDid"].clone())),
+        );
+        assert_eq!(
+            offered,
+            vec![(serde_json::json!(phone), serde_json::json!("did:a"))]
+        );
     }
 
     #[tokio::test]

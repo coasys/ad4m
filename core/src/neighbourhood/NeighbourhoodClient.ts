@@ -220,6 +220,26 @@ export class NeighbourhoodClient {
         })
     }
 
+    /** Ask the SFU to restart ICE on the session `participantId` (this
+     *  agent's, as its join returned it; any other is refused). The offer
+     *  arrives as an `sfu-call-renegotiation-offer` event for that session;
+     *  answer it with {@link sfuCallAnswerServerOffer}. */
+    async sfuCallRestartIce(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<boolean> {
+        return this.#apiClient.call("sfu.callRestartIce", { neighbourhoodUrl, roomName, participantId })
+    }
+
+    /** Fires after a network change, once the client's socket is back on
+     *  the new network. See {@link ApiClient.onNetworkChange}. */
+    onNetworkChange(callback: () => void): () => void {
+        return this.#apiClient.onNetworkChange(callback)
+    }
+
+    /** Check the client's socket now: one that says nothing within a
+     *  deadline is treated as a network change. See {@link ApiClient.checkConnection}. */
+    checkConnection(): void {
+        this.#apiClient.checkConnection()
+    }
+
     async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
         return this.#apiClient.call("sfu.getConfig", { neighbourhoodUrl })
     }

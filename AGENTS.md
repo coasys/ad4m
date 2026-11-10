@@ -145,6 +145,9 @@ so the same file runs on both link languages.
   participant process's TCP and UDP sockets from `/proc`, and the lease
   drops all their traffic (netem 100 % loss, matched by protocol and port)
   while sockets opened later work. Skips without passwordless `sudo -n tc`.
+  E18 makes the same cut, then fires `online` in the participant process
+  (`Participant.networkChanged`). Both assert the call came back in place:
+  u2 saw no departures, so no rebuild.
 - A participant process killed by a signal nobody sent (the libwebrtc binding
   crashes rarely while closing) reruns the scenario once; an assertion failure
   never does.
@@ -159,7 +162,7 @@ replaces the earlier session, which gets `sfu-session-replaced` and stops
 without rejoining, even mid-reconnect (E20); another device joins beside it as a participant of
 its own (E22; at most `MAX_DEVICES_PER_DID` = 4 per room). Every call about
 a session (`callLeave`, `callAnswerServerOffer`, `addIceCandidate`,
-`callSetQualityPreference`, `sendData`) names the `participantId` its join
+`callSetQualityPreference`, `callRestartIce`, `sendData`) names the `participantId` its join
 returned, and acts only on that session of the caller's DID; the SDK sends
 none of them without one, so a tab that never joined cannot end another
 tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
@@ -174,11 +177,24 @@ the participant id); a session never receives its own media or its own
 device; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer only after
-10 s of ICE `Disconnected`; the SDK rebuilds a failed connection and retries
-the join for 120 s. `ApiClient` drops an executor socket whose ping stays
-unanswered for a ping interval (10 s, `PING_INTERVAL_MS`; longer while a large
-write it sent may still be crossing a 16 kB/s link) and dials a new one, so a
-socket a network switch left OPEN is noticed in 10 to 20 s.
+10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
+(`sfu.callRestartIce`), 10 s after the request or after the restart's answer;
+on ICE `disconnected` or a network change the SDK restarts ICE in place (the
+SFU stays the only offerer: the restart comes as a server renegotiation
+offer), and rebuilds the call if that has not reconnected within 5 s; a
+failed connection is rebuilt at once, and a rebuild retries the join for
+120 s. The restart names the session's `participantId` (only that session
+restarts, never another device of the agent), and a manager with no session
+(join not back, left, replaced) sends none. A room roster that leaves this
+session out for 3 s also rebuilds the call (the executor sends the departure
+roster to the departed DID too); a roster that lists it, as during a restart
+in place, changes nothing.
+`ApiClient` drops an executor socket whose ping stays unanswered for a ping
+interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
+still be crossing a 16 kB/s link) and dials a new one, so a
+socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
+at once; `change` on `navigator.connection` and ICE `disconnected` run
+`checkConnection`, which drops a socket silent for 2 s after its ping.
 
 SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
 binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port
