@@ -349,7 +349,12 @@ the offer's state).
   exactly for `valid`. A found person stays for good; "no log" holds for 15 minutes.
   In a flow's authority checks a bot never acts as its owner: a bot-signed link counts
   under the bot's own `did:key` only (`perspectives::flow_instance::atom::flow_person`), so
-  `person` there is display, not authority.
+  `person` there is display, not authority. That rests on the bot mark reaching the flow:
+  the engine reads proposal and role links as `model_query` `__links` rows
+  (`model_query::links::decorated_link`, from `attach_links` and `containment`), so every
+  stored-link read selects `byBot` and `judgementVersion` beside `person` and decodes them as
+  `sparql_store::decode_proof` does (a stale judgement: no person, no mark). A new read of
+  stored links that keeps `person` must keep both.
 - **The re-check** (`run_recheck`, started by `init`): on each `VerdictChange` the links of
   that key; every 60 s the links of bot keys whose scope `expires` fell since the last tick
   (`KeyMap::expiring`), then the `cantCheck` links. Each is judged again and rewritten when

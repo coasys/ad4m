@@ -40,7 +40,7 @@ pub(crate) const JUDGEMENT_VERSION: u64 = 1;
 /// Whether a stored judgement is older than the rules now in force (the version annotation
 /// missing or lower): it is judged again, and until then a read presents its signer
 /// unclassified.
-fn judgement_stale(version: &str, signature: &str) -> bool {
+pub(crate) fn judgement_stale(version: &str, signature: &str) -> bool {
     !signature.is_empty() && version.parse::<u64>().unwrap_or(0) < JUDGEMENT_VERSION
 }
 const ONT_STATUS: &str = "ad4m://ontology/status";
