@@ -58,10 +58,11 @@ master key for the person.
   - release, `Released {epoch, token}`: `remove_master` pushes it, re-reads the epoch (when it
     moved, a store came between: pop and retry), writes `false` only while the release is
     the top layer, then forgets at the epoch. A failure pops only its own release. A removal
-    that finished retires the releases below its own (`retire_below`): no flow can see them
-    again, so repeat removals on an empty vault keep one release, not one per removal. Open
-    intents and receipts stay (an intent can be a take still in flight), so an intent that a
-    crash left adds one layer, until the clear of a later receipt takes out the layers below it.
+    that finished retires the releases below its own (`retire_below`): each is removed or
+    superseded by a receipt whenever the newer release goes, so no flow can see them again,
+    and repeat removals on an empty vault keep one release, not one per removal. Open intents
+    and receipts stay (an intent can be a take still in flight), so an intent that a crash
+    left adds one layer, until the clear of a later receipt takes out the layers below it.
 
   `CustodyNote::standing`: from the top, pass over open intents; the first release or receipt
   decides. `commit_own` removes releases above its intent with an epoch ≤ the intent's (its

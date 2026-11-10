@@ -66,7 +66,8 @@
 //!   refused or fails removes only its own release, wherever it is. A forget that finds a key
 //!   installed since ([`Forgot::Kept`]) released nothing: the release is removed and the
 //!   record is marked from the vault and the note in place. A removal that finished retires
-//!   the releases below its own ([`retire_below`]): no flow can see them again, so repeat
+//!   the releases below its own ([`retire_below`]): each is removed or superseded by a receipt
+//!   whenever the newer release goes, so no flow can see them again, and repeat
 //!   removals on an empty vault keep one release. Intents and receipts stay.
 //! - **repair** ([`refresh_master`], on a vault that keeps the current master): a `MarkOwed`
 //!   note first takes a master key that still waits in the inbox (an acquisition cut off
@@ -1616,12 +1617,15 @@ fn release(
 
 /// Retires the releases below the release of `token`'s removal, which stands for good (its
 /// removal finished and never takes it out again). Each operation that can take that release
-/// out takes out the releases below it too: a receipt whose intent is below them removes every
-/// release above its intent with an epoch not later than its own, and the epoch of a lower
-/// release is not later than the epoch of a higher one ([`release`] reads the epoch again after
-/// its push); a clear removes every layer below its receipt. So no flow can see a release below
-/// a release that stands. Intents and receipts stay: an open intent can be a take still in
-/// flight, and only its own operation changes it. No change when the release is not in the note.
+/// out either takes out the releases below it too or puts a receipt above them that supersedes
+/// them: a receipt whose intent is below them removes every release above its intent with an
+/// epoch not later than its own, and the epoch of a lower release is not later than the epoch
+/// of a higher one ([`release`] reads the epoch again after its push); a receipt whose intent
+/// sits between this release and an older one removes this release and supersedes the older
+/// one, and its clear takes that one out; a clear removes every layer below its receipt. So no
+/// flow can see a release below a release that stands. Intents and receipts stay: an open
+/// intent can be a take still in flight, and only its own operation changes it. No change when
+/// the release is not in the note.
 fn retire_below(
     vault: &dyn Vault,
     scid: &str,
