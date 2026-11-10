@@ -1280,8 +1280,9 @@ of a connection when the connection closes.
 
 A subscribe the client gives up on leaves nothing behind on the executor. When
 the call times out (30 s), or is cancelled (`dispose({ cancelOpening: true })`),
-the client cancels it on the executor. If the executor had already answered, the
-client disposes the subscription that answer names as soon as it arrives. The
+the client cancels it on the executor and then disposes it. The client picks
+each subscription's id itself and sends it with the subscribe call, so it can
+dispose a subscription whose answer it never got. The
 executor runs identical queries once per change, however many subscriptions
 hold them: each subscription still gets its own id and its own updates.
 
