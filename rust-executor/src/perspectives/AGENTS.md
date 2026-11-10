@@ -72,6 +72,11 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
+- `SparqlStore` bumps a write generation after every committed write (`write_generation`,
+  `watch_writes`). The auto-processor watch loop sleeps on it while idle (60 s fallback) and
+  keeps its config, transcript and cursor reads in `WatcherState` (`TickReads`) while it is
+  unchanged. A new store write path must call `note_write`, or the loop misses that change
+  until some other write lands.
 - **File descriptors.** Every perspective keeps one RocksDB store open
   (`SparqlStore::new`), and only `PerspectiveInstance` holds it: the store's descriptors close
   when the last clone of the removed instance drops, i.e. once its background loops have seen
