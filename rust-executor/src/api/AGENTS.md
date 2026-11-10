@@ -113,6 +113,10 @@ access check: a call that fails both gets the access answer.
 
 Notes on some methods:
 
+- `agent.generate` creates the main agent on first run only: it refuses (409) an
+  agent that is already initialised (`agent.status`'s `isInitialized`) — the check
+  runs inside the agent lock, so a racing generate cannot slip between it and the
+  write. `agent.unlock` is the call for an existing agent.
 - `Open` handlers check the session's principal (`user.logout`). `user.revokeAllSessions` is
   `Cap(agent:UPDATE)`, as `agent.removeApp`: since #1399 an app a user approved acts as the
   user's agent too; its handler checks the principal for a named user.
@@ -144,7 +148,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-219 methods: Cap 79, Executor 43, Open 5, Operator 22, Owns 68, UserOrOperator 2.
+220 methods: Cap 80, Executor 43, Open 5, Operator 22, Owns 68, UserOrOperator 2.
 
 | Method | Guard |
 |---|---|
@@ -340,6 +344,7 @@ the guard checked:
 | `sfu.callAnswerServerOffer` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callJoin` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callLeave` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callRestartIce` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callSetQualityPreference` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.cascadeStatus` | `Cap(neighbourhood:READ)` |
 | `sfu.ensureMembership` | `Operator` |
@@ -560,7 +565,8 @@ them against those two guards.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
 - `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,
-  `forbidden`, `not_found`, `internal`. No `From` impls for domain errors yet.
+  `unauthorized`, `forbidden`, `not_found`, `conflict`, `too_many_requests`,
+  `internal`, `not_implemented`. No `From` impls for domain errors yet.
 
 ## openai_compat/
 

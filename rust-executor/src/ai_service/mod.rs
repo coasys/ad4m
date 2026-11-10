@@ -3053,3 +3053,6 @@ mod transcription_owner_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod default_task_respawn_tests;
