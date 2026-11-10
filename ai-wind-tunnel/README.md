@@ -75,7 +75,9 @@ time); STT models rank on the mean WER over all clips (`werMean`).
 Needs: Node 24+, `pnpm`, `curl`, `ffmpeg` (decodes the m4a recording), an `ad4m-executor`
 binary, and whichever providers you want to measure. Nothing has to be installed for
 llama-server, whisper-server, nemo-speech and sherpa-onnx: the run downloads the manifest's
-build for the machine and checks its sha256. Ollama needs its binary; speaches and vLLM need docker.
+build for the machine and checks its sha256. The exception is whisper-server on macOS: the
+manifest has no macOS build, so its cells are skipped unless `AI_WT_WHISPER_SERVER` names a
+binary built from source. Ollama needs its binary; speaches and vLLM need docker.
 
 ```bash
 cd tests/js
@@ -93,6 +95,11 @@ Options: `--providers`, `--services`, `--models` (manifest ids or provider names
 `--repeat N`, `--concurrency 1,4`, `--llama-builds rocm,vulkan` (manifest build keys or
 backends; default the GPU builds, or CPU without a GPU backend), `--no-direct`, `--attach`,
 `--out FILE`, `--no-write`.
+
+A TTS cell checks its audio by transcribing it with an STT model that passed earlier in the
+same run. So a run filtered to `--services tts` has no reference and its TTS cells fail even
+when synthesis works; never commit such evidence. Run STT in the same pass, for example
+`--providers speaches --services stt,tts` without a narrowing `--models`.
 
 A full run takes a while the first time (about 12 GB of models); afterwards the cache
 (`~/.cache/ad4m-ai-wind-tunnel`, or `AI_WT_CACHE`) holds runtimes, model files, Ollama's
