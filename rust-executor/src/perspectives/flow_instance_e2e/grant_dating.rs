@@ -61,6 +61,7 @@ async fn sync_forged_at(
                 proof: crate::types::ExpressionProof {
                     key: format!("{author}#key"),
                     signature: "not-a-signature".to_string(),
+                    anchor: None,
                 },
                 status: Some(LinkStatus::Shared),
             },
