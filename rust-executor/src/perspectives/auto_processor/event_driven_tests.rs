@@ -188,7 +188,9 @@ async fn a_tick_rereads_the_transcript_only_after_a_link_change() {
 /// Reusing the last read must keep what a fresh read gives: only turns no
 /// run has consumed are queued, and both windows (turn timestamp and the
 /// run's `ran_at`) are applied at the tick's own `now_ms`, so a run that ages
-/// out of the window frees its turns without any link changing.
+/// out of the window frees its turns without any link changing. Consumed
+/// turns are kept without their text, so freeing one reads the transcript
+/// once more.
 #[tokio::test]
 async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
     const WINDOW: i64 = 60_000;
@@ -236,11 +238,22 @@ async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
 
     // No link changes from here on. Past `ran_at + WINDOW` the run no longer
     // counts, while "old" (stamped now) is still inside the window: it is
-    // queued again, as a fresh read would queue it.
+    // queued again, as a fresh read would queue it. The kept read holds no
+    // text for a consumed turn, so this costs one transcript read.
+    let transcript_reads = transcript_queries(&p);
     p.run_auto_processor_tick(&mut watcher, now_ms + WINDOW / 2 + 1_000, &ctx)
         .await;
     assert_eq!(pending_texts(&watcher, "windowed"), vec!["new", "old"]);
-    assert_eq!(all_queries(&p), reads, "and without reading the store");
+    assert_eq!(
+        transcript_queries(&p),
+        transcript_reads + 1,
+        "a consumed turn coming back is read again, once"
+    );
+    assert_eq!(all_queries(&p), reads + 1, "and nothing else is read");
+    let reads = all_queries(&p);
+    p.run_auto_processor_tick(&mut watcher, now_ms + WINDOW / 2 + 1_500, &ctx)
+        .await;
+    assert_eq!(all_queries(&p), reads, "the next tick reuses that read");
 
     // A run that consumed both turns, and a watcher that starts after it:
     // nothing to queue. Past `ran_at + WINDOW` the run no longer counts, but
@@ -441,6 +454,10 @@ async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back
         .windows(2)
         .map(|w| (w[1] - w[0]).as_millis())
         .collect();
+    println!(
+        "{} transcript reads in ~3 s of unrelated writes, gaps {gaps:?} ms",
+        reads.len()
+    );
     assert!(
         reads.len() <= 3,
         "{} transcript reads in ~3 s of unrelated writes (gaps {gaps:?} ms); \
@@ -457,4 +474,65 @@ async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back
         .await
         .expect("teardown ends the loop promptly")
         .expect("loop task");
+}
+
+/// The kept transcript holds text only for turns that may still be queued: a
+/// consumed turn is kept as its id and timestamp.
+#[tokio::test]
+async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
+    use super::watcher::CachedTurn;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "done",
+        "ns://body",
+    )
+    .await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://2",
+        "did:key:alice",
+        "open",
+        "ns://body",
+    )
+    .await;
+    let cfg = config("lean", 600_000, None);
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let turns = turn_ids(&p).await;
+    let done = turns.iter().find(|t| t.text == "done").expect("done turn");
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    mint_run(
+        &mut p,
+        &ctx,
+        "run-done",
+        "lean",
+        vec![done.id.clone()],
+        now_ms,
+    )
+    .await;
+
+    let mut watcher = WatcherState::new();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let kept = watcher
+        .reads
+        .transcript(&cfg, p.sparql_store.write_generation())
+        .expect("the tick kept its read");
+    assert_eq!(kept.len(), 2);
+    for turn in kept.iter() {
+        match turn {
+            CachedTurn::Consumed { id, .. } => assert_eq!(id, &done.id),
+            CachedTurn::Full(t) => assert_eq!(t.text, "open"),
+        }
+    }
+    assert!(kept
+        .iter()
+        .any(|t| matches!(t, CachedTurn::Consumed { .. })));
+    assert_eq!(pending_texts(&watcher, "lean"), vec!["open"]);
 }

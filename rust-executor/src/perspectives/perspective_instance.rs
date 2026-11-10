@@ -6545,7 +6545,12 @@ impl PerspectiveInstance {
     /// idle it sleeps until the perspective's store takes a write (a link
     /// added or removed, by anyone: local, a link language, the pass itself),
     /// waits `AUTO_PROCESSOR_TICK_MS` more so a burst of writes makes one
-    /// tick, and ticks; with no write it ticks after
+    /// tick, and ticks. A write-woken tick also waits out the idle back-off
+    /// since the last tick that read the store (doubling from
+    /// `AUTO_PROCESSOR_TICK_MS` to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS`, see
+    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)),
+    /// so a store busy with writes that add no turn is read no more often
+    /// than the poll this replaced. With no write it ticks after
     /// [`idle_wait_ms`](crate::perspectives::auto_processor::watcher::idle_wait_ms)
     /// (60 s, or when a deferral ends). A tick reuses the store reads of the
     /// one before while no write landed in between (`TickReads`), so an idle
@@ -6574,7 +6579,8 @@ impl PerspectiveInstance {
     /// `ProcessingClaim` election runs across distinct DIDs on one executor.
     pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
         use crate::perspectives::auto_processor::watcher::{
-            idle_wait_ms, wait_for_tick, WaitEnd, WatcherState, AUTO_PROCESSOR_TICK_MS,
+            idle_wait_ms, next_tick_delay_ms, wait_for_tick, WaitEnd, WatcherState,
+            AUTO_PROCESSOR_TICK_MS,
         };
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -6583,6 +6589,12 @@ impl PerspectiveInstance {
         let mut writes = self.sparql_store.watch_writes();
         // The first pass runs after one base tick, whatever the store does.
         let mut wait = Some(AUTO_PROCESSOR_TICK_MS);
+        // The last tick that found the store changed, so it read it, and its
+        // generation. A write-woken idle tick runs no sooner than `idle_floor_ms`
+        // after it: writes that add no turn must not make the loop read the
+        // store more often than the idle back-off did.
+        let mut last_read: Option<(u64, tokio::time::Instant)> = None;
+        let mut idle_floor_ms = AUTO_PROCESSOR_TICK_MS;
 
         loop {
             let end = match wait {
@@ -6591,9 +6603,19 @@ impl PerspectiveInstance {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     let ms = idle_wait_ms(&watcher, now_ms);
                     match wait_for_tick(&self.is_teardown, ms, Some(&mut writes)).await {
-                        // Let the rest of a burst of writes land first.
+                        // Let the rest of a burst of writes land first, and
+                        // keep the back-off since the last read.
                         WaitEnd::Write => {
-                            wait_for_tick(&self.is_teardown, AUTO_PROCESSOR_TICK_MS, None).await
+                            let since_read = last_read
+                                .map(|(_, at)| at.elapsed().as_millis() as u64)
+                                .unwrap_or(u64::MAX);
+                            let floor = idle_floor_ms.saturating_sub(since_read);
+                            wait_for_tick(
+                                &self.is_teardown,
+                                floor.max(AUTO_PROCESSOR_TICK_MS),
+                                None,
+                            )
+                            .await
                         }
                         other => other,
                     }
@@ -6604,7 +6626,10 @@ impl PerspectiveInstance {
             }
             // Writes up to here are seen by this tick; one landing during it
             // (the pass's own, or a peer's) wakes the next.
-            writes.borrow_and_update();
+            let generation = *writes.borrow_and_update();
+            if last_read.is_none_or(|(g, _)| g != generation) {
+                last_read = Some((generation, tokio::time::Instant::now()));
+            }
             let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
@@ -6613,6 +6638,7 @@ impl PerspectiveInstance {
                 .run_auto_processor_tick(&mut watcher, now_ms, &context)
                 .await;
             wait = had_pending.then_some(AUTO_PROCESSOR_TICK_MS);
+            idle_floor_ms = next_tick_delay_ms(idle_floor_ms, had_pending);
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -6655,7 +6681,7 @@ impl PerspectiveInstance {
             config::load_processors,
             cursor::{load_processed_sources, processed_ids_in_window, turn_in_source_window},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
-            watcher::{run_one_pass, PassOutcome, PendingTurn},
+            watcher::{run_one_pass, CachedTurn, PassOutcome, PendingTurn},
         };
 
         let uuid = self.uuid.clone();
@@ -6680,29 +6706,6 @@ impl PerspectiveInstance {
 
         // 1. Record new-since-last-processed turns per config (payload kept).
         for cfg in configs.iter() {
-            let transcript = match watcher.reads.transcript(cfg, generation) {
-                Some(t) => t,
-                None => match crate::perspectives::interpretation::gather_transcript_sparql(
-                    self,
-                    &cfg.source_scope_query,
-                )
-                .await
-                {
-                    Ok(t) => watcher.reads.set_transcript(
-                        cfg,
-                        generation,
-                        t.iter().map(PendingTurn::from_transcript).collect(),
-                    ),
-                    Err(e) => {
-                        log::warn!(
-                            "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
-                            cfg.processor_id,
-                            uuid
-                        );
-                        continue;
-                    }
-                },
-            };
             let processed_rows = match watcher.reads.processed(&cfg.processor_id, generation) {
                 Some(rows) => rows,
                 None => match load_processed_sources(self, &cfg.processor_id).await {
@@ -6720,13 +6723,49 @@ impl PerspectiveInstance {
                 },
             };
             let processed = processed_ids_in_window(&processed_rows, now_ms, cfg.source_window_ms);
-            for pending in transcript.iter() {
-                if let Some(window_ms) = cfg.source_window_ms {
-                    if !turn_in_source_window(&pending.timestamp, now_ms, window_ms) {
+            // Inside the window and not consumed: may be queued (unless deferred).
+            let queueable = |id: &str, timestamp: &str| {
+                cfg.source_window_ms
+                    .is_none_or(|w| turn_in_source_window(timestamp, now_ms, w))
+                    && !processed.contains(id)
+            };
+            // A kept read is reused unless a turn it keeps without text has
+            // become queueable (its run aged out of the window).
+            let kept = watcher.reads.transcript(cfg, generation).filter(|turns| {
+                !turns.iter().any(|t| {
+                    matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
+                })
+            });
+            let transcript = match kept {
+                Some(t) => t,
+                None => match crate::perspectives::interpretation::gather_transcript_sparql(
+                    self,
+                    &cfg.source_scope_query,
+                )
+                .await
+                {
+                    Ok(t) => watcher.reads.set_transcript(
+                        cfg,
+                        generation,
+                        t.iter().map(PendingTurn::from_transcript).collect(),
+                        queueable,
+                    ),
+                    Err(e) => {
+                        log::warn!(
+                            "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
+                            cfg.processor_id,
+                            uuid
+                        );
                         continue;
                     }
-                }
-                if processed.contains(&pending.id)
+                },
+            };
+            for turn in transcript.iter() {
+                // A turn kept without text was not queueable at this tick's `now_ms` (checked above).
+                let CachedTurn::Full(pending) = turn else {
+                    continue;
+                };
+                if !queueable(&pending.id, &pending.timestamp)
                     || watcher.is_deferred(&cfg.processor_id, &pending.id, now_ms)
                 {
                     continue;
