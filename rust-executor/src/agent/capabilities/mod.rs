@@ -14,6 +14,7 @@ pub use types::*;
 use crate::agent::grants::now;
 use crate::agent::AgentContext;
 use crate::events::Event;
+use crate::presence::{last_seen_write_due, LAST_SEEN_CLOCK_SKEW_S};
 use crate::pubsub::get_global_pubsub;
 use crate::secret::Secret;
 use crate::types::*;
@@ -38,12 +39,6 @@ lazy_static! {
 }
 
 const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
-
-/// Minimum interval (seconds) between two `users.last_seen` writes for the same
-/// user, so an active user's `last_seen` can be this stale. The auto-processor
-/// supervisor's online window depends on it
-/// ([`crate::perspectives::auto_processor::watcher::MANAGED_USER_ONLINE_WINDOW_S`], #1070).
-pub const LAST_SEEN_WRITE_THROTTLE_S: i64 = 300;
 
 /// Who can connect to the listener a request arrived on.
 ///
@@ -129,14 +124,18 @@ pub fn capability_matches(capabilities: &[Capability], expected: &Capability) ->
 pub(crate) const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
 
 /// Update the last_seen timestamp of the account that owns the managed agent `agent_did`, the
-/// agent the caller's session acts as.
-/// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
-/// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
+/// agent the caller's session acts as. See [`track_last_seen_at`].
 pub async fn track_last_seen(agent_did: &str) {
-    use crate::db::Ad4mDb;
+    track_last_seen_at(agent_did, chrono::Utc::now().timestamp()).await;
+}
 
+/// Record activity by the account that owns `agent_did` at `now` in `users.last_seen`, at most
+/// once per [`LAST_SEEN_WRITE_THROTTLE_S`](crate::presence::LAST_SEEN_WRITE_THROTTLE_S). Both the in-memory cache path and the DB path decide
+/// through [`last_seen_write_due`], the same rule the presence readers are tested against
+/// (#1070). The cache only avoids DB lookups: a cached value is never fresher than the DB, so it
+/// cannot suppress a write the DB path would make.
+pub(crate) async fn track_last_seen_at(agent_did: &str, now: i64) {
     let agent_did = agent_did.to_string();
-    let now = chrono::Utc::now().timestamp();
 
     // Check cache first (non-blocking read)
     {
@@ -145,12 +144,11 @@ pub async fn track_last_seen(agent_did: &str) {
             let cache_age = now - entry.last_checked;
             if cache_age < CACHE_TTL_SECONDS {
                 // Cache is fresh, check if update is needed based on cached value
-                let time_since_last_seen = now - entry.last_seen_value;
-                if time_since_last_seen < LAST_SEEN_WRITE_THROTTLE_S {
+                if !last_seen_write_due(Some(entry.last_seen_value), now) {
                     // Still inside the throttle period, no need to update
                     log::trace!(
                         "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
-                        agent_did, entry.last_seen_value, time_since_last_seen
+                        agent_did, entry.last_seen_value, now - entry.last_seen_value
                     );
                     return;
                 }
@@ -162,41 +160,34 @@ pub async fn track_last_seen(agent_did: &str) {
     // Use spawn_blocking to avoid blocking the async runtime
     let agent_did_clone = agent_did.clone();
     let should_update = tokio::task::spawn_blocking(move || {
-        Ad4mDb::with_global_instance(|db| {
-            if let Ok(Some(user)) = db.get_user_by_did(&agent_did_clone) {
-                if let Some(last_seen) = user.last_seen {
-                    let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
-
-                    // Handle unrealistic future timestamps by treating them as stale
-                    // (allow some clock skew tolerance of 1 minute)
-                    let should_update = if last_seen > now + 60 {
-                        log::warn!(
-                            "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
-                            agent_did_clone, last_seen
-                        );
-                        true
-                    } else {
-                        last_seen < throttle_cutoff
-                    };
-
-                    log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
-                        agent_did_clone, last_seen, throttle_cutoff, should_update);
-                    (should_update, Some(last_seen))
-                } else {
-                    log::debug!(
-                        "last_seen tracking for {}: never seen before, updating now",
-                        agent_did_clone
+        let user = crate::db_backend::db_backend().get_user_by_did(&agent_did_clone);
+        if let Ok(Some(user)) = user {
+            if let Some(last_seen) = user.last_seen {
+                if last_seen > now + LAST_SEEN_CLOCK_SKEW_S {
+                    log::warn!(
+                        "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
+                        agent_did_clone, last_seen
                     );
-                    (true, None) // Never updated, do it now
                 }
+                let should_update = last_seen_write_due(Some(last_seen), now);
+
+                log::trace!("last_seen tracking for {}: last_seen={}, should_update={}",
+                    agent_did_clone, last_seen, should_update);
+                (should_update, Some(last_seen))
             } else {
-                log::warn!(
-                    "last_seen tracking: no user owns the agent {}",
+                log::debug!(
+                    "last_seen tracking for {}: never seen before, updating now",
                     agent_did_clone
                 );
-                (false, None) // User not found
+                (true, None) // Never updated, do it now
             }
-        })
+        } else {
+            log::warn!(
+                "last_seen tracking: no user owns the agent {}",
+                agent_did_clone
+            );
+            (false, None) // User not found
+        }
     })
     .await;
 
@@ -229,7 +220,7 @@ pub async fn track_last_seen(agent_did: &str) {
         // Perform the update in spawn_blocking
         let agent_did_for_update = agent_did.clone();
         let update_result = tokio::task::spawn_blocking(move || {
-            Ad4mDb::with_global_instance(|db| db.update_agent_last_seen(&agent_did_for_update))
+            crate::db_backend::db_backend().update_agent_last_seen(&agent_did_for_update)
         })
         .await;
 
@@ -267,10 +258,11 @@ pub async fn track_last_seen(agent_did: &str) {
 /// mode is on, plus sign up, log in and verify an email when it is. Reading users is left out,
 /// so anonymous callers cannot list them.
 pub fn anonymous_capabilities() -> Vec<Capability> {
-    use crate::db::Ad4mDb;
-    anonymous_capabilities_when(Ad4mDb::with_global_instance(|db| {
-        db.get_multi_user_enabled().unwrap_or(false)
-    }))
+    anonymous_capabilities_when(
+        crate::db_backend::db_backend()
+            .get_multi_user_enabled()
+            .unwrap_or(false),
+    )
 }
 
 /// [`anonymous_capabilities`] with multi-user mode on or off.
@@ -594,6 +586,58 @@ pub fn gen_random_digits() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The writer itself, through the real DB and cache, writes exactly when
+    /// [`last_seen_write_due`] says so (#1070). The first call (no cache entry)
+    /// takes the DB path at the last not-due second; the second call, one
+    /// second later, first passes the cache entry the first call left behind
+    /// and then the DB path. An inline comparison on either path that
+    /// disagrees with the shared rule fails one of the two asserts.
+    #[tokio::test]
+    async fn track_last_seen_writes_exactly_when_the_throttle_has_elapsed() {
+        use crate::db::Ad4mDb;
+        use crate::presence::LAST_SEEN_WRITE_THROTTLE_S;
+        crate::perspectives::interpretation_test_support::ensure_db_init();
+
+        let email = "track-last-seen-throttle@test";
+        let did = "did:key:track-last-seen-throttle";
+        let t0 = chrono::Utc::now().timestamp() - 10_000;
+        Ad4mDb::with_global_instance(|db| {
+            db.import_from_json(
+                serde_json::json!({
+                    "users": [{
+                        "username": email,
+                        "did": did,
+                        "password_hash": "x",
+                        "last_seen": t0,
+                    }]
+                }),
+                None,
+            )
+        })
+        .expect("seed user");
+        let stored = || {
+            Ad4mDb::with_global_instance(|db| db.get_user_by_did(did))
+                .expect("read user")
+                .expect("user")
+                .last_seen
+        };
+        assert_eq!(stored(), Some(t0));
+
+        track_last_seen_at(did, t0 + LAST_SEEN_WRITE_THROTTLE_S).await;
+        assert_eq!(
+            stored(),
+            Some(t0),
+            "exactly one throttle after the last write is not due yet"
+        );
+
+        track_last_seen_at(did, t0 + LAST_SEEN_WRITE_THROTTLE_S + 1).await;
+        assert_ne!(
+            stored(),
+            Some(t0),
+            "one second past the throttle the writer must record the activity"
+        );
+    }
 
     #[test]
     fn all_capability_is_expected() {
@@ -1087,7 +1131,7 @@ mod app_token_tests {
             "the app list carried the app token"
         );
         assert!(!serde_json::to_string(&apps).unwrap().contains(&token));
-        let rows = crate::db::Ad4mDb::with_global_instance(|db| db.grants()).unwrap();
+        let rows = crate::db_backend::db_backend().grants().unwrap();
         assert!(rows.iter().any(|row| row.request_id == request_id));
         assert!(!format!("{rows:?}").contains(&token));
 
@@ -1373,11 +1417,7 @@ mod app_token_tests {
         assert!(requested_agent(Some("did:key:z6MkNoSuchAgent")).is_err());
         // An email without a user is taken, as one for nobody: the answer does not say
         // whether the email has an account.
-        let users = || {
-            crate::db::Ad4mDb::with_global_instance(|db| db.list_users())
-                .unwrap()
-                .len()
-        };
+        let users = || crate::db_backend::db_backend().list_users().unwrap().len();
         let before = users();
         assert_eq!(
             requested_agent(Some("nobody-here@example.org")).unwrap(),

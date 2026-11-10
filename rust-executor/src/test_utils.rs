@@ -231,6 +231,30 @@ pub fn ensure_test_db() {
     }
 }
 
+/// Closes the global database (takes it out of its slot) and puts it back when dropped, even
+/// if the test panics: every domain method then returns the "database is not open" error, as
+/// it does before the database opens. Opens an in-memory database first when none is open.
+pub struct DbClosed(Option<crate::db::Ad4mDb>);
+
+impl DbClosed {
+    pub fn now() -> Self {
+        ensure_test_db();
+        let db = crate::db::Ad4mDb::global_instance();
+        let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        DbClosed(db.take())
+    }
+}
+
+impl Drop for DbClosed {
+    fn drop(&mut self) {
+        let db = crate::db::Ad4mDb::global_instance();
+        let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if db.is_none() {
+            *db = self.0.take();
+        }
+    }
+}
+
 /// A token for the app `auth`, with its grant: on the managed agent of `auth.user_email`, or
 /// on the main agent. Valid for an hour. Needs `setup_wallet()` and `setup_agent()` first.
 pub fn granted_token(auth: crate::agent::capabilities::AuthInfo) -> String {

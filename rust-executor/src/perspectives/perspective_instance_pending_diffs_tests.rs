@@ -2,17 +2,25 @@
 //! link language, on tokio's paused clock.
 //!
 //! The fake language rejects every commit while it is "down" (a dead link
-//! server). Accepted links are recorded in order as `+target` / `-target`.
+//! server), and while up refuses any diff that adds a link to `REFUSED`.
+//! `fail_next` makes the next commits fail as if the server were briefly down.
+//! Accepted links are recorded in order as `+target` / `-target`.
 
 use super::*;
 use crate::db::Ad4mDb;
 use crate::types::{DecoratedNeighbourhoodExpression, ExpressionProof, Link, PerspectiveState};
 use std::sync::atomic::AtomicUsize;
 
+/// The fake language refuses, whenever it is up, any diff that adds a link
+/// to this target.
+const REFUSED: &str = "refused";
+
 #[derive(Default)]
 struct FakeLanguage {
     attempts: AtomicUsize,
     down: AtomicBool,
+    /// Fail this many of the next commits, whatever they carry.
+    fail_next: AtomicUsize,
     committed: std::sync::Mutex<Vec<String>>,
     /// Links per accepted commit, in order.
     batches: std::sync::Mutex<Vec<usize>>,
@@ -21,8 +29,16 @@ struct FakeLanguage {
 impl FakeLanguage {
     fn commit(&self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
-        if self.down.load(Ordering::SeqCst) {
+        if self.down.load(Ordering::SeqCst)
+            || self
+                .fail_next
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+        {
             return Err(anyhow!("link server unreachable"));
+        }
+        if diff.additions.iter().any(|l| l.data.target == REFUSED) {
+            return Err(anyhow!("link server refused the diff"));
         }
         self.batches
             .lock()
@@ -90,12 +106,51 @@ fn enqueue(perspective: &PerspectiveInstance, diff: &PerspectiveDiff) {
     Ad4mDb::with_global_instance(|db| db.add_pending_diff(&perspective.uuid, diff)).unwrap();
 }
 
+/// Store `target`'s link as Shared, as a write through `commit` leaves it.
+fn store_shared(perspective: &PerspectiveInstance, target: &str) {
+    perspective
+        .sparql_store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..link("did:key:alice", target)
+        })
+        .unwrap();
+}
+
+/// `fake`'s commit, with a render that answers `remote`.
+fn rendering_language(fake: &Arc<FakeLanguage>, remote: Vec<LinkExpression>) -> Language {
+    let fake = fake.clone();
+    Language::with_test_commit(
+        "fake-link-language".to_string(),
+        Arc::new(move |diff| fake.commit(diff)),
+    )
+    .with_test_render(Arc::new(move || {
+        Ok(Some(Perspective {
+            links: remote.clone(),
+        }))
+    }))
+}
+
 /// Diffs still waiting to be committed.
 fn pending(perspective: &PerspectiveInstance) -> usize {
     Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&perspective.uuid, None))
         .unwrap()
         .1
         .len()
+}
+
+/// Targets of the diffs taken out of the queue and kept (parked), read
+/// through the export, which lists every row with its `is_pending` flag.
+fn parked_targets(perspective: &PerspectiveInstance) -> Vec<String> {
+    let export = Ad4mDb::with_global_instance(|db| db.export_all_to_json()).unwrap();
+    export["perspective_diffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["perspective"] == perspective.uuid.as_str() && d["is_pending"] == false)
+        .flat_map(|d| d["additions"].as_array().unwrap().clone())
+        .map(|l| l["data"]["target"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn start_loop(perspective: &PerspectiveInstance) -> tokio::task::JoinHandle<()> {
@@ -212,14 +267,59 @@ async fn a_failing_language_is_retried_with_backoff() {
 
     let attempts = fake.attempts();
     // 100 ms doubling to a 30 s cap: about 9 attempts in the first minute,
-    // then 2 a minute (28 in all). Retrying every 100 ms would be ~6,000;
-    // without the cap the wait grows to 51.2 s and gives about 20.
+    // then 2 a minute (28 in all). Each attempt makes 3 calls: the batch,
+    // its oldest diff alone, the rest. Retrying every 100 ms would be
+    // ~18,000 calls; without the cap the wait grows to 51.2 s and gives
+    // about 60.
     assert!(
-        (25..=60).contains(&attempts),
+        (75..=180).contains(&attempts),
         "10 simulated minutes against a dead language made {} commit attempts",
         attempts
     );
     assert_eq!(pending(&perspective), 10, "an outage loses nothing");
+}
+
+/// The queue of commits a link language did not accept lives in the
+/// executor's database, not in the language: a restart (a new instance over
+/// the same database, with a new language instance) sends them, oldest
+/// first, and does not send again a diff the language accepted before it.
+#[tokio::test(start_paused = true)]
+async fn a_restart_sends_the_diffs_the_language_did_not_accept() {
+    let before = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&before).await;
+    perspective.set_immediate_commits(10).await;
+    perspective.commit(&add("accepted")).await.unwrap();
+    before.down.store(true, Ordering::SeqCst);
+    for t in ["first", "second", "third"] {
+        perspective.commit(&add(t)).await.unwrap();
+    }
+    assert_eq!(before.committed(), vec!["+accepted"]);
+    assert_eq!(
+        queued_targets(&perspective),
+        vec!["first", "second", "third"]
+    );
+
+    // The restart: nothing of the old instance or its language survives
+    // but the database.
+    let handle = perspective.persisted.lock().await.clone();
+    drop(perspective);
+    let after = Arc::new(FakeLanguage::default());
+    let restarted = PerspectiveInstance::new(handle, None);
+    let language = after.clone();
+    *restarted.link_language.write().await = Some(Language::with_test_commit(
+        "fake-link-language".to_string(),
+        Arc::new(move |diff| language.commit(diff)),
+    ));
+    let task = start_loop(&restarted);
+    let drained = run_until(Duration::from_secs(30), || pending(&restarted) == 0).await;
+    task.abort();
+
+    assert!(drained.is_some(), "{} still pending", pending(&restarted));
+    assert_eq!(
+        after.committed(),
+        vec!["+first", "+second", "+third"],
+        "the restarted executor sends what was not accepted, in order, and only that"
+    );
 }
 
 /// A success resets the backoff: a second outage starts again from 100 ms
@@ -250,6 +350,302 @@ async fn the_backoff_starts_again_after_a_success() {
         "a second outage got {} attempts in its first 10 s: the backoff did not reset",
         attempts
     );
+}
+
+/// A diff the language refuses while it accepts the others is parked (kept,
+/// out of the queue), and the diffs queued before and after it still reach
+/// the language, in order.
+#[tokio::test(start_paused = true)]
+async fn a_refused_diff_does_not_block_the_diffs_behind_it() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("before"));
+    enqueue(&perspective, &add(REFUSED));
+    enqueue(&perspective, &add("after"));
+    let task = start_loop(&perspective);
+
+    let drained = run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    // A later write is no longer queued behind the refused diff.
+    perspective.commit(&add("later")).await.unwrap();
+    task.abort();
+
+    assert!(
+        drained.is_some(),
+        "{} diffs still pending after {} commit attempts",
+        pending(&perspective),
+        fake.attempts()
+    );
+    assert_eq!(fake.committed(), vec!["+before", "+after", "+later"]);
+    assert_eq!(pending(&perspective), 0);
+    assert_eq!(parked_targets(&perspective), vec![REFUSED]);
+}
+
+/// A queued diff's links are Shared in the store before the commit loop sends
+/// them. The fallback sync leaves them to the queue: sending them too would
+/// commit the same links twice.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_leaves_a_queued_diff_to_the_queue() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("queued"));
+    store_shared(&perspective, "queued");
+    store_shared(&perspective, "missing");
+    *perspective.link_language.write().await = Some(rendering_language(&fake, vec![]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.committed(), vec!["+missing"]);
+    assert_eq!(pending(&perspective), 1);
+}
+
+/// The store reads a link without a predicate back as `None`; a language may
+/// render the same link with `""`. They are one link, so the fallback sync
+/// does not send it again.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_matches_an_empty_predicate_to_none() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let without = |predicate: Option<&str>| LinkExpression {
+        data: Link {
+            predicate: predicate.map(str::to_string),
+            ..link("did:key:alice", "plain").data
+        },
+        ..link("did:key:alice", "plain")
+    };
+    perspective
+        .sparql_store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..without(None)
+        })
+        .unwrap();
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, vec![without(Some(""))]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert!(fake.committed().is_empty(), "{:?}", fake.committed());
+}
+
+/// Two links that differ only in a nonempty predicate are two links: the
+/// fallback sync sends the one the remote lacks.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_tells_two_predicates_apart() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let with = |predicate: &str| LinkExpression {
+        data: Link {
+            predicate: Some(predicate.to_string()),
+            ..link("did:key:alice", "plain").data
+        },
+        ..link("did:key:alice", "plain")
+    };
+    perspective
+        .sparql_store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..with("ad4m://other")
+        })
+        .unwrap();
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, vec![with("ad4m://has")]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.committed(), vec!["+plain"]);
+}
+
+/// The fallback sync sends the Shared links the remote lacks, but never the
+/// links of a parked diff: they stay Shared in the store, and sending them
+/// would put them behind the diffs that went through after them. The parked
+/// diff failed only transiently, so the language would take it again.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_does_not_send_a_parked_diff_again() {
+    let fake = Arc::new(FakeLanguage::default());
+    fake.fail_next.store(2, Ordering::SeqCst);
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("a"));
+    enqueue(&perspective, &add("b"));
+    let task = start_loop(&perspective);
+    run_until(Duration::from_secs(60), || pending(&perspective) == 0)
+        .await
+        .expect("the queue drains");
+    task.abort();
+    assert_eq!(parked_targets(&perspective), vec!["a"]);
+
+    for target in ["a", "b", "missing"] {
+        store_shared(&perspective, target);
+    }
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, vec![link("did:key:alice", "b")]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(fake.committed(), vec!["+b", "+missing"]);
+}
+
+/// A fallback sync that starts while the commit loop is parking a diff waits
+/// for the park: it must not read the parked rows before the park lands and
+/// then send the parked link after the diffs that went through behind it.
+///
+/// The test seam's commit is synchronous, so the rest of the batch blocks a
+/// worker thread on a std channel once the language has taken it; the
+/// multi-thread runtime keeps the others free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fallback_sync_waits_for_a_park_in_flight() {
+    let fake = Arc::new(FakeLanguage::default());
+    // The batch and the oldest diff alone fail; the rest goes through.
+    fake.fail_next.store(2, Ordering::SeqCst);
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("a"));
+    enqueue(&perspective, &add("b"));
+    for target in ["a", "b"] {
+        store_shared(&perspective, target);
+    }
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let rest_sent = AtomicBool::new(false);
+    let in_language = fake.clone();
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| {
+                let result = in_language.commit(diff);
+                // Hold the commit loop between the language taking the rest
+                // of the batch and the park.
+                if result.is_ok() && !rest_sent.swap(true, Ordering::SeqCst) {
+                    entered_tx.lock().unwrap().send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30))
+                        .map_err(|_| anyhow!("never released"))?;
+                }
+                result
+            }),
+        )
+        .with_test_render(Arc::new(|| {
+            Ok(Some(Perspective {
+                links: vec![link("did:key:alice", "b")],
+            }))
+        })),
+    );
+
+    let commit_loop = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.commit_pending_diffs().await })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the rest of the batch reaches the language");
+
+    let fallback = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.ensure_public_links_are_shared().await })
+    };
+    // Time for a fallback that does not wait for the park to run to its end.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    release_tx.send(()).unwrap();
+    commit_loop.await.unwrap().unwrap();
+    assert!(fallback.await.unwrap());
+
+    assert_eq!(parked_targets(&perspective), vec!["a"]);
+    assert_eq!(fake.committed(), vec!["+b"]);
+}
+
+/// A fallback sync that starts while a pending batch is on its way to the
+/// language waits for it, and then sees its links in the render: the same
+/// links are not sent twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fallback_sync_waits_for_a_pending_batch_in_flight() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("a"));
+    store_shared(&perspective, "a");
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let first = AtomicBool::new(true);
+    let in_language = fake.clone();
+    let rendered = fake.clone();
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| {
+                // Hold the commit loop's first send before the language takes it.
+                if first.swap(false, Ordering::SeqCst) {
+                    entered_tx.lock().unwrap().send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30))
+                        .map_err(|_| anyhow!("never released"))?;
+                }
+                in_language.commit(diff)
+            }),
+        )
+        // The remote holds what the language accepted so far.
+        .with_test_render(Arc::new(move || {
+            Ok(Some(Perspective {
+                links: rendered
+                    .committed()
+                    .iter()
+                    .filter_map(|c| c.strip_prefix('+'))
+                    .map(|target| link("did:key:alice", target))
+                    .collect(),
+            }))
+        })),
+    );
+
+    let commit_loop = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.commit_pending_diffs().await })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the pending batch is on its way to the language");
+
+    let fallback = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.ensure_public_links_are_shared().await })
+    };
+    // Time for a fallback that does not wait for the batch to send its links.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    release_tx.send(()).unwrap();
+    commit_loop.await.unwrap().unwrap();
+    assert!(fallback.await.unwrap());
+
+    assert_eq!(fake.committed(), vec!["+a"]);
+}
+
+/// Two healthy diffs; the batch and the oldest alone fail on a transient
+/// outage, and the newer one goes through once it is over. The oldest was
+/// never refused for good, so it must be kept (parked), not deleted.
+#[tokio::test(start_paused = true)]
+async fn a_transient_failure_of_the_oldest_diff_parks_it_instead_of_deleting_it() {
+    let fake = Arc::new(FakeLanguage::default());
+    fake.fail_next.store(2, Ordering::SeqCst);
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("a"));
+    enqueue(&perspective, &add("b"));
+    let task = start_loop(&perspective);
+
+    let drained = run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    task.abort();
+
+    assert!(
+        drained.is_some(),
+        "{} diffs still pending",
+        pending(&perspective)
+    );
+    assert_eq!(fake.committed(), vec!["+b"]);
+    assert_eq!(parked_targets(&perspective), vec!["a"]);
 }
 
 /// A slow link-language commit must not block `set_immediate_commits`, and

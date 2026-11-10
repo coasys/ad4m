@@ -438,7 +438,8 @@ if ! timeout "$BUILD_TIMEOUT" bash -euo pipefail -c '
   pnpm install --no-frozen-lockfile
   pnpm build-dapp
   (cd core && pnpm install --no-frozen-lockfile)
-  pnpm run build-deno-snapshot
+  # The checkout persists between deploys: make the snapshot from source, never from a stamp.
+  FORCE_DENO_SNAPSHOT=1 pnpm run build-deno-snapshot
   export CUDA_ROOT="${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda-12.8}"
   # cudarc reads `nvcc` from PATH, not from CUDA_ROOT. /usr/local/cuda/bin is 13.0.
   export PATH="${CUDA_ROOT}/bin:${PATH}"

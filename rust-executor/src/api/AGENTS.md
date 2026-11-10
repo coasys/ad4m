@@ -7,7 +7,7 @@ REST/WS shim. Split plan: spec item 6.
 
 | Route | Handler | Notes |
 |---|---|---|
-| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
+| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice, or that repeats `params`, `events` or `event`, is refused from the frame's text (`identity_ws::duplicate_member_refusal`, 400 `invalid: DuplicateMember`): the params `Value` keeps only the last. The refusal comes after `HandlerMap::admit`, so a caller the guard refuses gets the access answer. **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS |
 
@@ -80,6 +80,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
 | `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
 | `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
+| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`): every app holds their capabilities by default |
 | `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
 
 `Owns` per `Owner` (who owns the resource; the operator reaches all):
@@ -112,6 +113,10 @@ access check: a call that fails both gets the access answer.
 
 Notes on some methods:
 
+- `agent.generate` creates the main agent on first run only: it refuses (409) an
+  agent that is already initialised (`agent.status`'s `isInitialized`) — the check
+  runs inside the agent lock, so a racing generate cannot slip between it and the
+  write. `agent.unlock` is the call for an existing agent.
 - `Open` handlers check the session's principal (`user.logout`). `user.revokeAllSessions` is
   `Cap(agent:UPDATE)`, as `agent.removeApp`: since #1399 an app a user approved acts as the
   user's agent too; its handler checks the principal for a named user.
@@ -143,7 +148,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-194 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 68.
+206 methods: Cap 80, Executor 33, Open 5, Operator 18, Owns 68, UserOrOperator 2.
 
 | Method | Guard |
 |---|---|
@@ -198,6 +203,17 @@ the guard checked:
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
 | `hosting.wallet` | `Executor(runtime.hosting:READ)` |
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
+| `identity.claimOffer` | `Operator` |
+| `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
+| `identity.devices` | `Cap(agent:READ)` |
+| `identity.joinStatus` | `Cap(agent:READ)` |
+| `identity.log` | `Cap(agent:READ)` |
+| `identity.offers` | `Cap(agent:READ)` |
+| `identity.openOffer` | `Cap(agent:UPDATE)` |
+| `identity.publish` | `UserOrOperator(agent:UPDATE)` |
+| `identity.resetLog` | `Operator` |
+| `identity.resolve` | `Cap(agent:READ)` |
+| `identity.status` | `Cap(agent:READ)` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |
@@ -314,6 +330,7 @@ the guard checked:
 | `sfu.callAnswerServerOffer` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callJoin` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callLeave` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callRestartIce` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callSetQualityPreference` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.cascadeStatus` | `Cap(neighbourhood:READ)` |
 | `sfu.ensureMembership` | `Operator` |
@@ -534,7 +551,8 @@ them against those two guards.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
 - `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,
-  `forbidden`, `not_found`, `internal`. No `From` impls for domain errors yet.
+  `unauthorized`, `forbidden`, `not_found`, `conflict`, `too_many_requests`,
+  `internal`, `not_implemented`. No `From` impls for domain errors yet.
 
 ## openai_compat/
 

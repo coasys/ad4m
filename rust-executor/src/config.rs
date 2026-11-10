@@ -129,6 +129,10 @@ pub struct Ad4mConfig {
     pub dynamic_class_tools: Option<bool>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,
+    /// Shut down once the process that started the executor is gone (unix). For launchers and
+    /// test harnesses that may die without stopping it. Default `false`: a daemonised executor
+    /// (`nohup`, `&` from a shell that then exits) keeps running.
+    pub exit_with_parent: Option<bool>,
     /// Local DID for this SFU node in a cascade cluster.  Required if
     /// any cascade options are set; otherwise the SFU runs single-node.
     pub sfu_local_did: Option<String>,
@@ -162,6 +166,16 @@ pub struct Ad4mConfig {
     /// DID of the cascade node that takes redirected joins first. Unset:
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
+    /// `identity.storeUrl`: the identity store's base URL, given to the agent language as its
+    /// `storeUrl` setting. Unset: the network seed's `identityStore`, else no store.
+    pub identity_store_url: Option<String>,
+    /// `identity.storeKeys`: the store keys (Ed25519 multikeys) a head from the store must be
+    /// signed by. A list, so the store's key can rotate. Unset: the seed's store keys when
+    /// `identity_store_url` is unset too, else none (`IdentitySettings::from_config`).
+    pub identity_store_keys: Option<Vec<String>>,
+    /// `identity.allowPrivateSrc`: let the `src` of a DID URL that `identity.resolve` reads
+    /// reach loopback and private addresses. Off by default; for tests and local development.
+    pub identity_allow_private_src: Option<bool>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -529,6 +543,7 @@ impl Ad4mConfig {
             mcp_port: None,
             dynamic_class_tools: None,
             pid_file: None,
+            exit_with_parent: None,
             sfu_local_did: None,
             sfu_max_participants_per_node: None,
             sfu_cascade_listen: None,
@@ -538,6 +553,9 @@ impl Ad4mConfig {
             sfu_udp_port: None,
             sfu_public_addr: None,
             sfu_preferred_node: None,
+            identity_store_url: None,
+            identity_store_keys: None,
+            identity_allow_private_src: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,

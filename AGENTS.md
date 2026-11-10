@@ -11,6 +11,10 @@ file. Edit this file; do not put unique rules in `CLAUDE.md`.
 | `rust-executor/` | The AD4M runtime: WS RPC server, perspectives/graph store, languages runtime (Deno), Holochain conductor, AI service, MCP server. **Start at `rust-executor/AGENTS.md`.** | Rust |
 | `cli/` | `ad4m` CLI binary; wraps `rust-executor` (`ad4m-executor` subcommand) and `rust-client` | Rust |
 | `rust-client/` | Rust client for the executor's WS RPC | Rust |
+| `ad4m-hash-chain/` | Generic linear hash chain of signed JSON entries (entry hash, `eddsa-jcs-2022` proofs, fold/import, fork detection, `ChainStore` with memory/SQLite adapters; native + WASM). Under the key log. See `ad4m-hash-chain/AGENTS.md` | Rust |
+| `ad4m-identity-core/` | The `did:scid:coasys:1` identity core: the key log as a chain type on `ad4m-hash-chain` (`Event`, `KelPolicy`, `fold`, `KeyState`), the DID document (`did_document`), signing domains, proof of work, event builders (`build`), the 12 words (`words`), WASM exports (`wasm`). Spec `docs-src/identity/did-scid-coasys-1.md`. See `ad4m-identity-core/AGENTS.md` | Rust |
+| `ad4m-identity-client/` | The master-key side of `did:scid:coasys:1` for apps: `Vault` (`MemoryVault` behind `test-vault`), `MasterSigner`, `ViaExecutor` (the executor's `identity.*` calls over any `ExecutorRpc`; feature `ws` for `ad4m-client`), flows `create`, `link`, `revoke`. Builds for wasm32. See `ad4m-identity-client/AGENTS.md` | Rust |
+| `identity-store/` | The shared store of key logs: `identity-store` binary (axum, SQLite on `ad4m-hash-chain`'s `SqliteChainStore`), signed heads, the key index, signed requests, agent records, offers and claims (an `add` spends a claim: the claim check). Its log and head reads are the public did:scid host profile (any origin, cached). Reached by executors only through the agent language. See `identity-store/AGENTS.md` | Rust |
 | `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC contracts (`src/generated/api/RpcMethods.ts`) | TS |
 | `connect/` | Browser/Node connection helper (`@coasys/ad4m-connect`) | TS |
 | `bootstrap-languages/` | The system Languages (agent, perspective-diff-sync, etc.) bundled into the executor | TS/Rust |
@@ -141,6 +145,9 @@ so the same file runs on both link languages.
   participant process's TCP and UDP sockets from `/proc`, and the lease
   drops all their traffic (netem 100 % loss, matched by protocol and port)
   while sockets opened later work. Skips without passwordless `sudo -n tc`.
+  E18 makes the same cut, then fires `online` in the participant process
+  (`Participant.networkChanged`). Both assert the call came back in place:
+  u2 saw no departures, so no rebuild.
 - A participant process killed by a signal nobody sent (the libwebrtc binding
   crashes rarely while closing) reruns the scenario once; an assertion failure
   never does.
@@ -155,11 +162,21 @@ participants by DID from it; tracks are attributed only by the `trackMapping`
 mids; `sfu-data` never echoes to its sender; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer only after
-10 s of ICE `Disconnected`; the SDK rebuilds a failed connection and retries
-the join for 120 s. `ApiClient` drops an executor socket whose ping stays
-unanswered for a ping interval (10 s, `PING_INTERVAL_MS`; longer while a large
-write it sent may still be crossing a 16 kB/s link) and dials a new one, so a
-socket a network switch left OPEN is noticed in 10 to 20 s.
+10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
+(`sfu.callRestartIce`), 10 s after the request or after the restart's answer;
+on ICE `disconnected` or a network change the SDK restarts ICE in place (the
+SFU stays the only offerer: the restart comes as a server renegotiation
+offer), and rebuilds the call if that has not reconnected within 5 s; a
+failed connection is rebuilt at once, and a rebuild retries the join for
+120 s. A room roster that leaves this agent out for 3 s also rebuilds the
+call (the executor sends the departure roster to the departed DID too); a
+roster that lists it, as during a restart in place, changes nothing.
+`ApiClient` drops an executor socket whose ping stays unanswered for a ping
+interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
+still be crossing a 16 kB/s link) and dials a new one, so a
+socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
+at once; `change` on `navigator.connection` and ICE `disconnected` run
+`checkConnection`, which drops a socket silent for 2 s after its ping.
 
 SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
 binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port

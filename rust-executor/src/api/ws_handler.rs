@@ -49,6 +49,12 @@ impl WsRpcError {
             message: msg.into(),
         }
     }
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            code: 409,
+            message: msg.into(),
+        }
+    }
     pub fn too_many_requests(msg: impl Into<String>) -> Self {
         Self {
             code: 429,
@@ -519,6 +525,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::users_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
     super::sfu_ws::register_ws_handlers(&mut map);
+    super::identity_ws::register_ws_handlers(&mut map);
     // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.
     map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
     map.inline::<NoParams, bool>(super::event_interest::UNWATCH);
