@@ -162,6 +162,61 @@ describe('ApiClient calls', () => {
     })
 })
 
+describe('ApiClient calls that hold something on the executor (onLateResult)', () => {
+    it('sends request.cancel when such a call times out', async () => {
+        const late: unknown[] = []
+        const promise = call('perspective.modelSubscribe', { uuid: 'u' }, { timeoutMs: 50, onLateResult: (r: unknown) => late.push(r) })
+        await flush()
+        const req = socket(0).sent[0]
+        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 408 })
+        expect(socket(0).sent[1]).toMatchObject({ type: 'request.cancel', params: { targetId: req.id } })
+    })
+
+    it('sends no request.cancel when a call without it times out', async () => {
+        // A write that timed out still runs to its end on the executor.
+        const promise = call('perspective.addLink', { uuid: 'u' }, { timeoutMs: 50 })
+        await flush()
+        await expect(promise).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).sent.map((m) => m.type)).toEqual(['perspective.addLink'])
+    })
+
+    it('hands a result that crossed the cancel to onLateResult, once', async () => {
+        const late: unknown[] = []
+        const controller = new AbortController()
+        const promise = call('perspective.modelSubscribe', { uuid: 'u' }, { signal: controller.signal, onLateResult: (r: unknown) => late.push(r) })
+        await flush()
+        const req = socket(0).sent[0]
+        controller.abort()
+        await expect(promise).rejects.toMatchObject({ name: 'AbortError' })
+
+        socket(0).reply({ id: socket(0).sent[1].id, result: { cancelled: false, targetId: req.id } })
+        socket(0).reply({ id: req.id, result: { subscriptionId: 's1' } })
+        socket(0).reply({ id: req.id, result: { subscriptionId: 's1' } })
+        expect(late).toEqual([{ subscriptionId: 's1' }])
+    })
+
+    it('does not call onLateResult for the cancelled reply, or after the socket closed', async () => {
+        const late: unknown[] = []
+        const first = new AbortController()
+        const second = new AbortController()
+        const a = call('perspective.modelSubscribe', { uuid: 'u' }, { signal: first.signal, onLateResult: (r: unknown) => late.push(r) })
+        const b = call('perspective.subscribeQuery', { uuid: 'u' }, { signal: second.signal, onLateResult: (r: unknown) => late.push(r) })
+        await flush()
+        const [reqA, reqB] = socket(0).sent
+        first.abort()
+        second.abort()
+        await expect(a).rejects.toMatchObject({ name: 'AbortError' })
+        await expect(b).rejects.toMatchObject({ name: 'AbortError' })
+
+        // The executor stopped the first call in time: it answers 499.
+        socket(0).reply({ id: reqA.id, error: { code: 499, message: 'Request cancelled by client' } })
+        // The socket closes before the second's reply: the executor ended what it opened.
+        socket(0).drop()
+        socket(0).reply({ id: reqB.id, result: { subscriptionId: 's2' } })
+        expect(late).toEqual([])
+    })
+})
+
 describe('ApiClient connect-phase failures', () => {
     beforeEach(() => { TestSocket.autoOpen = false })
 

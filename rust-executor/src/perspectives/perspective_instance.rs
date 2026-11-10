@@ -6210,7 +6210,7 @@ impl PerspectiveInstance {
         // First, so the queries collected below carry the new class lists.
         let reresolved = self.refresh_abstract_subscriptions().await;
 
-        let mut query_futures: Vec<future::BoxFuture<'static, Option<(String, String)>>> =
+        let mut query_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
             Vec::new();
 
         // Collect only the minimal data needed: ID, query string, predicates,
@@ -6233,6 +6233,9 @@ impl PerspectiveInstance {
 
         // Store reads the model triggers make, shared by every subscription.
         let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+        // The subscriptions to re-run, grouped by what they evaluate.
+        let mut groups: Vec<(Vec<String>, String, Option<ModelSubscriptionParams>)> = Vec::new();
+        let mut evaluations: HashMap<String, usize> = HashMap::new();
 
         // Create futures for each query check
         for (id, query_string, sub_predicates, model_params) in queries {
@@ -6277,10 +6280,27 @@ impl PerspectiveInstance {
             #[cfg(test)]
             subscription_triggers::reruns::note(&id);
 
-            // Each future returns Option<(id, new_result)> instead of locking individually.
+            // Identical queries give identical results, whoever subscribed, so
+            // each one runs once and its result goes to every subscription
+            // holding it. A client that retried a slow subscribe and left the
+            // earlier ones behind then costs one evaluation, not one per retry.
+            let key = subscriptions::evaluation_key(&query_string, model_params.as_ref());
+            match evaluations.get(&key) {
+                Some(&i) => groups[i].0.push(id),
+                None => {
+                    evaluations.insert(key, groups.len());
+                    groups.push((vec![id], query_string, model_params));
+                }
+            }
+        }
+
+        for (ids, query_string, model_params) in groups {
+            // Each future returns Option<(ids, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
             let query_future = Box::pin(async move {
+                #[cfg(test)]
+                subscriptions::evaluations::note(&self_clone.uuid);
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
                 // With no shape wait: every subscription on the perspective is
                 // re-checked in the one pass below, so a wait here for one
@@ -6311,7 +6331,7 @@ impl PerspectiveInstance {
                         }
                     }
                 };
-                Some((id, result_string))
+                Some((ids, result_string))
             });
             query_futures.push(query_future);
         }
@@ -6328,8 +6348,11 @@ impl PerspectiveInstance {
         let mut delta_updates = Vec::new();
         {
             let mut queries = self.subscribed_queries.lock().await;
-            for result in results.into_iter().flatten() {
-                let (id, result_string) = result;
+            let results = results
+                .into_iter()
+                .flatten()
+                .flat_map(|(ids, result)| ids.into_iter().map(move |id| (id, result.clone())));
+            for (id, result_string) in results {
                 if let Some(stored_query) = queries.get_mut(&id) {
                     if result_string != stored_query.last_result {
                         log::debug!(
