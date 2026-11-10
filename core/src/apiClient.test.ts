@@ -1078,6 +1078,23 @@ describe('ApiClient.setToken', () => {
         expect(TestSocket.instances).toHaveLength(1)
     })
 
+    // Data's test: it pins `_ensureWs`'s reset of the closed flag; without it a client
+    // reused after closeAll gets a 499 from watchApplied() on a live socket.
+    it('answers a watchApplied() waiter on a client reused after closeAll once its new socket\'s watch is applied', async () => {
+        open()
+        await flush()
+        client.closeAll()
+        open()
+        await flush() // socket 1 open, its events.watch sent
+        const applied = outcomeOf(client.watchApplied())
+        await flush()
+        expect(applied()).toBe('pending')
+        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
+        socket(1).reply({ id: watch.id, result: {} })
+        await flush()
+        expect(applied()).toBe('resolved')
+    })
+
     it('keeps a watchApplied() waiter on the new socket when setToken lands during a watch retry', async () => {
         jest.useFakeTimers()
         try {
