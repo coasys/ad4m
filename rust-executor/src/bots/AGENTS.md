@@ -42,7 +42,8 @@ Rules:
   bot row's `owner`); the owners' logs are pinned at startup and on `bot.createAgent`. A
   valid link by a bot key carries the owner as `person` and the bot mark `byBot: true`
   (`CheckedLink::by_bot`, stored as the reifier's `ad4m://ontology/byBot`), so a reader can
-  tell the person's own links from their bot's.
+  tell the person's own links from their bot's. In a flow's authority checks a bot never
+  acts as its owner: its links count under the bot's own `did:key` only.
 - **Only dispatch records** (`record: true`); `HandlerMap::admit` (MCP's pre-check) does not.
   A refusal by the bot check is logged at once; an admitted write or join gets one entry
   (`log::Pending`): the attempt writes `started` before the call runs — a call that cannot

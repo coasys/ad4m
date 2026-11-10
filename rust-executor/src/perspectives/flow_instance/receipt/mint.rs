@@ -891,4 +891,155 @@ mod tests {
         map.forget(&log_a.scid());
         map.forget(&log_b.scid());
     }
+
+    /// A bot never counts as its owner in a flow: person A's bot signing
+    /// `acceptedBy → A` — a `valid` link carrying the owner as `person` and the
+    /// bot mark — is not A's vote, so `{n: 2}` stays unmet. The same target
+    /// signed by A's own device IS A's vote (the control): quorum, mint and
+    /// verify. And a bot still votes as itself: `acceptedBy → did:key:bot`
+    /// counts under the bot's own DID.
+    ///
+    /// Red while `signed_by`/`voter_of` read a bot link's `person`: the bot's
+    /// vote then counts as A, the first `mint` settles, and the run mints.
+    #[test]
+    fn a_bot_of_the_owner_is_not_the_owner_in_a_quorum() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::verdict::LinkVerdict;
+        use crate::perspectives::flow_instance::atom::ACCEPTED_BY_PREDICATE;
+        use crate::perspectives::flow_instance::ProposalLinks;
+        use crate::types::DecoratedLinkExpression;
+        use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+
+        // Person A's log: d1 in the incept, plus a bot key added at seq 1 with a
+        // `write` scope (a bot key without `write` signs links judged
+        // `invalid:notInScope`). Person B's: one device. The key map holds each
+        // log's trusted head, as for a stored link's judgement.
+        let mut log_a = TestLog::new(140);
+        let bot_a = ed25519_dalek::SigningKey::from_bytes(&[141; 32]);
+        {
+            let chain = log_a.chain();
+            let mut event = add_unsigned(
+                &chain,
+                DeviceKey {
+                    id: chain.state().next_device_id(),
+                    sign: bot_a.key(),
+                    enc: ad4m_identity_core::encode_x25519_multikey(&[141; 32]),
+                    life: KeyLife::Bot(BotScope {
+                        can: vec!["write".into()],
+                        expires: 4_000_000_000,
+                    }),
+                },
+                "offer",
+                "co-sig",
+            )
+            .unwrap();
+            cosign(&mut event, "m0", &log_a.master).unwrap();
+            log_a.events.push(event);
+        }
+        let log_b = TestLog::new(142);
+        let map = global_key_map();
+        let now = chrono::Utc::now().timestamp() as u64;
+        for (log, trusted) in [(&log_a, 1u64), (&log_b, 0)] {
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted,
+                },
+            );
+            map.note_confirmed(&log.scid(), now);
+        }
+        let person_a = ad4m_identity_core::did_of(&log_a.scid());
+        let person_b = ad4m_identity_core::did_of(&log_b.scid());
+        let bot_did = format!("did:key:{}", bot_a.key());
+
+        // Person B's device proposes `open → done` committing to OUTPUT: its own
+        // vote is the pool's first voter.
+        let (uri_b, links_b) = device_terminal_proposal(
+            "p-b",
+            &log_b.device,
+            0,
+            "open",
+            "done",
+            &delivered().seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T1,
+        );
+        let read_set_of = |links: Vec<DecoratedLinkExpression>| {
+            read_set(
+                "open",
+                vec![ProposalLinks {
+                    uri: uri_b.clone(),
+                    links,
+                }],
+            )
+        };
+
+        // The bot signs `acceptedBy → person_a`: the resolver marks it valid,
+        // owned and `byBot` — and it must NOT count as A's vote.
+        let bot_as_owner = device_link(&uri_b, ACCEPTED_BY_PREDICATE, &person_a, &bot_a, 1, T2);
+        assert_eq!(bot_as_owner.verdict, Some(LinkVerdict::Valid));
+        assert_eq!(bot_as_owner.person.as_deref(), Some(person_a.as_str()));
+        assert_eq!(bot_as_owner.by_bot, Some(true), "premise: the bot mark");
+        let err = FlowReceipt::mint(
+            &n2_terminal_flow(),
+            read_set_of([links_b.clone(), vec![bot_as_owner]].concat()),
+            outs(&[OUTPUT]),
+            vec![delivered()],
+        )
+        .expect_err("a bot acting 'for' its owner is not the owner — `{n: 2}` is not met");
+        assert!(
+            format!("{err:#}").contains("can still transition out"),
+            "the fold must leave the run at `open`, got: {err:#}"
+        );
+
+        // Control: the same target signed by A's own device IS A's vote — the
+        // quorum is two persons and the minted receipt verifies.
+        let owner_vote = device_link(
+            &uri_b,
+            ACCEPTED_BY_PREDICATE,
+            &person_a,
+            &log_a.device,
+            1,
+            T3,
+        );
+        let verdict = mint_and_verify(
+            n2_terminal_flow(),
+            read_set_of([links_b.clone(), vec![owner_vote]].concat()),
+            outs(&[OUTPUT]),
+        )
+        .expect("the owner's own device vote reaches quorum");
+        let crate::perspectives::flow_instance::verify::ReceiptVerdict::Verified { voters, .. } =
+            &verdict
+        else {
+            panic!("expected Verified, got: {verdict}");
+        };
+        let mut expected = vec![person_a.clone(), person_b.clone()];
+        expected.sort();
+        assert_eq!(voters, &expected, "the quorum is the two persons");
+
+        // The bot can still vote as itself: `acceptedBy → did:key:bot` counts
+        // under the bot's own DID, distinct from its owner.
+        let bot_as_itself = device_link(&uri_b, ACCEPTED_BY_PREDICATE, &bot_did, &bot_a, 1, T3);
+        let verdict = mint_and_verify(
+            n2_terminal_flow(),
+            read_set_of([links_b, vec![bot_as_itself]].concat()),
+            outs(&[OUTPUT]),
+        )
+        .expect("a bot's own-DID vote still counts as the bot");
+        let crate::perspectives::flow_instance::verify::ReceiptVerdict::Verified { voters, .. } =
+            &verdict
+        else {
+            panic!("expected Verified, got: {verdict}");
+        };
+        let mut expected = vec![bot_did, person_b];
+        expected.sort();
+        assert_eq!(voters, &expected, "the bot votes as its own did:key");
+
+        map.forget(&log_a.scid());
+        map.forget(&log_b.scid());
+    }
 }

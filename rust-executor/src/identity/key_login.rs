@@ -1250,14 +1250,40 @@ impl RecheckAttempts {
 /// verdict change the subscription missed cannot end. A revoked bot holds no session already.
 /// An expired key scope ends the bot's live queries too: its reads are refused while the
 /// scope is out, so no query work keeps running for it.
-async fn recheck_bot_keys(service: &IdentityService) -> usize {
+///
+/// The reads run together under one deadline — the interval, as the key-bound reads' —
+/// `reads_at_once` at a time, each bounded by [`KEY_READ_TIMEOUT`], so a stalled owner's
+/// store holds neither the pass's end nor another bot's read. A bot whose read the pass
+/// does not reach counts as unread, as a timed-out one does.
+async fn recheck_bot_keys(service: &IdentityService, reads_at_once: usize) -> usize {
+    use futures::StreamExt;
+    let reads = futures::stream::iter(
+        crate::bots::all()
+            .into_iter()
+            .filter(|bot| bot.grant.state != crate::bots::GrantState::Revoked.as_str())
+            .map(|bot| async move {
+                let key = bot
+                    .did
+                    .strip_prefix("did:key:")
+                    .unwrap_or(&bot.did)
+                    .to_string();
+                let read =
+                    match tokio::time::timeout(KEY_READ_TIMEOUT, service.bot_key(&bot.owner, &key))
+                        .await
+                    {
+                        Ok(read) => read,
+                        Err(_) => Err(crate::identity::bot_key::BotKeyError::StoreUnavailable),
+                    };
+                (bot, key, read)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .buffer_unordered(reads_at_once);
+    let mut reads = Box::pin(reads);
     let mut ended = 0;
-    for bot in crate::bots::all() {
-        if bot.grant.state == crate::bots::GrantState::Revoked.as_str() {
-            continue;
-        }
-        let key = bot.did.strip_prefix("did:key:").unwrap_or(&bot.did);
-        if let Ok(found) = service.bot_key(&bot.owner, key).await {
+    let _ = tokio::time::timeout(KEY_RECHECK_INTERVAL, async {
+        while let Some((bot, key, read)) = reads.next().await {
+            let Ok(found) = read else { continue };
             if found.verdict == KeyVerdict::Expired {
                 for perspective in crate::perspectives::all_perspectives() {
                     perspective
@@ -1265,9 +1291,10 @@ async fn recheck_bot_keys(service: &IdentityService) -> usize {
                         .await;
                 }
             }
-            ended += end_revoked_bot(key, found.verdict);
+            ended += end_revoked_bot(&key, found.verdict);
         }
-    }
+    })
+    .await;
     ended
 }
 
@@ -1291,8 +1318,9 @@ fn end_on_verdict(grants: Vec<Arc<LiveGrant>>, key: &str) -> usize {
 /// (a cached read up to an interval old would let a revocation the cache missed stand for two
 /// intervals): a key no longer valid, or a bot's, ends its grants; a valid one records the
 /// check. While the store cannot be read, grants whose last valid check is
-/// [`STORE_OUTAGE_GRACE`] old end. The sessions of a local bot whose key was revoked end too
-/// ([`recheck_bot_keys`]).
+/// [`STORE_OUTAGE_GRACE`] old end — those outage decisions run before the bot sweep, so a
+/// stalled owner's log cannot hold them. The sessions of a local bot whose key was revoked
+/// end too ([`recheck_bot_keys`], under its own deadline at the same width).
 /// Returns how many active grants ended.
 pub async fn recheck_key_grants(
     service: &IdentityService,
@@ -1393,8 +1421,8 @@ pub async fn recheck_key_grants(
         }
     })
     .await;
-    // The bots' keys come after the key-bound reads, so they never delay them.
-    ended += recheck_bot_keys(service).await;
+    // The outage decisions come before the bot sweep: a stalled owner's log must not
+    // hold them past the pass's deadline.
     for ((scid, key), grants) in by_key {
         // A read that did not answer in [`KEY_READ_TIMEOUT`], or that the pass did not
         // reach within it, counts as the outage it is: the grant's own last check
@@ -1427,6 +1455,9 @@ pub async fn recheck_key_grants(
             ended += end_on_verdict(to_end, &key);
         }
     }
+    // The bots' keys read last, under their own deadline at the same width: a stalled
+    // owner's store holds neither the decisions above nor the next pass.
+    ended += recheck_bot_keys(service, reads_at_once).await;
     ended
 }
 
@@ -3841,6 +3872,85 @@ mod tests {
         }
         world.store.stall_for.lock().unwrap().clear();
         end_leftover_key_grants();
+        no_operator();
+    }
+
+    // Lal #1671 P3: the bot sweep is not ahead of the outage decisions and is not
+    // unbounded: bots whose owners' logs stall when read hold neither the key-bound
+    // decisions — a cached revocation ends the grant on time — nor the pass's end.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_bot_sweep_delays_neither_the_outage_decisions_nor_the_pass() {
+        use tokio::sync::Notify;
+        let mut world = world(67).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // Several bots whose owners' logs stall when read: each read is bounded, and the
+        // sweep itself answers by the deadline rather than reading them one by one.
+        for i in 0..3 {
+            crate::bots::remember(crate::db::BotRow {
+                did: format!("did:key:zBot{i}"),
+                username: format!("sweep-bot-{i}@bots.ad4m"),
+                name: "stalled".into(),
+                owner: format!("0-bot-owner-{i}"),
+                offer_id: "offer".into(),
+                created_at: 1,
+                grant: crate::db::BotGrantRow {
+                    spaces: vec![],
+                    can: vec!["read".into()],
+                    expires: None,
+                    state: "active".into(),
+                    version: 1,
+                    updated_at: 1,
+                },
+            });
+            world.store.stall_for.lock().unwrap().insert(
+                format!("did:scid:coasys:1:0-bot-owner-{i}"),
+                Arc::new(Notify::new()),
+            );
+        }
+        // The grant's own read stalls too, so its decision is the outage path's: a
+        // revocation the cache already holds ends it now, sweep or no sweep.
+        let revoke_phone =
+            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(revoke_phone);
+        accept_signed(&world.service.cache, &world.log.events).await;
+        world
+            .store
+            .stall_for
+            .lock()
+            .unwrap()
+            .insert(world.did.clone(), Arc::new(Notify::new()));
+        world.service.cache.note_read(&world.log.scid(), 0);
+
+        let service = Arc::new(world.service);
+        let started = tokio::time::Instant::now();
+        let recheck = tokio::spawn(async move {
+            recheck_key_grants(&service, now(), &RecheckAttempts::default()).await
+        });
+        // The grant's stalled read times out, the outage decision runs, and the sweep's
+        // stalled reads each time out under the sweep's own deadline — two read timeouts
+        // cover the whole pass.
+        while !recheck.is_finished() && started.elapsed() <= 3 * KEY_READ_TIMEOUT {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            recheck.is_finished(),
+            "the pass returned inside the deadline (elapsed {:?})",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() <= 2 * KEY_READ_TIMEOUT + Duration::from_secs(20),
+            "the pass took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            session.check(),
+            Err(AuthError::Revoked),
+            "the cached revocation ended the grant on time"
+        );
+        world.store.stall_for.lock().unwrap().clear();
         no_operator();
     }
 
