@@ -574,6 +574,70 @@ fn guarded_definition_queries_return_one_row_per_triple() {
     );
 }
 
+/// Lal's P3 on #1597: two signers give one property field conflicting
+/// counting values. The row carries one of them, and which one must not
+/// depend on the order the links reached the store (or the query returned
+/// them): the smallest value, whichever arrived first.
+///
+/// Red while `property_rows` takes the field's first value in query order.
+#[test]
+fn a_field_two_signers_disagree_on_reads_the_same_whatever_the_insert_order() {
+    use crate::perspectives::model_query::shape::property_rows;
+    use crate::perspectives::model_query::sparql_builder::LinkGuard;
+    use serde_json::Value;
+
+    const OWN: &str = "literal:1^^xsd:integer";
+    let guard = LinkGuard::default();
+    let body_row = |store: &SparqlStore| -> Value {
+        let shape_uri = load_shape_from_store(store, "Message").unwrap().shape_uri;
+        let rows = property_rows(store, &shape_uri, &guard).unwrap();
+        let body: Vec<Value> = rows
+            .into_iter()
+            .filter(|row| row["path"] == "flux://body")
+            .collect();
+        assert_eq!(body.len(), 1, "{body:?}");
+        body[0].clone()
+    };
+    let scratch = SparqlStore::new(None).unwrap();
+    install_class(&scratch, "Message", MESSAGE);
+    let body_prop = body_row(&scratch)["propUri"].as_str().unwrap().to_string();
+    assert_eq!(
+        body_row(&scratch)["maxCount"],
+        OWN,
+        "the writer's own value"
+    );
+
+    for conflicting in ["literal:0^^xsd:integer", "literal:7^^xsd:integer"] {
+        let expected = OWN.min(conflicting);
+        let other = Link {
+            source: body_prop.clone(),
+            predicate: Some("sh://maxCount".into()),
+            target: conflicting.into(),
+        };
+
+        let definition_first = SparqlStore::new(None).unwrap();
+        install_class(&definition_first, "Message", MESSAGE);
+        definition_first
+            .add_link(&link_expression(other.clone()))
+            .unwrap();
+
+        let conflict_first = SparqlStore::new(None).unwrap();
+        conflict_first.add_link(&link_expression(other)).unwrap();
+        install_class(&conflict_first, "Message", MESSAGE);
+
+        for (order, store) in [
+            ("definition first", &definition_first),
+            ("conflict first", &conflict_first),
+        ] {
+            assert_eq!(
+                body_row(store)["maxCount"],
+                expected,
+                "{order}, against {conflicting}"
+            );
+        }
+    }
+}
+
 /// A cold read of every class's definition — what a model query with
 /// `include` makes first, through `subject_classes_of_with_pending`, and what
 /// a waker's subscribe handshake waits on — must not cost a scan of every

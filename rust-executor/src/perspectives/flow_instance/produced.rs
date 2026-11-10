@@ -534,10 +534,14 @@ pub async fn flow_valid_outputs(
     // The signers the carried links resolve to must be the same on every
     // replica that can read the logs, so refresh them before the fold
     // re-judges them under the live window. A replica that cannot read a
-    // signer's log gets no verified answer — and no memoised refusal.
-    for receipt in &receipts {
-        receipt.read_set.prepare_carried_signers().await;
-    }
+    // signer's log gets no verified answer — and no memoised refusal. One
+    // prepare for the whole read, so the discovery cap is per read.
+    prepare_receipt_signers(
+        &catalogue,
+        &receipts,
+        Some(&perspective.receipt_verdict_memo),
+    )
+    .await;
     let candidates = valid_outputs(
         &catalogue,
         flow_uri,
@@ -586,6 +590,29 @@ pub async fn verify_flow_receipt(
     let catalogue = load_shacl_flows(perspective).await?;
     receipt.read_set.prepare_carried_signers().await;
     Ok(verify_receipt(&catalogue, receipt))
+}
+
+/// Refreshes the carried signers of every receipt in `receipts` a read is
+/// about to re-judge, in **one** [`crate::identity::prepare_link_signers`]
+/// call: the resolver's [`DISCOVERY_PER_BATCH`](crate::identity::resolver::DISCOVERY_PER_BATCH)
+/// then caps the key-index lookups of the whole read, not of each receipt, so
+/// N receipts signed by fresh `did:key`s cost one batch per read. A receipt
+/// `memo` already holds is left out: its verdict is final under the memo key
+/// ([`VerdictMemo::holds`]), so a refresh of its signers could change nothing
+/// the read returns.
+pub(crate) async fn prepare_receipt_signers(
+    catalogue: &HashMap<String, SHACLFlow>,
+    receipts: &[FlowReceipt],
+    memo: Option<&VerdictMemo>,
+) {
+    let links: Vec<crate::types::LinkExpression> = receipts
+        .iter()
+        .filter(|receipt| !memo.is_some_and(|memo| memo.holds(catalogue, receipt)))
+        .flat_map(|receipt| receipt.read_set.carried_links())
+        .collect();
+    if !links.is_empty() {
+        crate::identity::prepare_link_signers(&links).await;
+    }
 }
 
 /// The verdict as the API reports it: the three-kind `outcome` a caller must
