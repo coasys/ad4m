@@ -884,6 +884,11 @@ pub struct SparqlStore {
     /// assert which store queries a pipeline ran (see [`SparqlStore::queries_run`]).
     #[cfg(test)]
     query_log: Arc<Mutex<Vec<String>>>,
+    /// Test-only: how many index scans `query_links` and
+    /// `query_links_top_n_by_timestamp` ran, shared across clones. They do not
+    /// go through the query log.
+    #[cfg(test)]
+    link_scans: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -949,6 +954,8 @@ impl SparqlStore {
             writes: Arc::new(tokio::sync::watch::Sender::new(0)),
             #[cfg(test)]
             query_log: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            link_scans: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -1209,6 +1216,8 @@ impl SparqlStore {
         limit: Option<usize>,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::ops::ControlFlow;
+        #[cfg(test)]
+        self.count_link_scan();
         // Bail out early on the zero-page case: the closure below pushes first,
         // then checks `links.len() >= lim`, so without this guard `Some(0)`
         // would return one element instead of zero.
@@ -1244,6 +1253,8 @@ impl SparqlStore {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
         use std::ops::ControlFlow;
+        #[cfg(test)]
+        self.count_link_scan();
 
         if limit == 0 {
             return Ok(Vec::new());
@@ -2030,6 +2041,18 @@ impl SparqlStore {
             .lock()
             .map(|log| log.clone())
             .unwrap_or_default()
+    }
+
+    /// Test-only: how many link index scans this store (and its clones) ran so far.
+    #[cfg(test)]
+    pub(crate) fn link_scans_run(&self) -> usize {
+        self.link_scans.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn count_link_scan(&self) {
+        self.link_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Store `link` without refusing a link in the metadata vocabulary: the

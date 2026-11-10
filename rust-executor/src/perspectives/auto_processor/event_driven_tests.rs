@@ -22,8 +22,9 @@ fn transcript_queries(p: &PerspectiveInstance) -> usize {
         .count()
 }
 
+/// Every store read: SPARQL queries and link index scans.
 fn all_queries(p: &PerspectiveInstance) -> usize {
-    p.sparql_store.queries_run().len()
+    p.sparql_store.queries_run().len() + p.sparql_store.link_scans_run()
 }
 
 fn config(
