@@ -391,12 +391,25 @@ fn spawn_main_agent_publish() {
     });
 }
 
-/// agent.generate — generate agent identity
+/// agent.generate — create the main agent's keys and DID on first run.
+/// Refuses (409) when the agent is already initialised — the notion
+/// `agent.status` reports as `isInitialized`; unlock it instead. Always the
+/// main agent: the `Executor` guard keeps sessions acting as a managed user
+/// out entirely.
 async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: GenerateAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
+        // Inside the lock so a concurrent generate cannot slip between the
+        // check and the write: re-generating would replace the agent's keys
+        // (and its DID) under a caller that only found it uninitialised a
+        // moment ago.
+        if agent_service.is_initialized() {
+            return Err(WsRpcError::conflict(
+                "the agent is already initialised; unlock it with agent.unlock instead",
+            ));
+        }
         agent_service.create_new_keys();
 
         let dm_language = crate::runtime_service::RuntimeService::with_global_instance(|rt| {
@@ -409,8 +422,8 @@ async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
         agent_service.save(body.passphrase.clone());
         agent_service.passphrase = Some(body.passphrase.clone());
 
-        agent_service.dump().clone()
-    })
+        Ok(agent_service.dump().clone())
+    })?
     .with_identity()
     .await;
 
@@ -2281,6 +2294,171 @@ mod capability_request_tests {
         assert!(
             !PendingRequests::global().is_approved(&managed),
             "auto-permit never approves a request on a managed agent"
+        );
+    }
+}
+
+#[cfg(test)]
+mod generate_agent_tests {
+    use crate::agent::AgentService;
+    use crate::api::agent_ws::register_ws_handlers;
+    use crate::api::ws_handler::HandlerMap;
+    use crate::config::{set_global_config, Ad4mConfig};
+    use crate::runtime_service::RuntimeService;
+    use crate::test_utils::{
+        ensure_test_db, init_v8_platform, setup_agent, setup_wallet, test_languages_directory,
+    };
+    use crate::types::RequestContext;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    /// A RuntimeService on an inert bootstrap seed: `generate_agent` reads the
+    /// DM language from it inside the agent lock, where a missing service
+    /// panics and poisons the lock for the rest of the test process. The seed's
+    /// language-language bundle is not a language, so the post-generate system
+    /// language load fails fast into `init_errors` instead of starting
+    /// runtimes. Drop puts the slot back to `None` (same pattern as
+    /// `secret_leak_tests::RuntimeServiceGuard`).
+    struct RuntimeServiceGuard;
+
+    impl RuntimeServiceGuard {
+        fn start() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let seed = dir.path().join("seed.json");
+            let empty = json!({
+                "trustedAgents": [], "knownLinkLanguages": [],
+                "directMessageLanguage": "", "agentLanguage": "",
+                "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+                "languageLanguageBundle": "throw new Error('not a language')",
+            });
+            std::fs::write(&seed, empty.to_string()).unwrap();
+            RuntimeService::init_global_instance(seed.to_string_lossy().into_owned());
+            assert!(RuntimeService::global_instance().lock().unwrap().is_some());
+            RuntimeServiceGuard
+        }
+    }
+
+    impl Drop for RuntimeServiceGuard {
+        fn drop(&mut self) {
+            let instance = RuntimeService::global_instance();
+            *instance.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+    }
+
+    /// A global AgentService on a fresh app dir without `agent.json`: the main
+    /// agent is uninitialised (the notion `agent.status` reports as
+    /// `isInitialized`) until a `save` writes it. `run_holochain=false` sends
+    /// `generate_agent` down its local-language path, never at a conductor.
+    /// Drop restores `setup_agent` (which also restores the default config) so
+    /// the next test finds the globals it expects.
+    struct FreshAgent {
+        _tmp: tempfile::TempDir,
+        app_path: String,
+    }
+
+    impl FreshAgent {
+        fn new() -> Self {
+            init_v8_platform();
+            test_languages_directory();
+            setup_wallet();
+            ensure_test_db();
+            let mut config = Ad4mConfig::default();
+            config.run_holochain = Some(false);
+            set_global_config(config);
+
+            let tmp = tempfile::tempdir().unwrap();
+            let app_path = tmp.path().to_str().unwrap().to_string();
+            std::fs::create_dir_all(format!("{app_path}/ad4m")).unwrap();
+            AgentService::init_global_instance(app_path.clone());
+            FreshAgent {
+                _tmp: tmp,
+                app_path,
+            }
+        }
+
+        fn agent_file(&self) -> String {
+            format!("{}/ad4m/agent.json", self.app_path)
+        }
+    }
+
+    impl Drop for FreshAgent {
+        fn drop(&mut self) {
+            setup_agent();
+        }
+    }
+
+    async fn generate(passphrase: &str) -> Result<Value, (u16, String)> {
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        map.dispatch(
+            "agent.generate",
+            json!({ "passphrase": passphrase }),
+            Arc::new(RequestContext::operator_for_test()),
+        )
+        .await
+        .map_err(|e| (e.code, e.message))
+    }
+
+    #[tokio::test]
+    async fn generate_on_a_fresh_executor_initialises_the_agent() {
+        let _runtime = RuntimeServiceGuard::start();
+        let fresh = FreshAgent::new();
+
+        let reply = generate("pw-generate-test")
+            .await
+            .expect("agent.generate on a fresh executor");
+
+        assert_eq!(reply["isInitialized"], json!(true), "{reply}");
+        assert_eq!(reply["isUnlocked"], json!(true), "{reply}");
+        assert!(
+            reply["did"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("did:"),
+            "{reply}"
+        );
+        assert!(
+            std::path::Path::new(&fresh.agent_file()).exists(),
+            "generate must have written agent.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_refuses_an_initialised_agent_without_touching_it() {
+        let _runtime = RuntimeServiceGuard::start();
+        let fresh = FreshAgent::new();
+        AgentService::with_mutable_global_instance(|s| {
+            s.create_new_keys();
+            s.save("pw-generate-test".to_string());
+        });
+        let did_before = AgentService::with_global_instance(|s| s.did.clone().unwrap());
+        let key_before = crate::wallet::wallet_backend()
+            .get_public_key("main")
+            .unwrap();
+        let file_before = std::fs::read_to_string(fresh.agent_file()).unwrap();
+
+        let (code, message) = generate("a-different-passphrase")
+            .await
+            .expect_err("agent.generate on an initialised agent must be refused");
+
+        assert_eq!(code, 409, "{message}");
+        assert!(message.contains("initialised"), "{message}");
+        assert_eq!(
+            AgentService::with_global_instance(|s| s.did.clone().unwrap()),
+            did_before,
+            "the refusal must not have replaced the DID"
+        );
+        assert_eq!(
+            crate::wallet::wallet_backend()
+                .get_public_key("main")
+                .unwrap(),
+            key_before,
+            "the refusal must not have replaced the main key"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fresh.agent_file()).unwrap(),
+            file_before,
+            "the refusal must not have rewritten agent.json"
         );
     }
 }

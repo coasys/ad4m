@@ -141,6 +141,10 @@ operator's sessions on this machine.
 
 Notes on some methods:
 
+- `agent.generate` creates the main agent on first run only: it refuses (409) an
+  agent that is already initialised (`agent.status`'s `isInitialized`) — the check
+  runs inside the agent lock, so a racing generate cannot slip between it and the
+  write. `agent.unlock` is the call for an existing agent.
 - `Open` handlers check the session's principal: `user.logout` revokes the caller's own grant
   (any session a token opened, a key session's operator role included; 400 without a grant),
   `user.renewSession` needs a key-bound grant, `user.endAllSessions` a key-bound session or a
@@ -609,7 +613,8 @@ them against those two guards.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
 - `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,
-  `forbidden`, `not_found`, `internal`. No `From` impls for domain errors yet.
+  `unauthorized`, `forbidden`, `not_found`, `conflict`, `too_many_requests`,
+  `internal`, `not_implemented`. No `From` impls for domain errors yet.
 
 ## openai_compat/
 
