@@ -155,7 +155,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             .as_str()
             .map(decode_literal_string_target);
         let writable = parse_bool_literal_target(first["writable"].as_str());
-        let local = parse_bool_literal_target(first["local"].as_str());
+        // `local` is read from EVERY row: `shown_link_join_once` yields one
+        // row per shown declaration, and a shown `false` beside a shown
+        // `true` must not make the property shared whichever arrives first.
+        let local = rows
+            .iter()
+            .filter_map(|row| parse_bool_literal_target(row["local"].as_str()))
+            .reduce(|a, b| a || b);
         let getter = first["getter"].as_str().map(decode_literal_string_target);
         let ordering = first["ordering"].as_str().map(decode_literal_string_target);
         let has_value = first["hasValue"].as_str().map(decode_literal_target_value);

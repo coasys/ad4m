@@ -531,6 +531,13 @@ pub async fn flow_valid_outputs(
         );
     }
     let receipts = load_flow_receipts(perspective, flow_uri).await?;
+    // The signers the carried links resolve to must be the same on every
+    // replica that can read the logs, so refresh them before the fold
+    // re-judges them under the live window. A replica that cannot read a
+    // signer's log gets no verified answer — and no memoised refusal.
+    for receipt in &receipts {
+        receipt.read_set.prepare_carried_signers().await;
+    }
     let candidates = valid_outputs(
         &catalogue,
         flow_uri,
@@ -577,6 +584,7 @@ pub async fn verify_flow_receipt(
     receipt: &FlowReceipt,
 ) -> anyhow::Result<ReceiptVerdict> {
     let catalogue = load_shacl_flows(perspective).await?;
+    receipt.read_set.prepare_carried_signers().await;
     Ok(verify_receipt(&catalogue, receipt))
 }
 
@@ -646,6 +654,12 @@ pub async fn mint_flow_receipt(
         .ok_or_else(|| anyhow::anyhow!("flow `{}` is not in the catalogue", record.flow_uri))?;
     let instance = FlowInstance::from_record(record, flow);
     let read_set = instance.read_set(perspective).await?;
+
+    // Before the fold re-judges the carried links under the live admission
+    // window: refresh their signers' key logs, so the person each vote
+    // resolves to is the same on every replica that can read the logs and a
+    // stale cached head cannot let a revoked key's vote count.
+    read_set.prepare_carried_signers().await;
 
     // The outputs the run committed to, read off the counted atoms of the
     // final settled edge. `mint` re-derives the fold and re-checks the hash,

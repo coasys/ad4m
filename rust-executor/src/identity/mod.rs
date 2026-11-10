@@ -391,22 +391,6 @@ pub fn check_signed_own<T: serde::Serialize>(
     )
 }
 
-/// [`check_signed`] for a link a receipt carries: it was admitted when it was stored, so the
-/// live-write admission window ([`resolver::ADMIT_FRESHNESS`]) is not applied to it again.
-/// `own` is the seam the window hangs on, and every author passes it here — the window
-/// protects a write being admitted now, not a re-judgement of one stored long ago. What the
-/// held log says still applies in full: a revocation below the trusted seq is `flagged` or
-/// `invalid` as anywhere, and a log this replica does not hold is still `cantCheck`.
-pub fn check_signed_carried<T: serde::Serialize>(expr: &Expression<T>) -> CheckedLink {
-    resolver::check_signed_with_provenance(
-        expr,
-        &cache::global_key_map(),
-        None,
-        service::now(),
-        |_| true,
-    )
-}
-
 /// Whether `did` is one of this executor's agents: the main agent, or a managed user's. Reads
 /// no lock that panics: before the agent service or the database opens, `false`.
 pub(crate) fn is_local_agent(did: &str) -> bool {
@@ -424,6 +408,9 @@ pub(crate) fn is_local_agent(did: &str) -> bool {
 
 /// Fills the key map for the signers of `links` before they are checked and stored: the key
 /// index and the logs it names, through the agent language. Does nothing before [`init`].
+/// A listed signer's log is also refreshed when the store last confirmed its head more than
+/// [`resolver::ADMIT_FRESHNESS`] ago, which is what the receipt paths lean on before they
+/// re-judge carried links under the same window a live write is admitted under.
 pub async fn prepare_link_signers(links: &[LinkExpression]) {
     let Some(service) = SERVICE.get() else {
         return;
@@ -435,7 +422,7 @@ pub async fn prepare_link_signers(links: &[LinkExpression]) {
 /// signature holds for their own `author`. A link whose signature fails is `invalid` whatever
 /// any log says ([`verdict::judge`]), so a peer sending well-formed DIDs with bad signatures
 /// costs no lookup; the signature check is local.
-fn signers_to_prepare(links: &[LinkExpression]) -> Vec<(String, Option<u64>)> {
+pub(crate) fn signers_to_prepare(links: &[LinkExpression]) -> Vec<(String, Option<u64>)> {
     links
         .iter()
         .filter(|l| {

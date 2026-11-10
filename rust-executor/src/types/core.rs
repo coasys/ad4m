@@ -356,13 +356,6 @@ impl DecoratedLinkExpression {
         self.check_with(crate::identity::check_signed)
     }
 
-    /// [`check`] as the ingest seam of a receipt judges a carried link
-    /// ([`crate::identity::check_signed_carried`]): admitted when it was stored, so the
-    /// live-write admission window is not applied to it again.
-    pub fn check_carried(&self) -> crate::identity::resolver::CheckedLink {
-        self.check_with(crate::identity::check_signed_carried)
-    }
-
     fn check_with(
         &self,
         check: impl FnOnce(&Expression<Link>) -> crate::identity::resolver::CheckedLink,
@@ -379,13 +372,6 @@ impl DecoratedLinkExpression {
     /// Sets `proof.valid`, the verdict and the person from [`DecoratedLinkExpression::check`].
     pub fn verify_signature(&mut self) {
         let checked = self.check();
-        self.set_judgement(checked);
-    }
-
-    /// [`verify_signature`] through [`DecoratedLinkExpression::check_carried`]: the judgement
-    /// a link carried in a receipt is re-verified under.
-    pub fn verify_signature_carried(&mut self) {
-        let checked = self.check_carried();
         self.set_judgement(checked);
     }
 

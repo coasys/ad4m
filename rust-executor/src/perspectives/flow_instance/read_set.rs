@@ -146,10 +146,18 @@ impl ReadSet {
     ///
     /// No store and no network — but not store-free: the check reads the
     /// executor's key map and clock, through
-    /// [`DecoratedLinkExpression::verify_signature_carried`]. A carried link
-    /// was admitted when it was stored, so the live-write admission window
-    /// (`ADMIT_FRESHNESS`) is not re-applied to it; what the held log says —
-    /// a revocation, a listing past the trusted seq — still decides.
+    /// [`DecoratedLinkExpression::verify_signature`]. A carried link gets the
+    /// same judgement as a live write, the live-write admission window
+    /// (`ADMIT_FRESHNESS`) included: a receipt is a value from another
+    /// replica, and containing a link is no evidence an honest executor
+    /// admitted it before a revocation. What keeps an honest old receipt
+    /// verifiable is the refresh every async caller runs first
+    /// ([`prepare_carried_signers`]): the store confirms the signers' heads
+    /// again, and a replica that cannot read them answers "not yet" — the
+    /// links judge `cantCheck` rather than counting on a stale head, and the
+    /// memo keeps no such refusal, so a later read verifies again. What the
+    /// held log says — a revocation, a listing past the trusted seq — still
+    /// decides.
     ///
     /// # Both sides run it, and that is the contract
     ///
@@ -218,6 +226,39 @@ impl ReadSet {
                 .collect(),
         }
     }
+
+    /// Every carried link whose signer a fold of this read-set trusts: the
+    /// proposal and vote links, and the grant links and revocation
+    /// tombstones behind each role grant — all three go through the same
+    /// live-window policy. [`crate::identity::prepare_link_signers`] takes
+    /// this list, so [`prepare_carried_signers`] refreshes the signers'
+    /// key logs before the read-set is re-judged.
+    pub fn carried_links(&self) -> Vec<LinkExpression> {
+        self.proposals
+            .iter()
+            .flat_map(|p| p.links.iter().cloned().map(LinkExpression::from))
+            .chain(self.role_grants.iter().flat_map(|e| {
+                e.instances.iter().flat_map(|i| {
+                    i.grant_links
+                        .iter()
+                        .cloned()
+                        .chain(i.revocation_links.iter().cloned())
+                })
+            }))
+            .collect()
+    }
+
+    /// Fills the key map for the signers of [`carried_links`](ReadSet::carried_links)
+    /// before the read-set is folded through [`reverified`](ReadSet::reverified)
+    /// — the step the pure fold cannot take itself. A mint or verify calls this
+    /// once per read-set, so a carried link is judged under the live admission
+    /// window against a head the store just confirmed; a replica that cannot
+    /// read the store leaves the links `cantCheck` rather than counting them on
+    /// a stale head. A receipt's read-set is bounded, so only its distinct
+    /// authors are prepared, under the resolver's own timeouts.
+    pub async fn prepare_carried_signers(&self) {
+        crate::identity::prepare_link_signers(&self.carried_links()).await;
+    }
 }
 
 /// One carried link with its signature verdict recomputed from the signature
@@ -254,7 +295,7 @@ impl ReadSet {
 /// that, every link in one had come off the local store.
 fn reverified_link(link: &DecoratedLinkExpression) -> DecoratedLinkExpression {
     let mut link = link.clone();
-    link.verify_signature_carried();
+    link.verify_signature();
     link.status = None;
     link
 }
