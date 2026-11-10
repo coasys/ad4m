@@ -1278,6 +1278,13 @@ and `paginateSubscribe()` end the previous one first. `dispose()` ends it on the
 client at once and tells the executor. The executor also ends every subscription
 of a connection when the connection closes.
 
+A subscribe the client gives up on leaves nothing behind on the executor. When
+the call times out (30 s), or is cancelled (`dispose({ cancelOpening: true })`),
+the client cancels it on the executor. If the executor had already answered, the
+client disposes the subscription that answer names as soon as it arrives. The
+executor runs identical queries once per change, however many subscriptions
+hold them: each subscription still gets its own id and its own updates.
+
 ## Transactions
 
 Group multiple operations into an atomic batch:
