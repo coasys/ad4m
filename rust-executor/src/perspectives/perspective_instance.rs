@@ -992,8 +992,9 @@ impl PerspectiveInstance {
 
     /// Multi-user auto-processor spawn loop. Every supervisor tick it
     /// re-computes the set of managed users whose `last_seen` falls inside
-    /// `MANAGED_USER_ONLINE_WINDOW_S` (twice the `last_seen` write-throttle,
-    /// so active users do not flap — #1070), spawns a per-user
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (see [`crate::presence`]: three times the
+    /// `last_seen` write-throttle, so active users do not flap — #1070), and
+    /// the same window `online_agents` elects authors with, spawns a per-user
     /// `auto_processor_watch_loop` for any newly-online user, and aborts the
     /// loop of any user who has aged out. Users that go offline are cheap to
     /// re-spawn on next activity, so the transient churn is bounded.
@@ -1005,9 +1006,7 @@ impl PerspectiveInstance {
     ///   forever and no pass ever runs — the exact symptom we hit on Marvin
     ///   with James in a live call.
     async fn managed_user_auto_processor_supervisor(&self) {
-        use crate::perspectives::auto_processor::watcher::{
-            select_online_managed_users, MANAGED_USER_ONLINE_WINDOW_S,
-        };
+        use crate::perspectives::auto_processor::watcher::select_online_managed_users;
         use std::collections::HashMap;
         use std::time::{SystemTime, UNIX_EPOCH};
         use tokio::task::JoinHandle;
@@ -1049,8 +1048,7 @@ impl PerspectiveInstance {
                 }
             };
 
-            let online =
-                select_online_managed_users(user_tuples, now_s, MANAGED_USER_ONLINE_WINDOW_S);
+            let online = select_online_managed_users(user_tuples, now_s);
             let online_set: std::collections::HashSet<&String> = online.iter().collect();
 
             // Reap: drop entries for users who finished, aged out, or are no
@@ -2571,6 +2569,16 @@ impl PerspectiveInstance {
             self.persist_link_diff(&diff, true)
                 .await?
                 .fold_into(&mut decorated_diff);
+
+            // The reply and the link-updated event carry the judgement the
+            // store wrote; `persist_link_diff` discovered the signer, so a
+            // verdict computed before it can be stale.
+            decorated_diff.additions = self.stored_judgements(decorated_diff.additions);
+            let decorated_new_link_expression = decorated_diff
+                .additions
+                .first()
+                .cloned()
+                .unwrap_or(decorated_new_link_expression);
 
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -4482,16 +4490,39 @@ impl PerspectiveInstance {
         // pubsub/prolog, rather than decorating and converting back here.
 
         let effects = self.retraction_effects(&diff.additions)?;
-        let retracted = effects.retracted.iter().cloned().map(LinkExpression::from);
+        let removals: Vec<LinkExpression> = diff
+            .removals
+            .iter()
+            .cloned()
+            .chain(effects.retracted.iter().cloned().map(LinkExpression::from))
+            .collect();
+        let additions: Vec<LinkExpression> = diff
+            .additions
+            .iter()
+            .filter(|a| !effects.covers(a))
+            .cloned()
+            .collect();
+
+        // One store transaction for the whole diff, so a batch lands as one
+        // write. On failure nothing was written; fall back to one link at a
+        // time.
+        match self.sparql_store.apply_diff(&removals, &additions, own) {
+            Ok(()) => return Ok(effects),
+            Err(e) => log::warn!(
+                "Failed to apply link diff to SPARQL store in one transaction, \
+                 writing links one by one: {:?}",
+                e
+            ),
+        }
 
         // Removals first
-        for removal in diff.removals.iter().cloned().chain(retracted) {
-            if let Err(e) = self.sparql_store.remove_link(&removal) {
+        for removal in &removals {
+            if let Err(e) = self.sparql_store.remove_link(removal) {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
-        for addition in diff.additions.iter().filter(|a| !effects.covers(a)) {
+        for addition in &additions {
             let write = if own {
                 self.sparql_store.add_link(addition)
             } else {
@@ -5120,11 +5151,6 @@ impl PerspectiveInstance {
         }
     }
 
-    /// Seconds a locally-managed multi-tenancy user's `last_seen` may lag before
-    /// we treat them as offline for telepresence. Mirrors the 5-minute window
-    /// `agent::capabilities` already uses to throttle last-seen updates.
-    const LOCAL_ONLINE_THRESHOLD_SECS: i64 = 300;
-
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
         // Remote peers via the link language's telepresence adapter (when one is
         // present — i.e. a real multi-executor neighbourhood).
@@ -5175,18 +5201,16 @@ impl PerspectiveInstance {
         Ok(agents)
     }
 
-    /// DIDs of managed users who used any authed API within
-    /// [`Self::LOCAL_ONLINE_THRESHOLD_SECS`].
+    /// DIDs of managed users who are online by [`crate::presence::is_online`]:
+    /// the same predicate and window as the supervisor that runs their loops,
+    /// so a user is never "running" there yet absent from election here (#1070).
     fn recently_active_users() -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
         crate::db_backend::db_backend()
             .list_users()
             .unwrap_or_default()
             .into_iter()
-            .filter(|user| {
-                user.last_seen
-                    .map_or(false, |ls| now - ls < Self::LOCAL_ONLINE_THRESHOLD_SECS)
-            })
+            .filter(|user| crate::presence::is_online(user.last_seen, now))
             .map(|user| user.did)
             .collect()
     }
@@ -7025,6 +7049,7 @@ impl PerspectiveInstance {
             // to the claim (the min-DID claim still prevents doubles among peers
             // that escalate together).
             let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            let settle_ms = crate::perspectives::auto_processor::claim::claim_settle_ms(self).await;
             let outcome = match run_one_pass(
                 &mut perspective_clone,
                 cfg,
@@ -7032,7 +7057,7 @@ impl PerspectiveInstance {
                 now_ms,
                 context,
                 escalate,
-                crate::perspectives::auto_processor::claim::CLAIM_SETTLE_MS,
+                settle_ms,
             )
             .await
             {
@@ -7174,6 +7199,68 @@ mod tests {
     use crate::types::PerspectiveState;
     use fake::{Fake, Faker};
     use uuid::Uuid;
+
+    /// `online_agents` reports co-located managed users with the same
+    /// predicate and window as the auto-processor supervisor (#1070): a user
+    /// whose `last_seen` is inside `MANAGED_USER_ONLINE_WINDOW_S` is present for
+    /// author election, one just outside it is not. Before #1070 this reader
+    /// kept its own 300 s window, so a user whose loop the supervisor was
+    /// still running could be missing from election.
+    #[tokio::test]
+    async fn online_agents_uses_the_managed_user_online_window() {
+        use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+        use crate::presence::MANAGED_USER_ONLINE_WINDOW_S;
+
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+        let now = chrono::Utc::now().timestamp();
+        // 5 s either side of the boundary absorbs the clock read inside
+        // `online_agents`.
+        let users = [
+            ("presence-fresh@test", "did:key:presence-fresh", now),
+            (
+                "presence-inside@test",
+                "did:key:presence-inside",
+                now - MANAGED_USER_ONLINE_WINDOW_S + 5,
+            ),
+            (
+                "presence-outside@test",
+                "did:key:presence-outside",
+                now - MANAGED_USER_ONLINE_WINDOW_S - 5,
+            ),
+        ];
+        let rows: Vec<serde_json::Value> = users
+            .iter()
+            .map(|(email, did, last_seen)| {
+                serde_json::json!({
+                    "username": email, "did": did, "password_hash": "x", "last_seen": last_seen,
+                })
+            })
+            .collect();
+        Ad4mDb::with_global_instance(|db| {
+            db.import_from_json(serde_json::json!({ "users": rows }), None)
+        })
+        .expect("seed users");
+        {
+            let mut h = perspective.persisted.lock().await;
+            h.shared_url = Some("test://neighbourhood".into());
+            h.owners = Some(users.iter().map(|(_, did, _)| did.to_string()).collect());
+        }
+
+        let mut online: Vec<String> = perspective
+            .online_agents()
+            .await
+            .map(|agents| agents.into_iter().map(|a| a.did).collect())
+            .unwrap_or_default();
+        online.sort();
+        assert_eq!(
+            online,
+            vec![
+                "did:key:presence-fresh".to_string(),
+                "did:key:presence-inside".to_string()
+            ],
+            "online_agents must use the supervisor's {MANAGED_USER_ONLINE_WINDOW_S}s window"
+        );
+    }
 
     async fn setup() -> PerspectiveInstance {
         setup_wallet();
@@ -8798,6 +8885,80 @@ mod tests {
         let checked = LinkExpression::from(reply.clone()).check();
         assert_eq!(checked.verdict, LinkVerdict::CantCheck);
         assert_eq!(checked.person, None);
+        map.forget(&log.scid());
+    }
+
+    /// `update_link` reads back the judgement the store wrote, as every
+    /// other write path does through `stored_judgements`: on a stale head
+    /// the reply and the `link-updated` event carry the `valid` + person
+    /// the store wrote, not the `cantCheck` the decoration computed before
+    /// `persist_link_diff` ran signer discovery.
+    #[tokio::test]
+    async fn update_link_returns_the_stored_judgement() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+
+        let mut perspective = setup().await;
+
+        // The signer's log lists this executor's own key, so `update_link`
+        // signs for it: the store checks the link as this executor's own
+        // write (`valid` + person), while the head is stale for anything
+        // judged as a peer's.
+        let secret = crate::wallet::wallet_backend()
+            .get_secret_key(crate::wallet::KEY_NAME_MAIN)
+            .expect("the test wallet holds the main key");
+        let device = ed25519_dalek::SigningKey::from_bytes(
+            &secret[..32]
+                .try_into()
+                .expect("the wallet holds a 32-byte ed25519 secret"),
+        );
+        let log = TestLog::with_device(104, device);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+
+        let context = AgentContext::main_agent();
+        let added = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap();
+        let mut new_link = create_link();
+        new_link.target = "t://updated".to_string();
+        let updated = perspective
+            .update_link(LinkExpression::from(added), new_link, None, &context)
+            .await
+            .unwrap();
+
+        let stored = perspective
+            .sparql_store
+            .get_link(
+                &updated.data.source,
+                updated.data.predicate.as_deref(),
+                &updated.data.target,
+                &updated.author,
+                &updated.timestamp,
+            )
+            .unwrap()
+            .expect("the updated link is stored");
+        assert_eq!(
+            stored.verdict,
+            Some(LinkVerdict::Valid),
+            "the local write counts on the stale head"
+        );
+        assert_eq!(
+            updated.verdict, stored.verdict,
+            "the reply reports the stored judgement"
+        );
+        assert_eq!(updated.person, stored.person);
+        assert_eq!(updated.proof.valid, stored.proof.valid);
         map.forget(&log.scid());
     }
 
