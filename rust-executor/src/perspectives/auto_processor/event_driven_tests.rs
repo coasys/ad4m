@@ -231,7 +231,6 @@ async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
         vec!["new"],
         "only the turn added since the run is queued"
     );
-    let transcript_reads = transcript_queries(&p);
     let reads = all_queries(&p);
 
     // No link changes from here on. Past `ran_at + WINDOW` the run no longer
@@ -240,14 +239,23 @@ async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
     p.run_auto_processor_tick(&mut watcher, now_ms + WINDOW / 2 + 1_000, &ctx)
         .await;
     assert_eq!(pending_texts(&watcher, "windowed"), vec!["new", "old"]);
+    assert_eq!(all_queries(&p), reads, "and without reading the store");
 
-    // A watcher that has queued nothing yet, past the turns' own window:
-    // neither turn is queued, from the reused read either.
+    // A run that consumed both turns, and a watcher that starts after it:
+    // nothing to queue. Past `ran_at + WINDOW` the run no longer counts, but
+    // both turns are older than the window by then, so the reused read
+    // queues neither.
+    let both: Vec<String> = turn_ids(&p).await.into_iter().map(|t| t.id).collect();
+    assert_eq!(both.len(), 2);
+    // `turn_ids` runs the scope query too; count the ticks' reads from here.
+    let transcript_reads = transcript_queries(&p);
+    mint_run(&mut p, &ctx, "run-both", "windowed", both, now_ms + 5_000).await;
     let mut late = WatcherState::new();
     p.run_auto_processor_tick(&mut late, now_ms + 5_000, &ctx)
         .await;
+    assert!(pending_texts(&late, "windowed").is_empty());
     let late_reads = all_queries(&p);
-    p.run_auto_processor_tick(&mut late, now_ms + WINDOW + 60_000, &ctx)
+    p.run_auto_processor_tick(&mut late, now_ms + 5_000 + WINDOW + 1, &ctx)
         .await;
     assert!(
         pending_texts(&late, "windowed").is_empty(),
@@ -262,9 +270,8 @@ async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
     assert_eq!(
         transcript_queries(&p),
         transcript_reads + 1,
-        "only the new watcher's first tick read the transcript again"
+        "only the late watcher's first tick (after the new run) read the transcript again"
     );
-    assert!(all_queries(&p) > reads);
 }
 
 /// The loop itself: after its first pass it sleeps while no link changes
