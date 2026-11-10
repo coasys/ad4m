@@ -762,7 +762,12 @@ is version 1); a reader refuses a version lower than one it has read. A host can
 older version with its valid receipt, so that high-water mark is the reader's own state: the
 client keeps the highest version it has read per identity; the core functions keep none. A device entry's `holdsMaster` is `false`, `"offered"` or
 `true`; with `true` it carries `masterIndex`, the index *n* of the master key the device's
-vault keeps, written by the device (or the flow that put the key there). An entry without
+vault keeps, written by the device (or the flow that put the key there). A device whose
+vault keeps the current master owes its own mark until the record shows it; the client keeps
+no note of that debt but derives it whenever it checks its custody against the log: a stale
+recovery pair (re-attested by the master, which marks the device as it does) or its entry
+left `"offered"` or `true` with another index is written then, while an entry `false` is left
+as it is. An entry without
 `masterIndex` (written before it existed) is read as an unknown index. A pending revocation's `reason` is `left-host` or `account-deleted`.
 
 **The request box.** A device key without the bot mark posts `{body, expires}` with `body`

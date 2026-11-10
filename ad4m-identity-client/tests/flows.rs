@@ -7013,6 +7013,431 @@ async fn a_take_while_the_record_waits_for_reattestation_keeps_the_key() {
     assert!(flow.devices().iter().any(|d| d.name.is_some()));
 }
 
+/// A device that took a master key while the record waited for re-attestation, its mark
+/// still owed: `a` created the identity and rotated to master #1, cut off before the record's
+/// re-attestation, then pushed #1 to `b` (the desk, `d2`), which took it with
+/// `record_pending`.
+struct PendingTake {
+    a: ViaExecutor<TestExecutor>,
+    vault: MemoryVault,
+    b: ViaExecutor<TestExecutor>,
+    b_vault: MemoryVault,
+    did: String,
+    d2: String,
+    scid: String,
+}
+
+async fn pending_take(seed: u8) -> PendingTake {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, seed).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    let words = words::from_entropy(&[seed; 16]);
+    let cut = ViaExecutor::new(CutOffAfterPublish {
+        inner: a.rpc(),
+        published: Cell::new(false),
+    });
+    tokio::select! {
+        rotated = rotate(&cut, &vault, &did, &words, &[], &SystemClock, &OsRandom) => {
+            panic!("the rotation was not cut off: {rotated:?}")
+        }
+        _ = async {
+            while !cut.rpc().published.get() {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    vault.promote_master(&scid, 1).unwrap();
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(&b, &b_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("the pushed master key waits in the inbox");
+    assert!(taken.record_pending, "{taken:?}");
+    assert_eq!(b_vault.master_index(&scid).unwrap(), Some(1));
+    PendingTake {
+        a,
+        vault,
+        b,
+        b_vault,
+        did,
+        d2,
+        scid,
+    }
+}
+
+impl PendingTake {
+    /// Whether the record marks the desk holding master #1 and its recovery key is attested by
+    /// master #1, as `b` reads it.
+    async fn marked(&self) -> (Option<(HoldsMaster, Option<u32>)>, Option<String>) {
+        let opened = record::read(&self.b, &self.b_vault, &self.did)
+            .await
+            .unwrap()
+            .unwrap();
+        (
+            opened
+                .record
+                .devices
+                .get(&self.d2)
+                .map(|e| (e.holds_master, e.master_index)),
+            opened.recovery.map(|r| r.attestation.key_id),
+        )
+    }
+}
+
+/// `inner`, whose `MasterUse::Record` unlocks are cancelled while `cancel` is set: the person
+/// dismissed the prompt.
+struct CancelRecordUnlock<'v> {
+    inner: &'v MemoryVault,
+    cancel: std::sync::atomic::AtomicBool,
+}
+
+impl Vault for CancelRecordUnlock<'_> {
+    fn store_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
+        self.inner.store_master(scid, index, secret)
+    }
+    fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.inner.master_index(scid)
+    }
+    fn stage_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+        owner: &StageToken,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.stage_master(scid, index, secret, owner)
+    }
+    fn staged_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.inner.staged_index(scid)
+    }
+    fn promote_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
+        self.inner.promote_master(scid, index)
+    }
+    fn discard_staged(
+        &self,
+        scid: &str,
+        index: u32,
+        owner: Option<&StageToken>,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.discard_staged(scid, index, owner)
+    }
+    fn forget_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.inner.forget_master(scid, index)
+    }
+    fn custody_epoch(&self, scid: &str) -> Result<u64, ad4m_identity_client::VaultError> {
+        self.inner.custody_epoch(scid)
+    }
+    fn forget_master_at(
+        &self,
+        scid: &str,
+        epoch: u64,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.inner.forget_master_at(scid, epoch)
+    }
+    fn unlock(
+        &self,
+        scid: &str,
+        why: MasterUse,
+        now: u64,
+    ) -> Result<ad4m_identity_client::Unlocked, ad4m_identity_client::VaultError> {
+        if why == MasterUse::Record && self.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(ad4m_identity_client::VaultError::Cancelled);
+        }
+        self.inner.unlock(scid, why, now)
+    }
+    fn store_pending_incept(&self, incept: &Event) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.store_pending_incept(incept)
+    }
+    fn pending_incepts(&self) -> Result<Vec<Event>, ad4m_identity_client::VaultError> {
+        self.inner.pending_incepts()
+    }
+    fn incept_published(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.incept_published(scid)
+    }
+    fn keep_push(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.keep_push(push)
+    }
+    fn pending_pushes(&self) -> Result<Vec<PendingPush>, ad4m_identity_client::VaultError> {
+        self.inner.pending_pushes()
+    }
+    fn push_done(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.push_done(push)
+    }
+    fn record_seen(
+        &self,
+        scid: &str,
+        version: u64,
+    ) -> Result<Option<u64>, ad4m_identity_client::VaultError> {
+        self.inner.record_seen(scid, version)
+    }
+    fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.record_seen_reset(scid)
+    }
+}
+
+/// Lal's finding on the take's owed mark, (a): the completion's unlock is cancelled, so the
+/// mark stays owed with nothing in memory or in the inbox to recall it. The next
+/// `refresh_master` derives it from the vault and the record and completes it: the record
+/// lists the desk holding #1 and its recovery key is attested by master #1 again.
+#[tokio::test]
+async fn a_cancelled_completion_of_a_pending_take_is_repaired_by_the_next_refresh() {
+    let w = pending_take(91).await;
+    let cancelling = CancelRecordUnlock {
+        inner: &w.b_vault,
+        cancel: std::sync::atomic::AtomicBool::new(true),
+    };
+    let cancelled = complete_pending_mark(&w.b, &cancelling, &w.did, &SystemClock, &OsRandom).await;
+    assert!(
+        matches!(
+            cancelled,
+            Err(ClientError::Vault(
+                ad4m_identity_client::VaultError::Cancelled
+            ))
+        ),
+        "{cancelled:?}"
+    );
+    assert_eq!(w.marked().await, (Some((HoldsMaster::No, None)), None));
+
+    // The prompt is cancelled again on a refresh: the repair fails with the cancel and stays
+    // owed.
+    let refreshed = refresh_master(&w.b, &cancelling, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Err(e),
+    } = refreshed
+    else {
+        panic!("expected the owed mark tried and cancelled: {refreshed:?}")
+    };
+    assert!(
+        matches!(
+            e,
+            ClientError::Vault(ad4m_identity_client::VaultError::Cancelled)
+        ),
+        "{e:?}"
+    );
+
+    // The person approves this time: the mark lands, re-attesting the recovery key.
+    cancelling
+        .cancel
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let refreshed = refresh_master(&w.b, &cancelling, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected the owed mark repaired: {refreshed:?}")
+    };
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
+    );
+
+    // Once repaired, the holder is current again, without another write or prompt.
+    let puts = w.b.rpc().record_puts.get();
+    let unlocks = w.b_vault.unlocks().len();
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(w.b.rpc().record_puts.get(), puts);
+    assert_eq!(w.b_vault.unlocks().len(), unlocks);
+}
+
+/// (b): the completion's record put fails once (the store is down). The next refresh repairs
+/// the mark.
+#[tokio::test]
+async fn a_failed_put_of_a_pending_take_is_repaired_by_the_next_refresh() {
+    let w = pending_take(92).await;
+    w.b.rpc().refuse_record_puts.set(1);
+    let failed = complete_pending_mark(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom).await;
+    assert!(
+        matches!(failed, Err(ClientError::Rpc(RpcError { code: 503, .. }))),
+        "{failed:?}"
+    );
+    assert_eq!(w.marked().await, (Some((HoldsMaster::No, None)), None));
+
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected the owed mark repaired: {refreshed:?}")
+    };
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
+    );
+}
+
+/// (c): the restart shape. The app stops after the take and before any completion: the
+/// `Taken` is gone, the inbox message is acked, and the vault keeps #1. The first refresh
+/// after the restart repairs the mark from the vault and the record alone.
+#[tokio::test]
+async fn a_restart_after_a_pending_take_is_repaired_by_the_first_refresh() {
+    let w = pending_take(93).await;
+    assert!(
+        take_master(&w.b, &w.b_vault, &OsRandom)
+            .await
+            .unwrap()
+            .is_none(),
+        "no inbox message is left to recall the owed mark"
+    );
+    let unlocks = w.b_vault.unlocks().len();
+
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected the owed mark repaired: {refreshed:?}")
+    };
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
+    );
+    // The stale recovery pair needs the master: one record unlock.
+    assert_eq!(&w.b_vault.unlocks()[unlocks..], &[MasterUse::Record]);
+    // And the repaired holder now counts as another copy: the creator may remove its own.
+    let removed = remove_master(&w.a, &w.vault, &w.did, &OsRandom).await;
+    assert!(removed.is_ok(), "{removed:?}");
+    assert_eq!(w.vault.master_index(&w.scid).unwrap(), None);
+}
+
+/// A take whose own `holdsMaster` write failed for a passing reason (the store down), with
+/// the record's recovery pair current: no completion was ever owed by `record_pending`, and
+/// the next refresh lands the mark as the device, without a prompt.
+#[tokio::test]
+async fn a_take_whose_mark_failed_is_marked_by_the_next_refresh_without_a_prompt() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 94).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap()
+        .record
+        .unwrap();
+    b.rpc().refuse_record_puts.set(1);
+    let taken = take_master(&b, &b_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("the pushed master key waits in the inbox");
+    assert!(taken.record.is_err() && !taken.record_pending, "{taken:?}");
+
+    let refreshed = refresh_master(&b, &b_vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 0,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected the owed mark repaired: {refreshed:?}")
+    };
+    let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
+    let desk = &opened.record.devices[&d2];
+    assert_eq!(
+        (desk.holds_master, desk.master_index),
+        (HoldsMaster::Yes, Some(0))
+    );
+    assert!(b_vault.unlocks().is_empty(), "{:?}", b_vault.unlocks());
+}
+
+/// (d) and (e): a holder the record already marks stays `Current` with no record write and no
+/// prompt; a device that keeps no master key never writes the mark nor unlocks.
+#[tokio::test]
+async fn a_marked_holder_and_a_device_without_the_master_make_no_mark() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 95).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    let creator = &opened.record.devices[&a.status().await.unwrap().key_id.unwrap()];
+    assert_eq!(
+        (creator.holds_master, creator.master_index),
+        (HoldsMaster::Yes, Some(0))
+    );
+
+    let puts = a.rpc().record_puts.get();
+    let unlocks = vault.unlocks();
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(a.rpc().record_puts.get(), puts);
+    assert_eq!(vault.unlocks(), unlocks);
+
+    let refreshed = refresh_master(&b, &b_vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Unknown), "{refreshed:?}");
+    assert_eq!(b.rpc().record_puts.get(), 0);
+    assert!(b_vault.unlocks().is_empty());
+    let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::No);
+}
+
 /// An executor that checks, at the first `identity.inboxPut` of a rotation's hand-over,
 /// that the stored record's recovery key is already attested by the new master: the
 /// re-attesting write lands before any key is pushed.

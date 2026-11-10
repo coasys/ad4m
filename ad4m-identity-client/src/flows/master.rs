@@ -28,6 +28,9 @@
 //! that cannot be written — and the take answers the marking owed ([`Taken::record_pending`]):
 //! [`complete_pending_mark`] signs the fenced mark with the master just taken, re-attesting
 //! the recovery key and landing the mark, and [`refresh_master`] makes it on such a take.
+//! The obligation is never stored: a completion that is cancelled, fails or never runs (the
+//! app restarted) is derived again by the holder's next [`refresh_master`] from the vault and
+//! the record, and made there ([`Refreshed::Repaired`]).
 //!
 //! **After a rotation** ([`refresh_master`]): a device whose own rotation was cut off after
 //! its publish promotes the key its vault staged once the log's current master index is the
@@ -99,9 +102,9 @@ pub struct Taken {
     /// with a rotation and waits for the new master's attestation. The key is stored and the
     /// inbox message acked either way — the master copy is never lost behind a record that
     /// cannot be written; [`complete_pending_mark`], which [`refresh_master`] makes on a
-    /// take that answers so, re-attests and lands the mark. There is no persistent repair
-    /// queue: a caller must act on a pending take — a later refresh answers
-    /// [`Refreshed::Current`] without repairing it.
+    /// take that answers so, re-attests and lands the mark. No repair queue is kept: if the
+    /// completion is cancelled, fails or never runs, the next [`refresh_master`] derives the
+    /// owed mark from the vault and the record and makes it ([`Refreshed::Repaired`]).
     pub record_pending: bool,
 }
 
@@ -417,7 +420,9 @@ fn retry_entry(key_id: &str) -> DeviceEntry {
 /// not check, or a vault that refuses it, leaves the message for the next try. The key and
 /// the ack stand even when the record write is refused [`ClientError::RecoveryNeedsReattest`]
 /// — the record's recovery pair waiting on the new master — and the take answers it owed
-/// ([`Taken::record_pending`]); [`complete_pending_mark`] completes it.
+/// ([`Taken::record_pending`]); [`complete_pending_mark`] completes it, and when that does
+/// not happen (cancelled, failed, the app restarted) the next [`refresh_master`] does
+/// ([`Refreshed::Repaired`]), since the owed mark is derived from the vault and the record.
 pub async fn take_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -553,9 +558,10 @@ pub async fn reattest_recovery<R: ExecutorRpc>(
 /// keeps ([`record::Reader::Master`]) — the same write re-attests the record's recovery
 /// pair when it is stale. The mark is fenced by the custody epoch ([`hold_mark`]): it
 /// names the index the vault keeps when it lands, and a `remove_master` that won meanwhile
-/// leaves the entry `holdsMaster: false`. There is no persistent repair queue — a caller
-/// with a pending take must call this (a later `refresh_master` may answer
-/// [`Refreshed::Current`] without repairing anything). Answers the version written.
+/// leaves the entry `holdsMaster: false`. A caller with a pending take calls this right
+/// away; when it is cancelled or fails, nothing needs keeping: the holder's next
+/// [`refresh_master`] finds the stale record and makes this same write
+/// ([`Refreshed::Repaired`]). Answers the version written.
 pub async fn complete_pending_mark<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -590,6 +596,22 @@ pub async fn complete_pending_mark<R: ExecutorRpc>(
 pub enum Refreshed {
     /// The vault keeps the current master key.
     Current,
+    /// The vault keeps the current master key, but the record owed this device's mark for it:
+    /// its recovery pair was stale after a rotation (only the master re-attests it), or it
+    /// listed the device `holdsMaster: "offered"` or `true` with another index than `index`.
+    /// Derived from the vault and the record on each refresh ([`owed_mark`]), so a mark a
+    /// take left owed — its completion
+    /// cancelled, its put failed, the app restarted — is made here: as the device, or as the
+    /// master when the recovery pair is stale ([`complete_pending_mark`], one
+    /// [`MasterUse::Record`] unlock).
+    Repaired {
+        /// The index the vault keeps: the log's current master.
+        index: u32,
+        /// The record write (`holdsMaster: true` with `index`), or why the record could not
+        /// be read or written (a cancelled unlock, the store down): still owed, the next
+        /// refresh tries again. The key is kept either way.
+        record: Result<u64, ClientError>,
+    },
     /// A rotation of this device had staged the current master key and was cut off before it
     /// promoted it: the vault keeps a master key now, and the record marks this device
     /// holding it — by the master itself, re-attesting the recovery key, when the record's
@@ -630,7 +652,14 @@ pub enum Refreshed {
 ///    fenced by the custody epoch ([`hold_mark`]) and goes as the device, or — when the
 ///    record's recovery pair went stale with the rotation — as the promoted master itself,
 ///    re-attesting it ([`complete_pending_mark`]).
-/// 2. The vault keeps the current master: [`Refreshed::Current`].
+/// 2. The vault keeps the current master: one record read checks the mark it owes
+///    ([`owed_mark`]) — a stale recovery pair, or this device's entry left `offered` or
+///    `true` with another index. Nothing owed: [`Refreshed::Current`], no write, no unlock.
+///    Owed: written now, as the master when the pair is stale ([`complete_pending_mark`],
+///    one [`MasterUse::Record`] unlock), else as the device ([`Refreshed::Repaired`]). This
+///    is how a take's owed mark is repaired after its completion was cancelled or failed, or
+///    the app restarted; a device that does not keep the current master never reads the
+///    record here.
 /// 3. The current master waits in the inbox: taken ([`take_master`], [`Refreshed::Taken`]);
 ///    a take whose record write was refused [`ClientError::RecoveryNeedsReattest`] is
 ///    completed by [`complete_pending_mark`] with the master just taken.
@@ -662,26 +691,9 @@ pub async fn refresh_master<R: ExecutorRpc>(
                 let key_id = executor.status().await?.key_id.ok_or_else(|| {
                     ClientError::Protocol("the executor's device key is in no log".into())
                 })?;
-                match hold_mark(
-                    executor,
-                    vault,
-                    did,
-                    &scid,
-                    &key_id,
-                    &Reader::Executor,
-                    random,
-                )
-                .await
-                {
-                    // The record's recovery pair went stale with the rotation that made this
-                    // key current: a device write is refused rather than seal the record
-                    // without it, so the promoted master signs the fenced mark that
-                    // re-attests it and lands it.
-                    Err(ClientError::RecoveryNeedsReattest) => {
-                        complete_pending_mark(executor, vault, did, clock, random).await
-                    }
-                    other => other,
-                }
+                // The record's recovery pair went stale with the rotation that made this key
+                // current: the promoted master signs the fenced mark that re-attests it.
+                mark_held(executor, vault, did, &scid, &key_id, clock, random).await
             }
             .await;
             return Ok(Refreshed::Promoted { index, record });
@@ -698,7 +710,7 @@ pub async fn refresh_master<R: ExecutorRpc>(
     let epoch = vault.custody_epoch(&scid)?;
     let kept = vault.master_index(&scid)?;
     if live && kept == Some(current) {
-        return Ok(Refreshed::Current);
+        return Ok(current_or_repaired(executor, vault, did, &chain, current, clock, random).await);
     }
     if let Some(mut taken) = take_master(executor, vault, random).await? {
         if taken.did == did {
@@ -725,14 +737,141 @@ pub async fn refresh_master<R: ExecutorRpc>(
                         .await?;
                     Ok(Refreshed::Asked(id))
                 }
-                Forgot::Kept(kept) => Ok(if live && kept == current {
-                    Refreshed::Current
-                } else {
-                    Refreshed::Unknown
-                }),
+                Forgot::Kept(kept) if live && kept == current => Ok(current_or_repaired(
+                    executor, vault, did, &chain, current, clock, random,
+                )
+                .await),
+                Forgot::Kept(_) => Ok(Refreshed::Unknown),
             }
         }
         _ => Ok(Refreshed::Unknown),
+    }
+}
+
+/// This device's `holdsMaster` mark as the vault's custody of `scid` ([`hold_mark`]): written
+/// as the device, and — when that is refused [`ClientError::RecoveryNeedsReattest`] because
+/// the record's recovery pair went stale with a rotation — as the master the vault keeps,
+/// re-attesting it ([`complete_pending_mark`], one [`MasterUse::Record`] unlock).
+#[allow(clippy::too_many_arguments)]
+async fn mark_held<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    scid: &str,
+    key_id: &KeyId,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    match hold_mark(
+        executor,
+        vault,
+        did,
+        scid,
+        key_id,
+        &Reader::Executor,
+        random,
+    )
+    .await
+    {
+        Err(ClientError::RecoveryNeedsReattest) => {
+            complete_pending_mark(executor, vault, did, clock, random).await
+        }
+        other => other,
+    }
+}
+
+/// The mark the record owes this device, whose vault keeps master `kept` (see
+/// [`owed_mark`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Owed {
+    /// The record is as the custody says.
+    Nothing,
+    /// The record lists this device `holdsMaster: "offered"`, or `true` with another index
+    /// than `kept`; a device write makes the mark.
+    Device,
+    /// The record's recovery pair is stale after a rotation: only the master re-attests it,
+    /// and its write makes the mark too.
+    Master,
+}
+
+/// What the record `opened` owes device `key_id`, whose vault keeps master `kept` — the log's
+/// current one. Derived from the record and the vault alone, so no in-memory or persisted
+/// note is needed:
+///
+/// - a stale recovery pair needs the master's write ([`Owed::Master`]), which marks this
+///   device from the vault's custody as it re-attests — a take's owed mark always comes with
+///   one, since that is what refused its device write;
+/// - an entry for this device left `holdsMaster: "offered"` (the key was sent and taken, the
+///   take's own write did not land), or `true` with another index than `kept`, needs the
+///   device's write ([`Owed::Device`]).
+///
+/// An entry that says `holdsMaster: false` is never overridden by a device write: that is
+/// what [`remove_master`] writes, and an app sharing the vault may keep the key another app
+/// of the computer installed after this one removed it — marking it would count one vault
+/// as two copies in the only-copy check. A device the record does not list owes nothing (its
+/// entry comes with its link, and a `holdsMaster` change to an unlisted device changes
+/// nothing), nor does an identity without a record.
+fn owed_mark(opened: Option<&record::Opened>, key_id: &str, kept: u32) -> Owed {
+    let Some(opened) = opened else {
+        return Owed::Nothing;
+    };
+    if opened.recovery.is_none() && opened.recovery_key.is_some() {
+        return Owed::Master;
+    }
+    match opened.record.devices.get(key_id) {
+        Some(entry)
+            if entry.holds_master == HoldsMaster::Offered
+                || (entry.holds_master == HoldsMaster::Yes && entry.master_index != Some(kept)) =>
+        {
+            Owed::Device
+        }
+        _ => Owed::Nothing,
+    }
+}
+
+/// The vault keeps the log's current master `current` of `did` (`chain`): [`Refreshed::Current`]
+/// when the record marks this device holding it with a current recovery pair, else the owed
+/// mark made now ([`Refreshed::Repaired`]). One record read on this path only — a device
+/// without the current master never reaches it — and no unlock unless the recovery pair is
+/// stale.
+#[allow(clippy::too_many_arguments)]
+async fn current_or_repaired<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    chain: &KelChain,
+    current: u32,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Refreshed {
+    let repair = async {
+        let scid = scid_of(did)?;
+        let key_id = executor.status().await?.key_id.ok_or_else(|| {
+            ClientError::Protocol("the executor's device key is in no log".into())
+        })?;
+        let opened =
+            record::read_as(executor, vault, did, chain, &Reader::Executor, random).await?;
+        match owed_mark(opened.as_ref(), &key_id, current) {
+            Owed::Nothing => Ok(None),
+            // Known stale: the device write would only be refused.
+            Owed::Master => complete_pending_mark(executor, vault, did, clock, random)
+                .await
+                .map(Some),
+            Owed::Device => mark_held(executor, vault, did, &scid, &key_id, clock, random)
+                .await
+                .map(Some),
+        }
+    };
+    match repair.await {
+        Ok(None) => Refreshed::Current,
+        Ok(Some(version)) => Refreshed::Repaired {
+            index: current,
+            record: Ok(version),
+        },
+        Err(e) => Refreshed::Repaired {
+            index: current,
+            record: Err(e),
+        },
     }
 }
 

@@ -282,6 +282,11 @@ async fn main() {
                         .map_err(|e| e.to_string())?
                     {
                         Refreshed::Current => Ok(json!({ "refreshed": "current" })),
+                        Refreshed::Repaired { index, record } => Ok(json!({
+                            "refreshed": "repaired",
+                            "index": index,
+                            "record": written(&record),
+                        })),
                         Refreshed::Promoted { index, record } => Ok(json!({
                             "refreshed": "promoted",
                             "index": index,
