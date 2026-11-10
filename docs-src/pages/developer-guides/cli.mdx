@@ -129,7 +129,9 @@ The `ad4m` client tool provides a complete interface to interact with a running 
 ```bash
 ad4m agent generate
 ```
-This will prompt you for a password to encrypt your agent's keys.
+This will prompt you for a password to encrypt your agent's keys. On an agent
+that is already initialised the command is refused (409) — it never replaces the
+existing keys and DID; use `agent unlock` instead.
 
 3. On subsequent starts, unlock your agent:
 ```bash

@@ -2666,17 +2666,24 @@ impl AIService {
                     .await?;
                 model_ready_rx.await?;
 
-                // Respawn all tasks for this model: by its id, or by "default" when it is
-                // the default LLM.
+                // Respawn every task that runs on this model's worker: the ones
+                // naming it, and the ones naming a variable (`default`) that
+                // resolves to it. The new worker starts with no tasks.
                 let tasks = crate::db_backend::db_backend()
                     .get_tasks()
                     .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-                for task in tasks {
-                    if Self::replace_model_variables(&task.model_id).ok().as_ref()
-                        == Some(&model_id)
-                    {
-                        self.spawn_task(task).await?;
+                for task in tasks.into_iter().filter(|t| {
+                    Self::replace_model_variables(&t.model_id).is_ok_and(|id| id == model_id)
+                }) {
+                    // One task that fails to spawn must not leave the rest unspawned.
+                    if let Err(e) = self.spawn_task(task.clone()).await {
+                        log::warn!(
+                            "AIService::update_model: task '{}' (task_id={}) not respawned on {}: {e:#}",
+                            task.name,
+                            task.task_id,
+                            model_id
+                        );
                     }
                 }
             }
@@ -3890,3 +3897,6 @@ mod transcription_owner_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod default_task_respawn_tests;
