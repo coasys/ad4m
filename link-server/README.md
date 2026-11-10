@@ -347,7 +347,8 @@ could swap: a member's X25519 key follows from its DID.
   again. Until then the recipient cannot open the links of that version. Only
   a member of the room can do this, and only for versions it holds. A member
   that grants a wrong box again after each drop can win that race every time;
-  removing it from the ACL stops it.
+  removing it from the ACL stops it in allowlist mode. With `AUTO_ADMIT` the
+  server admits it again at its next sign-in.
 
 ### E2E encryption — other future requirements
 
