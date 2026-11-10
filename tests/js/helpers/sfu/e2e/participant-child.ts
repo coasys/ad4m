@@ -23,6 +23,8 @@ let options: JoinOptions | null = null;
 let tone: Source | null = null;
 let camera: Source | null = null;
 let screen: Source | null = null;
+/** The local media, one stream for the whole run: an app keeps its stream across a topology switch. */
+let localStream: MediaStream | null = null;
 
 const state = {
   topology: null as string | null,
@@ -32,6 +34,8 @@ const state = {
   /** `participant-left` events so far; a rebuilt connection fires one per participant. */
   departures: 0,
   hearing: new Hearing(),
+  /** The stream each participant's latest event handed over: what an app has on screen. */
+  bound: new Map<string, MediaStream>(),
   data: [] as { from: string; label: string; data: string; binary: boolean }[],
   errors: [] as string[],
   peerStates: {} as Record<string, string>,
@@ -49,7 +53,11 @@ function receiveAll(): void {
 
 async function snapshot(): Promise<Snapshot> {
   const participants = session?.participants ?? [];
-  const remotes = state.hearing.remotes(participants, options?.tones ?? []);
+  const tones = options?.tones ?? [];
+  const bound = [...state.bound].map(([agentDid, stream]) => ({ agentDid, stream }));
+  // What the bound streams hold, before the participants' tracks are read again.
+  const shown = state.hearing.remotes(bound, tones, participants);
+  const remotes = state.hearing.remotes(participants, tones, bound);
   return {
     joined: session?.getState() === "active",
     state: session?.getState() ?? "none",
@@ -59,6 +67,7 @@ async function snapshot(): Promise<Snapshot> {
     left: [...state.left],
     departures: state.departures,
     remotes,
+    shown,
     data: state.data,
     errors: state.errors,
     peerStates: state.peerStates,
@@ -67,52 +76,88 @@ async function snapshot(): Promise<Snapshot> {
   };
 }
 
-async function join(opts: JoinOptions): Promise<void> {
-  options = opts;
+/** Create a session for the room in `opts`, wired to `state`. Without `topology`, the space's stored policy decides. */
+async function open(opts: JoinOptions, topology?: "mesh" | "sfu"): Promise<Session> {
   client ??= new Ad4mClient(`http://127.0.0.1:${opts.port}`, opts.token);
   const perspective = (await client.perspective.all()).find((p) => p.sharedUrl === opts.neighbourhoodUrl);
   if (!perspective) throw new Error(`no perspective for ${opts.neighbourhoodUrl}`);
   const proxy = perspective.getNeighbourhoodProxy();
 
-  if (!session) {
-    // As an app does (WE's call adapter): the space's stored policy decides the topology.
-    // The executor always has a config, so an error here is a failure to report,
-    // not a reason to join in mesh.
-    const sfuConfig = await proxy.sfuConfig(opts.neighbourhoodUrl);
-    session = await proxy.createSession(opts.room, {
-      neighbourhoodUrl: opts.neighbourhoodUrl,
-      topology: sfuConfig.mode === "mesh" ? "mesh" : "auto",
-      sfuConfig,
-    });
-    session.on("topology-changed", (topology: string) => { state.topology = topology; });
-    session.on("participant-joined", (p: any) => { state.roster.add(didOf(p)); state.left.delete(didOf(p)); receiveAll(); });
-    session.on("participant-updated", () => receiveAll());
-    session.on("stream-added", () => receiveAll());
-    session.on("participant-left", (p: any) => { state.roster.delete(didOf(p)); state.left.add(didOf(p)); state.departures += 1; });
-    const debug = (line: string) => {
-      if (process.env.E2E_DEBUG) console.log(`[e2e ${process.env.E2E_WHO}] ${new Date().toISOString().slice(17, 23)} ${line}`);
-    };
-    session.on("peer-state", (did: string, peerState: string) => {
-      state.peerStates[did] = peerState;
-      debug(`peer ${did.slice(-6)} ${peerState}`);
-    });
-    session.on("peer-recovery", (did: string, attempt: { rung: string }) => {
-      state.recoveries += 1;
-      debug(`peer ${did.slice(-6)} recovery: ${attempt?.rung}`);
-    });
-    session.on("error", (error: unknown) => {
-      state.errors.push(error instanceof Error ? error.message : String(error));
-      console.error(`[${process.env.E2E_WHO}] session error:`, error);
-    });
-    session.onData((message: any) => {
-      state.data.push({ from: message.senderDid, label: message.channelLabel, data: message.data, binary: message.binary });
-    });
-  }
+  // As an app does (WE's call adapter): the space's stored policy decides the topology.
+  // The executor always has a config, so an error here is a failure to report,
+  // not a reason to join in mesh.
+  const sfuConfig = await proxy.sfuConfig(opts.neighbourhoodUrl);
+  const s = await proxy.createSession(opts.room, {
+    neighbourhoodUrl: opts.neighbourhoodUrl,
+    topology: topology ?? (sfuConfig.mode === "mesh" ? "mesh" : "auto"),
+    sfuConfig,
+  });
+  // A replaced session's last events (its leave) are not this participant's call any more.
+  const on = (event: Parameters<Session["on"]>[0], handler: (...args: any[]) => void) =>
+    s.on(event, (...args: any[]) => { if (session === s) handler(...args); });
+  const bind = (did: string, stream: MediaStream | undefined) => { if (did && stream) state.bound.set(did, stream); };
+  on("topology-changed", (t: string) => { state.topology = t; });
+  on("participant-joined", (p: any) => { state.roster.add(didOf(p)); state.left.delete(didOf(p)); bind(didOf(p), p.stream); receiveAll(); });
+  on("participant-updated", (p: any) => { bind(didOf(p), p.stream); receiveAll(); });
+  on("stream-added", (stream: MediaStream) => {
+    bind(s.participants.find((p) => p.stream === stream)?.agentDid ?? "", stream);
+    receiveAll();
+  });
+  on("participant-left", (p: any) => {
+    state.roster.delete(didOf(p));
+    state.left.add(didOf(p));
+    state.bound.delete(didOf(p));
+    state.departures += 1;
+  });
+  const debug = (line: string) => {
+    if (process.env.E2E_DEBUG) console.log(`[e2e ${process.env.E2E_WHO}] ${new Date().toISOString().slice(17, 23)} ${line}`);
+  };
+  on("peer-state", (did: string, peerState: string) => {
+    state.peerStates[did] = peerState;
+    debug(`peer ${did.slice(-6)} ${peerState}`);
+  });
+  on("peer-recovery", (did: string, attempt: { rung: string }) => {
+    state.recoveries += 1;
+    debug(`peer ${did.slice(-6)} recovery: ${attempt?.rung}`);
+  });
+  on("error", (error: unknown) => {
+    state.errors.push(error instanceof Error ? error.message : String(error));
+    console.error(`[${process.env.E2E_WHO}] session error:`, error);
+  });
+  s.onData((message: any) => {
+    if (session !== s) return;
+    state.data.push({ from: message.senderDid, label: message.channelLabel, data: message.data, binary: message.binary });
+  });
+  return s;
+}
 
+async function join(opts: JoinOptions): Promise<void> {
+  options = opts;
+  session ??= await open(opts);
   tone ??= toneSource(opts.tone);
   if (opts.video) camera ??= videoSource(opts.video.width, opts.video.height);
-  const tracks = [tone.track, ...(camera ? [camera.track] : [])];
-  await session.join(new wrtc.MediaStream(tracks));
+  const stream: MediaStream = (localStream ??= new wrtc.MediaStream([tone.track, ...(camera ? [camera.track] : [])]));
+  await session.join(stream);
+}
+
+/**
+ * Switch the live call to `topology` as WE does: destroy the session, create
+ * one on the other topology, join it with the same local stream.
+ */
+async function switchTo(topology: "mesh" | "sfu"): Promise<void> {
+  const previous = session;
+  const stream = localStream;
+  if (!previous || !options || !stream) throw new Error("not in a call");
+  session = null;
+  state.hearing.stop();
+  state.bound.clear();
+  state.roster.clear();
+  state.left.clear();
+  state.peerStates = {};
+  state.topology = null;
+  await previous.destroy();
+  session = await open(options, topology);
+  await session.join(stream);
 }
 
 async function run(command: Command): Promise<unknown> {
@@ -124,6 +169,7 @@ async function run(command: Command): Promise<unknown> {
     case "leave":
       await session?.leave();
       state.roster.clear();
+      state.bound.clear();
       return;
     case "mute":
       return session!.replaceTrack(command.media, null);
@@ -140,6 +186,8 @@ async function run(command: Command): Promise<unknown> {
       return session!.sendData(command.label, command.data, command.binary);
     case "snapshot":
       return snapshot();
+    case "switch":
+      return switchTo(command.topology);
     case "close":
       state.hearing.stop();
       await session?.destroy().catch(() => {});
