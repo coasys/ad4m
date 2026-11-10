@@ -23,8 +23,8 @@ use ad4m_identity_client::flows::revoke::{key_id_of, revoke, revoke_and_rotate};
 use ad4m_identity_client::flows::rotate::{rotate, MAX_TRIES};
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::{
-    ClientError, Clock, ExecutorRpc, MasterUse, MemoryVault, OsRandom, PendingPush, Random,
-    RpcError, StageToken, SystemClock, Vault, ViaExecutor,
+    ClientError, Clock, CustodyNote, ExecutorRpc, MasterUse, MemoryVault, OsRandom, PendingPush,
+    Random, RpcError, StageToken, SystemClock, Vault, ViaExecutor,
 };
 use ad4m_identity_core::build::{self, cosign, Signer};
 use ad4m_identity_core::inbox::{
@@ -1132,6 +1132,22 @@ impl Vault for RefusingVault {
 
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.0.record_seen_reset(scid)
+    }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.0.custody_note(scid, key_id)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.0.swap_custody_note(scid, key_id, expected, note)
     }
 }
 
@@ -4741,6 +4757,22 @@ impl Vault for PromotedFirst {
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.0.record_seen_reset(scid)
     }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.0.custody_note(scid, key_id)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.0.swap_custody_note(scid, key_id, expected, note)
+    }
 }
 
 /// A restore whose staged key another app promoted first: the enrolment still keeps #1.
@@ -5049,6 +5081,22 @@ impl Vault for LaggingIndex {
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.inner.record_seen_reset(scid)
     }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.inner.custody_note(scid, key_id)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.inner.swap_custody_note(scid, key_id, expected, note)
+    }
 }
 
 /// From the review of #1667, adapted: after a rotation whose promote failed half way, the
@@ -5277,6 +5325,22 @@ impl Vault for SharedVault {
 
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.0.record_seen_reset(scid)
+    }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.0.custody_note(scid, key_id)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.0.swap_custody_note(scid, key_id, expected, note)
     }
 }
 
@@ -6229,6 +6293,22 @@ impl Vault for InstallBeforeForget {
 
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.inner.record_seen_reset(scid)
+    }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.inner.custody_note(scid, key_id)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.inner.swap_custody_note(scid, key_id, expected, note)
     }
 }
 
@@ -7201,12 +7281,29 @@ impl Vault for CancelRecordUnlock<'_> {
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.inner.record_seen_reset(scid)
     }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.inner.custody_note(scid, key_id)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.inner.swap_custody_note(scid, key_id, expected, note)
+    }
 }
 
 /// Lal's finding on the take's owed mark, (a): the completion's unlock is cancelled, so the
-/// mark stays owed with nothing in memory or in the inbox to recall it. The next
-/// `refresh_master` derives it from the vault and the record and completes it: the record
-/// lists the desk holding #1 and its recovery key is attested by master #1 again.
+/// mark stays owed with nothing in memory or in the inbox to recall it — only the desk's
+/// `MarkOwed` custody note, written before the ack. The next `refresh_master` makes the mark
+/// from that note and clears it: the record lists the desk holding #1 and its recovery key is
+/// attested by master #1 again.
 #[tokio::test]
 async fn a_cancelled_completion_of_a_pending_take_is_repaired_by_the_next_refresh() {
     let w = pending_take(91).await;
@@ -7225,6 +7322,13 @@ async fn a_cancelled_completion_of_a_pending_take_is_repaired_by_the_next_refres
         "{cancelled:?}"
     );
     assert_eq!(w.marked().await, (Some((HoldsMaster::No, None)), None));
+    assert!(
+        matches!(
+            note_of(&w.b_vault, &w.scid, &w.d2),
+            Some(CustodyNote::MarkOwed { index: 1, .. })
+        ),
+        "a cancelled completion keeps the note"
+    );
 
     // The prompt is cancelled again on a refresh: the repair fails with the cancel and stays
     // owed.
@@ -7265,6 +7369,8 @@ async fn a_cancelled_completion_of_a_pending_take_is_repaired_by_the_next_refres
         (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
     );
 
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None, "the note is met");
+
     // Once repaired, the holder is current again, without another write or prompt.
     let puts = w.b.rpc().record_puts.get();
     let unlocks = w.b_vault.unlocks().len();
@@ -7276,8 +7382,8 @@ async fn a_cancelled_completion_of_a_pending_take_is_repaired_by_the_next_refres
     assert_eq!(w.b_vault.unlocks().len(), unlocks);
 }
 
-/// (b): the completion's record put fails once (the store is down). The next refresh repairs
-/// the mark.
+/// (b): the completion's record put fails once (the store is down); the note stays. The next
+/// refresh repairs the mark from it and clears it.
 #[tokio::test]
 async fn a_failed_put_of_a_pending_take_is_repaired_by_the_next_refresh() {
     let w = pending_take(92).await;
@@ -7303,11 +7409,13 @@ async fn a_failed_put_of_a_pending_take_is_repaired_by_the_next_refresh() {
         w.marked().await,
         (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
     );
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None);
 }
 
 /// (c): the restart shape. The app stops after the take and before any completion: the
-/// `Taken` is gone, the inbox message is acked, and the vault keeps #1. The first refresh
-/// after the restart repairs the mark from the vault and the record alone.
+/// `Taken` is gone, the inbox message is acked, and the vault keeps #1 and the desk's
+/// `MarkOwed` note (the vault is what survives a restart). The first refresh after the restart
+/// repairs the mark from that note and clears it.
 #[tokio::test]
 async fn a_restart_after_a_pending_take_is_repaired_by_the_first_refresh() {
     let w = pending_take(93).await;
@@ -7318,6 +7426,10 @@ async fn a_restart_after_a_pending_take_is_repaired_by_the_first_refresh() {
             .is_none(),
         "no inbox message is left to recall the owed mark"
     );
+    assert!(matches!(
+        note_of(&w.b_vault, &w.scid, &w.d2),
+        Some(CustodyNote::MarkOwed { index: 1, .. })
+    ));
     let unlocks = w.b_vault.unlocks().len();
 
     let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
@@ -7334,6 +7446,7 @@ async fn a_restart_after_a_pending_take_is_repaired_by_the_first_refresh() {
         w.marked().await,
         (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
     );
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None);
     // The stale recovery pair needs the master: one record unlock.
     assert_eq!(&w.b_vault.unlocks()[unlocks..], &[MasterUse::Record]);
     // And the repaired holder now counts as another copy: the creator may remove its own.
@@ -7343,8 +7456,8 @@ async fn a_restart_after_a_pending_take_is_repaired_by_the_first_refresh() {
 }
 
 /// A take whose own `holdsMaster` write failed for a passing reason (the store down), with
-/// the record's recovery pair current: no completion was ever owed by `record_pending`, and
-/// the next refresh lands the mark as the device, without a prompt.
+/// the record's recovery pair current: no completion was ever owed by `record_pending`, but
+/// the note was, and the next refresh lands the mark from it as the device, without a prompt.
 #[tokio::test]
 async fn a_take_whose_mark_failed_is_marked_by_the_next_refresh_without_a_prompt() {
     let store = TestStore::new();
@@ -7373,6 +7486,11 @@ async fn a_take_whose_mark_failed_is_marked_by_the_next_refresh_without_a_prompt
         .unwrap()
         .expect("the pushed master key waits in the inbox");
     assert!(taken.record.is_err() && !taken.record_pending, "{taken:?}");
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    assert!(matches!(
+        note_of(&b_vault, &scid, &d2),
+        Some(CustodyNote::MarkOwed { index: 0, .. })
+    ));
 
     let refreshed = refresh_master(&b, &b_vault, &did, &SystemClock, &OsRandom)
         .await
@@ -7391,6 +7509,7 @@ async fn a_take_whose_mark_failed_is_marked_by_the_next_refresh_without_a_prompt
         (HoldsMaster::Yes, Some(0))
     );
     assert!(b_vault.unlocks().is_empty(), "{:?}", b_vault.unlocks());
+    assert_eq!(note_of(&b_vault, &scid, &d2), None);
 }
 
 /// (d) and (e): a holder the record already marks stays `Current` with no record write and no
@@ -7436,6 +7555,476 @@ async fn a_marked_holder_and_a_device_without_the_master_make_no_mark() {
     assert!(b_vault.unlocks().is_empty());
     let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::No);
+}
+
+/// This device's custody note for `scid` in `vault`.
+fn note_of(vault: &dyn Vault, scid: &str, key_id: &str) -> Option<CustodyNote> {
+    vault.custody_note(scid, key_id).unwrap()
+}
+
+/// Lal's finding (1) at 08973ff97. B's take stores #1 and acks it, but its mark is refused
+/// while the recovery pair is stale, and its completion never runs. A then re-attests with #1:
+/// the pair is current, and B's entry still says `false`, so nothing in the record says B owes
+/// a mark. B's custody note does: B's next refresh enrols B as the device (no prompt) and clears
+/// the note.
+#[tokio::test]
+async fn a_failed_take_is_enrolled_by_its_refresh_after_another_device_reattested() {
+    let w = pending_take(96).await;
+    assert!(
+        matches!(
+            note_of(&w.b_vault, &w.scid, &w.d2),
+            Some(CustodyNote::MarkOwed { index: 1, .. })
+        ),
+        "the take noted its mark owed before the ack"
+    );
+    reattest_recovery(&w.a, &w.vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::No, None)), Some("m1".to_string())),
+        "the pair is current again and B's entry does not say it holds #1"
+    );
+
+    let unlocks = w.b_vault.unlocks().len();
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected B enrolled from its note: {refreshed:?}")
+    };
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
+    );
+    assert_eq!(
+        w.b_vault.unlocks().len(),
+        unlocks,
+        "a device write needs no prompt"
+    );
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None, "the note is met");
+}
+
+/// Lal's finding (2) at 08973ff97. Two apps share one vault on a computer: A (`d1`, the
+/// creator) and B (`d2`). B took #0 and then removed it (its note says released; the shared
+/// vault forgot the key). A rotates to #1 with the words; its hand-over write fails, so the
+/// record's recovery pair is stale and the shared vault keeps #1. B's refresh finds the vault
+/// keeping the current master and the pair stale: it must not re-mark B (nor prompt). A's own
+/// refresh enrols A from A's note.
+#[tokio::test]
+async fn a_released_app_on_a_shared_vault_is_not_marked_by_the_stale_pair() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &shared, 97).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        entry("Other app", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    send_master(&a, &*shared, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(&b, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("#0 waits in B's inbox");
+    taken.record.as_ref().unwrap();
+    remove_master(&b, &SharedVault(shared.clone()), &did, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+    assert!(matches!(
+        note_of(&*shared, &scid, &d2),
+        Some(CustodyNote::Released { .. })
+    ));
+
+    let words = words::from_entropy(&[97; 16]);
+    a.rpc().refuse_record_puts.set(1);
+    let rotated = rotate(
+        &a,
+        &SharedVault(shared.clone()),
+        &did,
+        &words,
+        &[],
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(rotated.record.is_err(), "{:?}", rotated.record);
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(1));
+    let opened = record::read(&b, &*shared, &did).await.unwrap().unwrap();
+    assert!(opened.recovery.is_none(), "the pair is stale");
+
+    let unlocks = shared.unlocks().len();
+    let puts = b.rpc().record_puts.get();
+    let refreshed = refresh_master(
+        &b,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(
+        shared.unlocks().len(),
+        unlocks,
+        "a released app was prompted"
+    );
+    assert_eq!(
+        b.rpc().record_puts.get(),
+        puts,
+        "a released app wrote the record"
+    );
+    let opened = record::read(&b, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices[&d2].holds_master,
+        HoldsMaster::No,
+        "the stale pair re-marked a released app"
+    );
+
+    // A's note owes A's mark: A's refresh re-attests and enrols A.
+    let refreshed = refresh_master(
+        &a,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected A enrolled from its note: {refreshed:?}")
+    };
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    let mine = &opened.record.devices["d1"];
+    assert_eq!(
+        (mine.holds_master, mine.master_index),
+        (HoldsMaster::Yes, Some(1))
+    );
+    assert_eq!(opened.recovery.unwrap().attestation.key_id, "m1");
+    assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::No);
+    assert_eq!(note_of(&*shared, &scid, "d1"), None);
+}
+
+/// Lal's finding (3) at 08973ff97. A device the log lists but the record does not (its link's
+/// record write failed) takes the current master while the recovery pair is stale. Its
+/// refresh finds the vault keeping the current master and the pair stale: it owes nothing the
+/// record could show, so it answers `Current` with no prompt and no write.
+#[tokio::test]
+async fn an_unlisted_device_with_a_stale_pair_is_never_prompted() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 98).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_b = b
+        .rpc()
+        .call(
+            "identity.claimOffer",
+            json!({ "offer": flow.offer_string(), "canKeepMaster": true }),
+        )
+        .await
+        .unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+    a.rpc().refuse_record_puts.set(2);
+    let linked = flow
+        .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), false)
+        .await
+        .unwrap();
+    a.rpc().refuse_record_puts.set(0);
+    assert!(linked.record.is_err(), "{:?}", linked.record);
+    join(&b, &claimed_b["offerId"]).await;
+    let d2 = linked.key_id;
+    // A later write by A wraps the record key for every device of the log, the desk included:
+    // the desk can open the record, which still lists no entry for it.
+    record::write(
+        &a,
+        &vault,
+        &did,
+        &[Change::Rename {
+            key_id: "d1".into(),
+            name: "Phone".into(),
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+
+    // A's rotation lands and is cut off before its re-attestation; A sends #1 to the desk.
+    let words = words::from_entropy(&[98; 16]);
+    let cut = ViaExecutor::new(CutOffAfterPublish {
+        inner: a.rpc(),
+        published: Cell::new(false),
+    });
+    tokio::select! {
+        rotated = rotate(&cut, &vault, &did, &words, &[], &SystemClock, &OsRandom) => {
+            panic!("the rotation was not cut off: {rotated:?}")
+        }
+        _ = async {
+            while !cut.rpc().published.get() {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    vault.promote_master(&scid, 1).unwrap();
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(&b, &b_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("#1 waits in the desk's inbox");
+    assert!(taken.record.is_err(), "{taken:?}");
+    assert_eq!(b_vault.master_index(&scid).unwrap(), Some(1));
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert!(
+        !opened.record.devices.contains_key(&d2),
+        "the desk is unlisted"
+    );
+    assert!(opened.recovery.is_none(), "the pair is stale");
+
+    let puts = b.rpc().record_puts.get();
+    let refreshed = refresh_master(&b, &b_vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert!(
+        b_vault.unlocks().is_empty(),
+        "an unlisted device was prompted: {:?}",
+        b_vault.unlocks()
+    );
+    assert_eq!(b.rpc().record_puts.get(), puts);
+}
+
+/// An executor whose first `identity.recordPut` is preceded by another app on the same shared
+/// vault and device running `remove_master` to the end: its release, its `false`, its forget
+/// and its mark again. The put then lands on a stale version, and the write reads again.
+struct RemovalBeforeRecordPut<'a> {
+    inner: &'a TestExecutor,
+    other_vault: SharedVault,
+    did: String,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for RemovalBeforeRecordPut<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.recordPut" && !self.done.replace(true) {
+            remove_master(
+                &ViaExecutor::new(Yielding(self.inner)),
+                &self.other_vault,
+                &self.did,
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Lal's P3 at 08973ff97: B's removal runs between a refresh's re-mark decision and its put.
+/// A (`d1`) and C both hold #0; A's entry was lost and a duplicate take on A's shared vault
+/// noted the mark owed (its own mark failed). A's refresh decides the repair, reads the record
+/// and checks the note; another app on the same vault and device then removes the key —
+/// released, `false`, forgotten, `false` again — before the repair's put. The put is stale;
+/// the write reads again and finds the note released, so the repair writes nothing. The record
+/// ends `false` for A, matching the empty vault, and C's removal is refused `OnlyCopy`.
+#[tokio::test]
+async fn a_removal_inside_a_refresh_repair_leaves_no_stale_mark() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 99).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    record::write(
+        &a,
+        &*shared,
+        &did,
+        &[Change::HoldsMaster {
+            key_id: "d1".into(),
+            holds: HoldsMaster::No,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    a.rpc().refuse_record_puts.set(1);
+    let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("the duplicate waits in the inbox");
+    assert!(taken.record.is_err(), "{taken:?}");
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::MarkOwed { index: 0, .. })
+    ));
+
+    let racing = ViaExecutor::new(RemovalBeforeRecordPut {
+        inner: a.rpc(),
+        other_vault: SharedVault(shared.clone()),
+        did: did.clone(),
+        done: Cell::new(false),
+    });
+    let refreshed = refresh_master(
+        &racing,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(racing.rpc().done.get(), "the removal ran inside the repair");
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::Released { .. })
+    ));
+
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"].holds_master,
+        HoldsMaster::No,
+        "the repair's mark landed after the removal"
+    );
+    let refused = remove_master(&c, &c_vault, &did, &OsRandom).await;
+    assert!(
+        matches!(refused, Err(ClientError::OnlyCopy)),
+        "C removed the last copy on a stale mark: {refused:?}"
+    );
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// A pending take completed right away clears its note; the next refresh answers `Current`
+/// with no record write and no prompt, though nothing else changed.
+#[tokio::test]
+async fn a_note_cleared_after_its_mark_landed_answers_current() {
+    let w = pending_take(100).await;
+    complete_pending_mark(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None);
+    let puts = w.b.rpc().record_puts.get();
+    let unlocks = w.b_vault.unlocks().len();
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(w.b.rpc().record_puts.get(), puts);
+    assert_eq!(w.b_vault.unlocks().len(), unlocks);
+}
+
+/// A take on a shared vault whose note says another app released this device's copy before
+/// the take's store outranks that release: noted, marked, cleared. A release that read the
+/// store's epoch stands: no note, and the mark mirrors it (`false`).
+#[tokio::test]
+async fn a_take_outranks_an_older_release_and_never_a_newer_one() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 101).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&a, &SharedVault(shared.clone()), &did, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::Released { .. })
+    ));
+
+    // The person gives this computer the key again: the take is a new copy.
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("#0 waits in the inbox");
+    taken.record.as_ref().unwrap();
+    assert_eq!(note_of(&*shared, &scid, "d1"), None);
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    let mine = &opened.record.devices["d1"];
+    assert_eq!(
+        (mine.holds_master, mine.master_index),
+        (HoldsMaster::Yes, Some(0))
+    );
+
+    // A release that read the epoch this store produced (a removal in flight) stands.
+    let epoch = shared.custody_epoch(&scid).unwrap();
+    let newer = CustodyNote::Released { epoch: epoch + 1 };
+    assert!(shared
+        .swap_custody_note(&scid, "d1", None, Some(&newer))
+        .unwrap());
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("#0 waits in the inbox");
+    taken.record.as_ref().unwrap();
+    assert_eq!(note_of(&*shared, &scid, "d1"), Some(newer));
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices["d1"].holds_master, HoldsMaster::No);
 }
 
 /// An executor that checks, at the first `identity.inboxPut` of a rotation's hand-over,

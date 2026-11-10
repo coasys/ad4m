@@ -46,7 +46,7 @@ use crate::flows::revoke::check_keys;
 use crate::record::{self, Change, Reader};
 use crate::request::{self, chain_of, scid_of};
 use crate::secret::Secret;
-use crate::vault::{KeySigner, MasterSigner, StageToken, Stored, Vault, VaultError};
+use crate::vault::{CustodyNote, KeySigner, MasterSigner, StageToken, Stored, Vault, VaultError};
 use crate::{fold, ClientError, Clock, Random};
 
 /// Rotations built and published before [`ClientError::LogBusy`]: the first, and a rebuild on
@@ -365,6 +365,31 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
         (Some(this), Some(epoch)) if this.kept.is_some() => Some((this.key_id.clone(), epoch)),
         _ => None,
     };
+    // This device's rotation kept the key: a new acquisition. Its mark is noted owed before
+    // the write (a release older than the store is replaced, one that read the store's epoch
+    // or later stands), so a write that fails is made by the next refresh, and cleared once
+    // it lands.
+    let owed = match (&this, fence_epoch) {
+        (
+            Some(ThisDevice {
+                key_id,
+                kept: Some(kept),
+                ..
+            }),
+            Some(epoch),
+        ) => {
+            let owed = CustodyNote::MarkOwed {
+                index: *kept,
+                epoch,
+            };
+            match master::note_owed(vault, &scid, key_id, &owed) {
+                Ok(true) => Some((key_id.clone(), owed)),
+                Ok(false) => None,
+                Err(e) => return (Vec::new(), Err(e)),
+            }
+        }
+        _ => None,
+    };
     let mut changes = Vec::new();
     match this {
         Some(ThisDevice {
@@ -422,6 +447,12 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     }
     if written.is_err() {
         return (Vec::new(), written);
+    }
+    if let Some((key_id, owed)) = &owed {
+        // Met: cleared, unless another flow wrote the note since.
+        if let Err(e) = vault.swap_custody_note(&scid, key_id, Some(owed), None) {
+            return (Vec::new(), Err(e.into()));
+        }
     }
     let mut pushes = Vec::new();
     let mut marks = Vec::new();

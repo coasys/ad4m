@@ -471,6 +471,23 @@ pub async fn write_if<R: ExecutorRpc>(
     .await
 }
 
+/// [`write_if`] as `reader`: a device write, or a master-signed one ([`Reader::Master`]) that
+/// re-attests a stale recovery pair as it writes. `check` runs on every version the write
+/// builds on, so a condition it reads from outside the record (this device's custody note in
+/// the vault) is checked after that version was read: a change made outside before the record
+/// moved on is seen, and one made after it can only be followed by a newer version.
+pub(crate) async fn write_as_if<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    reader: &Reader<'_>,
+    changes: &[Change],
+    check: Precondition<'_>,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    write_checked(executor, vault, did, reader, changes, None, check, random).await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn write_checked<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,

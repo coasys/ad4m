@@ -762,12 +762,20 @@ is version 1); a reader refuses a version lower than one it has read. A host can
 older version with its valid receipt, so that high-water mark is the reader's own state: the
 client keeps the highest version it has read per identity; the core functions keep none. A device entry's `holdsMaster` is `false`, `"offered"` or
 `true`; with `true` it carries `masterIndex`, the index *n* of the master key the device's
-vault keeps, written by the device (or the flow that put the key there). A device whose
-vault keeps the current master owes its own mark until the record shows it; the client keeps
-no note of that debt but derives it whenever it checks its custody against the log: a stale
-recovery pair (re-attested by the master, which marks the device as it does) or its entry
-left `"offered"` or `true` with another index is written then, while an entry `false` is left
-as it is. An entry without
+vault keeps, written by the device (or the flow that put the key there). The vault keeps a
+custody note per identity and device key: `MarkOwed {index, epoch}`, written after a take
+or promote stores the key and before the inbox ack, and cleared once the device's mark has
+landed; `Released {epoch}`, written before a removal publishes `false`. A device repairs its
+own entry only from its note: with `MarkOwed`, a later check of its custody against the log
+writes the mark (re-attesting a stale recovery pair with the master first); with `Released`
+it never writes `true`; with no note it repairs nothing, apart from a device the record
+already lists as holding the key, which re-attests a stale pair and keeps its mark. A device
+the record does not list, or one whose note is `Released`, is never asked to unlock its
+master for a repair. The record write that publishes the mark re-reads the note inside its
+version check, so a removal that writes `Released` while the mark is on its way makes the
+write fail and retry with `false`; a `false` never turns back to `true` without a new take.
+An acquisition's note replaces a `Released` only when its store moved the vault's custody
+epoch past the one the release read. An entry without
 `masterIndex` (written before it existed) is read as an unknown index. A pending revocation's `reason` is `left-host` or `account-deleted`.
 
 **The request box.** A device key without the bot mark posts `{body, expires}` with `body`

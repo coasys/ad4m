@@ -187,6 +187,32 @@ impl Unlocked {
 /// index or epoch the store cannot vouch for is an error or `None`, never a guess. The
 /// in-memory [`MemoryVault`] (tests) is exempt from durability and from the cross-process
 /// lock, since one process holds it.
+///
+/// **The custody note** ([`Vault::custody_note`], [`CustodyNote`]): one small, non-secret value
+/// per identity *and per device key* — the key id of the executor the app speaks through, the
+/// same key the record's device entry is keyed by. The key is shared by every app on the
+/// computer; the note is not: app A's release and app B's take on the same vault are two device
+/// entries in the record and two notes here, so neither overwrites the other. Apps that speak
+/// through one executor are one device and share its note, as they share its entry. The note
+/// is the device's own account of its custody decisions, the one thing the vault and the record
+/// cannot tell afterwards:
+///
+/// - [`CustodyNote::MarkOwed`]: this device took master `index` and owes the record its
+///   `holdsMaster: true` mark. A take writes it after its store and **before** it acknowledges
+///   the inbox message, and clears it only once the fenced mark has landed, so a crash, a
+///   cancelled unlock or a failed write between the two leaves the obligation here, never only
+///   in memory. Another holder re-attesting the record's recovery pair erases nothing of it.
+/// - [`CustodyNote::Released`]: this device chose to give its copy up. `remove_master` writes it
+///   **before** it publishes `holdsMaster: false`, and no refresh, repair or restart re-marks the
+///   device while it stands — though the shared vault may keep the key another app installed.
+///   Only a new acquisition by this device (its next take, its own rotation, a promote of a
+///   staged rotation) replaces it, and only when that acquisition's store moved the custody
+///   epoch past the one the release read (the removal's compare-and-delete cannot take the new
+///   key); a removal that forgot nothing (the epoch had moved) puts back the note it replaced.
+///
+/// No note: nothing owed and nothing released. The writes are compare-and-swap
+/// ([`Vault::swap_custody_note`]) so that a take, a removal and a refresh of the same device
+/// never clear a note another one wrote since they read it.
 pub trait Vault: Send + Sync {
     /// Stores master `index` for `scid` as the kept key, under the never-go-back rule: a key
     /// kept at a *higher* index is never replaced by a lower one — the call answers
@@ -288,6 +314,37 @@ pub trait Vault: Send + Sync {
     /// Forgets the versions of `scid`'s record seen so far: a caller that means to read an
     /// older version on purpose resets the mark first.
     fn record_seen_reset(&self, scid: &str) -> Result<(), VaultError>;
+    /// The custody note of device `key_id` for `scid` ([`CustodyNote`]); `None` when it has
+    /// none. Not secret, needs no unlock. Kept per (`scid`, `key_id`), never per `scid` alone:
+    /// every app sharing the vault has its own.
+    fn custody_note(&self, scid: &str, key_id: &str) -> Result<Option<CustodyNote>, VaultError>;
+    /// Sets the custody note of device `key_id` for `scid` to `note` (`None` clears it) only
+    /// while it is still `expected` (`None`: none kept), as one atomic step under the same
+    /// cross-process lock as the vault's other writes; answers whether it was set. Durable when
+    /// it answers `true`: a take acknowledges its inbox message, and a removal publishes
+    /// `holdsMaster: false`, only after.
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, VaultError>;
+}
+
+/// What one device has decided about its custody of an identity's master key, kept in the vault
+/// beside the key ([`Vault::custody_note`]); see the [`Vault`] docs for its lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum CustodyNote {
+    /// The device took master `index` (the index the vault kept after the take's store) and its
+    /// record mark has not landed yet. `epoch` is the custody epoch read right after that store:
+    /// it names this acquisition, so a clear removes only the note its own take wrote.
+    MarkOwed { index: u32, epoch: u64 },
+    /// The device released its copy (`remove_master`) after reading custody epoch `epoch`. A take
+    /// that stored its key before that read lost to the release; one that stored after it took
+    /// a new copy the removal will not forget, and replaces the note.
+    Released { epoch: u64 },
 }
 
 /// Who staged a master key ([`Vault::stage_master`]): an opaque token a rotating flow draws at
@@ -393,6 +450,8 @@ mod memory {
         pushes: Mutex<Vec<PendingPush>>,
         unlocks: Mutex<Vec<MasterUse>>,
         record_seen: Mutex<HashMap<String, u64>>,
+        /// Each (identity, device key id)'s custody note.
+        notes: Mutex<HashMap<(String, String), CustodyNote>>,
     }
 
     impl MemoryVault {
@@ -608,6 +667,38 @@ mod memory {
             self.record_seen.lock().map_err(poisoned)?.remove(scid);
             Ok(())
         }
+
+        fn custody_note(
+            &self,
+            scid: &str,
+            key_id: &str,
+        ) -> Result<Option<CustodyNote>, VaultError> {
+            Ok(self
+                .notes
+                .lock()
+                .map_err(poisoned)?
+                .get(&(scid.to_string(), key_id.to_string()))
+                .copied())
+        }
+
+        fn swap_custody_note(
+            &self,
+            scid: &str,
+            key_id: &str,
+            expected: Option<&CustodyNote>,
+            note: Option<&CustodyNote>,
+        ) -> Result<bool, VaultError> {
+            let mut notes = self.notes.lock().map_err(poisoned)?;
+            let slot = (scid.to_string(), key_id.to_string());
+            if notes.get(&slot) != expected {
+                return Ok(false);
+            }
+            match note {
+                Some(note) => notes.insert(slot, *note),
+                None => notes.remove(&slot),
+            };
+            Ok(true)
+        }
     }
 
     #[cfg(test)]
@@ -806,6 +897,35 @@ mod memory {
             assert_eq!(vault.record_seen("Qm2", 1).unwrap(), None);
             vault.record_seen_reset("Qm").unwrap();
             assert_eq!(vault.record_seen("Qm", 2).unwrap(), None);
+        }
+
+        /// The custody note is kept per device key, so two apps sharing the vault (two device
+        /// entries) never overwrite each other's; each write is a compare-and-swap, so a clear
+        /// never removes a note written since it was read.
+        #[test]
+        fn custody_notes_are_per_device_and_swapped_only_from_what_was_read() {
+            let vault = MemoryVault::new();
+            let owed = CustodyNote::MarkOwed { index: 1, epoch: 4 };
+            let released = CustodyNote::Released { epoch: 3 };
+            assert_eq!(vault.custody_note("Qm", "d1").unwrap(), None);
+            assert!(vault
+                .swap_custody_note("Qm", "d1", None, Some(&released))
+                .unwrap());
+            assert!(vault
+                .swap_custody_note("Qm", "d2", None, Some(&owed))
+                .unwrap());
+            assert_eq!(vault.custody_note("Qm", "d1").unwrap(), Some(released));
+            assert_eq!(vault.custody_note("Qm", "d2").unwrap(), Some(owed));
+            assert_eq!(vault.custody_note("Qm2", "d1").unwrap(), None);
+            // A clear that expects the note it wrote leaves another one in place.
+            assert!(!vault
+                .swap_custody_note("Qm", "d1", Some(&owed), None)
+                .unwrap());
+            assert_eq!(vault.custody_note("Qm", "d1").unwrap(), Some(released));
+            assert!(vault
+                .swap_custody_note("Qm", "d2", Some(&owed), None)
+                .unwrap());
+            assert_eq!(vault.custody_note("Qm", "d2").unwrap(), None);
         }
     }
 }
