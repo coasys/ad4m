@@ -200,6 +200,14 @@ async fn a_subscribe_with_a_malformed_id_gets_400_and_registers_nothing() {
                 .expect_err("malformed id");
             assert_eq!(err.code, 400, "{method} with {id:?}: {}", err.message);
         }
+        let disposed = call(
+            "perspective.disposeQuery",
+            json!({ "uuid": p.0, "subscriptionId": id }),
+            admin_conn_ctx("c"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(disposed, json!(false), "{id:?} registered");
     }
     // The longest valid id opens.
     let longest = "a".repeat(64);
