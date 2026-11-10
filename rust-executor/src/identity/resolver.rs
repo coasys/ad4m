@@ -864,7 +864,7 @@ impl Drop for AdmissionRead<'_> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         #[cfg(test)]
-        tests::inside_admission_map();
+        tests::inside_admission_map(self.reads as *const _ as usize);
         let Some(lock) = self.lock.take() else {
             return;
         };
@@ -2046,12 +2046,21 @@ mod tests {
     /// [`std::sync::Barrier`] here and the next `AdmissionRead::drop` to arrive
     /// waits on it,
     /// so the test starts a second drop exactly while the first holds the map.
-    /// The first drop consumes it; a drop without one is a no-op.
-    pub(crate) static ADMISSION_DROP_BARRIER: StdMutex<Option<Arc<std::sync::Barrier>>> =
+    /// The first drop of THAT map consumes it; a drop of any other map (another test's
+    /// resolver, in a parallel run) or without one is a no-op. The slot is keyed by the
+    /// map's address, as the static is process-wide (Data's fix).
+    pub(crate) static ADMISSION_DROP_BARRIER: StdMutex<Option<(usize, Arc<std::sync::Barrier>)>> =
         StdMutex::new(None);
 
-    pub(crate) fn inside_admission_map() {
-        let barrier = ADMISSION_DROP_BARRIER.lock().unwrap().take();
+    pub(crate) fn inside_admission_map(map: usize) {
+        let barrier = {
+            let mut slot = ADMISSION_DROP_BARRIER.lock().unwrap();
+            if slot.as_ref().is_some_and(|(m, _)| *m == map) {
+                slot.take().map(|(_, b)| b)
+            } else {
+                None
+            }
+        };
         if let Some(barrier) = barrier {
             barrier.wait();
         }
@@ -2446,13 +2455,16 @@ mod tests {
             a.scid = "s".repeat(4 << 20);
             let b = resolver.admission_lock("the-scid");
             let inside = Arc::new(std::sync::Barrier::new(2));
-            *ADMISSION_DROP_BARRIER.lock().unwrap() = Some(inside.clone());
+            *ADMISSION_DROP_BARRIER.lock().unwrap() = Some((
+                &resolver.admission_reads as *const _ as usize,
+                inside.clone(),
+            ));
             std::thread::scope(|scope| {
                 scope.spawn(|| drop(a));
-                // `a`'s drop holds the map while it waits on the barrier, so
-                // `b`'s drop is already parked on the map's mutex when `a`
-                // lets it go — its check lands inside the tail of `a`'s
-                // teardown.
+                // `a`'s drop holds the map while it waits on the barrier; the
+                // parent passes the barrier and only then calls `drop(b)`, so
+                // `b`'s lock attempt lands inside the tail of `a`'s critical
+                // section — a narrow window, timing-based, run over the rounds.
                 inside.wait();
                 drop(b);
             });
