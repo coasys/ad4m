@@ -163,6 +163,8 @@ jobs:
     - name: Generate deno snapshot
       env:
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        # A release always makes its snapshot from source, never from a stamp.
+        FORCE_DENO_SNAPSHOT: "1"
       run: |
         cd rust-executor && pnpm run build-deno-snapshot && cd ..
 
