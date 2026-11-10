@@ -96,6 +96,7 @@
     "@coasys/rust-ad4m-executor#build": {
       "dependsOn": ["@coasys/dapp#build"],
       "outputs": ["dist/**", "lib/**", "build/**", "CUSTOM_DENO_SNAPSHOT.bin"],
+      "passThroughEnv": ["CI_ARTIFACT_DIR", "FORCE_DENO_SNAPSHOT"],
       "cache": false
     },
 

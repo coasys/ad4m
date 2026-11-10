@@ -94,6 +94,8 @@ CUSTOM_DENO_SNAPSHOT.residual_esm.rs
 CUSTOM_DENO_SNAPSHOT.residual_js.rs
 rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs
 rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
+# Hash of the snapshot's inputs (rust-executor/scripts/build-deno-snapshot.sh).
+rust-executor/CUSTOM_DENO_SNAPSHOT.inputs
 
 # Overnight watchdog scratch — logs and repro scripts, not source
 .overnight-status/
