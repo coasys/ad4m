@@ -7,7 +7,8 @@ import type { LinkVerdict } from "./LinkVerdict";
 export type DecoratedLinkExpression = { author: string, timestamp: string, data: Link, proof: DecoratedExpressionProof, status: LinkStatus | null, 
 /**
  * The link's verdict, as this executor judged it. Logic reads count only `valid`;
- * display reads show `cantCheck` and `flagged` with it and never return `invalid`.
+ * display reads show `cantCheck` and `flagged` with it, and show `invalid` only with
+ * `includeUnverified: true`.
  */
 verdict?: LinkVerdict, 
 /**
