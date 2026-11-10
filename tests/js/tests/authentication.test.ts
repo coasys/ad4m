@@ -180,6 +180,14 @@ describe("Authentication integration tests", () => {
                     lastErr = null
                     break
                 } catch (e) {
+                    // agent.generate refuses an already-initialised agent: a
+                    // reply lost to the flaky socket below lands exactly here —
+                    // the first call still ran to completion server-side.
+                    const status = await ad4mClient.agent.status().catch(() => null)
+                    if (status?.isInitialized) {
+                        lastErr = null
+                        break
+                    }
                     lastErr = e
                     console.log(`agent.generate attempt ${attempt}/3 failed, retrying:`, e)
                     await sleep(1000)
