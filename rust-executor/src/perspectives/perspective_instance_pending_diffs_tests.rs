@@ -1033,3 +1033,36 @@ async fn a_failed_push_after_publish_does_not_queue_a_queued_link_again() {
     assert_eq!(queued.len(), 31, "{queued:?}");
     assert_eq!(queued.iter().filter(|t| *t == "queued").count(), 1);
 }
+
+/// An executor that was offline wrote most of its shared set while away:
+/// those commits failed and wait in the queue. The fallback leaves queued
+/// links to the queue, so it neither refuses nor sends them, and the queue
+/// delivers all of them.
+#[tokio::test(start_paused = true)]
+async fn an_offline_backlog_larger_than_half_the_shared_set_goes_through_the_queue() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let on_server = store_many_shared(&perspective, "s", 20);
+    for target in targets("offline", 80) {
+        store_shared(&perspective, &target);
+        enqueue(&perspective, &add(&target));
+    }
+    *perspective.link_language.write().await = Some(rendering_language(&fake, on_server));
+
+    assert!(
+        perspective.ensure_public_links_are_shared().await,
+        "not refused"
+    );
+    assert_eq!(
+        fake.attempts(),
+        0,
+        "the fallback leaves the backlog to the queue"
+    );
+
+    let task = start_loop(&perspective);
+    run_until(Duration::from_secs(600), || pending(&perspective) == 0)
+        .await
+        .expect("the queue drains the backlog");
+    task.abort();
+    assert_eq!(fake.committed().len(), 80);
+}
