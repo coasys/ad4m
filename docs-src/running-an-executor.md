@@ -108,7 +108,9 @@ After startup, **write down** where the admin credential lives (the file path â€
 
 ### Step 3: Generate Agent
 
-First run only. Creates cryptographic keys and DID identity.
+First run only. Creates cryptographic keys and DID identity. It refuses (409)
+an agent that is already initialised â€” a second `generate` does not replace the
+existing keys and DID; unlock the existing agent instead (Step 4).
 
 ```bash
 ad4m --executor-url http://localhost:12000 agent generate --passphrase <passphrase>
