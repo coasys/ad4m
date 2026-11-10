@@ -873,3 +873,65 @@ async fn a_removal_does_not_overtake_a_slow_failed_addition() {
 
     assert_eq!(*seen.lock().unwrap(), vec!["+x", "-x"]);
 }
+
+/// Store `count` Shared links, targets `{prefix}0..`, and return them.
+fn store_many_shared(
+    perspective: &PerspectiveInstance,
+    prefix: &str,
+    count: usize,
+) -> Vec<LinkExpression> {
+    (0..count)
+        .map(|i| {
+            let target = format!("{prefix}{i}");
+            store_shared(perspective, &target);
+            link("did:key:alice", &target)
+        })
+        .collect()
+}
+
+/// The staging case (2026-11-10): the link language's mirror held about 500
+/// of the perspective's 12,803 shared links, while the server held them all.
+/// Pushing the other 12,303 would only send duplicates (or, from an empty
+/// mirror, the whole room again), so the fallback sync commits nothing and
+/// reports failure: its backoff tries again later.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_does_not_push_most_of_the_shared_set_again() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 12_803);
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, shared[..500].to_vec()));
+
+    assert!(!perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.attempts(), 0, "nothing is committed");
+}
+
+/// A catch-up of more than 20 links that is still a minority of the shared
+/// set goes through as before.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_still_sends_a_minority_of_the_shared_set() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 100);
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, shared[..70].to_vec()));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.committed().len(), 30);
+}
+
+/// After a publish the creator sends every shared link the new room lacks:
+/// the links made before the neighbourhood existed were never sent.
+#[tokio::test(start_paused = true)]
+async fn the_push_after_publish_sends_the_whole_shared_set() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    store_many_shared(&perspective, "l", 100);
+    *perspective.link_language.write().await = Some(rendering_language(&fake, vec![]));
+
+    assert!(perspective.share_links_after_publish().await);
+
+    assert_eq!(fake.committed().len(), 100);
+}

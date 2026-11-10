@@ -1,3 +1,4 @@
+use super::fallback_sync::{fallback_push_refused, ShareScope};
 use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
@@ -1289,7 +1290,7 @@ impl PerspectiveInstance {
             );
         }
         if self.persisted.lock().await.state == PerspectiveState::NeighbourhoodCreationInitiated {
-            self.ensure_public_links_are_shared().await;
+            self.share_links_after_publish().await;
         }
         self.update_perspective_state_log_error(
             PerspectiveState::LinkLanguageInstalledButNotSynced,
@@ -1559,7 +1560,10 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn ensure_public_links_are_shared(&self) -> bool {
+    /// Commits the Shared links the link language's `render()` lacks. Callers:
+    /// `ensure_public_links_are_shared` and `share_links_after_publish`
+    /// (`fallback_sync.rs`); `scope` says how many it may send.
+    pub(crate) async fn share_links_missing_remotely(&self, scope: ShareScope) -> bool {
         let _sharing = self.share_links_mutex.lock().await;
         let uuid = self.uuid.clone();
 
@@ -1669,17 +1673,16 @@ impl PerspectiveInstance {
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
 
-                // Defensive check: a fallback sync should normally only ever need to commit
-                // a handful of links that failed to make it into a prior commit. If it's
-                // about to resubmit most or all of the perspective's shared links, that's a
-                // signal something upstream (e.g. a misread of the remote state) is wrong —
-                // log it loudly so a future regression like this one is caught immediately
-                // rather than only discoverable by manually auditing link counts later.
-                if links_count > 20 && links_count as f64 > local_links.len() as f64 * 0.5 {
-                    log::warn!(
-                        "ensure_public_links_are_shared: about to commit {} of {} local shared links for perspective {} — this looks like a full resync rather than a small catch-up, which usually indicates the remote state couldn't be read correctly",
+                // A fallback sync catches up the few links a commit missed. Most of
+                // the shared set missing means the language's view of the remote is
+                // wrong (an empty or partial mirror): sending would push the room's
+                // whole set again. Send nothing; the caller's backoff retries.
+                if fallback_push_refused(links_count, local_links.len(), scope) {
+                    log::error!(
+                        "ensure_public_links_are_shared: refusing to commit {} of {} local shared links for perspective {}: the link language's render() lacks most of them, so its view of the remote is incomplete, not the remote",
                         links_count, local_links.len(), uuid
                     );
+                    return false;
                 }
 
                 let result = link_language
