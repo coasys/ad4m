@@ -278,6 +278,45 @@ impl Drop for UnregisterOnDrop {
     }
 }
 
+/// What one re-check of a subscription evaluates. Subscriptions with the same
+/// key get the same result, whoever subscribed: a re-check pass runs each key
+/// once and hands its result to all of them (`check_subscribed_queries`).
+pub(super) fn evaluation_key(
+    query: &str,
+    model: Option<&super::ModelSubscriptionParams>,
+) -> String {
+    match model {
+        Some(params) => format!("model\0{:?}\0{}", params.classes, params.query_json),
+        None => format!("sparql\0{query}"),
+    }
+}
+
+/// Test hook: how many evaluations re-check passes ran, per perspective.
+#[cfg(test)]
+pub(super) mod evaluations {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    static EVALUATIONS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+    pub(in crate::perspectives) fn note(perspective_uuid: &str) {
+        *EVALUATIONS
+            .lock()
+            .unwrap()
+            .entry(perspective_uuid.to_string())
+            .or_default() += 1;
+    }
+
+    pub(in crate::perspectives) fn count(perspective_uuid: &str) -> usize {
+        EVALUATIONS
+            .lock()
+            .unwrap()
+            .get(perspective_uuid)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
 /// The most subscription re-checks that run at once in the executor.
 const MAX_CONCURRENT_RECHECKS: usize = 8;
 

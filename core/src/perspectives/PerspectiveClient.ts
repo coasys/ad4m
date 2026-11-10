@@ -111,7 +111,20 @@ export class PerspectiveClient {
     /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
     /** `options.signal` cancels the call, and the executor stops computing the first result. */
     async subscribeQuery(uuid: string, query: string, options?: CallOptions): Promise<Subscribed> {
-        return this.#apiClient.call('perspective.subscribeQuery', { uuid, query }, options)
+        return this.#apiClient.call('perspective.subscribeQuery', { uuid, query }, this.#releasingLate(uuid, options))
+    }
+
+    /** A subscribe call given up on (aborted, or timed out) is cancelled on the
+     *  executor; when its reply crossed the cancel, the subscription it names is
+     *  disposed, so no live query stays on the executor that nobody holds. */
+    #releasingLate(uuid: string, options?: CallOptions): CallOptions {
+        return {
+            ...options,
+            onLateResult: (subscribed) => {
+                const id = (subscribed as Subscribed | undefined)?.subscriptionId
+                if (id) this.disposeQuerySubscription(uuid, id).catch(() => {})
+            },
+        }
     }
 
     /** Every `query-subscription-update` event on this client's socket. */
@@ -167,7 +180,8 @@ export class PerspectiveClient {
     /** `options.signal` cancels the call, and the executor stops computing the first result. */
     async modelSubscribe(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<Subscribed> {
         return this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }, options
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson },
+            this.#releasingLate(uuid, options),
         )
     }
 
