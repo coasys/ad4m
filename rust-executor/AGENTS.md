@@ -10,9 +10,11 @@ file; keep `CLAUDE.md` as `@AGENTS.md`.
 ## Build and test
 
 ```bash
-pnpm build                 # deno snapshot + cargo build --release (needed after any js_core/*.js or
-                           # extension-list change; with a stale snapshot, deno_core panics at runtime
-                           # creation: "Extensions from snapshot loaded in wrong order")
+pnpm build                 # deno snapshot (scripts/build-deno-snapshot.sh). Run it after every pull and
+                           # every js_core/ or extension change: it skips when the snapshot's inputs
+                           # did not change (stamp CUSTOM_DENO_SNAPSHOT.inputs). FORCE_DENO_SNAPSHOT=1
+                           # builds anyway. A stale snapshot can make deno_core panic at runtime creation
+                           # ("Extensions from snapshot loaded in wrong order") or call the wrong op silently
 cargo build --release      # Rust-only change
 pnpm test                  # = cargo test --release -- --test-threads=1  (serial: global singletons)
 cargo test --release -- --test-threads=1 <name>   # one test
