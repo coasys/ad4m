@@ -12,7 +12,7 @@ import type { RoomConfig, StorageAdapter, Transport, TransportResponse } from ".
 import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
-import { decryptLinkFromWire, encryptLinkForWire, generateRoomKey, type KeyRing } from "../src/encryption.js";
+import { decryptLinkFromWire, encryptLinkForWire, generateRoomKey, wireLinkHash, type KeyRing } from "../src/encryption.js";
 import type { LinkExpression, PerspectiveDiff, WireLinkExpression } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
 
@@ -765,11 +765,15 @@ describe("sync: bootstrap", () => {
 // ---------------------------------------------------------------------------
 
 describe("sync: render / currentRevision", () => {
-    it("render() returns the local store contents", () => {
+    it("render() returns the local store contents once they are the room's, else null (unknown)", () => {
         const transport = new MockTransport();
         setup(transport);
-        store.putLink(makeLink());
-        assert.equal(syncModule.render().links.length, 1);
+        const link = makeLink();
+        store.putLink(link);
+        assert.equal(syncModule.render(), null, "no revision from the server yet");
+        store.setSequence(1);
+        store.setRevision(roomRevision([link]));
+        assert.equal(syncModule.render()?.links.length, 1);
     });
 
     it("currentRevision() returns the stored revision, or empty string when unset", () => {
@@ -1217,5 +1221,166 @@ describe("sync: a failed startup render is retried", () => {
         await syncModule._awaitRenderRetryForTests();
         assert.equal(server.renderCalls(), 2);
         assert.equal(store.getRenderProgress(), null);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// An incomplete mirror is not the server's state, and heals
+// ---------------------------------------------------------------------------
+
+/** The link server's room revision over `links`: the XOR of their link hashes. */
+function roomRevision(links: LinkExpression[]): string {
+    const acc = new Uint8Array(32);
+    for (const link of links) {
+        const h = wireLinkHash(link);
+        for (let i = 0; i < 32; i++) acc[i] ^= parseInt(h.slice(i * 2, i * 2 + 2), 16);
+    }
+    return [...acc].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+describe("sync: an incomplete mirror is not presented as the server's state", () => {
+    afterEach(() => syncModule._setPageLimitsForTests());
+
+    const room = [1, 2, 3, 4, 5].map((i) => makeLink({ source: `room-${i}` }));
+
+    /** A link server holding `links` at `head`: paged `/render` (pages of
+     *  `pageSize`), `/sync` with nothing after `head`. */
+    function roomServer(links: WireLinkExpression[], head: number, revision: string, pageSize = 2) {
+        const transport = new MockTransport();
+        setup(transport);
+        syncModule._setPageLimitsForTests(pageSize);
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            (url) => {
+                const from = Number(new URL(url).searchParams.get("next") ?? "0");
+                const to = from + pageSize;
+                return jsonResponse({
+                    links: links.slice(from, to),
+                    revision,
+                    sequence: head,
+                    upto: head,
+                    next: to < links.length ? String(to) : null,
+                });
+            },
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse({ diffs: [], revision, sequence: head, next: null }),
+        );
+        return transport;
+    }
+
+    const renders = (transport: MockTransport) =>
+        transport.calls.filter((c) => new URL(c.url).pathname.endsWith("/render")).length;
+
+    it("render() answers the mirror when it hashes to the room's revision at the cursor", () => {
+        setup(new MockTransport());
+        for (const link of room) store.putLink(link);
+        store.setSequence(3745);
+        store.setRevision(roomRevision(room));
+
+        assert.equal(syncModule.render()?.links.length, 5);
+    });
+
+    it("render() is unknown (null) while a render is stored, first page or half done", () => {
+        setup(new MockTransport());
+        store.putLink(room[0]);
+        store.setRevision(roomRevision([room[0]]));
+        store.setRenderProgress({ upto: null, next: null, page: 0 });
+        assert.equal(syncModule.render(), null, "a render stored, no page yet");
+
+        store.putLink(room[1]);
+        store.setRenderProgress({ upto: 9, next: "2", page: 1 });
+        assert.equal(syncModule.render(), null, "a render half done");
+    });
+
+    it("render() is unknown (null) when the mirror holds fewer links than the room's revision covers", () => {
+        // The staging case: cursor 3745, the server holds the whole room,
+        // the mirror only a part of it.
+        setup(new MockTransport());
+        store.putLink(room[0]);
+        store.putLink(room[1]);
+        store.setSequence(3745);
+        store.setRevision(roomRevision(room));
+
+        assert.equal(syncModule.render(), null);
+    });
+
+    it("render() counts a held link as the room's: a member waiting for a key is not short", () => {
+        setup(new MockTransport());
+        const otherKey = generateRoomKey();
+        const waiting = makeLink({ source: "waiting" });
+        store.putLink(room[0]);
+        syncModule.applyInboundWireDiff({ additions: [encryptLinkForWire(waiting, otherKey, 2)], removals: [] }, 1, "");
+        store.setSequence(1);
+        store.setRevision(roomRevision([room[0], waiting]));
+
+        assert.equal(syncModule.hasHeldLinks(), true);
+        assert.deepEqual(syncModule.render()?.links, [room[0]]);
+    });
+
+    it("a member with a cursor whose mirror is short re-renders, paged, and then answers the whole room", async () => {
+        const revision = roomRevision(room);
+        const transport = roomServer(room.map(wire), 3745, revision);
+        store.putLink(room[0]);
+        store.putLink(room[3]);
+        store.setSequence(3745);
+        store.setRevision(revision);
+
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(renders(transport), 3, "five links in pages of two");
+        assert.equal(store.getRenderProgress(), null, "the heal render finished");
+        assert.equal(store.getSequence(), 3745);
+        assert.deepEqual(
+            store.allLinks().links.map((l) => l.data.source).sort(),
+            room.map((l) => l.data.source).sort(),
+        );
+        assert.deepEqual(
+            emitCounts("additions"),
+            new Map([["room-2", 1], ["room-3", 1], ["room-5", 1]]),
+            "only the links the mirror lacked reach the executor",
+        );
+        assert.equal(syncModule.render()?.links.length, 5);
+
+        // Healed: later catch-ups only tail.
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(renders(transport), 3);
+    });
+
+    it("a complete mirror does not re-render", async () => {
+        const revision = roomRevision(room);
+        const transport = roomServer(room.map(wire), 3745, revision);
+        for (const link of room) store.putLink(link);
+        store.setSequence(3745);
+        store.setRevision(revision);
+
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(renders(transport), 0);
+        assert.equal(syncModule.render()?.links.length, 5);
+    });
+
+    it("heals at most once per start: a mismatch the render does not fix stays unknown, without a render loop", async () => {
+        // The server counts a link no member can open: no render fixes the mirror.
+        const unopenable = { ...wire(makeLink({ source: "spoiled" })), data: { ciphertext: "AAAA", nonce: "AAAA" } };
+        const revision = roomRevision([...room, makeLink({ source: "spoiled" })]);
+        const transport = roomServer([...room.map(wire), unopenable], 3745, revision);
+        store.putLink(room[0]);
+        store.setSequence(3745);
+        store.setRevision(revision);
+
+        for (let i = 0; i < 3; i++) {
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+        }
+
+        assert.equal(renders(transport), 3, "one heal render (three pages), not one per catch-up");
+        assert.equal(store.getRenderProgress(), null);
+        assert.equal(store.allLinks().links.length, 5);
+        assert.equal(syncModule.render(), null, "still short of the room's revision: unknown");
     });
 });
