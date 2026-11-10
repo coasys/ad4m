@@ -27,9 +27,6 @@ const BOB: &str = "bob";
 /// link being dropped *without* taking the honest links beside it.
 const CAROL: &str = "carol";
 const REVIEWER: &str = "coasys://Reviewer";
-/// Earlier than any grant link a test writes — the fallback dating a
-/// dropped grant link must *not* be allowed to fall back to.
-const INSTANCE_CREATED: &str = "2025-12-01T00:00:00.000Z";
 
 // ---- fixtures --------------------------------------------------------
 

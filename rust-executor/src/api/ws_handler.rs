@@ -49,7 +49,8 @@ impl WsRpcError {
             message: msg.into(),
         }
     }
-    /// 409: the call does not fit the executor's state (`no-config-file`, `no-log-file`).
+    /// 409: the call does not fit the executor's state (`no-config-file`, `no-log-file`, an
+    /// `agent.generate` on an agent that is already initialised).
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self {
             code: 409,
