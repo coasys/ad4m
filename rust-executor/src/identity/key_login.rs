@@ -2729,7 +2729,7 @@ mod tests {
             KeyLife::Standing,
         );
         world.log.revoke_d1();
-        let mut world = world.with_store();
+        let world = world.with_store();
         accept_signed(&world.service.cache, &world.log.events).await;
         // `MainBound::to` reads the DID, which is not loaded yet: bind it directly.
         test_db(|db| db.clear_agent_identity_for_test(&main)).unwrap();
@@ -2769,6 +2769,54 @@ mod tests {
         assert!(ended.is_ended(), "the cached revocation ends it");
         crate::test_utils::setup_agent();
         no_operator();
+    }
+
+    // `agent_ready` releases the key watcher: a first run marks it where `create_new_keys`
+    // makes the agent, a restart where `load` reads the agent file in, its wallet still
+    // locked. Before either the start-up step neither panics nor marks, so the watcher waits.
+    #[tokio::test]
+    async fn the_agent_is_ready_once_generated_or_loaded() {
+        // A panic below must not leave the flag down: every later watcher would wait on it.
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::test_utils::setup_wallet();
+                crate::test_utils::setup_agent();
+            }
+        }
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let _restore = Restore;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        // A fresh executor: no agent file, so nothing to load and no DID yet.
+        crate::agent::AgentService::init_global_instance(path.clone());
+        crate::agent::unmark_agent_ready_for_test();
+        crate::load_agent_and_end_revoked_key_grants(None).await;
+        assert!(!*crate::agent::agent_ready().borrow(), "no agent yet");
+        // `agent.generate`.
+        crate::agent::AgentService::with_mutable_global_instance(|service| {
+            service.create_new_keys();
+            service.passphrase = Some("ready".into());
+            service.store_agent_profile();
+            service.save("ready".into());
+        });
+        assert!(*crate::agent::agent_ready().borrow(), "generating marks it");
+        // A restart: the agent file is there, the wallet locked.
+        crate::agent::AgentService::with_mutable_global_instance(|service| {
+            service.lock("ready".into())
+        });
+        crate::agent::AgentService::init_global_instance(path);
+        crate::agent::unmark_agent_ready_for_test();
+        crate::load_agent_and_end_revoked_key_grants(None).await;
+        assert!(crate::agent::AgentService::with_global_instance(
+            |service| { service.did.is_some() && !service.is_unlocked() }
+        ));
+        assert!(
+            *crate::agent::agent_ready().borrow(),
+            "loading a locked agent marks it"
+        );
     }
 
     // The re-check reads each key again from the store: a revocation the subscription missed
