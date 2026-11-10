@@ -54,7 +54,6 @@ fn bare_service() -> AIService {
         embedding_channel: Arc::new(Mutex::new(HashMap::new())),
         llm_channel: Arc::new(Mutex::new(HashMap::new())),
         transcription_streams: Arc::new(Mutex::new(HashMap::new())),
-        cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
         shared_whisper_models: Arc::new(Mutex::new(HashMap::new())),
         default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(Arc::new(|_| {
             Box::pin(async { Err(anyhow!("no embedding models in this test")) })
