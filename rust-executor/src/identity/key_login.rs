@@ -660,8 +660,9 @@ async fn agent_speaks(service: &IdentityService, grant: &LiveGrant, scid: &str) 
     // An agent bound to another identity cannot speak for this one; an agent the
     // table does not bind at all keeps the grant — the table binds, it does not
     // revoke. A key the trusted log does not list is a verdict (`NotListed`), as
-    // `role_for` reads it at login; only a cache that cannot read keeps it: a
-    // check that cannot read is no revocation, as for the bound key's own outage.
+    // `role_for` reads it at login; only a cache that cannot judge keeps it —
+    // unreadable, or holding no log of the identity at all: a check that cannot
+    // read is no revocation, as for the bound key's own outage.
     // `identity_agents` holds the bare SCID; a grant's binding names the identity's DID.
     let bound = db(|db| db.agent_identity(&agent_did)).unwrap_or_default();
     if bound.is_some_and(|s| scid_from(&s) != scid_from(scid)) {
@@ -1347,7 +1348,9 @@ pub async fn recheck_key_grants(
                 // it) — the `NotListed` verdict the live read and `agent_speaks`
                 // end grants on too. A valid one is no fresh check — the outage
                 // grace still runs from the grant's own last check, for a key the
-                // log lists whose read only failed.
+                // log lists whose read only failed. A cache that cannot judge —
+                // unreadable, or holding no log of the identity at all — is no
+                // verdict either: the same grace holds it.
                 Ok(cached) if !cached.admits() => grants,
                 Err(SessionKeyError::NotListed) => grants,
                 Ok(_) | Err(SessionKeyError::StoreUnavailable) => {
@@ -3493,6 +3496,38 @@ mod tests {
         no_operator();
     }
 
+    // A re-check whose store read fails asks the cached verdict next — but a cache
+    // that holds no log for the identity at all is no verdict either, as an
+    // `identity.resetLog` while the store is down leaves: the grant keeps its
+    // outage grace, as it does on an unreadable cache.
+    #[tokio::test]
+    async fn a_recheck_keeps_the_grant_of_an_identity_the_cache_has_no_log_for() {
+        let world = world(45).await;
+        world.operate();
+        // Bound to an identity the cache never read: no head, no log, nothing.
+        let unknown = did_of(&TestLog::new(77).scid());
+        let grant = Grants::global()
+            .insert(
+                LiveGrant::for_test("no-cached-log", AgentContext::main_agent(), now() + 3600)
+                    .bound_to(KeyBinding::new(
+                        unknown,
+                        signing_key(98).key(),
+                        "d9".into(),
+                        0,
+                        now(),
+                    )),
+            )
+            .unwrap();
+        world.store.store_down.store(true, Ordering::SeqCst);
+        recheck_key_grants(&world.service, now(), &RecheckAttempts::default()).await;
+        assert!(
+            !grant.is_ended(),
+            "no cached log is no verdict: the outage grace keeps the grant"
+        );
+        end_leftover_key_grants();
+        no_operator();
+    }
+
     // The fresh read the post-mint check takes can age the selected agent's own key out too:
     // the login is refused, and no grant acts as an agent that no longer speaks for the
     // identity.
@@ -3699,17 +3734,19 @@ mod tests {
             "the pass took {:?}",
             started.elapsed()
         );
-        assert_eq!(ended, 3, "the session's grant and the two stalled reads'");
+        assert_eq!(
+            ended, 1,
+            "only the session's grant: the stalled reads kept theirs"
+        );
         assert_eq!(session.check(), Err(AuthError::Revoked));
-        // The stalled grants' keys name no cached log: the outage pass's
-        // `NotListed` verdict ends them — the outage grace holds only a key the
-        // trusted log lists.
+        // The stalled grants' keys name no cached log at all: no verdict — the
+        // outage grace holds them, as an unreadable cache does.
         for scid in ["0-stall-a", "0-stall-b"] {
             assert!(
                 Grants::global()
                     .get(&crate::agent::session::TokenId(format!("stalled-{scid}")))
-                    .is_none(),
-                "{scid}: no cached log lists its key"
+                    .is_some(),
+                "{scid}: no cached log is no verdict — the grace keeps it"
             );
         }
         world.store.stall_for.lock().unwrap().clear();
@@ -4299,11 +4336,12 @@ mod tests {
         assert!(
             Grants::global()
                 .get(&crate::agent::session::TokenId("stall-grant".into()))
-                .is_none(),
-            "no cached log lists the stalled grant's key: the outage pass's \
-             NotListed verdict ends it"
+                .is_some(),
+            "the cache holds no log of the stalled grant's identity: no verdict, \
+             so the outage grace keeps it"
         );
         world.store.stall_for.lock().unwrap().clear();
+        end_leftover_key_grants();
         no_operator();
     }
 

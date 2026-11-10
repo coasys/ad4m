@@ -54,6 +54,14 @@
 //! [`MEMO_ENTRY_MAX_BYTES`] is returned but not stored; the next read
 //! re-verifies it, as an un-memoised read would.
 //!
+//! A `None` is kept only for a verdict the key pins down
+//! ([`ReceiptVerdict::is_structural`]): the checks that answer before the
+//! fold reads a carried verdict — a changed DNA, a seal that does not
+//! re-hash, a receipt with no outputs. A refusal the fold produced is never
+//! stored: it can rest on a carried link this replica judged `cantCheck`,
+//! and that judgement changes under the same key once the signer's log
+//! lands, so the next read verifies again.
+//!
 //! # Why it exists (#1177)
 //!
 //! `load_flow_receipts` has no count cap any more, so a flow with N receipts
@@ -187,10 +195,24 @@ impl VerdictMemo {
         #[cfg(test)]
         self.verifications
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let settled = settle(catalogue, receipt);
-        let weight = settled.as_ref().map_or(0, SettledRun::bytes);
-        if let Some(key) = key.filter(|_| weight <= MEMO_ENTRY_MAX_BYTES) {
-            self.lock().put(key, settled.clone());
+        let verdict = verify_receipt(catalogue, receipt);
+        let settled = SettledRun::of(&verdict);
+        if settled.is_none() {
+            log::debug!(
+                "a receipt for `{}` does not verify and speaks for nothing here — {verdict}",
+                receipt.flow_uri
+            );
+        }
+        // The key pins down a `Verified` run and a refusal the checks reach
+        // before the fold (`is_structural`): both are final under this key.
+        // A refusal the fold produced is not kept — it can rest on a carried
+        // link this replica judged `cantCheck`, which changes under the same
+        // key once the signer's log lands.
+        if settled.is_some() || verdict.is_structural() {
+            let weight = settled.as_ref().map_or(0, SettledRun::bytes);
+            if let Some(key) = key.filter(|_| weight <= MEMO_ENTRY_MAX_BYTES) {
+                self.lock().put(key, settled.clone());
+            }
         }
         settled
     }
