@@ -4937,6 +4937,137 @@ async fn instance_create_writes_a_collection_local_when_its_local_is_unresolved(
     );
 }
 
+/// Lal's P2 at 00fc3580d: a counting `ad4m://local false` beside the
+/// counting `true` must not make the property Shared, whichever was stored
+/// first: `load_shape` reads locality from every row, as `mcp/shacl.rs` does.
+///
+/// Red while `load_shape` reads `first["local"]`: in one of the two orders
+/// the `false` row comes first and the collection loads Shared.
+///
+/// (Test by Data, review 5834928639.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_counting_local_false_beside_true_keeps_the_property_local_in_both_orders() {
+    use crate::agent::signatures::TestSigner;
+    use crate::types::{Link, LinkExpression, LinkStatus};
+
+    let mut seen = Vec::new();
+    for false_first in [true, false] {
+        let (_handler, uuid, _guard) = setup(false).await;
+        let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+        let prop = crate::perspectives::shacl_parser::parse_shacl_to_links(
+            VERDICT_CHANNEL_SDNA,
+            "VerdictedChannel",
+        )
+        .unwrap()
+        .into_iter()
+        .find(|l| l.predicate.as_deref() == Some("ad4m://local") && l.source.ends_with(".messages"))
+        .expect("the collection's ad4m://local link")
+        .source;
+        let add_false = || {
+            let link = Link {
+                source: prop.clone(),
+                predicate: Some("ad4m://local".to_string()),
+                target: "literal:false".to_string(),
+            };
+            let mut le = LinkExpression::from(TestSigner::generate().sign(link.normalize()));
+            le.status = Some(LinkStatus::Shared);
+            perspective.sparql_store.add_link(&le).unwrap();
+        };
+        if false_first {
+            add_false();
+        }
+        let links = store_shacl_links(&perspective, "VerdictedChannel", VERDICT_CHANNEL_SDNA, &[]);
+        assert!(
+            links
+                .iter()
+                .any(|l| l.data.predicate.as_deref() == Some("ad4m://local")
+                    && l.data.source == prop
+                    && l.data.target == "literal:true"),
+            "the fixture's `true` sits on the property shape the `false` names"
+        );
+        if !false_first {
+            add_false();
+        }
+        let shape = crate::perspectives::model_query::shape::load_shape(
+            &perspective.sparql_store,
+            "VerdictedChannel",
+        )
+        .expect("shape");
+        let messages = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "messages")
+            .expect("the collection property");
+        seen.push((false_first, messages.local));
+    }
+    assert!(
+        seen.iter().all(|(_, local)| *local),
+        "(false stored first, loaded local): {seen:?}"
+    );
+}
+
+/// The locality read itself failing is the same direction as a `cantCheck`
+/// declaration: `instance_create` writes the membership `Local`, never
+/// `Shared` on a guess.
+///
+/// Red while the `Err` arm of the `ad4m://local` `get_links` in
+/// `mcp/shacl.rs` answers `false`.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_create_writes_a_collection_local_when_the_locality_lookup_fails() {
+    use crate::types::{LinkQuery, LinkStatus};
+
+    let (handler, uuid, _guard) = setup(false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let prop = crate::perspectives::shacl_parser::parse_shacl_to_links(
+        VERDICT_CHANNEL_SDNA,
+        "VerdictedChannel",
+    )
+    .unwrap()
+    .into_iter()
+    .find(|l| l.predicate.as_deref() == Some("ad4m://local") && l.source.ends_with(".messages"))
+    .expect("the collection's ad4m://local link")
+    .source;
+    store_shacl_links(&perspective, "VerdictedChannel", VERDICT_CHANNEL_SDNA, &[]);
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            *crate::mcp::shacl::LOCAL_LOOKUP_FAILS_FOR.lock().unwrap() = None;
+        }
+    }
+    let _reset = Reset;
+    *crate::mcp::shacl::LOCAL_LOOKUP_FAILS_FOR.lock().unwrap() = Some(prop);
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "VerdictedChannel".into(),
+                properties: Some(props(&[
+                    ("name", json!("vc")),
+                    ("messages", json!(["flux://item/1"])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let membership = perspective
+        .get_links(&LinkQuery {
+            predicate: Some("ad4m://has_child".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(membership.len(), 1, "{membership:?}");
+    assert_eq!(
+        membership[0].status,
+        Some(LinkStatus::Local),
+        "a failed ad4m://local lookup writes Local: {membership:?}"
+    );
+}
+
 /// The MCP loader's own reads get the same cut: with the class's only
 /// `ad4m://shacl_shape_uri` link not counting, the raw-link parser finds no
 /// shape — `resolve_property_predicate` refuses rather than guessing a
