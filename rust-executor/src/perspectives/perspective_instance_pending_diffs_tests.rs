@@ -972,3 +972,64 @@ async fn a_failed_push_after_publish_leaves_the_shared_set_to_the_queue() {
         assert_eq!(fake.committed().len(), 100, "render known: {render_known}");
     }
 }
+
+/// Staging.8 on a neighbourhood published before it: the link language is
+/// the old clone, whose `render()` answers its short mirror and is never null.
+/// The fallback loop refuses on every pass, backs off to 5 minutes, and
+/// neither commits nor queues anything, however long it runs.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_loop_never_pushes_from_an_old_languages_short_mirror() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 2_000);
+    let renders = Arc::new(AtomicUsize::new(0));
+    let (f, r, mirror) = (fake.clone(), renders.clone(), shared[..100].to_vec());
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| f.commit(diff)),
+        )
+        .with_test_render(Arc::new(move || {
+            r.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(Perspective {
+                links: mirror.clone(),
+            }))
+        })),
+    );
+
+    let looping = perspective.clone();
+    let task = tokio::spawn(async move { looping.fallback_sync_loop().await });
+    tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+    perspective.is_teardown.store(true, Ordering::Release);
+    task.await.unwrap();
+
+    assert_eq!(fake.attempts(), 0, "nothing is committed");
+    assert_eq!(pending(&perspective), 0, "nothing is queued");
+    // Passes at 0, 60, 180, 420, 720 and 1020 s: the backoff doubles to 5 minutes.
+    assert_eq!(renders.load(Ordering::SeqCst), 6);
+    assert_eq!(
+        *perspective.fallback_sync_interval.lock().await,
+        Duration::from_secs(300)
+    );
+}
+
+/// A failed push after publish queues the shared links no queued or parked
+/// diff holds: a link already waiting in the queue is not queued twice, so
+/// the queue sends it once.
+#[tokio::test(start_paused = true)]
+async fn a_failed_push_after_publish_does_not_queue_a_queued_link_again() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    store_many_shared(&perspective, "l", 30);
+    store_shared(&perspective, "queued");
+    enqueue(&perspective, &add("queued"));
+    fake.fail_next.store(1, Ordering::SeqCst);
+    *perspective.link_language.write().await = Some(rendering_language(&fake, vec![]));
+
+    assert!(perspective.share_links_after_publish().await);
+
+    let mut queued = queued_targets(&perspective);
+    queued.sort();
+    assert_eq!(queued.len(), 31, "{queued:?}");
+    assert_eq!(queued.iter().filter(|t| *t == "queued").count(), 1);
+}

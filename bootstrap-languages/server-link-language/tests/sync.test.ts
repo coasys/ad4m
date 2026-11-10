@@ -1319,6 +1319,19 @@ describe("sync: an incomplete mirror is not presented as the server's state", ()
         assert.deepEqual(syncModule.render()?.links, [room[0]]);
     });
 
+    it("render() takes a held removal as the room's: the link it removes no longer counts", () => {
+        setup(new MockTransport());
+        const otherKey = generateRoomKey();
+        store.putLink(room[0]);
+        store.putLink(room[1]);
+        syncModule.applyInboundWireDiff({ additions: [], removals: [encryptLinkForWire(room[1], otherKey, 2)] }, 1, "");
+        store.setSequence(1);
+        store.setRevision(roomRevision([room[0]]));
+
+        assert.equal(syncModule.hasHeldLinks(), true);
+        assert.notEqual(syncModule.render(), null);
+    });
+
     it("a member with a cursor whose mirror is short re-renders, paged, and then answers the whole room", async () => {
         const revision = roomRevision(room);
         const transport = roomServer(room.map(wire), 3745, revision);
