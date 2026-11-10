@@ -515,11 +515,11 @@ them against those two guards.
   may approve and its handler caps the approval at the caller's own capabilities.
   `capabilities::permit_capability` is the dev-mode auto-permit.
 - Live queries: `subscribeQuery` / `modelSubscribe` take the id the client minted
-  (`subscriptionId`, required) and reply `{ subscriptionId, result, revision }` with it. An id
-  already registered on the perspective, by any connection, is refused with 409 and registers
-  nothing (`SubscriptionIdTaken`); internal callers mint a uuid (revision 0, or later if a write landed while the first result was computed: the subscription is
-  registered first);
-  each `query-subscription-update` carries the change (models: `ids` + `upsert`; queries: `added` /
+  (`subscriptionId`, required: 1 to 64 characters of `[A-Za-z0-9-]`, else 400) and reply
+  `{ subscriptionId, result, revision }` with it (revision 0, or later if a write landed while
+  the first result was computed: the subscription is registered first). An id already
+  registered on the perspective, by any connection, is refused with 409 and registers nothing
+  (`SubscriptionIdTaken`). Internal callers mint a uuid. Each `query-subscription-update` carries the change (models: `ids` + `upsert`; queries: `added` /
   `removed` rows, or the whole `result` when the rows would lose their order; see
   `perspectives/perspective_instance/subscriptions.rs`) and `revision` (+1 per update). On a gap,
   `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }`. When the

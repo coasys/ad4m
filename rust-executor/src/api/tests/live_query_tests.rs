@@ -190,6 +190,24 @@ async fn a_subscribe_needs_the_clients_id() {
 }
 
 #[tokio::test]
+async fn a_subscribe_with_a_malformed_id_gets_400_and_registers_nothing() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    let too_long = "a".repeat(65);
+    for id in ["", "line\nbreak", "a b", too_long.as_str()] {
+        for (method, params) in opens(&p.0, id) {
+            let err = call(method, params, admin_conn_ctx("c"))
+                .await
+                .expect_err("malformed id");
+            assert_eq!(err.code, 400, "{method} with {id:?}: {}", err.message);
+        }
+    }
+    // The longest valid id opens.
+    let longest = "a".repeat(64);
+    let [(method, params), _] = opens(&p.0, &longest);
+    call(method, params, admin_conn_ctx("c")).await.unwrap();
+}
+
+#[tokio::test]
 async fn a_subscribe_with_a_taken_id_gets_409_and_registers_nothing() {
     let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
     let [(method, params), _] = opens(&p.0, "taken");

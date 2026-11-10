@@ -824,7 +824,7 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let opened = perspective
         .subscribe_and_query(
             body.query,
-            body.subscription_id,
+            client_subscription_id(body.subscription_id)?,
             connection_id.clone(),
             subscriber(&ctx),
         )
@@ -838,6 +838,21 @@ fn connection_id(ctx: &RequestContext) -> Result<String, WsRpcError> {
     ctx.connection_id.clone().ok_or_else(|| {
         WsRpcError::bad_request("Subscriptions need a WebSocket connection (/api/v1/ws)")
     })
+}
+
+/// The id a client minted for the live query it opens. It is a map key, and it appears
+/// in logs, errors and updates, so it must be a short id: 1 to 64 characters of
+/// `[A-Za-z0-9-]` (the SDK sends a UUID).
+fn client_subscription_id(id: String) -> Result<String, WsRpcError> {
+    let valid =
+        (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    if valid {
+        Ok(id)
+    } else {
+        Err(WsRpcError::bad_request(
+            "subscriptionId must be 1 to 64 characters of [A-Za-z0-9-]",
+        ))
+    }
 }
 
 /// The agent a subscription runs as, whose sessions alone get its updates: the
@@ -1185,7 +1200,7 @@ async fn model_subscribe_handler(
 ) -> Result<Value, WsRpcError> {
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
-    let subscription_id = params.require_str("subscriptionId")?;
+    let subscription_id = client_subscription_id(params.require_str("subscriptionId")?)?;
 
     let connection_id = connection_id(&ctx)?;
     let perspective = guarded_perspective(&params).await?;
