@@ -14,7 +14,7 @@
 //! the integration test suite, which builds shapes from JSON fixtures
 //! without going through the SHACL writer.
 
-use super::sparql_builder::{shown_link_join_once, LinkGuard};
+use super::sparql_builder::{shown_link_join, LinkGuard};
 use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
 use crate::perspectives::sparql_store::SparqlStore;
@@ -111,13 +111,9 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         .ok_or_else(|| anyhow!("Missing targetClass in SHACL query result"))?
         .to_string();
 
-    // Step 2: Load all property shapes for this shape.  Fetches every
-    // predicate the SHACL writer emits in one batched SELECT.  Using
-    // OPTIONAL keeps unset fields as nulls in the result rows.
-    let props_query = props_sparql(&shape_uri, &guard);
-
-    let props_json = store.query(&props_query)?;
-    let prop_results: Vec<Value> = serde_json::from_str(&props_json)?;
+    // Step 2: Load all property shapes for this shape: one row per property
+    // (per `rdf://type` and shown `local` value), unset fields absent.
+    let prop_results = property_rows(store, &shape_uri, &guard)?;
 
     // Property shapes can fan into multiple rows because their `rdf://type`
     // may appear more than once (e.g. both sh:PropertyShape and a marker
@@ -155,7 +151,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             .as_str()
             .map(decode_literal_string_target);
         let writable = parse_bool_literal_target(first["writable"].as_str());
-        // `local` is read from EVERY row: `shown_link_join_once` yields one
+        // `local` is read from EVERY row: `property_rows` yields one
         // row per shown declaration, and a shown `false` beside a shown
         // `true` must not make the property shared whichever arrives first.
         let local = rows
@@ -376,86 +372,154 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     })
 }
 
-/// The property-shape query [`load_shape`] runs for `shape_uri`: every
-/// guarded triple through `join_once`, so a definition asserted by two
-/// signers still yields one row per property rather than multiplying the
-/// SELECT's rows by its reifier count.
-pub(super) fn props_sparql(shape_uri: &str, guard: &LinkGuard) -> String {
+/// Every field the SHACL writer emits on a property shape, by predicate, with
+/// the name [`load_shape`] reads it under. `sh://path` and `rdf://type` are
+/// required; `ad4m://local` is read by [`local_sparql`] under its own rule.
+const PROPERTY_FIELDS: &[(&str, &str)] = &[
+    ("sh://path", "path"),
+    ("rdf://type", "propType"),
+    ("ad4m://interpretation_hint", "interpretationHint"),
+    ("ad4m://identity", "identity"),
+    ("sh://datatype", "datatype"),
+    ("sh://minCount", "minCount"),
+    ("sh://maxCount", "maxCount"),
+    ("ad4m://resolveLanguage", "resolveLanguage"),
+    ("ad4m://writable", "writable"),
+    ("ad4m://getter", "getter"),
+    ("ad4m://ordering", "ordering"),
+    ("sh://hasValue", "hasValue"),
+    ("sh://class", "className"),
+    ("ad4m://relationKind", "relationKind"),
+    ("ad4m://targetClassName", "targetClassName"),
+    ("ad4m://whereFilter", "whereFilter"),
+    ("ad4m://wherePredicates", "wherePredicates"),
+    ("ad4m://filter", "filterEnabled"),
+    ("ad4m://transform", "transform"),
+];
+
+/// Every triple about each of `shape_uri`'s property shapes that a
+/// *counting* link asserts, one row per `?propUri ?p ?o`.
+///
+/// One basic graph pattern with no `OPTIONAL`: a field a peer sent with a
+/// verdict that does not count is simply absent, exactly as if it had never
+/// been written, and [`property_rows`] pivots the triples into one row per
+/// property. Not one `OPTIONAL` per field: Oxigraph evaluates a reifier
+/// join inside an `OPTIONAL` per property by scanning every reifier in the
+/// store, which made one shape cost about a second in a perspective of a few
+/// thousand links — and the first `include` of a model query loads the shape
+/// of every concrete class (`definition_reads_do_not_scale_with_the_perspectives_links`).
+fn props_sparql(shape_uri: &str, guard: &LinkGuard) -> String {
+    let shape = format!("<{shape_uri}>");
     format!(
         r#"
-        SELECT
-            ?propUri ?path ?propType
-            ?datatype ?minCount ?maxCount
-            ?resolveLanguage ?writable ?local
-            ?getter ?hasValue ?className
-            ?relationKind ?targetClassName
-            ?whereFilter ?wherePredicates ?filterEnabled
-            ?transform ?interpretationHint ?identity ?ordering
-        WHERE {{
-            {prop_once}
-            {path_once}
-            {type_once}
-{optional_guards}        }}
+        SELECT DISTINCT ?propUri ?p ?o WHERE {{
+            {shape} <sh://property> ?propUri .{prop_guard}
+            ?propUri ?p ?o .{field_guard}
+        }}
         "#,
-        prop_once = guard.join_once(
-            "?_gr_prop",
-            &format!("<{shape_uri}>"),
-            "<sh://property>",
-            "?propUri"
-        ),
-        path_once = guard.join_once("?_gr_path", "?propUri", "<sh://path>", "?path"),
-        type_once = guard.join_once("?_gr_ptype", "?propUri", "<rdf://type>", "?propType"),
-        optional_guards = [
-            ("ad4m://interpretation_hint", "interpretationHint"),
-            ("ad4m://identity", "identity"),
-            ("sh://datatype", "datatype"),
-            ("sh://minCount", "minCount"),
-            ("sh://maxCount", "maxCount"),
-            ("ad4m://resolveLanguage", "resolveLanguage"),
-            ("ad4m://writable", "writable"),
-            ("ad4m://local", "local"),
-            ("ad4m://getter", "getter"),
-            ("ad4m://ordering", "ordering"),
-            ("sh://hasValue", "hasValue"),
-            ("sh://class", "className"),
-            ("ad4m://relationKind", "relationKind"),
-            ("ad4m://targetClassName", "targetClassName"),
-            ("ad4m://whereFilter", "whereFilter"),
-            ("ad4m://wherePredicates", "wherePredicates"),
-            ("ad4m://filter", "filterEnabled"),
-            ("ad4m://transform", "transform"),
-        ]
-        .iter()
-        .map(|(predicate, var)| {
-            // Each OPTIONAL binds its field only when a *counting* link
-            // asserts it: the reifier requirement sits inside the OPTIONAL,
-            // so a field a peer sent with a verdict that does not count is
-            // unbound, exactly as if it had never been written. `join_once`
-            // keeps it one row per property however many counting reifiers
-            // assert the triple.
-            if *predicate == "ad4m://local" {
-                // Locality fails toward Local: a `true` from any link that
-                // is not `invalid` — `cantCheck` included — declares the
-                // property private. `proofValid` is not asked; `invalid`
-                // stays out, or a forged `true` could stop the victim's
-                // writes being shared.
-                return format!(
-                    "            OPTIONAL {{ {} }}\n",
-                    shown_link_join_once("?_gr_local", "?propUri", "<ad4m://local>", "?local")
-                );
-            }
-            format!(
-                "            OPTIONAL {{ {} }}\n",
-                guard.join_once(
-                    &format!("?_gr_{var}"),
-                    "?propUri",
-                    &format!("<{predicate}>"),
-                    &format!("?{var}")
-                )
-            )
-        })
-        .collect::<String>(),
+        prop_guard = guard.join("?_gr_prop", &shape, "<sh://property>", "?propUri"),
+        field_guard = guard.join("?_gr_field", "?propUri", "?p", "?o"),
     )
+}
+
+/// The `ad4m://local` values of `shape_uri`'s (counting) property shapes,
+/// under the shown-link rule rather than the counting one. Locality fails
+/// toward Local: a `true` from any link that is not `invalid` — `cantCheck`
+/// included — declares the property private. `proofValid` is not asked;
+/// `invalid` stays out, or a forged `true` could stop the victim's writes
+/// being shared.
+fn local_sparql(shape_uri: &str, guard: &LinkGuard) -> String {
+    let shape = format!("<{shape_uri}>");
+    format!(
+        r#"
+        SELECT DISTINCT ?propUri ?local WHERE {{
+            {shape} <sh://property> ?propUri .{prop_guard}
+            ?propUri <ad4m://local> ?local .{local_join}
+        }}
+        "#,
+        prop_guard = guard.join("?_gr_prop", &shape, "<sh://property>", "?propUri"),
+        local_join = shown_link_join("?_gr_local", "?propUri", "<ad4m://local>", "?local"),
+    )
+}
+
+/// The property rows [`load_shape`] parses, one per property and per
+/// combination of its `sh://path`, `rdf://type` and shown `ad4m://local`
+/// values (the rows the per-field `OPTIONAL` query used to return), every
+/// other field carried as its first value and absent when unset. A property
+/// without a counting `sh://path` and `rdf://type` yields no row.
+pub(super) fn property_rows(
+    store: &SparqlStore,
+    shape_uri: &str,
+    guard: &LinkGuard,
+) -> Result<Vec<Value>, Error> {
+    let triples: Vec<Value> = serde_json::from_str(&store.query(&props_sparql(shape_uri, guard))?)?;
+    let locals: Vec<Value> = serde_json::from_str(&store.query(&local_sparql(shape_uri, guard))?)?;
+
+    let mut order: Vec<String> = Vec::new();
+    let mut fields: HashMap<String, BTreeMap<&'static str, Vec<String>>> = HashMap::new();
+    let mut push = |prop: &str, field: &'static str, value: &str| {
+        if !fields.contains_key(prop) {
+            order.push(prop.to_string());
+        }
+        let values = fields
+            .entry(prop.to_string())
+            .or_default()
+            .entry(field)
+            .or_default();
+        if !values.iter().any(|v| v == value) {
+            values.push(value.to_string());
+        }
+    };
+    for row in &triples {
+        let (Some(prop), Some(predicate), Some(object)) = (
+            row["propUri"].as_str(),
+            row["p"].as_str(),
+            row["o"].as_str(),
+        ) else {
+            continue;
+        };
+        if let Some((_, field)) = PROPERTY_FIELDS.iter().find(|(p, _)| *p == predicate) {
+            push(prop, field, object);
+        }
+    }
+    for row in &locals {
+        if let (Some(prop), Some(local)) = (row["propUri"].as_str(), row["local"].as_str()) {
+            push(prop, "local", local);
+        }
+    }
+
+    let mut rows = Vec::new();
+    for prop in &order {
+        let fields = &fields[prop];
+        let (Some(paths), Some(types)) = (fields.get("path"), fields.get("propType")) else {
+            continue;
+        };
+        let locals: Vec<Option<&String>> = match fields.get("local") {
+            Some(values) => values.iter().map(Some).collect(),
+            None => vec![None],
+        };
+        for path in paths {
+            for prop_type in types {
+                for local in &locals {
+                    let mut row = serde_json::Map::new();
+                    row.insert("propUri".into(), Value::String(prop.clone()));
+                    row.insert("path".into(), Value::String(path.clone()));
+                    row.insert("propType".into(), Value::String(prop_type.clone()));
+                    if let Some(local) = local {
+                        row.insert("local".into(), Value::String((*local).clone()));
+                    }
+                    for (field, values) in fields {
+                        if matches!(*field, "path" | "propType" | "local") {
+                            continue;
+                        }
+                        row.insert((*field).into(), Value::String(values[0].clone()));
+                    }
+                    rows.push(Value::Object(row));
+                }
+            }
+        }
+    }
+    Ok(rows)
 }
 
 /// Recover an initial value for a non-flag property by inspecting the

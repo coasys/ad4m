@@ -526,6 +526,12 @@ fn mark_agent_ready() {
     AGENT_READY.send_replace(true);
 }
 
+/// Back to "no main agent yet", as a fresh process starts: a test of what marks it.
+#[cfg(test)]
+pub(crate) fn unmark_agent_ready_for_test() {
+    AGENT_READY.send_replace(false);
+}
+
 /// SHA-256 over the names and public keys in a wallet, in name order.
 fn key_set_fingerprint(wallet: &dyn crate::wallet::WalletBackend) -> String {
     use sha2::{Digest, Sha256};
