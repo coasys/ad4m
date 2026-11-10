@@ -2529,7 +2529,7 @@ mod tests {
             KeyLife::Standing,
         );
         world.log.revoke_d1();
-        let mut world = world.with_store();
+        let world = world.with_store();
         accept_signed(&world.service.cache, &world.log.events).await;
         // `MainBound::to` reads the DID, which is not loaded yet: bind it directly.
         test_db(|db| db.clear_agent_identity_for_test(&main)).unwrap();
