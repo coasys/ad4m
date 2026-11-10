@@ -29,6 +29,7 @@ use crate::types::{Link, LinkStatus};
 
 use super::claim::{batch_key, confirm_claim, renew_claim, settle_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
+use super::cursor::ProcessedSource;
 use super::events::{
     emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
     AutoProcessorStep, NeighbourhoodPhase,
@@ -231,6 +232,97 @@ pub struct WatcherState {
     /// anyway, so retrying is the intended crashed-claimant recovery rather
     /// than a redundant race.
     deferred: BTreeMap<String, BTreeMap<String, i64>>,
+    /// The store reads the last tick made, reused while no link changed.
+    pub(crate) reads: TickReads,
+}
+
+/// Store reads a tick keeps for the next one, each tagged with the store's
+/// write generation ([`SparqlStore::write_generation`](crate::perspectives::sparql_store::SparqlStore::write_generation))
+/// read before the query. A tick reuses a read while the generation is
+/// unchanged: the store answers the same query with the same rows until a
+/// write lands. Everything that depends on the tick's `now_ms` (both
+/// `source_window_ms` filters, deferrals) is applied to the kept rows at
+/// each tick, exactly as to fresh ones.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TickReads {
+    configs: Option<(u64, Arc<Vec<AutoProcessorConfig>>)>,
+    /// Per processor id: its scope query, and the turns it returned.
+    transcripts: BTreeMap<String, (u64, String, Arc<Vec<PendingTurn>>)>,
+    /// Per processor id: the cursor rows, not yet windowed.
+    processed: BTreeMap<String, (u64, Arc<Vec<ProcessedSource>>)>,
+}
+
+impl TickReads {
+    pub(crate) fn configs(&self, generation: u64) -> Option<Arc<Vec<AutoProcessorConfig>>> {
+        self.configs
+            .as_ref()
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, c)| c.clone())
+    }
+
+    /// Keep `configs`, and drop the reads of processors no longer declared.
+    pub(crate) fn set_configs(
+        &mut self,
+        generation: u64,
+        configs: Vec<AutoProcessorConfig>,
+    ) -> Arc<Vec<AutoProcessorConfig>> {
+        let declared: HashSet<&str> = configs.iter().map(|c| c.processor_id.as_str()).collect();
+        self.transcripts
+            .retain(|id, _| declared.contains(id.as_str()));
+        self.processed
+            .retain(|id, _| declared.contains(id.as_str()));
+        let configs = Arc::new(configs);
+        self.configs = Some((generation, configs.clone()));
+        configs
+    }
+
+    pub(crate) fn transcript(
+        &self,
+        cfg: &AutoProcessorConfig,
+        generation: u64,
+    ) -> Option<Arc<Vec<PendingTurn>>> {
+        self.transcripts
+            .get(&cfg.processor_id)
+            .filter(|(g, query, _)| *g == generation && *query == cfg.source_scope_query)
+            .map(|(_, _, turns)| turns.clone())
+    }
+
+    pub(crate) fn set_transcript(
+        &mut self,
+        cfg: &AutoProcessorConfig,
+        generation: u64,
+        turns: Vec<PendingTurn>,
+    ) -> Arc<Vec<PendingTurn>> {
+        let turns = Arc::new(turns);
+        self.transcripts.insert(
+            cfg.processor_id.clone(),
+            (generation, cfg.source_scope_query.clone(), turns.clone()),
+        );
+        turns
+    }
+
+    pub(crate) fn processed(
+        &self,
+        processor_id: &str,
+        generation: u64,
+    ) -> Option<Arc<Vec<ProcessedSource>>> {
+        self.processed
+            .get(processor_id)
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, rows)| rows.clone())
+    }
+
+    pub(crate) fn set_processed(
+        &mut self,
+        processor_id: &str,
+        generation: u64,
+        rows: Vec<ProcessedSource>,
+    ) -> Arc<Vec<ProcessedSource>> {
+        let rows = Arc::new(rows);
+        self.processed
+            .insert(processor_id.to_string(), (generation, rows.clone()));
+        rows
+    }
 }
 
 impl WatcherState {
@@ -352,6 +444,17 @@ impl WatcherState {
             .is_some_and(|until| *until > now_ms)
     }
 
+    /// The earliest deferral that is still running at `now_ms`, as the unix
+    /// millis it ends: its turns may be queued again then, with no link
+    /// change to wake the loop.
+    pub fn next_deferral_end_ms(&self, now_ms: i64) -> Option<i64> {
+        self.deferred
+            .values()
+            .flat_map(|m| m.values().copied())
+            .filter(|until| *until > now_ms)
+            .min()
+    }
+
     /// Whether any processor has turns waiting to be batched, declared or
     /// not. Used only when the declared processors could not be loaded.
     pub fn has_pending(&self) -> bool {
@@ -373,27 +476,73 @@ impl WatcherState {
     }
 }
 
-/// Poll interval of an auto-processor watch loop while turns are pending.
+/// Tick interval of an auto-processor watch loop while turns are pending, so
+/// `debounce_ms` and `max_wait_ms` keep their resolution. Also how long the
+/// loop lets a burst of link writes settle before the tick they woke, and the
+/// slice it sleeps in, so teardown is seen this promptly.
 pub const AUTO_PROCESSOR_TICK_MS: u64 = 500;
 
-/// Longest interval an idle watch loop backs off to (#1072). Every tick costs
-/// a `load_processors` store query plus, per config, the transcript and cursor
-/// queries, whether or not anything changed; one loop runs per perspective and
-/// online user. Backing off cuts an idle loop from 2 ticks/s to one per 4 s.
-/// The price is up to this much extra delay before the first new turn after a
-/// quiet spell is noticed.
-pub const AUTO_PROCESSOR_IDLE_TICK_MAX_MS: u64 = 4_000;
+/// Longest an idle watch loop sleeps when no link changes. A link write wakes
+/// it at once ([`wait_for_tick`]); a tick with no write since the last runs no
+/// store query ([`TickReads`]), so this fallback only re-applies the
+/// time-based filters (`source_window_ms`) to what the loop already read.
+pub const AUTO_PROCESSOR_IDLE_FALLBACK_MS: u64 = 60_000;
 
-/// Delay before the next watch-loop tick: [`AUTO_PROCESSOR_TICK_MS`] after a
-/// tick that left turns pending, otherwise double the previous delay, capped at
-/// [`AUTO_PROCESSOR_IDLE_TICK_MAX_MS`].
-pub fn next_tick_delay_ms(previous_ms: u64, had_pending: bool) -> u64 {
-    if had_pending {
-        return AUTO_PROCESSOR_TICK_MS;
+/// How long an idle loop (no turn pending) waits for a link write before it
+/// ticks anyway: [`AUTO_PROCESSOR_IDLE_FALLBACK_MS`], or less when a deferral
+/// ends sooner, since its turns may be queued again without any write.
+pub fn idle_wait_ms(watcher: &WatcherState, now_ms: i64) -> u64 {
+    match watcher.next_deferral_end_ms(now_ms) {
+        Some(until) => {
+            (until.saturating_sub(now_ms).max(0) as u64).min(AUTO_PROCESSOR_IDLE_FALLBACK_MS)
+        }
+        None => AUTO_PROCESSOR_IDLE_FALLBACK_MS,
     }
-    previous_ms
-        .saturating_mul(2)
-        .clamp(AUTO_PROCESSOR_TICK_MS, AUTO_PROCESSOR_IDLE_TICK_MAX_MS)
+}
+
+/// How a [`wait_for_tick`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitEnd {
+    Teardown,
+    /// The store took a write.
+    Write,
+    Elapsed,
+}
+
+/// Sleep up to `ms`, in slices of at most [`AUTO_PROCESSOR_TICK_MS`] so
+/// `teardown` is seen promptly. With `writes`, return as soon as the store's
+/// write generation moves past what the receiver has seen.
+pub async fn wait_for_tick(
+    teardown: &AtomicBool,
+    ms: u64,
+    mut writes: Option<&mut tokio::sync::watch::Receiver<u64>>,
+) -> WaitEnd {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
+    loop {
+        if teardown.load(Ordering::Acquire) {
+            return WaitEnd::Teardown;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return WaitEnd::Elapsed;
+        }
+        let slice = (deadline - now).min(std::time::Duration::from_millis(AUTO_PROCESSOR_TICK_MS));
+        let mut closed = false;
+        match writes.as_deref_mut() {
+            Some(rx) => tokio::select! {
+                changed = rx.changed() => match changed {
+                    Ok(()) => return WaitEnd::Write,
+                    // The store is gone; only the timer is left.
+                    Err(_) => closed = true,
+                },
+                _ = tokio::time::sleep(slice) => {}
+            },
+            None => tokio::time::sleep(slice).await,
+        }
+        if closed {
+            writes = None;
+        }
+    }
 }
 
 /// Result of a single [`run_one_pass`] call.
@@ -1633,26 +1782,23 @@ mod tests {
 
     // ---- WatcherState -------------------------------------------------------
 
-    /// Idle ticks double the delay up to the ceiling; one tick that leaves
-    /// turns pending drops straight back to the base rate (#1072).
+    /// An idle loop waits the long fallback for a link write, or less when a
+    /// deferral ends first: a backed-off batch is retried at the claim's
+    /// expiry whether or not a link changed.
     #[test]
-    fn tick_delay_backs_off_while_idle_and_resets_when_turns_are_pending() {
-        let mut delay = AUTO_PROCESSOR_TICK_MS;
-        let mut idle_delays = Vec::new();
-        for _ in 0..6 {
-            delay = next_tick_delay_ms(delay, false);
-            idle_delays.push(delay);
-        }
-        assert_eq!(idle_delays, vec![1_000, 2_000, 4_000, 4_000, 4_000, 4_000]);
+    fn idle_wait_is_the_fallback_unless_a_deferral_ends_sooner() {
+        let mut w = WatcherState::new();
+        assert_eq!(idle_wait_ms(&w, 1_000), AUTO_PROCESSOR_IDLE_FALLBACK_MS);
+        w.defer_turns("p", &["a".into()], 1_000, 20_000);
+        assert_eq!(idle_wait_ms(&w, 1_000), 20_000);
+        assert_eq!(idle_wait_ms(&w, 16_000), 5_000);
         assert_eq!(
-            next_tick_delay_ms(AUTO_PROCESSOR_IDLE_TICK_MAX_MS, true),
-            AUTO_PROCESSOR_TICK_MS
+            idle_wait_ms(&w, 21_000),
+            AUTO_PROCESSOR_IDLE_FALLBACK_MS,
+            "an ended deferral no longer shortens the wait"
         );
-        assert_eq!(next_tick_delay_ms(0, false), AUTO_PROCESSOR_TICK_MS);
-        assert_eq!(
-            next_tick_delay_ms(u64::MAX, false),
-            AUTO_PROCESSOR_IDLE_TICK_MAX_MS
-        );
+        w.defer_turns("p", &["b".into()], 21_000, 600_000);
+        assert_eq!(idle_wait_ms(&w, 21_000), AUTO_PROCESSOR_IDLE_FALLBACK_MS);
     }
 
     /// `has_pending` is what keeps the loop at the base rate: true from the

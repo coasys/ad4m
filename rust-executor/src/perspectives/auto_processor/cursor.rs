@@ -53,46 +53,76 @@ fn decode_binding(raw: &str) -> String {
     }
 }
 
-/// Load turn IDs this processor has consumed. When `window_ms` is `Some`, only
+/// One row of the cursor query: a turn id a run of this processor consumed,
+/// and that run's `ran_at` (unix millis; `None` when absent or unparseable).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessedSource {
+    pub id: String,
+    pub ran_at_ms: Option<i64>,
+}
+
+/// Read every turn id this processor's runs consumed, with each run's
+/// `ran_at`. Not windowed: the window depends on `now_ms`, so the watch loop
+/// keeps these rows while the store is unchanged and applies
+/// [`processed_ids_in_window`] at each tick.
+pub async fn load_processed_sources(
+    perspective: &PerspectiveInstance,
+    processor_id: &str,
+) -> anyhow::Result<Vec<ProcessedSource>> {
+    let rows_json = perspective
+        .sparql_query(processed_ids_query(processor_id))
+        .map_err(|e| anyhow::anyhow!("load_processed_source_ids: SPARQL failed: {e:#}"))?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&rows_json)
+        .map_err(|e| anyhow::anyhow!("load_processed_source_ids: bad SPARQL JSON: {e:#}"))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let id = decode_binding(row.get("id")?.as_str()?);
+            let ran_at_ms = row
+                .get("ran_at")
+                .and_then(|v| v.as_str())
+                .map(decode_binding)
+                .and_then(|s| s.parse::<i64>().ok());
+            Some(ProcessedSource { id, ran_at_ms })
+        })
+        .collect())
+}
+
+/// The turn ids `rows` retire at `now_ms`. When `window_ms` is `Some`, only
 /// runs whose `ran_at` is inside that window count; `None` is unbounded and
-/// ignores `ran_at` entirely. Empty when the class has never been written.
+/// ignores `ran_at` entirely.
 ///
 /// In the windowed case a row whose `ran_at` is absent or unparseable is
 /// **dropped**, i.e. treated as not-yet-processed. The cursor is a suppression
 /// list, so the conservative direction is to re-process (output identity-dedup
 /// catches the duplicate) rather than to suppress a turn that was never
 /// actually interpreted.
+pub fn processed_ids_in_window(
+    rows: &[ProcessedSource],
+    now_ms: i64,
+    window_ms: Option<i64>,
+) -> HashSet<String> {
+    let cutoff = window_ms.map(|w| now_ms.saturating_sub(w));
+    rows.iter()
+        .filter(|row| match cutoff {
+            None => true,
+            Some(cutoff) => row.ran_at_ms.is_some_and(|ran_at| ran_at >= cutoff),
+        })
+        .map(|row| row.id.clone())
+        .collect()
+}
+
+/// Load turn IDs this processor has consumed: [`load_processed_sources`]
+/// filtered by [`processed_ids_in_window`]. Empty when the class has never
+/// been written.
 pub async fn load_processed_source_ids(
     perspective: &PerspectiveInstance,
     processor_id: &str,
     now_ms: i64,
     window_ms: Option<i64>,
 ) -> anyhow::Result<HashSet<String>> {
-    let cutoff = window_ms.map(|w| now_ms.saturating_sub(w));
-    let rows_json = perspective
-        .sparql_query(processed_ids_query(processor_id))
-        .map_err(|e| anyhow::anyhow!("load_processed_source_ids: SPARQL failed: {e:#}"))?;
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&rows_json)
-        .map_err(|e| anyhow::anyhow!("load_processed_source_ids: bad SPARQL JSON: {e:#}"))?;
-    let mut out = HashSet::new();
-    for row in rows {
-        let Some(raw_id) = row.get("id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if let Some(cutoff) = cutoff {
-            let ran_at = row
-                .get("ran_at")
-                .and_then(|v| v.as_str())
-                .map(decode_binding)
-                .and_then(|s| s.parse::<i64>().ok());
-            match ran_at {
-                Some(ran_at_ms) if ran_at_ms >= cutoff => {}
-                _ => continue,
-            }
-        }
-        out.insert(decode_binding(raw_id));
-    }
-    Ok(out)
+    let rows = load_processed_sources(perspective, processor_id).await?;
+    Ok(processed_ids_in_window(&rows, now_ms, window_ms))
 }
 
 #[cfg(test)]

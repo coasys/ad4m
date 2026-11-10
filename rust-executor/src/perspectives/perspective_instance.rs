@@ -6538,12 +6538,18 @@ impl PerspectiveInstance {
         log::debug!("Fallback sync loop ended for perspective {}", uuid);
     }
 
-    /// Auto-processor watch loop (P-B2b2 polling MVP).
+    /// Auto-processor watch loop.
     ///
     /// One instance per perspective, joined into `start_background_tasks`.
-    /// Every tick (`AUTO_PROCESSOR_TICK_MS` while turns are pending, backing
-    /// off to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS` while idle, see
-    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)):
+    /// It ticks every `AUTO_PROCESSOR_TICK_MS` while turns are pending. While
+    /// idle it sleeps until the perspective's store takes a write (a link
+    /// added or removed, by anyone: local, a link language, the pass itself),
+    /// waits `AUTO_PROCESSOR_TICK_MS` more so a burst of writes makes one
+    /// tick, and ticks; with no write it ticks after
+    /// [`idle_wait_ms`](crate::perspectives::auto_processor::watcher::idle_wait_ms)
+    /// (60 s, or when a deferral ends). A tick reuses the store reads of the
+    /// one before while no write landed in between (`TickReads`), so an idle
+    /// perspective costs no query at all. Each tick:
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
     ///   2. Per config, run its `source_scope_query` to gather the current
@@ -6561,39 +6567,44 @@ impl PerspectiveInstance {
     ///      `ShapesMissing` and `EmptyTranscript` do not write sources, so the
     ///      ids are retried once the shape or transcript lands.
     ///
-    /// This is the "polling MVP". The event-driven variant
-    /// (subscribe to `Topic::LinkAdded` events, record `link.data.source`
-    /// deltas) is a follow-up optimisation — the coordination correctness
-    /// envelope is the same because the `ProcessingClaim` (P-A) is the real
-    /// double-processing guard, not the trigger latency.
+    /// The trigger only decides *when* a tick runs; the `ProcessingClaim`
+    /// (P-A) is the double-processing guard, not the trigger latency.
     /// `context` is the agent this executor runs passes as — production passes
     /// the main agent; a multi-user test spawns one loop per managed user so the
     /// `ProcessingClaim` election runs across distinct DIDs on one executor.
     pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
         use crate::perspectives::auto_processor::watcher::{
-            next_tick_delay_ms, WatcherState, AUTO_PROCESSOR_TICK_MS,
+            idle_wait_ms, wait_for_tick, WaitEnd, WatcherState, AUTO_PROCESSOR_TICK_MS,
         };
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
-        let mut delay_ms = AUTO_PROCESSOR_TICK_MS;
+        let mut writes = self.sparql_store.watch_writes();
+        // The first pass runs after one base tick, whatever the store does.
+        let mut wait = Some(AUTO_PROCESSOR_TICK_MS);
 
-        while !self.is_teardown.load(Ordering::Acquire) {
-            // Sleep in base-tick slices so teardown is observed as promptly
-            // while backed off as at the base rate.
-            let mut remaining = delay_ms;
-            while remaining > 0 {
-                if self.is_teardown.load(Ordering::Acquire) {
-                    return;
+        loop {
+            let end = match wait {
+                Some(ms) => wait_for_tick(&self.is_teardown, ms, None).await,
+                None => {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let ms = idle_wait_ms(&watcher, now_ms);
+                    match wait_for_tick(&self.is_teardown, ms, Some(&mut writes)).await {
+                        // Let the rest of a burst of writes land first.
+                        WaitEnd::Write => {
+                            wait_for_tick(&self.is_teardown, AUTO_PROCESSOR_TICK_MS, None).await
+                        }
+                        other => other,
+                    }
                 }
-                let step = remaining.min(AUTO_PROCESSOR_TICK_MS);
-                sleep(Duration::from_millis(step)).await;
-                remaining -= step;
+            };
+            if end == WaitEnd::Teardown {
+                break;
             }
-            if self.is_teardown.load(Ordering::Acquire) {
-                return;
-            }
+            // Writes up to here are seen by this tick; one landing during it
+            // (the pass's own, or a peer's) wakes the next.
+            writes.borrow_and_update();
             let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
@@ -6601,7 +6612,7 @@ impl PerspectiveInstance {
             let had_pending = self
                 .run_auto_processor_tick(&mut watcher, now_ms, &context)
                 .await;
-            delay_ms = next_tick_delay_ms(delay_ms, had_pending);
+            wait = had_pending.then_some(AUTO_PROCESSOR_TICK_MS);
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -6616,7 +6627,9 @@ impl PerspectiveInstance {
     /// Loads every declared `AutoProcessorConfig`, records new-since-processed
     /// transcript turns into `watcher` (gather minus this processor's
     /// `InterpretationRun.sources`, optionally windowed), then drains and runs
-    /// any ready batch.
+    /// any ready batch. The config, transcript and cursor reads are kept in
+    /// `watcher` and reused while the store's write generation is unchanged;
+    /// the windows and deferrals are applied at `now_ms` either way.
     ///
     /// `context` is the agent this executor runs the pass as — the production
     /// loop passes the main agent; a multi-user test passes each managed user's
@@ -6640,82 +6653,92 @@ impl PerspectiveInstance {
     ) -> bool {
         use crate::perspectives::auto_processor::{
             config::load_processors,
-            cursor::{load_processed_source_ids, turn_in_source_window},
+            cursor::{load_processed_sources, processed_ids_in_window, turn_in_source_window},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
             watcher::{run_one_pass, PassOutcome, PendingTurn},
         };
 
         let uuid = self.uuid.clone();
-        let configs = match load_processors(self).await {
-            Ok(cs) => cs,
-            Err(e) => {
-                log::warn!(
-                    "auto_processor_tick [{}]: load_processors failed: {e:#}",
-                    uuid
-                );
-                return watcher.has_pending();
-            }
+        // Read before any query, so a write during one makes the next tick read again.
+        let generation = self.sparql_store.write_generation();
+        let configs = match watcher.reads.configs(generation) {
+            Some(cs) => cs,
+            None => match load_processors(self).await {
+                Ok(cs) => watcher.reads.set_configs(generation, cs),
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor_tick [{}]: load_processors failed: {e:#}",
+                        uuid
+                    );
+                    return watcher.has_pending();
+                }
+            },
         };
         if configs.is_empty() {
             return false;
         }
 
         // 1. Record new-since-last-processed turns per config (payload kept).
-        for cfg in &configs {
-            let transcript = match crate::perspectives::interpretation::gather_transcript_sparql(
-                self,
-                &cfg.source_scope_query,
-            )
-            .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!(
-                        "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
-                        cfg.processor_id,
-                        uuid
-                    );
-                    continue;
-                }
+        for cfg in configs.iter() {
+            let transcript = match watcher.reads.transcript(cfg, generation) {
+                Some(t) => t,
+                None => match crate::perspectives::interpretation::gather_transcript_sparql(
+                    self,
+                    &cfg.source_scope_query,
+                )
+                .await
+                {
+                    Ok(t) => watcher.reads.set_transcript(
+                        cfg,
+                        generation,
+                        t.iter().map(PendingTurn::from_transcript).collect(),
+                    ),
+                    Err(e) => {
+                        log::warn!(
+                            "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
+                            cfg.processor_id,
+                            uuid
+                        );
+                        continue;
+                    }
+                },
             };
-            let processed = match load_processed_source_ids(
-                self,
-                &cfg.processor_id,
-                now_ms,
-                cfg.source_window_ms,
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!(
-                        "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
-                        cfg.processor_id,
-                        uuid
-                    );
-                    continue;
-                }
+            let processed_rows = match watcher.reads.processed(&cfg.processor_id, generation) {
+                Some(rows) => rows,
+                None => match load_processed_sources(self, &cfg.processor_id).await {
+                    Ok(rows) => watcher
+                        .reads
+                        .set_processed(&cfg.processor_id, generation, rows),
+                    Err(e) => {
+                        log::warn!(
+                            "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
+                            cfg.processor_id,
+                            uuid
+                        );
+                        continue;
+                    }
+                },
             };
-            for turn in &transcript {
+            let processed = processed_ids_in_window(&processed_rows, now_ms, cfg.source_window_ms);
+            for pending in transcript.iter() {
                 if let Some(window_ms) = cfg.source_window_ms {
-                    if !turn_in_source_window(&turn.timestamp, now_ms, window_ms) {
+                    if !turn_in_source_window(&pending.timestamp, now_ms, window_ms) {
                         continue;
                     }
                 }
-                let pending = PendingTurn::from_transcript(turn);
                 if processed.contains(&pending.id)
                     || watcher.is_deferred(&cfg.processor_id, &pending.id, now_ms)
                 {
                     continue;
                 }
-                watcher.record_item(&cfg.processor_id, pending, now_ms);
+                watcher.record_item(&cfg.processor_id, pending.clone(), now_ms);
             }
         }
 
         let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
 
         // 2. Drain + run a pass per config.
-        for cfg in &configs {
+        for cfg in configs.iter() {
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
                 continue;
             };
