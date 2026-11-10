@@ -466,20 +466,26 @@ pub async fn load_class_properties_with_uri(
         // links. Read here as well as in `load_shape`, because this
         // link-walking path is what the dynamic per-class tools resolve
         // against; missing it would leave them writing Shared links for a
-        // property the shape declares local.
-        let local = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://local".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links)
-                .and_then(|link| link.data.target.rsplit(':').next())
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            _ => false,
+        // property the shape declares local. Locality fails toward Local:
+        // a `true` from any link that is not `invalid` — `cantCheck`
+        // included — declares the property private; only an `invalid`
+        // declaration stays out, or a forged `true` could stop the
+        // victim's writes being shared. A lookup that fails answers `true`
+        // for the same reason: a write the executor cannot see declared
+        // private must not be gossiped.
+        let local = match local_property_links(perspective, prop_uri).await {
+            Ok(links) => links
+                .iter()
+                .filter(|link| link.verdict.as_ref().is_none_or(|v| v.shown()))
+                .filter_map(|link| link.data.target.rsplit(':').next())
+                .any(|v| v.eq_ignore_ascii_case("true")),
+            Err(e) => {
+                log::warn!(
+                    "the ad4m://local lookup for `{prop_uri}` failed ({e}); treating the \
+                     property as local, so its next write stays on this executor"
+                );
+                true
+            }
         };
 
         properties.push(ShaclProperty {
@@ -499,6 +505,37 @@ pub async fn load_class_properties_with_uri(
     }
 
     (properties, Some(shape_uri.clone()))
+}
+
+/// The property-shape URIs whose `ad4m://local` lookup fails as if the store
+/// errored: the seam the `instance_create` locality tests fail the read
+/// through. Keyed by URI and cleared by the test, so one test's failure
+/// never reaches another's store.
+#[cfg(test)]
+pub(crate) static LOCAL_LOOKUP_FAILS_FOR: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+/// The `ad4m://local` declarations on `prop_uri`, as the store answers them.
+async fn local_property_links(
+    perspective: &PerspectiveInstance,
+    prop_uri: &str,
+) -> Result<Vec<DecoratedLinkExpression>, deno_core::error::AnyError> {
+    #[cfg(test)]
+    if LOCAL_LOOKUP_FAILS_FOR
+        .lock()
+        .unwrap()
+        .as_deref()
+        .is_some_and(|fails| fails == prop_uri)
+    {
+        return Err(anyhow::anyhow!("injected locality lookup failure"));
+    }
+    perspective
+        .get_links(&LinkQuery {
+            source: Some(prop_uri.to_string()),
+            predicate: Some("ad4m://local".to_string()),
+            ..Default::default()
+        })
+        .await
 }
 
 /// Find the original-cased class name from a lowercase name

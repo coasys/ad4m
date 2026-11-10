@@ -531,6 +531,31 @@ impl<'a> LinkGuard<'a> {
         )
     }
 
+    /// [`join`] wrapped so the guarded triple yields at most one row per
+    /// binding of the triple's variables, however many reifiers pass the
+    /// checks — the `order_key_link` shape (`{ SELECT DISTINCT <vars> WHERE
+    /// { triple join } }`). For the definition reads that must not let a
+    /// second signer of one triple multiply a result row
+    /// (`AbstractIndex::load`, `load_shape`): a join yields one row per
+    /// passing reifier, and rows here are consumed without dedupe.
+    pub(crate) fn join_once(
+        &self,
+        reifier: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> String {
+        let triple = format!("{subject} {predicate} {object} .");
+        let join = self.join(reifier, subject, predicate, object);
+        if join.is_empty() {
+            return triple;
+        }
+        format!(
+            "{{ SELECT DISTINCT {} WHERE {{ {triple}{join} }} }}",
+            distinct_vars(subject, predicate, object)
+        )
+    }
+
     /// For a read that matches the bare triple `subject predicate object`
     /// rather than joining one reifier per row: kept when at least one link
     /// asserting the triple passes both checks on the same reifier.
@@ -547,6 +572,44 @@ impl<'a> LinkGuard<'a> {
             self.on_reifier("?_pv")
         )
     }
+}
+
+/// The `?var`s among `subject`, `predicate` and `object`, each once, for the
+/// `SELECT DISTINCT` of a `join_once`/`shown_link_join_once` wrapper.
+fn distinct_vars(subject: &str, predicate: &str, object: &str) -> String {
+    let mut vars = Vec::new();
+    for term in [subject, predicate, object] {
+        if term.starts_with('?') && !vars.contains(&term) {
+            vars.push(term);
+        }
+    }
+    vars.join(" ")
+}
+
+/// The `join_once` shape for the one read that must admit the verdicts a
+/// *display* read shows rather than the ones that count: `valid`,
+/// `cantCheck`, `flagged` and a link with no verdict annotation at all —
+/// every stored verdict but `invalid:*`, where `proofValid` is not asked.
+/// `invalid` stays out: a forged declaration must never act for its victim.
+///
+/// For `ad4m://local`, where locality fails toward Local: a `true` a peer
+/// sent whose judgement is still unresolved declares the property private
+/// just as a verified one does — and an `invalid` `true` stays out, or a
+/// forged declaration could stop the victim's writes being shared.
+pub(crate) fn shown_link_join_once(
+    reifier: &str,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+) -> String {
+    format!(
+        "{{ SELECT DISTINCT {} WHERE {{ {subject} {predicate} {object} . \
+         {reifier} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+         <<( {subject} {predicate} {object} )>> . \
+         OPTIONAL {{ {reifier} <ad4m://ontology/linkVerdict> {reifier}_lv . }} \
+         FILTER(!BOUND({reifier}_lv) || !STRSTARTS(STR({reifier}_lv), \"invalid:\")) }} }}",
+        distinct_vars(subject, predicate, object)
+    )
 }
 
 /// [`LinkGuard::exists`] for an IRI predicate, with the two options passed

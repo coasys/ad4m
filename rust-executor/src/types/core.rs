@@ -314,7 +314,8 @@ pub struct DecoratedLinkExpression {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<LinkStatus>,
     /// The link's verdict, as this executor judged it. Logic reads count only `valid`;
-    /// display reads show `cantCheck` and `flagged` with it and never return `invalid`.
+    /// display reads show `cantCheck` and `flagged` with it, and show `invalid` only with
+    /// `includeUnverified: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub verdict: Option<crate::identity::verdict::LinkVerdict>,
@@ -357,18 +358,29 @@ impl DecoratedLinkExpression {
     /// signature was produced over the normalized link, so verifying the raw form reports a
     /// valid link as invalid.
     pub fn check(&self) -> crate::identity::resolver::CheckedLink {
+        self.check_with(crate::identity::check_signed)
+    }
+
+    fn check_with(
+        &self,
+        check: impl FnOnce(&Expression<Link>) -> crate::identity::resolver::CheckedLink,
+    ) -> crate::identity::resolver::CheckedLink {
         let link_expr = Expression::<Link> {
             author: self.author.clone(),
             timestamp: self.timestamp.clone(),
             data: self.data.normalize(),
             proof: self.proof.plain(),
         };
-        crate::identity::check_signed(&link_expr)
+        check(&link_expr)
     }
 
     /// Sets `proof.valid`, the verdict, the person and the bot mark from [`DecoratedLinkExpression::check`].
     pub fn verify_signature(&mut self) {
         let checked = self.check();
+        self.set_judgement(checked);
+    }
+
+    fn set_judgement(&mut self, checked: crate::identity::resolver::CheckedLink) {
         let valid = checked.verdict.counts();
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);

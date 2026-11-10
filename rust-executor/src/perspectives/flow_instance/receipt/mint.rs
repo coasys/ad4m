@@ -892,6 +892,237 @@ mod tests {
         map.forget(&log_b.scid());
     }
 
+    /// Lal's P1 at 00fc3580d: a receipt is a value from another replica, so
+    /// its carried votes get the same head-freshness window as a live write.
+    /// The store has since revoked the voting device; this replica's head
+    /// predates the revocation and is past the window. The live check holds
+    /// the vote as `cantCheck`; the receipt must not verify on that head.
+    ///
+    /// Red while `check_signed_carried` passes `own = |_| true`: the vote is
+    /// `valid` and the receipt verifies on the stale head.
+    ///
+    /// (Test by Data, review 5834928639.)
+    #[test]
+    fn a_carried_vote_on_a_stale_head_does_not_verify() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+        use crate::identity::verdict::LinkVerdict;
+        use crate::perspectives::flow_instance::verify::verify_receipt;
+        use crate::perspectives::flow_instance::ProposalLinks;
+
+        let mut log = TestLog::new(133);
+        let map = global_key_map();
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        map.note_confirmed(&log.scid(), now);
+
+        let (uri, mut links) = device_terminal_proposal(
+            "p-1",
+            &log.device,
+            0,
+            "open",
+            "done",
+            &delivered().seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T1,
+        );
+        let vote = device_vote(&uri, &log.device, 0, T2);
+        links.push(vote.clone());
+        let flow = two_state_flow();
+        let receipt = FlowReceipt::mint(
+            &flow,
+            read_set("open", vec![ProposalLinks { uri, links }]),
+            outs(&[OUTPUT]),
+            vec![delivered()],
+        )
+        .expect("the run mints while the confirmation is fresh");
+
+        // The store revokes d1; this replica's head does not have it and
+        // ages past the window.
+        log.revoke_d1();
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+
+        assert_eq!(
+            vote.check().verdict,
+            LinkVerdict::CantCheck,
+            "the live path holds the vote on the stale head"
+        );
+        let catalogue = std::iter::once((flow.flow_uri(), flow)).collect();
+        let verdict = verify_receipt(&catalogue, &receipt);
+        map.forget(&log.scid());
+        assert!(
+            !verdict.is_verified(),
+            "a vote by a key the store revoked counts on a stale head: {verdict}"
+        );
+    }
+
+    /// G-1 after Lal's P1: an honest old receipt still verifies — not by
+    /// dropping the freshness window but because the verify path refreshes
+    /// the carried signers' logs first (`prepare_carried_signers`). The
+    /// replica's confirmed head ages past `ADMIT_FRESHNESS`; with the store
+    /// down the refresh fails and the receipt stays undecided (the memo
+    /// keeps no such refusal); once the store answers, the refresh confirms
+    /// the head and the same receipt verifies.
+    ///
+    /// Red while `reverified_link` runs `check_signed_carried`: the lifted
+    /// window lets the vote count with no store read at all, so the
+    /// store-down phase below verifies when it must stay undecided.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_honest_old_receipt_verifies_through_the_signer_refresh() {
+        use crate::identity::cache::tests::{accept_signed, store_key, FakeStore, TestLog};
+        use crate::identity::cache::{global_key_map, KelCache};
+        use crate::identity::resolver::{Resolver, ADMIT_FRESHNESS};
+        use crate::identity::signers_to_prepare;
+        use crate::perspectives::flow_instance::verify::verify_receipt;
+        use crate::perspectives::flow_instance::ProposalLinks;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let log = TestLog::new(134);
+        let dir = tempfile::tempdir().unwrap();
+        // A cache on a scratch file that feeds the executor's global key
+        // map, as the production `KelCache::open` does.
+        let cache = KelCache::open(
+            dir.path().join("ad4m_db.sqlite"),
+            vec![store_key().multikey()],
+        )
+        .unwrap();
+        accept_signed(&cache, &log.events).await;
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let backend: Arc<dyn crate::identity::backend::IdentityBackend> = store.clone();
+        let resolver = Resolver::new(Arc::new(cache), backend, None, false);
+        let map = global_key_map();
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.note_confirmed(&log.scid(), now);
+
+        let (uri, mut links) = device_terminal_proposal(
+            "p-1",
+            &log.device,
+            0,
+            "open",
+            "done",
+            &delivered().seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T1,
+        );
+        links.push(device_vote(&uri, &log.device, 0, T2));
+        let flow = two_state_flow();
+        let receipt = FlowReceipt::mint(
+            &flow,
+            read_set("open", vec![ProposalLinks { uri, links }]),
+            outs(&[OUTPUT]),
+            vec![delivered()],
+        )
+        .expect("the run mints while the confirmation is fresh");
+        let signers = signers_to_prepare(&receipt.read_set.carried_links());
+
+        // Long after: the confirmed head the mint ran against is stale. The
+        // store is down, so the prepare's refresh fails and the receipt
+        // stays undecided — `cantCheck`, never a memoised refusal.
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+        store.store_down.store(true, Ordering::SeqCst);
+        resolver.prepare(&signers).await;
+        let catalogue = std::iter::once((flow.flow_uri(), flow)).collect();
+        let verdict = verify_receipt(&catalogue, &receipt);
+        assert!(
+            !verdict.is_verified(),
+            "the stale head must not count the vote: {verdict}"
+        );
+
+        // The store answers on the next window: the refresh confirms the
+        // head and the honest receipt verifies.
+        store.store_down.store(false, Ordering::SeqCst);
+        resolver
+            .prepare_at(&signers, now + ADMIT_FRESHNESS + 5)
+            .await;
+        let verdict = verify_receipt(&catalogue, &receipt);
+        map.forget(&log.scid());
+        assert!(verdict.is_verified(), "got: {verdict}");
+    }
+
+    /// A verification that failed for a cause the receipt does not carry —
+    /// a signer's log this replica does not hold — is not memoised: under
+    /// the same `(receipt, definition)` key the answer changes once the log
+    /// lands, so the memo must re-verify rather than serve the failure (G-1).
+    ///
+    /// Red while `VerdictMemo::settled` stores every `None`: the second read
+    /// is served the failure the first computed and stays `None`.
+    #[test]
+    fn a_verification_that_failed_for_want_of_a_log_is_not_memoised() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::perspectives::flow_instance::verify::memo::VerdictMemo;
+        use crate::perspectives::flow_instance::ProposalLinks;
+
+        let log = TestLog::new(131);
+        let map = global_key_map();
+        let now = chrono::Utc::now().timestamp() as u64;
+        let publish = |map: &crate::identity::cache::KeyMap, log: &TestLog| {
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted: 0,
+                },
+            );
+            map.note_confirmed(&log.scid(), now);
+        };
+        publish(&map, &log);
+
+        let (uri, mut links) = device_terminal_proposal(
+            "p-1",
+            &log.device,
+            0,
+            "open",
+            "done",
+            &delivered().seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T1,
+        );
+        links.push(device_vote(&uri, &log.device, 0, T2));
+        let flow = two_state_flow();
+        let receipt = FlowReceipt::mint(
+            &flow,
+            read_set("open", vec![ProposalLinks { uri, links }]),
+            outs(&[OUTPUT]),
+            vec![delivered()],
+        )
+        .expect("the run mints");
+        let catalogue: std::collections::HashMap<String, SHACLFlow> =
+            std::iter::once((flow.flow_uri(), flow)).collect();
+        let memo = VerdictMemo::default();
+
+        // The log leaves the key map, as on a replica that never fetched it:
+        // the anchored links read `cantCheck` and the receipt cannot verify —
+        // a failure whose cause is not in the receipt.
+        map.forget(&log.scid());
+        assert_eq!(
+            memo.settled(&catalogue, &receipt),
+            None,
+            "without the signer's log the receipt does not verify"
+        );
+
+        // The log lands: the same key answers differently, so the memo must
+        // not serve the failure it computed.
+        publish(&map, &log);
+        assert!(
+            memo.settled(&catalogue, &receipt).is_some(),
+            "the memo must not keep a failure whose cause can change"
+        );
+
+        map.forget(&log.scid());
+    }
+
     /// A bot never counts as its owner in a flow: person A's bot signing
     /// `acceptedBy → A` — a `valid` link carrying the owner as `person` and the
     /// bot mark — is not A's vote, so `{n: 2}` stays unmet. The same target
