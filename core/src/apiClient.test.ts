@@ -1055,6 +1055,29 @@ describe('ApiClient.setToken', () => {
         }
     })
 
+    it('rejects a watchApplied() waiter on closeAll while a watch is in flight, and opens no socket', async () => {
+        open()
+        await flush() // socket 0 open, its events.watch sent and unanswered
+        const applied = outcomeOf(client.watchApplied())
+        expect(applied()).toBe('pending')
+        client.closeAll()
+        await flush()
+        expect(applied()).toMatchObject({ name: 'RpcError', status: 499 })
+        expect(socket(0).readyState).toBe(3)
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('rejects a watchApplied() waiter on closeAll while the socket still connects, and opens no socket', async () => {
+        TestSocket.autoOpen = false
+        open()
+        const applied = outcomeOf(client.watchApplied())
+        client.closeAll()
+        await flush()
+        expect(applied()).toMatchObject({ name: 'RpcError', status: 499 })
+        expect(socket(0).readyState).toBe(3)
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
     it('keeps a watchApplied() waiter on the new socket when setToken lands during a watch retry', async () => {
         jest.useFakeTimers()
         try {

@@ -817,10 +817,13 @@ impl SessionKey {
 /// Why no verdict of a session's key could be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionKeyError {
-    /// The log lists no such device key at its trusted seq: no log, no store-signed head, a
-    /// master key, or a key added only past the trusted seq.
+    /// The log lists no such device key at its trusted seq — a master key, or a
+    /// key added only past it — or the store answers it holds no log of the
+    /// identity at all. A verdict: only a log that was read gives it.
     NotListed,
-    /// The configured store did not answer, and the cached answer is too old.
+    /// The configured store did not answer, and the cache cannot judge either —
+    /// its answer is too old, it holds no trusted log of the identity, or its
+    /// log is unreadable.
     StoreUnavailable,
 }
 
@@ -867,6 +870,8 @@ impl Drop for AdmissionRead<'_> {
             .reads
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        #[cfg(test)]
+        tests::inside_admission_map();
         let Some(lock) = self.lock.take() else {
             return;
         };
@@ -1282,7 +1287,8 @@ impl Resolver {
     }
 
     /// [`Resolver::session_key`] from the cached log only, whatever its age. A cache
-    /// that cannot read its log is an outage, not a verdict — [`SessionKeyError::StoreUnavailable`],
+    /// that cannot read its log — or that holds no trusted log of the identity at
+    /// all — is an outage, not a verdict — [`SessionKeyError::StoreUnavailable`],
     /// never `NotListed`: a caller must not end a grant on a verdict nothing gave.
     pub async fn cached_session_key(
         &self,
@@ -1292,7 +1298,7 @@ impl Resolver {
         let scid = scid_from(scid);
         let (chain, trusted) = match self.cache.trusted(scid).await {
             Ok(Some(found)) => found,
-            Ok(None) => return Err(SessionKeyError::NotListed),
+            Ok(None) => return Err(SessionKeyError::StoreUnavailable),
             Err(e) => {
                 log::warn!(
                     "identity: the cached log of {} is unreadable: {e}",
@@ -2043,6 +2049,21 @@ mod tests {
         parse_did_url(input).unwrap_err().code()
     }
 
+    /// A test's rendezvous inside the map's critical section: the test leaves a
+    /// [`std::sync::Barrier`] here and the next `AdmissionRead::drop` to arrive
+    /// waits on it,
+    /// so the test starts a second drop exactly while the first holds the map.
+    /// The first drop consumes it; a drop without one is a no-op.
+    pub(crate) static ADMISSION_DROP_BARRIER: StdMutex<Option<Arc<std::sync::Barrier>>> =
+        StdMutex::new(None);
+
+    pub(crate) fn inside_admission_map() {
+        let barrier = ADMISSION_DROP_BARRIER.lock().unwrap().take();
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+    }
+
     #[test]
     fn a_did_url_parses_into_did_src_version_and_fragment() {
         let log = TestLog::new(1);
@@ -2419,10 +2440,11 @@ mod tests {
     // Two callers' guards of one identity's lock, dropped at the same instant,
     // leave no entry behind: the second drop's check runs only after the
     // first's hold is gone, so the last of them sees the map's and its own
-    // hold alone and removes it. `a`'s `scid` is swapped for a long string so
-    // the tail of its drop — freeing the field — outlasts `b`'s whole check;
-    // which entry `a`'s own lookup names no longer matters: its count is never
-    // two either way.
+    // hold alone and removes it. `a`'s drop signals from inside the map's
+    // critical section, so `b`'s starts exactly while `a` holds the map — its
+    // check lands inside the tail of `a`'s teardown, which freeing `a`'s long
+    // `scid` outlasts. Which entry `a`'s own lookup names no longer matters:
+    // its count is never two either way.
     #[test]
     fn concurrent_drops_of_one_locks_guards_leave_no_entry() {
         let resolver = local_resolver(trusting(), Arc::new(FakeStore::new(vec![])));
@@ -2430,14 +2452,15 @@ mod tests {
             let mut a = resolver.admission_lock("the-scid");
             a.scid = "s".repeat(4 << 20);
             let b = resolver.admission_lock("the-scid");
+            let inside = Arc::new(std::sync::Barrier::new(2));
+            *ADMISSION_DROP_BARRIER.lock().unwrap() = Some(inside.clone());
             std::thread::scope(|scope| {
                 scope.spawn(|| drop(a));
-                // Once `a`'s drop holds the map — the long lookup keeps it
-                // there — `b`'s drop starts: its check lands inside the tail
-                // of `a`'s teardown.
-                while resolver.admission_reads.try_lock().is_ok() {
-                    std::hint::spin_loop();
-                }
+                // `a`'s drop holds the map while it waits on the barrier, so
+                // `b`'s drop is already parked on the map's mutex when `a`
+                // lets it go — its check lands inside the tail of `a`'s
+                // teardown.
+                inside.wait();
                 drop(b);
             });
             assert!(

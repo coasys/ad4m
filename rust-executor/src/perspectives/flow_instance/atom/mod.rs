@@ -125,7 +125,8 @@ pub struct Vote {
     pub did: String,
     pub at: String,
     /// Who the vote counts as when quorum is pooled: the person the signer's stored verdict
-    /// names, when it names one. `None`: the DID itself. Absent in read-sets written before it.
+    /// names, when it names one — never a bot's owner; a bot counts as its own DID.
+    /// `None`: the DID itself. Absent in read-sets written before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voter: Option<String>,
 }
@@ -244,11 +245,25 @@ impl std::fmt::Display for AtomRejection {
 // Identity primitives (pure)
 // ---------------------------------------------------------------------------
 
+/// The person a link's signer speaks for in a flow's authority checks: the
+/// stored person resolution — except on a bot's link. A bot never acts as its
+/// owner in a flow: its own `did:key` stays the actor, so the `person` its
+/// verdict names (its owner) answers nothing here.
+fn flow_person(link: &DecoratedLinkExpression) -> Option<&str> {
+    if link.by_bot == Some(true) {
+        None
+    } else {
+        link.person.as_deref()
+    }
+}
+
 /// The one identity check in the flow engine: the link counts (its stored verdict is
 /// valid) **and** `did` names who signed it: the signer's device key (a `did:key`, one
 /// device) or the person that key speaks for (a `did:scid`, any of the person's devices).
+/// A bot's link names the bot only: `person` on it is its owner, and a bot never acts
+/// as its owner in a flow.
 pub fn signed_by(link: &DecoratedLinkExpression, did: &str) -> bool {
-    link.proof.valid == Some(true) && (link.author == did || link.person.as_deref() == Some(did))
+    link.proof.valid == Some(true) && (link.author == did || flow_person(link) == Some(did))
 }
 
 /// The value a link carries, `literal:string:` decoded. URI targets (DIDs,
@@ -331,10 +346,11 @@ pub fn valid_votes(
     proposed_at: &str,
 ) -> Vec<Vote> {
     // Who a vote counts as when quorum is pooled: the person its signer's verdict names (the
-    // stored `person`), else the DID the vote names. The atom keeps one vote per DID, since
+    // stored `person`), else the DID the vote names — and a bot's own DID always, since a bot
+    // never counts as its owner (`flow_person`). The atom keeps one vote per DID, since
     // role grants are per DID and the fold filters by them first; the pool then counts one
     // voter per person (`Vote::voter`), so a person's two devices are one voter there.
-    let voter_of = |l: &DecoratedLinkExpression| l.person.clone();
+    let voter_of = |l: &DecoratedLinkExpression| flow_person(l).map(str::to_string);
     let proposer_voter = links_on(links, PROPOSER_PREDICATE)
         .find(|l| signed_by(l, &l.data.target))
         .and_then(voter_of);
@@ -700,6 +716,43 @@ mod tests {
         assert!(
             !signed_by(&not_counted, person),
             "a link that does not count speaks for no one"
+        );
+    }
+
+    /// A bot never acts as its owner in a flow: its `did:key` stays the actor, so a
+    /// link it signs speaks as the bot even though its stored `person` names the
+    /// owner (what apps display as "on behalf of"). A proposer or `acceptedBy`
+    /// link the bot signs naming the owner is nobody's word; one naming the bot
+    /// counts as the bot.
+    #[test]
+    fn a_bot_acts_as_itself_never_its_owner() {
+        let person = "did:scid:coasys:1:zPerson";
+        const BOT: &str = "did:key:bot";
+        let bot_link = |predicate, target, at| {
+            let mut l = link(predicate, target, BOT, true, at);
+            l.person = Some(person.into());
+            l.by_bot = Some(true);
+            l
+        };
+        let as_owner = bot_link(PROPOSER_PREDICATE, person, T1);
+        assert!(signed_by(&as_owner, BOT), "the bot's own key is its author");
+        assert!(!signed_by(&as_owner, person), "never its owner");
+        assert_eq!(
+            self_authored_proposer(&[as_owner]),
+            Err(AtomRejection::NoValidProposerLink),
+            "a bot cannot propose in its owner's name"
+        );
+
+        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        links.push(bot_link(ACCEPTED_BY_PREDICATE, person, T2));
+        links.push(bot_link(ACCEPTED_BY_PREDICATE, BOT, T3));
+        assert_eq!(
+            valid_votes(&links, ALICE, T1)
+                .iter()
+                .map(|v| (v.did.as_str(), v.voter()))
+                .collect::<Vec<_>>(),
+            vec![(ALICE, ALICE), (BOT, BOT)],
+            "a vote naming the owner is dropped; the bot's own counts as the bot"
         );
     }
 

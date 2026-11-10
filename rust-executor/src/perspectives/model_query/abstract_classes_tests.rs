@@ -537,3 +537,45 @@ fn an_alias_that_clashes_is_refused_at_registration() {
     )
     .expect("no clash");
 }
+
+/// Two signers asserting one definition triple must not multiply its rows:
+/// every guarded triple `AbstractIndex::load` and `load_shape` join yields
+/// one row per binding, however many counting reifiers assert it. Installing
+/// the classes twice writes a second reifier (a second signer) over every
+/// definition triple; before `join_once`, each row of the definition reads
+/// duplicated by its reifier count.
+#[test]
+fn guarded_definition_queries_return_one_row_per_triple() {
+    use serde_json::Value;
+
+    let store = SparqlStore::new(None).unwrap();
+    install_class(&store, "TextContent", TEXT_CONTENT);
+    install_class(&store, "Message", MESSAGE);
+    install_class(&store, "TextContent", TEXT_CONTENT);
+    install_class(&store, "Message", MESSAGE);
+
+    let guard = crate::perspectives::model_query::sparql_builder::LinkGuard::default();
+    let marked: Vec<Value> =
+        serde_json::from_str(&store.query(&AbstractIndex::marked_query(&guard)).unwrap()).unwrap();
+    assert_eq!(marked.len(), 1, "{marked:?}");
+
+    let aliased: Vec<Value> =
+        serde_json::from_str(&store.query(&AbstractIndex::aliased_query(&guard)).unwrap()).unwrap();
+    assert_eq!(aliased.len(), 1, "{aliased:?}");
+
+    // `load_shape`'s property read is bound by the shape URI on record.
+    let shape_uri = load_shape_from_store(&store, "Message").unwrap().shape_uri;
+    let props: Vec<Value> = serde_json::from_str(
+        &store
+            .query(&crate::perspectives::model_query::shape::props_sparql(
+                &shape_uri, &guard,
+            ))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        props.len(),
+        3,
+        "Message's three properties, one row each: {props:?}"
+    );
+}

@@ -531,6 +531,13 @@ pub async fn flow_valid_outputs(
         );
     }
     let receipts = load_flow_receipts(perspective, flow_uri).await?;
+    // The signers the carried links resolve to must be the same on every
+    // replica that can read the logs, so refresh them before the fold
+    // re-judges them under the live window. A replica that cannot read a
+    // signer's log gets no verified answer — and no memoised refusal.
+    for receipt in &receipts {
+        receipt.read_set.prepare_carried_signers().await;
+    }
     let candidates = valid_outputs(
         &catalogue,
         flow_uri,
@@ -577,6 +584,7 @@ pub async fn verify_flow_receipt(
     receipt: &FlowReceipt,
 ) -> anyhow::Result<ReceiptVerdict> {
     let catalogue = load_shacl_flows(perspective).await?;
+    receipt.read_set.prepare_carried_signers().await;
     Ok(verify_receipt(&catalogue, receipt))
 }
 
@@ -646,6 +654,12 @@ pub async fn mint_flow_receipt(
         .ok_or_else(|| anyhow::anyhow!("flow `{}` is not in the catalogue", record.flow_uri))?;
     let instance = FlowInstance::from_record(record, flow);
     let read_set = instance.read_set(perspective).await?;
+
+    // Before the fold re-judges the carried links under the live admission
+    // window: refresh their signers' key logs, so the person each vote
+    // resolves to is the same on every replica that can read the logs and a
+    // stale cached head cannot let a revoked key's vote count.
+    read_set.prepare_carried_signers().await;
 
     // The outputs the run committed to, read off the counted atoms of the
     // final settled edge. `mint` re-derives the fold and re-checks the hash,
@@ -1153,10 +1167,12 @@ mod tests {
         assert!(memo.settled(&same_dna, &receipt).is_some());
     }
 
-    /// A second read of an unchanged set re-verifies nothing: three receipts
-    /// cost three verifications on the first enumeration and zero on the
-    /// next, whichever surface asks. A forgery beside them is memoised as
-    /// what it is — excluded on the first read and on every later one.
+    /// A second read of an unchanged set re-verifies the verified receipts
+    /// zero times: three receipts cost three verifications on the first
+    /// enumeration and none on the next, whichever surface asks. A forgery
+    /// beside them is excluded on the first read and on every later one —
+    /// its refusal is re-derived each time, never memoised, because a
+    /// fold-driven failure's cause can change under the same key.
     ///
     /// Red if the memo does not store, does not look up, or keys on
     /// something a repeat read does not reproduce.
@@ -1198,8 +1214,9 @@ mod tests {
         );
         assert_eq!(
             memo.verifications(),
-            4,
-            "an unchanged set is answered from the memo: zero re-verifies across three surfaces"
+            7,
+            "the three verified receipts are answered from the memo across three surfaces; \
+             the forgery's refusal is verified afresh each pass — never memoised"
         );
     }
 
@@ -1302,8 +1319,9 @@ mod tests {
         }
         assert_eq!(
             memo.verifications(),
-            3,
-            "each receipt is verified once, then every surface answers from the memo"
+            9,
+            "the verified receipt is verified once and answered from the memo; the two \
+             rejections are fold-driven, so each of the four surface calls re-verifies them"
         );
 
         let keys: usize = receipts

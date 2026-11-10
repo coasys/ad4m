@@ -194,6 +194,9 @@ export class ApiClient {
     setToken(token: string): void {
         const changed = token !== this.token
         this.token = token
+        // An explicit new principal ends an intentional close's generation: a
+        // wait it parked follows the socket this opens, as a dropped one's would.
+        this._closed = false
         if (this._authFailed !== null) {
             this._authFailed = null
             // The refused token's watch outcome is stale: a rejected `events.watch`
@@ -240,6 +243,10 @@ export class ApiClient {
     private _ws: WebSocket | null = null
     /** The token `_ws` dialed with: a close code is that token's verdict, not the current one's. */
     private _wsToken?: string
+    /** Set by `_closeWs` — an intentional close — and cleared by the next dial:
+     *  while it stands, `watchApplied()` answers 499 rather than open a socket
+     *  for a wait the close ended. */
+    private _closed = false
     /** Sockets `setToken` replaced, kept open while calls they carry are in flight. */
     private _superseded = new Set<WebSocket>()
     /** Sockets `setToken` ever replaced, remembered past their close (`_superseded`
@@ -299,6 +306,9 @@ export class ApiClient {
     private _ensureWs(): void {
         if (this._ws) return
         if (this._authFailed !== null) throw new RpcError(401, this._authFailed)
+        // A dial ends the intentional close's generation: only an explicit open
+        // reaches here — a dropped socket's reconnect timer died with it.
+        this._closed = false
         // A dial ends any wait for one: a call or subscriber that dials during the backoff
         // leaves no timer behind to swallow the retry after this socket's own drop.
         this._cancelReconnect()
@@ -735,6 +745,11 @@ export class ApiClient {
      */
     async watchApplied(): Promise<void> {
         for (;;) {
+            // An intentional close ends the wait wherever it stands — waiting on
+            // the open, on the watch reply or on a retry — rather than dial again.
+            // A refused token is terminal too, with its own verdict: the 401
+            // `_ensureWs` and the socket's close carry.
+            if (this._closed && this._authFailed === null) throw new RpcError(499, 'Client closed')
             this._ensureWs()
             const ws = this._ws!
             const open = this._wsOpen!
@@ -742,6 +757,7 @@ export class ApiClient {
                 try {
                     await open
                 } catch (e) {
+                    if (this._closed && this._authFailed === null) throw new RpcError(499, 'Client closed')
                     // A rejection of a socket `setToken` replaced before it opened —
                     // its close's verdict is that replaced socket's, not the wait's:
                     // loop onto the current socket. Every other rejection propagates,
@@ -756,6 +772,7 @@ export class ApiClient {
             // `setToken` replaced it, or it dropped and a successor opened: what a
             // waiter needs applied is the current socket's watch, so it waits on
             // that one too. Its failure (a refused token, a close) propagates.
+            if (this._closed && this._authFailed === null) throw new RpcError(499, 'Client closed')
             if (this._ws === ws) return
         }
     }
@@ -838,6 +855,7 @@ export class ApiClient {
     }
 
     private _closeWs(): void {
+        this._closed = true
         this._stopPing()
         if (this._watchRetryTimer) {
             clearTimeout(this._watchRetryTimer)
