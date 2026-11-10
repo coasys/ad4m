@@ -345,7 +345,9 @@ could swap: a member's X25519 key follows from its DID.
   its key ring and drops its own box (`DELETE /rooms/:roomId/keys/:version`).
   The version then shows as missing again, and a member holding it grants it
   again. Until then the recipient cannot open the links of that version. Only
-  a member of the room can do this, and only for versions it holds.
+  a member of the room can do this, and only for versions it holds. A member
+  that grants a wrong box again after each drop can win that race every time;
+  removing it from the ACL stops it.
 
 ### E2E encryption — other future requirements
 
