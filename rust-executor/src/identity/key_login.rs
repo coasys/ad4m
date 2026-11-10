@@ -1421,11 +1421,18 @@ pub async fn end_key_grants_revoked_in_cache(service: &IdentityService, grants: 
 /// key that gained the bot mark). Started by `identity::init`, which makes `changes` before it
 /// spawns this: a change fired while the task waited to run — a replay of the identities at
 /// start — is buffered on it, not lost.
+///
+/// `init` runs before `AgentService` is initialised and the agent loaded, and a change's and
+/// a pass's `agent_speaks` read the main agent's DID — panicking before it ("AgentService not
+/// initialized"), so the watcher waits on `agent_ready` first. Nothing is lost while it
+/// waits: `changes` holds what the subscription buffered (a lag overflows into a full pass).
 pub async fn run_key_session_watch(
     service: Arc<IdentityService>,
     mut changes: tokio::sync::broadcast::Receiver<VerdictChange>,
+    mut agent_ready: tokio::sync::watch::Receiver<bool>,
 ) {
     use tokio::sync::broadcast::error::RecvError;
+    let _ = agent_ready.wait_for(|ready| *ready).await;
     let mut tick = tokio::time::interval(KEY_RECHECK_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // A re-check runs in its own task: however long its store reads take, a verdict change
@@ -1762,6 +1769,34 @@ mod tests {
     impl Drop for MainBound {
         fn drop(&mut self) {
             let _ = test_db(|db| db.clear_agent_identity_for_test(&self.0));
+        }
+    }
+
+    /// The global agent service taken out until dropped, as `run` finds it before
+    /// `AgentService::init_global_instance`. A panic inside its lock poisons the mutex,
+    /// cleared on restore so the panic under test does not take every later test with it.
+    struct AgentServiceAside(Option<crate::agent::AgentService>);
+
+    impl AgentServiceAside {
+        fn take() -> Self {
+            let global = crate::agent::AgentService::global_instance();
+            let mut service = global
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            AgentServiceAside(service.take())
+        }
+    }
+
+    impl Drop for AgentServiceAside {
+        fn drop(&mut self) {
+            let global = crate::agent::AgentService::global_instance();
+            {
+                let mut service = global
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *service = self.0.take();
+            }
+            global.clear_poison();
         }
     }
 
@@ -2413,6 +2448,126 @@ mod tests {
             reloaded.get(&grant_id).is_none(),
             "the cached verdict ends it before the API serves"
         );
+        no_operator();
+    }
+
+    // The start-up pass asks each grant's agent's DID (`agent_speaks`), which the agent
+    // service answers only once `init_global_instance` ran: before it the read panics —
+    // inside the singleton's lock, so it poisons too. `run` calls the pass after the
+    // agent is initialised and loaded, never before the service exists; the panic stays
+    // the contract, so an earlier call cannot slip in quietly.
+    #[tokio::test]
+    async fn the_start_up_pass_panics_before_the_agent_service() {
+        use futures::FutureExt;
+        let world = world(131).await;
+        // A grant on the main agent bound to a key the log admits.
+        Grants::global()
+            .insert(
+                LiveGrant::for_test("pre-service", AgentContext::main_agent(), now() + 3600)
+                    .bound_to(KeyBinding::new(
+                        world.did.clone(),
+                        world.phone.key(),
+                        "d2".into(),
+                        1,
+                        now(),
+                    )),
+            )
+            .unwrap();
+        let _aside = AgentServiceAside::take();
+        let panicked = std::panic::AssertUnwindSafe(end_key_grants_revoked_in_cache(
+            &world.service,
+            Grants::global(),
+        ))
+        .catch_unwind()
+        .await
+        .expect_err("agent_speaks reads the main DID while the service is None");
+        let message = panicked
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panicked.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(
+            message.contains("AgentService not initialized"),
+            "{message}"
+        );
+        assert!(
+            crate::agent::AgentService::global_instance().is_poisoned(),
+            "the panic held the singleton's lock"
+        );
+        no_operator();
+    }
+
+    // `run` reads the agent file in first: a grant on the main agent asks its DID, which an
+    // initialised service that has not loaded has no answer for — it would end a grant the
+    // agent still speaks for. The ordered step loads, then the cached verdicts end only
+    // what they refuse, still before the API serves.
+    #[tokio::test]
+    async fn the_start_up_pass_runs_once_the_agent_loaded() {
+        let mut world = world(141).await;
+        no_operator();
+        // Persisted main agent on `dir`, as a start would find it: keys and file.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::agent::AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        let main = crate::agent::AgentService::with_mutable_global_instance(|service| {
+            service.create_new_keys();
+            service.passphrase = Some("startup".into());
+            service.store_agent_profile();
+            service.save("startup".into());
+            service.did.clone().unwrap()
+        });
+        // The service `run` calls the step on: initialised, the agent file unread.
+        crate::agent::AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        assert!(crate::agent::AgentService::with_global_instance(
+            |service| service.did.is_none()
+        ));
+        // The main agent speaks for the identity: bound, its device key listed.
+        add_key(
+            &mut world.log,
+            device_multikey(&main).unwrap(),
+            enc_key_of(&device_multikey(&main).unwrap()).unwrap(),
+            KeyLife::Standing,
+        );
+        world.log.revoke_d1();
+        let mut world = world.with_store();
+        accept_signed(&world.service.cache, &world.log.events).await;
+        // `MainBound::to` reads the DID, which is not loaded yet: bind it directly.
+        test_db(|db| db.clear_agent_identity_for_test(&main)).unwrap();
+        db(|db| db.set_agent_identity(&main, &world.log.scid(), 1)).unwrap();
+        let _bound = MainBound(main.clone());
+        let kept = Grants::global()
+            .insert(
+                LiveGrant::for_test("startup-kept", AgentContext::main_agent(), now() + 3600)
+                    .bound_to(KeyBinding::new(
+                        world.did.clone(),
+                        world.phone.key(),
+                        "d2".into(),
+                        1,
+                        now(),
+                    )),
+            )
+            .unwrap();
+        let ended = Grants::global()
+            .insert(
+                LiveGrant::for_test("startup-ended", AgentContext::main_agent(), now() + 3600)
+                    .bound_to(KeyBinding::new(
+                        world.did.clone(),
+                        world.log.device.key(),
+                        "d1".into(),
+                        1,
+                        now(),
+                    )),
+            )
+            .unwrap();
+        crate::load_agent_and_end_revoked_key_grants(Some(&world.service)).await;
+        assert_eq!(
+            did_for_context(&AgentContext::main_agent()).ok().as_deref(),
+            Some(main.as_str()),
+            "the step read the agent file in"
+        );
+        assert!(!kept.is_ended(), "the loaded main agent still speaks");
+        assert!(ended.is_ended(), "the cached revocation ends it");
+        crate::test_utils::setup_agent();
         no_operator();
     }
 
@@ -3622,7 +3777,11 @@ mod tests {
         // session now (the re-check keeps the grant on its fresh check).
         world.store.store_down.store(true, Ordering::SeqCst);
         let service = Arc::new(world.service);
-        let watch = tokio::spawn(run_key_session_watch(service.clone(), changes));
+        let watch = tokio::spawn(run_key_session_watch(
+            service.clone(),
+            changes,
+            crate::agent::agent_ready(),
+        ));
         for _ in 0..10 {
             tokio::task::yield_now().await;
             if session.check().is_err() {
@@ -3630,6 +3789,75 @@ mod tests {
             }
         }
         assert_eq!(session.check(), Err(AuthError::Revoked));
+        watch.abort();
+        no_operator();
+    }
+
+    // `init` spawns the watcher before the agent service is initialised and the agent
+    // loaded: a change's and a pass's `agent_speaks` read the main agent's DID and panic
+    // before it. The watcher holds its first pass — and the changes its subscription
+    // buffered — until the DID reads.
+    #[tokio::test]
+    async fn the_watch_waits_for_the_main_agents_did() {
+        let mut world = world(76).await;
+        no_operator();
+        let main = did_for_context(&AgentContext::main_agent()).unwrap();
+        add_key(
+            &mut world.log,
+            device_multikey(&main).unwrap(),
+            enc_key_of(&device_multikey(&main).unwrap()).unwrap(),
+            KeyLife::Standing,
+        );
+        let mut world = world.with_store();
+        accept_signed(&world.service.cache, &world.log.events).await;
+        let _bound = MainBound::to(&world.log.scid());
+        // A grant on the main agent, bound to the phone's key.
+        let grant = Grants::global()
+            .insert(
+                LiveGrant::for_test("watch-waits", AgentContext::main_agent(), now() + 3600)
+                    .bound_to(KeyBinding::new(
+                        world.did.clone(),
+                        world.phone.key(),
+                        "d2".into(),
+                        1,
+                        now(),
+                    )),
+            )
+            .unwrap();
+        // Subscribed before the change, as `init` subscribes before it spawns; the agent's
+        // DID is not ready.
+        let changes = world.service.cache.subscribe();
+        let (ready, readiness) = tokio::sync::watch::channel(false);
+        let service = Arc::new(world.service);
+        let watch = tokio::spawn(run_key_session_watch(service.clone(), changes, readiness));
+        // A revocation the subscription receives before the agent's DID is ready: the
+        // watcher runs no pass and ends nothing yet.
+        let calls = world.store.log_calls.load(Ordering::SeqCst);
+        let revoke_phone =
+            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(revoke_phone);
+        accept_signed(&service.cache, &world.log.events).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!grant.is_ended(), "the change waits for the agent's DID");
+        assert_eq!(
+            world.store.log_calls.load(Ordering::SeqCst),
+            calls,
+            "no pass ran"
+        );
+        // Once the DID reads, the buffered change ends the session.
+        ready.send_replace(true);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+            if grant.is_ended() {
+                break;
+            }
+        }
+        assert!(
+            grant.is_ended(),
+            "the buffered change ran once the DID read"
+        );
         watch.abort();
         no_operator();
     }
@@ -3649,6 +3877,7 @@ mod tests {
         let watch = tokio::spawn(run_key_session_watch(
             service.clone(),
             service.cache.subscribe(),
+            crate::agent::agent_ready(),
         ));
         entered_store(&entered).await;
         let revoke_phone =
@@ -3879,6 +4108,7 @@ mod tests {
         let watch = tokio::spawn(run_key_session_watch(
             service.clone(),
             service.cache.subscribe(),
+            crate::agent::agent_ready(),
         ));
         entered_store(&entered[0]).await;
         while session.check().is_ok()
@@ -3946,6 +4176,7 @@ mod tests {
         let watch = tokio::spawn(run_key_session_watch(
             service.clone(),
             service.cache.subscribe(),
+            crate::agent::agent_ready(),
         ));
         while !service.cache.read_ok_within(&scid, now(), 60) {
             tokio::task::yield_now().await;
@@ -3991,6 +4222,7 @@ mod tests {
         let watch = tokio::spawn(run_key_session_watch(
             service.clone(),
             service.cache.subscribe(),
+            crate::agent::agent_ready(),
         ));
         // The first pass runs at once and ends: its read of the key lands, then its
         // handle finishes while the watcher is parked — ended, not dispatched past.

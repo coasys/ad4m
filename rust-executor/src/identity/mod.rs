@@ -279,9 +279,16 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
             let changes = service.cache.subscribe();
             handle.spawn(run_recheck(service.clone(), changes));
             // The key sessions' watcher too: `load_local_identities` replays the held
-            // verdicts before the spawned task may first run.
+            // verdicts before the spawned task may first run. It waits for the main
+            // agent's DID first — its `agent_speaks` reads it and `AgentService` is not
+            // yet initialised — and the subscription, made here before the spawn, holds
+            // what fires meanwhile.
             let changes = service.cache.subscribe();
-            handle.spawn(key_login::run_key_session_watch(service, changes));
+            handle.spawn(key_login::run_key_session_watch(
+                service,
+                changes,
+                crate::agent::agent_ready(),
+            ));
         }
         Err(_) => log::error!("identity: no runtime for the re-check of links and key sessions"),
     }

@@ -2449,10 +2449,10 @@ mod tests {
             *ADMISSION_DROP_BARRIER.lock().unwrap() = Some(inside.clone());
             std::thread::scope(|scope| {
                 scope.spawn(|| drop(a));
-                // `a`'s drop holds the map while it waits on the barrier, so
-                // `b`'s drop is already parked on the map's mutex when `a`
-                // lets it go — its check lands inside the tail of `a`'s
-                // teardown.
+                // `a`'s drop holds the map while it waits on the barrier; the
+                // parent passes the barrier and only then calls `drop(b)`, so
+                // `b`'s lock attempt lands inside the tail of `a`'s critical
+                // section — a narrow window, timing-based, run over the rounds.
                 inside.wait();
                 drop(b);
             });
