@@ -373,8 +373,10 @@ export class AgentClient {
 
   /**
    * Signs a native key statement with this executor's own device key, as the identity it
-   * speaks for. Only for the admin credential (or the loopback caller): the shell on the
-   * machine that signs a login to another executor.
+   * speaks for. Local only: it answers only the operator on this machine, that is the admin
+   * credential, or no token on an executor without one, on a loopback listener. Every other caller
+   * gets 403 `local-only`, the admin credential on a network listener and an operator from a key
+   * login included. Its caller is the shell on the machine that signs a login to another executor.
    */
   async signSessionStatement(statement: UnsignedKeyStatement): Promise<SignedKeyStatement> {
     return this.#apiClient.call('agent.signSessionStatement', { statement });
