@@ -763,29 +763,43 @@ older version with its valid receipt, so that high-water mark is the reader's ow
 client keeps the highest version it has read per identity; the core functions keep none. A device entry's `holdsMaster` is `false`, `"offered"` or
 `true`; with `true` it carries `masterIndex`, the index *n* of the master key the device's
 vault keeps, written by the device (or the flow that put the key there). The vault keeps a
-custody note per identity and device key, each carrying a random 16-byte token so that a
-compare-and-swap on the whole note matches only the note one operation wrote: a rollback or
-clear removes its own note and never a later one with the same index and epoch.
-`MarkOwed {index, epoch, token}` is an intent: the device reads the vault's custody epoch,
-writes the note, and only then stores or promotes the key, acknowledges the inbox and writes
-the mark; it clears the note once the mark has landed. `Released {epoch, token}` is written
-before a removal forgets the key and publishes `false`; a removal that fails puts back only
-the note it replaced, and one whose forget kept a later take leaves that take's note alone. A
-device repairs its own entry only from its note: with `MarkOwed`, a later check of its custody
-first takes a master key still waiting in its inbox; else, when the intent landed (the vault
-keeps the index and its custody epoch moved past the note's), it writes the mark
-(re-attesting a stale recovery pair with the master first), and when it did not (a crash
-before the store) it clears the note and writes nothing. With `Released` it never writes
-`true`; with no note it repairs nothing, apart from a device the record already lists as
-holding the key, which re-attests a stale pair and keeps its mark. A device the record does
-not list, or one whose note is `Released`, is never asked to unlock its master for a repair.
-Every write of the device's `holdsMaster`, a rotation's hand-over included, reads the custody
-epoch, then the note, and re-reads the note inside the record's version check. The record's
-versions order the writes: a removal that wrote `Released` before that check makes the write
-fail and retry with `false`, and one that wrote it after publishes its own `false` on a later
-version; a `false` never turns back to `true` without a new take. An acquisition's note
-replaces a `Released` only when its store moved the vault's custody epoch past the one the
-release read. An entry without
+custody note per identity and device key. The note is a stack of layers: each operation puts
+one layer on top and keeps the note below it (`restores`). Each layer carries a random 16-byte
+token. An operation changes or removes only its own layer, found by its token, with a
+compare-and-swap on the whole note. It never puts back or removes a layer that another
+operation wrote, even one with the same index and epoch. There are three kinds of layer:
+
+- `MarkOwed {index, epoch, token, acquired: false}` is an intent. The device reads the vault's
+  custody epoch, writes the intent, and only then stores or promotes the key. An intent proves
+  nothing: the store can fail, or another app on the same vault can install the key.
+- `MarkOwed {…, acquired: true}` is a receipt. The operation writes it only when its own store
+  or promote answered that it installed the key. Then it acknowledges the inbox and writes
+  the mark. It clears the receipt, and the layers below it, once a mark has met it.
+- `Released {epoch, token}` is written before a removal forgets the key and publishes `false`.
+  The removal reads the custody epoch again after the release. When the epoch moved, a store
+  came between: it removes the release and starts again. It writes `false` only while its
+  release is still the top layer. A removal that fails removes only its own release.
+
+The standing of the note comes from the top layer down: open intents are passed over, and the
+first release or receipt decides. A receipt defeats a release below it, and a release above it
+whose epoch is not later than the receipt's intent: the store moved the custody epoch past such
+a release, so its forget cannot take the new key. A device writes `holdsMaster: true` only
+from a receipt for the index its vault keeps. It writes `false` when the note stands released
+or the vault keeps no key. Otherwise it leaves its holding as the record says: a key in a
+shared vault without a receipt of this device can be another device's. A device repairs its
+own entry only from its note: when the note is a `MarkOwed`, a later check of its custody
+first takes a master key still waiting in its inbox; else, when the note stands on a receipt
+for the index the vault keeps, it writes the mark (re-attesting a stale recovery pair with the
+master first). A note with open intents only (a crash before the receipt) it clears, and it
+writes nothing. When the note stands released it never writes `true`; with no note it repairs
+nothing, apart from a device the record already lists as holding the key, which re-attests a
+stale pair and keeps its mark. A device the record does not list, or one whose note stands
+released, is never asked to unlock its master for a repair. Every write of the device's
+`holdsMaster`, a rotation's hand-over included, reads the custody epoch, then the note, and
+re-reads the note inside the record's version check. The record's versions order the writes: a
+removal that wrote `Released` before that check makes the write fail and retry with `false`,
+and one that wrote it after publishes its own `false` on a later version; a `false` never
+turns back to `true` without a new receipt. An entry without
 `masterIndex` (written before it existed) is read as an unknown index. A pending revocation's `reason` is `left-host` or `account-deleted`.
 
 **The request box.** A device key without the bot mark posts `{body, expires}` with `body`

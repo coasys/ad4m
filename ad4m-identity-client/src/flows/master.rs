@@ -32,36 +32,60 @@
 //! and [`refresh_master`] makes it on such a take.
 //!
 //! **The custody note** ([`CustodyNote`], kept by the vault per identity and per device key
-//! id, so two apps with their own executors on one shared vault never read each other's). Each
-//! note carries a random token ([`crate::NoteToken`]): an operation rolls back or clears only
-//! the note it wrote itself (a whole-note compare-and-swap), never another operation's
-//! identical-looking one. Its lifecycle:
+//! id, so two apps with their own executors on one shared vault never read each other's). The
+//! note is a stack of layers. Each operation puts one layer on top and keeps the note below in
+//! that layer. Each layer has a random token ([`crate::NoteToken`]). An operation changes,
+//! removes or clears only its own layer, found by its token, with a compare-and-swap of the
+//! whole note. It never puts back a note that another operation owns. The layers:
 //!
-//! - **take** ([`take_master`]): read the custody epoch → note [`CustodyNote::MarkOwed`] with
-//!   it (the intent) → store the key → ack the inbox message → mark → clear the note when the
-//!   mark was written under it. A rotation's promote or store ([`super::rotate::rotate`],
-//!   a restore's enrolment) and the promote of a staged rotation in [`refresh_master`] do the
-//!   same around their acquisition. [`complete_pending_mark`] clears a landed note when its
-//!   mark lands.
-//! - **remove** ([`remove_master`]): read the custody epoch → note
-//!   [`CustodyNote::Released`] with it → record `holdsMaster: false` → forget at that epoch
-//!   → mark again (`false`). A removal refused or failed puts back the note it replaced, only
-//!   while its own release is still the note; one whose forget finds a key installed since
-//!   does too (it released nothing), and when another note replaced its release (this
-//!   device's acquisition, another removal) it marks the record from the vault and that note.
+//! - an **intent** ([`CustodyNote::MarkOwed`], `acquired: false`): an acquisition read the
+//!   custody epoch and will store or promote a key. An intent proves nothing. It never lets a
+//!   mark say `holdsMaster: true`, and a release below it stays in effect.
+//! - a **receipt** (`MarkOwed`, `acquired: true`): this operation's own store or promote
+//!   answered [`crate::Stored::Stored`]. Only a receipt lets a mark say `holdsMaster: true`, and
+//!   only for its own index, while the vault keeps that index.
+//! - a **release** ([`CustodyNote::Released`]): a removal read the custody epoch and will
+//!   forget the key at it.
+//!
+//! The standing of the note ([`CustodyNote::standing`]) comes from the top: open intents are
+//! passed over, and the first release or receipt decides.
+//!
+//! The lifecycle:
+//!
+//! - **take** ([`take_master`]): read the custody epoch → push the intent with it → store the
+//!   key → settle ([`settle`]: a receipt when this store answered `Stored`, else the intent is
+//!   removed) → ack the inbox message → mark → clear when the mark met this receipt
+//!   ([`clear_own`]: the receipt and the layers below it go). A rotation's promote or store
+//!   ([`super::rotate::rotate`], a restore's enrolment) and the promote of a staged rotation in
+//!   [`refresh_master`] do the same around their acquisition. A promote that another app made
+//!   first is not an acquisition of this device: its intent is removed.
+//! - **remove** ([`remove_master`]): read the custody epoch → push the release with it → read
+//!   the epoch again (when it moved, a store came between: the release is removed and the
+//!   steps start again) → record `holdsMaster: false`, only while the release is still the top
+//!   layer → forget at that epoch → mark again from the vault and the note. A removal that is
+//!   refused or fails removes only its own release, wherever it is. A forget that finds a key
+//!   installed since ([`Forgot::Kept`]) released nothing: the release is removed and the
+//!   record is marked from the vault and the note in place.
 //! - **repair** ([`refresh_master`], on a vault that keeps the current master): a `MarkOwed`
 //!   note first takes a master key that still waits in the inbox (an acquisition cut off
-//!   before its ack); else it marks this device only when its acquisition landed
-//!   ([`CustodyNote::landed`]: the vault keeps its index or a later one, and the epoch moved
-//!   since its intent), and a stale intent (cut off before its store, or refused there) is
-//!   cleared and marks nothing. A `Released` note never marks; no note re-attests or carries
-//!   forward only a device the record lists `holdsMaster: true` already. A device with no
-//!   note that the record does not list holding never unlocks or prompts.
-//! - **the later note wins**: an acquisition's intent replaces whatever note is in place (a
-//!   release written before it read its epoch before the intent, so before the store, and
-//!   the store moves the epoch past that removal's compare-and-delete); a release written
-//!   after an intent replaces it in turn, and every holder mark mirrors the note in place when
-//!   it writes (a release: `false`).
+//!   before its ack). Else it marks this device only when the note has landed
+//!   ([`CustodyNote::landed`]: its standing is a receipt for the index the vault keeps). A note
+//!   that has not landed (open intents, a receipt for another index) is cleared and marks
+//!   nothing. A note that stands released never marks. With no note, only a device that the
+//!   record lists `holdsMaster: true` already is re-attested or carried forward. A device with
+//!   no note that the record does not list holding never unlocks or prompts.
+//!
+//! **Which layer wins.** A receipt removes the releases above it whose epoch is not later than
+//! its intent's ([`commit_own`]): its store moved the epoch past them, so their forget cannot
+//! take its key. A release with a later epoch stays above the receipt and wins. A receipt also
+//! defeats every release below it (written before its intent, so before its store). A removal
+//! that reads the epoch, and then sees it move, starts again: so its release never goes over a
+//! store that it did not see.
+//!
+//! **The mark** ([`hold_mark`]) writes `holdsMaster: true` only for a receipt whose index the
+//! vault keeps, and `false` for a release or for a vault that keeps no key. Otherwise it leaves
+//! the device's holding unchanged: a key in a shared vault without a receipt of this device can
+//! be another device's.
 //!
 //! Why a mark never outlives a release (a happens-before argument, not one atomic step): every
 //! holder mark reads the note again inside its record write, after the record version it
@@ -105,7 +129,8 @@ use crate::request::{
     body_bytes, chain_of, log_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
 };
 use crate::vault::{
-    CustodyNote, Forgot, KeySigner, MasterSigner, MasterUse, PendingPush, Stored, Vault,
+    CustodyNote, Forgot, KeySigner, MasterSigner, MasterUse, NoteToken, PendingPush, Standing,
+    Stored, Vault,
 };
 use crate::{ClientError, Clock, Random};
 
@@ -458,23 +483,25 @@ fn retry_entry(key_id: &str) -> DeviceEntry {
 
 /// The device's side, after its own unlock: takes the master key its executor opened
 /// (`identity.takeMaster`, the custody channel), checks that it is the current master of the
-/// log as this app folds it, notes the mark it owes ([`CustodyNote::MarkOwed`], an intent
-/// with the custody epoch read before it), keeps the key in `vault`, acknowledges the message,
-/// marks this device
-/// `holdsMaster: true` in the record ([`hold_mark`], fenced by the custody epoch and the note)
-/// and clears the note once that mark landed under it. `None` when no master key waits. A key
-/// that does not check, or a vault that refuses it or its note, leaves the message for the
-/// next try; a store that fails leaves the intent too (the store may have landed), and the
-/// next refresh takes the waiting message again ([`refresh_master`]). The
-/// key, the note and the ack stand even when the record write is refused
-/// [`ClientError::RecoveryNeedsReattest`] — the record's recovery pair waiting on the new
-/// master — and the take answers it owed ([`Taken::record_pending`]); [`complete_pending_mark`]
-/// completes it, and when that does not happen (cancelled, failed, the app restarted) the next
-/// [`refresh_master`] does ([`Refreshed::Repaired`]), from the note.
+/// log as this app folds it, puts its intent on the custody note ([`CustodyNote::MarkOwed`]
+/// with the custody epoch read before it), keeps the key in `vault`, makes the intent a
+/// receipt when this store answered [`Stored::Stored`] ([`settle`]; else the intent is
+/// removed: a newer key that the vault keeps is another acquisition), acknowledges the
+/// message, marks this device in the record ([`hold_mark`], fenced by the custody epoch and
+/// the note: `holdsMaster: true` only for the receipt's index) and clears its receipt once
+/// that mark met it ([`clear_own`]). `None` when no master key waits. A key that does not
+/// check, or a vault that refuses it or its note, leaves the message for the next try. A store
+/// that fails leaves the open intent, and the next refresh takes the waiting message again
+/// ([`refresh_master`]). The key, the receipt and the ack stand even when the record write is
+/// refused [`ClientError::RecoveryNeedsReattest`] — the record's recovery pair waiting on the
+/// new master — and the take answers it owed ([`Taken::record_pending`]);
+/// [`complete_pending_mark`] completes it, and when that does not happen (cancelled, failed,
+/// the app restarted) the next [`refresh_master`] does ([`Refreshed::Repaired`]), from the
+/// receipt.
 ///
-/// A removal of this device's copy ([`remove_master`]) whose release replaced this take's
-/// intent wins: its [`CustodyNote::Released`] stays, and the mark mirrors it
-/// (`holdsMaster: false`).
+/// A removal of this device's copy ([`remove_master`]) whose release went over this take's
+/// receipt with a later epoch wins: its [`CustodyNote::Released`] stays on top, and the mark
+/// mirrors it (`holdsMaster: false`).
 pub async fn take_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -496,20 +523,20 @@ pub async fn take_master<R: ExecutorRpc>(
         executor.status().await?.key_id.ok_or_else(|| {
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
-    // The intent before the store: the obligation exists before the key does, so a crash
-    // right after the store (or the ack) leaves the note that says this device owes its mark.
-    // Its epoch is read before the note, so it never names a later custody change.
+    // The intent before the store: the obligation exists before the key does. Its epoch is
+    // read before the note. A crash between the store and the receipt leaves an open intent
+    // and an unacknowledged message: the next refresh takes the message again.
     let owed = CustodyNote::owed(taken.index, vault.custody_epoch(&scid)?, random);
     note_owed(vault, &scid, &key_id, &owed)?;
     // Another app sharing the vault may keep a newer master already (its own take or promote
     // landed while this take was in flight): the older key never replaces it, and the answer
-    // and the record name the index the vault keeps. A store that fails leaves the intent:
-    // the store may have landed, and the message is not acknowledged, so the next refresh
-    // takes it again ([`refresh_master`]); an intent whose store never landed marks nothing.
-    let index = match vault.store_master(&scid, taken.index, taken.secret)? {
-        Stored::Stored => taken.index,
-        Stored::AlreadyNewer { kept } => kept,
+    // names the index the vault keeps. Only this take's own `Stored` makes its receipt: a
+    // newer key that another app kept is not this device's acquisition.
+    let (index, acquired) = match vault.store_master(&scid, taken.index, taken.secret)? {
+        Stored::Stored => (taken.index, true),
+        Stored::AlreadyNewer { kept } => (kept, false),
     };
+    settle(vault, &scid, &key_id, &owed, acquired)?;
     executor.inbox_ack(&taken.message_id).await?;
     let record = match hold_mark(
         executor,
@@ -526,7 +553,7 @@ pub async fn take_master<R: ExecutorRpc>(
             // The mark landed under this take's own note: the obligation is met. A mark
             // decided under another note (a release since) leaves this note to whoever wrote
             // the one in place.
-            clear_own(vault, &scid, &key_id, &owed, &marked)?;
+            clear_own(vault, &scid, &key_id, owed.token(), &marked)?;
             Ok(marked.version)
         }
         Err(e) => Err(e),
@@ -542,71 +569,177 @@ pub async fn take_master<R: ExecutorRpc>(
     }))
 }
 
-/// Writes `owed` (a [`CustodyNote::MarkOwed`] intent, written before the store or promote it
-/// announces) as device `key_id`'s custody note for `scid`, over whatever it was; answers the
-/// note it replaced. A release in place is replaced too: it was written before this intent, so
-/// the removal read its epoch before the store this intent announces, and that store moves the
-/// epoch past it (the removal's compare-and-delete then forgets nothing). A release written
-/// after this intent replaces it in turn, and the holder mark mirrors whichever note is in
-/// place when it writes ([`hold_mark`]).
+/// Puts `owed` (a [`CustodyNote::MarkOwed`] intent, written before the store or promote it
+/// announces) on top of device `key_id`'s custody note for `scid`. The note in place stays
+/// below it. A release below an intent stays in effect until the intent becomes a receipt
+/// ([`settle`]), so the intent alone never lets a mark say `holdsMaster: true`.
 pub(crate) fn note_owed(
     vault: &dyn Vault,
     scid: &str,
     key_id: &str,
     owed: &CustodyNote,
-) -> Result<Option<CustodyNote>, ClientError> {
+) -> Result<(), ClientError> {
     if !matches!(owed, CustodyNote::MarkOwed { .. }) {
         return Err(ClientError::Protocol(
             "a release is not an owed mark".into(),
         ));
     }
-    replace_note(vault, scid, key_id, owed)
+    push_note(vault, scid, key_id, owed)
 }
 
-/// Writes `note` as device `key_id`'s custody note for `scid` over whatever it is; answers the
-/// note it replaced.
-fn replace_note(
+/// Puts `note` (one layer) on top of device `key_id`'s custody note for `scid`.
+fn push_note(
     vault: &dyn Vault,
     scid: &str,
     key_id: &str,
     note: &CustodyNote,
-) -> Result<Option<CustodyNote>, ClientError> {
+) -> Result<(), ClientError> {
+    swap_layers(vault, scid, key_id, |layers| {
+        layers.insert(0, note.clone());
+        Some(())
+    })?
+    .ok_or_else(note_busy)
+}
+
+/// Changes the layers of device `key_id`'s custody note for `scid` with `change` and writes
+/// them back by compare-and-swap, from a fresh read each time another write came between.
+/// `change` answers `None` to leave the note as it is. Answers what `change` answered.
+fn swap_layers<T>(
+    vault: &dyn Vault,
+    scid: &str,
+    key_id: &str,
+    mut change: impl FnMut(&mut Vec<CustodyNote>) -> Option<T>,
+) -> Result<Option<T>, ClientError> {
     for _ in 0..NOTE_SWAPS {
         let now = vault.custody_note(scid, key_id)?;
-        if vault.swap_custody_note(scid, key_id, now.as_ref(), Some(note))? {
-            return Ok(now);
+        let mut layers = now.as_ref().map(CustodyNote::layers).unwrap_or_default();
+        let Some(answer) = change(&mut layers) else {
+            return Ok(None);
+        };
+        let next = CustodyNote::stacked(layers);
+        if next == now || vault.swap_custody_note(scid, key_id, now.as_ref(), next.as_ref())? {
+            return Ok(Some(answer));
         }
     }
     Err(note_busy())
 }
 
-/// Puts `before` back in place of `mine`, a note this operation wrote, only while `mine` is
-/// still the note: its token makes it this operation's alone, so a note another operation
-/// wrote since (an identical-looking release included) is never rolled back. Answers whether
-/// it was put back.
-fn roll_back(
+/// Takes the layer that `token`'s operation wrote out of device `key_id`'s custody note, where
+/// it is: on top, the note below it comes back; under other layers, they stay. Answers whether
+/// the layer was there. Another operation's layer is never touched, so a failed operation never
+/// puts back a note that another operation owns.
+fn pop_own(
     vault: &dyn Vault,
     scid: &str,
     key_id: &str,
-    mine: &CustodyNote,
-    before: Option<&CustodyNote>,
+    token: NoteToken,
 ) -> Result<bool, ClientError> {
-    Ok(vault.swap_custody_note(scid, key_id, Some(mine), before)?)
+    Ok(swap_layers(vault, scid, key_id, |layers| {
+        let at = layers.iter().position(|layer| layer.token() == token)?;
+        layers.remove(at);
+        Some(())
+    })?
+    .is_some())
 }
 
-/// Clears `owed`, the note this operation wrote, once `marked` was written under it: the
-/// obligation is met. A mark decided under another note (a release since, or another
-/// acquisition's intent) leaves the note in place to whoever wrote it.
-pub(crate) fn clear_own(
+/// Settles the intent `owed` after its acquisition. `acquired`: this operation's own store or
+/// promote answered [`Stored::Stored`], so the intent becomes a receipt ([`commit_own`]).
+/// Otherwise (the vault kept a newer key, or another app promoted first) this operation
+/// acquired nothing, and its intent is taken out ([`pop_own`]).
+pub(crate) fn settle(
     vault: &dyn Vault,
     scid: &str,
     key_id: &str,
     owed: &CustodyNote,
+    acquired: bool,
+) -> Result<(), ClientError> {
+    if acquired {
+        commit_own(vault, scid, key_id, owed)
+    } else {
+        pop_own(vault, scid, key_id, owed.token()).map(|_| ())
+    }
+}
+
+/// Makes `owed`, this operation's intent, a receipt: its own store or promote of the index
+/// landed. A release written over the intent with an epoch read no later than the intent's
+/// (`epoch`) lost to this store: the store moved the custody epoch past it, so its forget
+/// cannot take this key. Such a release is taken out. A release with a later epoch can have
+/// been read after the store, so it stays, and the receipt stays below it.
+///
+/// When the intent is no longer in the note (a mark under another receipt cleared it), the
+/// receipt is put on top, unless a release remains: then the device stays unmarked (an
+/// under-claim, never a copy that the record names without one).
+pub(crate) fn commit_own(
+    vault: &dyn Vault,
+    scid: &str,
+    key_id: &str,
+    owed: &CustodyNote,
+) -> Result<(), ClientError> {
+    let CustodyNote::MarkOwed {
+        index,
+        epoch: read,
+        token,
+        ..
+    } = owed
+    else {
+        return Err(ClientError::Protocol(
+            "a release is not an owed mark".into(),
+        ));
+    };
+    let receipt = CustodyNote::MarkOwed {
+        index: *index,
+        epoch: *read,
+        token: *token,
+        acquired: true,
+        restores: None,
+    };
+    swap_layers(vault, scid, key_id, |layers| {
+        let at = layers.iter().position(|layer| layer.token() == *token);
+        let above = at.unwrap_or(layers.len());
+        let mut kept = Vec::with_capacity(layers.len());
+        for (i, layer) in layers.drain(..).enumerate() {
+            let lost =
+                i < above && matches!(layer, CustodyNote::Released { epoch, .. } if epoch <= *read);
+            if !lost {
+                kept.push(layer);
+            }
+        }
+        *layers = kept;
+        match layers.iter().position(|layer| layer.token() == *token) {
+            Some(at) => layers[at] = receipt.clone(),
+            None if layers
+                .iter()
+                .any(|layer| matches!(layer, CustodyNote::Released { .. })) =>
+            {
+                return None
+            }
+            None => layers.insert(0, receipt.clone()),
+        }
+        Some(())
+    })?;
+    Ok(())
+}
+
+/// Clears the obligation of `token`'s operation once `marked` was decided on its receipt
+/// ([`CustodyNote::receipt`]): its own layer and every layer below it go. The layers below are
+/// met by the same mark (older receipts of this device) or lost to its store (releases written
+/// before its intent). Layers above it stay to their operations. A mark decided on another
+/// note leaves the note as it is.
+pub(crate) fn clear_own(
+    vault: &dyn Vault,
+    scid: &str,
+    key_id: &str,
+    token: NoteToken,
     marked: &Marked,
 ) -> Result<(), ClientError> {
-    if marked.under.as_ref() == Some(owed) {
-        vault.swap_custody_note(scid, key_id, Some(owed), None)?;
+    if marked.met != Some(token) {
+        return Ok(());
     }
+    swap_layers(vault, scid, key_id, |layers| {
+        let at = layers.iter().position(|layer| layer.token() == token)?;
+        layers.truncate(at);
+        Some(())
+    })?;
     Ok(())
 }
 
@@ -624,10 +757,17 @@ fn note_busy() -> ClientError {
 /// epoch and this device's custody note. Only the operation that kept the key (a take's
 /// [`Vault::store_master`], a [`Vault::promote_master`], a rotation's hand-over) or a repair of
 /// the mark it owes writes through here — never a bare re-attestation, which asserts no
-/// custody. Each write names the index [`Vault::master_index`] authenticates (`holdsMaster:
-/// true` with it, `false` when the vault keeps none, or when this device's note is
-/// [`CustodyNote::Released`]: a copy it gave up is not its own, whoever installed the key in
-/// the shared vault since). Two fences:
+/// custody. The note's standing ([`CustodyNote::standing`]) decides the write:
+///
+/// - a receipt for the index that [`Vault::master_index`] authenticates: `holdsMaster: true`
+///   with that index. The mark meets that receipt ([`Marked::met`]);
+/// - a release ([`CustodyNote::Released`]), or a vault that keeps no key: `false`. A copy this
+///   device gave up is not its own, whoever installed the key in the shared vault since;
+/// - else (open intents only, a receipt for another index, no note): the device's holding is
+///   left as the record says. A key in a shared vault without a receipt of this device can be
+///   another device's.
+///
+/// Two fences:
 ///
 /// - the note is read again inside the record write, after the version it builds on was read
 ///   (a precondition of [`record::write_as_if`]): a release written since is seen there, and
@@ -688,13 +828,13 @@ pub(crate) async fn mark_this<R: ExecutorRpc>(
 pub(crate) struct Marked {
     /// The record version written.
     pub version: u64,
-    /// This device's custody note the mark was decided on, still in place on the version the
-    /// write built on. Only an operation whose own note this is has met its obligation.
-    pub under: Option<CustodyNote>,
+    /// The receipt whose `holdsMaster: true` this mark wrote (its token): only that
+    /// operation has met its obligation ([`clear_own`]).
+    pub met: Option<NoteToken>,
 }
 
 /// What a holder mark may assume about this device's custody note ([`hold_mark_gated`]).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Gate {
     /// The operation that kept the key, or a removal mirroring what it left: the mark follows
     /// the custody whatever the note is (a release mirrors as none), decided again when the
@@ -725,44 +865,66 @@ async fn hold_mark_gated<R: ExecutorRpc>(
         // The epoch first: a custody change after it lands in `held` or in the re-read.
         let fenced = vault.custody_epoch(scid)?;
         let note = vault.custody_note(scid, key_id)?;
-        if let Gate::Repair(decided) = gate {
-            if note != decided {
+        if let Gate::Repair(decided) = &gate {
+            if note != *decided {
                 return Err(ClientError::CustodyNoteMoved);
             }
         }
-        let held = match note {
-            Some(CustodyNote::Released { .. }) => None,
-            _ => vault.master_index(scid)?,
+        // `Some(held)`: the mark to write (`None` inside: `holdsMaster: false`). `None`: leave
+        // the device's holding as the record says.
+        let kept = vault.master_index(scid)?;
+        let held = match (&gate, note.as_ref().map(CustodyNote::standing)) {
+            // A listed holder without a note: the write is guarded by its listed `true`.
+            (Gate::Repair(None), _) => Some(kept),
+            (_, Some(Standing::Released)) => Some(None),
+            (_, Some(Standing::Acquired(index))) if kept == Some(index) => Some(kept),
+            // No receipt for the key the vault keeps: it can be another device's on the same
+            // vault, so nothing here says this device holds it. When the vault keeps none,
+            // this device holds none.
+            _ if kept.is_none() => Some(None),
+            _ => None,
         };
+        // The receipt this mark meets: it writes `true` for exactly the index of the receipt.
+        let met = match (&gate, &held) {
+            (Gate::Repair(None), _) | (_, None | Some(None)) => None,
+            (_, Some(Some(_))) => note.as_ref().and_then(CustodyNote::receipt),
+        }
+        .map(|receipt| receipt.token());
         let changes = match entry {
-            // Listed anew: the whole entry, holding exactly what the vault keeps.
-            Some(entry) => vec![Change::Device {
-                key_id: key_id.clone(),
-                entry: DeviceEntry {
-                    holds_master: if held.is_some() {
-                        HoldsMaster::Yes
-                    } else {
-                        HoldsMaster::No
-                    },
-                    master_index: held,
-                    ..entry.clone()
-                },
-            }],
-            None => {
-                let mut changes = vec![Change::HoldsMaster {
+            // Listed anew: the whole entry, holding exactly what this device is known to keep.
+            Some(entry) => {
+                let held = held.flatten();
+                vec![Change::Device {
                     key_id: key_id.clone(),
-                    holds: HoldsMaster::No,
-                }];
-                if let Some(kept) = held {
-                    // `Change::Holds` alone never lowers a stale `masterIndex`: the entry is
-                    // cleared first, so it ends naming exactly the index the vault keeps.
-                    changes.push(Change::Holds {
-                        key_id: key_id.clone(),
-                        index: kept,
-                    });
-                }
-                changes
+                    entry: DeviceEntry {
+                        holds_master: if held.is_some() {
+                            HoldsMaster::Yes
+                        } else {
+                            HoldsMaster::No
+                        },
+                        master_index: held,
+                        ..entry.clone()
+                    },
+                }]
             }
+            None => match held {
+                Some(held) => {
+                    let mut changes = vec![Change::HoldsMaster {
+                        key_id: key_id.clone(),
+                        holds: HoldsMaster::No,
+                    }];
+                    if let Some(kept) = held {
+                        // `Change::Holds` alone never lowers a stale `masterIndex`: the entry
+                        // is cleared first, so it ends naming exactly the index the vault keeps.
+                        changes.push(Change::Holds {
+                            key_id: key_id.clone(),
+                            index: kept,
+                        });
+                    }
+                    changes
+                }
+                None => Vec::new(),
+            },
         };
         // Checked on the version the write builds on, after it was read.
         let still = |record: Option<&PrivateRecord>, _: &KelChain| {
@@ -772,7 +934,7 @@ async fn hold_mark_gated<R: ExecutorRpc>(
             let listed_holding = record
                 .and_then(|r| r.devices.get(key_id))
                 .is_some_and(|entry| entry.holds_master == HoldsMaster::Yes);
-            if matches!(gate, Gate::Repair(None)) && !listed_holding {
+            if matches!(&gate, Gate::Repair(None)) && !listed_holding {
                 return Err(ClientError::CustodyNoteMoved);
             }
             Ok(())
@@ -790,13 +952,10 @@ async fn hold_mark_gated<R: ExecutorRpc>(
         .await;
         match written {
             // The note changed under the write: decide the mark again from the new one.
-            Err(ClientError::CustodyNoteMoved) if matches!(gate, Gate::Custody) => continue,
+            Err(ClientError::CustodyNoteMoved) if matches!(&gate, Gate::Custody) => continue,
             Err(e) => return Err(e),
             Ok(version) if vault.custody_epoch(scid)? == fenced => {
-                return Ok(Marked {
-                    version,
-                    under: note,
-                })
+                return Ok(Marked { version, met })
             }
             // Custody moved under the write: mirror what it moved to.
             Ok(_) => {}
@@ -847,9 +1006,8 @@ pub async fn reattest_recovery<R: ExecutorRpc>(
 /// pair when it is stale. The mark is fenced by the custody epoch and this device's custody
 /// note ([`hold_mark`]): it names the index the vault keeps when it lands, and a
 /// `remove_master` that won meanwhile leaves the entry `holdsMaster: false`. On success the
-/// [`CustodyNote::MarkOwed`] note read before the write is cleared when its acquisition had
-/// landed by then ([`CustodyNote::landed`]) and the mark was written under it: an intent whose
-/// store is still to come stays for that store's mark. A caller with a pending take calls this
+/// receipt that the mark met is cleared with the layers below it ([`clear_own`]); an open
+/// intent whose store is still to come stays for that store's mark. A caller with a pending take calls this
 /// right away; when it is cancelled or fails, the note stays, and the holder's next
 /// [`refresh_master`] makes this same write from it ([`Refreshed::Repaired`]). Answers the
 /// version written.
@@ -865,7 +1023,6 @@ pub async fn complete_pending_mark<R: ExecutorRpc>(
         executor.status().await?.key_id.ok_or_else(|| {
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
-    let note = landed_owed(vault, &scid, &key_id)?;
     let unlocked = vault.unlock(&scid, MasterUse::Record, clock.now())?;
     let signer = unlocked.signer(clock.now())?;
     let marked = hold_mark(
@@ -881,24 +1038,10 @@ pub async fn complete_pending_mark<R: ExecutorRpc>(
         random,
     )
     .await?;
-    if let Some(owed) = note {
-        clear_own(vault, &scid, &key_id, &owed, &marked)?;
+    if let Some(token) = marked.met {
+        clear_own(vault, &scid, &key_id, token, &marked)?;
     }
     Ok(marked.version)
-}
-
-/// Device `key_id`'s custody note for `scid` when it is a [`CustodyNote::MarkOwed`] whose
-/// acquisition landed ([`CustodyNote::landed`]), read before a mark: a mark written under it
-/// after this read names the key it announced, and meets it.
-fn landed_owed(
-    vault: &dyn Vault,
-    scid: &str,
-    key_id: &str,
-) -> Result<Option<CustodyNote>, ClientError> {
-    match vault.custody_note(scid, key_id)? {
-        Some(owed @ CustodyNote::MarkOwed { .. }) if owed.landed(vault, scid)? => Ok(Some(owed)),
-        _ => Ok(None),
-    }
 }
 
 /// What [`refresh_master`] found.
@@ -910,11 +1053,13 @@ pub enum Refreshed {
     /// The vault keeps the current master key, and the record owed this device's mark for it,
     /// made now. Only two things owe it:
     ///
-    /// - this device's custody note says [`CustodyNote::MarkOwed`]: a take (or a promote)
-    ///   kept the key and its mark has not landed — its completion cancelled, its put failed,
-    ///   the app restarted. The mark is written as the device, or as the master when the
-    ///   record's recovery pair is stale ([`MasterUse::Record`], one unlock), while the note is
-    ///   still that one, then the note is cleared;
+    /// - this device's custody note has landed ([`CustodyNote::landed`]: a receipt for the
+    ///   index the vault keeps): a take (or a promote) kept the key and its mark has not
+    ///   landed — its completion cancelled, its put failed, the app restarted. The mark is
+    ///   written as the device, or as the master when the record's recovery pair is stale
+    ///   ([`MasterUse::Record`], one unlock), while the note is still that one, then the
+    ///   receipt is cleared. A note with open intents only proves nothing: it is cleared and
+    ///   marks nothing;
     /// - no note, and the record lists this device `holdsMaster: true` already: its recovery
     ///   pair is stale (only the master re-attests it, and the write carries the entry to the
     ///   index the vault keeps), or its entry names an older index.
@@ -931,11 +1076,13 @@ pub enum Refreshed {
         record: Result<u64, ClientError>,
     },
     /// A rotation on this computer had staged the current master key and was cut off before
-    /// it promoted it: the vault keeps a master key now, noted owed before the promote like a
-    /// take's ([`CustodyNote::MarkOwed`]), and the record marks this device holding it — by
-    /// the master itself, re-attesting the recovery key, when the record's stored pair went
-    /// stale with the rotation. A removal whose release replaced the intent wins, and the mark
-    /// mirrors it (`holdsMaster: false`).
+    /// it promoted it: the vault keeps a master key now. An intent goes on the note before the
+    /// promote, like a take's ([`CustodyNote::MarkOwed`]), and becomes a receipt only when this
+    /// promote installed the key. Then the record marks this device holding it — by the master
+    /// itself, re-attesting the recovery key, when the record's stored pair went stale with the
+    /// rotation. A promote that another app made first leaves this device's holding as the
+    /// record says. A removal whose release stands over the note wins, and the mark mirrors it
+    /// (`holdsMaster: false`).
     Promoted {
         /// The index the vault keeps: the staged key's, or a newer one another app sharing
         /// the vault kept first.
@@ -970,23 +1117,25 @@ pub enum Refreshed {
 ///    discarded (a later rotation superseded it, or its publish was refused long ago). The
 ///    promotion goes by index only: the words derive the key at each index, and the staged key
 ///    is not checked against the log's commitment. The promote is an acquisition like a
-///    take's store: the mark is noted owed before it ([`CustodyNote::MarkOwed`], the intent;
-///    a promote that finds nothing to promote puts the note back), then written fenced by the
-///    custody epoch and the note ([`hold_mark`]) as the device, or — when the record's
-///    recovery pair went stale with the rotation — as the promoted master itself,
-///    re-attesting it; the note is cleared once the mark lands under it. A promote that
-///    fails otherwise leaves the intent for the next refresh.
+///    take's store: an intent goes on the note before it ([`CustodyNote::MarkOwed`]). It
+///    becomes a receipt only when this promote installed the key; a promote that another app
+///    made first, or that finds nothing to promote, removes it. Then the mark is written,
+///    fenced by the custody epoch and the note ([`hold_mark`]), as the device, or — when the
+///    record's recovery pair went stale with the rotation — as the promoted master itself,
+///    re-attesting it; the receipt is cleared once the mark meets it. A promote that fails
+///    otherwise leaves the open intent, which proves nothing: the next refresh clears it.
 /// 2. The vault keeps the current master: the mark this device owes, by its custody note
 ///    ([`repair_mark`]). A [`CustodyNote::MarkOwed`] note (an acquisition cut off after its
 ///    intent: before its store, before its ack, or before its mark lands) first takes a
-///    master key that still waits in the inbox ([`Refreshed::Taken`], the message consumed);
-///    else, when its acquisition landed ([`CustodyNote::landed`]), it is marked now and
-///    cleared ([`Refreshed::Repaired`]), and when it did not it is cleared and marks nothing
-///    ([`Refreshed::Current`]); a device the record lists `holdsMaster: true`
-///    without a note is re-attested when the pair is stale, or carried to the current index.
-///    A [`CustodyNote::Released`] note, or no note on a device not listed holding, owes
-///    nothing: [`Refreshed::Current`], no write, no unlock. A device that does not keep the
-///    current master never reads the record here.
+///    master key that still waits in the inbox ([`Refreshed::Taken`], the message consumed).
+///    Else, when the note has landed ([`CustodyNote::landed`]: a receipt for the index the
+///    vault keeps), it is marked now and cleared ([`Refreshed::Repaired`]). When it has not
+///    (open intents only, or a receipt for another index), it is cleared and marks nothing
+///    ([`Refreshed::Current`]). A device the record lists `holdsMaster: true` without a note
+///    is re-attested when the pair is stale, or carried to the current index. A note that
+///    stands released, or no note on a device not listed holding, owes nothing:
+///    [`Refreshed::Current`], no write, no unlock. A device that does not keep the current
+///    master never reads the record here.
 /// 3. The current master waits in the inbox: taken ([`take_master`], [`Refreshed::Taken`]);
 ///    a take whose record write was refused [`ClientError::RecoveryNeedsReattest`] is
 ///    completed by [`complete_pending_mark`] with the master just taken.
@@ -1014,22 +1163,23 @@ pub async fn refresh_master<R: ExecutorRpc>(
         // The rotation to it landed: promote (or another app on this computer did first).
         Some(staged) if live && staged == current => {
             let key_id = own_key_id(executor).await?;
-            // The intent before the promote, with the epoch read before it: a crash right
-            // after the promote leaves the note that says this device owes its mark.
+            // The intent before the promote, with the epoch read before it.
             let owed = CustodyNote::owed(staged, vault.custody_epoch(&scid)?, random);
-            let before = note_owed(vault, &scid, &key_id, &owed)?;
-            let index = match super::rotate::promote(vault, &scid, staged) {
-                Ok(index) => index,
-                // Nothing staged and nothing kept at or past it: nothing was acquired, so the
-                // note goes back to what it was, unless another flow wrote it since.
+            note_owed(vault, &scid, &key_id, &owed)?;
+            let (index, acquired) = match super::rotate::promote(vault, &scid, staged) {
+                Ok(promoted) => promoted,
+                // Nothing staged and nothing kept at or past it: nothing was acquired, so this
+                // refresh's intent is taken out.
                 Err(crate::VaultError::NotFound) => {
-                    roll_back(vault, &scid, &key_id, &owed, before.as_ref())?;
+                    pop_own(vault, &scid, &key_id, owed.token())?;
                     return Err(crate::VaultError::NotFound.into());
                 }
-                // The promote may have landed: the intent stays, and the next refresh marks
-                // from it once it did, or clears it ([`repair_mark`]).
+                // The promote may have landed, but nothing proves it: the open intent stays,
+                // marks nothing, and the next refresh clears it ([`repair_mark`]).
                 Err(e) => return Err(e.into()),
             };
+            // A promote that another app made first is not this device's acquisition.
+            settle(vault, &scid, &key_id, &owed, acquired)?;
             // The record's recovery pair went stale with the rotation that made this key
             // current: the promoted master signs the fenced mark that re-attests it.
             let record = match mark_gated(
@@ -1046,7 +1196,7 @@ pub async fn refresh_master<R: ExecutorRpc>(
             .await
             {
                 Ok(marked) => {
-                    clear_own(vault, &scid, &key_id, &owed, &marked).map(|()| marked.version)
+                    clear_own(vault, &scid, &key_id, owed.token(), &marked).map(|()| marked.version)
                 }
                 Err(e) => Err(e),
             };
@@ -1194,13 +1344,16 @@ async fn repair_mark<R: ExecutorRpc>(
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
         let note = vault.custody_note(&scid, &key_id)?;
-        match note {
-            Some(CustodyNote::Released { .. }) => return Ok(None),
-            // A stale intent: the acquisition it announced never landed (cut off between the
-            // intent and its store or promote, or refused there). It marks nothing — the key
-            // the vault keeps is another acquisition's — and is cleared, unless it changed.
-            Some(owed @ CustodyNote::MarkOwed { .. }) if !owed.landed(vault, &scid)? => {
-                vault.swap_custody_note(&scid, &key_id, Some(&owed), None)?;
+        match &note {
+            Some(note) if note.standing() == Standing::Released => return Ok(None),
+            // Open intents only, or a receipt for another index than the one the vault keeps:
+            // no acquisition of this device proves the key the vault keeps (an intent cut off
+            // before its store or promote, or after it without its receipt; a later key that
+            // another app kept). It marks nothing and is cleared, unless it changed. An
+            // operation still in flight whose intent goes here puts its receipt on top when
+            // its store lands ([`commit_own`]).
+            Some(stale) if !stale.landed(vault, &scid)? => {
+                vault.swap_custody_note(&scid, &key_id, Some(stale), None)?;
                 return Ok(None);
             }
             _ => {}
@@ -1220,21 +1373,22 @@ async fn repair_mark<R: ExecutorRpc>(
         let stale = opened.recovery.is_none() && opened.recovery_key.is_some();
         let holding = entry.holds_master == HoldsMaster::Yes;
         let marked = holding && entry.master_index == Some(current);
+        // Here a note is a landed receipt.
         let gate = match note {
-            Some(owed @ CustodyNote::MarkOwed { .. }) if marked && !stale => {
+            Some(owed) if marked && !stale => {
                 vault.swap_custody_note(&scid, &key_id, Some(&owed), None)?;
                 return Ok(None);
             }
-            Some(owed @ CustodyNote::MarkOwed { .. }) => Gate::Repair(Some(owed)),
+            Some(owed) => Gate::Repair(Some(owed)),
             None if holding && (stale || !marked) => Gate::Repair(None),
-            _ => return Ok(None),
+            None => return Ok(None),
         };
         let marked = mark_gated(
             executor, vault, did, &scid, &key_id, gate, stale, clock, random,
         )
         .await?;
-        if let Some(owed) = note {
-            clear_own(vault, &scid, &key_id, &owed, &marked)?;
+        if let Some(token) = marked.met {
+            clear_own(vault, &scid, &key_id, token, &marked)?;
         }
         Ok(Some(marked.version))
     };
@@ -1275,7 +1429,7 @@ async fn mark_gated<R: ExecutorRpc>(
             scid,
             key_id,
             &Reader::Executor,
-            gate,
+            gate.clone(),
             None,
             None,
             random,
@@ -1314,20 +1468,23 @@ async fn mark_gated<R: ExecutorRpc>(
 /// record version the write builds on, again after each stale version ([`record::write_if`]),
 /// so of two holders removing it at once at most one does.
 ///
-/// The order: the custody epoch is read; this device's custody note becomes
-/// [`CustodyNote::Released`] with it; the record marks this device `holdsMaster: false`; the
+/// The order: the custody epoch is read; a [`CustodyNote::Released`] layer with it goes on
+/// top of this device's custody note; the epoch is read again, and when it moved (a store
+/// came between) the release is removed and the steps start again ([`release`]); the record
+/// marks this device `holdsMaster: false`, only while the release is still the top layer; the
 /// vault forgets the key ([`Vault::forget_master_at`] that epoch, so a key another app sharing
 /// the vault installed in between, the same one included, is never removed); and, when it
-/// forgot, the entry is marked again from the vault ([`hold_mark`]: `false`, the note being a
-/// release). The release is durable before the `false` write: every holder mark reads the note
-/// on the record version it builds on, so a repair decided before the release either landed
-/// before the `false` (which overwrites it) or sees the release and writes nothing. A refused
-/// or failed record write puts the note back as it was, only while the release is still this
-/// removal's own (its token), and leaves the key where it was. A forget that finds a key
-/// installed since ([`Forgot::Kept`]) released nothing: the note goes back the same way, and
-/// when another note replaced the release (this device took the key again, or another
-/// removal) the entry is marked from the vault and that note ([`hold_mark`]).
-/// Answers the record version written.
+/// forgot, the entry is marked again from the vault ([`hold_mark`]: `false`, the note standing
+/// released). The release is durable before the `false` write: every holder mark reads the
+/// note on the record version it builds on, so a repair decided before the release either
+/// landed before the `false` (which overwrites it) or sees the release and writes nothing.
+///
+/// A layer of this device's acquisition put on the note after the release stops the removal
+/// with [`ClientError::CustodyNoteMoved`]. A refused or failed record write removes only this
+/// removal's own release (its token), wherever it is, and leaves the key where it was: it never
+/// puts back a note that another operation owns. A forget that finds a key installed since
+/// ([`Forgot::Kept`]) released nothing: the release is removed, and the entry is marked from
+/// the vault and the note in place ([`hold_mark`]). Answers the record version written.
 pub async fn remove_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -1340,14 +1497,16 @@ pub async fn remove_master<R: ExecutorRpc>(
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
     // Before the only-copy check: the forget below holds only while this custody state lasts.
-    let epoch = vault.custody_epoch(&scid)?;
-    // Its own token: only this removal's note is ever rolled back, never another removal's
-    // release of the same epoch, nor a note an acquisition wrote since.
-    let released = CustodyNote::released(epoch, random);
-    let before = replace_note(vault, &scid, &own, &released)?;
+    let (epoch, released) = release(vault, &scid, &own, random)?;
+    let token = released.token();
     let removed = async {
         let (events, log_chain) = log_of(executor, did).await?;
         let check = |record: Option<&PrivateRecord>, chain: &KelChain| {
+            // An acquisition of this device put its note over the release: it wins, and its
+            // mark follows this write. Nothing is released.
+            if vault.custody_note(&scid, &own)?.map(|note| note.token()) != Some(token) {
+                return Err(ClientError::CustodyNoteMoved);
+            }
             // The events may lag the chain the write read; a key `add`ed since is no copy yet.
             if record.is_some_and(|r| another_copy(r, &events, chain, &own)) {
                 Ok(())
@@ -1373,9 +1532,8 @@ pub async fn remove_master<R: ExecutorRpc>(
     let (mut version, log_chain) = match removed {
         Ok(removed) => removed,
         Err(e) => {
-            // Nothing was released: the note goes back to what it was, unless another flow
-            // wrote it since.
-            roll_back(vault, &scid, &own, &released, before.as_ref())?;
+            // Nothing was released: this removal's release is taken out, wherever it is now.
+            pop_own(vault, &scid, &own, token)?;
             return Err(e);
         }
     };
@@ -1401,12 +1559,10 @@ pub async fn remove_master<R: ExecutorRpc>(
             // record is then marked from the vault and the note in place, so a key this device
             // took since is not left marked `false` with nothing owing its mark.
             Forgot::Kept(_) => {
-                if !roll_back(vault, &scid, &own, &released, before.as_ref())? {
-                    version =
-                        hold_mark(executor, vault, did, &scid, &own, &Reader::Executor, random)
-                            .await?
-                            .version;
-                }
+                pop_own(vault, &scid, &own, token)?;
+                version = hold_mark(executor, vault, did, &scid, &own, &Reader::Executor, random)
+                    .await?
+                    .version;
             }
         }
     }
@@ -1424,6 +1580,30 @@ pub async fn remove_master<R: ExecutorRpc>(
         }
     }
     Ok(version)
+}
+
+/// Puts a release on top of device `key_id`'s custody note for `scid`, bound to the custody
+/// epoch read before it, and checks that the epoch did not move while it was written. A store
+/// between the read and the release (an acquisition that completed and cleared its note) moves
+/// the epoch: the release is taken out and written again from a fresh read, so the forget is
+/// bound to a custody state that includes that store. Answers the epoch and the release.
+fn release(
+    vault: &dyn Vault,
+    scid: &str,
+    key_id: &str,
+    random: &dyn Random,
+) -> Result<(u64, CustodyNote), ClientError> {
+    for _ in 0..NOTE_SWAPS {
+        let epoch = vault.custody_epoch(scid)?;
+        // Its own token: only this removal's layer is ever taken out.
+        let released = CustodyNote::released(epoch, random);
+        push_note(vault, scid, key_id, &released)?;
+        if vault.custody_epoch(scid)? == epoch {
+            return Ok((epoch, released));
+        }
+        pop_own(vault, scid, key_id, released.token())?;
+    }
+    Err(note_busy())
 }
 
 /// Whether `record` lists a device other than `own` that holds the current master key of

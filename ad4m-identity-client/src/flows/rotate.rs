@@ -124,13 +124,19 @@ pub(crate) fn stage(
 /// the computer shares the vault, so another one's `refresh_master` may have promoted it
 /// already (a `NotFound` while the vault keeps master `index` or a later one), or kept a later
 /// rotation's key before this one's promotion ran ([`Stored::AlreadyNewer`]). Answers the
-/// index the vault keeps, `Err` when it keeps no master at `index` or later.
-pub(crate) fn promote(vault: &dyn Vault, scid: &str, index: u32) -> Result<u32, VaultError> {
+/// index the vault keeps and whether this call's own promote installed it (`Stored`): only
+/// then is the key this device's acquisition. `Err` when the vault keeps no master at `index`
+/// or later.
+pub(crate) fn promote(
+    vault: &dyn Vault,
+    scid: &str,
+    index: u32,
+) -> Result<(u32, bool), VaultError> {
     match vault.promote_master(scid, index) {
-        Ok(Stored::Stored) => Ok(index),
-        Ok(Stored::AlreadyNewer { kept }) => Ok(kept),
+        Ok(Stored::Stored) => Ok((index, true)),
+        Ok(Stored::AlreadyNewer { kept }) => Ok((kept, false)),
         Err(VaultError::NotFound) => match vault.master_index(scid)? {
-            Some(kept) if kept >= index => Ok(kept),
+            Some(kept) if kept >= index => Ok((kept, false)),
             _ => Err(VaultError::NotFound),
         },
         Err(e) => Err(e),
@@ -389,7 +395,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
                 // Met when written under the caller's own intent; a note written since is
                 // its writer's.
                 Ok(marked) => match &owed {
-                    Some(owed) => master::clear_own(vault, &scid, &key_id, owed, &marked)
+                    Some(owed) => master::clear_own(vault, &scid, &key_id, owed.token(), &marked)
                         .map(|()| marked.version),
                     None => Ok(marked.version),
                 },
@@ -506,20 +512,21 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
 /// the vault keeping no master at or past it (another app's rotation re-staged the slot): the
 /// words make the same key, so it is stored under the vault's never-go-back rule
 /// ([`Vault::store_master`]; a key another app kept meanwhile wins). Answers the index the
-/// vault keeps — `index`, or a later one's.
+/// vault keeps (`index`, or a later one's) and whether this call's own promote or store
+/// installed it ([`master::settle`]).
 pub(crate) fn acquire(
     vault: &dyn Vault,
     scid: &str,
     seed: &Seed,
     index: u32,
-) -> Result<u32, ClientError> {
+) -> Result<(u32, bool), ClientError> {
     match promote(vault, scid, index) {
         Ok(kept) => Ok(kept),
         Err(VaultError::NotFound) => {
             let key = words::master_key(seed, index)?;
             match vault.store_master(scid, index, Secret::new(key.to_bytes()))? {
-                Stored::Stored => Ok(index),
-                Stored::AlreadyNewer { kept } => Ok(kept),
+                Stored::Stored => Ok((index, true)),
+                Stored::AlreadyNewer { kept } => Ok((kept, false)),
             }
         }
         Err(e) => Err(e.into()),
@@ -573,8 +580,19 @@ pub async fn rotate<R: ExecutorRpc>(
         .map_err(ClientError::from)
         .map(|epoch| CustodyNote::owed(index, epoch, random))
         .and_then(|owed| master::note_owed(vault, &scid, &own, &owed).map(|_| owed));
+    // Settled right after: a receipt only for this rotation's own promote or store. A promote
+    // that another app made first, a newer key kept, or a failed acquisition take the intent
+    // out, so nothing here says this device holds a key it did not install.
     let (kept, owed) = match owed {
-        Ok(owed) => (acquire(vault, &scid, &seed, index), Some(owed)),
+        Ok(owed) => {
+            let kept = match acquire(vault, &scid, &seed, index) {
+                Ok((kept, acquired)) => {
+                    master::settle(vault, &scid, &own, &owed, acquired).map(|()| kept)
+                }
+                Err(e) => master::settle(vault, &scid, &own, &owed, false).and(Err(e)),
+            };
+            (kept, Some(owed))
+        }
         Err(e) => (Err(e), None),
     };
     // The record's rewrite is the new master's: it re-attests the recovery key, which a

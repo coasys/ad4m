@@ -34,7 +34,7 @@ use ad4m_ldk::identity::SignedHead;
 
 use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::flows::link::LinkFlow;
-use crate::flows::master::note_owed;
+use crate::flows::master::{commit_own, note_owed, settle};
 use crate::flows::rotate::{
     acquire, current_index, hand_over, master_of, publish_rotation, recovery_key_of, ThisDevice,
 };
@@ -110,6 +110,10 @@ pub struct RestoreFlow<'a, R: ExecutorRpc> {
     record_error: Option<ClientError>,
     /// The index of the master this flow's rotation made current, once it is published.
     rotated: Option<u32>,
+    /// The intent of an enrolment whose own promote or store installed the key while this
+    /// device was not linked yet, so that no receipt could be written for it: a later
+    /// enrolment writes the receipt from it once the link gives the device a key id.
+    installed: std::cell::RefCell<Option<CustodyNote>>,
 }
 
 /// The device keys of `chain` valid at its head, except `own` (this executor's device key),
@@ -188,6 +192,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             devices,
             record_error,
             rotated: None,
+            installed: std::cell::RefCell::new(None),
         })
     }
 
@@ -275,12 +280,14 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
                 "master #{index} of this restore was replaced; restore again with the words"
             )));
         }
-        // The custody epoch before the acquisition: the intent names it, so it lands with the
-        // promote or store below ([`CustodyNote::landed`]). A device the log lists already
-        // writes the intent before them, so a crash right after leaves the note that owes its
-        // mark; a device linked only below has no key id until then, and writes it after its
-        // link (a crash before leaves the key kept and the device unmarked: an under-claim,
-        // never a copy the record names without one).
+        // The custody epoch before the acquisition: the intent names it. A device the log
+        // lists already writes the intent before the promote or store, and makes it a receipt
+        // right after, when its own call installed the key ([`settle`]). A device linked only
+        // below has no key id until then: its receipt is written after its link, again only
+        // for its own install. When that link fails, the flow keeps the intent of its install,
+        // and a later enrolment of the same flow writes the receipt from it. A crash between
+        // the install and the receipt leaves the key kept and the device unmarked: an
+        // under-claim, never a copy the record names without one.
         let epoch = self.vault.custody_epoch(&scid)?;
         let status = self.executor.status().await?;
         let listed = chain
@@ -296,10 +303,32 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
         // vault keeping no master at or past it: current in the log, stored under the vault's
         // never-go-back rule as a key taken from the inbox would be ([`acquire`]). `kept`
         // names the index the vault keeps.
-        let kept = acquire(self.vault, &scid, &self.seed, index)?;
+        let (kept, acquired) = match acquire(self.vault, &scid, &self.seed, index) {
+            Ok(acquired) => acquired,
+            Err(e) => {
+                if let Some(key_id) = &listed {
+                    settle(self.vault, &scid, key_id, &owed, false)?;
+                }
+                return Err(e);
+            }
+        };
+        if let Some(key_id) = &listed {
+            settle(self.vault, &scid, key_id, &owed, acquired)?;
+        }
+        // An earlier enrolment of this flow installed the key before its link failed: that
+        // install is this device's acquisition, while the vault still keeps its index.
+        let owed = match self.installed.borrow().clone() {
+            Some(earlier) if !acquired && listed.is_none() && kept == index => earlier,
+            _ => owed,
+        };
+        let acquired = acquired || self.installed.borrow().as_ref() == Some(&owed);
+        if acquired && listed.is_none() {
+            self.installed.replace(Some(owed.clone()));
+        }
         let key_id = self.link_this(&this_device).await?;
-        if listed.as_ref() != Some(&key_id) {
-            note_owed(self.vault, &scid, &key_id, &owed)?;
+        if acquired && listed.as_ref() != Some(&key_id) {
+            commit_own(self.vault, &scid, &key_id, &owed)?;
+            self.installed.replace(None);
         }
         let signer = master_of(&self.seed, index)?;
         let secret = words::recovery_secret(&self.seed);
