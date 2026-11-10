@@ -445,6 +445,9 @@ pub(crate) fn is_local_agent(did: &str) -> bool {
 
 /// Fills the key map for the signers of `links` before they are checked and stored: the key
 /// index and the logs it names, through the agent language. Does nothing before [`init`].
+/// A listed signer's log is also refreshed when the store last confirmed its head more than
+/// [`resolver::ADMIT_FRESHNESS`] ago, which is what the receipt paths lean on before they
+/// re-judge carried links under the same window a live write is admitted under.
 pub async fn prepare_link_signers(links: &[LinkExpression]) {
     let Some(service) = SERVICE.get() else {
         return;
@@ -456,7 +459,7 @@ pub async fn prepare_link_signers(links: &[LinkExpression]) {
 /// signature holds for their own `author`. A link whose signature fails is `invalid` whatever
 /// any log says ([`verdict::judge`]), so a peer sending well-formed DIDs with bad signatures
 /// costs no lookup; the signature check is local.
-fn signers_to_prepare(links: &[LinkExpression]) -> Vec<(String, Option<u64>)> {
+pub(crate) fn signers_to_prepare(links: &[LinkExpression]) -> Vec<(String, Option<u64>)> {
     links
         .iter()
         .filter(|l| {

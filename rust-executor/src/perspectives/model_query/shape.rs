@@ -14,7 +14,7 @@
 //! the integration test suite, which builds shapes from JSON fixtures
 //! without going through the SHACL writer.
 
-use super::sparql_builder::LinkGuard;
+use super::sparql_builder::{shown_link_join_once, LinkGuard};
 use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
 use crate::perspectives::sparql_store::SparqlStore;
@@ -77,19 +77,19 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let query = format!(
         r#"
         SELECT ?shapeUri ?targetClass WHERE {{
-            ?targetClass <rdf://type> <ad4m://SubjectClass> .{type_guard}
-            ?targetClass <ad4m://shape> ?shapeUri .{shape_guard}
+            {type_once}
+            {shape_once}
             FILTER(STRENDS(STR(?targetClass), "/{safe_name}") || STRENDS(STR(?targetClass), "{hash_suffix}") || STR(?targetClass) = "{safe_name}")
         }}
         LIMIT 1
         "#,
-        type_guard = guard.join(
+        type_once = guard.join_once(
             "?_gr_type",
             "?targetClass",
             "<rdf://type>",
             "<ad4m://SubjectClass>"
         ),
-        shape_guard = guard.join("?_gr_shape", "?targetClass", "<ad4m://shape>", "?shapeUri"),
+        shape_once = guard.join_once("?_gr_shape", "?targetClass", "<ad4m://shape>", "?shapeUri"),
     );
 
     let result_json = store.query(&query)?;
@@ -114,68 +114,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     // Step 2: Load all property shapes for this shape.  Fetches every
     // predicate the SHACL writer emits in one batched SELECT.  Using
     // OPTIONAL keeps unset fields as nulls in the result rows.
-    let props_query = format!(
-        r#"
-        SELECT
-            ?propUri ?path ?propType
-            ?datatype ?minCount ?maxCount
-            ?resolveLanguage ?writable ?local
-            ?getter ?hasValue ?className
-            ?relationKind ?targetClassName
-            ?whereFilter ?wherePredicates ?filterEnabled
-            ?transform ?interpretationHint ?identity ?ordering
-        WHERE {{
-            <{shape_uri}> <sh://property> ?propUri .{prop_guard}
-            ?propUri <sh://path> ?path .{path_guard}
-            ?propUri <rdf://type> ?propType .{type_guard}
-{optional_guards}        }}
-        "#,
-        prop_guard = guard.join(
-            "?_gr_prop",
-            &format!("<{shape_uri}>"),
-            "<sh://property>",
-            "?propUri"
-        ),
-        path_guard = guard.join("?_gr_path", "?propUri", "<sh://path>", "?path"),
-        type_guard = guard.join("?_gr_ptype", "?propUri", "<rdf://type>", "?propType"),
-        optional_guards = [
-            ("ad4m://interpretation_hint", "interpretationHint"),
-            ("ad4m://identity", "identity"),
-            ("sh://datatype", "datatype"),
-            ("sh://minCount", "minCount"),
-            ("sh://maxCount", "maxCount"),
-            ("ad4m://resolveLanguage", "resolveLanguage"),
-            ("ad4m://writable", "writable"),
-            ("ad4m://local", "local"),
-            ("ad4m://getter", "getter"),
-            ("ad4m://ordering", "ordering"),
-            ("sh://hasValue", "hasValue"),
-            ("sh://class", "className"),
-            ("ad4m://relationKind", "relationKind"),
-            ("ad4m://targetClassName", "targetClassName"),
-            ("ad4m://whereFilter", "whereFilter"),
-            ("ad4m://wherePredicates", "wherePredicates"),
-            ("ad4m://filter", "filterEnabled"),
-            ("ad4m://transform", "transform"),
-        ]
-        .iter()
-        .map(|(predicate, var)| {
-            // Each OPTIONAL binds its field only when a *counting* link
-            // asserts it: the reifier requirement sits inside the OPTIONAL,
-            // so a field a peer sent with a verdict that does not count is
-            // unbound, exactly as if it had never been written.
-            format!(
-                "            OPTIONAL {{ ?propUri <{predicate}> ?{var} .{} }}\n",
-                guard.join(
-                    &format!("?_gr_{var}"),
-                    "?propUri",
-                    &format!("<{predicate}>"),
-                    &format!("?{var}")
-                )
-            )
-        })
-        .collect::<String>(),
-    );
+    let props_query = props_sparql(&shape_uri, &guard);
 
     let props_json = store.query(&props_query)?;
     let prop_results: Vec<Value> = serde_json::from_str(&props_json)?;
@@ -216,7 +155,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             .as_str()
             .map(decode_literal_string_target);
         let writable = parse_bool_literal_target(first["writable"].as_str());
-        let local = parse_bool_literal_target(first["local"].as_str());
+        // `local` is read from EVERY row: `shown_link_join_once` yields one
+        // row per shown declaration, and a shown `false` beside a shown
+        // `true` must not make the property shared whichever arrives first.
+        let local = rows
+            .iter()
+            .filter_map(|row| parse_bool_literal_target(row["local"].as_str()))
+            .reduce(|a, b| a || b);
         let getter = first["getter"].as_str().map(decode_literal_string_target);
         let ordering = first["ordering"].as_str().map(decode_literal_string_target);
         let has_value = first["hasValue"].as_str().map(decode_literal_target_value);
@@ -429,6 +374,88 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         include_relations,
         interpretation_hint: class_hint,
     })
+}
+
+/// The property-shape query [`load_shape`] runs for `shape_uri`: every
+/// guarded triple through `join_once`, so a definition asserted by two
+/// signers still yields one row per property rather than multiplying the
+/// SELECT's rows by its reifier count.
+pub(super) fn props_sparql(shape_uri: &str, guard: &LinkGuard) -> String {
+    format!(
+        r#"
+        SELECT
+            ?propUri ?path ?propType
+            ?datatype ?minCount ?maxCount
+            ?resolveLanguage ?writable ?local
+            ?getter ?hasValue ?className
+            ?relationKind ?targetClassName
+            ?whereFilter ?wherePredicates ?filterEnabled
+            ?transform ?interpretationHint ?identity ?ordering
+        WHERE {{
+            {prop_once}
+            {path_once}
+            {type_once}
+{optional_guards}        }}
+        "#,
+        prop_once = guard.join_once(
+            "?_gr_prop",
+            &format!("<{shape_uri}>"),
+            "<sh://property>",
+            "?propUri"
+        ),
+        path_once = guard.join_once("?_gr_path", "?propUri", "<sh://path>", "?path"),
+        type_once = guard.join_once("?_gr_ptype", "?propUri", "<rdf://type>", "?propType"),
+        optional_guards = [
+            ("ad4m://interpretation_hint", "interpretationHint"),
+            ("ad4m://identity", "identity"),
+            ("sh://datatype", "datatype"),
+            ("sh://minCount", "minCount"),
+            ("sh://maxCount", "maxCount"),
+            ("ad4m://resolveLanguage", "resolveLanguage"),
+            ("ad4m://writable", "writable"),
+            ("ad4m://local", "local"),
+            ("ad4m://getter", "getter"),
+            ("ad4m://ordering", "ordering"),
+            ("sh://hasValue", "hasValue"),
+            ("sh://class", "className"),
+            ("ad4m://relationKind", "relationKind"),
+            ("ad4m://targetClassName", "targetClassName"),
+            ("ad4m://whereFilter", "whereFilter"),
+            ("ad4m://wherePredicates", "wherePredicates"),
+            ("ad4m://filter", "filterEnabled"),
+            ("ad4m://transform", "transform"),
+        ]
+        .iter()
+        .map(|(predicate, var)| {
+            // Each OPTIONAL binds its field only when a *counting* link
+            // asserts it: the reifier requirement sits inside the OPTIONAL,
+            // so a field a peer sent with a verdict that does not count is
+            // unbound, exactly as if it had never been written. `join_once`
+            // keeps it one row per property however many counting reifiers
+            // assert the triple.
+            if *predicate == "ad4m://local" {
+                // Locality fails toward Local: a `true` from any link that
+                // is not `invalid` — `cantCheck` included — declares the
+                // property private. `proofValid` is not asked; `invalid`
+                // stays out, or a forged `true` could stop the victim's
+                // writes being shared.
+                return format!(
+                    "            OPTIONAL {{ {} }}\n",
+                    shown_link_join_once("?_gr_local", "?propUri", "<ad4m://local>", "?local")
+                );
+            }
+            format!(
+                "            OPTIONAL {{ {} }}\n",
+                guard.join_once(
+                    &format!("?_gr_{var}"),
+                    "?propUri",
+                    &format!("<{predicate}>"),
+                    &format!("?{var}")
+                )
+            )
+        })
+        .collect::<String>(),
+    )
 }
 
 /// Recover an initial value for a non-flag property by inspecting the

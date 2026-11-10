@@ -49,7 +49,7 @@ Flow definitions are [Social DNA](/social-dna): a flow is data in the Perspectiv
 
 To answer *"what state is this task in?"*, the engine:
 
-1. starts at the flow's lowest-valued state,
+1. starts at the flow's lowest-valued state (if two states share the lowest `value`, the one whose name sorts first),
 2. looks at the declared edges that leave it,
 3. takes the edge that collected enough distinct, eligible signatures earliest,
 4. repeats from the state that edge leads to,
@@ -166,7 +166,7 @@ await perspective.addFlow("TaskFlow", flow);
 
 Facts about this shape:
 
-- `value` is an ordering key, not a progress percentage. `0, 1, 2` and `0, 10, 20` behave the same. **Every run begins in the lowest-valued state.**
+- `value` is an ordering key, not a progress percentage. `0, 1, 2` and `0, 10, 20` behave the same. **Every run begins in the lowest-valued state.** Give the entry state a `value` no other state shares. If two states do share the lowest `value`, the run begins in the one whose name sorts first (plain code-point order, the same in TypeScript and Rust), and the parser logs a warning. Both runtimes read the stored `value` with the same grammar: a plain decimal (`-0`, `1.5`, `1e21`) or `inf`/`infinity` with an optional sign. A `value` that fits neither (`NaN`, an empty or garbled literal) sorts last in both runtimes and never becomes the initial state; a state with no `value` at all counts as `0`.
 - The flow's canonical identity is its `flowUri`: `${namespace}${name}Flow`, here `handover://TaskFlowFlow`. Instances store that URI, because bare names collide when two communities share Social DNA.
 - Each state's `interpretationHint` is one English sentence. It is rendered into the prompt an interpreting LLM sees for that state, so an agent reasoning about a transition reads what the group meant, not a guess from the name.
 - A per-state `consensusRule` overrides the flow-level default. Cheap early edges can take one signature while the final one takes two, or a reviewer.
@@ -411,7 +411,7 @@ verdict.voters;         // the distinct DIDs that settled the final edge
 
 **What a receipt does not prove** — see [Guarantees](#guarantees-and-non-guarantees) for the full list. The two that matter most in practice: it does not prove any voter actually re-checked the seal before signing (an honest client does, but the check itself is not signed), and it does not prove the outputs still have the committed content *now*. A receipt attests to content at completion. A later edit does not invalidate a minted receipt — its preimages are frozen inside it.
 
-**Verification never re-runs guards and never queries the live graph.** The receipt carries the signed material, and the verdict comes from re-folding that material under the verifier's own catalogue. A receipt minted under an older flow definition stops verifying when the definition changes — the verdict names that reason (`DnaChanged`) rather than calling the receipt bad.
+**Verification never re-runs guards and never queries the live graph.** The receipt carries the signed material, and the verdict comes from re-folding that material under the verifier's own catalogue. Before the fold, the verifier refreshes the signers' key logs — as the minter does before minting — so the carried votes and grant links are judged under the same freshness window as live writes, and a replica that cannot read a log answers `undecidable`, never `verified`, and tries again on the next read. A receipt minted under an older flow definition stops verifying when the definition changes — the verdict names that reason (`DnaChanged`) rather than calling the receipt bad.
 
 The three-way verdict is deliberate. `undecidable` means "this replica cannot decide", not "the receipt is bad". Do not collapse it into `rejected` in a UI, and never treat it as `verified`.
 
