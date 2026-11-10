@@ -65,7 +65,9 @@
 //!   layer → forget at that epoch → mark again from the vault and the note. A removal that is
 //!   refused or fails removes only its own release, wherever it is. A forget that finds a key
 //!   installed since ([`Forgot::Kept`]) released nothing: the release is removed and the
-//!   record is marked from the vault and the note in place.
+//!   record is marked from the vault and the note in place. A removal that finished retires
+//!   the releases below its own ([`retire_below`]): no flow can see them again, so repeat
+//!   removals on an empty vault keep one release. Intents and receipts stay.
 //! - **repair** ([`refresh_master`], on a vault that keeps the current master): a `MarkOwed`
 //!   note first takes a master key that still waits in the inbox (an acquisition cut off
 //!   before its ack). Else it marks this device only when the note has landed
@@ -1484,7 +1486,10 @@ async fn mark_gated<R: ExecutorRpc>(
 /// removal's own release (its token), wherever it is, and leaves the key where it was: it never
 /// puts back a note that another operation owns. A forget that finds a key installed since
 /// ([`Forgot::Kept`]) released nothing: the release is removed, and the entry is marked from
-/// the vault and the note in place ([`hold_mark`]). Answers the record version written.
+/// the vault and the note in place ([`hold_mark`]). When the removal finished with its release
+/// in place, it retires the releases below that release ([`retire_below`]), so a repeat removal
+/// (a retry after an uncertain answer, on a vault that is empty already) keeps one release in
+/// the note, not one per removal. Answers the record version written.
 pub async fn remove_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -1566,6 +1571,9 @@ pub async fn remove_master<R: ExecutorRpc>(
             }
         }
     }
+    // The release stands now: this removal never takes it out again. The releases below it are
+    // retired, so repeat removals do not grow the note.
+    retire_below(vault, &scid, &own, token)?;
     // A stage at or behind the log would be promoted or kept by the next refresh, bringing back
     // the key the person just removed. One ahead is a rotation in flight: its owner decides.
     let current = log_chain.state().masters.len().saturating_sub(1);
@@ -1604,6 +1612,32 @@ fn release(
         pop_own(vault, scid, key_id, released.token())?;
     }
     Err(note_busy())
+}
+
+/// Retires the releases below the release of `token`'s removal, which stands for good (its
+/// removal finished and never takes it out again). Each operation that can take that release
+/// out takes out the releases below it too: a receipt whose intent is below them removes every
+/// release above its intent with an epoch not later than its own, and the epoch of a lower
+/// release is not later than the epoch of a higher one ([`release`] reads the epoch again after
+/// its push); a clear removes every layer below its receipt. So no flow can see a release below
+/// a release that stands. Intents and receipts stay: an open intent can be a take still in
+/// flight, and only its own operation changes it. No change when the release is not in the note.
+fn retire_below(
+    vault: &dyn Vault,
+    scid: &str,
+    key_id: &str,
+    token: NoteToken,
+) -> Result<(), ClientError> {
+    swap_layers(vault, scid, key_id, |layers| {
+        let at = layers.iter().position(|layer| layer.token() == token)?;
+        let mut i = 0;
+        layers.retain(|layer| {
+            i += 1;
+            i <= at + 1 || !matches!(layer, CustodyNote::Released { .. })
+        });
+        Some(())
+    })?;
+    Ok(())
 }
 
 /// Whether `record` lists a device other than `own` that holds the current master key of

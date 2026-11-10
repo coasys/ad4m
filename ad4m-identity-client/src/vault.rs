@@ -221,7 +221,9 @@ impl Unlocked {
 ///   app installed. A receipt of a new acquisition by this device defeats it: a release below
 ///   the receipt, and a release above it whose epoch is not later than the receipt's intent.
 ///   The store moved the custody epoch past such a release, so the removal's compare-and-delete
-///   forget cannot take the new key.
+///   forget cannot take the new key. A removal that finished removes the releases below its
+///   own: every operation that can remove its release removes them too, so no flow sees them
+///   again, and repeat removals keep one release, not one per removal.
 ///
 /// The standing of a note ([`CustodyNote::standing`]) comes from the top layer down: open
 /// intents are passed over, and the first release or receipt decides. No note: nothing owed
@@ -493,8 +495,29 @@ impl CustodyNote {
         }
     }
 
+    /// This layer alone, without the notes below it. Copies none of them, so [`Self::layers`]
+    /// is linear in the depth of the note.
     fn bare(&self) -> CustodyNote {
-        self.clone().over(None)
+        match self {
+            CustodyNote::MarkOwed {
+                index,
+                epoch,
+                token,
+                acquired,
+                ..
+            } => CustodyNote::MarkOwed {
+                index: *index,
+                epoch: *epoch,
+                token: *token,
+                acquired: *acquired,
+                restores: None,
+            },
+            CustodyNote::Released { epoch, token, .. } => CustodyNote::Released {
+                epoch: *epoch,
+                token: *token,
+                restores: None,
+            },
+        }
     }
 
     /// What the note says, from the top layer down: open intents are passed over, and the

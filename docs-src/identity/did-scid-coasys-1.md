@@ -778,7 +778,10 @@ operation wrote, even one with the same index and epoch. There are three kinds o
 - `Released {epoch, token}` is written before a removal forgets the key and publishes `false`.
   The removal reads the custody epoch again after the release. When the epoch moved, a store
   came between: it removes the release and starts again. It writes `false` only while its
-  release is still the top layer. A removal that fails removes only its own release.
+  release is still the top layer. A removal that fails removes only its own release. A
+  removal that finished retires the releases below its own: every operation that can remove
+  its release removes them too, so no reader sees them again. Thus a repeated removal keeps
+  one release, not one per removal. It keeps the intents and receipts below it.
 
 The standing of the note comes from the top layer down: open intents are passed over, and the
 first release or receipt decides. A receipt defeats a release below it, and a release above it

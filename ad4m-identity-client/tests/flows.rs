@@ -80,8 +80,9 @@ impl TestStore {
             Settings {
                 pow_bits: 8,
                 // A test makes an identity's writes (offers, inbox puts, record writes, posts)
-                // within a second; the store's bucket is not under test here.
-                identity_burst: 100,
+                // within a second (one test runs 200 removals); the store's bucket is not under
+                // test here.
+                identity_burst: 1000,
                 ..Settings::default()
             },
         );
@@ -10031,4 +10032,116 @@ async fn nested_failed_removals_restore_the_owed_mark() {
         (HoldsMaster::Yes, Some(0))
     );
     assert_eq!(note_of(&*shared, &scid, "d1"), None);
+}
+
+/// Asserts that `note` survives a serde JSON round trip unchanged (a vault keeps it as JSON).
+fn assert_round_trips(note: &CustodyNote) {
+    let json = serde_json::to_string(note).unwrap();
+    let back: CustodyNote = serde_json::from_str(&json).unwrap_or_else(|e| {
+        panic!(
+            "a note of {} layers does not decode: {e}",
+            note.layers().len()
+        )
+    });
+    assert_eq!(&back, note);
+}
+
+/// Lal's P3 (releases never retired). A removal on a vault that is already empty (a retry after
+/// an uncertain answer, the person pressing remove again) passes the another-copy check, and its
+/// release stays. The release of the earlier removal below it is retired, so the note stays one
+/// layer deep however many times the removal runs, and its JSON stays decodable.
+#[tokio::test]
+async fn repeat_removals_on_an_empty_vault_keep_one_release() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 125).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert_eq!(vault.master_index(&scid).unwrap(), None);
+    for round in 2..=200 {
+        remove_master(&a, &vault, &did, &OsRandom)
+            .await
+            .unwrap_or_else(|e| panic!("removal {round} failed: {e:?}"));
+        let note = note_of(&vault, &scid, "d1").expect("the release stays");
+        assert_eq!(
+            note.layers().len(),
+            1,
+            "removal {round} left {} layers",
+            note.layers().len()
+        );
+        assert!(matches!(note, CustodyNote::Released { .. }), "{note:?}");
+    }
+    let note = note_of(&vault, &scid, "d1").unwrap();
+    assert_round_trips(&note);
+    assert_eq!(mark_of(&a, &vault, &did, "d1").await.0, HoldsMaster::No);
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom).await;
+    assert!(
+        !matches!(refreshed, Ok(Refreshed::Repaired { .. })),
+        "a refresh re-marked the released copy: {refreshed:?}"
+    );
+    assert_eq!(mark_of(&a, &vault, &did, "d1").await.0, HoldsMaster::No);
+    assert_eq!(note_of(&vault, &scid, "d1"), Some(note));
+}
+
+/// An intent cut off by a crash (its take wrote it, then stopped before its store) between
+/// repeat removals. The note cannot tell such an intent from one whose take is still in
+/// flight, so the removals keep every intent; only the releases below the newest one are
+/// retired. Each crash adds at most one layer, and the note still decodes.
+#[tokio::test]
+async fn repeat_removals_keep_open_intents_and_retire_older_releases() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 126).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    let mut intents = Vec::new();
+    for round in 1..=20 {
+        let below = note_of(&vault, &scid, "d1");
+        let epoch = vault.custody_epoch(&scid).unwrap();
+        let intent = CustodyNote::owed(0, epoch, &OsRandom);
+        let crashed = intent.clone().over(below.clone());
+        assert!(vault
+            .swap_custody_note(&scid, "d1", below.as_ref(), Some(&crashed))
+            .unwrap());
+        intents.insert(0, intent);
+        remove_master(&a, &vault, &did, &OsRandom)
+            .await
+            .unwrap_or_else(|e| panic!("removal {round} failed: {e:?}"));
+        let note = note_of(&vault, &scid, "d1").unwrap();
+        let layers = note.layers();
+        assert!(
+            matches!(layers[0], CustodyNote::Released { .. }),
+            "round {round}: {layers:?}"
+        );
+        assert_eq!(
+            layers[1..],
+            intents[..],
+            "round {round}: the intents changed, or a release stayed below the newest"
+        );
+        assert_round_trips(&note);
+    }
 }
