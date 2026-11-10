@@ -4361,7 +4361,11 @@ mod tests {
         let before = passes();
         let service = Arc::new(world.service);
         let changes = service.cache.subscribe();
-        tokio::spawn(run_key_session_watch(service, changes));
+        tokio::spawn(run_key_session_watch(
+            service,
+            changes,
+            crate::agent::agent_ready(),
+        ));
         let started = tokio::time::Instant::now();
         let mut second_pass_at = None;
         while started.elapsed() < 2 * KEY_RECHECK_INTERVAL {
