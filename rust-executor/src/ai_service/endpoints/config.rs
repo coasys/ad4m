@@ -24,6 +24,7 @@ use crate::types::{
 pub struct AiEndpointSetting {
     pub name: String,
     pub kind: EndpointKind,
+    #[serde(deserialize_with = "credential_free_url")]
     pub base_url: Url,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
@@ -37,6 +38,16 @@ pub struct AiEndpointSetting {
     /// Unset: no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<u32>,
+}
+
+/// A `base_url` without a user name or password: the file is refused with
+/// [`super::URL_CREDENTIALS_REFUSAL`], as `ai.addEndpoint` refuses it.
+fn credential_free_url<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Url, D::Error> {
+    let url = Url::deserialize(deserializer)?;
+    if super::has_credentials(&url) {
+        return Err(serde::de::Error::custom(super::URL_CREDENTIALS_REFUSAL));
+    }
+    Ok(url)
 }
 
 /// One `ai_models` entry: `remote_model` on the endpoint named `endpoint`.

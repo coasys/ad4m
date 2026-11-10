@@ -683,6 +683,18 @@ mod tests {
         );
     }
 
+    /// An endpoint URL with a user name or password in it is refused, naming the reason.
+    #[test]
+    fn an_ai_endpoint_url_with_credentials_is_refused() {
+        let refused = parse(
+            r#"{"ai_endpoints": [{"name": "openai", "kind": "OPEN_AI",
+                  "base_url": "https://alice:hunter2@api.openai.com/v1"}]}"#,
+        );
+        let message = format!("{}", refused.unwrap_err());
+        assert!(message.contains("user name or password"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
+    }
+
     #[test]
     fn an_out_of_range_sfu_udp_port_is_refused() {
         assert!(parse(r#"{"sfu_udp_port": 70000}"#).is_err());
