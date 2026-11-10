@@ -75,6 +75,9 @@ export class AgentClient {
     return new AgentStatus(agentStatus);
   }
 
+  /** Creates the agent's keys and DID on first run. The executor refuses (409)
+   *  an agent that is already initialised — {@link unlock} it instead; a second
+   *  `generate` never replaces the existing keys and DID. */
   async generate(passphrase: string, options?: CallOptions): Promise<AgentStatus> {
     const result = await this.#apiClient.call('agent.generate', { passphrase }, options);
     return new AgentStatus(result);
