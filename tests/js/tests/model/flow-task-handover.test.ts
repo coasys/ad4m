@@ -69,7 +69,9 @@
  *     A key the engine does not know anywhere in the rule is refused by
  *     `addFlow` before the definition is stored (Part 4); it is not dropped.
  *     A definition that reached the store another way (synced from a peer)
- *     is refused when it is read: the edge fires for nobody.
+ *     is refused when it is read: the edge fires for nobody. A grant starts
+ *     at a link whose signature verifies, from an author the rule accepts;
+ *     an earlier link from anyone else does not move it (Part 5).
  *
  *  7. GRANTING A ROLE IS ITSELF A FLOW  (the fractal stretch)
  *     A `ReviewerRoleGrant` flow runs over a `HandoverReviewerRole` instance
@@ -119,7 +121,7 @@
  */
 
 import { expect } from "chai";
-import { Ad4mClient, PerspectiveProxy, SHACLFlow } from "@coasys/ad4m";
+import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, SHACLFlow } from "@coasys/ad4m";
 import { FlowInstance } from "@coasys/ad4m";
 import type { ConsensusRule, FlowProposeResult } from "@coasys/ad4m";
 import { Ad4mModel, Model, Property } from "@coasys/ad4m";
@@ -719,5 +721,61 @@ describe("flow task handover — WE-facing API with roles", function () {
       stored!.states.find((s) => s.name === "Done")?.consensusRule?.fromRole,
       "with the gate as written",
     ).to.have.property("producedByFlow");
+  });
+
+  // ── Part 5: when a grant starts ──────────────────────────────────────────
+
+  it("Part 5 — a grant starts at the granter's link, not at an earlier one the grantee wrote", async () => {
+    const { aliceP, bobP } = await sharedPerspective("handover-grant-start");
+    // Only Alice grants the role: the rule's author sits under every field,
+    // so both the `agent` and the `domain` link must be hers.
+    await aliceP.addFlow(
+      "TaskFlow",
+      makeTaskFlow({
+        n: 1,
+        fromRole: {
+          className: "HandoverReviewerRole",
+          where: { domain: "frontend", author: aliceDid },
+          didProperty: "agent",
+        },
+      }),
+    );
+
+    const task = (await (Task as any).create(aliceP, { title: "Early self-assignment" })) as Task;
+    await FlowInstance.start(aliceP, "TaskFlow", task.id);
+    await advanceToInReview(aliceP, bobP, task.id);
+    await createUnder<ReviewNote>(ReviewNote, aliceP, task.id, { body: "Looks good" });
+
+    // Bob writes the role instance naming himself, then votes. His own links
+    // are not a grant under this rule, so the vote does not count.
+    const role = await createUnder<ReviewerRole>(ReviewerRole, bobP, task.id, {
+      agent: bobDid,
+      domain: "frontend",
+    });
+    const bobPress = await (await instanceOn(bobP, task.id)).proposeTransition("Done");
+    expect(bobPress.outcomes, "Bob granted himself nothing").to.have.lengthOf(0);
+    expect(bobPress.recordedVote).to.be.true;
+
+    // Alice grants him the role after his vote, by writing the same two
+    // links herself. The vote was cast outside the role.
+    for (const predicate of ["handover://role_agent", "handover://role_domain"]) {
+      const [bobs] = await aliceP.get(new LinkQuery({ source: role.id, predicate }));
+      expect(bobs, `Bob's ${predicate} link`).to.exist;
+      await aliceP.add(new Link({ source: role.id, predicate, target: bobs.data.target }));
+    }
+
+    // Alice's own click re-derives the run. She holds no role, so it counts
+    // for nothing, and Bob's vote predates his grant.
+    // Fail-on-old-code: the grant started at the earliest `agent` link naming
+    // Bob from ANY author, which was his own, written before his vote, so the
+    // vote counted, the run had already settled Done, and this press failed
+    // with "`Done` is not reachable from `Done`".
+    const alicePress = await (await instanceOn(aliceP, task.id)).proposeTransition("Done");
+    expect(
+      alicePress.outcomes,
+      "Bob's own earlier link must not date the grant Alice made after his vote",
+    ).to.have.lengthOf(0);
+    expect(alicePress.derivedState).to.equal("InReview");
+    // Part 2 is the positive half: a vote cast after a genuine grant counts.
   });
 });

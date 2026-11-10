@@ -433,7 +433,8 @@ if ! timeout "$BUILD_TIMEOUT" bash -euo pipefail -c '
   pnpm install --no-frozen-lockfile
   pnpm build-dapp
   (cd core && pnpm install --no-frozen-lockfile)
-  pnpm run build-deno-snapshot
+  # The checkout persists between deploys: make the snapshot from source, never from a stamp.
+  FORCE_DENO_SNAPSHOT=1 pnpm run build-deno-snapshot
   (cd cli && cargo build --release)
 ' build "$SRC" "$sha" >"$build_log" 2>&1; then
   set_status last_failed_sha "$sha"
