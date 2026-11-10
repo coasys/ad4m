@@ -1266,9 +1266,44 @@ mod tests {
         else {
             panic!("expected Verified, got: {verdict}");
         };
-        let mut expected = vec![bot_did, person_b];
+        let mut expected = vec![bot_did.clone(), person_b];
         expected.sort();
         assert_eq!(voters, &expected, "the bot votes as its own did:key");
+
+        // The owner's proposal and its bot's own vote are two voters: the bot is its
+        // own did:key, as any did:key signer with no log is, not a second device of A.
+        let (uri_a, links_a) = device_terminal_proposal(
+            "p-a",
+            &log_a.device,
+            1,
+            "open",
+            "done",
+            &delivered().seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T1,
+        );
+        let bot_vote = device_link(&uri_a, ACCEPTED_BY_PREDICATE, &bot_did, &bot_a, 1, T3);
+        let verdict = mint_and_verify(
+            n2_terminal_flow(),
+            read_set(
+                "open",
+                vec![ProposalLinks {
+                    uri: uri_a,
+                    links: [links_a, vec![bot_vote]].concat(),
+                }],
+            ),
+            outs(&[OUTPUT]),
+        )
+        .expect("the owner and its bot are two voters");
+        let crate::perspectives::flow_instance::verify::ReceiptVerdict::Verified { voters, .. } =
+            &verdict
+        else {
+            panic!("expected Verified, got: {verdict}");
+        };
+        let mut expected = vec![bot_did, person_a];
+        expected.sort();
+        assert_eq!(voters, &expected, "the owner and its bot, each once");
 
         map.forget(&log_a.scid());
         map.forget(&log_b.scid());
