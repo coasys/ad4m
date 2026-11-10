@@ -565,17 +565,60 @@ fn guarded_definition_queries_return_one_row_per_triple() {
 
     // `load_shape`'s property read is bound by the shape URI on record.
     let shape_uri = load_shape_from_store(&store, "Message").unwrap().shape_uri;
-    let props: Vec<Value> = serde_json::from_str(
-        &store
-            .query(&crate::perspectives::model_query::shape::props_sparql(
-                &shape_uri, &guard,
-            ))
-            .unwrap(),
-    )
-    .unwrap();
+    let props =
+        crate::perspectives::model_query::shape::property_rows(&store, &shape_uri, &guard).unwrap();
     assert_eq!(
         props.len(),
         3,
         "Message's three properties, one row each: {props:?}"
     );
+}
+
+/// A cold read of every class's definition — what a model query with
+/// `include` makes first, through `subject_classes_of_with_pending`, and what
+/// a waker's subscribe handshake waits on — must not cost a scan of every
+/// counting reifier in the perspective per property field. With a reifier
+/// join inside each of `load_shape`'s per-field `OPTIONAL`s and inside
+/// `concrete_subject_class_names`' `FILTER NOT EXISTS`, Oxigraph scanned
+/// every reifier per row: about a second per class in a WE space of a few
+/// thousand links, so the first `include` and the waker's handshake timed out.
+#[test]
+fn definition_reads_do_not_scale_with_the_perspectives_links() {
+    let store = all_classes();
+    for i in 0..30 {
+        let name = format!("Kind{i}");
+        let property = format!(r#"{{"path":"app://field{i}","name":"field","max_count":1}}"#);
+        install_class(&store, &name, &concrete_shacl(&name, &property));
+    }
+    // Records: every link its own counting reifier.
+    let signer = TestSigner::generate();
+    for i in 0..6000u32 {
+        let link = Link {
+            source: format!("app://record-{}", i / 3),
+            predicate: Some(format!("app://field{}", i % 30)),
+            target: format!("literal:string:r{i}"),
+        };
+        let mut le = LinkExpression::from(signer.sign(link.normalize()));
+        le.status = Some(LinkStatus::Shared);
+        store.add_link(&le).unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    let concrete = concrete_subject_class_names(&store).unwrap();
+    let classes_took = start.elapsed();
+    for name in &concrete {
+        let shape = load_shape_from_store(&store, name).unwrap();
+        assert!(
+            !shape.properties.is_empty() || !shape.include_relations.is_empty(),
+            "{name}"
+        );
+    }
+    let elapsed = start.elapsed();
+    eprintln!(
+        "{} concrete classes over 6000 signed links: class list {classes_took:?}, with every shape {elapsed:?}",
+        concrete.len()
+    );
+    assert_eq!(concrete.len(), 37, "{concrete:?}");
+    // Linear in the records before the fix: ~9 s here in a release build; ~0.4 s after.
+    assert!(elapsed.as_millis() < 1000, "{elapsed:?}");
 }
