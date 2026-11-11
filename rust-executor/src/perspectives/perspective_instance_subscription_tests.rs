@@ -76,11 +76,23 @@ async fn a_model_subscriber_keeps_its_updates_when_another_disposes() {
     let query_json = r#"{"where":{"owner":"alice"}}"#;
 
     let (id1, _, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into(), None)
+        .model_subscribe_and_query(
+            "Task".into(),
+            query_json.into(),
+            uuid::Uuid::new_v4().to_string(),
+            "c".into(),
+            None,
+        )
         .await
         .expect("first model subscribe");
     let (id2, _, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into(), None)
+        .model_subscribe_and_query(
+            "Task".into(),
+            query_json.into(),
+            uuid::Uuid::new_v4().to_string(),
+            "c".into(),
+            None,
+        )
         .await
         .expect("second model subscribe");
     assert_ne!(id1, id2, "each subscriber gets its own subscription");
@@ -132,11 +144,21 @@ async fn a_query_subscriber_keeps_its_updates_when_another_connection_disposes()
     let query = "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".to_string();
 
     let (id1, _, _) = perspective
-        .subscribe_and_query(query.clone(), "a".into(), None)
+        .subscribe_and_query(
+            query.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "a".into(),
+            None,
+        )
         .await
         .expect("first subscribe");
     let (id2, _, _) = perspective
-        .subscribe_and_query(query.clone(), "b".into(), None)
+        .subscribe_and_query(
+            query.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "b".into(),
+            None,
+        )
         .await
         .expect("second subscribe");
     assert_ne!(id1, id2, "each subscriber gets its own subscription");
@@ -193,11 +215,21 @@ async fn a_rerun_update_reaches_only_its_subscriber() {
     let query = "SELECT ?s ?o WHERE { ?s <ns://audience-title> ?o . }".to_string();
 
     let (id_u, _, _) = perspective
-        .subscribe_and_query(query.clone(), "u-connection".into(), Some(u.clone()))
+        .subscribe_and_query(
+            query.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "u-connection".into(),
+            Some(u.clone()),
+        )
         .await
         .expect("U subscribes");
     let (id_v, _, _) = perspective
-        .subscribe_and_query(query.clone(), "v-connection".into(), Some(v.clone()))
+        .subscribe_and_query(
+            query.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "v-connection".into(),
+            Some(v.clone()),
+        )
         .await
         .expect("V subscribes");
     assert_ne!(id_u, id_v, "two agents' subscriptions are not shared");
@@ -284,6 +316,7 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
         .model_subscribe_and_query(
             classes,
             r#"{"includeUnverified":true}"#.into(),
+            uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
         )
@@ -354,6 +387,7 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
         .model_subscribe_and_query(
             classes,
             r#"{"includeUnverified":true}"#.into(),
+            uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
         )
@@ -411,6 +445,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .model_subscribe_and_query(
             QueryClasses::union(vec!["Task".into(), "Note".into()]),
             query_json.into(),
+            uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
         )
@@ -420,6 +455,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .model_subscribe_and_query(
             QueryClasses::union(vec!["Note".into(), "Task".into(), "Note".into()]),
             query_json.into(),
+            uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
         )
@@ -427,4 +463,105 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .expect("second union subscribe");
     assert_ne!(a, b, "each subscriber gets its own subscription");
     assert_eq!(result_a, result_b, "equal unions answer the same");
+}
+
+/// A client that gives up on a slow subscribe and tries again leaves the earlier
+/// subscriptions behind when the executor finished them anyway (staging, 2026-11-10: one
+/// socket held 62 copies of one mention query over 76k links). Copies of one query keep
+/// their own ids, revisions and updates, but a re-check pass evaluates the query once
+/// for all of them, not once per copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn identical_subscriptions_share_one_evaluation_per_pass() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+    let query_json = r#"{"where":{"owner":"alice"}}"#;
+    let other_json = r#"{"where":{"owner":"bob"}}"#;
+
+    let mut copies = vec![];
+    for connection in ["c", "c", "c", "d"] {
+        let (id, _, _) = perspective
+            .model_subscribe_and_query(
+                "Task".into(),
+                query_json.into(),
+                uuid::Uuid::new_v4().to_string(),
+                connection.into(),
+                None,
+            )
+            .await
+            .expect("model subscribe");
+        copies.push((id, connection));
+    }
+    let (other, _, _) = perspective
+        .model_subscribe_and_query(
+            "Task".into(),
+            other_json.into(),
+            uuid::Uuid::new_v4().to_string(),
+            "c".into(),
+            None,
+        )
+        .await
+        .expect("model subscribe to another query");
+    let ids: HashSet<&String> = copies.iter().map(|(id, _)| id).collect();
+    assert_eq!(
+        ids.len(),
+        4,
+        "each subscribe still gets its own subscription"
+    );
+
+    let mut rx = get_global_pubsub().await.subscribe_events();
+    perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("Task".to_string()),
+                query: None,
+            },
+            "ad4m://task/shared".to_string(),
+            Some(serde_json::json!({ "title": "once", "owner": "alice" })),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("create_subject(Task)");
+
+    let before = subscriptions::evaluations::count(&perspective.uuid);
+    perspective
+        .check_subscribed_queries(ChangedPredicates::CheckAll)
+        .await;
+    assert_eq!(
+        subscriptions::evaluations::count(&perspective.uuid) - before,
+        2,
+        "one evaluation for the four copies, one for the other query"
+    );
+
+    // Updates for all copies come in any order: collect them by id.
+    let mut got: HashMap<String, Arc<Event>> = HashMap::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while got.len() < copies.len() {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("pubsub receiver closed: {e}"),
+            };
+            if event.topic != Topic::PerspectiveQuerySubscription
+                || event.payload["perspectiveUuid"] != perspective.uuid
+            {
+                continue;
+            }
+            if let Some(id) = event.payload["subscriptionId"].as_str() {
+                got.insert(id.to_string(), event.clone());
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("updates for {:?} only", got.keys()));
+    for (id, connection) in &copies {
+        let event = &got[id];
+        assert!(
+            event.payload.to_string().contains("ad4m://task/shared"),
+            "every copy gets the new Task, got: {}",
+            event.payload
+        );
+        assert_eq!(event.payload["revision"], 1);
+        assert_eq!(event.connection.as_deref(), Some(*connection));
+    }
+    assert!(is_registered(&perspective, &other).await);
 }

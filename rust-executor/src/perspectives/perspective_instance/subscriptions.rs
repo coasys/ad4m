@@ -16,6 +16,22 @@ use crate::agent::{did_for_context, AgentContext};
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
 
+/// A subscribe call named an id that a subscription on the perspective already has.
+#[derive(Debug)]
+pub struct SubscriptionIdTaken(pub String);
+
+impl std::fmt::Display for SubscriptionIdTaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Subscription id {} is already in use on this perspective",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for SubscriptionIdTaken {}
+
 impl PerspectiveInstance {
     /// Resync after a revision gap (`perspective.resyncSubscription`): the
     /// subscription's current revision and the result it describes, read
@@ -33,29 +49,34 @@ impl PerspectiveInstance {
         Some((query.revision, query.last_result.clone()))
     }
 
-    /// Register `query` under a new id, then compute its first result with
-    /// `first_result`. Registering first means a write that lands meanwhile
-    /// is still checked, and reported. Until the first result is stored,
-    /// `last_result` is empty, so an update published before then carries
-    /// the whole `result`. Returns the id, and the revision and result the
-    /// subscribe reply carries: revision 0 and the first result, or the
-    /// newer revision a check already published.
+    /// Register `query` under `id`, the client's, then compute its first
+    /// result with `first_result`. Registering first means a write that lands
+    /// meanwhile is still checked, and reported. Until the first result is
+    /// stored, `last_result` is empty, so an update published before then
+    /// carries the whole `result`. Returns the id, and the revision and result
+    /// the subscribe reply carries: revision 0 and the first result, or the
+    /// newer revision a check already published. An `id` already registered on
+    /// this perspective, by any connection, fails with [`SubscriptionIdTaken`]
+    /// and registers nothing.
     pub(super) async fn open_subscription(
         &self,
+        id: String,
         query: SubscribedQuery,
         first_result: impl std::future::Future<Output = Result<String, AnyError>>,
     ) -> Result<(String, u64, String), AnyError> {
-        let id = uuid::Uuid::new_v4().to_string();
-        log::info!(
-            "🔗 subscription {} created for connection {} [{}]",
-            id,
-            query.connection,
-            self.uuid
-        );
-        self.subscribed_queries
-            .lock()
-            .await
-            .insert(id.clone(), query);
+        {
+            let mut queries = self.subscribed_queries.lock().await;
+            if queries.contains_key(&id) {
+                return Err(SubscriptionIdTaken(id).into());
+            }
+            log::info!(
+                "🔗 subscription {} created for connection {} [{}]",
+                id,
+                query.connection,
+                self.uuid
+            );
+            queries.insert(id.clone(), query);
+        }
         // A call the client cancels (`request.cancel`, or its connection closing) drops this
         // future while the first result computes. Take the subscription out again then, or it
         // stays registered and re-runs on every change for a query nobody holds (#1595).
@@ -278,6 +299,45 @@ impl Drop for UnregisterOnDrop {
     }
 }
 
+/// What one re-check of a subscription evaluates. Subscriptions with the same
+/// key get the same result, whoever subscribed: a re-check pass runs each key
+/// once and hands its result to all of them (`check_subscribed_queries`).
+pub(super) fn evaluation_key(
+    query: &str,
+    model: Option<&super::ModelSubscriptionParams>,
+) -> String {
+    match model {
+        Some(params) => format!("model\0{:?}\0{}", params.classes, params.query_json),
+        None => format!("sparql\0{query}"),
+    }
+}
+
+/// Test hook: how many evaluations re-check passes ran, per perspective.
+#[cfg(test)]
+pub(super) mod evaluations {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    static EVALUATIONS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+    pub(in crate::perspectives) fn note(perspective_uuid: &str) {
+        *EVALUATIONS
+            .lock()
+            .unwrap()
+            .entry(perspective_uuid.to_string())
+            .or_default() += 1;
+    }
+
+    pub(in crate::perspectives) fn count(perspective_uuid: &str) -> usize {
+        EVALUATIONS
+            .lock()
+            .unwrap()
+            .get(perspective_uuid)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
 /// The most subscription re-checks that run at once in the executor.
 const MAX_CONCURRENT_RECHECKS: usize = 8;
 
@@ -459,7 +519,13 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let query = r#"{"includeUnverified": true}"#.to_string();
         let (id, _, initial) = p
-            .model_subscribe_and_query("Todo".into(), query.clone(), "c".into(), None)
+            .model_subscribe_and_query(
+                "Todo".into(),
+                query.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                "c".into(),
+                None,
+            )
             .await
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
@@ -501,7 +567,12 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
         let (id, _, _) = p
-            .subscribe_and_query(q.clone(), "c".into(), None)
+            .subscribe_and_query(
+                q.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                "c".into(),
+                None,
+            )
             .await
             .unwrap();
         let (revision, result) = p.subscription_state(&id, "c").await.unwrap();
@@ -522,6 +593,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_subscription_takes_the_id_its_caller_gives() {
+        let (p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
+        let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
+        let (id, revision, _) = p
+            .subscribe_and_query(q.clone(), "client-minted".into(), "c".into(), None)
+            .await
+            .unwrap();
+        assert_eq!((id.as_str(), revision), ("client-minted", 0));
+        assert!(p.subscription_state("client-minted", "c").await.is_some());
+
+        let (id, _, _) = p
+            .model_subscribe_and_query(
+                "Todo".into(),
+                "{}".into(),
+                "client-minted-model".into(),
+                "c".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(id, "client-minted-model");
+        assert!(p
+            .subscription_state("client-minted-model", "c")
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn an_id_already_registered_is_refused_and_registers_nothing() {
+        let (p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
+        let held = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
+        p.subscribe_and_query(held.clone(), "taken".into(), "c".into(), None)
+            .await
+            .unwrap();
+        // Any connection's id counts, whichever kind of live query asks for it.
+        for connection in ["c", "other"] {
+            let err = p
+                .subscribe_and_query(
+                    "SELECT ?s WHERE { ?s <test://q> ?o }".into(),
+                    "taken".into(),
+                    connection.into(),
+                    None,
+                )
+                .await
+                .expect_err("the id is taken");
+            assert!(
+                err.downcast_ref::<super::SubscriptionIdTaken>().is_some(),
+                "{err}"
+            );
+            let err = p
+                .model_subscribe_and_query(
+                    "Todo".into(),
+                    "{}".into(),
+                    "taken".into(),
+                    connection.into(),
+                    None,
+                )
+                .await
+                .expect_err("the id is taken");
+            assert!(
+                err.downcast_ref::<super::SubscriptionIdTaken>().is_some(),
+                "{err}"
+            );
+        }
+        let queries = p.subscribed_queries.lock().await;
+        assert_eq!(queries.len(), 1, "nothing else registered");
+        let kept = &queries["taken"];
+        assert_eq!(
+            (kept.query.as_str(), kept.connection.as_str()),
+            (held.as_str(), "c")
+        );
+        assert!(
+            kept.model_query_params.is_none(),
+            "the first one is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dispose_after_the_open_completed_ends_it() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
+        p.subscribe_and_query(q.clone(), "mine".into(), "c".into(), None)
+            .await
+            .unwrap();
+        // The client gave up on the call after the executor answered: it releases the
+        // id it minted, without the reply.
+        assert!(p.dispose_query_subscription("mine", "c").await);
+        assert!(p.subscribed_queries.lock().await.is_empty());
+        // The id is free again.
+        p.subscribe_and_query(q, "mine".into(), "c".into(), None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn a_write_while_the_first_result_is_computed_is_reported() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
@@ -537,7 +703,10 @@ mod tests {
                 .await;
             Ok(stale)
         };
-        let (id, revision, result) = p.open_subscription(query, first_result).await.unwrap();
+        let (id, revision, result) = p
+            .open_subscription("s".into(), query, first_result)
+            .await
+            .unwrap();
         assert_eq!(revision, 1, "the reply carries the write");
         assert_eq!(super::result_json(&result).as_array().unwrap().len(), 1);
         assert_eq!(p.subscription_state(&id, "c").await.unwrap().0, 1);
@@ -548,7 +717,12 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
         let (first, _, _) = p
-            .subscribe_and_query(q.clone(), "c".into(), None)
+            .subscribe_and_query(
+                q.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                "c".into(),
+                None,
+            )
             .await
             .unwrap();
         add(&mut p, "test://a", "test://p", "test://b").await;
@@ -557,7 +731,10 @@ mod tests {
             json!(1)
         );
 
-        let (second, _, _) = p.subscribe_and_query(q, "c".into(), None).await.unwrap();
+        let (second, _, _) = p
+            .subscribe_and_query(q, uuid::Uuid::new_v4().to_string(), "c".into(), None)
+            .await
+            .unwrap();
         assert_ne!(first, second, "not shared");
         assert_eq!(p.subscription_state(&second, "c").await.unwrap().0, 0);
     }
@@ -566,7 +743,12 @@ mod tests {
     async fn a_prolog_live_query_is_refused_and_not_registered() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let err = p
-            .subscribe_and_query(r#"triple(X, _, "test://b")."#.into(), "c".into(), None)
+            .subscribe_and_query(
+                r#"triple(X, _, "test://b")."#.into(),
+                uuid::Uuid::new_v4().to_string(),
+                "c".into(),
+                None,
+            )
             .await
             .expect_err("a Prolog live query is refused");
         assert_eq!(err.to_string(), super::super::PROLOG_LIVE_QUERY_UNSUPPORTED);
@@ -584,7 +766,7 @@ mod tests {
         // The client cancels (or its connection closes) while the first
         // result is still being computed: the call future is dropped (#1595).
         let never = std::future::pending::<Result<String, deno_core::error::AnyError>>();
-        let opening = p.open_subscription(query, never);
+        let opening = p.open_subscription("s".into(), query, never);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), opening)
                 .await
@@ -605,7 +787,11 @@ mod tests {
         );
         let (computed, first_result) = tokio::sync::oneshot::channel();
         let mut opening =
-            Box::pin(p.open_subscription(query, async move { first_result.await.unwrap() }));
+            Box::pin(p.open_subscription(
+                "s".into(),
+                query,
+                async move { first_result.await.unwrap() },
+            ));
         let short = std::time::Duration::from_millis(20);
         assert!(tokio::time::timeout(short, opening.as_mut()).await.is_err());
         // A check of the live queries holds the registry as the first result comes in,

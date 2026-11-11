@@ -454,7 +454,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     // Guard::Owns on a perspective: the params beside `uuid`.
     ("perspective.queryProlog", || json!({ "query": "true." })),
     ("perspective.querySparql", || json!({ "query": "ASK {}" })),
-    ("perspective.subscribeQuery", || json!({ "query": "true." })),
+    (
+        "perspective.subscribeQuery",
+        || json!({ "query": "true.", "subscriptionId": "s" }),
+    ),
     (
         "perspective.subscribeSparql",
         || json!({ "query": "ASK {}" }),
@@ -481,7 +484,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "perspective.modelSubscribe",
-        || json!({ "class_name": "C", "query_json": "{}" }),
+        || json!({ "class_name": "C", "query_json": "{}", "subscriptionId": "s" }),
     ),
     (
         "perspective.evaluateGetters",
@@ -592,26 +595,33 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     // params take `{}`.
     ("sfu.startRoom", sfu_room),
     ("sfu.stopRoom", sfu_room),
-    ("sfu.callLeave", sfu_room),
+    (
+        "sfu.callLeave",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1" }),
+    ),
+    (
+        "sfu.callRestartIce",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1" }),
+    ),
     (
         "sfu.callJoin",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}", "deviceId": "d", "sessionKey": "k" }),
     ),
     (
         "sfu.callSetQualityPreference",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "preference": "low" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "preference": "low" }),
     ),
     (
         "sfu.callAnswerServerOffer",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpAnswer": "{}" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "sdpAnswer": "{}" }),
     ),
     (
         "sfu.addIceCandidate",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "candidate": "c" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "candidate": "c" }),
     ),
     (
         "sfu.sendData",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "channelLabel": "c", "data": "d" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "channelLabel": "c", "data": "d" }),
     ),
     ("sfu.getConfig", sfu_neighbourhood),
     ("sfu.sfuPeerForNeighbourhood", sfu_neighbourhood),
