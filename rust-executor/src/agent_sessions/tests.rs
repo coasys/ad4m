@@ -16,14 +16,16 @@ use super::service::{
     self, running_for_test, AgentSessionCreate, AgentSessionUpdateParams, SessionError,
 };
 use super::store::{agent_session_store, DbAgentSessionStore};
-use super::types::{AgentSession, AgentSessionMessageRole, AgentTurnStatus};
+use super::types::{AgentSession, AgentSessionMessage, AgentSessionMessageRole, AgentTurnStatus};
 use crate::agent::capabilities::{
-    perspective_query_capability, perspective_update_capability, Capability, ALL_CAPABILITY,
+    perspective_query_capability, perspective_update_capability, Capability, AGENT_READ_CAPABILITY,
+    ALL_CAPABILITY,
 };
 use crate::agent::session::{Principal, Session};
 use crate::agent::AgentContext;
 use crate::ai_service::harness::provider::{ToolProvider, ToolSchema};
 use crate::ai_service::harness::{CompletionSource, HarnessCompletion, HarnessToolCall};
+use crate::db::Ad4mDb;
 use crate::events::Topic;
 use crate::types::RequestContext;
 
@@ -63,6 +65,8 @@ fn everything() -> Vec<Capability> {
 struct Scripted {
     script: Mutex<Vec<HarnessCompletion>>,
     released: Arc<AtomicBool>,
+    /// What each completion was asked with: the messages and the tools on offer.
+    asked: Mutex<Vec<(Vec<Value>, Vec<ToolSchema>)>>,
 }
 
 impl Scripted {
@@ -70,6 +74,7 @@ impl Scripted {
         Arc::new(Self {
             script: Mutex::new(script),
             released: Arc::new(AtomicBool::new(true)),
+            asked: Mutex::new(Vec::new()),
         })
     }
 
@@ -79,7 +84,20 @@ impl Scripted {
         Arc::new(Self {
             script: Mutex::new(Vec::new()),
             released,
+            asked: Mutex::new(Vec::new()),
         })
+    }
+
+    /// How many completions the model was asked for.
+    fn times_asked(&self) -> usize {
+        self.asked.lock().unwrap().len()
+    }
+
+    /// The tools the first completion was offered.
+    fn offered(&self) -> Vec<ToolSchema> {
+        let asked = self.asked.lock().unwrap();
+        let (_, tools) = asked.first().expect("the model was asked");
+        tools.clone()
     }
 }
 
@@ -88,9 +106,10 @@ impl CompletionSource for Scripted {
     async fn complete(
         &self,
         _model_id: &str,
-        _messages: &[Value],
-        _tools: Vec<ToolSchema>,
+        messages: &[Value],
+        tools: Vec<ToolSchema>,
     ) -> anyhow::Result<HarnessCompletion> {
+        self.asked.lock().unwrap().push((messages.to_vec(), tools));
         while !self.released.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -117,6 +136,15 @@ fn calls(name: &str, arguments: Value) -> HarnessCompletion {
     }
 }
 
+fn schema(name: &str) -> ToolSchema {
+    ToolSchema {
+        name: name.to_string(),
+        description: format!("the {name} tool"),
+        parameters: json!({ "type": "object", "properties": {} }),
+        side_effect: crate::ai_service::harness::provider::SideEffect::Read,
+    }
+}
+
 /// A provider that answers `ok:<name>` to any call and records them.
 struct StubProvider {
     tools: Vec<ToolSchema>,
@@ -126,15 +154,7 @@ struct StubProvider {
 impl StubProvider {
     fn named(names: &[&str]) -> Arc<Self> {
         Arc::new(Self {
-            tools: names
-                .iter()
-                .map(|name| ToolSchema {
-                    name: name.to_string(),
-                    description: format!("the {name} tool"),
-                    parameters: json!({ "type": "object", "properties": {} }),
-                    side_effect: crate::ai_service::harness::provider::SideEffect::Read,
-                })
-                .collect(),
+            tools: names.iter().map(|name| schema(name)).collect(),
             calls: Mutex::new(Vec::new()),
         })
     }
@@ -151,6 +171,20 @@ impl ToolProvider for StubProvider {
             anyhow::bail!("tool `{name}` is not in the current provider's surface");
         }
         Ok(format!("ok:{name}"))
+    }
+}
+
+/// A provider whose one tool, `wait`, never returns: the turn that calls it stays inside the
+/// call until something ends it.
+struct Stuck;
+
+#[async_trait::async_trait]
+impl ToolProvider for Stuck {
+    async fn tools(&self) -> Vec<ToolSchema> {
+        vec![schema("wait")]
+    }
+    async fn call(&self, _name: &str, _args: Value) -> anyhow::Result<String> {
+        std::future::pending().await
     }
 }
 
@@ -181,8 +215,63 @@ fn create(ctx: &RequestContext) -> AgentSession {
     .expect("a session")
 }
 
-/// The reply row once it is not `running` any more, within 10 s.
-async fn settled(owner: Option<&str>, reply_id: &str) -> super::types::AgentSessionMessage {
+/// The first tool step of the session, once the turn has written it, within 10 s.
+async fn first_step(owner: &str, session_id: &str) -> AgentSessionMessage {
+    let store = agent_session_store();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows = store.messages(Some(owner), session_id, 100, None).unwrap();
+        if let Some(step) = rows
+            .into_iter()
+            .find(|m| m.role == AgentSessionMessageRole::Tool)
+        {
+            return step;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn wrote no tool step within 10 s"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// One turn of `session` sent by `caller`, the model answering from `model`: the tool steps
+/// the turn wrote, in order.
+async fn steps_of(
+    session: &AgentSession,
+    caller: &RequestContext,
+    model: Arc<Scripted>,
+    provider: Option<Arc<dyn ToolProvider>>,
+) -> Vec<AgentSessionMessage> {
+    let store = agent_session_store();
+    let agent = caller.acts_as();
+    let before = store
+        .messages(agent.managed_did(), &session.id, 500, None)
+        .unwrap()
+        .len();
+    run_turn(
+        session.clone(),
+        caller.session.clone(),
+        agent.clone(),
+        store.clone(),
+        TurnDeps {
+            completion: Some(model),
+            provider,
+        },
+    )
+    .await
+    .expect("the turn ran");
+    store
+        .messages(agent.managed_did(), &session.id, 500, None)
+        .unwrap()
+        .into_iter()
+        .skip(before)
+        .filter(|m| m.role == AgentSessionMessageRole::Tool)
+        .collect()
+}
+
+/// The row `id` once it is not `running` any more, within 10 s.
+async fn settled(owner: Option<&str>, reply_id: &str) -> AgentSessionMessage {
     let store = agent_session_store();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -231,13 +320,17 @@ async fn a_session_is_its_owners_alone() {
         service::send(&bob, &session.id, "hi", deps(Scripted::answering(vec![]))).await,
         Err(SessionError::NotFound(_))
     ));
-    assert!(!service::delete(&bob, &session.id).unwrap_or(false));
+    assert!(matches!(
+        service::delete(&bob, &session.id),
+        Err(SessionError::NotFound(_))
+    ));
     assert!(service::get(&alice, &session.id).is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_main_agent_and_a_user_never_reach_each_others_sessions() {
     setup();
+    let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
     let operator = operator();
     let user_a = user("did:key:alice-a2", everything());
     let main_session = create(&operator);
@@ -252,8 +345,62 @@ async fn the_main_agent_and_a_user_never_reach_each_others_sessions() {
         service::get(&user_a, &main_session.id),
         Err(SessionError::NotFound(_))
     ));
-    assert_eq!(service::list(&operator).unwrap().len(), 1);
-    assert_eq!(service::list(&user_a).unwrap().len(), 1);
+    let listed = |caller: &RequestContext| -> Vec<String> {
+        let sessions = service::list(caller).unwrap();
+        sessions.into_iter().map(|session| session.id).collect()
+    };
+    assert!(listed(&operator).contains(&main_session.id));
+    assert!(!listed(&operator).contains(&user_session.id));
+    assert_eq!(listed(&user_a), vec![user_session.id.clone()]);
+
+    // Nor does any other call: each names the other's session and finds none.
+    for (caller, theirs) in [(&operator, &user_session), (&user_a, &main_session)] {
+        assert!(matches!(
+            service::messages(caller, &theirs.id, None, None),
+            Err(SessionError::NotFound(_))
+        ));
+        let rename = AgentSessionUpdateParams {
+            title: Some("taken".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            service::update(caller, &theirs.id, rename),
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            service::cancel(caller, &theirs.id),
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            service::send(caller, &theirs.id, "hi", deps(Scripted::answering(vec![]))).await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            service::delete(caller, &theirs.id),
+            Err(SessionError::NotFound(_))
+        ));
+    }
+    for (owner, own) in [(&operator, &main_session), (&user_a, &user_session)] {
+        assert_eq!(service::get(owner, &own.id).unwrap().title, "test");
+        assert!(service::messages(owner, &own.id, None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    // And each one's events go to its own sessions only.
+    let mut heard = 0;
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+    {
+        let of_main = event.payload["sessionId"] == main_session.id.as_str();
+        let of_user = event.payload["sessionId"] == user_session.id.as_str();
+        if !(of_main || of_user) {
+            continue;
+        }
+        heard += 1;
+        assert_eq!(operator.session.may_receive(&event), of_main);
+        assert_eq!(user_a.session.may_receive(&event), of_user);
+    }
+    assert_eq!(heard, 2, "one `created` event each");
 }
 
 // ── capabilities ─────────────────────────────────────────────────────────────
@@ -470,6 +617,88 @@ async fn delete_ends_a_running_turn_and_takes_the_transcript() {
     hold.store(true, Ordering::SeqCst);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn only_its_owner_ends_a_sessions_running_turn() {
+    setup();
+    let did = "did:key:alice-a10";
+    let alice = user(did, everything());
+    let session = create(&alice);
+    let hold = Arc::new(AtomicBool::new(false));
+    let started = service::send(
+        &alice,
+        &session.id,
+        "go",
+        deps(Scripted::holding(hold.clone())),
+    )
+    .await
+    .unwrap();
+
+    // Another user and the operator name the session: neither finds it, and the turn
+    // runs on.
+    for other in [user("did:key:bob-a10", everything()), operator()] {
+        assert!(matches!(
+            service::delete(&other, &session.id),
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            service::cancel(&other, &session.id),
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(running_for_test(&session.id));
+    }
+    // The operator passes the `owns` guard of any id, so over the socket its call reaches
+    // the handler. The answer is the same.
+    let methods = crate::api::ws_handler::build_handler_map();
+    for (method, params) in [
+        ("agent.sessionDelete", json!({ "id": session.id })),
+        ("agent.cancel", json!({ "sessionId": session.id })),
+    ] {
+        let refused = methods
+            .dispatch(method, params, Arc::new(operator()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 404, "{method}: {}", refused.message);
+        assert!(running_for_test(&session.id), "{method}");
+    }
+
+    hold.store(true, Ordering::SeqCst);
+    let reply = settled(Some(did), &started.reply_id).await;
+    assert_eq!(reply.status, Some(AgentTurnStatus::Done));
+    assert_eq!(reply.content["text"], "done");
+    assert!(service::get(&alice, &session.id).is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_turn_leaves_no_step_running() {
+    setup();
+    let did = "did:key:alice-a11";
+    let alice = user(did, everything());
+    let session = create(&alice);
+
+    // The turn is inside a tool call that never returns.
+    let started = service::send(
+        &alice,
+        &session.id,
+        "go",
+        TurnDeps {
+            completion: Some(Scripted::answering(vec![calls("wait", json!({}))])),
+            provider: Some(Arc::new(Stuck)),
+        },
+    )
+    .await
+    .unwrap();
+    let step = first_step(did, &session.id).await;
+    assert_eq!(step.status, Some(AgentTurnStatus::Running));
+
+    assert!(service::cancel(&alice, &session.id).unwrap());
+    let reply = settled(Some(did), &started.reply_id).await;
+    assert_eq!(reply.status, Some(AgentTurnStatus::Cancelled));
+    // The step ends with its turn: nothing will return for it.
+    let step = settled(Some(did), &step.id).await;
+    assert_eq!(step.status, Some(AgentTurnStatus::Interrupted));
+    assert!(step.error.is_some());
+}
+
 #[test]
 fn the_startup_sweep_marks_every_running_row_interrupted() {
     setup();
@@ -571,6 +800,73 @@ async fn a_tool_call_becomes_a_step_row_the_history_reads_back() {
         .find(|m| m["role"] == "tool")
         .expect("a tool result entry");
     assert_eq!(result["content"], "ok:describe_perspective");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_next_turn_reads_the_last_one_in_the_order_it_happened() {
+    setup();
+    let did = "did:key:alice-b4";
+    let alice = user(did, everything());
+    let session = create(&alice);
+
+    let first = service::send(
+        &alice,
+        &session.id,
+        "look",
+        TurnDeps {
+            completion: Some(Scripted::answering(vec![calls(
+                "describe_perspective",
+                json!({"perspective_id": "px"}),
+            )])),
+            provider: Some(StubProvider::named(&["describe_perspective"])),
+        },
+    )
+    .await
+    .unwrap();
+    settled(Some(did), &first.reply_id).await;
+    // The rows as `send` and the observer wrote them: the answer's row before the step.
+    let rows = service::messages(&alice, &session.id, None, None).unwrap();
+    let roles: Vec<_> = rows.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        [
+            AgentSessionMessageRole::User,
+            AgentSessionMessageRole::Assistant,
+            AgentSessionMessageRole::Tool,
+        ]
+    );
+
+    let model = Scripted::answering(vec![]);
+    let second = service::send(&alice, &session.id, "and now?", deps(model.clone()))
+        .await
+        .unwrap();
+    settled(Some(did), &second.reply_id).await;
+
+    // What the model was asked: the call and its result come before the answer they led
+    // to, and the new message is last.
+    let asked = model.asked.lock().unwrap();
+    let (messages, _) = &asked[0];
+    let roles: Vec<_> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        roles,
+        ["system", "user", "assistant", "tool", "assistant", "user"],
+        "{messages:#?}"
+    );
+    assert_eq!(messages[1]["content"], "look");
+    assert_eq!(
+        messages[2]["tool_calls"][0]["function"]["name"],
+        "describe_perspective"
+    );
+    assert_eq!(
+        messages[3]["tool_call_id"],
+        messages[2]["tool_calls"][0]["id"]
+    );
+    assert_eq!(messages[3]["content"], "ok:describe_perspective");
+    assert_eq!(messages[4]["content"], "done");
+    assert_eq!(messages[5]["content"], "and now?");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -680,6 +976,171 @@ async fn a_session_change_reaches_its_owners_event_stream() {
     assert_eq!(event.payload["session"]["id"], session.id);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sessions_events_reach_its_owners_agent_readers_and_no_one_else() {
+    setup();
+    let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+    let did = "did:key:alice-c2";
+    let alice = user(did, everything());
+
+    // A session's whole life: created, a turn with a tool step, renamed, deleted.
+    let session = create(&alice);
+    let started = service::send(
+        &alice,
+        &session.id,
+        "look",
+        TurnDeps {
+            completion: Some(Scripted::answering(vec![calls(
+                "describe_perspective",
+                json!({"perspective_id": "px"}),
+            )])),
+            provider: Some(StubProvider::named(&["describe_perspective"])),
+        },
+    )
+    .await
+    .unwrap();
+    settled(Some(did), &started.reply_id).await;
+    let rename = AgentSessionUpdateParams {
+        title: Some("renamed".into()),
+        ..Default::default()
+    };
+    service::update(&alice, &session.id, rename).unwrap();
+    assert!(service::delete(&alice, &session.id).unwrap());
+
+    // Who is listening: the owner's apps with and without `agent:READ`, another user,
+    // the operator (the main agent) and a session nobody logged in on.
+    let reader = user(did, vec![AGENT_READ_CAPABILITY.clone()]);
+    let no_agent_read = user(did, vec![perspective_query_capability(vec!["px".into()])]);
+    let bob = user("did:key:bob-c2", everything());
+    let operator = operator();
+    let anonymous = ctx_for(Session::for_test(Principal::Anonymous));
+    let listeners = [
+        ("the owner", &alice, true),
+        ("the owner's app holding agent:READ", &reader, true),
+        ("the owner's app without agent:READ", &no_agent_read, false),
+        ("another user", &bob, false),
+        ("the operator", &operator, false),
+        ("an anonymous session", &anonymous, false),
+    ];
+
+    let mut kinds: Vec<String> = Vec::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(300), events.recv()).await
+    {
+        if event.payload["sessionId"] != session.id.as_str() {
+            continue;
+        }
+        let kind = event.payload["kind"].as_str().unwrap_or_default();
+        assert_eq!(event.topic, Topic::AgentSessionChanged);
+        for (who, listener, hears) in &listeners {
+            assert_eq!(
+                listener.session.may_receive(&event),
+                *hears,
+                "{who} and a `{kind}` event"
+            );
+        }
+        kinds.push(kind.to_string());
+    }
+    let count = |kind: &str| kinds.iter().filter(|k| *k == kind).count();
+    assert_eq!(count("created"), 1, "{kinds:?}");
+    assert_eq!(count("updated"), 1, "{kinds:?}");
+    assert_eq!(count("deleted"), 1, "{kinds:?}");
+    // The person's message, the reply running and done, the step running and done.
+    assert_eq!(count("message"), 5, "{kinds:?}");
+}
+
+// ── credits ──────────────────────────────────────────────────────────────────
+
+/// Free hosting off while it lives: a managed user pays for every model call, as on a
+/// hosted node.
+struct PaidHosting {
+    was_free: bool,
+}
+
+impl PaidHosting {
+    fn on() -> Self {
+        let was_free = Ad4mDb::with_global_instance(|db| {
+            let was_free = db.get_free_hosting_enabled()?;
+            db.set_free_hosting_enabled(false)?;
+            Ok::<_, anyhow::Error>(was_free)
+        })
+        .unwrap();
+        Self { was_free }
+    }
+}
+
+impl Drop for PaidHosting {
+    fn drop(&mut self) {
+        let _ = crate::db_backend::db_backend().set_free_hosting_enabled(self.was_free);
+    }
+}
+
+/// A managed user with `credits` to spend. Returns their DID.
+fn account(credits: f64) -> String {
+    let id = uuid::Uuid::new_v4();
+    let email = format!("user-{id}@example.org");
+    let did = format!("did:key:user-{id}");
+    Ad4mDb::with_global_instance(|db| {
+        db.add_user(&email, &did, "pw")?;
+        db.set_user_credits(&email, credits)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .unwrap();
+    did
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_without_credits_starts_no_turn() {
+    setup();
+    let _paid = PaidHosting::on();
+    let broke = user(&account(0.0), everything());
+    let funded = user(&account(5.0), everything());
+
+    // Over the socket `agent.send` refuses before a row is written or a slot taken.
+    let session = create(&broke);
+    let refused = crate::api::ws_handler::build_handler_map()
+        .dispatch(
+            "agent.send",
+            json!({ "sessionId": session.id, "text": "hi" }),
+            Arc::new(user(broke.user_did().unwrap(), everything())),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, 403, "{}", refused.message);
+    assert!(refused.message.contains("credits"), "{}", refused.message);
+    assert!(service::messages(&broke, &session.id, None, None)
+        .unwrap()
+        .is_empty());
+    assert!(!running_for_test(&session.id));
+
+    // A turn that is already running when the credits run out asks the model nothing
+    // more: the gate stands before every completion.
+    let model = Scripted::answering(vec![]);
+    let outcome = run_turn(
+        session.clone(),
+        broke.session.clone(),
+        broke.acts_as(),
+        agent_session_store(),
+        deps(model.clone()),
+    )
+    .await;
+    assert!(outcome.is_err(), "{outcome:?}");
+    assert_eq!(model.times_asked(), 0);
+
+    // The same turn of a user who can pay runs.
+    let session = create(&funded);
+    let model = Scripted::answering(vec![]);
+    let outcome = run_turn(
+        session.clone(),
+        funded.session.clone(),
+        funded.acts_as(),
+        agent_session_store(),
+        deps(model.clone()),
+    )
+    .await;
+    assert_eq!(outcome.unwrap(), "done");
+    assert_eq!(model.times_asked(), 1);
+}
+
 // ── the capability intersection on the real MCP surface ─────────────────────
 
 /// Two perspectives of `did`'s; the returned ids unregister on `clean_up`.
@@ -693,6 +1154,33 @@ async fn clean_up(perspectives: Vec<String>) {
     for uuid in perspectives {
         crate::perspectives::unregister_perspective(&uuid);
     }
+}
+
+/// Every link of the perspective `uuid` as (source, predicate, target), sorted.
+async fn links_of(uuid: &str) -> Vec<(String, String, String)> {
+    let mut links: Vec<_> = crate::perspectives::get_perspective(uuid)
+        .expect("the perspective")
+        .get_links(&crate::types::LinkQuery::default())
+        .await
+        .expect("its links")
+        .into_iter()
+        .map(|link| {
+            (
+                link.data.source,
+                link.data.predicate.unwrap_or_default(),
+                link.data.target,
+            )
+        })
+        .collect();
+    links.sort();
+    links
+}
+
+/// What a tool answers a session whose capabilities do not cover the call.
+const NOT_HELD: &str = "Capability is not matched";
+
+fn refusal(step: &AgentSessionMessage) -> &str {
+    step.content["error"].as_str().unwrap_or_default()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -711,61 +1199,45 @@ async fn a_read_only_sessions_write_tool_is_refused_and_a_read_answers() {
         },
     )
     .unwrap();
+    let before = links_of(&a).await;
 
-    // Read on A answers; a write on A is refused, and no link lands.
-    let caller = ctx.session.clone();
-    let agent = AgentContext::managed(did.to_string());
-    let store = agent_session_store();
-    run_turn(
-        session.clone(),
-        caller,
-        agent,
-        store.clone(),
-        TurnDeps {
-            completion: Some(Scripted::answering(vec![
-                calls("query_links", json!({"perspective_id": a, "query": {}})),
-                calls(
-                    "add_link",
-                    json!({
-                        "perspective_id": a,
-                        "link": {"source": "s://a", "predicate": "p://x", "target": "t://1"},
-                    }),
-                ),
-            ])),
-            // `None`: the turn's real MCP surface, acting as the session's narrowed
-            // in-process session.
-            provider: None,
-        },
+    // Read on A answers; a write on A is refused, and no link lands. `None` for the
+    // provider: the turn's real MCP surface, acting as the session's narrowed in-process
+    // session.
+    let steps = steps_of(
+        &session,
+        &ctx,
+        Scripted::answering(vec![
+            calls("query_links", json!({"perspective_id": a})),
+            calls(
+                "add_link",
+                json!({
+                    "perspective_id": a,
+                    "source": "s://a", "predicate": "p://x", "target": "t://1",
+                }),
+            ),
+        ]),
+        None,
     )
-    .await
-    .unwrap();
+    .await;
 
-    let rows = store.messages(Some(did), &session.id, 100, None).unwrap();
-    let steps: Vec<_> = rows
-        .iter()
-        .filter(|m| m.role == AgentSessionMessageRole::Tool)
-        .collect();
-    assert_eq!(steps.len(), 2, "{rows:?}");
+    assert_eq!(steps.len(), 2, "{steps:?}");
     assert_eq!(
         steps[0].status,
         Some(AgentTurnStatus::Done),
-        "the read answers"
+        "the read answers: {steps:?}"
     );
     assert_eq!(
         steps[1].status,
         Some(AgentTurnStatus::Failed),
-        "the write is refused"
+        "the write is refused: {steps:?}"
     );
-    let error = steps[1].content["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("capab")
-            || error.contains("permission")
-            || error.contains("denied")
-            || error.contains("403")
-            || error.contains("missing"),
-        "the refusal is readable by the model: {error}"
+        refusal(&steps[1]).contains(NOT_HELD),
+        "the model reads why: {steps:?}"
     );
     assert!(steps[1].content.get("result").is_none());
+    assert_eq!(links_of(&a).await, before, "the refused write left a link");
     clean_up(cleanup).await;
 }
 
@@ -793,33 +1265,586 @@ async fn a_session_reaches_no_perspective_outside_its_capabilities() {
     )
     .unwrap();
 
-    run_turn(
-        session.clone(),
-        ctx.session.clone(),
-        AgentContext::managed(did.to_string()),
-        agent_session_store(),
-        TurnDeps {
-            completion: Some(Scripted::answering(vec![calls(
-                "query_links",
-                json!({"perspective_id": b, "query": {}}),
-            )])),
-            provider: None,
+    let steps = steps_of(
+        &session,
+        &ctx,
+        Scripted::answering(vec![calls("query_links", json!({"perspective_id": b}))]),
+        None,
+    )
+    .await;
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(
+        steps[0].status,
+        Some(AgentTurnStatus::Failed),
+        "perspective B is outside the session's caps: {steps:?}"
+    );
+    assert!(refusal(&steps[0]).contains(NOT_HELD), "{steps:?}");
+    clean_up(cleanup).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_reaches_no_further_than_the_caller_who_sends_it() {
+    setup();
+    let did = "did:key:alice-d4";
+    let (a, b, cleanup) = two_perspectives_of(did).await;
+    let read = |uuid: &String| perspective_query_capability(vec![uuid.clone()]);
+    // Made by a caller who reads A and B: the session holds both.
+    let wide = user(did, vec![read(&a), read(&b)]);
+    let session = create(&wide);
+    assert_eq!(session.capabilities, vec![read(&a), read(&b)]);
+
+    // Sent by another session of the same agent, one that reads A alone.
+    let narrow = user(did, vec![read(&a)]);
+    let steps = steps_of(
+        &session,
+        &narrow,
+        Scripted::answering(vec![
+            calls("query_links", json!({"perspective_id": a})),
+            calls("query_links", json!({"perspective_id": b})),
+        ]),
+        None,
+    )
+    .await;
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    assert_eq!(steps[0].status, Some(AgentTurnStatus::Done), "{steps:?}");
+    assert_eq!(
+        steps[1].status,
+        Some(AgentTurnStatus::Failed),
+        "the sender does not read B, so neither does its turn: {steps:?}"
+    );
+    assert!(refusal(&steps[1]).contains(NOT_HELD), "{steps:?}");
+
+    // The session itself reaches B: sent by the wide caller, the same call answers.
+    let steps = steps_of(
+        &session,
+        &wide,
+        Scripted::answering(vec![calls("query_links", json!({"perspective_id": b}))]),
+        None,
+    )
+    .await;
+    assert_eq!(steps[0].status, Some(AgentTurnStatus::Done), "{steps:?}");
+    clean_up(cleanup).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_is_offered_no_tool_that_opens_or_widens_a_session() {
+    setup();
+    let ctx = user("did:key:alice-d3", everything());
+    let session = create(&ctx);
+    // The tools that answer before a caller is authenticated, less the two that only read:
+    // what is left logs in, signs up, asks for a capability or mints a token.
+    let opening: Vec<&str> = crate::mcp::tools::AUTH_TOOLS
+        .iter()
+        .copied()
+        .filter(|tool| !["get_documentation", "auth_status"].contains(tool))
+        .collect();
+    assert_eq!(opening.len(), 6, "{opening:?}");
+
+    let model = Scripted::answering(opening.iter().map(|tool| calls(tool, json!({}))).collect());
+    let steps = steps_of(&session, &ctx, model.clone(), None).await;
+
+    let offered: Vec<String> = model.offered().into_iter().map(|tool| tool.name).collect();
+    assert!(
+        offered.iter().any(|tool| tool == "query_links"),
+        "the turn has the executor's tools: {offered:?}"
+    );
+    for tool in &opening {
+        assert!(
+            !offered.iter().any(|name| name == tool),
+            "`{tool}` is on offer"
+        );
+    }
+    // A model that names one anyway gets no further.
+    assert_eq!(steps.len(), opening.len(), "{steps:?}");
+    for step in &steps {
+        assert_eq!(step.status, Some(AgentTurnStatus::Failed), "{step:?}");
+        assert!(
+            refusal(step).contains("is not in the current provider's filtered surface"),
+            "{step:?}"
+        );
+    }
+}
+
+// ── every tool, against a perspective the session does not hold ─────────────
+
+/// A subject class `attack://{class}` with a `body` text and an `items` collection.
+fn class_shape(class: &str) -> String {
+    json!({
+        "target_class": format!("attack://{class}"),
+        "constructor_actions": [{
+            "action": "addLink", "source": "this",
+            "predicate": "rdf://type", "target": format!("attack://{class}"),
+        }],
+        "properties": [
+            {
+                "path": "attack://body", "name": "body", "datatype": "xsd:string",
+                "min_count": 1, "max_count": 1, "writable": true,
+                "setter": [{
+                    "action": "setSingleTarget", "source": "this",
+                    "predicate": "attack://body", "target": "value",
+                }],
+            },
+            {
+                "path": "ad4m://has_child", "name": "items", "collection": true,
+                "writable": true,
+                "adder": [{
+                    "action": "addLink", "source": "this",
+                    "predicate": "ad4m://has_child", "target": "value",
+                }],
+                "remover": [{
+                    "action": "removeLink", "source": "this",
+                    "predicate": "ad4m://has_child", "target": "value",
+                }],
+            },
+        ],
+    })
+    .to_string()
+}
+
+/// Gives the perspective `uuid` the class `class`, one instance `item://{name}` of it whose
+/// body is `secret`, and a plain link to `secret` — written by the operator.
+async fn seed(uuid: &str, class: &str, name: &str, secret: &str) {
+    let operator =
+        crate::mcp::tools::test_support::handler_as(crate::mcp::tools::test_support::operator());
+    let base = format!("item://{name}");
+    for (tool, arguments) in [
+        (
+            "add_model",
+            json!({"perspective_id": uuid, "class_name": class, "shacl_json": class_shape(class)}),
+        ),
+        (
+            "instance_create",
+            json!({
+                "perspective_id": uuid, "class_name": class, "base_uri": base,
+                "properties": {"body": secret},
+            }),
+        ),
+        (
+            "add_link",
+            json!({
+                "perspective_id": uuid, "source": base,
+                "predicate": "attack://holds", "target": format!("literal:string:{secret}"),
+            }),
+        ),
+    ] {
+        operator
+            .call_tool_by_name(tool, arguments)
+            .await
+            .unwrap_or_else(|e| panic!("seeding with {tool}: {e}"));
+    }
+}
+
+/// One call of every tool that names a perspective, aimed at `p`, whose class is `class`
+/// and whose instance is `item://{name}`: the reads first, then the writes, then the two
+/// kinds of tool a class brings.
+fn perspective_calls(p: &str, class: &str, name: &str) -> Vec<(String, Value)> {
+    let base = format!("item://{name}");
+    let command = json!([{
+        "action": "addLink", "source": "this",
+        "predicate": "attack://wrote", "target": "attack://by-command",
+    }])
+    .to_string();
+    let mut rows: Vec<(String, Value)> = [
+        ("query_links", json!({"perspective_id": p})),
+        ("describe_perspective", json!({"perspective_id": p})),
+        ("instance_query", json!({"perspective_id": p, "class_name": class})),
+        ("instance_get", json!({"perspective_id": p, "class_name": class, "base_uri": base})),
+        ("instance_transcript", json!({"perspective_id": p, "parent": base})),
+        ("get_children", json!({"perspective_id": p, "parent": base})),
+        ("get_flows", json!({"perspective_id": p})),
+        ("flow_state", json!({"perspective_id": p, "flow_name": "f", "expression_address": base})),
+        ("flow_actions", json!({"perspective_id": p, "flow_name": "f", "expression_address": base})),
+        ("flow_valid_outputs", json!({"perspective_id": p, "flow_name": "f"})),
+        ("generate_waker_query", json!({"perspective_id": p, "class_name": class})),
+        ("get_mention_waker_config", json!({"perspective_id": p})),
+        ("template_read", json!({"perspective_id": p, "base_uri": base})),
+        (
+            "add_link",
+            json!({
+                "perspective_id": p, "source": base,
+                "predicate": "attack://wrote", "target": "attack://landed",
+            }),
+        ),
+        (
+            "add_model",
+            json!({"perspective_id": p, "class_name": "Planted", "shacl_json": class_shape("Planted")}),
+        ),
+        (
+            "instance_create",
+            json!({"perspective_id": p, "class_name": class, "properties": {"body": "planted"}}),
+        ),
+        (
+            "instance_update",
+            json!({
+                "perspective_id": p, "class_name": class, "base_uri": base,
+                "properties": {"body": "changed"},
+            }),
+        ),
+        (
+            "instance_add_to_collection",
+            json!({
+                "perspective_id": p, "class_name": class, "base_uri": base,
+                "collection": "items", "item_uri": "attack://item",
+            }),
+        ),
+        (
+            "instance_remove_from_collection",
+            json!({
+                "perspective_id": p, "class_name": class, "base_uri": base,
+                "collection": "items", "item_uri": "attack://item",
+            }),
+        ),
+        ("add_child", json!({"perspective_id": p, "parent": base, "child": "attack://child"})),
+        (
+            "execute_commands",
+            json!({"perspective_id": p, "commands": command, "expression_address": base}),
+        ),
+        ("template_update", json!({"perspective_id": p, "base_uri": base})),
+        ("add_flow", json!({"perspective_id": p, "flow_name": "planted", "shacl_json": "{}"})),
+        ("flow_proposal_accept", json!({"perspective_id": p, "proposal_uri": base})),
+        ("flow_proposal_reject", json!({"perspective_id": p, "proposal_uri": base})),
+        (
+            "neighbourhood_publish_from_perspective",
+            json!({"perspective_uuid": p, "link_language": "lang://none"}),
+        ),
+        ("instance_remove", json!({"perspective_id": p, "class_name": class, "base_uri": base})),
+    ]
+    .into_iter()
+    .map(|(tool, arguments)| (tool.to_string(), arguments))
+    .collect();
+    let lower = class.to_lowercase();
+    rows.push((format!("{lower}_query"), json!({"perspective_id": p})));
+    rows.push((
+        format!("{lower}_create"),
+        json!({"perspective_id": p, "body": "planted"}),
+    ));
+    rows
+}
+
+/// One call of every tool that names no perspective: what it reaches is the agent's.
+fn agent_wide_calls() -> Vec<(String, Value)> {
+    [
+        ("list_perspectives", json!({})),
+        ("add_perspective", json!({"name": "planted"})),
+        (
+            "neighbourhood_join_from_url",
+            json!({"url": "neighbourhood://QmPlanted"}),
+        ),
+        ("set_agent_profile", json!({"username": "planted"})),
+        (
+            "set_agent_profile_picture",
+            json!({"image_base64": "AAAA", "mime_type": "image/png"}),
+        ),
+        ("set_agent_public_perspective", json!({"links_json": "[]"})),
+        ("get_agent_profile", json!({})),
+        ("get_agent_public_perspective", json!({})),
+        ("get_my_did", json!({})),
+        ("language_meta", json!({"address": "QmNone"})),
+        ("list_link_language_templates", json!({})),
+    ]
+    .into_iter()
+    .map(|(tool, arguments)| (tool.to_string(), arguments))
+    .collect()
+}
+
+/// Calls on `a`, which the session holds, that name `b` or what is in it wherever an
+/// argument takes a free value: none of them may read from `b` or write to it.
+fn calls_naming_another_perspective(a: &str, b: &str, theirs: &str) -> Vec<(String, Value)> {
+    let command = json!([{
+        "action": "addLink", "source": "this",
+        "predicate": "attack://wrote", "target": "attack://by-command",
+    }])
+    .to_string();
+    [
+        (
+            "query_links",
+            json!({"perspective_id": a, "perspective_uuid": b, "uuid": b, "source": theirs}),
+        ),
+        (
+            "instance_get",
+            json!({"perspective_id": a, "class_name": "Note", "base_uri": theirs}),
+        ),
+        (
+            "instance_query",
+            json!({"perspective_id": a, "class_name": "Vault"}),
+        ),
+        (
+            "instance_query",
+            json!({
+                "perspective_id": a, "class_name": "Note", "parent": b,
+                "filter": {"perspective_id": b, "id": theirs},
+            }),
+        ),
+        (
+            "get_children",
+            json!({"perspective_id": a, "parent": theirs}),
+        ),
+        (
+            "instance_transcript",
+            json!({"perspective_id": a, "parent": b}),
+        ),
+        (
+            "instance_update",
+            json!({
+                "perspective_id": a, "class_name": "Note", "base_uri": theirs,
+                "properties": {"body": "changed", "perspective_id": b},
+            }),
+        ),
+        (
+            "add_child",
+            json!({"perspective_id": a, "parent": b, "child": theirs}),
+        ),
+        (
+            "execute_commands",
+            json!({"perspective_id": a, "commands": command, "expression_address": theirs}),
+        ),
+    ]
+    .into_iter()
+    .map(|(tool, arguments)| (tool.to_string(), arguments))
+    .collect()
+}
+
+/// Whether a tool's parameters name a perspective anywhere below their top level, where
+/// `perspective_calls` would not aim it.
+fn names_a_perspective_below_the_top(parameters: &Value) -> bool {
+    fn any_key(value: &Value) -> bool {
+        match value {
+            Value::Object(object) => object
+                .iter()
+                .any(|(key, value)| key.contains("perspective") || any_key(value)),
+            Value::Array(items) => items.iter().any(any_key),
+            _ => false,
+        }
+    }
+    parameters.as_object().is_some_and(|top| {
+        top.iter().any(|(key, value)| match value.as_object() {
+            Some(properties) if key == "properties" => properties.values().any(any_key),
+            _ => any_key(value),
+        })
+    })
+}
+
+/// The tool steps of `table` called in order on `session` by `caller`, and the tools the
+/// model was offered. Six calls a turn: a turn stops at twenty.
+async fn steps_of_calls(
+    session: &AgentSession,
+    caller: &RequestContext,
+    table: &[(String, Value)],
+) -> (Vec<AgentSessionMessage>, Vec<ToolSchema>) {
+    let mut steps = Vec::new();
+    let mut offered = Vec::new();
+    for chunk in table.chunks(6) {
+        let model = Scripted::answering(
+            chunk
+                .iter()
+                .map(|(tool, arguments)| calls(tool, arguments.clone()))
+                .collect(),
+        );
+        steps.extend(steps_of(session, caller, model.clone(), None).await);
+        offered = model.offered();
+    }
+    assert_eq!(steps.len(), table.len(), "one step a call: {steps:?}");
+    (steps, offered)
+}
+
+/// A session of `caller`'s that holds read and write on perspective A and nothing else,
+/// sent by that caller, who holds everything: whatever tool a turn calls, perspective B —
+/// the same agent's — is neither read nor changed, and nothing of the agent's outside A is
+/// reached.
+async fn a_narrowed_sessions_tools_stay_inside_it(
+    caller: RequestContext,
+    owners: Option<Vec<String>>,
+) {
+    use crate::mcp::tools::test_support;
+    let _runtime = test_support::RuntimeService::start();
+    let a = test_support::perspective(owners.clone()).await;
+    let b = test_support::perspective(owners).await;
+    seed(&a, "Note", "inside-a", "words-of-a").await;
+    seed(&b, "Vault", "inside-b", "words-of-b").await;
+    let untouched = links_of(&b).await;
+    assert!(
+        untouched
+            .iter()
+            .any(|(_, _, target)| target.contains("words-of-b")),
+        "B holds its words: {untouched:?}"
+    );
+
+    let session = service::create(
+        &caller,
+        AgentSessionCreate {
+            model: Some("scripted".into()),
+            capabilities: Some(vec![
+                perspective_query_capability(vec![a.clone()]),
+                perspective_update_capability(vec![a.clone()]),
+            ]),
+            ..Default::default()
         },
     )
-    .await
     .unwrap();
 
-    let rows = agent_session_store()
-        .messages(Some(did), &session.id, 100, None)
-        .unwrap();
-    let step = rows
-        .iter()
-        .find(|m| m.role == AgentSessionMessageRole::Tool)
-        .expect("a tool step");
-    assert_eq!(
-        step.status,
-        Some(AgentTurnStatus::Failed),
-        "perspective B is outside the session's caps: {rows:?}"
+    // Every tool that names a perspective, aimed at B.
+    let table = perspective_calls(&b, "Vault", "inside-b");
+    let (outside, offered) = steps_of_calls(&session, &caller, &table).await;
+    for (step, (tool, _)) in outside.iter().zip(&table) {
+        assert_eq!(
+            step.status,
+            Some(AgentTurnStatus::Failed),
+            "`{tool}` on B: {step:?}"
+        );
+        // A class tool of B's is not there to call; every other tool refuses the session.
+        let expected = if tool.starts_with("vault_") {
+            "is not in the current provider's filtered surface"
+        } else {
+            NOT_HELD
+        };
+        assert!(refusal(step).contains(expected), "`{tool}` on B: {step:?}");
+        assert!(
+            step.content.get("result").is_none(),
+            "`{tool}` on B: {step:?}"
+        );
+    }
+
+    // The table is the whole surface: every tool on offer that names a perspective has a
+    // row (A's class tools aside: B's are the ones aimed at B), none names one where the
+    // table would not aim it, and no class tool of B's is on offer.
+    for tool in &offered {
+        let names_a_perspective = tool.parameters["properties"]
+            .as_object()
+            .is_some_and(|properties| properties.keys().any(|key| key.contains("perspective")));
+        assert!(
+            !names_a_perspective
+                || tool.name.starts_with("note_")
+                || table.iter().any(|(row, _)| *row == tool.name),
+            "`{}` names a perspective and `perspective_calls` has no row for it",
+            tool.name
+        );
+        assert!(
+            !names_a_perspective_below_the_top(&tool.parameters),
+            "`{}` names a perspective inside an argument: {}",
+            tool.name,
+            tool.parameters
+        );
+        assert!(
+            !tool.name.starts_with("vault_"),
+            "`{}` is on offer",
+            tool.name
+        );
+    }
+    assert!(
+        offered.iter().any(|tool| tool.name == "note_query"),
+        "A's class tools are on offer"
     );
-    clean_up(cleanup).await;
+
+    // Every tool that names none: the session holds no capability of the agent's own.
+    let table = agent_wide_calls();
+    let (agent_wide, _) = steps_of_calls(&session, &caller, &table).await;
+    for (step, (tool, _)) in agent_wide.iter().zip(&table) {
+        assert_eq!(
+            step.status,
+            Some(AgentTurnStatus::Failed),
+            "`{tool}`: {step:?}"
+        );
+        assert!(refusal(step).contains(NOT_HELD), "`{tool}`: {step:?}");
+    }
+    let (status, _) =
+        steps_of_calls(&session, &caller, &[("auth_status".to_string(), json!({}))]).await;
+    assert!(
+        !status[0].content.to_string().contains(&b),
+        "what the session reads of itself names B: {status:?}"
+    );
+    for tool in &offered {
+        let listed = table.iter().any(|(row, _)| *row == tool.name);
+        let names_a_perspective = tool.parameters["properties"]
+            .as_object()
+            .is_some_and(|properties| properties.keys().any(|key| key.contains("perspective")));
+        assert!(
+            names_a_perspective
+                || listed
+                || ["auth_status", "get_documentation"].contains(&tool.name.as_str()),
+            "`{}` names no perspective and `agent_wide_calls` has no row for it",
+            tool.name
+        );
+    }
+
+    // The same session on A, which it holds: the reads answer with A's words and the write
+    // lands, so what refused every call above was the session's capabilities.
+    let (inside, _) = steps_of_calls(
+        &session,
+        &caller,
+        &[
+            ("query_links".to_string(), json!({"perspective_id": a})),
+            (
+                "instance_query".to_string(),
+                json!({"perspective_id": a, "class_name": "Note"}),
+            ),
+            ("note_query".to_string(), json!({"perspective_id": a})),
+            (
+                "add_link".to_string(),
+                json!({
+                    "perspective_id": a, "source": "item://inside-a",
+                    "predicate": "attack://wrote", "target": "attack://landed",
+                }),
+            ),
+        ],
+    )
+    .await;
+    for step in &inside {
+        assert_eq!(step.status, Some(AgentTurnStatus::Done), "on A: {step:?}");
+    }
+    for step in &inside[..2] {
+        assert!(
+            step.content["result"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("words-of-a"),
+            "on A: {step:?}"
+        );
+    }
+    assert!(
+        links_of(&a).await.contains(&(
+            "item://inside-a".to_string(),
+            "attack://wrote".to_string(),
+            "attack://landed".to_string(),
+        )),
+        "the write on A landed: {inside:?}"
+    );
+
+    // Calls on A that name B wherever an argument takes a free value.
+    let table = calls_naming_another_perspective(&a, &b, "item://inside-b");
+    let (naming, _) = steps_of_calls(&session, &caller, &table).await;
+
+    // Nothing of B's reached the transcript, and B is as it was.
+    for step in outside
+        .iter()
+        .chain(&agent_wide)
+        .chain(&inside)
+        .chain(&naming)
+    {
+        assert!(
+            !step.content.to_string().contains("words-of-b"),
+            "B's words are in the transcript: {step:?}"
+        );
+    }
+    assert_eq!(links_of(&b).await, untouched, "B changed");
+    let perspectives = test_support::handler_as(test_support::operator())
+        .call_tool_by_name("list_perspectives", json!({}))
+        .await
+        .unwrap();
+    assert!(!perspectives.contains("planted"), "{perspectives}");
+    service::delete(&caller, &session.id).unwrap();
+    clean_up(vec![a, b]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_tool_reaches_a_perspective_outside_a_users_sessions_capabilities() {
+    setup();
+    let did = crate::test_utils::create_test_user("alice-d5@example.org");
+    a_narrowed_sessions_tools_stay_inside_it(user(&did, everything()), Some(vec![did])).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_tool_reaches_a_perspective_outside_the_main_agents_sessions_capabilities() {
+    setup();
+    a_narrowed_sessions_tools_stay_inside_it(operator(), None).await;
 }
