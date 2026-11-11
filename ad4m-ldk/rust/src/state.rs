@@ -30,9 +30,7 @@ impl<T: 'static> State<T> {
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         self.inner.with(|cell| {
             let borrow = cell.borrow();
-            let v = borrow
-                .as_ref()
-                .expect("State not initialized (call init() first)");
+            let v = borrow.as_ref().expect("State not initialized (call init() first)");
             f(v)
         })
     }
@@ -40,9 +38,7 @@ impl<T: 'static> State<T> {
     pub fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         self.inner.with(|cell| {
             let mut borrow = cell.borrow_mut();
-            let v = borrow
-                .as_mut()
-                .expect("State not initialized (call init() first)");
+            let v = borrow.as_mut().expect("State not initialized (call init() first)");
             f(v)
         })
     }
@@ -65,7 +61,8 @@ macro_rules! language_state {
             static __LANG_STATE_CELL: std::cell::RefCell<Option<$ty>> =
                 std::cell::RefCell::new(None);
         }
-        static $name: $crate::state::State<$ty> = $crate::state::State::new(&__LANG_STATE_CELL);
+        static $name: $crate::state::State<$ty> =
+            $crate::state::State::new(&__LANG_STATE_CELL);
     };
 }
 
@@ -317,15 +314,12 @@ mod tests {
         let m = slot.get("async").unwrap();
         let guard = block_on(m.lock("async")).unwrap();
 
-        let e = slot
-            .try_with("perspectiveCommit", |l| l.log.push("sync"))
-            .unwrap_err();
+        let e = slot.try_with("perspectiveCommit", |l| l.log.push("sync")).unwrap_err();
         assert!(matches!(e.code, ErrorCode::Transient));
         assert!(e.message.contains("busy"));
 
         drop(guard);
-        slot.try_with("perspectiveCommit", |l| l.log.push("sync"))
-            .unwrap();
+        slot.try_with("perspectiveCommit", |l| l.log.push("sync")).unwrap();
         assert_eq!(m.try_lock().unwrap().log, vec!["sync"]);
     }
 

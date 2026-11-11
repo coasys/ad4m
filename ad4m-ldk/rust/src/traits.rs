@@ -12,9 +12,7 @@ use crate::types::*;
 pub trait Language: 'static {
     fn name() -> &'static str;
     fn version() -> &'static str;
-    fn is_public() -> bool {
-        false
-    }
+    fn is_public() -> bool { false }
     /// Async so that languages can register Holochain DNAs, await zome
     /// calls, or otherwise use any of the Promise-returning imports
     /// during initialization. Languages whose init logic is sync can
@@ -23,17 +21,13 @@ pub trait Language: 'static {
     fn init() -> impl std::future::Future<Output = LanguageResult<Self>>
     where
         Self: Sized;
-    fn teardown(&mut self) -> LanguageResult<()> {
-        Ok(())
-    }
+    fn teardown(&mut self) -> LanguageResult<()> { Ok(()) }
     /// Returns the interactions available for the given expression
     /// address. Spec §5.7 — the runtime calls this per expression to
     /// discover what actions can be performed against it. Languages
     /// that don't expose per-expression interactions can ignore the
     /// address argument and return a static list (or `Vec::new()`).
-    fn interactions(&self, _address: Address) -> Vec<Interaction> {
-        Vec::new()
-    }
+    fn interactions(&self, _address: Address) -> Vec<Interaction> { Vec::new() }
 
     /// Execute a named interaction against an expression. Spec §5.7 —
     /// Rust ALDK languages cannot return JS callables in `interactions()`
