@@ -82,6 +82,9 @@ pub(crate) fn describe_class(
     if let Some(hint) = &shape.interpretation_hint {
         v["interpretation_hint"] = json!(hint);
     }
+    if let Some(auto_accept) = &shape.auto_accept {
+        v["auto_accept"] = json!(auto_accept.as_str());
+    }
     if let Some(id) = identity {
         v["identity_property"] = json!(id);
     }

@@ -27,6 +27,11 @@ pub struct ShaclClass {
     /// All predicate URIs used by this class's properties (derived from sh://path).
     /// Useful for constructing targeted subscription queries.
     pub all_predicates: Vec<String>,
+    /// Class-level interpretation auto-accept rule (`"always"`,
+    /// `"when_placed"`, `"never"`), mirrored from
+    /// `ModelShape::auto_accept`. `None` when the SDNA declared no rule —
+    /// behaves as `"never"`.
+    pub auto_accept: Option<String>,
 }
 
 /// A property on a SHACL subject class
@@ -228,6 +233,7 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
         properties,
         shape_uri: Some(shape.shape_uri.clone()),
         all_predicates,
+        auto_accept: shape.auto_accept.map(|a| a.as_str().to_string()),
     }
 }
 

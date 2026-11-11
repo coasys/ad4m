@@ -496,6 +496,102 @@ fn round_trip_absent_interpretation_hint_is_none() {
     );
 }
 
+/// The class-level `auto_accept` rule survives the writer → store → loader
+/// round-trip and surfaces on `ModelShape.auto_accept`, so the interpretation
+/// tail can read it through `get_shape` without re-querying SHACL.
+#[test]
+fn round_trip_surfaces_auto_accept_on_class() {
+    for (declared, expected) in [
+        ("always", super::types::AutoAccept::Always),
+        ("when_placed", super::types::AutoAccept::WhenPlaced),
+        ("never", super::types::AutoAccept::Never),
+    ] {
+        let shacl_json = format!(
+            r#"{{
+                "target_class": "ns://Item",
+                "auto_accept": "{declared}",
+                "properties": [
+                    {{ "path": "ns://title", "name": "title", "datatype": "xsd://string" }}
+                ]
+            }}"#
+        );
+        let shape = round_trip("Item", &shacl_json);
+        assert_eq!(
+            shape.auto_accept,
+            Some(expected),
+            "declared auto_accept \"{declared}\" should surface on ModelShape"
+        );
+    }
+}
+
+/// Absent `auto_accept` round-trips to `None`: the interpretation tail treats
+/// `None` as "never", i.e. shapes written before this key existed keep their
+/// pending-for-a-human behaviour.
+#[test]
+fn round_trip_absent_auto_accept_is_none() {
+    let shacl_json = r#"{
+        "target_class": "ns://Item",
+        "properties": [
+            { "path": "ns://title", "name": "title", "datatype": "xsd://string" }
+        ]
+    }"#;
+    let shape = round_trip("Item", shacl_json);
+    assert!(
+        shape.auto_accept.is_none(),
+        "no auto_accept declared → ModelShape.auto_accept must be None"
+    );
+}
+
+/// A stored `ad4m://auto_accept` value outside the declared set can only
+/// arrive via raw link writes or sync (the writer rejects it at parse time).
+/// `load_shape` must degrade it to `None` — "never" — rather than fail the
+/// whole shape load for the class.
+#[test]
+fn load_shape_degrades_an_unknown_stored_auto_accept_value() {
+    let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    let links = parse_shacl_to_links(
+        r#"{
+            "target_class": "ns://Item",
+            "properties": [
+                { "path": "ns://title", "name": "title", "datatype": "xsd://string" }
+            ]
+        }"#,
+        "Item",
+    )
+    .expect("parse SHACL");
+    let mut all_links = vec![
+        Link {
+            source: "ns://Item".to_string(),
+            predicate: Some("rdf://type".to_string()),
+            target: "ad4m://SubjectClass".to_string(),
+        },
+        Link {
+            source: "ns://Item".to_string(),
+            predicate: Some("ad4m://shape".to_string()),
+            target: "ns://ItemShape".to_string(),
+        },
+        // A hand-written bogus value — the path `parse_shacl_to_links`
+        // can never produce, but a peer or raw `addLink` can store.
+        Link {
+            source: "ns://ItemShape".to_string(),
+            predicate: Some("ad4m://auto_accept".to_string()),
+            target: "literal:string:sometimes".to_string(),
+        },
+    ];
+    all_links.extend(links);
+    for link in all_links {
+        store
+            .add_link(&make_link_for_round_trip(&signer, link))
+            .unwrap();
+    }
+    let shape = load_shape(&store, "Item").expect("load shape");
+    assert_eq!(
+        shape.auto_accept, None,
+        "unknown stored value degrades to None (never), shape still loads"
+    );
+}
+
 /// A custom (non-"literal") resolveLanguage round-trips and is never treated
 /// as deterministic-literal storage.
 #[test]

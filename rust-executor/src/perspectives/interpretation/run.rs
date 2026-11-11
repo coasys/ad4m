@@ -1664,6 +1664,7 @@ mod pass_session_tests {
             properties: vec![],
             shape_uri: None,
             all_predicates: vec![],
+            auto_accept: None,
         }
     }
 

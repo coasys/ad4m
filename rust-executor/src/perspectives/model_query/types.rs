@@ -985,6 +985,83 @@ impl ShapeProperty {
     }
 }
 
+/// The class-level `auto_accept` interpretation rule: whether an inferred
+/// item of this class is accepted automatically at the end of an
+/// interpretation pass, without a human clicking `accept_interpretation`.
+///
+/// Deserialized verbatim from the SHACL shape JSON (`"auto_accept":
+/// "always" | "when_placed" | "never"`), emitted by
+/// `parse_shacl_to_links` as one `ad4m://auto_accept` link on the shape
+/// node, and read back by `load_shape` onto [`ModelShape::auto_accept`].
+/// An absent declaration behaves as `Never` — pre-auto-accept behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoAccept {
+    /// Accept every inferred item of this class after each pass.
+    Always,
+    /// Accept only items carrying at least one parent relation value —
+    /// a forward `hasOne` relation to another class instance, either an
+    /// accepted link or a still-staged inferred overlay value.
+    WhenPlaced,
+    /// Never auto-accept; items stay pending in the overlay for a human.
+    Never,
+}
+
+impl AutoAccept {
+    /// The declared string form — the link target and the JSON wire value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutoAccept::Always => "always",
+            AutoAccept::WhenPlaced => "when_placed",
+            AutoAccept::Never => "never",
+        }
+    }
+
+    /// Parse the stored/wire string. `None` on anything that is not one of
+    /// the three declared values — a stored garbage value degrades to the
+    /// `Never` behaviour rather than breaking shape loading for the class.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "always" => Some(AutoAccept::Always),
+            "when_placed" => Some(AutoAccept::WhenPlaced),
+            "never" => Some(AutoAccept::Never),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod auto_accept_tests {
+    use super::*;
+
+    #[test]
+    fn auto_accept_strings_round_trip() {
+        for (s, v) in [
+            ("always", AutoAccept::Always),
+            ("when_placed", AutoAccept::WhenPlaced),
+            ("never", AutoAccept::Never),
+        ] {
+            assert_eq!(AutoAccept::parse(s), Some(v), "parse {s}");
+            assert_eq!(v.as_str(), s, "as_str {s}");
+            // serde wire form is the same snake_case string (it's what the
+            // SHACL JSON carries).
+            assert_eq!(serde_json::to_value(v).unwrap(), serde_json::json!(s));
+            let back: AutoAccept = serde_json::from_value(serde_json::json!(s)).unwrap();
+            assert_eq!(back, v);
+        }
+    }
+
+    #[test]
+    fn auto_accept_parse_rejects_unknown_values() {
+        for bad in ["sometimes", "Always", "ALWAYS", "", " when_placed "] {
+            assert_eq!(AutoAccept::parse(bad), None, "{bad:?} must not parse");
+        }
+        // The serde side is a closed enum: a bad wire value is a hard error
+        // at parse time, which is how `parse_shacl_to_links` rejects it.
+        assert!(serde_json::from_value::<AutoAccept>(serde_json::json!("sometimes")).is_err());
+    }
+}
+
 /// Enriched relation metadata for include (eager-loading) resolution.
 /// Target shapes are resolved at recursion time through a [`ShapeResolver`]
 /// against the perspective's in-memory shape cache.
@@ -1024,6 +1101,11 @@ pub struct ModelShape {
     /// LLM extractor toward what instances of this class represent.  `None`
     /// when the SDNA declared no class hint.
     pub(crate) interpretation_hint: Option<String>,
+    /// Class-level auto-accept rule for interpretation, read back from the
+    /// `ad4m://auto_accept` link on the shape node.  `None` behaves as
+    /// [`AutoAccept::Never`] — the item stays pending in the overlay for a
+    /// human, exactly as before this rule existed.
+    pub(crate) auto_accept: Option<AutoAccept>,
 }
 
 impl ModelShape {

@@ -14,7 +14,7 @@
 //! the integration test suite, which builds shapes from JSON fixtures
 //! without going through the SHACL writer.
 
-use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
+use super::types::{AutoAccept, ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::{anyhow, Error};
@@ -357,22 +357,39 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         }
     }
 
-    // Class-level interpretation hint lives on the shape node itself.
-    let class_hint_query = format!(
+    // Class-level interpretation metadata lives on the shape node itself: the
+    // natural-language hint plus the auto-accept rule.
+    let class_meta_query = format!(
         r#"
-        SELECT ?hint WHERE {{
-            <{shape_uri}> <ad4m://interpretation_hint> ?hint .
+        SELECT ?hint ?autoAccept WHERE {{
+            OPTIONAL {{ <{shape_uri}> <ad4m://interpretation_hint> ?hint . }}
+            OPTIONAL {{ <{shape_uri}> <ad4m://auto_accept> ?autoAccept . }}
         }}
         LIMIT 1
         "#
     );
-    let class_hint = store
-        .query(&class_hint_query)
+    let class_meta_row = store
+        .query(&class_meta_query)
         .ok()
         .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
-        .and_then(|rows| {
-            rows.first()
-                .and_then(|r| r["hint"].as_str().map(decode_literal_string_target))
+        .and_then(|rows| rows.into_iter().next());
+    let class_hint = class_meta_row
+        .as_ref()
+        .and_then(|r| r["hint"].as_str().map(decode_literal_string_target));
+    let auto_accept = class_meta_row
+        .as_ref()
+        .and_then(|r| r["autoAccept"].as_str().map(decode_literal_string_target))
+        .and_then(|raw| {
+            AutoAccept::parse(&raw).or_else(|| {
+                // A declared-but-unknown value reaches here only via raw link
+                // writes or sync (the writer rejects it at parse time). Treat
+                // it as `never` rather than failing shape load for the class.
+                log::warn!(
+                    "SHACL shape for class '{class_name}': unknown auto_accept value \
+                     '{raw}' — treating it as 'never'"
+                );
+                None
+            })
         });
 
     Ok(ModelShape {
@@ -381,6 +398,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         properties,
         include_relations,
         interpretation_hint: class_hint,
+        auto_accept,
     })
 }
 
@@ -725,6 +743,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         properties,
         include_relations,
         interpretation_hint: None,
+        auto_accept: None,
     })
 }
 
