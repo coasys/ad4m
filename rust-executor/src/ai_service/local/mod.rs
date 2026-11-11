@@ -302,6 +302,9 @@ lazy_static! {
     /// during a start stops what the start started. Not by the exit stop, which must not
     /// wait for a start (the runtime's stop handle reaches a start in progress).
     static ref LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+    /// Held around each write of `selection.json`, and around a start's read of it and
+    /// write back: an install saves without `LIFECYCLE`, so it must not land between them.
+    static ref SELECTION_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static ref MANAGED_PORTS: std::sync::RwLock<BTreeMap<u16, ManagedPort>> =
         std::sync::RwLock::new(BTreeMap::new());
     /// Per runtime, the GPU check of its last start: on the GPU, and the bytes it held.
@@ -761,7 +764,10 @@ async fn install_for(
             server_flags: model.server_flags.clone(),
         });
     }
-    selection.save(paths)?;
+    {
+        let _file = SELECTION_FILE.lock().unwrap();
+        selection.save(paths)?;
+    }
 
     if params.start.unwrap_or(true) {
         // A new set of models: stop what runs, start the new one, make it the default.
@@ -1349,6 +1355,7 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
     // `ai.localInstall` saves its selection without the lifecycle lock, so it may have
     // done so while the runtimes above loaded: that selection stays, with the ports of
     // this start. The install's own start, or the next one, runs its models.
+    let _file = SELECTION_FILE.lock().unwrap();
     match Selection::load(paths) {
         Some(mut saved) => {
             saved.ports = selection.ports;
