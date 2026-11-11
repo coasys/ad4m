@@ -14,7 +14,10 @@
  * executor gives it a participant id that every later call about the
  * session names. The same agent on another device is another participant;
  * a later join from this device — another tab — replaces this session, and
- * the manager stops (`replaced`) rather than taking the call back.
+ * the manager stops (`replaced`) rather than taking the call back. Each
+ * user join sends a random session key that the rebuilds of that call send
+ * again; the executor refuses (409) a key another tab's join replaced, so a
+ * tab that missed its `sfu-session-replaced` notice stops all the same.
  *
  * Applications (Flux, WE, or any other) wrap this class with their
  * own reactive store and UI layer.  The manager itself only touches
@@ -22,6 +25,7 @@
  * neighbourhood RPC surface.
  */
 
+import { RpcError } from "../apiClient"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
@@ -45,6 +49,7 @@ export interface SfuNeighbourhoodApi {
         roomName: string,
         sdpOffer: string,
         deviceId: string,
+        sessionKey: string,
     ): Promise<CallSessionInfo>
     sfuCallLeave(
         neighbourhoodUrl: string,
@@ -256,6 +261,10 @@ export class SfuManager {
     private agentDid: string
     /** The device this manager calls from: a later join from it replaces this session. */
     private deviceId: string
+    /** This call session's key: a rebuild joins with it again, a user's join
+     *  makes a new one. The executor refuses a key a later join from this
+     *  device replaced, so a tab that missed its notice cannot take the call back. */
+    private sessionKey: string = randomId()
     private state: SfuCallState
     private callbacks: Map<SfuEvent, SfuEventCallback[]> = new Map()
     private iceServers: RTCIceServer[]
@@ -353,7 +362,9 @@ export class SfuManager {
      * the join would replace it anyway, as it comes from this device.
      * Another tab's join can still replace the old session before the leave
      * lands: that notice stops the rebuild wherever it is, and a session its
-     * join already got is left.
+     * join already got is left. A tab that missed the notice learns it from
+     * the rejoin: the executor refuses the replaced session key (409), and
+     * the manager stops as the notice would have stopped it, without retrying.
      *
      * Two budgets. A rebuild whose join works but whose connection fails
      * again counts once against `MAX_RECONNECTS`, reset when ICE connects.
@@ -374,6 +385,7 @@ export class SfuManager {
         )
         this.reconnecting = true
         this.endRestart()
+        const previous = this.state.participantId
         try {
             const deadline = Date.now() + SfuManager.REJOIN_WINDOW_MS
             for (let delay = 1000; ; delay = Math.min(delay * 2, 10_000)) {
@@ -391,6 +403,15 @@ export class SfuManager {
                     return
                 } catch (e) {
                     if (generation !== this.generation) return
+                    if (e instanceof RpcError && e.status === 409) {
+                        this.stopReplaced({
+                            targetDid: this.agentDid,
+                            neighbourhoodUrl: this.neighbourhoodUrl,
+                            roomName: this.roomId,
+                            participantId: previous ?? "",
+                        })
+                        return
+                    }
                     if (Date.now() + delay > deadline) {
                         console.error("SFU reconnect failed:", e)
                         this.emit("error", e)
@@ -484,6 +505,7 @@ export class SfuManager {
     /** Join the SFU call with simulcast support. */
     async join(localStream: MediaStream): Promise<void> {
         const generation = this.generation
+        if (!this.reconnecting) this.sessionKey = randomId()
         this.state.localStream = localStream
 
         const pc = new RTCPeerConnection({ iceServers: this.iceServers })
@@ -620,6 +642,7 @@ export class SfuManager {
                 this.roomId,
                 sdpOffer,
                 this.deviceId,
+                this.sessionKey,
             )
         } catch (err) {
             // Settled either way: offers queued behind this join reach

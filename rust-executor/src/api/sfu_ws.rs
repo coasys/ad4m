@@ -33,7 +33,7 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::{NEIGHBOURHOOD_READ_CAPABILITY, NEIGHBOURHOOD_UPDATE_CAPABILITY};
-use crate::sfu::{get_sfu_service, CallSessionInfo, SfuConfig, SfuRoomInfo};
+use crate::sfu::{get_sfu_service, CallJoinError, CallSessionInfo, SfuConfig, SfuRoomInfo};
 use crate::types::RequestContext;
 
 use super::guards::Guard;
@@ -174,11 +174,15 @@ async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
             &p.room_name,
             &agent_did,
             &p.device_id,
+            &p.session_key,
             &p.sdp_offer,
             p.accept_redirect.unwrap_or(false),
         )
         .await
-        .map_err(map_room_err)?;
+        .map_err(|e| match e {
+            CallJoinError::Replaced(m) => WsRpcError::conflict(m),
+            CallJoinError::Failed(m) => WsRpcError::internal(m),
+        })?;
     Ok(serde_json::to_value(session)?)
 }
 
@@ -598,6 +602,11 @@ pub struct SfuCallJoinParams {
     /// The caller's session from the same device is replaced; one from
     /// another device stays beside it.
     pub device_id: String,
+    /// The client's random key for this call session (1 to 128 characters,
+    /// never published). A rebuild of the session sends it again and
+    /// replaces its own dead session; a join whose key a later join from the
+    /// same device replaced is refused with 409: that session must stop.
+    pub session_key: String,
     /// The caller can reach other cascade nodes, so a busy room may answer
     /// with `redirectTo` instead of a session. Off by default: an SDK client
     /// reaches only this executor.
@@ -807,10 +816,14 @@ mod tests {
                 "sfu.sendData",
                 json!({ "neighbourhoodUrl": "n", "roomName": "r", "channelLabel": "c", "data": "x" }),
             ),
-            // A join names its device.
+            // A join names its device and its session key.
             (
                 "sfu.callJoin",
-                json!({ "neighbourhoodUrl": "n", "roomName": "r", "sdpOffer": "{}" }),
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "sdpOffer": "{}", "sessionKey": "k" }),
+            ),
+            (
+                "sfu.callJoin",
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "sdpOffer": "{}", "deviceId": "d" }),
             ),
             ("sfu.setConfig", json!({ "neighbourhoodUrl": "n" })),
             (

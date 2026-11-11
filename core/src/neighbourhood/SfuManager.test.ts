@@ -97,6 +97,7 @@ class FakePeerConnection {
     constructor(init: RTCSessionDescriptionInit) { Object.assign(this, init) }
 }
 
+import { RpcError } from "../apiClient"
 import { defaultDeviceId, SfuManager, type SfuNeighbourhoodApi, type SfuParticipantState } from "./SfuManager"
 import type {
     CallSessionInfo,
@@ -631,7 +632,7 @@ test("a failed connection leaves, then joins this executor again", async () => {
         "subscribe-roster",
         "sfuCallJoin",
     ])
-    expect(api.sfuCallJoin).toHaveBeenLastCalledWith(URL, ROOM, expect.any(String), expect.any(String))
+    expect(api.sfuCallJoin).toHaveBeenLastCalledWith(URL, ROOM, expect.any(String), expect.any(String), expect.any(String))
     expect(FakePeerConnection.instances).toHaveLength(2)
 })
 
@@ -1010,6 +1011,51 @@ test("replaced while a reconnect waits between leave and join: it stops, and nev
     expect(api.replacedHandlers.size).toBe(0)
 })
 
+test("a rebuild's join refused as replaced stops the call, says so, and never joins again", async () => {
+    // The replaced notice was missed (the socket was down): only the refusal
+    // tells this tab that another tab of the device took the call.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+        const replacedEvents: unknown[] = []
+        const errors: unknown[] = []
+        manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+        manager.on("error", (e: unknown) => errors.push(e))
+        await manager.join(fakeStream())
+        api.sfuCallLeave.mockResolvedValueOnce(false)
+        api.sfuCallJoin.mockRejectedValueOnce(new RpcError(409, "This call session was replaced"))
+
+        await iceState("failed")
+        await flush()
+        await jest.advanceTimersByTimeAsync(180_000)
+
+        expect(replacedEvents).toEqual([replaced(MINE)])
+        expect(errors).toEqual([])
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        expect(manager.getState().participantId).toBeNull()
+        expect(manager.getState().peerConnection).toBeNull()
+        expect(api.offerHandlers.size + api.rosterHandlers.size + api.replacedHandlers.size).toBe(0)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a rebuild joins with the session key of its call; a new join takes a new key", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+    await manager.join(fakeStream())
+    await iceState("failed")
+    await manager.leave()
+    await manager.join(fakeStream())
+
+    const keys = (api.sfuCallJoin.mock.calls as unknown as string[][]).map((call) => call[4])
+    expect(keys).toHaveLength(3)
+    expect(keys[0]).toEqual(expect.any(String))
+    expect(keys[1]).toBe(keys[0])
+    expect(keys[2]).not.toBe(keys[0])
+})
+
 test("replaced while a reconnect's join is out: the session that join got is left", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
@@ -1073,7 +1119,7 @@ test("the join sends the device id; every later call names the participant id th
     await manager.sendData("chat", "hi")
     await manager.leave()
 
-    expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), DEVICE)
+    expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), DEVICE, expect.any(String))
     expect(api.sfuAddIceCandidate.mock.calls).toEqual([
         [URL, ROOM, MINE, "early"],
         [URL, ROOM, MINE, "late"],
@@ -1318,7 +1364,7 @@ describe("the default device id", () => {
         g.localStorage = fakeLocalStorage()
         const api = fakeApi()
         await new SfuManager(api, ROOM, ME, URL, undefined, undefined, "electron-main").join(fakeStream())
-        expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), "electron-main")
+        expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), "electron-main", expect.any(String))
         expect(g.localStorage.items.size).toBe(0)
     })
 })

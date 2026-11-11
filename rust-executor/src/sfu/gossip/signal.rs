@@ -182,7 +182,7 @@ mod tests {
         let gossip = SignalGossip::new("did:test:local".into(), 8, sender);
 
         // Inject a well-formed signal
-        let json = r#"{"type":"sfu-announce","did":"did:test:remote","room_id":"r1","participant_count":2,"capacity_hint":8}"#;
+        let json = r#"{"type":"sfu-announce","did":"did:test:remote","room_id":"r1","participant_count":2,"capacity_hint":8,"sessions":[{"agentDid":"did:test:alice","participantId":"P1"}]}"#;
         assert!(gossip.inject_signal(json).is_ok());
 
         // Take the inbound channel and verify the signal arrived

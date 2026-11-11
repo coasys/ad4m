@@ -7,7 +7,7 @@
 //! agent on another device is another participant; a join from the same
 //! device (another browser tab) replaces the earlier session.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -31,6 +31,10 @@ impl ParticipantId {
 
 /// Most sessions one DID holds in one room: one per device.
 pub const MAX_DEVICES_PER_DID: usize = 4;
+
+/// Most replaced session keys a room remembers per DID and device: the
+/// tabs a user left behind on one device, newest kept.
+pub const MAX_SUPERSEDED_KEYS: usize = 8;
 
 impl fmt::Display for ParticipantId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -79,6 +83,9 @@ pub struct ParticipantInfo {
     pub agent_did: String,
     /// The device the session joined from, as the client named it.
     pub device_id: String,
+    /// The client's key for its call session: a rebuild of the session
+    /// joins with it again, a new tab with a new one. Never published.
+    pub session_key: String,
     pub joined_at: Instant,
     pub has_audio: bool,
     pub has_video: bool,
@@ -96,6 +103,10 @@ pub struct SfuRoom {
     /// Epoch millis when the room was created.
     pub created_at: u64,
     pub max_participants: Option<usize>,
+    /// Per DID and device, the session keys a join with another key
+    /// replaced, newest last, at most [`MAX_SUPERSEDED_KEYS`]: a session
+    /// that was replaced never comes back by rebuilding itself.
+    superseded: HashMap<(String, String), VecDeque<String>>,
 }
 
 impl SfuRoom {
@@ -108,25 +119,41 @@ impl SfuRoom {
                 .unwrap_or_default()
                 .as_millis() as u64,
             max_participants,
+            superseded: HashMap::new(),
         }
     }
 
-    /// Add the session `pid` of `agent_did` on `device_id`. A session of the
-    /// same DID on the same device leaves the room for it, and its id is
-    /// returned: the caller drops its peer and tells it so. It does not count
-    /// against the room's capacity or the DID's devices.
+    /// Add the session `pid` of `agent_did` on `device_id`, keyed
+    /// `session_key`. A session of the same DID on the same device leaves
+    /// the room for it, and its id is returned: the caller drops its peer
+    /// and tells it so. It does not count against the room's capacity or
+    /// the DID's devices.
+    ///
+    /// A rebuild of a session joins with its key again and replaces its own
+    /// dead session. A key that another key replaced on this device is
+    /// refused with [`RoomError::Replaced`]: an older tab that missed its
+    /// notice must not take the call back from the newer one.
     pub fn add_participant(
         &mut self,
         pid: ParticipantId,
         agent_did: String,
         device_id: String,
+        session_key: String,
     ) -> Result<Option<ParticipantId>, RoomError> {
+        let device = (agent_did, device_id);
+        if self
+            .superseded
+            .get(&device)
+            .is_some_and(|keys| keys.contains(&session_key))
+        {
+            return Err(RoomError::Replaced);
+        }
         let replaced = self
             .participants
             .values()
-            .find(|p| p.agent_did == agent_did && p.device_id == device_id)
-            .map(|p| p.id.clone());
-        let staying = |p: &&ParticipantInfo| Some(&p.id) != replaced.as_ref();
+            .find(|p| p.agent_did == device.0 && p.device_id == device.1)
+            .map(|p| (p.id.clone(), p.session_key.clone()));
+        let staying = |p: &&ParticipantInfo| Some(&p.id) != replaced.as_ref().map(|(id, _)| id);
 
         if let Some(max) = self.max_participants {
             if self.participants.values().filter(staying).count() >= max {
@@ -137,21 +164,30 @@ impl SfuRoom {
             .participants
             .values()
             .filter(staying)
-            .filter(|p| p.agent_did == agent_did)
+            .filter(|p| p.agent_did == device.0)
             .count();
         if devices >= MAX_DEVICES_PER_DID {
             return Err(RoomError::TooManyDevices);
         }
 
-        if let Some(old) = &replaced {
+        if let Some((old, old_key)) = &replaced {
             self.participants.remove(old);
+            if *old_key != session_key {
+                let keys = self.superseded.entry(device.clone()).or_default();
+                if keys.len() >= MAX_SUPERSEDED_KEYS {
+                    keys.pop_front();
+                }
+                keys.push_back(old_key.clone());
+            }
         }
+        let (agent_did, device_id) = device;
         self.participants.insert(
             pid.clone(),
             ParticipantInfo {
                 id: pid,
                 agent_did,
                 device_id,
+                session_key,
                 joined_at: Instant::now(),
                 has_audio: false,
                 has_video: false,
@@ -160,7 +196,7 @@ impl SfuRoom {
             },
         );
 
-        Ok(replaced)
+        Ok(replaced.map(|(old, _)| old))
     }
 
     /// Mark a participant as able to follow a redirect to another node.
@@ -207,6 +243,9 @@ pub enum RoomError {
     RoomFull,
     /// The DID is in the room from [`MAX_DEVICES_PER_DID`] other devices.
     TooManyDevices,
+    /// The session key was replaced on this device by a later join (another
+    /// tab): the session it names must stop, not rebuild.
+    Replaced,
     NotFound,
 }
 
@@ -218,6 +257,10 @@ impl fmt::Display for RoomError {
                 f,
                 "Already in this call from {} devices: leave on one of them first",
                 MAX_DEVICES_PER_DID
+            ),
+            RoomError::Replaced => write!(
+                f,
+                "This call session was replaced by a later join from the same device"
             ),
             RoomError::NotFound => write!(f, "Room not found"),
         }
@@ -282,14 +325,85 @@ impl RoomManager {
 mod tests {
     use super::*;
 
+    /// A join from a new tab: a session key of its own.
     fn join(
         room: &mut SfuRoom,
         did: &str,
         device: &str,
     ) -> Result<(ParticipantId, Option<ParticipantId>), RoomError> {
         let pid = ParticipantId::next();
-        let replaced = room.add_participant(pid.clone(), did.to_string(), device.to_string())?;
+        join_keyed(room, did, device, &format!("key-{}", pid))
+    }
+
+    fn join_keyed(
+        room: &mut SfuRoom,
+        did: &str,
+        device: &str,
+        key: &str,
+    ) -> Result<(ParticipantId, Option<ParticipantId>), RoomError> {
+        let pid = ParticipantId::next();
+        let replaced = room.add_participant(
+            pid.clone(),
+            did.to_string(),
+            device.to_string(),
+            key.to_string(),
+        )?;
         Ok((pid, replaced))
+    }
+
+    /// Tab A (K1) is replaced by tab B (K2) and missed the notice: its
+    /// rebuild, with K1, is refused and tab B keeps the call. Tab B's own
+    /// rebuild, with K2, replaces its session as before.
+    #[test]
+    fn a_replaced_session_key_cannot_take_the_call_back() {
+        let mut room = SfuRoom::new(RoomId::new("n", "r"), Some(8));
+        let (a, _) = join_keyed(&mut room, "did:a", "phone", "K1").unwrap();
+        let (b, replaced) = join_keyed(&mut room, "did:a", "phone", "K2").unwrap();
+        assert_eq!(replaced, Some(a));
+
+        assert!(matches!(
+            join_keyed(&mut room, "did:a", "phone", "K1"),
+            Err(RoomError::Replaced)
+        ));
+        assert_eq!(room.participants.keys().collect::<Vec<_>>(), vec![&b]);
+
+        let (b2, replaced) = join_keyed(&mut room, "did:a", "phone", "K2").unwrap();
+        assert_eq!(replaced, Some(b));
+        assert_eq!(room.participants.keys().collect::<Vec<_>>(), vec![&b2]);
+
+        // The key is refused on this device only, and only for this DID.
+        join_keyed(&mut room, "did:a", "laptop", "K1").unwrap();
+        join_keyed(&mut room, "did:b", "phone", "K1").unwrap();
+    }
+
+    /// A rebuild joins with its own key again: it replaces its dead session.
+    #[test]
+    fn a_rebuild_with_its_key_replaces_its_own_session() {
+        let mut room = SfuRoom::new(RoomId::new("n", "r"), Some(8));
+        let (first, _) = join_keyed(&mut room, "did:a", "phone", "K1").unwrap();
+        let (second, replaced) = join_keyed(&mut room, "did:a", "phone", "K1").unwrap();
+        assert_eq!(replaced, Some(first));
+        let (_, replaced) = join_keyed(&mut room, "did:a", "phone", "K1").unwrap();
+        assert_eq!(replaced, Some(second));
+    }
+
+    /// The replaced keys a room remembers per device are bounded; the
+    /// newest are kept.
+    #[test]
+    fn the_replaced_keys_kept_are_bounded() {
+        let mut room = SfuRoom::new(RoomId::new("n", "r"), Some(8));
+        for i in 0..=MAX_SUPERSEDED_KEYS + 1 {
+            join_keyed(&mut room, "did:a", "phone", &format!("K{i}")).unwrap();
+        }
+        let kept = &room.superseded[&("did:a".to_string(), "phone".to_string())];
+        assert_eq!(kept.len(), MAX_SUPERSEDED_KEYS);
+        assert_eq!(kept.back().unwrap(), &format!("K{}", MAX_SUPERSEDED_KEYS));
+        // The oldest fell out of the record; a newer one is still refused.
+        join_keyed(&mut room, "did:a", "phone", "K0").unwrap();
+        assert!(matches!(
+            join_keyed(&mut room, "did:a", "phone", "K3"),
+            Err(RoomError::Replaced)
+        ));
     }
 
     #[test]

@@ -172,8 +172,12 @@ export function createSession(config: SessionImplConfig): Session {
     }
 
     /** `destroy()` ran: a join still resolving must not go on to reach the executor. */
+    /** Set when `destroy()` starts, before its awaits: a join that resumes
+     *  while the session closes must not go on. */
+    let destroying = false
+
     function destroyed(): boolean {
-        return state === "closed"
+        return destroying || state === "closed"
     }
 
     /**
@@ -412,11 +416,18 @@ export function createSession(config: SessionImplConfig): Session {
                 })
 
                 await mesh.join(localStream)
+                // Destroyed while the mesh joined: destroy() already let the
+                // mesh go and found nothing to leave.
+                if (destroyed()) throw new Error("Session destroyed")
 
                 // Announce this agent's presence in the call, then
                 // start polling so the mesh reconciles connections
                 // against whoever else the roster contains.
                 await announceCallPresence()
+                if (destroyed()) {
+                    await withdrawCallPresence()
+                    throw new Error("Session destroyed")
+                }
                 startRosterPolling()
 
                 emit("topology-changed", "mesh")
@@ -438,6 +449,7 @@ export function createSession(config: SessionImplConfig): Session {
             })
 
             await manager.join(localStream)
+            if (destroyed()) throw new Error("Session destroyed")
             // Replaced while joining: the session is idle again.
             if (sfuManager !== manager) return
             emit("topology-changed", "sfu")
@@ -548,6 +560,7 @@ export function createSession(config: SessionImplConfig): Session {
         },
 
         async destroy() {
+            destroying = true
             // Capture refs before leave() nulls them
             const mesh = meshManager
             const sfu = sfuManager

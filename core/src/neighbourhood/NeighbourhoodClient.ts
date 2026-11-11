@@ -172,18 +172,23 @@ export class NeighbourhoodClient {
      * Join a call from `deviceId`. The executor replaces this agent's session
      * from the same device (another tab) and keeps those from other devices.
      * The result's `participantId` names the session in every later call.
+     * `sessionKey` is the caller's random key for the session: a rebuild
+     * sends it again; a key a later join from this device replaced is
+     * refused with `RpcError` status 409, and that session must stop.
      */
     async sfuCallJoin(
         neighbourhoodUrl: string,
         roomName: string,
         sdpOffer: string,
         deviceId: string,
+        sessionKey: string,
     ): Promise<CallSessionInfo> {
         return this.#apiClient.call("sfu.callJoin", {
             neighbourhoodUrl,
             roomName,
             sdpOffer,
             deviceId,
+            sessionKey,
         })
     }
 

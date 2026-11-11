@@ -7,7 +7,8 @@
 //! ```text
 //! { "type": "sfu-announce", "did": "did:key:...",
 //!   "room_id": "windtunnel://t3:t3-sfu-cascade-2node",
-//!   "participant_count": 4, "capacity_hint": 4 }\n
+//!   "participant_count": 1, "capacity_hint": 4,
+//!   "sessions": [{ "agentDid": "did:key:...", "participantId": "P7" }] }\n
 //! ```
 //!
 //! On the receive side the transport spawns one tokio task per
@@ -349,6 +350,7 @@ mod tests {
             room_id: "n:r".into(),
             participant_count: 1,
             capacity_hint: 4,
+            sessions: Vec::new(),
         })
         .unwrap();
         frame.push(b'\n');

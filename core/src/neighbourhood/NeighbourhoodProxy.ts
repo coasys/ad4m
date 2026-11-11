@@ -203,8 +203,9 @@ export class NeighbourhoodProxy {
         roomName: string,
         sdpOffer: string,
         deviceId: string,
+        sessionKey: string,
     ): Promise<CallSessionInfo> {
-        return await this.#client.sfuCallJoin(neighbourhoodUrl, roomName, sdpOffer, deviceId)
+        return await this.#client.sfuCallJoin(neighbourhoodUrl, roomName, sdpOffer, deviceId, sessionKey)
     }
 
     /** Leave the session `participantId` (the join's). */
