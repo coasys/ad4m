@@ -4969,3 +4969,34 @@ async fn the_template_tools_do_not_reach_a_library_the_caller_does_not_own() {
         "nothing was made in the space"
     );
 }
+
+/// An agent session binds the library its caller named: `template_create` makes its record
+/// there, also when the model names another perspective as the library.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_makes_its_template_in_the_library_its_caller_named() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+    let (_, elsewhere, _g3) = setup_with(&[("Template", TEMPLATE_SDNA)], false).await;
+    let create = vec!["template_create".to_string()];
+    let tools = crate::perspectives::agent_session::session_tools(
+        std::sync::Arc::new(handler),
+        &space,
+        Some(&library),
+        &create,
+    );
+    let made = parse(
+        &tools
+            .call(
+                "template_create",
+                json!({ "library_perspective_id": elsewhere, "name": "Reading list" }),
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(made["perspective_id"], library.as_str(), "{made}");
+    assert_eq!(templates_in(&library).await.len(), 1);
+    assert_eq!(
+        templates_in(&elsewhere).await.len(),
+        0,
+        "the model named this one"
+    );
+}
