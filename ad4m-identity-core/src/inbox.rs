@@ -37,7 +37,12 @@ pub const INBOX_DOMAIN: &str = "coasys:inbox";
 pub const JOINED_TTL_S: u64 = 30 * 86_400;
 /// The longest sealed text (base64url) the store keeps.
 pub const MAX_SEALED_BYTES: usize = 8 * 1024;
-/// Messages per pre-join address.
+/// Messages per writing identity at a pre-join address. Counted per identity, so an identity
+/// that learned a device string cannot fill the room of the holder that scanned it. Each writer
+/// needs an open offer bound to the device key, and an identity holds at most
+/// [`crate::link::MAX_OPEN_OFFERS`] open offers, so one identity holds at most 10 pre-join
+/// messages (80 KiB of sealed text) in all at a time, each gone with its offer (5 minutes);
+/// one address holds 2 × the identities with such an offer.
 pub const MAX_PRE_MESSAGES: usize = 2;
 /// Messages per joined inbox.
 pub const MAX_JOINED_MESSAGES: usize = 16;

@@ -1,12 +1,16 @@
 //! The request box: short requests between a person's own devices. Any device key of the
 //! identity without the bot mark, valid at the head, posts (`403 signer` for a master key);
 //! the same keys and the current master key read; the poster or the current master key
-//! deletes. A request lives at most 7 days, an identity holds at most 16, and a new
-//! `send-master` from a key replaces its older one. The store keeps the signed request each
-//! came with, so a reader checks the poster itself; a revoked key's requests go with its
-//! revocation.
+//! deletes. A request lives at most 7 days, an identity holds at most 16 and one posting key
+//! at most 4 of them (so one device cannot keep the others out), and a new `send-master` from
+//! a key replaces its older one. A post's bytes must be `JCS({body, expires})`, the bytes its
+//! `bodyHash` covers (`400 canonical` otherwise). The store keeps the signed request each came
+//! with, so a reader checks the poster itself (`ad4m_identity_core::requests::verify_posted`);
+//! a revoked key's requests go with its revocation.
 
-use ad4m_identity_core::requests::{check_post, PostedRequest, MAX_OPEN_REQUESTS};
+use ad4m_identity_core::requests::{
+    check_post, posted_bytes, PostedRequest, MAX_OPEN_REQUESTS, MAX_OPEN_REQUESTS_PER_KEY,
+};
 use ad4m_ldk::identity::DeviceRequest;
 use rusqlite::{params, TransactionBehavior};
 use serde_json::{json, Value};
@@ -28,6 +32,16 @@ impl Store {
         post: &PostedRequest,
         incoming: &Incoming<'_>,
     ) -> Result<Value, ApiError> {
+        // The bytes as sent must be the JCS of the post: the signed request's bodyHash covers
+        // them, and a reader hashes JCS({body, expires}) of the request it lists.
+        let canonical =
+            posted_bytes(post).map_err(|e| ApiError::invalid(e.name(), e.to_string()))?;
+        if incoming.body != canonical.as_bytes() {
+            return Err(ApiError::invalid(
+                "canonical",
+                "the body is not sent as JCS({body, expires})",
+            ));
+        }
         let did = ad4m_identity_core::did_of(scid);
         let now = self.now();
         let mut conn = self.db.lock()?;
@@ -56,6 +70,20 @@ impl Store {
                 "DELETE FROM requests WHERE scid = ?1 AND by_key = ?2 AND kind = 'send-master'",
                 params![scid, by],
             )?;
+        }
+        // Room per posting key first, then per identity: one key at its cap leaves the box's
+        // other places to the identity's other device keys.
+        let (by_key, by_key_first): (i64, Option<i64>) = tx.query_row(
+            "SELECT COUNT(*), MIN(expires) FROM requests
+             WHERE scid = ?1 AND by_key = ?2 AND expires > ?3",
+            params![scid, by, to_sql(now)?],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if by_key as usize >= MAX_OPEN_REQUESTS_PER_KEY {
+            let retry = by_key_first
+                .map(|e| from_sql(e).saturating_sub(now))
+                .unwrap_or(60);
+            return Err(ApiError::rate_limited("identity", retry.max(1)));
         }
         let (open, first): (i64, Option<i64>) = tx.query_row(
             "SELECT COUNT(*), MIN(expires) FROM requests WHERE scid = ?1 AND expires > ?2",

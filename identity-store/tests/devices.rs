@@ -9,7 +9,9 @@ use ad4m_identity_core::link::OfferKind;
 use ad4m_identity_core::record::{
     self, open_record, verify_receipt, RecordReceipt, RecoveryAttestation, SealedRecord, Writer,
 };
-use ad4m_identity_core::requests::REQUEST_TTL_S;
+use ad4m_identity_core::requests::{
+    verify_posted, BoxedRequest, MAX_OPEN_REQUESTS, MAX_OPEN_REQUESTS_PER_KEY, REQUEST_TTL_S,
+};
 use ad4m_identity_core::{x25519_multikey_of, BotScope, X25519Secret};
 use axum::http::StatusCode;
 use ed25519_dalek::SigningKey;
@@ -653,6 +655,51 @@ async fn a_claim_ends_the_offers_pre_join_messages() {
     assert_eq!(t.count("inbox"), 0);
 }
 
+/// Room at a pre-join address is counted per writing identity: another identity that learned
+/// the device string and opened its own offer bound to the device key fills its own room, and
+/// the holder that scanned the string still delivers its ticket.
+#[tokio::test]
+async fn another_identity_filling_its_room_at_a_pre_join_address_leaves_the_holders() {
+    let t = TestStore::with_identity_burst(100);
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let mut mallory = Person::new("mallory");
+    t.publish(&mallory).await;
+    let desk = Device::new("alice desk");
+    let address = desk.pre_address();
+
+    let (theirs, s) = bound_offer(&t, &mut mallory, &desk).await;
+    let write = json!({"sealed": mallory.seal_ticket(&desk, &theirs, s),
+                       "bind": bind(&mallory, &theirs.offer.offer_id, &desk)});
+    let m = (mallory.master_id(), mallory.current_master());
+    for _ in 0..2 {
+        let reply = put_pre(&t, &mallory, &address, &write, (&m.0, &m.1)).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    }
+    let reply = put_pre(&t, &mallory, &address, &write, (&m.0, &m.1)).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        reply.body
+    );
+
+    let (ours, s) = bound_offer(&t, &mut alice, &desk).await;
+    let write = json!({"sealed": alice.seal_ticket(&desk, &ours, s),
+                       "bind": bind(&alice, &ours.offer.offer_id, &desk)});
+    let a = (alice.master_id(), alice.current_master());
+    let reply = put_pre(&t, &alice, &address, &write, (&a.0, &a.1)).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+
+    // The device reads both identities' messages and tells them apart by their writer.
+    let path = format!("/v1/inbox/pre/{address}");
+    let reply = pre_read(&t, &desk, "GET", &path).await;
+    let list = reply.body.as_array().unwrap();
+    assert_eq!(list.len(), 3);
+    let by = |scid: String| list.iter().filter(|m| m["writer"]["scid"] == scid).count();
+    assert_eq!((by(mallory.scid()), by(alice.scid())), (2, 1));
+}
+
 // ----- the private details record -----
 
 #[tokio::test]
@@ -1191,6 +1238,11 @@ async fn a_device_posts_a_request_that_the_master_reads_and_deletes() {
         list[0]["signed"]["req"]["bodyHash"],
         hash_bytes(&body(&send))
     );
+    // A reader checks each poster against its own copy of the log.
+    for entry in list {
+        let entry: BoxedRequest = serde_json::from_value(entry.clone()).unwrap();
+        assert_eq!(verify_posted(&entry, &alice.chain), Ok(()));
+    }
     // A device key reads it too; `since` filters.
     let reply = signed(&t, &alice, "GET", &path, ("d1", &alice.device_key(1))).await;
     assert_eq!(reply.body.as_array().unwrap().len(), 2);
@@ -1252,16 +1304,78 @@ async fn requests_need_a_device_key_seven_days_at_most_and_room_in_the_box() {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{refused}");
     }
 
-    // Sixteen open requests; the seventeenth is 429.
+    // Four open requests per posting key: d1's fifth is 429, and it does not keep the
+    // identity's other device keys out of the box.
     let revoke = json!({"body": {"kind": "confirm-revoke", "keyIds": ["d1"], "rotate": true},
                         "expires": T0 + 60});
-    for _ in 0..16 {
+    for _ in 0..MAX_OPEN_REQUESTS_PER_KEY {
         let reply = signed_body(&t, &alice, "POST", &path, &revoke, d1).await;
         assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
     }
     let reply = signed_body(&t, &alice, "POST", &path, &revoke, d1).await;
-    assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        reply.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        reply.body
+    );
     assert_eq!(reply.body["scope"], "identity");
+    let mut others = Vec::new();
+    for i in 0..4 {
+        let device = Device::new(&format!("alice device {i}"));
+        let id = t.link(&mut alice, &device, OfferKind::Device, None).await;
+        others.push((id, device));
+    }
+    let (first_id, first) = &others[0];
+    let reply = signed_body(&t, &alice, "POST", &path, &revoke, (first_id, &first.key)).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+
+    // Sixteen open requests per identity: with four keys at their cap the box is full, and a
+    // fifth key's post is 429.
+    for (n, (id, device)) in others[..3].iter().enumerate() {
+        let left = MAX_OPEN_REQUESTS_PER_KEY - usize::from(n == 0);
+        for _ in 0..left {
+            let reply = signed_body(&t, &alice, "POST", &path, &revoke, (id, &device.key)).await;
+            assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        }
+    }
+    assert_eq!(t.count("requests"), MAX_OPEN_REQUESTS as i64);
+    let (last_id, last) = &others[3];
+    let reply = signed_body(&t, &alice, "POST", &path, &revoke, (last_id, &last.key)).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        reply.body
+    );
+    assert_eq!(reply.body["scope"], "identity");
+}
+
+#[tokio::test]
+async fn a_post_not_sent_as_its_jcs_is_refused() {
+    let t = TestStore::with_identity_burst(100);
+    let alice = Person::new("alice");
+    t.publish(&alice).await;
+    let path = format!("/v1/requests/{}", alice.scid());
+    let key = alice.device_key(1);
+    // The same post with spaces and its members out of order, and with the hash its own bytes
+    // have: the store refuses it, so no reader hashes JCS({body, expires}) to another bodyHash.
+    let expires = T0 + 60;
+    for text in [
+        format!(r#"{{"expires":{expires},"body":{{"kind":"send-master"}}}}"#),
+        format!(r#"{{ "body": {{ "kind": "send-master" }}, "expires": {expires} }}"#),
+    ] {
+        let bytes = text.into_bytes();
+        let header = alice.request("d1", &key, "POST", &path, &bytes, t.now() + 60);
+        let reply = t.send("POST", &path, Some(bytes), Some(header)).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+        assert_eq!(reply.body["error"], "canonical");
+    }
+    assert_eq!(t.count("requests"), 0);
+    // Sent as its JCS, the same post is taken.
+    let send = json!({"body": {"kind": "send-master"}, "expires": expires});
+    let reply = signed_body(&t, &alice, "POST", &path, &send, ("d1", &key)).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
 }
 
 #[tokio::test]
