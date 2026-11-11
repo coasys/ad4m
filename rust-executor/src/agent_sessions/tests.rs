@@ -81,8 +81,14 @@ impl Scripted {
     /// A model whose completions wait on `released`: a turn stays `running` until the
     /// test lets it end.
     fn holding(released: Arc<AtomicBool>) -> Arc<Self> {
+        Self::holding_with(released, vec![])
+    }
+
+    /// A model whose completions wait on `released`, then answer `script` one a call:
+    /// a turn stays inside the model's answer until the test lets it land.
+    fn holding_with(released: Arc<AtomicBool>, script: Vec<HarnessCompletion>) -> Arc<Self> {
         Arc::new(Self {
-            script: Mutex::new(Vec::new()),
+            script: Mutex::new(script),
             released,
             asked: Mutex::new(Vec::new()),
         })
@@ -809,6 +815,76 @@ async fn a_deleted_sessions_turn_calls_no_tool_afterwards() {
     assert_eq!(model.times_asked(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_started_while_a_delete_is_midway_leaves_no_turn_running() {
+    setup();
+    let did = "did:key:alice-a16";
+    let alice = user(did, everything());
+    let session = create(&alice);
+
+    // The gap a send once slipped a whole turn start into: the delete has cleared the
+    // running-turn slot and not yet taken the rows.
+    let (delete_reached, let_delete_run) = service::pause_delete_before_commit();
+    let deleting = {
+        let caller = user(did, everything());
+        let session_id = session.id.clone();
+        tokio::task::spawn_blocking(move || service::delete(&caller, &session_id))
+    };
+    while !delete_reached.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // A send on the session while the delete is parked: at the gap the row is still
+    // there to find, and its turn would ask the held model for a write call.
+    let released = Arc::new(AtomicBool::new(false));
+    let model = Scripted::holding_with(
+        released.clone(),
+        vec![calls("add_link", json!({"perspective_id": "px"}))],
+    );
+    let provider = StubProvider::named(&["add_link"]);
+    let sending = {
+        let model = model.clone();
+        let provider = provider.clone();
+        let session_id = session.id.clone();
+        tokio::spawn(async move {
+            service::send(
+                &alice,
+                &session_id,
+                "go",
+                TurnDeps {
+                    completion: Some(model),
+                    provider: Some(provider),
+                    ..Default::default()
+                },
+            )
+            .await
+        })
+    };
+
+    // An admitted send's task asks the model — that is what the delete must not miss.
+    // A refused send never asks: give it time to say so, then let the delete run.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while model.times_asked() == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let_delete_run.store(true, Ordering::SeqCst);
+
+    assert!(deleting.await.unwrap().unwrap());
+    let outcome = sending.await.unwrap();
+    assert!(
+        matches!(outcome, Err(SessionError::NotFound(_))),
+        "a send on a deleted session answers not-found: {outcome:?}"
+    );
+    assert!(
+        !running_for_test(&session.id),
+        "no turn may be running on a session that is gone"
+    );
+    // Whatever the send's model answers afterwards, none of it runs.
+    released.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(provider.calls.lock().unwrap().is_empty());
+}
+
 /// A model that panics when asked: the turn's task dies without settling anything.
 struct Panicking;
 
@@ -1157,6 +1233,81 @@ async fn a_turn_whose_caller_session_ended_is_refused() {
     )
     .await;
     assert!(outcome.is_err(), "a dead caller refuses the turn");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completion_landing_after_the_caller_was_revoked_runs_no_tool() {
+    setup();
+    let did = "did:key:alice-b6";
+    let alice = user(did, everything());
+    let session = create(&alice);
+
+    // The model has been asked and is holding its answer: the turn is inside a
+    // completion when the caller's grant ends (a revoke or a logout is the same
+    // `ended` cancellation).
+    let released = Arc::new(AtomicBool::new(false));
+    let model = Scripted::holding_with(
+        released.clone(),
+        vec![calls("add_link", json!({"perspective_id": "px"}))],
+    );
+    let provider = StubProvider::named(&["add_link"]);
+    let started = service::send(
+        &alice,
+        &session.id,
+        "go",
+        TurnDeps {
+            completion: Some(model.clone()),
+            provider: Some(provider.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    while model.times_asked() == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    alice.session.grant().unwrap().ended.cancel();
+    released.store(true, Ordering::SeqCst);
+
+    // No call of that completion may run: the turn ends refused, the way a failed
+    // gate check ends it, and the write tool it asked for stays uncalled.
+    let reply = settled(Some(did), &started.reply_id).await;
+    assert_eq!(reply.status, Some(AgentTurnStatus::Failed));
+    assert!(
+        provider.calls.lock().unwrap().is_empty(),
+        "a call of a dead caller's completion must not run"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_whose_grant_still_holds_runs_its_tool_calls() {
+    setup();
+    let did = "did:key:alice-b7";
+    let alice = user(did, everything());
+    let session = create(&alice);
+    let provider = StubProvider::named(&["add_link"]);
+    let started = service::send(
+        &alice,
+        &session.id,
+        "go",
+        TurnDeps {
+            completion: Some(Scripted::answering(vec![calls(
+                "add_link",
+                json!({"perspective_id": "px"}),
+            )])),
+            provider: Some(provider.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let reply = settled(Some(did), &started.reply_id).await;
+    assert_eq!(reply.status, Some(AgentTurnStatus::Done));
+    assert_eq!(
+        *provider.calls.lock().unwrap(),
+        vec!["add_link".to_string()]
+    );
 }
 
 // ── the events ───────────────────────────────────────────────────────────────

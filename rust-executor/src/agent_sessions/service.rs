@@ -315,6 +315,9 @@ pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
             abort.abort();
         }
     }
+    // A test parks the delete here to run a send inside the gap above.
+    #[cfg(test)]
+    wait_at_delete_pause();
     if !store
         .delete_session(owner, id)
         .map_err(SessionError::Failed)?
@@ -591,6 +594,44 @@ impl Drop for SendHold {
     fn drop(&mut self) {
         if self.armed {
             release(&self.session_id, &self.reply);
+        }
+    }
+}
+
+/// Arms a pause inside `delete` for a test, between the session's running-turn slot
+/// being cleared and its rows being deleted — the gap a send once slipped a turn
+/// start into. One-shot: the next delete consumes the pair, sets `reached` and spins
+/// on `open` there.
+#[cfg(test)]
+static DELETE_PAUSE: Lazy<
+    Mutex<
+        Option<(
+            Arc<std::sync::atomic::AtomicBool>,
+            Arc<std::sync::atomic::AtomicBool>,
+        )>,
+    >,
+> = Lazy::new(|| Mutex::new(None));
+
+/// Arms the pause inside `delete`. One-shot, so a test arms it again for another go.
+#[cfg(test)]
+pub(crate) fn pause_delete_before_commit() -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let open = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *DELETE_PAUSE.lock().unwrap() = Some((reached.clone(), open.clone()));
+    (reached, open)
+}
+
+/// Where `delete` parks for [`pause_delete_before_commit`].
+#[cfg(test)]
+fn wait_at_delete_pause() {
+    use std::sync::atomic::Ordering;
+    if let Some((reached, open)) = DELETE_PAUSE.lock().unwrap().take() {
+        reached.store(true, Ordering::SeqCst);
+        while !open.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 }
