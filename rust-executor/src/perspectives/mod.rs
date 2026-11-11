@@ -116,6 +116,13 @@ pub(crate) fn get_app_data_path() -> Option<String> {
     APP_DATA_PATH.read().unwrap().clone()
 }
 
+/// Sets the data folder to `path` and answers the one it replaces: tests put the folder they
+/// set back.
+#[cfg(test)]
+pub(crate) fn replace_app_data_path(path: Option<String>) -> Option<String> {
+    std::mem::replace(&mut *APP_DATA_PATH.write().unwrap(), path)
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SerializedPerspective {
     #[serde(flatten)]

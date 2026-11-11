@@ -17,6 +17,7 @@ pub mod database;
 pub mod files;
 pub mod keyring_file;
 pub mod lang_storage;
+pub mod persons;
 pub mod secret_source;
 pub mod sqlite;
 

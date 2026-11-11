@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use ad4m_keyring::{hkdf_subkey, KeyVersion, SecretKey, VersionedKey};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use zeroize::Zeroizing;
@@ -43,6 +43,8 @@ pub enum KeyringError {
     StillOwned,
     #[error("the store would have no owner left; destroy it instead")]
     LastOwner,
+    #[error("the main agent's data key is not one that can be destroyed")]
+    MainPerson,
     #[error("cannot write the keyring file: {0}")]
     Io(String),
 }
@@ -63,6 +65,44 @@ pub enum SubkeyPurpose {
     LanguageStorage,
     Rows,
     Archive,
+}
+
+/// Why a key was destroyed: the reason its tombstone keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DestroyReason {
+    /// A tenant left with its data deleted, or the operator removed it.
+    TenantDeleted,
+    /// A tenant's join did not complete.
+    PendingExpired,
+    /// A managed user (a legacy user or a guest) was removed.
+    UserRemoved,
+    /// The perspective was removed.
+    PerspectiveRemoved,
+    /// The store's last owner left it.
+    OwnerRemoved,
+}
+
+impl DestroyReason {
+    /// The reason as the tombstone writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DestroyReason::TenantDeleted => "tenant-deleted",
+            DestroyReason::PendingExpired => "pending-expired",
+            DestroyReason::UserRemoved => "user-removed",
+            DestroyReason::PerspectiveRemoved => "perspective-removed",
+            DestroyReason::OwnerRemoved => "owner-removed",
+        }
+    }
+}
+
+/// What [`DataKeys::destroy_person`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DestroyReport {
+    /// When the keyring file without the person's keys was on disk.
+    pub key_destroyed_at: DateTime<Utc>,
+    /// When no copy of the person's keys is left anywhere the executor made one. With no
+    /// backups of the keyring, the same time as `key_destroyed_at`.
+    pub shredded_everywhere_at: DateTime<Utc>,
 }
 
 impl SubkeyPurpose {
@@ -321,51 +361,141 @@ impl DataKeys {
         self.with_open(|open| Ok(summarise(&open.file)))
     }
 
-    /// A data key for a new person, wrapped under the root key.
-    pub fn create_person(&self, owner: KeyOwner) -> Result<(), KeyringError> {
+    /// Makes sure `owner` is a person: a data key wrapped under the root key, and the person's
+    /// own store (`person:<owner>`) with its key wrapped under that data key, both in one write
+    /// of the keyring file. Answers the current version of the person's data key. A person
+    /// who exists keeps its keys; one made before persons had their own store gets it now.
+    pub fn create_person(&self, owner: KeyOwner) -> Result<KeyVersion, KeyringError> {
         let path = self.path.clone();
         self.with_open(|open| {
-            if open.file.persons.contains_key(&owner) {
-                return Err(KeyringError::OwnerExists);
+            let store = StoreId::Person(owner.clone());
+            let existing = open.file.persons.get(&owner).map(|p| p.key.current());
+            if let Some(version) = existing {
+                if open.file.store(&store).is_some() {
+                    return Ok(version);
+                }
             }
-            let key = SecretKey::random();
             let mut next = open.file.clone();
-            let wrapped = next.wrap_person_key(&owner, KeyVersion::FIRST, &key, &open.root);
-            next.persons.insert(
-                owner.clone(),
-                PersonEntry {
-                    owner: owner.clone(),
-                    created_at: Utc::now(),
-                    key: VersionedKey::new(wrapped),
+            let new_person = match existing {
+                Some(_) => None,
+                None => {
+                    let key = SecretKey::random();
+                    let wrapped = next.wrap_person_key(&owner, KeyVersion::FIRST, &key, &open.root);
+                    next.persons.insert(
+                        owner.clone(),
+                        PersonEntry {
+                            owner: owner.clone(),
+                            created_at: Utc::now(),
+                            key: VersionedKey::new(wrapped),
+                        },
+                    );
+                    Some(key)
+                }
+            };
+            let version = existing.unwrap_or(KeyVersion::FIRST);
+            let store_key = SecretKey::random();
+            let wrap = {
+                let person_key = match &new_person {
+                    Some(key) => key,
+                    None => open
+                        .persons
+                        .get(&(owner.clone(), version))
+                        .ok_or(KeyringError::UnknownOwner)?,
+                };
+                next.wrap_store_key(
+                    &store,
+                    KeyVersion::FIRST,
+                    &store_key,
+                    &Wrapper::Person {
+                        owner: owner.clone(),
+                        version,
+                    },
+                    person_key,
+                )
+            };
+            next.stores.insert(
+                store.clone(),
+                StoreEntry {
+                    id: store.clone(),
+                    state: StoreState::Plain,
+                    key: VersionedKey::new(StoreKeyWraps {
+                        state: VersionState::Active,
+                        wraps: vec![wrap],
+                    }),
                 },
             );
             Self::commit(&path, open, next)?;
-            open.persons.insert((owner, KeyVersion::FIRST), key);
-            Ok(())
+            if let Some(key) = new_person {
+                open.persons.insert((owner, KeyVersion::FIRST), key);
+            }
+            open.stores.insert((store, KeyVersion::FIRST), store_key);
+            Ok(version)
         })
     }
 
-    /// Destroys a person's data key, leaving a tombstone. Refused while a store still has the
-    /// person as an owner.
-    pub fn destroy_person(&self, owner: &KeyOwner, reason: &str) -> Result<(), KeyringError> {
+    /// Whether `owner` is a person of this keyring.
+    pub fn has_person(&self, owner: &KeyOwner) -> Result<bool, KeyringError> {
+        self.with_open(|open| Ok(open.file.persons.contains_key(owner)))
+    }
+
+    /// The stores `owner` holds a wrap of, its own person store left out.
+    pub fn stores_of(&self, owner: &KeyOwner) -> Result<Vec<StoreId>, KeyringError> {
+        self.with_open(|open| {
+            Ok(open
+                .file
+                .all_stores()
+                .filter(|s| s.id != StoreId::Person(owner.clone()) && wrapped_by(s, owner))
+                .map(|s| s.id.clone())
+                .collect())
+        })
+    }
+
+    /// Destroys a person: every version of its data key and its own person store, leaving a
+    /// tombstone for each, in one write of the keyring file. Refused while any other store
+    /// still has the person as an owner (`StillOwned`): the caller takes the person out of
+    /// every store first, and deletes the rows of its person store, so the keys go after the
+    /// data they protect. The main agent's person is not one that can be destroyed.
+    pub fn destroy_person(
+        &self,
+        owner: &KeyOwner,
+        reason: DestroyReason,
+    ) -> Result<DestroyReport, KeyringError> {
+        if *owner == KeyOwner::Main {
+            return Err(KeyringError::MainPerson);
+        }
         let path = self.path.clone();
         self.with_open(|open| {
             if !open.file.persons.contains_key(owner) {
                 return Err(KeyringError::UnknownOwner);
             }
-            if open.file.all_stores().any(|s| wrapped_by(s, owner)) {
+            let own = StoreId::Person(owner.clone());
+            if open
+                .file
+                .all_stores()
+                .any(|s| s.id != own && wrapped_by(s, owner))
+            {
                 return Err(KeyringError::StillOwned);
             }
+            let now = Utc::now();
+            let tombstone = |kind, id: &str| Tombstone {
+                destroyed_at: now,
+                ..Tombstone::new(kind, id, reason.as_str())
+            };
             let mut next = open.file.clone();
+            if next.stores.remove(&own).is_some() {
+                next.tombstones
+                    .push(tombstone(TombstoneKind::Store, &own.to_string()));
+            }
             next.persons.remove(owner);
-            next.tombstones.push(Tombstone::new(
-                TombstoneKind::Person,
-                &owner.to_string(),
-                reason,
-            ));
+            next.tombstones
+                .push(tombstone(TombstoneKind::Person, &owner.to_string()));
             Self::commit(&path, open, next)?;
+            open.stores.retain(|(s, _), _| *s != own);
             open.persons.retain(|(o, _), _| o != owner);
-            Ok(())
+            Ok(DestroyReport {
+                key_destroyed_at: now,
+                shredded_everywhere_at: now,
+            })
         })
     }
 
@@ -508,7 +638,7 @@ impl DataKeys {
 
     /// Destroys store `id`'s key, leaving a tombstone. The executor's own store is not one
     /// that can be destroyed: `UnknownStore`.
-    pub fn destroy_store(&self, id: &StoreId, reason: &str) -> Result<(), KeyringError> {
+    pub fn destroy_store(&self, id: &StoreId, reason: DestroyReason) -> Result<(), KeyringError> {
         let path = self.path.clone();
         self.with_open(|open| {
             if !open.file.stores.contains_key(id) {
@@ -519,7 +649,7 @@ impl DataKeys {
             next.tombstones.push(Tombstone::new(
                 TombstoneKind::Store,
                 &id.to_string(),
-                reason,
+                reason.as_str(),
             ));
             Self::commit(&path, open, next)?;
             open.stores.retain(|(s, _), _| s != id);
@@ -561,9 +691,8 @@ impl DataKeys {
     /// one yet) holds its key. A store made here starts [`StoreState::Plain`].
     pub fn ensure_store(&self, id: &StoreId, owners: &[KeyOwner]) -> Result<(), KeyringError> {
         for owner in owners {
-            match self.create_person(owner.clone()) {
-                Ok(()) | Err(KeyringError::OwnerExists) => {}
-                Err(e) => return Err(e),
+            if !self.has_person(owner)? {
+                self.create_person(owner.clone())?;
             }
         }
         match self.create_store(id.clone(), owners) {
@@ -875,10 +1004,17 @@ mod tests {
         keys.unlock(secret(5)).unwrap();
         let alice = KeyOwner::User("alice".into());
         let bob = KeyOwner::User("bob".into());
-        keys.create_person(alice.clone()).unwrap();
+        assert_eq!(keys.create_person(alice.clone()), Ok(KeyVersion::FIRST));
+        let written = std::fs::read(keys.path()).unwrap();
         assert_eq!(
             keys.create_person(alice.clone()),
-            Err(KeyringError::OwnerExists)
+            Ok(KeyVersion::FIRST),
+            "a person made twice keeps its keys"
+        );
+        assert_eq!(
+            std::fs::read(keys.path()).unwrap(),
+            written,
+            "and writes nothing"
         );
         let store = StoreId::Perspective(uuid::Uuid::new_v4());
         assert_eq!(
@@ -895,7 +1031,7 @@ mod tests {
         keys.add_owner(&store, &bob).unwrap();
         assert_eq!(keys.add_owner(&store, &bob), Err(KeyringError::OwnerExists));
         assert_eq!(
-            keys.destroy_person(&alice, "left"),
+            keys.destroy_person(&alice, DestroyReason::TenantDeleted),
             Err(KeyringError::StillOwned)
         );
         assert_eq!(
@@ -908,7 +1044,8 @@ mod tests {
             "the last owner keeps its wrap until the store is destroyed"
         );
         assert_eq!(keys.store_owners(&store).unwrap(), vec![bob.clone()]);
-        keys.destroy_person(&alice, "left").unwrap();
+        keys.destroy_person(&alice, DestroyReason::TenantDeleted)
+            .unwrap();
 
         let on_disk = KeyringFile::read(keys.path()).unwrap().unwrap();
         assert_eq!(on_disk.seq, 6);
@@ -920,23 +1057,71 @@ mod tests {
             .find(|s| s.id == store.to_string())
             .unwrap();
         assert_eq!(entry.owners, vec!["user:bob".to_string()]);
-        assert_eq!(summary.tombstones.len(), 1);
-        assert_eq!(summary.tombstones[0].kind, TombstoneKindName::Person);
+        // Alice's own store and her data key.
+        assert_eq!(
+            summary
+                .tombstones
+                .iter()
+                .map(|t| t.kind)
+                .collect::<Vec<_>>(),
+            vec![TombstoneKindName::Store, TombstoneKindName::Person]
+        );
         let raw = std::fs::read_to_string(keys.path()).unwrap();
         assert!(
             !raw.contains("user:alice"),
             "a tombstone keeps only the hash of the id"
         );
 
-        keys.destroy_store(&store, "deleted").unwrap();
+        keys.destroy_store(&store, DestroyReason::PerspectiveRemoved)
+            .unwrap();
         assert!(matches!(
             keys.subkey(&store, None, SubkeyPurpose::Rows),
             Err(KeyringError::UnknownStore)
         ));
         assert_eq!(
-            keys.destroy_store(&StoreId::Executor, "no"),
+            keys.destroy_store(&StoreId::Executor, DestroyReason::OwnerRemoved),
             Err(KeyringError::UnknownStore)
         );
+    }
+
+    /// The main agent's person and an unknown person are not destroyed, and a refusal writes
+    /// nothing. A destroyed person reports one time for its key and for the last copy of it,
+    /// lists no store, and can be made again as a new person.
+    #[test]
+    fn a_destroyed_person_reports_one_time_and_main_is_never_destroyed() {
+        let (_folder, keys) = sealed();
+        keys.unlock(secret(12)).unwrap();
+        let before = std::fs::read(keys.path()).unwrap();
+        assert_eq!(
+            keys.destroy_person(&KeyOwner::Main, DestroyReason::UserRemoved),
+            Err(KeyringError::MainPerson)
+        );
+        let dave = KeyOwner::User("dave".into());
+        assert_eq!(
+            keys.destroy_person(&dave, DestroyReason::UserRemoved),
+            Err(KeyringError::UnknownOwner)
+        );
+        assert_eq!(std::fs::read(keys.path()).unwrap(), before);
+
+        let first = keys.create_person(dave.clone()).unwrap();
+        assert!(keys.has_store(&StoreId::Person(dave.clone())).unwrap());
+        assert!(
+            keys.stores_of(&dave).unwrap().is_empty(),
+            "its own store is not listed"
+        );
+        let report = keys
+            .destroy_person(&dave, DestroyReason::UserRemoved)
+            .unwrap();
+        assert_eq!(report.key_destroyed_at, report.shredded_everywhere_at);
+        assert!(!keys.has_person(&dave).unwrap());
+        assert!(!keys.has_store(&StoreId::Person(dave.clone())).unwrap());
+        let tombstones = keys.summary().unwrap().tombstones;
+        assert_eq!(tombstones.len(), 2, "its store and its key");
+        assert!(tombstones
+            .iter()
+            .all(|t| t.destroyed_at == report.key_destroyed_at.to_rfc3339()));
+        assert!(tombstones.iter().all(|t| t.reason == "user-removed"));
+        assert_eq!(keys.create_person(dave.clone()).unwrap(), first);
     }
 
     #[cfg(unix)]
@@ -992,7 +1177,8 @@ mod tests {
         assert_eq!(keys.store_owners(&store).unwrap(), vec![bob.clone()]);
 
         assert!(keys.remove_owner(&store, &bob).unwrap().is_empty());
-        keys.destroy_store(&store, "perspective-removed").unwrap();
+        keys.destroy_store(&store, DestroyReason::PerspectiveRemoved)
+            .unwrap();
         let raw = std::fs::read_to_string(keys.path()).unwrap();
         assert!(
             !raw.contains(&store.to_string()),
@@ -1035,7 +1221,8 @@ mod tests {
         );
         assert_eq!(keys.store_owners(&store).unwrap(), vec![bob]);
         // Alice owns nothing now: her key can go.
-        keys.destroy_person(&alice, "left").unwrap();
+        keys.destroy_person(&alice, DestroyReason::UserRemoved)
+            .unwrap();
     }
 
     /// Each person's perspective has its own key, wrapped only under its owner's data key: the

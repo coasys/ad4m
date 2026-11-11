@@ -392,6 +392,46 @@ pub fn write_file(
     files::write_atomic(&full, &bytes).map_err(|e| io_error(&full, e))
 }
 
+/// Deletes every file the language at `address` keeps in its storage folder under
+/// `languages` (the executor's own files of the language stay), and the folders left empty
+/// inside it. Answers how many files it deleted; none for a language without a folder.
+pub fn delete_storage(languages: &Path, address: &str) -> io::Result<usize> {
+    if address.is_empty() || address == NOT_A_LANGUAGE || address.contains(['/', '\\']) {
+        return Ok(0);
+    }
+    let folder = languages.join(address);
+    if !folder.is_dir() {
+        return Ok(0);
+    }
+    delete_files_in(&folder, true)
+}
+
+fn delete_files_in(dir: &Path, top: bool) -> io::Result<usize> {
+    let mut deleted = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let path = entry.path();
+        if kind.is_dir() {
+            deleted += delete_files_in(&path, false)?;
+            if std::fs::read_dir(&path)?.next().is_none() {
+                std::fs::remove_dir(&path)?;
+            }
+            continue;
+        }
+        let reserved = top
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| RESERVED.contains(&name));
+        if !reserved {
+            std::fs::remove_file(&path)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
 /// What the start step did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum LanguageStorageStep {
@@ -589,6 +629,45 @@ mod tests {
             address,
             system: false,
         }
+    }
+
+    /// A language's storage goes, down every subfolder, and its bundle, meta and settings stay;
+    /// an address that is not one folder deletes nothing.
+    #[test]
+    fn a_languages_storage_goes_and_its_bundle_stays() {
+        let data = tempfile::tempdir().unwrap();
+        let languages = data.path().join("languages");
+        let folder = languages.join("QmLanguageA");
+        std::fs::create_dir_all(folder.join("sub").join("deeper")).unwrap();
+        for name in RESERVED {
+            std::fs::write(folder.join(name), b"kept").unwrap();
+        }
+        std::fs::write(folder.join("links.db"), b"stored").unwrap();
+        std::fs::write(folder.join("sub").join("bundle.js"), b"stored").unwrap();
+        std::fs::write(folder.join("sub").join("deeper").join("x"), b"stored").unwrap();
+        let other = languages.join("QmLanguageB");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("links.db"), b"other").unwrap();
+
+        for refused in [
+            "",
+            NOT_A_LANGUAGE,
+            "../QmLanguageB",
+            "QmLanguageB/..",
+            "missing",
+        ] {
+            assert_eq!(delete_storage(&languages, refused).unwrap(), 0, "{refused}");
+        }
+        assert_eq!(delete_storage(&languages, "QmLanguageA").unwrap(), 3);
+        let mut left: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let mut reserved: Vec<_> = RESERVED.iter().map(|s| s.to_string()).collect();
+        reserved.sort();
+        assert_eq!(left, reserved);
+        assert!(other.join("links.db").exists());
     }
 
     #[test]

@@ -25,11 +25,9 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::{Ad4mDb, Ad4mDbResult};
+use crate::at_rest::data_keys::DestroyReason;
 use crate::at_rest::keyring_file::{KeyOwner, StoreId};
 use crate::at_rest::sqlite::{self, Cell, SealError};
-
-/// The tombstone reason of a perspective's store destroyed with the perspective.
-pub(crate) const PERSPECTIVE_REMOVED: &str = "perspective-removed";
 
 /// A row as `seal_plain_values` reads it: rowid, owner, key values, column values.
 type StoredRow = (i64, Option<String>, Vec<String>, Vec<Option<String>>);
@@ -364,10 +362,33 @@ impl Ad4mDb {
             return Ok(());
         };
         let store = StoreId::Perspective(uuid::Uuid::parse_str(uuid)?);
-        match keys.destroy_store(&store, PERSPECTIVE_REMOVED) {
+        match keys.destroy_store(&store, DestroyReason::PerspectiveRemoved) {
             Ok(()) | Err(crate::at_rest::KeyringError::UnknownStore) => Ok(()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Deletes every row sealed under the person store of the managed user whose DID is
+    /// `did`: the rows of the tables whose owner column names a person (notifications, tasks,
+    /// expressions, the outbox) that name `did`. Answers how many it deleted. Runs before the
+    /// person's key is destroyed, so the key goes after the rows it protects.
+    pub(crate) fn delete_person_rows(&self, did: &str) -> Ad4mDbResult<usize> {
+        if did.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut deleted = 0;
+        for table in SEALED_TABLES {
+            if let OwnerColumn::Person(column) | OwnerColumn::PersonOrExecutor(column) = table.owner
+            {
+                deleted += tx.execute(
+                    &format!("DELETE FROM {} WHERE {column} = ?1", table.table),
+                    params![did],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(deleted)
     }
 
     /// The perspectives the keyring holds a store key for that have no handle in this
@@ -729,6 +750,45 @@ mod tests {
             again.store_owners(&store),
             Err(crate::at_rest::KeyringError::UnknownStore)
         );
+    }
+
+    /// The rows of a person's own store go with one call; another person's rows, the
+    /// executor's rows and every perspective's rows stay. An empty owner names the executor,
+    /// so it deletes nothing.
+    #[test]
+    fn a_persons_rows_go_and_no_one_elses() {
+        let folder = tempfile::tempdir().unwrap();
+        let keys = keyring(folder.path(), 1);
+        let key = database_key(&keys).unwrap();
+        let db =
+            Ad4mDb::open(&folder.path().join("db.sqlite"), Some((&key, keys.clone()))).unwrap();
+        let perspective = filled(&db);
+        assert_eq!(db.delete_person_rows("").unwrap(), 0);
+        let expressions = |db: &Ad4mDb| {
+            db.conn
+                .query_row("SELECT count(*) FROM expression", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        let before = expressions(&db);
+
+        // Alice's notification and task.
+        assert_eq!(db.delete_person_rows("did:key:alice").unwrap(), 2);
+        assert!(db
+            .get_notifications_for_owner("did:key:alice")
+            .unwrap()
+            .is_empty());
+        assert!(db.get_tasks().unwrap().is_empty());
+        assert_eq!(
+            db.get_notifications_for_owner("did:key:main")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(expressions(&db), before);
+        assert!(db._get_perspective(&perspective).unwrap().is_some());
+        assert_eq!(db.delete_person_rows("did:key:alice").unwrap(), 0);
     }
 
     #[test]

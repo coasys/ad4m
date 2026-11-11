@@ -708,6 +708,20 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     }
 
+    // Managed users made before each user had its own data key get theirs now, before any of
+    // their sessions writes.
+    if gate.keys().is_open() {
+        let usernames = match crate::db_backend::db_backend().list_users() {
+            Ok(users) => users.into_iter().map(|u| u.username).collect::<Vec<_>>(),
+            Err(e) => return failed_start(format!("Could not list the managed users: {e}")),
+        };
+        match at_rest::persons::prepare(gate.keys(), &usernames) {
+            Ok(0) => {}
+            Ok(made) => info!("Made the data keys of {made} managed users"),
+            Err(e) => return failed_start(e),
+        }
+    }
+
     // The bots and their grants, which every call of a bot's session reads. Without them no
     // managed agent's session is served (`bots::classify`): a bot must not pass as a user.
     if let Err(e) = crate::bots::init() {

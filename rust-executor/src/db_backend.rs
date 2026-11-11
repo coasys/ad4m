@@ -288,6 +288,7 @@ macro_rules! ad4m_db_methods {
             fn remove_perspective(&self, uuid: &str) -> Ad4mDbResult<()>;
             fn destroy_perspective_store(&self, uuid: &str) -> Ad4mDbResult<()>;
             fn perspective_stores_without_handle(&self) -> Ad4mDbResult<Vec<String>>;
+            fn delete_person_rows(&self, did: &str) -> Ad4mDbResult<usize>;
             fn add_owner_to_neighbourhood(
                 &self,
                 neighbourhood_url: &str,

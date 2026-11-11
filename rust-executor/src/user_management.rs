@@ -121,6 +121,9 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
         }
     }
 
+    // The user's data key and person store, before anything of the user is written.
+    crate::at_rest::persons::create_for_user(email)?;
+
     // The agent's key, named by its DID
     let did = AgentService::create_managed_agent_key(email)
         .map_err(|e| format!("Failed to create user key: {}", e))?;
@@ -299,6 +302,7 @@ fn adopt_shared_user(
     did: &str,
     stored_hash: &str,
 ) -> Result<String, deno_core::error::AnyError> {
+    crate::at_rest::persons::create_for_user(email).map_err(deno_core::anyhow::Error::msg)?;
     if let Err(e) = crate::db_backend::db_backend().add_user_prehashed(email, did, stored_hash) {
         log::warn!("Failed to import user to local DB: {}", e);
     }
