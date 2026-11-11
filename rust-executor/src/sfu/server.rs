@@ -2,6 +2,7 @@
 //! and the Sans I/O event loop driven by tokio.
 
 use std::collections::{HashMap, HashSet};
+use std::mem::Discriminant;
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -9,9 +10,12 @@ use std::time::{Duration, Instant};
 use log::{debug, error, info, warn};
 use str0m::change::SdpOffer;
 use str0m::channel::ChannelId;
-use str0m::media::{KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid};
+use str0m::format::Codec;
+use str0m::media::{
+    KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid, Rid,
+};
 use str0m::net::Protocol;
-use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc};
+use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -69,6 +73,14 @@ pub struct SfuPeer {
     /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
     /// request until its answer lands or its offer goes stale.
     pub ice_restart: Option<IceRestart>,
+    /// (outbound mid, codec) of forwarded packets dropped because the
+    /// peer negotiated no matching codec on that mid — each logged once,
+    /// not per packet, so a track the peer cannot take does not flood
+    /// the log at media rate.
+    pub drops_logged: HashSet<(Mid, Discriminant<Codec>)>,
+    /// (outbound mid, error kind) of failed media writes already logged
+    /// — once each, not per packet.
+    pub write_errors_logged: HashSet<(Mid, Discriminant<RtcError>)>,
 }
 
 /// A client's ICE restart in flight. The SFU stays the only offerer: the
@@ -132,6 +144,8 @@ impl SfuPeer {
             channels: HashMap::new(),
             disconnected_since: None,
             ice_restart: None,
+            drops_logged: HashSet::new(),
+            write_errors_logged: HashSet::new(),
         }
     }
 
@@ -302,6 +316,8 @@ impl std::fmt::Debug for SfuPeer {
             .field("is_pipe", &self.is_pipe)
             .field("channels", &self.channels.len())
             .field("ice_restart", &self.ice_restart.as_ref().map(|r| r.since))
+            .field("drops_logged", &self.drops_logged.len())
+            .field("write_errors_logged", &self.write_errors_logged.len())
             .finish()
     }
 }
@@ -1148,16 +1164,7 @@ impl SfuServer {
                             data.rid.as_ref(),
                             data.time,
                         );
-                        if let Some(writer) = target_peer.rtc.writer(out_mid) {
-                            if let Err(e) =
-                                writer.write(data.pt, data.network_time, time, data.data.clone())
-                            {
-                                warn!(
-                                    "SFU: failed to write media to peer {} mid {}: {:?}",
-                                    target_pid, out_mid, e
-                                );
-                            }
-                        }
+                        write_forwarded(target_peer, out_mid, data, time);
                     }
                 }
             }
@@ -1455,6 +1462,58 @@ impl SfuServer {
             for (_pid, peer) in peers.iter_mut() {
                 let _ = peer.rtc.handle_input(Input::Timeout(now));
             }
+        }
+    }
+}
+
+/// Write one forwarded packet to `peer`'s outbound `mid`, as the media
+/// relay does for every packet it decided this peer gets.
+///
+/// `data` carries the ORIGIN's payload type, which means nothing to this
+/// peer: every side numbers its own PTs — a browser answers on its own
+/// numbering (Chrome's opus is 111, Firefox's 109), so `data.pt` names
+/// only what the SENDER negotiated and is only logged, never written.
+/// The write goes out on the PT `peer` negotiated for the same codec on
+/// `mid`: [`str0m::media::Writer::match_params`] scores the codec spec
+/// (codec, clock rate, channels and format parameters such as H264's
+/// profile-level-id and packetization-mode), and the
+/// [`str0m::media::Writer::payload_params`] check keeps it to a PT this
+/// mid actually negotiated — `match_params` scores the whole session
+/// config, which can hold the codec locked for another mid.
+///
+/// A peer with no matching codec on `mid` gets nothing; the drop logs
+/// once per (mid, codec) and a failed write once per (mid, error kind)
+/// — never per packet.
+fn write_forwarded(peer: &mut SfuPeer, mid: Mid, data: &MediaData, time: MediaTime) {
+    let Some(writer) = peer.rtc.writer(mid) else {
+        return;
+    };
+    let pt = writer
+        .match_params(data.params)
+        .filter(|&pt| writer.payload_params().any(|p| p.pt() == pt));
+    let Some(pt) = pt else {
+        let codec = data.params.spec().codec;
+        if peer
+            .drops_logged
+            .insert((mid, std::mem::discriminant(&codec)))
+        {
+            warn!(
+                "SFU: peer {} mid {} negotiated no codec matching {:?} (PT {}); \
+                 dropping this track's media",
+                peer.id, mid, codec, data.pt
+            );
+        }
+        return;
+    };
+    if let Err(e) = writer.write(pt, data.network_time, time, data.data.clone()) {
+        if peer
+            .write_errors_logged
+            .insert((mid, std::mem::discriminant(&e)))
+        {
+            warn!(
+                "SFU: failed to write media to peer {} mid {}: {:?}",
+                peer.id, mid, e
+            );
         }
     }
 }
@@ -1791,6 +1850,7 @@ mod tests {
         ice: Vec<(Duration, IceConnectionState)>,
         data: Vec<Duration>,
         channel: Option<ChannelId>,
+        media: Vec<MediaData>,
     }
 
     /// Feed `rtc` the clock, then drain it: events go to `seen`, packets
@@ -1812,6 +1872,7 @@ mod tests {
                 }
                 Output::Event(Event::ChannelOpen(id, _)) => seen.channel = Some(id),
                 Output::Event(Event::ChannelData(_)) => seen.data.push(now - start),
+                Output::Event(Event::MediaData(d)) => seen.media.push(d),
                 Output::Event(_) => {}
             }
         }
@@ -2683,5 +2744,380 @@ mod tests {
         assert!(peers.get(&pid_b).unwrap().deferred_tracks.is_empty());
         assert!(peers.get(&pid_c).unwrap().tracks_out.is_empty());
         assert!(peers.get(&pid_c).unwrap().tracks_out_rev.is_empty());
+    }
+
+    mod payload_types {
+        use super::*;
+        use str0m::format::{Codec, FormatParams};
+        use str0m::media::{Frequency, Pt};
+
+        /// A caller whose codec config numbers PTs the way a browser does:
+        /// `firefox` gets opus 109 and VP8 120 (+RTX 121); otherwise str0m's
+        /// defaults, which are Chrome's (opus 111, VP8 96 + RTX 97).
+        /// `video_only` negotiates a VP8-only caller — one with no common
+        /// codec for audio or for other video codecs.
+        fn browser_rtc(firefox: bool, video_only: bool, addr: SocketAddr) -> Rtc {
+            let mut config = Rtc::builder();
+            if firefox {
+                let codecs = config.codec_config();
+                codecs.clear();
+                if !video_only {
+                    codecs.add_config(
+                        109.into(),
+                        None,
+                        Codec::Opus,
+                        Frequency::FORTY_EIGHT_KHZ,
+                        Some(2),
+                        FormatParams {
+                            min_p_time: Some(10),
+                            use_inband_fec: Some(true),
+                            ..FormatParams::default()
+                        },
+                    );
+                }
+                codecs.add_config(
+                    120.into(),
+                    Some(121.into()),
+                    Codec::Vp8,
+                    Frequency::NINETY_KHZ,
+                    None,
+                    FormatParams::default(),
+                );
+            }
+            let mut rtc = config.build(Instant::now());
+            rtc.add_local_candidate(Candidate::host(addr, "udp").unwrap());
+            rtc
+        }
+
+        /// One end of a call: the caller-side `Rtc` (the "browser"), the
+        /// [`SfuPeer`] the event loop holds for it, and what each saw.
+        struct CallEnd {
+            caller: Rtc,
+            peer: SfuPeer,
+            pid: ParticipantId,
+            addr: SocketAddr,
+            bind: SocketAddr,
+            /// The caller's own mids — the mids MediaData arrives under
+            /// on `peer` (a mid keeps the offerer's name on both ends).
+            mid_audio: Option<Mid>,
+            mid_video: Mid,
+            caller_seen: Seen,
+            peer_seen: Seen,
+        }
+
+        /// A caller that offered `audio`/`video` sendrecv and got an ICE
+        /// connection to its SFU peer up — the state the event loop holds
+        /// once the join's signalling settled.
+        fn call_end(
+            firefox: bool,
+            video_only: bool,
+            addr: &str,
+            bind: &str,
+            did: &str,
+            room: &RoomId,
+        ) -> CallEnd {
+            let caller_addr: SocketAddr = addr.parse().unwrap();
+            let bind_addr: SocketAddr = bind.parse().unwrap();
+            let mut caller = browser_rtc(firefox, video_only, caller_addr);
+            let mut change = caller.sdp_api();
+            let mid_audio = (!video_only).then(|| {
+                change.add_media(
+                    MediaKind::Audio,
+                    str0m::media::Direction::SendRecv,
+                    None,
+                    None,
+                    None,
+                )
+            });
+            let mid_video = change.add_media(
+                MediaKind::Video,
+                str0m::media::Direction::SendRecv,
+                None,
+                None,
+                None,
+            );
+            let (offer, pending) = change.apply().unwrap();
+            let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind_addr, None).unwrap();
+            caller
+                .sdp_api()
+                .accept_answer(pending, serde_json::from_str(&answer).unwrap())
+                .unwrap();
+            let peer = SfuPeer::new(
+                ParticipantId::next(),
+                room.clone(),
+                did.to_string(),
+                rtc,
+                false,
+            );
+            let pid = peer.id.clone();
+
+            let mut end = CallEnd {
+                caller,
+                peer,
+                pid,
+                addr: caller_addr,
+                bind: bind_addr,
+                mid_audio,
+                mid_video,
+                caller_seen: Seen::default(),
+                peer_seen: Seen::default(),
+            };
+
+            let start = Instant::now();
+            let mut now = start;
+            let deadline = start + Duration::from_secs(10);
+            loop {
+                let (caller_next, peer_next) = exchange(&mut end, now, start);
+                let up = |seen: &Seen| {
+                    seen.ice.iter().any(|(_, s)| {
+                        matches!(
+                            s,
+                            IceConnectionState::Connected | IceConnectionState::Completed
+                        )
+                    })
+                };
+                if up(&end.caller_seen) && up(&end.peer_seen) {
+                    return end;
+                }
+                assert!(now < deadline, "the call never connected");
+                now = caller_next.min(peer_next).clamp(
+                    now + Duration::from_millis(1),
+                    now + Duration::from_millis(50),
+                );
+            }
+        }
+
+        /// One round on one end's network link: the caller's packets go to
+        /// the SFU's peer, the peer's packets come back. Returns each
+        /// side's next str0m deadline.
+        fn exchange(end: &mut CallEnd, now: Instant, start: Instant) -> (Instant, Instant) {
+            let mut sent = Vec::new();
+            let caller_next = drive(&mut end.caller, now, start, &mut end.caller_seen, &mut sent);
+            for (_, destination, data) in sent.drain(..) {
+                assert_eq!(destination, end.bind, "the caller sends to the SFU only");
+                receive(&mut end.peer.rtc, now, end.addr, end.bind, &data);
+            }
+            let peer_next = drive(&mut end.peer.rtc, now, start, &mut end.peer_seen, &mut sent);
+            for (_, destination, data) in sent.drain(..) {
+                assert_eq!(destination, end.addr, "the SFU sends to the caller only");
+                receive(&mut end.caller, now, end.bind, end.addr, &data);
+            }
+            (caller_next, peer_next)
+        }
+
+        /// The SFU offers `origin`'s tracks outbound on `end`'s peer, the
+        /// caller answers, and the track mappings land as the event loop's
+        /// renegotiation leaves them.
+        fn plumb(end: &mut CallEnd, origin_pid: &ParticipantId, tracks: &[(Mid, MediaKind)]) {
+            let kinds: Vec<MediaKind> = tracks.iter().map(|(_, kind)| *kind).collect();
+            let (offer, pending, mids) = offer_send_only(&mut end.peer.rtc, &kinds, false).unwrap();
+            end.peer.pending_offer = Some(pending);
+            end.peer.pending_offer_sent = Some(Instant::now());
+            let answer = end.caller.sdp_api().accept_offer(offer).unwrap();
+            end.peer
+                .accept_server_answer(&serde_json::to_string(&answer).unwrap())
+                .unwrap();
+            for ((origin_mid, _), out_mid) in tracks.iter().zip(&mids) {
+                end.peer
+                    .tracks_out
+                    .insert(*out_mid, (origin_pid.clone(), *origin_mid));
+                end.peer
+                    .tracks_out_rev
+                    .insert((origin_pid.clone(), *origin_mid), *out_mid);
+            }
+        }
+
+        /// The caller sends `frame` on `mid` encoded as `codec`.
+        fn write_media(caller: &mut Rtc, mid: Mid, codec: Codec, ticks: u64, frame: &[u8]) {
+            let pt = caller
+                .codec_config()
+                .find(|p| p.spec().codec == codec)
+                .unwrap_or_else(|| panic!("the caller negotiated no {codec:?}"))
+                .pt();
+            let time = if codec.is_audio() {
+                MediaTime::new(ticks * 480, Frequency::FORTY_EIGHT_KHZ)
+            } else {
+                MediaTime::from_90khz(ticks * 3_000)
+            };
+            caller
+                .writer(mid)
+                .expect("a mid the caller sends on")
+                .write(pt, Instant::now(), time, frame.to_vec())
+                .expect("the caller writes with its own PT");
+        }
+
+        /// Forward every MediaData that landed on `origin`'s peer to
+        /// `target`'s peer, as the event loop's relay does.
+        fn relay(origin: &mut CallEnd, target: &mut CallEnd) {
+            for data in origin.peer_seen.media.drain(..) {
+                let track = (origin.pid.clone(), data.mid);
+                let Some(&mid) = target.peer.tracks_out_rev.get(&track) else {
+                    continue;
+                };
+                write_forwarded(&mut target.peer, mid, &data, data.time);
+            }
+        }
+
+        /// Two callers whose SDPs number the same codecs differently —
+        /// Chrome's opus/VP8 are 111/96, Firefox's 109/120 — hear each
+        /// other because the SFU rewrites every packet's PT to the one
+        /// the receiver negotiated. Before the fix the writes went out
+        /// on the sender's PT and str0m refused them (UnknownPt), so
+        /// each side heard and saw nothing.
+        #[test]
+        fn media_crossing_peers_arrives_on_the_receivers_payload_type() {
+            let room = RoomId::new("neighbourhood://test", "room");
+            let mut a = call_end(
+                false,
+                false,
+                "203.0.113.20:50000",
+                "192.168.0.10:40000",
+                "did:key:alice",
+                &room,
+            );
+            let mut b = call_end(
+                true,
+                false,
+                "203.0.113.30:50000",
+                "192.168.0.10:40001",
+                "did:key:bob",
+                &room,
+            );
+
+            // Each caller's tracks, outbound on the other's peer.
+            plumb(
+                &mut b,
+                &a.pid,
+                &[
+                    (a.mid_audio.unwrap(), MediaKind::Audio),
+                    (a.mid_video, MediaKind::Video),
+                ],
+            );
+            plumb(
+                &mut a,
+                &b.pid,
+                &[
+                    (b.mid_audio.unwrap(), MediaKind::Audio),
+                    (b.mid_video, MediaKind::Video),
+                ],
+            );
+
+            const OPUS_A: &[u8] = b"alice's opus frame";
+            const VP8_A: &[u8] = b"alice's vp8 frame, a longer one";
+            const OPUS_B: &[u8] = b"bob's opus frame";
+            const VP8_B: &[u8] = b"bob's vp8 frame, a longer one";
+            let start = Instant::now();
+            let mut now = start;
+            write_media(&mut a.caller, a.mid_audio.unwrap(), Codec::Opus, 1, OPUS_A);
+            write_media(&mut a.caller, a.mid_video, Codec::Vp8, 1, VP8_A);
+            write_media(&mut b.caller, b.mid_audio.unwrap(), Codec::Opus, 1, OPUS_B);
+            write_media(&mut b.caller, b.mid_video, Codec::Vp8, 1, VP8_B);
+
+            // Run the room: media lands on each origin's peer, is
+            // forwarded on the other's outbound mid as the relay does,
+            // and reaches the other caller.
+            let (mut at_a, mut at_b) = (Vec::new(), Vec::new());
+            for _ in 0..100 {
+                exchange(&mut a, now, start);
+                exchange(&mut b, now, start);
+                relay(&mut a, &mut b);
+                relay(&mut b, &mut a);
+                at_a.append(&mut a.caller_seen.media);
+                at_b.append(&mut b.caller_seen.media);
+                if at_a.len() >= 2 && at_b.len() >= 2 {
+                    break;
+                }
+                now += Duration::from_millis(1);
+            }
+
+            // Bob hears Alice on his own numbering: opus 109, VP8 120.
+            let opus = at_b
+                .iter()
+                .find(|d| &*d.data == OPUS_A)
+                .expect("Alice's opus reached Bob");
+            assert_eq!(opus.pt, Pt::new_with_value(109));
+            let vp8 = at_b
+                .iter()
+                .find(|d| &*d.data == VP8_A)
+                .expect("Alice's VP8 reached Bob");
+            assert_eq!(vp8.pt, Pt::new_with_value(120));
+
+            // And Alice hears Bob on hers: opus 111, VP8 96.
+            let opus = at_a
+                .iter()
+                .find(|d| &*d.data == OPUS_B)
+                .expect("Bob's opus reached Alice");
+            assert_eq!(opus.pt, Pt::new_with_value(111));
+            let vp8 = at_a
+                .iter()
+                .find(|d| &*d.data == VP8_B)
+                .expect("Bob's VP8 reached Alice");
+            assert_eq!(vp8.pt, Pt::new_with_value(96));
+        }
+
+        /// A track whose codec the receiver never negotiated is dropped
+        /// — and logged once per (mid, codec), not once per packet.
+        #[test]
+        fn a_receiver_with_no_matching_codec_drops_the_track_once() {
+            let room = RoomId::new("neighbourhood://test", "room");
+            let mut a = call_end(
+                false,
+                false,
+                "203.0.113.20:50000",
+                "192.168.0.10:40000",
+                "did:key:alice",
+                &room,
+            );
+            // Bob negotiates VP8 only: no audio, no other video codec.
+            let mut b = call_end(
+                true,
+                true,
+                "203.0.113.30:50000",
+                "192.168.0.10:40001",
+                "did:key:bob",
+                &room,
+            );
+            plumb(&mut b, &a.pid, &[(a.mid_video, MediaKind::Video)]);
+
+            const VP8_A: &[u8] = b"alice's vp8 frame, a longer one";
+            let start = Instant::now();
+            let mut now = start;
+            // Alice sends two VP9 frames and one VP8 frame; Bob's video
+            // mid negotiated no VP9.
+            write_media(
+                &mut a.caller,
+                a.mid_video,
+                Codec::Vp9,
+                1,
+                b"alice's first vp9 frame",
+            );
+            write_media(
+                &mut a.caller,
+                a.mid_video,
+                Codec::Vp9,
+                2,
+                b"alice's second vp9 frame",
+            );
+            write_media(&mut a.caller, a.mid_video, Codec::Vp8, 3, VP8_A);
+
+            let mut at_b = Vec::new();
+            for _ in 0..100 {
+                exchange(&mut a, now, start);
+                exchange(&mut b, now, start);
+                relay(&mut a, &mut b);
+                at_b.append(&mut b.caller_seen.media);
+                now += Duration::from_millis(1);
+            }
+
+            // The VP8 frame arrived on Bob's numbering; both VP9 frames
+            // were dropped, logged once for the (mid, codec) pair.
+            let vp8 = at_b
+                .iter()
+                .find(|d| &*d.data == VP8_A)
+                .expect("VP8 reached Bob");
+            assert_eq!(vp8.pt, Pt::new_with_value(120));
+            assert_eq!(at_b.len(), 1, "only VP8 may arrive: {at_b:?}");
+            assert_eq!(b.peer.drops_logged.len(), 1, "two dropped packets log once");
+        }
     }
 }

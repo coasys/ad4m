@@ -1,3 +1,4 @@
+use super::fallback_sync::{fallback_push_refused, ShareScope};
 use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
@@ -720,9 +721,9 @@ pub struct PerspectiveInstance {
 
 /// The local Shared links the remote render lacks, without the links of the diffs the
 /// queue still holds (queued or parked). Links compare by author, timestamp, source,
-/// predicate and target; one set of those identities for remote and unsent keeps the
-/// pass linear.
-fn links_missing_remotely(
+/// predicate (an empty predicate counts as none) and target; one set of those
+/// identities for remote and unsent keeps the pass linear.
+pub(super) fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
     unsent: &[LinkExpression],
@@ -732,7 +733,7 @@ fn links_missing_remotely(
             &l.author,
             &l.timestamp,
             &l.data.source,
-            l.data.predicate.as_deref(),
+            l.data.predicate.as_deref().filter(|p| !p.is_empty()),
             &l.data.target,
         )
     }
@@ -1289,7 +1290,7 @@ impl PerspectiveInstance {
             );
         }
         if self.persisted.lock().await.state == PerspectiveState::NeighbourhoodCreationInitiated {
-            self.ensure_public_links_are_shared().await;
+            self.share_links_after_publish().await;
         }
         self.update_perspective_state_log_error(
             PerspectiveState::LinkLanguageInstalledButNotSynced,
@@ -1559,7 +1560,10 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn ensure_public_links_are_shared(&self) -> bool {
+    /// Commits the Shared links the link language's `render()` lacks. Callers:
+    /// `ensure_public_links_are_shared` and `share_links_after_publish`
+    /// (`fallback_sync.rs`); `scope` says how many it may send.
+    pub(crate) async fn share_links_missing_remotely(&self, scope: ShareScope) -> bool {
         let _sharing = self.share_links_mutex.lock().await;
         let uuid = self.uuid.clone();
 
@@ -1669,17 +1673,16 @@ impl PerspectiveInstance {
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
 
-                // Defensive check: a fallback sync should normally only ever need to commit
-                // a handful of links that failed to make it into a prior commit. If it's
-                // about to resubmit most or all of the perspective's shared links, that's a
-                // signal something upstream (e.g. a misread of the remote state) is wrong —
-                // log it loudly so a future regression like this one is caught immediately
-                // rather than only discoverable by manually auditing link counts later.
-                if links_count > 20 && links_count as f64 > local_links.len() as f64 * 0.5 {
-                    log::warn!(
-                        "ensure_public_links_are_shared: about to commit {} of {} local shared links for perspective {} — this looks like a full resync rather than a small catch-up, which usually indicates the remote state couldn't be read correctly",
+                // A fallback sync catches up the few links a commit missed. Most of
+                // the shared set missing means the language's view of the remote is
+                // wrong (an empty or partial mirror): sending would push the room's
+                // whole set again. Send nothing; the caller's backoff retries.
+                if fallback_push_refused(links_count, local_links.len(), scope) {
+                    log::error!(
+                        "ensure_public_links_are_shared: refusing to commit {} of {} local shared links for perspective {}: the link language's render() lacks most of them, so its view of the remote is incomplete, not the remote",
                         links_count, local_links.len(), uuid
                     );
+                    return false;
                 }
 
                 let result = link_language
@@ -6207,7 +6210,7 @@ impl PerspectiveInstance {
         // First, so the queries collected below carry the new class lists.
         let reresolved = self.refresh_abstract_subscriptions().await;
 
-        let mut query_futures: Vec<future::BoxFuture<'static, Option<(String, String)>>> =
+        let mut query_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
             Vec::new();
 
         // Collect only the minimal data needed: ID, query string, predicates,
@@ -6230,6 +6233,9 @@ impl PerspectiveInstance {
 
         // Store reads the model triggers make, shared by every subscription.
         let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+        // The subscriptions to re-run, grouped by what they evaluate.
+        let mut groups: Vec<(Vec<String>, String, Option<ModelSubscriptionParams>)> = Vec::new();
+        let mut evaluations: HashMap<String, usize> = HashMap::new();
 
         // Create futures for each query check
         for (id, query_string, sub_predicates, model_params) in queries {
@@ -6274,10 +6280,27 @@ impl PerspectiveInstance {
             #[cfg(test)]
             subscription_triggers::reruns::note(&id);
 
-            // Each future returns Option<(id, new_result)> instead of locking individually.
+            // Identical queries give identical results, whoever subscribed, so
+            // each one runs once and its result goes to every subscription
+            // holding it. A client that retried a slow subscribe and left the
+            // earlier ones behind then costs one evaluation, not one per retry.
+            let key = subscriptions::evaluation_key(&query_string, model_params.as_ref());
+            match evaluations.get(&key) {
+                Some(&i) => groups[i].0.push(id),
+                None => {
+                    evaluations.insert(key, groups.len());
+                    groups.push((vec![id], query_string, model_params));
+                }
+            }
+        }
+
+        for (ids, query_string, model_params) in groups {
+            // Each future returns Option<(ids, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
             let query_future = Box::pin(async move {
+                #[cfg(test)]
+                subscriptions::evaluations::note(&self_clone.uuid);
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
                 // With no shape wait: every subscription on the perspective is
                 // re-checked in the one pass below, so a wait here for one
@@ -6308,7 +6331,7 @@ impl PerspectiveInstance {
                         }
                     }
                 };
-                Some((id, result_string))
+                Some((ids, result_string))
             });
             query_futures.push(query_future);
         }
@@ -6325,8 +6348,11 @@ impl PerspectiveInstance {
         let mut delta_updates = Vec::new();
         {
             let mut queries = self.subscribed_queries.lock().await;
-            for result in results.into_iter().flatten() {
-                let (id, result_string) = result;
+            let results = results
+                .into_iter()
+                .flatten()
+                .flat_map(|(ids, result)| ids.into_iter().map(move |id| (id, result.clone())));
+            for (id, result_string) in results {
                 if let Some(stored_query) = queries.get_mut(&id) {
                     if result_string != stored_query.last_result {
                         log::debug!(

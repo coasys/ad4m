@@ -428,3 +428,92 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
     assert_ne!(a, b, "each subscriber gets its own subscription");
     assert_eq!(result_a, result_b, "equal unions answer the same");
 }
+
+/// A client that gives up on a slow subscribe and tries again leaves the earlier
+/// subscriptions behind when the executor finished them anyway (staging, 2026-11-10: one
+/// socket held 62 copies of one mention query over 76k links). Copies of one query keep
+/// their own ids, revisions and updates, but a re-check pass evaluates the query once
+/// for all of them, not once per copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn identical_subscriptions_share_one_evaluation_per_pass() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+    let query_json = r#"{"where":{"owner":"alice"}}"#;
+    let other_json = r#"{"where":{"owner":"bob"}}"#;
+
+    let mut copies = vec![];
+    for connection in ["c", "c", "c", "d"] {
+        let (id, _, _) = perspective
+            .model_subscribe_and_query("Task".into(), query_json.into(), connection.into(), None)
+            .await
+            .expect("model subscribe");
+        copies.push((id, connection));
+    }
+    let (other, _, _) = perspective
+        .model_subscribe_and_query("Task".into(), other_json.into(), "c".into(), None)
+        .await
+        .expect("model subscribe to another query");
+    let ids: HashSet<&String> = copies.iter().map(|(id, _)| id).collect();
+    assert_eq!(
+        ids.len(),
+        4,
+        "each subscribe still gets its own subscription"
+    );
+
+    let mut rx = get_global_pubsub().await.subscribe_events();
+    perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("Task".to_string()),
+                query: None,
+            },
+            "ad4m://task/shared".to_string(),
+            Some(serde_json::json!({ "title": "once", "owner": "alice" })),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("create_subject(Task)");
+
+    let before = subscriptions::evaluations::count(&perspective.uuid);
+    perspective
+        .check_subscribed_queries(ChangedPredicates::CheckAll)
+        .await;
+    assert_eq!(
+        subscriptions::evaluations::count(&perspective.uuid) - before,
+        2,
+        "one evaluation for the four copies, one for the other query"
+    );
+
+    // Updates for all copies come in any order: collect them by id.
+    let mut got: HashMap<String, Arc<Event>> = HashMap::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while got.len() < copies.len() {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("pubsub receiver closed: {e}"),
+            };
+            if event.topic != Topic::PerspectiveQuerySubscription
+                || event.payload["perspectiveUuid"] != perspective.uuid
+            {
+                continue;
+            }
+            if let Some(id) = event.payload["subscriptionId"].as_str() {
+                got.insert(id.to_string(), event.clone());
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("updates for {:?} only", got.keys()));
+    for (id, connection) in &copies {
+        let event = &got[id];
+        assert!(
+            event.payload.to_string().contains("ad4m://task/shared"),
+            "every copy gets the new Task, got: {}",
+            event.payload
+        );
+        assert_eq!(event.payload["revision"], 1);
+        assert_eq!(event.connection.as_deref(), Some(*connection));
+    }
+    assert!(is_registered(&perspective, &other).await);
+}
