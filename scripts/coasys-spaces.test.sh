@@ -133,13 +133,22 @@ test_preflight() {
     # record notes the WE commit the clone had.
     mkdir -p "$COASYS_SPACES_WORK" && echo "$WE_HEAD" >"$COASYS_SPACES_WORK/we.sha"
     bash "$SCRIPT" record >/dev/null || fail "record failed"
-    [ "$(cat "$COASYS_SPACES_STATE/last-success")" = "$SHA $WE_HEAD" ] || fail "record wrote the wrong pair"
+    [ "$(cat "$COASYS_SPACES_STATE/last-success")" = "$SHA $WE_HEAD real gemma3:12b ctx16384" ] ||
+        fail "record wrote the wrong key: $(cat "$COASYS_SPACES_STATE/last-success")"
 
     preflight_exits 10
     COASYS_SPACES_FORCE=1 preflight_exits 0
     AD4M_SHA=1111111111111111111111111111111111111111 preflight_exits 0
     WE_REF="$WE_HEAD" preflight_exits 10
     WE_REF=no-such-branch preflight_exits 0
+    # Another tier, model or context window is another run.
+    COASYS_SPACES_TIER=stub preflight_exits 0
+    COASYS_SPACES_LLM_MODEL=gemma3:27b preflight_exits 0
+    COASYS_SPACES_LLM_NUM_CTX=8192 preflight_exits 0
+
+    # An annotated tag resolves to the commit the clone checks out, so it skips too.
+    git -C "$WE_REPO" -c user.name=t -c user.email=t@t tag -a -m v1 v1
+    WE_REF=v1 preflight_exits 10
 
     git -C "$WE_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m two
     preflight_exits 0
@@ -148,6 +157,32 @@ test_preflight() {
 test_record_needs_we_sha() {
     bash "$SCRIPT" record >/dev/null 2>&1 && fail "record passed without a cloned WE commit"
     [ ! -e "$COASYS_SPACES_STATE/last-success" ] || fail "record wrote a pair without a WE commit"
+}
+
+test_we_ref_must_be_a_name() {
+    make_we
+    for ref in --upload-pack=touch "dev x" 'dev;true'; do
+        out="$(WE_REF="$ref" bash "$SCRIPT" preflight 2>&1)" && fail "preflight took WE_REF '$ref'"
+        grep -qF "is not a branch, tag or commit name" <<<"$out" || fail "WE_REF '$ref' not refused as such: $out"
+    done
+    WE_REF=release/v0.12.0-rc.1 preflight_exits 0
+}
+
+# The SDK is packed from the checkout, so it refuses an AD4M_SHA the checkout is not at.
+test_sdk_needs_the_checkout_at_ad4m_sha() {
+    out="$(bash "$SCRIPT" sdk 2>&1)" && fail "sdk passed with AD4M_SHA $SHA"
+    grep -qF "not AD4M_SHA $SHA" <<<"$out" || fail "the mismatch is not reported: $out"
+}
+
+# A WE without the suite fails the test step; pnpm --filter would run nothing and pass.
+test_test_needs_the_suite() {
+    mkdir -p "$COASYS_SPACES_WORK/we/apps/we-web"
+    : >"$COASYS_SPACES_WORK/ad4m-executor" && chmod 755 "$COASYS_SPACES_WORK/ad4m-executor"
+    for pkg in '{"name":"@we/app-web","scripts":{}}' '{"name":"@we/web","scripts":{"test:spaces":"x"}}'; do
+        echo "$pkg" >"$COASYS_SPACES_WORK/we/apps/we-web/package.json"
+        out="$(bash "$SCRIPT" test 2>&1)" && fail "test passed with $pkg"
+        grep -qF "has no @we/app-web with a test:spaces script" <<<"$out" || fail "not reported for $pkg: $out"
+    done
 }
 
 # A model server on a free port that lists the given model ids at /v1/models. With OLLAMA=1 it
@@ -216,7 +251,8 @@ test_llm_context_window() {
 
 for t in test_executor_from_zst test_executor_from_gz test_executor_missing \
     test_executor_checksum_mismatch test_executor_other_commit test_executor_size_mismatch \
-    test_executor_unknown_file test_preflight test_record_needs_we_sha test_llm_check \
+    test_executor_unknown_file test_preflight test_record_needs_we_sha test_we_ref_must_be_a_name \
+    test_sdk_needs_the_checkout_at_ad4m_sha test_test_needs_the_suite test_llm_check \
     test_llm_context_window; do
     echo "$t"
     setup

@@ -134,9 +134,11 @@ executor and SDK:
 - WE comes from the pipeline parameter `we-ref` (branch, tag or full commit;
   default `dev`). WE installs with its own pnpm (10).
 
-The job halts green when the same ad4m commit and WE commit already passed on the
-host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
-`COASYS_SPACES_FORCE=1` to run anyway. Screenshots, traces and logs are under the
+The job halts green when the same ad4m commit, WE commit, tier and model already
+passed on the host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
+`COASYS_SPACES_FORCE=1` to run anyway. It shares the serial group
+`nightly-llm` with `llm-e2e`: both use the host's Ollama and GPU, so they run
+one after the other. Screenshots, traces and logs are under the
 job's artifacts, `coasys-spaces/`.
 
 Each step is a subcommand of `scripts/coasys-spaces.sh`. `bash

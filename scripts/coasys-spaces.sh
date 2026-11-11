@@ -62,13 +62,32 @@ die() {
 
 is_sha() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'; }
 
+# WE_REF goes to `git fetch` and `git ls-remote`: a value that starts with `-` would be an option.
+[[ $WE_REF =~ ^[A-Za-z0-9._/-]+$ && $WE_REF != -* ]] || die "WE_REF '$WE_REF' is not a branch, tag or commit name"
+
+# The SDK and a built executor come from the checkout, so it must be the commit under test.
+checkout_is_ad4m_sha() {
+    local head
+    head="$(git -C "$REPO" rev-parse HEAD)"
+    [ "$head" = "$AD4M_SHA" ] || die "the checkout is at $head, not AD4M_SHA $AD4M_SHA"
+}
+
+# What a pass is recorded under: both commits, the tier and, in the real tier, the model.
+run_key() {
+    local key="$AD4M_SHA $1 $TIER"
+    if [ "$TIER" = real ]; then key="$key $LLM_MODEL ctx${LLM_NUM_CTX:-default}"; fi
+    echo "$key"
+}
+
 # The commit WE_REF names on WE_REPO now, without a clone.
 we_remote_sha() {
     if is_sha "$WE_REF"; then
         echo "$WE_REF"
         return
     fi
-    git ls-remote "$WE_REPO" "refs/heads/$WE_REF" "refs/tags/$WE_REF" | awk 'NR == 1 {print $1}'
+    # An annotated tag lists the tag object and, as `<tag>^{}`, the commit the clone checks out.
+    git ls-remote "$WE_REPO" "refs/heads/$WE_REF" "refs/tags/$WE_REF" "refs/tags/$WE_REF^{}" |
+        awk '$2 ~ /\^\{\}$/ {peeled = $1} NR == 1 {first = $1} END {print (peeled != "" ? peeled : first)}'
 }
 
 cmd_preflight() {
@@ -85,8 +104,8 @@ cmd_preflight() {
         return 0
     fi
     last="$(cat "$STATE/last-success" 2>/dev/null || true)"
-    if [ "$last" = "$AD4M_SHA $we_sha" ]; then
-        log "ad4m $AD4M_SHA with WE $we_sha already passed; skipping"
+    if [ "$last" = "$(run_key "$we_sha")" ]; then
+        log "ad4m $AD4M_SHA with WE $we_sha already passed ($last); skipping"
         return "$SKIP"
     fi
     log "ad4m $AD4M_SHA with WE $we_sha (last passed: ${last:-none}); running"
@@ -147,6 +166,7 @@ fetch_published_executor() {
 # and no bootstrap languages: the executor does not need them, and the publish step publishes
 # exactly this binary.
 build_executor() {
+    checkout_is_ad4m_sha
     log "building the executor (pnpm run build-libs)"
     cd "$REPO"
     pnpm install --no-frozen-lockfile
@@ -175,6 +195,7 @@ cmd_executor() {
 }
 
 cmd_sdk() {
+    checkout_is_ad4m_sha
     cd "$REPO"
     pnpm install --no-frozen-lockfile
     (cd core && pnpm install --no-frozen-lockfile)
@@ -326,6 +347,13 @@ cmd_build_web() {
 
 cmd_test() {
     [ -x "$EXECUTOR" ] || die "no executor at $EXECUTOR (run the executor step)"
+    # `pnpm --filter` that matches no package, or a package without the script, runs nothing and
+    # exits 0; record would then mark a pass.
+    node -e '
+      const pkg = require(process.argv[1]);
+      if (pkg.name !== process.argv[2] || !pkg.scripts?.["test:spaces"]) process.exit(1);
+    ' "$WE_DIR/apps/we-web/package.json" "$WE_PACKAGE" ||
+        die "WE $WE_REF has no $WE_PACKAGE with a test:spaces script at apps/we-web"
     use_we_pnpm
     mkdir -p "$ARTIFACTS"
     {
@@ -350,9 +378,9 @@ cmd_record() {
     we_sha="$(cat "$WORK/we.sha")"
     is_sha "$we_sha" || die "no tested WE commit in $WORK/we.sha"
     mkdir -p "$STATE"
-    echo "$AD4M_SHA $we_sha" >"$STATE/last-success.tmp"
+    run_key "$we_sha" >"$STATE/last-success.tmp"
     mv "$STATE/last-success.tmp" "$STATE/last-success"
-    log "recorded ad4m $AD4M_SHA with WE $we_sha as passed"
+    log "recorded $(cat "$STATE/last-success") as passed"
 }
 
 case "${1:-}" in

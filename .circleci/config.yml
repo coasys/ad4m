@@ -1214,7 +1214,9 @@ workflows:
   # other's result: an llm-e2e failure must not skip the tunnel, and a tunnel
   # failure must not skip llm-e2e. Three API triggers fire this pipeline every night on
   # one host. Each job has its own serial group, so a second trigger waits
-  # instead of sharing ports, DIDs and the GPU with the first.
+  # instead of sharing ports, DIDs and the GPU with the first. llm-e2e and
+  # coasys-spaces share one group: both run models on the host's Ollama and
+  # GPU, and together they make extraction timeouts likelier.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -1228,4 +1230,4 @@ workflows:
       - integration-tests-sfu-browsers:
           serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
       - coasys-spaces:
-          serial-group: << pipeline.project.slug >>/nightly-coasys-spaces
+          serial-group: << pipeline.project.slug >>/nightly-llm
