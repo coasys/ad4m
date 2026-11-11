@@ -465,6 +465,26 @@ impl AIService {
         Ok(())
     }
 
+    /// Build the client of the stored model `model_id` when `clients` has none. The start's
+    /// load builds them in a spawned task: a call that comes before it got to the model
+    /// builds that one itself rather than finding it not loaded. A model that is not stored,
+    /// or whose client does not build, stays without one: the caller says so.
+    async fn load_if_missing<C>(&self, model_id: &str, clients: &Mutex<HashMap<String, C>>) {
+        if clients.lock().await.contains_key(model_id) {
+            return;
+        }
+        let Ok(Some(model)) = crate::db_backend::db_backend().get_model(model_id.to_string())
+        else {
+            return;
+        };
+        if let Err(e) = self.init_model(&model).await {
+            error!(
+                "AI model {:?} ({}) did not load: {e:#}",
+                model.name, model.id
+            );
+        }
+    }
+
     /// Forget the clients of model `model_id`, whatever its type was.
     async fn drop_clients(&self, model_id: &str) {
         self.llms.lock().await.remove(model_id);
@@ -609,6 +629,7 @@ impl AIService {
     /// caller's mistake (an [`InvalidModel`](crate::db::InvalidModel)): a task names a model
     /// that is not an LLM, or none.
     async fn chat_model(&self, model_id: &str) -> Result<ChatModel> {
+        self.load_if_missing(model_id, &self.llms).await;
         self.llms
             .lock()
             .await
@@ -1054,6 +1075,7 @@ impl AIService {
             estimate
         );
         let started = std::time::Instant::now();
+        self.load_if_missing(&model_id, &self.embedders).await;
         let embedder = self
             .embedders
             .lock()
@@ -1802,6 +1824,69 @@ mod tests {
             rechecked(&endpoint).await,
             "the endpoint was not re-checked"
         );
+    }
+
+    // `AIService::new` loads the stored models in a spawned task: a call that came before
+    // the load got to its model was refused as "not loaded" (the interpretation LLM-E2E's
+    // semantic dedup, embedding right after the service's start). `empty()` is a service
+    // whose load has not run yet.
+    #[tokio::test]
+    async fn an_embed_before_the_starts_load_uses_the_stored_model() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let mut upstream = mockito::Server::new_async().await;
+        let embeddings = upstream
+            .mock("POST", "/v1/embeddings")
+            .with_body(r#"{"data":[{"index":0,"embedding":[1.0,0.0]}]}"#)
+            .create_async()
+            .await;
+        let endpoint = saved_endpoint(EndpointKind::LlamaServer, &upstream.url());
+        let input = model_on(&endpoint, ModelType::Embedding, "nomic-embed-text");
+        Ad4mDb::with_global_instance(|db| db.add_model(&input)).unwrap();
+
+        let service = AIService::empty();
+        let result = service
+            .embed(input.name.clone(), "text".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(result.embeddings, vec![1.0, 0.0]);
+        embeddings.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_task_before_the_starts_load_uses_the_stored_model() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(r#"{"choices":[{"message":{"content":"merci"}}]}"#)
+            .create_async()
+            .await;
+        let endpoint = saved_endpoint(EndpointKind::LlamaServer, &upstream.url());
+        let model_id = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&model_on(&endpoint, ModelType::Llm, "qwen3:8b"))
+        })
+        .unwrap();
+
+        let service = AIService::empty();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "t".into(),
+                    model_id,
+                    system_prompt: String::new(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let answer = service
+            .prompt(task.task_id, "thanks".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(answer.text, "merci");
+        completion.assert_async().await;
     }
 
     // The wrapper cut a chat call to an endpoint with no timeout of its own at 300 s, where
