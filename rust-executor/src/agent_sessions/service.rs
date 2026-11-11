@@ -366,7 +366,11 @@ pub async fn send(
         );
     }
     // From here the slot is ours; any early return must free it. `SendHold` does on drop.
-    let hold = SendHold(session_id.to_string());
+    let hold = SendHold {
+        session_id: session_id.to_string(),
+        reply: reply_id.clone(),
+        armed: true,
+    };
 
     // Rows still `running` here belong to a task that died (a panic lost its task without
     // the sweep having run): they are finished, whatever they say.
@@ -474,7 +478,7 @@ pub async fn send(
             );
         }
     }
-    std::mem::forget(hold);
+    hold.keep();
     Ok(AgentSendStarted {
         message_id: user.id,
         reply_id,
@@ -566,13 +570,27 @@ fn settle(
     }
 }
 
-/// Frees the session's slot on drop: a `send` that fails after reserving leaves no
-/// phantom turn behind.
-struct SendHold(String);
+/// Frees the slot a `send` reserved on drop: a `send` that fails after reserving leaves no
+/// phantom turn behind. Only its own slot — a cancel may have taken it since, and a newer
+/// send's slot for the same session is not this one's to free.
+struct SendHold {
+    session_id: String,
+    reply: String,
+    armed: bool,
+}
+
+impl SendHold {
+    /// The send went through: the slot stays with the turn it started.
+    fn keep(mut self) {
+        self.armed = false;
+    }
+}
 
 impl Drop for SendHold {
     fn drop(&mut self) {
-        RUNNING.lock().unwrap().remove(&self.0);
+        if self.armed {
+            release(&self.session_id, &self.reply);
+        }
     }
 }
 
@@ -585,4 +603,45 @@ pub(crate) fn running_for_test(session_id: &str) -> bool {
 #[cfg(test)]
 pub(crate) fn clear_running_for_test() {
     RUNNING.lock().unwrap().clear();
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+
+    fn reserve(session_id: &str, reply: &str) {
+        RUNNING.lock().unwrap().insert(
+            session_id.to_string(),
+            RunningTurn {
+                reply: reply.to_string(),
+                agent: AgentContext::main_agent(),
+                abort: None,
+            },
+        );
+    }
+
+    fn hold(session_id: &str, reply: &str) -> SendHold {
+        SendHold {
+            session_id: session_id.to_string(),
+            reply: reply.to_string(),
+            armed: true,
+        }
+    }
+
+    // A send that fails after a cancel and a second send took its place must leave the
+    // second send's slot: without it that turn could run beside a third and never settle.
+    #[test]
+    fn a_failed_send_frees_its_own_slot_and_no_newer_one() {
+        let session = format!("slot-{}", Uuid::new_v4());
+        reserve(&session, "second");
+        drop(hold(&session, "first"));
+        assert!(running_for_test(&session), "the newer send keeps its slot");
+
+        // A send that went through keeps the slot for its turn.
+        hold(&session, "second").keep();
+        assert!(running_for_test(&session), "a kept slot stays");
+
+        drop(hold(&session, "second"));
+        assert!(!running_for_test(&session), "its own slot is freed");
+    }
 }
