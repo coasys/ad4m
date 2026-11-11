@@ -26,6 +26,7 @@ const mockSfuManagerInstance = {
 
 jest.mock("./SfuManager", () => ({
     SfuManager: jest.fn().mockImplementation(() => mockSfuManagerInstance),
+    defaultDeviceId: () => "this-device",
 }))
 
 const mockMeshManagerInstance = {
@@ -41,6 +42,7 @@ const mockMeshManagerInstance = {
 }
 
 jest.mock("./MeshManager", () => ({
+    ...jest.requireActual("./MeshManager"),
     MeshManager: jest.fn().mockImplementation(() => mockMeshManagerInstance),
 }))
 
@@ -73,6 +75,7 @@ function fakeApi() {
         sfuSendData: jest.fn(),
         subscribeSfuDataChannel: jest.fn(),
         subscribeSfuRoomRoster: jest.fn(),
+        subscribeSfuSessionReplaced: jest.fn(),
     }
 }
 
@@ -250,7 +253,8 @@ describe("mesh path", () => {
         expect(MeshManager).toHaveBeenCalledWith({
             channel,
             callId: "my-room",
-            selfId: "did:me",
+            // A mesh peer is the agent on this device.
+            selfId: "did:me#this-device",
             onNetworkChange: expect.any(Function),
             checkConnection: expect.any(Function),
         })
@@ -289,7 +293,7 @@ describe("mesh path", () => {
         await session.join(fakeMediaStream())
 
         expect(setOnlineStatus).toHaveBeenCalledWith({
-            links: [{ source: "did:me", predicate: "ad4m://session/in-call", target: "my-room" }],
+            links: [{ source: "did:me#this-device", predicate: "ad4m://session/in-call", target: "my-room" }],
         })
     })
 
@@ -297,7 +301,8 @@ describe("mesh path", () => {
     // must survive the call, and the presence must go when the call ends.
     describe("call presence in the agent's status", () => {
         const appLink = { source: "did:me", predicate: "app://mood", target: "literal:string:busy" }
-        const inCall = { source: "did:me", predicate: "ad4m://session/in-call", target: "my-room" }
+        const inCall = { source: "did:me#this-device", predicate: "ad4m://session/in-call", target: "my-room" }
+        const phoneInCall = { source: "did:me#phone", predicate: "ad4m://session/in-call", target: "my-room" }
         const statusWith = (...links: object[]) => ({ data: { links: links.map((data) => ({ data })) } })
 
         function presenceSession(ownOnlineStatus: jest.Mock) {
@@ -326,6 +331,16 @@ describe("mesh path", () => {
             own.mockResolvedValue(statusWith(appLink, inCall))
             await session.leave()
             expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink] })
+        })
+
+        it("adds its link beside another device's, and leaving takes out only its own", async () => {
+            const own = jest.fn().mockResolvedValue(statusWith(appLink, phoneInCall))
+            const { session, setOnlineStatus } = presenceSession(own)
+            await session.join(fakeMediaStream())
+            expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink, phoneInCall, inCall] })
+            own.mockResolvedValue(statusWith(appLink, phoneInCall, inCall))
+            await session.leave()
+            expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink, phoneInCall] })
         })
 
         it("takes the presence link out on destroy", async () => {
@@ -379,46 +394,155 @@ describe("mesh path", () => {
         jest.useRealTimers()
     })
 
-    it("filters roster to agents in the same call room", async () => {
+    describe("the roster", () => {
         // A status is a signed perspective: its links sit under `data`.
-        const inCall = (did: string, room: string) => ({
-            did,
-            status: {
-                author: did,
-                timestamp: "2026-01-01T00:00:00Z",
-                data: {
-                    links: [{
-                        author: did,
-                        timestamp: "2026-01-01T00:00:00Z",
-                        data: { source: did, predicate: "ad4m://session/in-call", target: room },
-                    }],
-                },
+        const statusOf = (did: string, ...links: { source: string; target: string }[]) => ({
+            author: did,
+            timestamp: "2026-01-01T00:00:00Z",
+            data: {
+                links: links.map(({ source, target }) => ({
+                    author: did,
+                    timestamp: "2026-01-01T00:00:00Z",
+                    data: { source, predicate: "ad4m://session/in-call", target },
+                })),
             },
         })
-        const onlineAgents = jest.fn().mockResolvedValue([
-            inCall("did:bob", "my-room"),
-            inCall("did:carol", "other-room"),
-            inCall("did:me", "my-room"),
-        ])
+        const agent = (did: string, ...links: { source: string; target: string }[]) => ({ did, status: statusOf(did, ...links) })
 
-        const session = createSession(baseConfig({
-            topology: "mesh",
-            channel: fakeChannel(),
-            onlineAgents,
-            roomId: "my-room",
-            agentDid: "did:me",
-        }))
-        await session.join(fakeMediaStream())
-        // Wait for the async pollRoster to settle
-        await new Promise((r) => setTimeout(r, 10))
+        async function rosterOf(agents: unknown[], own: unknown = null) {
+            const session = createSession(baseConfig({
+                topology: "mesh",
+                channel: fakeChannel(),
+                onlineAgents: jest.fn().mockResolvedValue(agents),
+                ownOnlineStatus: jest.fn().mockResolvedValue(own),
+                roomId: "my-room",
+                agentDid: "did:me",
+            }))
+            await session.join(fakeMediaStream())
+            // Wait for the async pollRoster to settle
+            await new Promise((r) => setTimeout(r, 10))
+            return mockMeshManagerInstance.setRoster.mock.calls.at(-1)?.[0]
+        }
 
-        expect(mockMeshManagerInstance.setRoster).toHaveBeenCalledWith(["did:bob"])
+        it("is each device in this room, of every agent", async () => {
+            const roster = await rosterOf([
+                agent("did:bob", { source: "did:bob#desk", target: "my-room" }, { source: "did:bob#phone", target: "my-room" }),
+                agent("did:carol", { source: "did:carol#desk", target: "other-room" }),
+            ])
+            expect(roster).toEqual(["did:bob#desk", "did:bob#phone"])
+        })
+
+        it("holds this agent's other devices, read from its own status, never this one", async () => {
+            const own = statusOf("did:me", { source: "did:me#this-device", target: "my-room" }, { source: "did:me#phone", target: "my-room" })
+            // An executor may or may not list the caller; the roster is the same either way.
+            expect(await rosterOf([], own)).toEqual(["did:me#phone"])
+            expect(await rosterOf([{ did: "did:me", status: own }], own)).toEqual(["did:me#phone"])
+        })
+
+        it("takes no agent's word for another agent's device, nor a link that names no device", async () => {
+            const roster = await rosterOf([
+                agent("did:carol", { source: "did:bob#desk", target: "my-room" }, { source: "did:carol", target: "my-room" }),
+            ])
+            expect(roster).toEqual([])
+        })
+    })
+
+    // Two tabs of one device are one mesh peer, so only one of them can hold the call.
+    describe("joined again from this device", () => {
+        const delivered = () => new Promise((r) => setTimeout(r, 20))
+
+        function tab(overrides: Record<string, unknown> = {}) {
+            const setOnlineStatus = jest.fn().mockResolvedValue(true)
+            const session = createSession(baseConfig({
+                topology: "mesh",
+                channel: fakeChannel(),
+                setOnlineStatus,
+                // A room no other test's session is still in: tabs of one device hear each other per room.
+                roomId: "tab-room",
+                agentDid: "did:me",
+                ...overrides,
+            }))
+            const replaced: unknown[] = []
+            session.on("replaced", (event: unknown) => replaced.push(event))
+            return { session, setOnlineStatus, replaced }
+        }
+
+        it("hands the call to the later tab: the earlier says replaced, goes idle and leaves the presence link", async () => {
+            const a = tab()
+            await a.session.join(fakeMediaStream())
+            const announced = a.setOnlineStatus.mock.calls.length
+            const b = tab()
+            await b.session.join(fakeMediaStream())
+            await delivered()
+
+            expect(a.replaced).toEqual([{
+                targetDid: "did:me", neighbourhoodUrl: "neighbourhood://test", roomName: "tab-room", participantId: "did:me#this-device",
+            }])
+            expect(a.session.getState()).toBe("idle")
+            expect(mockMeshManagerInstance.leave).toHaveBeenCalledTimes(1)
+            // The link is the device's, and the later tab holds the call on it.
+            expect(a.setOnlineStatus).toHaveBeenCalledTimes(announced)
+            expect(b.replaced).toEqual([])
+            expect(b.session.getState()).toBe("active")
+
+            await Promise.all([a.session.destroy(), b.session.destroy()])
+        })
+
+        it("keeps the presence link for the later tab when the earlier is replaced and then destroyed while it announces", async () => {
+            let finishAnnounce: (ok: boolean) => void = () => {}
+            // The announce waits until the test lets it finish; any later write settles at once.
+            const aSetStatus = jest.fn(() => Promise.resolve(true))
+                .mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishAnnounce = resolve }))
+            const a = tab({ setOnlineStatus: aSetStatus })
+            const aJoin = a.session.join(fakeMediaStream()).catch((err: unknown) => err)
+            await delivered()
+            const b = tab()
+            await b.session.join(fakeMediaStream())
+            await delivered()
+            expect(a.replaced).toHaveLength(1)
+
+            await a.session.destroy()
+            finishAnnounce(true)
+            await aJoin
+
+            // Only the announce: no withdraw of the link the later tab holds the call on.
+            expect(aSetStatus).toHaveBeenCalledTimes(1)
+            expect(b.session.getState()).toBe("active")
+            await b.session.destroy()
+        })
+
+        it("leaves a call on another device alone", async () => {
+            const a = tab()
+            await a.session.join(fakeMediaStream())
+            const b = tab({ deviceId: "phone" })
+            await b.session.join(fakeMediaStream())
+            await delivered()
+
+            expect(a.replaced).toEqual([])
+            expect(a.session.getState()).toBe("active")
+
+            await Promise.all([a.session.destroy(), b.session.destroy()])
+        })
+
+        it("lets a tab that left be joined from again without replacing anyone", async () => {
+            const a = tab()
+            await a.session.join(fakeMediaStream())
+            await a.session.leave()
+            const b = tab()
+            await b.session.join(fakeMediaStream())
+            await delivered()
+
+            expect(a.replaced).toEqual([])
+            expect(b.session.getState()).toBe("active")
+
+            await Promise.all([a.session.destroy(), b.session.destroy()])
+        })
     })
 
     it("delegates participants to mesh manager (includes stream)", async () => {
         const bobStream = fakeMediaStream()
         mockMeshManagerInstance.getParticipants.mockReturnValue([
-            { did: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+            { did: "did:bob#desk", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
         ])
         const session = createSession(baseConfig({
             topology: "mesh",
@@ -426,8 +550,28 @@ describe("mesh path", () => {
         }))
         await session.join(fakeMediaStream())
 
+        // The mesh keys its peers by device: the peer id is the participant id.
         expect(session.participants).toEqual([
-            { agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+            { participantId: "did:bob#desk", agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+        ])
+    })
+
+    it("reports a mesh participant's events as the SFU path does: the device's session and its agent", async () => {
+        const session = createSession(baseConfig({ topology: "mesh", channel: fakeChannel() }))
+        await session.join(fakeMediaStream())
+        const heard: [string, unknown][] = []
+        for (const event of ["participant-joined", "participant-left", "participant-updated"] as const) {
+            session.on(event, (p: unknown) => heard.push([event, p]))
+        }
+        const stream = fakeMediaStream()
+        const bob = { did: "did:bob#desk", stream, hasAudio: true, hasVideo: true, isActiveSpeaker: false }
+        for (const [, handler] of mockMeshManagerInstance.on.mock.calls) handler(bob)
+
+        const reported = { participantId: "did:bob#desk", did: "did:bob", stream, hasAudio: true, hasVideo: true, isActiveSpeaker: false }
+        expect(heard).toEqual([
+            ["participant-joined", reported],
+            ["participant-left", reported],
+            ["participant-updated", reported],
         ])
     })
 
@@ -485,6 +629,66 @@ describe("mesh path", () => {
         expect(mockMeshManagerInstance.leave).toHaveBeenCalled()
         expect(mockMeshManagerInstance.destroy).toHaveBeenCalled()
     })
+
+    it("stays closed when destroyed while the mesh joins", async () => {
+        jest.useFakeTimers()
+        try {
+            let listened!: () => void
+            mockMeshManagerInstance.join.mockImplementationOnce(
+                () => new Promise<void>((resolve) => { listened = resolve }),
+            )
+            const setOnlineStatus = jest.fn().mockResolvedValue(true)
+            const onlineAgents = jest.fn().mockResolvedValue([])
+            const session = createSession(baseConfig({
+                topology: "mesh",
+                channel: fakeChannel(),
+                setOnlineStatus,
+                onlineAgents,
+            }))
+            const states = collectStates(session)
+
+            const joining = session.join(fakeMediaStream())
+            const outcome = joining.then(() => null, (err: Error) => err)
+            await Promise.resolve()
+            await session.destroy()
+            listened()
+
+            expect((await outcome)?.message).toBe("Session destroyed")
+            expect(session.getState()).toBe("closed")
+            expect(states).not.toContain("active")
+            expect(setOnlineStatus).not.toHaveBeenCalled()
+            expect(onlineAgents).not.toHaveBeenCalled()
+            expect(jest.getTimerCount()).toBe(0)
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it("withdraws its presence when destroyed while announcing it", async () => {
+        let announced!: () => void
+        const setOnlineStatus = jest.fn()
+            .mockImplementationOnce(() => new Promise<boolean>((resolve) => { announced = () => resolve(true) }))
+            .mockResolvedValue(true)
+        const onlineAgents = jest.fn().mockResolvedValue([])
+        const session = createSession(baseConfig({
+            topology: "mesh",
+            channel: fakeChannel(),
+            setOnlineStatus,
+            onlineAgents,
+            roomId: "my-room",
+            agentDid: "did:me",
+        }))
+
+        const outcome = session.join(fakeMediaStream()).then(() => null, (err: Error) => err)
+        while (setOnlineStatus.mock.calls.length === 0) await Promise.resolve()
+        await session.destroy()
+        announced()
+
+        expect((await outcome)?.message).toBe("Session destroyed")
+        expect(session.getState()).toBe("closed")
+        expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [] })
+        expect(onlineAgents).not.toHaveBeenCalled()
+    })
 })
 
 describe("SFU path", () => {
@@ -503,7 +707,155 @@ describe("SFU path", () => {
             "neighbourhood://sfu",
             undefined, // iceConfig
             undefined, // sfuConfig
+            "this-device", // deviceId: the SDK's default
         )
+    })
+
+    it("passes the app's device id to the SFU manager", async () => {
+        const session = createSession(baseConfig({ topology: "sfu", deviceId: "electron-main" }))
+        await session.join(fakeMediaStream())
+        expect((SfuManager as unknown as jest.Mock).mock.calls[0][6]).toBe("electron-main")
+    })
+
+    it("lists each session of an agent as its own participant", async () => {
+        const laptop = fakeMediaStream()
+        const phone = fakeMediaStream()
+        mockSfuManagerInstance.getParticipants.mockReturnValue([
+            { participantId: "P2", did: "did:bob", stream: laptop, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+            { participantId: "P3", did: "did:bob", stream: phone, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+        ])
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await session.join(fakeMediaStream())
+
+        expect(session.participants.map((p) => [p.participantId, p.agentDid, p.stream])).toEqual([
+            ["P2", "did:bob", laptop],
+            ["P3", "did:bob", phone],
+        ])
+    })
+
+    it("a replaced call says so and goes idle without leaving, and can be joined again", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        const dataUnsubscribe = jest.fn()
+        mockSfuManagerInstance.subscribeDataChannel.mockReturnValue(dataUnsubscribe)
+        await session.join(fakeMediaStream())
+        const states = collectStates(session)
+        const replacedEvents: unknown[] = []
+        session.on("replaced", (event: unknown) => replacedEvents.push(event))
+
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "replaced") handler(event)
+
+        expect(replacedEvents).toEqual([event])
+        expect(states).toEqual(["idle"])
+        expect(dataUnsubscribe).toHaveBeenCalled()
+        expect(mockSfuManagerInstance.leave).not.toHaveBeenCalled()
+        expect(session.participants).toEqual([])
+
+        await session.join(fakeMediaStream())
+        expect(session.getState()).toBe("active")
+        expect(SfuManager).toHaveBeenCalledTimes(2)
+    })
+
+    it("a replaced call is idle by the time its listeners hear it, so a listener may join again", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await session.join(fakeMediaStream())
+        let rejoin: Promise<unknown> = Promise.resolve()
+        let stateHeard: string | null = null
+        session.on("replaced", () => {
+            stateHeard = session.getState()
+            rejoin = session.join(fakeMediaStream()).then(() => "joined", (e: Error) => e.message)
+        })
+
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "replaced") handler(event)
+
+        expect(await rejoin).toBe("joined")
+        expect(stateHeard).toBe("idle")
+        expect(session.getState()).toBe("active")
+    })
+
+    it("a replaced call's manager no longer reaches the session's listeners", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await session.join(fakeMediaStream())
+        const heard = jest.fn()
+        session.on("error", heard)
+        session.on("participant-left", heard)
+        const handlers = [...mockSfuManagerInstance.on.mock.calls]
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        for (const [name, handler] of handlers) if (name === "replaced") handler(event)
+
+        // A sendData or quality call made before the replacement rejects after it.
+        for (const [name, handler] of handlers) if (name === "error") handler(new Error("late"))
+        for (const [name, handler] of handlers) if (name === "participant-left") handler("did:other")
+        expect(heard).not.toHaveBeenCalled()
+    })
+
+    it("a replaced call's late error does not reach the next call's listeners", async () => {
+        // Each join gets its own manager, so the first one's handlers stay bound to it.
+        const first = { ...mockSfuManagerInstance, on: jest.fn() }
+        ;(SfuManager as unknown as jest.Mock).mockImplementationOnce(() => first)
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await session.join(fakeMediaStream())
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        for (const [name, handler] of first.on.mock.calls) if (name === "replaced") handler(event)
+        await session.join(fakeMediaStream())
+        expect(session.getState()).toBe("active")
+
+        const heard = jest.fn()
+        session.on("error", heard)
+        for (const [name, handler] of first.on.mock.calls) if (name === "error") handler(new Error("late"))
+        expect(heard).not.toHaveBeenCalled()
+        // The current manager's errors still arrive.
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "error") handler(new Error("now"))
+        expect(heard).toHaveBeenCalledTimes(1)
+    })
+
+    it("a call replaced while it joins stays idle", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        mockSfuManagerInstance.join.mockImplementationOnce(async () => {
+            for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "replaced") handler(event)
+        })
+        const states = collectStates(session)
+
+        await session.join(fakeMediaStream())
+
+        expect(states).toEqual(["joining", "idle"])
+        expect(session.getState()).toBe("idle")
+    })
+
+    it("a session destroyed while its topology resolves never joins", async () => {
+        let serves!: (all: boolean) => void
+        const session = createSession(baseConfig({
+            localSfuStatus: { isPublic: true },
+            sfuServesAllMembers: () => new Promise<boolean>((resolve) => { serves = resolve }),
+        }))
+        const joining = session.join(fakeMediaStream())
+        await session.destroy()
+        serves(true)
+
+        await expect(joining).rejects.toThrow(/destroyed/)
+        expect(SfuManager).not.toHaveBeenCalled()
+        expect(session.getState()).toBe("closed")
+    })
+
+    it("a session destroyed while the SFU joins never turns active", async () => {
+        let joined!: () => void
+        mockSfuManagerInstance.join.mockImplementationOnce(
+            () => new Promise<void>((resolve) => { joined = resolve }),
+        )
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        const states = collectStates(session)
+        const outcome = session.join(fakeMediaStream()).then(() => null, (err: Error) => err)
+        while (mockSfuManagerInstance.join.mock.calls.length === 0) await Promise.resolve()
+
+        const destroying = session.destroy()
+        joined()
+        await destroying
+
+        expect((await outcome)?.message).toBe("Session destroyed")
+        expect(states).not.toContain("active")
+        expect(session.getState()).toBe("closed")
     })
 
     it("calls sfu.join with the local stream", async () => {
@@ -516,13 +868,13 @@ describe("SFU path", () => {
     it("delegates participants to SFU manager (includes stream)", async () => {
         const bobStream = fakeMediaStream()
         mockSfuManagerInstance.getParticipants.mockReturnValue([
-            { did: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
+            { participantId: "P2", did: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
         ])
         const session = createSession(baseConfig({ topology: "sfu" }))
         await session.join(fakeMediaStream())
 
         expect(session.participants).toEqual([
-            { agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
+            { participantId: "P2", agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
         ])
     })
 
