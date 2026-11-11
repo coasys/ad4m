@@ -1752,10 +1752,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_observer_keeps_the_same_behaviour() {
-        let script = vec![
-            tool_call_turn("c1", "ok", json!({})),
-            plain_answer("done"),
-        ];
+        let script = vec![tool_call_turn("c1", "ok", json!({})), plain_answer("done")];
         let llm = Arc::new(ScriptedLLM::new(script));
 
         let out = run_with_tools(
