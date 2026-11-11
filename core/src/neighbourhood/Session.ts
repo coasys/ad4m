@@ -372,6 +372,12 @@ export function createSession(config: SessionImplConfig): Session {
     }
 
     /**
+     * The mesh another tab of this device took over. A destroy also lets the mesh go, so only
+     * this tells a join that its call moved on, and that the presence link is no longer its own.
+     */
+    let replacedMesh: MeshManager | null = null
+
+    /**
      * Listen for this device joining the same mesh call from another tab,
      * and tell any tab already in it. Both tabs are one peer, so only one
      * can hold the call: the earlier lets go, without withdrawing the
@@ -383,6 +389,7 @@ export function createSession(config: SessionImplConfig): Session {
         const channel = sameDevice
         channel.onmessage = (event: MessageEvent) => {
             if (meshManager !== mesh || (event.data as { joined?: unknown })?.joined !== true) return
+            replacedMesh = mesh
             releaseDevice()
             stopRosterPolling()
             if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
@@ -491,22 +498,26 @@ export function createSession(config: SessionImplConfig): Session {
 
                 claimDevice(mesh)
                 await mesh.join(localStream)
+                // Replaced while joining: the session is idle again.
+                if (replacedMesh === mesh) return
                 // Destroyed while the mesh joined: destroy() already let the
                 // mesh go and found nothing to leave.
                 if (destroyed()) throw new Error("Session destroyed")
-                // Replaced while joining: the session is idle again.
-                if (meshManager !== mesh) return
 
                 // Announce this agent's presence in the call, then
                 // start polling so the mesh reconciles connections
                 // against whoever else the roster contains.
                 await announceCallPresence()
+                // Replaced while announcing, destroyed or not: the link stays,
+                // for the tab that took over.
+                if (replacedMesh === mesh) {
+                    announced = false
+                    return
+                }
                 if (destroyed()) {
                     await withdrawCallPresence()
                     throw new Error("Session destroyed")
                 }
-                // Replaced while announcing: the link stays, for the tab that took over.
-                if (meshManager !== mesh) return
                 startRosterPolling()
 
                 emit("topology-changed", "mesh")

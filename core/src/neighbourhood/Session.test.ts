@@ -488,6 +488,29 @@ describe("mesh path", () => {
             await Promise.all([a.session.destroy(), b.session.destroy()])
         })
 
+        it("keeps the presence link for the later tab when the earlier is replaced and then destroyed while it announces", async () => {
+            let finishAnnounce: (ok: boolean) => void = () => {}
+            // The announce waits until the test lets it finish; any later write settles at once.
+            const aSetStatus = jest.fn(() => Promise.resolve(true))
+                .mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishAnnounce = resolve }))
+            const a = tab({ setOnlineStatus: aSetStatus })
+            const aJoin = a.session.join(fakeMediaStream()).catch((err: unknown) => err)
+            await delivered()
+            const b = tab()
+            await b.session.join(fakeMediaStream())
+            await delivered()
+            expect(a.replaced).toHaveLength(1)
+
+            await a.session.destroy()
+            finishAnnounce(true)
+            await aJoin
+
+            // Only the announce: no withdraw of the link the later tab holds the call on.
+            expect(aSetStatus).toHaveBeenCalledTimes(1)
+            expect(b.session.getState()).toBe("active")
+            await b.session.destroy()
+        })
+
         it("leaves a call on another device alone", async () => {
             const a = tab()
             await a.session.join(fakeMediaStream())
