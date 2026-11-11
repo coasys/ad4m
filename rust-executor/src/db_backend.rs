@@ -440,7 +440,6 @@ macro_rules! ad4m_db_methods {
                 limit: u32,
                 before: Option<i64>
             ) -> Result<Vec<AgentSessionMessage>, rusqlite::Error>;
-            fn count_running_agent_turns(&self, owner_did: Option<&str>) -> Result<i64, rusqlite::Error>;
             fn interrupt_running_agent_messages(
                 &self,
                 session_id: Option<&str>

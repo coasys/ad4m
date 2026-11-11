@@ -369,22 +369,6 @@ impl Ad4mDb {
         rows.collect()
     }
 
-    /// How many of `owner_did`'s sessions have an assistant turn marked `running`: the
-    /// durable half of the per-caller run limit, so a leaked task handle can never hide
-    /// a running turn.
-    pub fn count_running_agent_turns(
-        &self,
-        owner_did: Option<&str>,
-    ) -> Result<i64, rusqlite::Error> {
-        self.conn.query_row(
-            "SELECT COUNT(*) FROM agent_messages m
-             JOIN agent_sessions s ON s.id = m.session_id
-             WHERE s.owner_did IS ?1 AND m.status = 'running'",
-            params![owner_did],
-            |row| row.get(0),
-        )
-    }
-
     /// Every row still marked `running` — of the session `session_id` when one is named,
     /// of the whole table at startup — marked `interrupted`. A row is `running` while its
     /// task is alive; a `running` row that survives the task that wrote it was cut off.
@@ -551,7 +535,6 @@ mod tests {
         db.append_agent_message(alice, "t1", "s1", "tool", "{}", Some("running"))
             .unwrap();
 
-        assert_eq!(db.count_running_agent_turns(alice).unwrap(), 2);
         assert!(db
             .finish_agent_message(alice, "a1", "done", None, Some(&json!({ "text": "hi" })),)
             .unwrap());

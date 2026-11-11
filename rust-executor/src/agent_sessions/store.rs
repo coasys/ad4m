@@ -80,8 +80,6 @@ pub trait AgentSessionStore: Send + Sync {
         limit: u32,
         before: Option<i64>,
     ) -> Result<Vec<AgentSessionMessage>, AnyError>;
-    /// How many of `owner_did`'s turns are marked `running`.
-    fn running_turns(&self, owner_did: Option<&str>) -> Result<u64, AnyError>;
     /// Every `running` row — of the session `session_id`, or of the whole table when none is
     /// named — marked `interrupted`. How many it caught.
     fn interrupt_running(&self, session_id: Option<&str>) -> Result<u64, AnyError>;
@@ -185,13 +183,6 @@ impl AgentSessionStore for DbAgentSessionStore {
     ) -> Result<Vec<AgentSessionMessage>, AnyError> {
         db_backend()
             .list_agent_messages(owner_did, session_id, limit, before)
-            .map_err(Into::into)
-    }
-
-    fn running_turns(&self, owner_did: Option<&str>) -> Result<u64, AnyError> {
-        db_backend()
-            .count_running_agent_turns(owner_did)
-            .map(|n| n.max(0) as u64)
             .map_err(Into::into)
     }
 
