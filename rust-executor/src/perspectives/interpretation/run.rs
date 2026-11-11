@@ -926,8 +926,7 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     .await?;
 
     // Auto-accept the inferred items whose class declared it, before the flow
-    // passes so `requires` read their values as real. Kept one small call so
-    // the run.rs tail refactor (PR #1414) rebases cleanly.
+    // passes so `requires` read their values as real.
     let accepted = super::overlay::auto_accept_pass(
         perspective,
         &bases,

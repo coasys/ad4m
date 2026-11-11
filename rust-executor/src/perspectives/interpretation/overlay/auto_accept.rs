@@ -18,8 +18,7 @@
 //! Everything routes through the human path's own
 //! [`accept_interpretation`]: auto-accept *is* the accept button, pressed by
 //! the shape declaration rather than a user. A per-item failure is logged
-//! and does not abort the pass; the marker link is kept tiny so removing the
-//! feature is one commit.
+//! and does not abort the pass.
 //!
 //! # What auto-accept never does
 //!
