@@ -1232,7 +1232,7 @@ pub async fn run_interpretation_with_harness_and_model(
         provider,
         bridge,
         HarnessConfig { max_tool_calls },
-        emit_ctx,
+        emit_ctx.map(|ctx| ctx as &dyn crate::ai_service::harness::ToolObserver),
         credit_gate,
     )
     .await?;
