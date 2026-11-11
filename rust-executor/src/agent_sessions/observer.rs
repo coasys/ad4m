@@ -45,11 +45,9 @@ impl StepObserver {
         }
     }
 
-    /// The step's row written and the event out; `None` when the session went away
-    /// mid-turn (deleted underneath the run — the task ends soon anyway).
-    fn push(&self, step: super::types::AgentSessionMessage) -> Option<()> {
+    /// The step's row, as it now reads, told to the session's owner.
+    fn push(&self, step: super::types::AgentSessionMessage) {
         service::publish_step(&self.agent, &self.session_id, step);
-        Some(())
     }
 }
 
