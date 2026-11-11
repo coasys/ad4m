@@ -1,4 +1,4 @@
-//! The harness [`ToolObserver`] of an agent-session turn: every tool call the model makes
+//! The harness [`ToolObserver`] of an AI-session turn: every tool call the model makes
 //! becomes a `role: "tool"` transcript entry, live, so the UI shows the steps as they run.
 //!
 //! `tool_called` appends a `running` step naming the tool, its arguments and the target it
@@ -18,24 +18,24 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::service;
-use super::store::AgentSessionStore;
-use super::types::{tool_content, tool_target, AgentSessionMessageRole, AgentTurnStatus};
+use super::store::AiSessionStore;
+use super::types::{tool_content, tool_target, AiSessionMessageRole, AiTurnStatus};
 use crate::agent::AgentContext;
 use crate::ai_service::harness::ToolObserver;
 
 /// Writes each tool call of one turn to the session's transcript.
 pub struct StepObserver {
-    store: Arc<dyn AgentSessionStore>,
+    store: Arc<dyn AiSessionStore>,
     owner_did: Option<String>,
     session_id: String,
-    /// The agent the `agent-session-changed` events go to.
+    /// The agent the `ai-session-changed` events go to.
     agent: AgentContext,
     /// Ids of the steps still `running`, oldest first.
     open: Mutex<VecDeque<String>>,
 }
 
 impl StepObserver {
-    pub fn new(store: Arc<dyn AgentSessionStore>, agent: AgentContext, session_id: &str) -> Self {
+    pub fn new(store: Arc<dyn AiSessionStore>, agent: AgentContext, session_id: &str) -> Self {
         Self {
             store,
             owner_did: agent.managed_did().map(str::to_string),
@@ -46,7 +46,7 @@ impl StepObserver {
     }
 
     /// The step's row, as it now reads, told to the session's owner.
-    fn push(&self, step: super::types::AgentSessionMessage) {
+    fn push(&self, step: super::types::AiSessionMessage) {
         service::publish_step(&self.agent, &self.session_id, step);
     }
 }
@@ -61,7 +61,7 @@ impl Drop for StepObserver {
             match self.store.finish_message(
                 self.owner_did.as_deref(),
                 &id,
-                AgentTurnStatus::Interrupted,
+                AiTurnStatus::Interrupted,
                 Some("the turn ended before this call returned"),
                 None,
             ) {
@@ -73,7 +73,7 @@ impl Drop for StepObserver {
                 // The session was deleted with its rows: nothing is left to mark.
                 Ok(false) => {}
                 Err(e) => log::error!(
-                    "agent session {}: could not mark a cut-off tool step: {e}",
+                    "ai session {}: could not mark a cut-off tool step: {e}",
                     self.session_id
                 ),
             }
@@ -89,20 +89,20 @@ impl ToolObserver for StepObserver {
             self.owner_did.as_deref(),
             &Uuid::new_v4().to_string(),
             &self.session_id,
-            AgentSessionMessageRole::Tool,
+            AiSessionMessageRole::Tool,
             &content,
-            Some(AgentTurnStatus::Running),
+            Some(AiTurnStatus::Running),
         ) {
             Ok(Some(step)) => {
                 self.open.lock().unwrap().push_back(step.id.clone());
                 self.push(step);
             }
             Ok(None) => log::warn!(
-                "agent session {}: a tool step found no session to land on",
+                "ai session {}: a tool step found no session to land on",
                 self.session_id
             ),
             Err(e) => log::error!(
-                "agent session {}: could not write a tool step: {e}",
+                "ai session {}: could not write a tool step: {e}",
                 self.session_id
             ),
         }
@@ -128,17 +128,13 @@ impl ToolObserver for StepObserver {
         };
         let (status, patch, error) = match result.strip_prefix("error: ") {
             Some(error) => (
-                AgentTurnStatus::Failed,
+                AiTurnStatus::Failed,
                 json!({ "error": error.trim() }),
                 Some(error.trim().to_string()),
             ),
             None => match refusal(result) {
-                Some(error) => (
-                    AgentTurnStatus::Failed,
-                    json!({ "error": error }),
-                    Some(error),
-                ),
-                None => (AgentTurnStatus::Done, json!({ "result": result }), None),
+                Some(error) => (AiTurnStatus::Failed, json!({ "error": error }), Some(error)),
+                None => (AiTurnStatus::Done, json!({ "result": result }), None),
             },
         };
         let id = self.open.lock().unwrap().pop_front();
@@ -152,7 +148,7 @@ impl ToolObserver for StepObserver {
                     Some(&patch),
                 ) {
                     log::error!(
-                        "agent session {}: could not finish a tool step: {e}",
+                        "ai session {}: could not finish a tool step: {e}",
                         self.session_id
                     );
                 }
@@ -162,7 +158,7 @@ impl ToolObserver for StepObserver {
             }
             None => {
                 log::warn!(
-                    "agent session {}: a tool returned that was never called",
+                    "ai session {}: a tool returned that was never called",
                     self.session_id
                 );
                 let mut content = tool_content(name, arguments, tool_target(arguments));
@@ -173,7 +169,7 @@ impl ToolObserver for StepObserver {
                     self.owner_did.as_deref(),
                     &Uuid::new_v4().to_string(),
                     &self.session_id,
-                    AgentSessionMessageRole::Tool,
+                    AiSessionMessageRole::Tool,
                     &content,
                     Some(status),
                 ) {

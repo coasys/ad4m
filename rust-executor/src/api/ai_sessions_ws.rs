@@ -1,11 +1,11 @@
-//! `agent.session*` — the agent-session calls: conversations with the executor's agent,
-//! kept in the executor's own database (`agent_sessions/`).
+//! `ai.session*` — the AI-session calls: conversations with the executor's AI,
+//! kept in the executor's own database (`ai_sessions/`).
 //!
 //! A session names the agent's capabilities it may use: the turn's tools run as an
 //! in-process session of the session's agent, narrowed to what those and the caller's
 //! both allow, so a read-only session's write tool answers an error, and a perspective
-//! outside the set is not reached. `agent.send` stores the person's message and starts
-//! the turn as a detached task — it returns at once; `agent-session-changed` events tell
+//! outside the set is not reached. `ai.sessionSend` stores the person's message and starts
+//! the turn as a detached task — it returns at once; `ai-session-changed` events tell
 //! the owner as each message, status change and tool step lands.
 
 use serde::Deserialize;
@@ -14,10 +14,11 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
-use crate::agent_sessions::service::{self, SessionError};
-use crate::agent_sessions::types::AgentSession;
+use crate::ai_sessions::service::{self, SessionError};
+use crate::ai_sessions::types::AiSession;
 use crate::types::*;
 
+use super::ai_ws::AiIdParams;
 use super::guards::{Guard, IdParam, Owner};
 use super::perspectives_ws::check_credits;
 use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
@@ -44,7 +45,7 @@ fn session_error(e: SessionError) -> WsRpcError {
 }
 
 async fn session_create(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: service::AgentSessionCreate = serde_json::from_value(params)
+    let body: service::AiSessionCreate = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
     service::create(&ctx, body)
         .map_err(session_error)
@@ -65,7 +66,7 @@ async fn session_get(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn session_update(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: AgentSessionUpdateRequest = serde_json::from_value(params.clone())
+    let body: AiSessionUpdateRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
     service::update(&ctx, &body.id, body.update)
         .map_err(session_error)
@@ -80,7 +81,7 @@ async fn session_delete(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn send(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: AgentSendParams = serde_json::from_value(params.clone())
+    let body: AiSessionSendParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
     check_credits(ctx.user_did())?;
     service::send(&ctx, &body.session_id, &body.text, Default::default())
@@ -97,7 +98,7 @@ async fn cancel(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcE
 }
 
 async fn messages(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: AgentSessionMessagesParams = serde_json::from_value(params.clone())
+    let body: AiSessionMessagesParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
     service::messages(&ctx, &body.session_id, body.limit, body.before)
         .map_err(session_error)
@@ -105,51 +106,51 @@ async fn messages(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.method::<service::AgentSessionCreate, AgentSession>("agent.sessionCreate", session_create)
+    map.method::<service::AiSessionCreate, AiSession>("ai.sessionCreate", session_create)
         .guard(Guard::Cap(AGENT_CREATE_CAPABILITY.clone()));
-    map.method::<NoParams, Vec<AgentSession>>("agent.sessionList", session_list)
+    map.method::<NoParams, Vec<AiSession>>("ai.sessionList", session_list)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
-    map.method::<AgentSessionIdParams, AgentSession>("agent.session", session_get)
+    map.method::<AiIdParams, AiSession>("ai.session", session_get)
         .read()
         .guard(Guard::Owns {
             cap: |_| AGENT_READ_CAPABILITY.clone(),
             id: ID_PARAM,
-            owner: Owner::AgentSession,
+            owner: Owner::AiSession,
         });
-    map.method::<AgentSessionUpdateRequest, AgentSession>("agent.sessionUpdate", session_update)
+    map.method::<AiSessionUpdateRequest, AiSession>("ai.sessionUpdate", session_update)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
             id: ID_PARAM,
-            owner: Owner::AgentSession,
+            owner: Owner::AiSession,
         });
-    map.method::<AgentSessionIdParams, bool>("agent.sessionDelete", session_delete)
+    map.method::<AiIdParams, bool>("ai.sessionDelete", session_delete)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
             id: ID_PARAM,
-            owner: Owner::AgentSession,
+            owner: Owner::AiSession,
         });
-    map.method::<AgentSendParams, service::AgentSendStarted>("agent.send", send)
+    map.method::<AiSessionSendParams, service::AiSessionSendStarted>("ai.sessionSend", send)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
             id: SESSION_ID_PARAM,
-            owner: Owner::AgentSession,
+            owner: Owner::AiSession,
         });
-    map.method::<AgentCancelParams, bool>("agent.cancel", cancel)
+    map.method::<AiSessionCancelParams, bool>("ai.sessionCancel", cancel)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
             id: SESSION_ID_PARAM,
-            owner: Owner::AgentSession,
+            owner: Owner::AiSession,
         });
-    map.method::<AgentSessionMessagesParams, Vec<crate::agent_sessions::types::AgentSessionMessage>>(
-        "agent.messages",
+    map.method::<AiSessionMessagesParams, Vec<crate::ai_sessions::types::AiSessionMessage>>(
+        "ai.sessionMessages",
         messages,
     )
     .read()
     .guard(Guard::Owns {
         cap: |_| AGENT_READ_CAPABILITY.clone(),
         id: SESSION_ID_PARAM,
-        owner: Owner::AgentSession,
+        owner: Owner::AiSession,
     });
 }
 
@@ -157,16 +158,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSessionIdParams {
-    /// The session's id.
-    pub id: String,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSendParams {
+#[ts(export, rename = "AISessionSendParams")]
+pub struct AiSessionSendParams {
     /// The session to send on.
     pub session_id: String,
     /// What the person says.
@@ -175,16 +168,16 @@ pub struct AgentSendParams {
 
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentCancelParams {
+#[ts(export, rename = "AISessionCancelParams")]
+pub struct AiSessionCancelParams {
     /// The session whose turn ends.
     pub session_id: String,
 }
 
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSessionMessagesParams {
+#[ts(export, rename = "AISessionMessagesParams")]
+pub struct AiSessionMessagesParams {
     /// The session to read.
     pub session_id: String,
     /// How many entries at most (200 default).
@@ -194,15 +187,15 @@ pub struct AgentSessionMessagesParams {
     pub before: Option<i64>,
 }
 
-/// `agent.sessionUpdate`'s params: the session's id and the fields to change, flat.
+/// `ai.sessionUpdate`'s params: the session's id and the fields to change, flat.
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSessionUpdateRequest {
+#[ts(export, rename = "AISessionUpdateRequest")]
+pub struct AiSessionUpdateRequest {
     /// The session's id.
     pub id: String,
     /// The fields to change.
     #[serde(flatten)]
     #[ts(flatten)]
-    pub update: service::AgentSessionUpdateParams,
+    pub update: service::AiSessionUpdateParams,
 }

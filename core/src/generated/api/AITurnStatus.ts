@@ -4,4 +4,4 @@
  * Where an assistant turn or a tool step is. `running` is only ever set on a row its task
  * owns; the startup sweep marks any it finds `interrupted`.
  */
-export type AgentTurnStatus = "running" | "done" | "failed" | "cancelled" | "interrupted";
+export type AITurnStatus = "running" | "done" | "failed" | "cancelled" | "interrupted";

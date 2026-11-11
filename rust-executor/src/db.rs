@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
-mod agent_sessions;
+mod ai_sessions;
 mod grants;
 mod identity;
 mod tasks;
@@ -592,7 +592,7 @@ impl Ad4mDb {
              ON flow_fired_mark(perspective, agent_did, instance)",
         )?;
 
-        agent_sessions::create_agent_session_tables(&conn)?;
+        ai_sessions::create_ai_session_tables(&conn)?;
 
         Ok(Self { conn })
     }

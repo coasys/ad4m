@@ -1,7 +1,7 @@
-//! The wire and row types of an agent session: `agent_sessions` and `agent_messages` rows.
+//! The wire and row types of an AI session: `ai_sessions` and `ai_messages` rows.
 //!
-//! `AgentSession` and `AgentSessionMessage` are the API's types too (`agent.sessionList`,
-//! `agent.messages`), so their fields serialize camelCase and carry `TS` derives for the
+//! `AiSession` and `AiSessionMessage` are the API's types too (`ai.sessionList`,
+//! `ai.sessionMessages`), so their fields serialize camelCase and carry `TS` derives for the
 //! generated contracts. `owner_did` is `None` for a session of the main agent, a managed
 //! agent's DID otherwise — the `NULL`-is-the-main-agent convention of `tasks.agent_did`.
 
@@ -10,11 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use ts_rs::TS;
 
-/// A conversation with the executor's agent: the `agent_sessions` row.
+/// A conversation with the executor's AI: the `ai_sessions` row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSession {
+#[ts(export, rename = "AISession")]
+pub struct AiSession {
     pub id: String,
     /// The managed agent that owns the session; `null` for a session of the main agent.
     pub owner_did: Option<String>,
@@ -34,10 +34,10 @@ pub struct AgentSession {
     pub updated_at: String,
 }
 
-/// What `agent.sessionUpdate` may change. `None` keeps a column; for the nullable ones an
+/// What `ai.sessionUpdate` may change. `None` keeps a column; for the nullable ones an
 /// inner `None` clears it, `Some` sets it — the `Option<Option<..>>` of `set_nullable`.
 #[derive(Debug, Clone, Default)]
-pub struct AgentSessionUpdate {
+pub struct AiSessionUpdate {
     pub title: Option<String>,
     pub model: Option<Option<String>>,
     pub default_perspective: Option<Option<String>>,
@@ -45,11 +45,11 @@ pub struct AgentSessionUpdate {
     pub capabilities: Option<Vec<Capability>>,
 }
 
-/// Who wrote an `agent_messages` row.
+/// Who wrote an `ai_messages` row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export)]
-pub enum AgentSessionMessageRole {
+#[ts(export, rename = "AISessionMessageRole")]
+pub enum AiSessionMessageRole {
     /// The person the session belongs to.
     User,
     /// The agent's answer to a turn.
@@ -58,7 +58,7 @@ pub enum AgentSessionMessageRole {
     Tool,
 }
 
-impl AgentSessionMessageRole {
+impl AiSessionMessageRole {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
@@ -81,8 +81,8 @@ impl AgentSessionMessageRole {
 /// owns; the startup sweep marks any it finds `interrupted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export)]
-pub enum AgentTurnStatus {
+#[ts(export, rename = "AITurnStatus")]
+pub enum AiTurnStatus {
     Running,
     Done,
     Failed,
@@ -90,7 +90,7 @@ pub enum AgentTurnStatus {
     Interrupted,
 }
 
-impl AgentTurnStatus {
+impl AiTurnStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -102,29 +102,29 @@ impl AgentTurnStatus {
     }
 }
 
-/// One transcript entry: the `agent_messages` row.
+/// One transcript entry: the `ai_messages` row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSessionMessage {
+#[ts(export, rename = "AISessionMessage")]
+pub struct AiSessionMessage {
     pub id: String,
     pub session_id: String,
     /// The order the entries were written, per session.
     #[ts(type = "number")]
     pub seq: i64,
-    pub role: AgentSessionMessageRole,
+    pub role: AiSessionMessageRole,
     /// The transcript entry: `{"text": ..}` for user and assistant turns;
     /// `{"name", "arguments", "target"?, "result"? | "error"?}` for a tool step.
     #[ts(type = "unknown")]
     pub content: Value,
     /// Set on the assistant's turns and on tool steps: `running` until it ends.
-    pub status: Option<AgentTurnStatus>,
+    pub status: Option<AiTurnStatus>,
     /// Why a `failed`, `cancelled` or `interrupted` row ended.
     pub error: Option<String>,
     pub created_at: String,
 }
 
-impl AgentSessionMessage {
+impl AiSessionMessage {
     /// A failed or otherwise unfinished tool step's answer to the model.
     pub fn tool_result_text(&self) -> String {
         let content = &self.content;
@@ -132,7 +132,7 @@ impl AgentSessionMessage {
             result.to_string()
         } else if let Some(error) = content.get("error").and_then(Value::as_str) {
             format!("error: {error}")
-        } else if self.status == Some(AgentTurnStatus::Running) {
+        } else if self.status == Some(AiTurnStatus::Running) {
             "error: the tool call did not return (the turn was interrupted)".to_string()
         } else {
             format!(
@@ -180,19 +180,19 @@ pub fn tool_target(arguments: &Value) -> Option<&str> {
     None
 }
 
-/// The `agent-session-changed` event: pushed to the session's owner on a new message, a
+/// The `ai-session-changed` event: pushed to the session's owner on a new message, a
 /// status change and each tool step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSessionChanged {
+#[ts(export, rename = "AISessionChanged")]
+pub struct AiSessionChanged {
     pub session_id: String,
     /// `created`, `updated`, `deleted` or `message`.
     pub kind: String,
     /// The session row, for `created` and `updated`.
-    pub session: Option<AgentSession>,
+    pub session: Option<AiSession>,
     /// The message row, for `message`.
-    pub message: Option<AgentSessionMessage>,
+    pub message: Option<AiSessionMessage>,
 }
 
 #[cfg(test)]
@@ -201,13 +201,13 @@ mod tests {
 
     #[test]
     fn a_tool_message_answers_its_result_or_its_error() {
-        let mut step = AgentSessionMessage {
+        let mut step = AiSessionMessage {
             id: "m1".into(),
             session_id: "s1".into(),
             seq: 1,
-            role: AgentSessionMessageRole::Tool,
+            role: AiSessionMessageRole::Tool,
             content: json!({ "name": "t", "arguments": {} }),
-            status: Some(AgentTurnStatus::Done),
+            status: Some(AiTurnStatus::Done),
             error: None,
             created_at: "now".into(),
         };
@@ -216,9 +216,9 @@ mod tests {
         step.content = json!({ "name": "t", "error": "not allowed" });
         assert_eq!(step.tool_result_text(), "error: not allowed");
         step.content = json!({ "name": "t" });
-        step.status = Some(AgentTurnStatus::Running);
+        step.status = Some(AiTurnStatus::Running);
         assert!(step.tool_result_text().starts_with("error: "));
-        step.status = Some(AgentTurnStatus::Failed);
+        step.status = Some(AiTurnStatus::Failed);
         step.error = Some("boom".into());
         assert_eq!(step.tool_result_text(), "error: boom");
     }

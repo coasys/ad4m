@@ -2,9 +2,9 @@
 import type { Capability } from "./Capability";
 
 /**
- * A conversation with the executor's agent: the `agent_sessions` row.
+ * A conversation with the executor's AI: the `ai_sessions` row.
  */
-export type AgentSession = { id: string, 
+export type AISession = { id: string, 
 /**
  * The managed agent that owns the session; `null` for a session of the main agent.
  */

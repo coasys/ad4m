@@ -2,9 +2,9 @@
 import type { Capability } from "./Capability";
 
 /**
- * `agent.sessionUpdate`'s params: the session's id and the fields to change, flat.
+ * `ai.sessionUpdate`'s params: the session's id and the fields to change, flat.
  */
-export type AgentSessionUpdateRequest = { 
+export type AISessionUpdateRequest = { 
 /**
  * The session's id.
  */

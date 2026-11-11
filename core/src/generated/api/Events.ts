@@ -2,7 +2,7 @@
 // Do NOT edit manually — regenerate with: pnpm run generate:api-types
 
 import type { AIModelLoadingStatus } from "./AIModelLoadingStatus";
-import type { AgentSessionChanged } from "./AgentSessionChanged";
+import type { AISessionChanged } from "./AISessionChanged";
 import type { AgentStatusChangedEvent } from "./AgentStatusChangedEvent";
 import type { AgentUpdatedEvent } from "./AgentUpdatedEvent";
 import type { Apps } from "./Apps";
@@ -29,7 +29,7 @@ import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
 export interface EventMap {
-  "agent-session-changed": AgentSessionChanged;
+  "ai-session-changed": AISessionChanged;
   "agent-status-changed": AgentStatusChangedEvent;
   "agent-updated": AgentUpdatedEvent;
   "apps-changed": Apps;

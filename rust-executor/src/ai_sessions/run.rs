@@ -1,4 +1,4 @@
-//! One turn of an agent session, run through the harness loop.
+//! One turn of an AI session, run through the harness loop.
 //!
 //! [`run_turn`] is the piece the detached task in `service` runs: it rebuilds the
 //! transcript the model sees, offers the MCP tools as the session's agent within the
@@ -19,8 +19,8 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use super::observer::StepObserver;
-use super::store::AgentSessionStore;
-use super::types::{AgentSession, AgentSessionMessage, AgentSessionMessageRole, AgentTurnStatus};
+use super::store::AiSessionStore;
+use super::types::{AiSession, AiSessionMessage, AiSessionMessageRole, AiTurnStatus};
 use crate::agent::capabilities::{caps_within, ListenerReach};
 use crate::agent::session::Session;
 use crate::agent::AgentContext;
@@ -33,7 +33,7 @@ use crate::types::ModelType;
 const HISTORY_MAX_MESSAGES: u32 = 200;
 const HISTORY_MAX_BYTES: usize = 128 * 1024;
 
-/// The tools an agent session never sees, of the static surface: each would mint a token
+/// The tools an AI session never sees, of the static surface: each would mint a token
 /// or replace the session the turn acts within (`store_token_and_respond` rewrites the
 /// caller), or let it mint a session for someone else. `get_documentation` and
 /// `auth_status` stay: the session asks them without side effects.
@@ -59,7 +59,7 @@ pub struct TurnDeps {
 }
 
 /// What the model is told at the head of the conversation.
-fn system_prompt(session: &AgentSession) -> String {
+fn system_prompt(session: &AiSession) -> String {
     let mut prompt = String::from(
         "You are an agent working inside an AD4M executor for the person you are talking \
          to, through the same tools an app would use. Tools that act on a perspective take \
@@ -99,64 +99,63 @@ fn system_prompt(session: &AgentSession) -> String {
 /// person's message, the assistant row (the answer lands on it when the turn ends), then
 /// the steps. The model reads them in the order they happened: the message, the calls and
 /// their results, then the answer.
-pub(crate) fn history(messages: Vec<AgentSessionMessage>) -> Vec<Value> {
+pub(crate) fn history(messages: Vec<AiSessionMessage>) -> Vec<Value> {
     // Group a run of tool steps into the OpenAI shape the loop itself appends: one
     // assistant message carrying `tool_calls`, then one `tool` message per call. A step
     // still `running` (its task died mid-call) answers a synthetic `error: …` result.
     let mut out: Vec<Value> = Vec::new();
-    let mut tool_group: Vec<&AgentSessionMessage> = Vec::new();
+    let mut tool_group: Vec<&AiSessionMessage> = Vec::new();
     // The answer of the turn being read, held back until the steps that follow its row
     // are out.
     let mut answer: Option<Value> = None;
-    let flush = |out: &mut Vec<Value>,
-                 group: &mut Vec<&AgentSessionMessage>,
-                 answer: &mut Option<Value>| {
-        if group.is_empty() {
-            out.extend(answer.take());
-            return;
-        }
-        let calls: Vec<Value> = group
-            .iter()
-            .map(|step| {
-                json!({
-                    "id": format!("call_{}", step.id),
-                    "type": "function",
-                    "function": {
-                        "name": step.content["name"],
-                        "arguments": step.content["arguments"].to_string(),
-                    },
+    let flush =
+        |out: &mut Vec<Value>, group: &mut Vec<&AiSessionMessage>, answer: &mut Option<Value>| {
+            if group.is_empty() {
+                out.extend(answer.take());
+                return;
+            }
+            let calls: Vec<Value> = group
+                .iter()
+                .map(|step| {
+                    json!({
+                        "id": format!("call_{}", step.id),
+                        "type": "function",
+                        "function": {
+                            "name": step.content["name"],
+                            "arguments": step.content["arguments"].to_string(),
+                        },
+                    })
                 })
-            })
-            .collect();
-        out.push(json!({
-            "role": "assistant",
-            "content": null,
-            "tool_calls": calls,
-        }));
-        for step in group.drain(..) {
+                .collect();
             out.push(json!({
-                "role": "tool",
-                "tool_call_id": format!("call_{}", step.id),
-                "content": step.tool_result_text(),
+                "role": "assistant",
+                "content": null,
+                "tool_calls": calls,
             }));
-        }
-        out.extend(answer.take());
-    };
+            for step in group.drain(..) {
+                out.push(json!({
+                    "role": "tool",
+                    "tool_call_id": format!("call_{}", step.id),
+                    "content": step.tool_result_text(),
+                }));
+            }
+            out.extend(answer.take());
+        };
     for message in &messages {
         match message.role {
-            AgentSessionMessageRole::User => {
+            AiSessionMessageRole::User => {
                 flush(&mut out, &mut tool_group, &mut answer);
                 if let Some(text) = message.content.get("text").and_then(Value::as_str) {
                     out.push(json!({ "role": "user", "content": text }));
                 }
             }
-            AgentSessionMessageRole::Assistant => {
+            AiSessionMessageRole::Assistant => {
                 flush(&mut out, &mut tool_group, &mut answer);
                 // The turn this history feeds is `running`: not part of the past. A
                 // finished turn contributes its answer; a failed one its error text, so
                 // the model sees it stumbled.
                 match message.status {
-                    Some(AgentTurnStatus::Running) => {}
+                    Some(AiTurnStatus::Running) => {}
                     _ => {
                         let text = message
                             .content
@@ -169,7 +168,7 @@ pub(crate) fn history(messages: Vec<AgentSessionMessage>) -> Vec<Value> {
                     }
                 }
             }
-            AgentSessionMessageRole::Tool => tool_group.push(message),
+            AiSessionMessageRole::Tool => tool_group.push(message),
         }
     }
     flush(&mut out, &mut tool_group, &mut answer);
@@ -269,10 +268,10 @@ fn session_provider(tool_session: Arc<Session>) -> Arc<dyn ToolProvider> {
 /// Returns the model's answer; `Err` when the turn could not run at all — `service`
 /// writes the row's status either way.
 pub(crate) async fn run_turn(
-    session: AgentSession,
+    session: AiSession,
     caller: Arc<Session>,
     agent: AgentContext,
-    store: Arc<dyn AgentSessionStore>,
+    store: Arc<dyn AiSessionStore>,
     deps: TurnDeps,
 ) -> Result<String> {
     // What the session's tools may do: the session's capabilities the caller still holds.
@@ -355,18 +354,18 @@ pub(crate) async fn run_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_sessions::types::{
-        assistant_content, tool_content, user_content, AgentSessionMessageRole, AgentTurnStatus,
+    use crate::ai_sessions::types::{
+        assistant_content, tool_content, user_content, AiSessionMessageRole, AiTurnStatus,
     };
 
     fn row(
         id: &str,
         seq: i64,
-        role: AgentSessionMessageRole,
+        role: AiSessionMessageRole,
         content: Value,
-        status: Option<AgentTurnStatus>,
-    ) -> AgentSessionMessage {
-        AgentSessionMessage {
+        status: Option<AiTurnStatus>,
+    ) -> AiSessionMessage {
+        AiSessionMessage {
             id: id.into(),
             session_id: "s".into(),
             seq,
@@ -386,37 +385,37 @@ mod tests {
             row(
                 "u1",
                 1,
-                AgentSessionMessageRole::User,
+                AiSessionMessageRole::User,
                 user_content("what is on it?"),
                 None,
             ),
             row(
                 "a1",
                 2,
-                AgentSessionMessageRole::Assistant,
+                AiSessionMessageRole::Assistant,
                 assistant_content("3 links"),
-                Some(AgentTurnStatus::Done),
+                Some(AiTurnStatus::Done),
             ),
             row(
                 "t1",
                 3,
-                AgentSessionMessageRole::Tool,
+                AiSessionMessageRole::Tool,
                 json!({ "name": "query_links", "arguments": {"perspective_id": "p"}, "result": "3 links" }),
-                Some(AgentTurnStatus::Done),
+                Some(AiTurnStatus::Done),
             ),
             row(
                 "u2",
                 4,
-                AgentSessionMessageRole::User,
+                AiSessionMessageRole::User,
                 user_content("and now?"),
                 None,
             ),
             row(
                 "a2",
                 5,
-                AgentSessionMessageRole::Assistant,
+                AiSessionMessageRole::Assistant,
                 assistant_content(""),
-                Some(AgentTurnStatus::Running),
+                Some(AiTurnStatus::Running),
             ),
         ];
         let history = history(messages);
@@ -457,23 +456,23 @@ mod tests {
             row(
                 "u1",
                 1,
-                AgentSessionMessageRole::User,
+                AiSessionMessageRole::User,
                 user_content("go"),
                 None,
             ),
             row(
                 "a1",
                 2,
-                AgentSessionMessageRole::Assistant,
+                AiSessionMessageRole::Assistant,
                 assistant_content(""),
-                Some(AgentTurnStatus::Running),
+                Some(AiTurnStatus::Running),
             ),
             row(
                 "t1",
                 3,
-                AgentSessionMessageRole::Tool,
+                AiSessionMessageRole::Tool,
                 tool_content("add_link", &json!({"perspective_id": "p"}), Some("p")),
-                Some(AgentTurnStatus::Running),
+                Some(AiTurnStatus::Running),
             ),
         ];
         let history = history(messages);
@@ -490,16 +489,16 @@ mod tests {
         let mut failed = row(
             "a1",
             2,
-            AgentSessionMessageRole::Assistant,
+            AiSessionMessageRole::Assistant,
             assistant_content(""),
-            Some(AgentTurnStatus::Failed),
+            Some(AiTurnStatus::Failed),
         );
         failed.error = Some("the turn ran out of time".into());
         let messages = vec![
             row(
                 "u1",
                 1,
-                AgentSessionMessageRole::User,
+                AiSessionMessageRole::User,
                 user_content("go"),
                 None,
             ),
@@ -507,9 +506,9 @@ mod tests {
             row(
                 "t1",
                 3,
-                AgentSessionMessageRole::Tool,
+                AiSessionMessageRole::Tool,
                 json!({ "name": "query_links", "arguments": {}, "result": "3 links" }),
-                Some(AgentTurnStatus::Done),
+                Some(AiTurnStatus::Done),
             ),
         ];
         let history = history(messages);
@@ -531,25 +530,25 @@ mod tests {
             row(
                 id,
                 seq,
-                AgentSessionMessageRole::Tool,
+                AiSessionMessageRole::Tool,
                 json!({ "name": "query_links", "arguments": {}, "result": "x".repeat(bytes) }),
-                Some(AgentTurnStatus::Done),
+                Some(AiTurnStatus::Done),
             )
         };
         let messages = vec![
             row(
                 "u1",
                 1,
-                AgentSessionMessageRole::User,
+                AiSessionMessageRole::User,
                 user_content("read it all"),
                 None,
             ),
             row(
                 "a1",
                 2,
-                AgentSessionMessageRole::Assistant,
+                AiSessionMessageRole::Assistant,
                 assistant_content("read"),
-                Some(AgentTurnStatus::Done),
+                Some(AiTurnStatus::Done),
             ),
             // Together over the cap; the second alone fits.
             step("t1", 3, HISTORY_MAX_BYTES - 1024),
@@ -557,7 +556,7 @@ mod tests {
             row(
                 "u2",
                 5,
-                AgentSessionMessageRole::User,
+                AiSessionMessageRole::User,
                 user_content("and now?"),
                 None,
             ),

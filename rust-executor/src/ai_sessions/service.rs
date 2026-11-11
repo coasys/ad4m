@@ -1,9 +1,9 @@
-//! The session service: the calls `agent.session*` make, and the registry of the turns
+//! The session service: the calls `ai.session*` make, and the registry of the turns
 //! they start.
 //!
 //! A send stores the person's message and a `running` assistant row, hands the turn to a
 //! detached tokio task, and returns at once — the answer lands on the row (and on the
-//! `agent-session-changed` event) whenever it is ready; the caller's socket may be gone by
+//! `ai-session-changed` event) whenever it is ready; the caller's socket may be gone by
 //! then. The task is the only thing a run keeps in memory ([`RUNNING`], one slot per
 //! session): the status it will write is the row's `status`, so a restart loses only the
 //! handle, and the startup sweep marks every row still `running` `interrupted`.
@@ -24,10 +24,10 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use super::run::{run_turn, TurnDeps};
-use super::store::{agent_session_store, AgentSessionStore};
+use super::store::{ai_session_store, AiSessionStore};
 use super::types::{
-    assistant_content, user_content, AgentSession, AgentSessionChanged, AgentSessionMessage,
-    AgentSessionMessageRole, AgentSessionUpdate, AgentTurnStatus,
+    assistant_content, user_content, AiSession, AiSessionChanged, AiSessionMessage,
+    AiSessionMessageRole, AiSessionUpdate, AiTurnStatus,
 };
 use crate::agent::capabilities::{caps_within, Capability};
 use crate::agent::AgentContext;
@@ -47,7 +47,7 @@ pub(crate) const MAX_RUNNING_PER_CALLER: usize = 8;
 /// `TooManyTurns` 409, `Invalid` 400, `Failed` 500.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    #[error("Agent session {0} not found")]
+    #[error("AI session {0} not found")]
     NotFound(String),
     #[error("a turn is already running on this session; cancel it or let it end")]
     Busy,
@@ -59,21 +59,21 @@ pub enum SessionError {
     Failed(#[from] anyhow::Error),
 }
 
-/// `agent.send`'s answer: the ids of the person's message and of the `running` assistant
+/// `ai.sessionSend`'s answer: the ids of the person's message and of the `running` assistant
 /// row the detached task writes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSendStarted {
+#[ts(export, rename = "AISessionSendStarted")]
+pub struct AiSessionSendStarted {
     pub message_id: String,
     pub reply_id: String,
 }
 
-/// What `agent.sessionCreate` takes.
+/// What `ai.sessionCreate` takes.
 #[derive(Debug, Clone, Default, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSessionCreate {
+#[ts(export, rename = "AISessionCreate")]
+pub struct AiSessionCreate {
     pub title: Option<String>,
     pub model: Option<String>,
     /// The perspective the conversation is about, as a hint for the model. Not a limit.
@@ -87,13 +87,13 @@ pub struct AgentSessionCreate {
     pub capabilities: Option<Vec<Capability>>,
 }
 
-/// What `agent.sessionUpdate` takes. A field left out keeps its value; a nullable one is
+/// What `ai.sessionUpdate` takes. A field left out keeps its value; a nullable one is
 /// cleared with `null` — the `Option<Option<..>>` serde shape, which plain serde collapses
 /// to `None` either way, so each one takes [`triple_option`].
 #[derive(Debug, Clone, Default, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AgentSessionUpdateParams {
+#[ts(export, rename = "AISessionUpdateParams")]
+pub struct AiSessionUpdateParams {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default, deserialize_with = "triple_option")]
@@ -198,20 +198,20 @@ fn retire_lifecycle_lock(owner: Option<&str>, session_id: &str, lock: &Arc<Mutex
 
 /// The row's new state published to its owner, so a watching client draws each message,
 /// status change and step as it lands.
-fn publish(agent: &AgentContext, changed: AgentSessionChanged) {
+fn publish(agent: &AgentContext, changed: AiSessionChanged) {
     get_global_pubsub_sync().publish_event(Event::new(
-        Topic::AgentSessionChanged,
+        Topic::AiSessionChanged,
         Audience::of(agent),
         changed,
     ));
 }
 
-/// The `agent-session-changed` event of a message row (`kind: "message"`), to the
+/// The `ai-session-changed` event of a message row (`kind: "message"`), to the
 /// session's owner. The observer calls this for every step it writes.
-pub(crate) fn publish_step(agent: &AgentContext, session_id: &str, message: AgentSessionMessage) {
+pub(crate) fn publish_step(agent: &AgentContext, session_id: &str, message: AiSessionMessage) {
     publish(
         agent,
-        AgentSessionChanged {
+        AiSessionChanged {
             session_id: session_id.to_string(),
             kind: "message".to_string(),
             session: None,
@@ -221,10 +221,10 @@ pub(crate) fn publish_step(agent: &AgentContext, session_id: &str, message: Agen
 }
 
 /// A session row event (`created`, `updated`, `deleted`), to its owner.
-fn publish_session(agent: &AgentContext, kind: &str, session: &AgentSession) {
+fn publish_session(agent: &AgentContext, kind: &str, session: &AiSession) {
     publish(
         agent,
-        AgentSessionChanged {
+        AiSessionChanged {
             session_id: session.id.clone(),
             kind: kind.to_string(),
             session: Some(session.clone()),
@@ -245,14 +245,11 @@ fn narrowed_caps(
     }
 }
 
-/// `agent.sessionCreate`: a session of the caller's agent.
-pub fn create(
-    ctx: &RequestContext,
-    params: AgentSessionCreate,
-) -> Result<AgentSession, SessionError> {
+/// `ai.sessionCreate`: a session of the caller's agent.
+pub fn create(ctx: &RequestContext, params: AiSessionCreate) -> Result<AiSession, SessionError> {
     let agent = ctx.acts_as();
     let now = chrono::Utc::now().to_rfc3339();
-    let session = AgentSession {
+    let session = AiSession {
         id: Uuid::new_v4().to_string(),
         owner_did: agent.managed_did().map(str::to_string),
         title: params.title.unwrap_or_default(),
@@ -263,37 +260,37 @@ pub fn create(
         created_at: now.clone(),
         updated_at: now,
     };
-    agent_session_store()
+    ai_session_store()
         .create_session(&session)
         .map_err(SessionError::Failed)?;
     publish_session(&agent, "created", &session);
     Ok(session)
 }
 
-/// `agent.sessionList`: the caller's sessions.
-pub fn list(ctx: &RequestContext) -> Result<Vec<AgentSession>, SessionError> {
-    agent_session_store()
+/// `ai.sessionList`: the caller's sessions.
+pub fn list(ctx: &RequestContext) -> Result<Vec<AiSession>, SessionError> {
+    ai_session_store()
         .sessions(ctx.acts_as().managed_did())
         .map_err(SessionError::Failed)
 }
 
-/// `agent.session` / the read side: the session `id` of the caller's agent.
-pub fn get(ctx: &RequestContext, id: &str) -> Result<AgentSession, SessionError> {
-    agent_session_store()
+/// `ai.session` / the read side: the session `id` of the caller's agent.
+pub fn get(ctx: &RequestContext, id: &str) -> Result<AiSession, SessionError> {
+    ai_session_store()
         .session(ctx.acts_as().managed_did(), id)
         .map_err(SessionError::Failed)?
         .ok_or_else(|| SessionError::NotFound(id.to_string()))
 }
 
-/// `agent.messages`: the newest `limit` transcript entries of the session, or those older
+/// `ai.sessionMessages`: the newest `limit` transcript entries of the session, or those older
 /// than `before` (`seq`).
 pub fn messages(
     ctx: &RequestContext,
     session_id: &str,
     limit: Option<u32>,
     before: Option<i64>,
-) -> Result<Vec<AgentSessionMessage>, SessionError> {
-    let store = agent_session_store();
+) -> Result<Vec<AiSessionMessage>, SessionError> {
+    let store = ai_session_store();
     let agent = ctx.acts_as();
     let owner = agent.managed_did();
     if store
@@ -308,16 +305,16 @@ pub fn messages(
         .map_err(SessionError::Failed)
 }
 
-/// `agent.sessionUpdate`: the fields `params` names, on the caller's session `id`. The
+/// `ai.sessionUpdate`: the fields `params` names, on the caller's session `id`. The
 /// capabilities it sets can only reach what the caller holds.
 pub fn update(
     ctx: &RequestContext,
     id: &str,
-    params: AgentSessionUpdateParams,
-) -> Result<AgentSession, SessionError> {
+    params: AiSessionUpdateParams,
+) -> Result<AiSession, SessionError> {
     let agent = ctx.acts_as();
     let owner = agent.managed_did();
-    let update = AgentSessionUpdate {
+    let update = AiSessionUpdate {
         title: params.title,
         model: params.model,
         default_perspective: params.default_perspective,
@@ -326,7 +323,7 @@ pub fn update(
             .capabilities
             .map(|caps| caps_within(&ctx.session.capabilities(), &caps)),
     };
-    let store = agent_session_store();
+    let store = ai_session_store();
     if !store
         .update_session(owner, id, &update)
         .map_err(SessionError::Failed)?
@@ -338,12 +335,12 @@ pub fn update(
     Ok(session)
 }
 
-/// `agent.sessionDelete`: the session `id` of the caller and its transcript, gone. A turn
+/// `ai.sessionDelete`: the session `id` of the caller and its transcript, gone. A turn
 /// running on it is cancelled first.
 pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
     let agent = ctx.acts_as();
     let owner = agent.managed_did();
-    let store = agent_session_store();
+    let store = ai_session_store();
     // Admission and teardown on one session are mutually exclusive: a send may not slip
     // a turn into the gap between the slot clear below and the transcript delete.
     let lifecycle = lifecycle_lock(owner, id);
@@ -375,7 +372,7 @@ pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
     Ok(true)
 }
 
-/// `agent.send`: the person's message stored, a `running` assistant row created, the turn
+/// `ai.sessionSend`: the person's message stored, a `running` assistant row created, the turn
 /// started as a detached task — and the answer returned at once. The reply lands on the
 /// row and the event stream whenever the model is done; the socket need not stay open.
 pub async fn send(
@@ -383,10 +380,10 @@ pub async fn send(
     session_id: &str,
     text: &str,
     deps: TurnDeps,
-) -> Result<AgentSendStarted, SessionError> {
+) -> Result<AiSessionSendStarted, SessionError> {
     let agent = ctx.acts_as();
     let owner = agent.managed_did();
-    let store = agent_session_store();
+    let store = ai_session_store();
     // Admission holds the session's lifecycle lock through the read, the slot take and
     // the task registration below: a delete may not land between them. It is a std
     // mutex across synchronous work only — nothing under it awaits.
@@ -441,7 +438,7 @@ pub async fn send(
             owner,
             &Uuid::new_v4().to_string(),
             session_id,
-            AgentSessionMessageRole::User,
+            AiSessionMessageRole::User,
             &user_content(text),
             None,
         )
@@ -454,9 +451,9 @@ pub async fn send(
             owner,
             &reply_id,
             session_id,
-            AgentSessionMessageRole::Assistant,
+            AiSessionMessageRole::Assistant,
             &assistant_content(""),
-            Some(AgentTurnStatus::Running),
+            Some(AiTurnStatus::Running),
         )
         .map_err(SessionError::Failed)?
         .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
@@ -492,7 +489,7 @@ pub async fn send(
                 &task_store,
                 &task_agent,
                 &task_reply_id,
-                AgentTurnStatus::Done,
+                AiTurnStatus::Done,
                 None,
                 Some(&serde_json::json!({ "text": text })),
             ),
@@ -500,7 +497,7 @@ pub async fn send(
                 &task_store,
                 &task_agent,
                 &task_reply_id,
-                AgentTurnStatus::Failed,
+                AiTurnStatus::Failed,
                 Some(&format!("{e:#}")),
                 None,
             ),
@@ -508,7 +505,7 @@ pub async fn send(
                 &task_store,
                 &task_agent,
                 &task_reply_id,
-                AgentTurnStatus::Failed,
+                AiTurnStatus::Failed,
                 Some("the turn ran out of time"),
                 None,
             ),
@@ -531,25 +528,25 @@ pub async fn send(
                 &store,
                 &agent,
                 &reply_id,
-                AgentTurnStatus::Cancelled,
+                AiTurnStatus::Cancelled,
                 Some("the turn was cancelled before it started"),
                 None,
             );
         }
     }
     hold.keep();
-    Ok(AgentSendStarted {
+    Ok(AiSessionSendStarted {
         message_id: user.id,
         reply_id,
     })
 }
 
-/// `agent.cancel`: the turn running on the caller's session `session_id`, ended. `false`
+/// `ai.sessionCancel`: the turn running on the caller's session `session_id`, ended. `false`
 /// when nothing is running.
 pub fn cancel(ctx: &RequestContext, session_id: &str) -> Result<bool, SessionError> {
     let agent = ctx.acts_as();
     let owner = agent.managed_did();
-    let store = agent_session_store();
+    let store = ai_session_store();
     if store
         .session(owner, session_id)
         .map_err(SessionError::Failed)?
@@ -566,7 +563,7 @@ pub fn cancel(ctx: &RequestContext, session_id: &str) -> Result<bool, SessionErr
                     &store,
                     &turn.agent,
                     &turn.reply,
-                    AgentTurnStatus::Cancelled,
+                    AiTurnStatus::Cancelled,
                     Some("the caller cancelled the turn"),
                     None,
                 );
@@ -587,10 +584,10 @@ pub fn cancel(ctx: &RequestContext, session_id: &str) -> Result<bool, SessionErr
 /// off with the process — mark them so a client never waits on a dead row. Called once
 /// from `run()` after the database opens.
 pub fn startup_sweep() {
-    match agent_session_store().interrupt_running(None) {
+    match ai_session_store().interrupt_running(None) {
         Ok(0) => {}
-        Ok(n) => log::warn!("agent sessions: marked {n} turns interrupted that a restart cut off"),
-        Err(e) => log::error!("agent sessions: the startup sweep failed: {e}"),
+        Ok(n) => log::warn!("ai sessions: marked {n} turns interrupted that a restart cut off"),
+        Err(e) => log::error!("ai sessions: the startup sweep failed: {e}"),
     }
 }
 
@@ -610,22 +607,22 @@ fn release(session_id: &str, reply: &str) -> bool {
 /// The turn's end written on its row and told to the owner: `status`, `error`, and
 /// `content_patch` merged into the row's content.
 fn settle(
-    store: &Arc<dyn AgentSessionStore>,
+    store: &Arc<dyn AiSessionStore>,
     agent: &AgentContext,
     reply_id: &str,
-    status: AgentTurnStatus,
+    status: AiTurnStatus,
     error: Option<&str>,
     content_patch: Option<&serde_json::Value>,
 ) {
     let owner = agent.managed_did();
     if let Err(e) = store.finish_message(owner, reply_id, status, error, content_patch) {
-        log::error!("agent sessions: could not settle turn {reply_id}: {e}");
+        log::error!("ai sessions: could not settle turn {reply_id}: {e}");
         return;
     }
     match store.message(owner, reply_id) {
         Ok(Some(row)) => publish_step(agent, &row.session_id.clone(), row),
-        Ok(None) => log::warn!("agent sessions: turn {reply_id} settled but its row is gone"),
-        Err(e) => log::error!("agent sessions: could not read the settled turn {reply_id}: {e}"),
+        Ok(None) => log::warn!("ai sessions: turn {reply_id} settled but its row is gone"),
+        Err(e) => log::error!("ai sessions: could not read the settled turn {reply_id}: {e}"),
     }
 }
 

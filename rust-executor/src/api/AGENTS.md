@@ -13,7 +13,8 @@ REST/WS shim. Split plan: spec item 6.
 
 ## Handler modules
 
-`*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
+`*_ws.rs`, one per RPC namespace: `agent`, `ai`, `ai_sessions` (`ai.session*`),
+`expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
 handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
@@ -156,7 +157,6 @@ the guard checked:
 | `agent.addTrustedAgents` | `Executor(runtime.trusted_agents:CREATE)` |
 | `agent.byDIDs` | `Cap(agent:READ)` |
 | `agent.byDid` | `Cap(agent:READ)` |
-| `agent.cancel` | `Owns(AgentSession sessionId, agent:UPDATE)` |
 | `agent.deleteEntanglementProofs` | `Executor(agent:UPDATE)` |
 | `agent.deleteTrustedAgents` | `Executor(runtime.trusted_agents:DELETE)` |
 | `agent.entanglementProofPreflight` | `Executor(agent:READ)` |
@@ -169,17 +169,10 @@ the guard checked:
 | `agent.import` | `Cap(agent:CREATE)` |
 | `agent.isLocked` | `Open` |
 | `agent.lock` | `Executor(agent:UPDATE)` |
-| `agent.messages` | `Owns(AgentSession sessionId, agent:READ)` |
 | `agent.permitCapability` | `Owns(Request auth(JSON).requestId, agent:PERMIT)` |
 | `agent.removeApp` | `Owns(Grant id, agent:UPDATE)` |
 | `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
 | `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
-| `agent.send` | `Owns(AgentSession sessionId, agent:UPDATE)` |
-| `agent.session` | `Owns(AgentSession id, agent:READ)` |
-| `agent.sessionCreate` | `Cap(agent:CREATE)` |
-| `agent.sessionDelete` | `Owns(AgentSession id, agent:UPDATE)` |
-| `agent.sessionList` | `Cap(agent:READ)` |
-| `agent.sessionUpdate` | `Owns(AgentSession id, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
 | `agent.status` | `Cap(agent:READ)` |
 | `agent.unlock` | `Executor(agent:SIGN)` |
@@ -194,6 +187,14 @@ the guard checked:
 | `ai.prompt` | `Owns(Task taskId, artificial intelligence:PROMPT)` |
 | `ai.removeModel` | `Executor(artificial intelligence:CREATE)` |
 | `ai.removeTask` | `Owns(Task id, artificial intelligence:CREATE)` |
+| `ai.session` | `Owns(AiSession id, agent:READ)` |
+| `ai.sessionCancel` | `Owns(AiSession sessionId, agent:UPDATE)` |
+| `ai.sessionCreate` | `Cap(agent:CREATE)` |
+| `ai.sessionDelete` | `Owns(AiSession id, agent:UPDATE)` |
+| `ai.sessionList` | `Cap(agent:READ)` |
+| `ai.sessionMessages` | `Owns(AiSession sessionId, agent:READ)` |
+| `ai.sessionSend` | `Owns(AiSession sessionId, agent:UPDATE)` |
+| `ai.sessionUpdate` | `Owns(AiSession id, agent:UPDATE)` |
 | `ai.setDefaultModel` | `Executor(artificial intelligence:CREATE)` |
 | `ai.tasks` | `Cap(artificial intelligence:READ)` |
 | `ai.transcriptionClose` | `Cap(artificial intelligence:TRANSCRIBE)` |

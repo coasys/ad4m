@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 
-use crate::agent_sessions::types::{AgentSession, AgentSessionMessage, AgentSessionUpdate};
+use crate::ai_sessions::types::{AiSession, AiSessionMessage, AiSessionUpdate};
 use crate::db::{
     Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinRow,
     OperatorRecordRow, PaymentRequest,
@@ -383,35 +383,35 @@ macro_rules! ad4m_db_methods {
             fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
 
-            // Agent sessions (`agent_sessions/`): a run's state lives in these tables,
+            // AI sessions (`ai_sessions/`): a run's state lives in these tables,
             // never only in memory. Every method scopes by `owner_did` (`None` = the main
             // agent), so a caller can never reach another agent's session.
-            fn create_agent_session(&self, session: &AgentSession) -> Result<(), rusqlite::Error>;
-            fn get_agent_session(
+            fn create_ai_session(&self, session: &AiSession) -> Result<(), rusqlite::Error>;
+            fn get_ai_session(
                 &self,
                 owner_did: Option<&str>,
                 id: &str
-            ) -> Result<Option<AgentSession>, rusqlite::Error>;
-            fn get_agent_session_any(
+            ) -> Result<Option<AiSession>, rusqlite::Error>;
+            fn get_ai_session_any(
                 &self,
                 id: &str
-            ) -> Result<Option<AgentSession>, rusqlite::Error>;
-            fn list_agent_sessions(
+            ) -> Result<Option<AiSession>, rusqlite::Error>;
+            fn list_ai_sessions(
                 &self,
                 owner_did: Option<&str>
-            ) -> Result<Vec<AgentSession>, rusqlite::Error>;
-            fn update_agent_session(
+            ) -> Result<Vec<AiSession>, rusqlite::Error>;
+            fn update_ai_session(
                 &self,
                 owner_did: Option<&str>,
                 id: &str,
-                update: &AgentSessionUpdate
+                update: &AiSessionUpdate
             ) -> Result<bool, rusqlite::Error>;
-            fn delete_agent_session(
+            fn delete_ai_session(
                 &self,
                 owner_did: Option<&str>,
                 id: &str
             ) -> Result<bool, rusqlite::Error>;
-            fn append_agent_message(
+            fn append_ai_message(
                 &self,
                 owner_did: Option<&str>,
                 id: &str,
@@ -419,13 +419,13 @@ macro_rules! ad4m_db_methods {
                 role: &str,
                 content: &str,
                 status: Option<&str>
-            ) -> Result<Option<AgentSessionMessage>, rusqlite::Error>;
-            fn get_agent_message(
+            ) -> Result<Option<AiSessionMessage>, rusqlite::Error>;
+            fn get_ai_message(
                 &self,
                 owner_did: Option<&str>,
                 id: &str
-            ) -> Result<Option<AgentSessionMessage>, rusqlite::Error>;
-            fn finish_agent_message(
+            ) -> Result<Option<AiSessionMessage>, rusqlite::Error>;
+            fn finish_ai_message(
                 &self,
                 owner_did: Option<&str>,
                 id: &str,
@@ -433,14 +433,14 @@ macro_rules! ad4m_db_methods {
                 error: Option<&str>,
                 content_patch: Option<&Value>
             ) -> Result<bool, rusqlite::Error>;
-            fn list_agent_messages(
+            fn list_ai_messages(
                 &self,
                 owner_did: Option<&str>,
                 session_id: &str,
                 limit: u32,
                 before: Option<i64>
-            ) -> Result<Vec<AgentSessionMessage>, rusqlite::Error>;
-            fn interrupt_running_agent_messages(
+            ) -> Result<Vec<AiSessionMessage>, rusqlite::Error>;
+            fn interrupt_running_ai_messages(
                 &self,
                 session_id: Option<&str>
             ) -> Result<u64, rusqlite::Error>;

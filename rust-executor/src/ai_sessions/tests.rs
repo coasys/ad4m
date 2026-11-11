@@ -13,11 +13,11 @@ use serde_json::{json, Value};
 
 use super::run::{run_turn, TurnDeps};
 use super::service::{
-    self, lifecycle_entry_for_test, running_for_test, AgentSessionCreate, AgentSessionUpdateParams,
+    self, lifecycle_entry_for_test, running_for_test, AiSessionCreate, AiSessionUpdateParams,
     SessionError,
 };
-use super::store::{agent_session_store, DbAgentSessionStore};
-use super::types::{AgentSession, AgentSessionMessage, AgentSessionMessageRole, AgentTurnStatus};
+use super::store::{ai_session_store, DbAiSessionStore};
+use super::types::{AiSession, AiSessionMessage, AiSessionMessageRole, AiTurnStatus};
 use crate::agent::capabilities::{
     perspective_query_capability, perspective_update_capability, Capability, AGENT_READ_CAPABILITY,
     ALL_CAPABILITY,
@@ -208,13 +208,13 @@ fn deps(completion: Arc<dyn CompletionSource>) -> TurnDeps {
 fn setup() {
     crate::mcp::tools::test_support::setup();
     service::clear_running_for_test();
-    super::store::set_agent_session_store(Some(Arc::new(DbAgentSessionStore)));
+    super::store::set_ai_session_store(Some(Arc::new(DbAiSessionStore)));
 }
 
-fn create(ctx: &RequestContext) -> AgentSession {
+fn create(ctx: &RequestContext) -> AiSession {
     service::create(
         ctx,
-        AgentSessionCreate {
+        AiSessionCreate {
             title: Some("test".into()),
             model: Some("scripted".into()),
             ..Default::default()
@@ -224,14 +224,14 @@ fn create(ctx: &RequestContext) -> AgentSession {
 }
 
 /// The first tool step of the session, once the turn has written it, within 10 s.
-async fn first_step(owner: &str, session_id: &str) -> AgentSessionMessage {
-    let store = agent_session_store();
+async fn first_step(owner: &str, session_id: &str) -> AiSessionMessage {
+    let store = ai_session_store();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let rows = store.messages(Some(owner), session_id, 100, None).unwrap();
         if let Some(step) = rows
             .into_iter()
-            .find(|m| m.role == AgentSessionMessageRole::Tool)
+            .find(|m| m.role == AiSessionMessageRole::Tool)
         {
             return step;
         }
@@ -246,12 +246,12 @@ async fn first_step(owner: &str, session_id: &str) -> AgentSessionMessage {
 /// One turn of `session` sent by `caller`, the model answering from `model`: the tool steps
 /// the turn wrote, in order.
 async fn steps_of(
-    session: &AgentSession,
+    session: &AiSession,
     caller: &RequestContext,
     model: Arc<Scripted>,
     provider: Option<Arc<dyn ToolProvider>>,
-) -> Vec<AgentSessionMessage> {
-    let store = agent_session_store();
+) -> Vec<AiSessionMessage> {
+    let store = ai_session_store();
     let agent = caller.acts_as();
     let before = store
         .messages(agent.managed_did(), &session.id, 500, None)
@@ -275,17 +275,17 @@ async fn steps_of(
         .unwrap()
         .into_iter()
         .skip(before)
-        .filter(|m| m.role == AgentSessionMessageRole::Tool)
+        .filter(|m| m.role == AiSessionMessageRole::Tool)
         .collect()
 }
 
 /// The row `id` once it is not `running` any more, within 10 s.
-async fn settled(owner: Option<&str>, reply_id: &str) -> AgentSessionMessage {
-    let store = agent_session_store();
+async fn settled(owner: Option<&str>, reply_id: &str) -> AiSessionMessage {
+    let store = ai_session_store();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(Some(row)) = store.message(owner, reply_id) {
-            if row.status != Some(AgentTurnStatus::Running) {
+            if row.status != Some(AiTurnStatus::Running) {
                 return row;
             }
         }
@@ -318,7 +318,7 @@ async fn a_session_is_its_owners_alone() {
         Err(SessionError::NotFound(_))
     ));
     assert!(matches!(
-        service::update(&bob, &session.id, AgentSessionUpdateParams::default()),
+        service::update(&bob, &session.id, AiSessionUpdateParams::default()),
         Err(SessionError::NotFound(_))
     ));
     assert!(matches!(
@@ -368,7 +368,7 @@ async fn the_main_agent_and_a_user_never_reach_each_others_sessions() {
             service::messages(caller, &theirs.id, None, None),
             Err(SessionError::NotFound(_))
         ));
-        let rename = AgentSessionUpdateParams {
+        let rename = AiSessionUpdateParams {
             title: Some("taken".into()),
             ..Default::default()
         };
@@ -424,7 +424,7 @@ fn a_create_narrows_the_capabilities_it_was_given_to_what_the_caller_holds() {
     );
     let session = service::create(
         &caller,
-        AgentSessionCreate {
+        AiSessionCreate {
             model: Some("m".into()),
             capabilities: Some(vec![
                 perspective_query_capability(vec!["pa".into()]),
@@ -444,7 +444,7 @@ fn a_create_narrows_the_capabilities_it_was_given_to_what_the_caller_holds() {
     // Absent: everything the caller holds.
     let session = service::create(
         &caller,
-        AgentSessionCreate {
+        AiSessionCreate {
             model: Some("m".into()),
             capabilities: None,
             ..Default::default()
@@ -470,7 +470,7 @@ fn an_update_cannot_widen_a_session_past_the_caller() {
     let session = service::update(
         &caller,
         &session.id,
-        AgentSessionUpdateParams {
+        AiSessionUpdateParams {
             capabilities: Some(vec![perspective_update_capability(vec!["pa".into()])]),
             ..Default::default()
         },
@@ -496,12 +496,12 @@ async fn a_send_runs_detached_and_the_reply_lands_on_the_row() {
     .await
     .unwrap();
     let reply = settled(Some("did:key:alice-a5"), &started.reply_id).await;
-    assert_eq!(reply.status, Some(AgentTurnStatus::Done));
+    assert_eq!(reply.status, Some(AiTurnStatus::Done));
     assert_eq!(reply.content["text"], "done");
 
     let messages = service::messages(&alice, &session.id, None, None).unwrap();
     assert_eq!(messages.len(), 2);
-    assert_eq!(messages[0].role, AgentSessionMessageRole::User);
+    assert_eq!(messages[0].role, AiSessionMessageRole::User);
     assert_eq!(messages[0].content["text"], "what can you see?");
     assert!(!running_for_test(&session.id));
 }
@@ -571,7 +571,7 @@ async fn one_turn_per_session_and_eight_per_caller() {
             Some("did:key:alice-a6")
         };
         let row = settled(owner, &reply_id).await;
-        assert_eq!(row.status, Some(AgentTurnStatus::Done));
+        assert_eq!(row.status, Some(AiTurnStatus::Done));
     }
 }
 
@@ -592,15 +592,15 @@ async fn cancel_ends_the_running_turn() {
     .unwrap();
     assert!(service::cancel(&alice, &session.id).unwrap());
     let reply = settled(Some("did:key:alice-a7"), &started.reply_id).await;
-    assert_eq!(reply.status, Some(AgentTurnStatus::Cancelled));
+    assert_eq!(reply.status, Some(AiTurnStatus::Cancelled));
     // The model answering afterwards changes nothing: the row stays as the cancel left it.
     hold.store(true, Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let reply = agent_session_store()
+    let reply = ai_session_store()
         .message(Some("did:key:alice-a7"), &started.reply_id)
         .unwrap()
         .unwrap();
-    assert_eq!(reply.status, Some(AgentTurnStatus::Cancelled));
+    assert_eq!(reply.status, Some(AiTurnStatus::Cancelled));
 
     // Nothing running now: cancel says so, and a new send is free to go.
     assert!(!service::cancel(&alice, &session.id).unwrap());
@@ -678,8 +678,8 @@ async fn only_its_owner_ends_a_sessions_running_turn() {
     // the handler. The answer is the same.
     let methods = crate::api::ws_handler::build_handler_map();
     for (method, params) in [
-        ("agent.sessionDelete", json!({ "id": session.id })),
-        ("agent.cancel", json!({ "sessionId": session.id })),
+        ("ai.sessionDelete", json!({ "id": session.id })),
+        ("ai.sessionCancel", json!({ "sessionId": session.id })),
     ] {
         let refused = methods
             .dispatch(method, params, Arc::new(operator()))
@@ -691,7 +691,7 @@ async fn only_its_owner_ends_a_sessions_running_turn() {
 
     hold.store(true, Ordering::SeqCst);
     let reply = settled(Some(did), &started.reply_id).await;
-    assert_eq!(reply.status, Some(AgentTurnStatus::Done));
+    assert_eq!(reply.status, Some(AiTurnStatus::Done));
     assert_eq!(reply.content["text"], "done");
     assert!(service::get(&alice, &session.id).is_ok());
 }
@@ -707,25 +707,25 @@ async fn a_caller_who_may_only_read_changes_no_session_and_starts_no_turn() {
     let methods = crate::api::ws_handler::build_handler_map();
 
     for (method, params) in [
-        ("agent.sessionList", json!({})),
-        ("agent.session", json!({ "id": session.id })),
-        ("agent.messages", json!({ "sessionId": session.id })),
+        ("ai.sessionList", json!({})),
+        ("ai.session", json!({ "id": session.id })),
+        ("ai.sessionMessages", json!({ "sessionId": session.id })),
     ] {
         let answer = methods.dispatch(method, params, reader()).await;
         assert!(answer.is_ok(), "{method}: {:?}", answer.err());
     }
     for (method, params) in [
-        ("agent.sessionCreate", json!({})),
+        ("ai.sessionCreate", json!({})),
         (
-            "agent.sessionUpdate",
+            "ai.sessionUpdate",
             json!({ "id": session.id, "title": "theirs" }),
         ),
         (
-            "agent.send",
+            "ai.sessionSend",
             json!({ "sessionId": session.id, "text": "hi" }),
         ),
-        ("agent.cancel", json!({ "sessionId": session.id })),
-        ("agent.sessionDelete", json!({ "id": session.id })),
+        ("ai.sessionCancel", json!({ "sessionId": session.id })),
+        ("ai.sessionDelete", json!({ "id": session.id })),
     ] {
         let refused = methods
             .dispatch(method, params, reader())
@@ -765,14 +765,14 @@ async fn a_cancelled_turn_leaves_no_step_running() {
     .await
     .unwrap();
     let step = first_step(did, &session.id).await;
-    assert_eq!(step.status, Some(AgentTurnStatus::Running));
+    assert_eq!(step.status, Some(AiTurnStatus::Running));
 
     assert!(service::cancel(&alice, &session.id).unwrap());
     let reply = settled(Some(did), &started.reply_id).await;
-    assert_eq!(reply.status, Some(AgentTurnStatus::Cancelled));
+    assert_eq!(reply.status, Some(AiTurnStatus::Cancelled));
     // The step ends with its turn: nothing will return for it.
     let step = settled(Some(did), &step.id).await;
-    assert_eq!(step.status, Some(AgentTurnStatus::Interrupted));
+    assert_eq!(step.status, Some(AiTurnStatus::Interrupted));
     assert!(step.error.is_some());
 }
 
@@ -947,9 +947,9 @@ async fn a_turn_whose_task_died_frees_its_session_and_the_next_send_ends_its_row
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let store = agent_session_store();
+    let store = ai_session_store();
     let left = store.message(Some(did), &died.reply_id).unwrap().unwrap();
-    assert_eq!(left.status, Some(AgentTurnStatus::Running));
+    assert_eq!(left.status, Some(AiTurnStatus::Running));
 
     // The next send ends what the dead task left running, and runs its own turn.
     let next = service::send(
@@ -961,9 +961,9 @@ async fn a_turn_whose_task_died_frees_its_session_and_the_next_send_ends_its_row
     .await
     .unwrap();
     let left = store.message(Some(did), &died.reply_id).unwrap().unwrap();
-    assert_eq!(left.status, Some(AgentTurnStatus::Interrupted));
+    assert_eq!(left.status, Some(AiTurnStatus::Interrupted));
     let reply = settled(Some(did), &next.reply_id).await;
-    assert_eq!(reply.status, Some(AgentTurnStatus::Done));
+    assert_eq!(reply.status, Some(AiTurnStatus::Done));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -988,11 +988,11 @@ async fn a_turn_that_runs_out_of_time_ends_failed_and_frees_its_session() {
     .unwrap();
 
     let reply = settled(Some(did), &started.reply_id).await;
-    assert_eq!(reply.status, Some(AgentTurnStatus::Failed));
+    assert_eq!(reply.status, Some(AiTurnStatus::Failed));
     assert_eq!(reply.error.as_deref(), Some("the turn ran out of time"));
     // The call it was inside ended with it, and the session takes the next message.
     let step = first_step(did, &session.id).await;
-    assert_eq!(step.status, Some(AgentTurnStatus::Interrupted));
+    assert_eq!(step.status, Some(AiTurnStatus::Interrupted));
     assert!(!running_for_test(&session.id));
     let next = service::send(
         &alice,
@@ -1003,7 +1003,7 @@ async fn a_turn_that_runs_out_of_time_ends_failed_and_frees_its_session() {
     .await
     .unwrap();
     let reply = settled(Some(did), &next.reply_id).await;
-    assert_eq!(reply.status, Some(AgentTurnStatus::Done));
+    assert_eq!(reply.status, Some(AiTurnStatus::Done));
 }
 
 #[test]
@@ -1014,15 +1014,15 @@ fn the_startup_sweep_marks_every_running_row_interrupted() {
         let ctx = user(alice, everything());
         create(&ctx)
     };
-    let store = agent_session_store();
+    let store = ai_session_store();
     store
         .append_message(
             Some(alice),
             "a-turn",
             &session.id,
-            AgentSessionMessageRole::Assistant,
+            AiSessionMessageRole::Assistant,
             &json!({"text": ""}),
-            Some(AgentTurnStatus::Running),
+            Some(AiTurnStatus::Running),
         )
         .unwrap();
     store
@@ -1030,9 +1030,9 @@ fn the_startup_sweep_marks_every_running_row_interrupted() {
             Some(alice),
             "a-step",
             &session.id,
-            AgentSessionMessageRole::Tool,
+            AiSessionMessageRole::Tool,
             &json!({"name": "t", "arguments": {}}),
-            Some(AgentTurnStatus::Running),
+            Some(AiTurnStatus::Running),
         )
         .unwrap();
 
@@ -1040,13 +1040,13 @@ fn the_startup_sweep_marks_every_running_row_interrupted() {
 
     for id in ["a-turn", "a-step"] {
         let row = store.message(Some(alice), id).unwrap().unwrap();
-        assert_eq!(row.status, Some(AgentTurnStatus::Interrupted), "{id}");
+        assert_eq!(row.status, Some(AiTurnStatus::Interrupted), "{id}");
         assert!(row.error.is_some());
     }
     // A second sweep finds nothing: `interrupted` is a settled state.
     service::startup_sweep();
     let row = store.message(Some(alice), "a-turn").unwrap().unwrap();
-    assert_eq!(row.status, Some(AgentTurnStatus::Interrupted));
+    assert_eq!(row.status, Some(AiTurnStatus::Interrupted));
 }
 
 // ── the transcript a turn leaves ─────────────────────────────────────────────
@@ -1057,7 +1057,7 @@ async fn a_tool_call_becomes_a_step_row_the_history_reads_back() {
     let alice = AgentContext::managed("did:key:alice-b1".to_string());
     let ctx = user("did:key:alice-b1", everything());
     let session = create(&ctx);
-    let store = agent_session_store();
+    let store = ai_session_store();
 
     // A turn of this session by hand: the model calls a tool, the observer writes it.
     let caller = ctx.session.clone();
@@ -1086,12 +1086,12 @@ async fn a_tool_call_becomes_a_step_row_the_history_reads_back() {
         .unwrap();
     let step = rows
         .iter()
-        .find(|m| m.role == AgentSessionMessageRole::Tool)
+        .find(|m| m.role == AiSessionMessageRole::Tool)
         .expect("a tool step row");
     assert_eq!(step.content["name"], "describe_perspective");
     assert_eq!(step.content["target"], "px");
     assert_eq!(step.content["result"], "ok:describe_perspective");
-    assert_eq!(step.status, Some(AgentTurnStatus::Done));
+    assert_eq!(step.status, Some(AiTurnStatus::Done));
 
     // And the model sees it next turn: the history rebuilds the call and its result.
     let history = super::run::history(rows);
@@ -1139,9 +1139,9 @@ async fn the_next_turn_reads_the_last_one_in_the_order_it_happened() {
     assert_eq!(
         roles,
         [
-            AgentSessionMessageRole::User,
-            AgentSessionMessageRole::Assistant,
-            AgentSessionMessageRole::Tool,
+            AiSessionMessageRole::User,
+            AiSessionMessageRole::Assistant,
+            AiSessionMessageRole::Tool,
         ]
     );
 
@@ -1184,7 +1184,7 @@ async fn a_failing_tool_call_ends_its_step_failed() {
     let alice = AgentContext::managed("did:key:alice-b2".to_string());
     let ctx = user("did:key:alice-b2", everything());
     let session = create(&ctx);
-    let store = agent_session_store();
+    let store = ai_session_store();
 
     // A provider that knows no tool the model names: the dispatch refuses.
     run_turn(
@@ -1209,9 +1209,9 @@ async fn a_failing_tool_call_ends_its_step_failed() {
         .unwrap();
     let step = rows
         .iter()
-        .find(|m| m.role == AgentSessionMessageRole::Tool)
+        .find(|m| m.role == AiSessionMessageRole::Tool)
         .expect("a tool step row");
-    assert_eq!(step.status, Some(AgentTurnStatus::Failed));
+    assert_eq!(step.status, Some(AiTurnStatus::Failed));
     assert!(step.content.get("error").is_some(), "{:?}", step.content);
 }
 
@@ -1230,13 +1230,13 @@ async fn a_turn_whose_caller_session_ended_is_refused() {
     };
     let session = create(&ctx);
     // Give the turn its first running row so the gate is what the turn hits.
-    let store = agent_session_store();
+    let store = ai_session_store();
     store
         .append_message(
             Some("did:key:alice-b3"),
             "u1",
             &session.id,
-            AgentSessionMessageRole::User,
+            AiSessionMessageRole::User,
             &json!({"text": "go"}),
             None,
         )
@@ -1246,9 +1246,9 @@ async fn a_turn_whose_caller_session_ended_is_refused() {
             Some("did:key:alice-b3"),
             "r1",
             &session.id,
-            AgentSessionMessageRole::Assistant,
+            AiSessionMessageRole::Assistant,
             &json!({"text": ""}),
-            Some(AgentTurnStatus::Running),
+            Some(AiTurnStatus::Running),
         )
         .unwrap();
 
@@ -1301,7 +1301,7 @@ async fn a_completion_landing_after_the_caller_was_revoked_runs_no_tool() {
     // No call of that completion may run: the turn ends refused, the way a failed
     // gate check ends it, and the write tool it asked for stays uncalled.
     let reply = settled(Some(did), &started.reply_id).await;
-    assert_eq!(reply.status, Some(AgentTurnStatus::Failed));
+    assert_eq!(reply.status, Some(AiTurnStatus::Failed));
     assert!(
         provider.calls.lock().unwrap().is_empty(),
         "a call of a dead caller's completion must not run"
@@ -1331,7 +1331,7 @@ async fn a_caller_whose_grant_still_holds_runs_its_tool_calls() {
     .await
     .unwrap();
     let reply = settled(Some(did), &started.reply_id).await;
-    assert_eq!(reply.status, Some(AgentTurnStatus::Done));
+    assert_eq!(reply.status, Some(AiTurnStatus::Done));
     assert_eq!(
         *provider.calls.lock().unwrap(),
         vec!["add_link".to_string()]
@@ -1351,7 +1351,7 @@ async fn a_session_change_reaches_its_owners_event_stream() {
         .await
         .expect("an event")
         .expect("the stream is open");
-    assert_eq!(event.topic, Topic::AgentSessionChanged);
+    assert_eq!(event.topic, Topic::AiSessionChanged);
     assert_eq!(
         event.audience,
         crate::events::Audience::Dids(vec!["did:key:alice-c1".to_string()]),
@@ -1386,7 +1386,7 @@ async fn a_sessions_events_reach_its_owners_agent_readers_and_no_one_else() {
     .await
     .unwrap();
     settled(Some(did), &started.reply_id).await;
-    let rename = AgentSessionUpdateParams {
+    let rename = AiSessionUpdateParams {
         title: Some("renamed".into()),
         ..Default::default()
     };
@@ -1416,7 +1416,7 @@ async fn a_sessions_events_reach_its_owners_agent_readers_and_no_one_else() {
             continue;
         }
         let kind = event.payload["kind"].as_str().unwrap_or_default();
-        assert_eq!(event.topic, Topic::AgentSessionChanged);
+        assert_eq!(event.topic, Topic::AiSessionChanged);
         for (who, listener, hears) in &listeners {
             assert_eq!(
                 listener.session.may_receive(&event),
@@ -1481,11 +1481,11 @@ async fn a_user_without_credits_starts_no_turn() {
     let broke = user(&account(0.0), everything());
     let funded = user(&account(5.0), everything());
 
-    // Over the socket `agent.send` refuses before a row is written or a slot taken.
+    // Over the socket `ai.sessionSend` refuses before a row is written or a slot taken.
     let session = create(&broke);
     let refused = crate::api::ws_handler::build_handler_map()
         .dispatch(
-            "agent.send",
+            "ai.sessionSend",
             json!({ "sessionId": session.id, "text": "hi" }),
             Arc::new(user(broke.user_did().unwrap(), everything())),
         )
@@ -1505,7 +1505,7 @@ async fn a_user_without_credits_starts_no_turn() {
         session.clone(),
         broke.session.clone(),
         broke.acts_as(),
-        agent_session_store(),
+        ai_session_store(),
         deps(model.clone()),
     )
     .await;
@@ -1519,7 +1519,7 @@ async fn a_user_without_credits_starts_no_turn() {
         session.clone(),
         funded.session.clone(),
         funded.acts_as(),
-        agent_session_store(),
+        ai_session_store(),
         deps(model.clone()),
     )
     .await;
@@ -1565,7 +1565,7 @@ async fn links_of(uuid: &str) -> Vec<(String, String, String)> {
 /// What a tool answers a session whose capabilities do not cover the call.
 const NOT_HELD: &str = "Capability is not matched";
 
-fn refusal(step: &AgentSessionMessage) -> &str {
+fn refusal(step: &AiSessionMessage) -> &str {
     step.content["error"].as_str().unwrap_or_default()
 }
 
@@ -1578,7 +1578,7 @@ async fn a_read_only_sessions_write_tool_is_refused_and_a_read_answers() {
     let ctx = user(did, vec![perspective_query_capability(vec![a.clone()])]);
     let session = service::create(
         &ctx,
-        AgentSessionCreate {
+        AiSessionCreate {
             model: Some("scripted".into()),
             capabilities: Some(vec![perspective_query_capability(vec![a.clone()])]),
             ..Default::default()
@@ -1610,12 +1610,12 @@ async fn a_read_only_sessions_write_tool_is_refused_and_a_read_answers() {
     assert_eq!(steps.len(), 2, "{steps:?}");
     assert_eq!(
         steps[0].status,
-        Some(AgentTurnStatus::Done),
+        Some(AiTurnStatus::Done),
         "the read answers: {steps:?}"
     );
     assert_eq!(
         steps[1].status,
-        Some(AgentTurnStatus::Failed),
+        Some(AiTurnStatus::Failed),
         "the write is refused: {steps:?}"
     );
     assert!(
@@ -1643,7 +1643,7 @@ async fn a_session_reaches_no_perspective_outside_its_capabilities() {
     );
     let session = service::create(
         &ctx,
-        AgentSessionCreate {
+        AiSessionCreate {
             model: Some("scripted".into()),
             capabilities: Some(vec![perspective_query_capability(vec![a.clone()])]),
             ..Default::default()
@@ -1662,7 +1662,7 @@ async fn a_session_reaches_no_perspective_outside_its_capabilities() {
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert_eq!(
         steps[0].status,
-        Some(AgentTurnStatus::Failed),
+        Some(AiTurnStatus::Failed),
         "perspective B is outside the session's caps: {steps:?}"
     );
     assert!(refusal(&steps[0]).contains(NOT_HELD), "{steps:?}");
@@ -1693,10 +1693,10 @@ async fn a_turn_reaches_no_further_than_the_caller_who_sends_it() {
     )
     .await;
     assert_eq!(steps.len(), 2, "{steps:?}");
-    assert_eq!(steps[0].status, Some(AgentTurnStatus::Done), "{steps:?}");
+    assert_eq!(steps[0].status, Some(AiTurnStatus::Done), "{steps:?}");
     assert_eq!(
         steps[1].status,
-        Some(AgentTurnStatus::Failed),
+        Some(AiTurnStatus::Failed),
         "the sender does not read B, so neither does its turn: {steps:?}"
     );
     assert!(refusal(&steps[1]).contains(NOT_HELD), "{steps:?}");
@@ -1709,7 +1709,7 @@ async fn a_turn_reaches_no_further_than_the_caller_who_sends_it() {
         None,
     )
     .await;
-    assert_eq!(steps[0].status, Some(AgentTurnStatus::Done), "{steps:?}");
+    assert_eq!(steps[0].status, Some(AiTurnStatus::Done), "{steps:?}");
     clean_up(cleanup).await;
 }
 
@@ -1774,7 +1774,7 @@ async fn a_turn_is_offered_no_tool_that_opens_or_widens_a_session() {
     // A model that names one anyway gets no further.
     assert_eq!(steps.len(), opening.len(), "{steps:?}");
     for step in &steps {
-        assert_eq!(step.status, Some(AgentTurnStatus::Failed), "{step:?}");
+        assert_eq!(step.status, Some(AiTurnStatus::Failed), "{step:?}");
         assert!(
             refusal(step).contains("is not in the current provider's filtered surface"),
             "{step:?}"
@@ -2044,10 +2044,10 @@ fn names_a_perspective_below_the_top(parameters: &Value) -> bool {
 /// The tool steps of `table` called in order on `session` by `caller`, and the tools the
 /// model was offered. Six calls a turn: a turn stops at twenty.
 async fn steps_of_calls(
-    session: &AgentSession,
+    session: &AiSession,
     caller: &RequestContext,
     table: &[(String, Value)],
-) -> (Vec<AgentSessionMessage>, Vec<ToolSchema>) {
+) -> (Vec<AiSessionMessage>, Vec<ToolSchema>) {
     let mut steps = Vec::new();
     let mut offered = Vec::new();
     for chunk in table.chunks(6) {
@@ -2088,7 +2088,7 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
 
     let session = service::create(
         &caller,
-        AgentSessionCreate {
+        AiSessionCreate {
             model: Some("scripted".into()),
             capabilities: Some(vec![
                 perspective_query_capability(vec![a.clone()]),
@@ -2105,7 +2105,7 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
     for (step, (tool, _)) in outside.iter().zip(&table) {
         assert_eq!(
             step.status,
-            Some(AgentTurnStatus::Failed),
+            Some(AiTurnStatus::Failed),
             "`{tool}` on B: {step:?}"
         );
         // A class tool of B's is not there to call; every other tool refuses the session.
@@ -2158,7 +2158,7 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
     for (step, (tool, _)) in agent_wide.iter().zip(&table) {
         assert_eq!(
             step.status,
-            Some(AgentTurnStatus::Failed),
+            Some(AiTurnStatus::Failed),
             "`{tool}`: {step:?}"
         );
         assert!(refusal(step).contains(NOT_HELD), "`{tool}`: {step:?}");
@@ -2206,7 +2206,7 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
     )
     .await;
     for step in &inside {
-        assert_eq!(step.status, Some(AgentTurnStatus::Done), "on A: {step:?}");
+        assert_eq!(step.status, Some(AiTurnStatus::Done), "on A: {step:?}");
     }
     for step in &inside[..2] {
         assert!(

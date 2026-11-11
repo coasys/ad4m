@@ -2,9 +2,9 @@
 import type { Capability } from "./Capability";
 
 /**
- * What `agent.sessionCreate` takes.
+ * What `ai.sessionCreate` takes.
  */
-export type AgentSessionCreate = { title: string | null, model: string | null, 
+export type AISessionCreate = { title: string | null, model: string | null, 
 /**
  * The perspective the conversation is about, as a hint for the model. Not a limit.
  */

@@ -2,8 +2,8 @@
 import type { Capability } from "./Capability";
 
 /**
- * What `agent.sessionUpdate` takes. A field left out keeps its value; a nullable one is
+ * What `ai.sessionUpdate` takes. A field left out keeps its value; a nullable one is
  * cleared with `null` — the `Option<Option<..>>` serde shape, which plain serde collapses
  * to `None` either way, so each one takes [`triple_option`].
  */
-export type AgentSessionUpdateParams = { title: string | null, model: string | null | null, defaultPerspective: string | null | null, libraryPerspective: string | null | null, capabilities: Array<Capability> | null, };
+export type AISessionUpdateParams = { title: string | null, model: string | null | null, defaultPerspective: string | null | null, libraryPerspective: string | null | null, capabilities: Array<Capability> | null, };
