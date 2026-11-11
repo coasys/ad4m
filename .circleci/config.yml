@@ -687,6 +687,44 @@ jobs:
           path: /tmp/test-artifacts
           destination: test-logs
 
+  # SFU and mesh calls in real Chromium, Firefox and WebKit, mixed, through the
+  # SDK's browser build (tests/js/tests/sfu-browsers.test.ts). One executor,
+  # local languages. Every push, not nightly: the suite takes about a minute
+  # past the world's start, and it is the only check that a browser other than
+  # Chromium can call (#1684 broke Firefox on the SFU while every Chromium-based
+  # suite stayed green), so a regression must stop the PR that makes it.
+  # Playwright's browsers persist in the runner's ~/.cache/ms-playwright, so
+  # the install is a download only when playwright-core's version changes; their
+  # system libraries need root. `SFU_BROWSERS_REQUIRED` makes a browser that
+  # cannot start fail the job instead of skipping its tests.
+  integration-tests-sfu-browsers:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment:
+          local: true
+      - run:
+          name: Install Chromium, Firefox and WebKit
+          command: |
+            cd ./tests/js
+            if sudo -n true 2>/dev/null; then
+              pnpm exec playwright-core install --with-deps chromium firefox webkit
+            else
+              echo "no passwordless sudo: installing the browsers without their system libraries"
+              pnpm exec playwright-core install chromium firefox webkit
+            fi
+      - run:
+          name: Run cross-browser SFU and mesh call tests
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && SFU_BROWSERS_REQUIRED=1 pnpm run test-main-sfu-browsers 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 20m
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
   # Multi-node suite over the server-link-language: Alice + Bob on local
   # languages (no Holochain), links syncing through a link-server the suite
   # starts (tests/js/tests/integration-server-link.test.ts).
@@ -1044,6 +1082,9 @@ workflows:
           requires:
             - build
       - integration-tests-sfu-e2e:
+          requires:
+            - build
+      - integration-tests-sfu-browsers:
           requires:
             - build
       - integration-tests-multi-node-server-link:
