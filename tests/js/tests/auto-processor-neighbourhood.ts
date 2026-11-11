@@ -47,7 +47,7 @@ ORDER BY ?timestamp`;
 async function registerLlm(ad4m: any): Promise<void> {
   const modelId = await ad4m.ai.addModel({
     name: "interpretation-llm",
-    api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
+    api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA" },
     modelType: "LLM",
   });
   await ad4m.ai.setDefaultModel("LLM", modelId);

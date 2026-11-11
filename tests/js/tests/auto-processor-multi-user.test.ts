@@ -117,7 +117,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     // resolve to it.
     const modelId = await admin.ai.addModel({
       name: "interpretation-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
+      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA" },
       modelType: "LLM",
     } as any);
     await admin.ai.setDefaultModel("LLM", modelId);

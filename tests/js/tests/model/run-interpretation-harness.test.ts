@@ -126,7 +126,7 @@ describeIfLLM("perspective.runInterpretationWithHarness (WS + real LLM)", functi
 
     const modelId = await ad4m.ai.addModel({
       name: "harness-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
+      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA" },
       modelType: "LLM",
     } as any);
     await ad4m.ai.setDefaultModel("LLM", modelId);
@@ -315,7 +315,7 @@ describeIfLLM("perspective.runInterpretationWithHarness — relation interpretat
 
     const modelId = await ad4m.ai.addModel({
       name: "harness-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
+      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA" },
       modelType: "LLM",
     } as any);
     await ad4m.ai.setDefaultModel("LLM", modelId);
@@ -502,7 +502,7 @@ describeIfLLM("perspective.runInterpretationWithHarness — tool-call events", f
 
     const modelId = await ad4m.ai.addModel({
       name: "harness-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
+      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA" },
       modelType: "LLM",
     } as any);
     await ad4m.ai.setDefaultModel("LLM", modelId);

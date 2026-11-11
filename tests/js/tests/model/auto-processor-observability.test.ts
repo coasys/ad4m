@@ -103,7 +103,7 @@ describeIfLLM("AutoProcessor observability — events + debug output (PR #903)",
 
     const modelId = await ad4m.ai.addModel({
       name: "interpretation-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
+      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA" },
       modelType: "LLM",
     } as any);
     await ad4m.ai.setDefaultModel("LLM", modelId);
