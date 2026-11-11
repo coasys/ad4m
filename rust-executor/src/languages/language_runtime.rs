@@ -27,8 +27,11 @@ use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 // token and keeps it in a V8 async-context variable. V8 carries that variable
 // with every continuation the call creates (awaits, promise reactions, timers),
 // and the agent ops (`agent_did`, `agent_sign`, ...) sign as the token they are
-// given. Code outside any call (a language's init, a WebSocket or Holochain
-// signal handler) acts as the main agent. See `js_core/agent_extension.rs`.
+// given. With no token they refuse. The host's own entries into the language
+// (module evaluation, init, callback registration, teardown) run the same way
+// with a main-agent token (`execute_as_host`), and so does every timer, socket
+// handler and promise they start; a Holochain signal arrives as a call as the
+// main agent. See `js_core/agent_extension.rs`.
 
 /// Request sent to a LanguageRuntime via its channel
 #[derive(Debug)]
@@ -47,7 +50,8 @@ pub(crate) struct LanguageRuntimeRequest {
 pub(crate) struct Running {
     /// The ordered request running, if any: its id and when it started.
     pub ordered: Option<(u64, Instant)>,
-    /// The reads running.
+    /// The reads started (first polled, their script begun) and not yet ended. A read
+    /// admitted but not started is not here: its caller's start deadline still runs.
     pub reads: HashSet<u64>,
 }
 
@@ -139,6 +143,7 @@ impl LanguageRuntime {
     /// full module namespace is captured as `globalThis.languageModule`.
     pub async fn load_module(
         &self,
+        id: u64,
         source: &str,
         language_context: &LanguageContext,
     ) -> Result<(), String> {
@@ -161,8 +166,10 @@ impl LanguageRuntime {
                 .unwrap_or_default(),
         );
 
+        // Loaded, not evaluated: the `import()` below evaluates it, under the main agent's
+        // token, so the bundle's top-level code and the timers it starts act as the main agent.
         self.js_core
-            .load_module_from_source(&specifier, source.to_string())
+            .load_module_from_source_unevaluated(&specifier, source.to_string())
             .await
             .map_err(|e| format!("Failed to load language bundle: {}", e))?;
 
@@ -201,15 +208,14 @@ impl LanguageRuntime {
             }})"#,
             specifier_lit
         );
-        self.js_core
-            .execute(&capture_script)
+        self.execute_as_host(id, &capture_script)
             .await
             .map_err(|e| format!("Failed to capture language constructor: {}", e))?;
         Ok(())
     }
 
     /// Initialize the language with context via the bootstrap's initLanguage()
-    pub async fn load_language(&self, language_context: JsonValue) -> Result<(), String> {
+    pub async fn load_language(&self, id: u64, language_context: JsonValue) -> Result<(), String> {
         info!("Initializing language: {}", self.language_address);
 
         let context_json = serde_json::to_string(&language_context)
@@ -217,7 +223,7 @@ impl LanguageRuntime {
 
         let script = format!("await initLanguage({})", context_json);
 
-        match self.js_core.execute(&script).await {
+        match self.execute_as_host(id, &script).await {
             Ok(result) => {
                 info!(
                     "Language constructor completed for {}: {}",
@@ -239,9 +245,18 @@ impl LanguageRuntime {
         }
     }
 
-    /// Execute a script in this language's runtime
+    /// Execute a script in this language's runtime, with no agent token: the agent ops refuse.
+    /// Language code runs only through `execute_call` and `execute_as_host`.
     pub async fn execute(&self, script: &str) -> Result<String, String> {
         self.js_core.execute(script).await
+    }
+
+    /// Runs a host entry into the language (loading, init, callback registration, teardown)
+    /// as the main agent: the language code it runs, and every timer and promise that code
+    /// starts, act as the main agent. `id` is the lifecycle request's.
+    async fn execute_as_host(&self, id: u64, script: &str) -> Result<String, String> {
+        self.execute_call(id, script, AgentContext::main_agent())
+            .await
     }
 
     /// Wire the runtime's diff / sync-state / telepresence-signal sinks
@@ -268,7 +283,7 @@ impl LanguageRuntime {
     ///    language actually exports. The caller stores the set in the
     ///    global capability registry so `Language::new(address)` can later
     ///    answer `has(Capability::…)` without another v8 round-trip.
-    pub async fn register_callbacks(&self) -> Result<HashSet<Capability>, String> {
+    pub async fn register_callbacks(&self, id: u64) -> Result<HashSet<Capability>, String> {
         // JSON-encode the language address so it embeds as a proper JS
         // string literal — defensive against addresses containing quotes,
         // backslashes, or newlines.
@@ -303,14 +318,14 @@ impl LanguageRuntime {
             "#,
         );
 
-        let _ = self.execute(&callback_script).await?;
+        let _ = self.execute_as_host(id, &callback_script).await?;
 
         // Detect which capabilities the language actually exports. Returns
         // a JSON array of kebab-case capability names that parse_capability_list
         // converts to the typed enum set. Kept as one v8 round-trip per
         // language load, not per call. The script checks one flat export
         // per capability (`Capability::export_name`).
-        let raw = self.execute(&detection_script()).await?;
+        let raw = self.execute_as_host(id, &detection_script()).await?;
         let caps = parse_capability_list(raw.trim());
 
         info!(
@@ -322,7 +337,7 @@ impl LanguageRuntime {
     }
 
     /// Teardown and cleanup this language runtime
-    pub async fn teardown(&self) -> Result<(), String> {
+    pub async fn teardown(&self, id: u64) -> Result<(), String> {
         info!("Tearing down language runtime: {}", self.language_address);
 
         // Run the language's teardown hook. The bootstrap shim wraps
@@ -338,7 +353,7 @@ impl LanguageRuntime {
             })()
         "#;
 
-        if let Err(e) = self.execute(cleanup_script).await {
+        if let Err(e) = self.execute_as_host(id, cleanup_script).await {
             error!(
                 "Error during language cleanup for {}: {}",
                 self.language_address, e
@@ -354,7 +369,7 @@ impl LanguageRuntime {
         // on the isolate — harmless today because the isolate tears
         // down immediately after, but wrong on its face.
         let _ = self
-            .execute("delete globalThis.__ad4m_language_instance__")
+            .execute_as_host(id, "delete globalThis.__ad4m_language_instance__")
             .await;
 
         info!("Tore down language runtime: {}", self.language_address);
@@ -371,70 +386,76 @@ struct Finished {
 }
 
 impl LanguageRuntime {
-    /// Marks `request` started (in `running`, as a read or as the ordered request) and
-    /// returns the future that runs it, or answers it at once with an error when it is a
-    /// script call whose caller has gone. The caller gives up under the same lock, so a call
-    /// either runs with its caller waiting or not at all.
+    /// Returns the future that runs `request`. The request counts as started (in `running`, as
+    /// a read or as the ordered request) on the future's first poll, just before its script
+    /// starts, not when the loop admits it: reads admitted together start one after the other,
+    /// and one that holds the thread keeps the others from starting, so until then their
+    /// callers' start deadline still runs. A script call whose caller has gone by its first
+    /// poll is answered with an error and not run. The caller gives up under the same lock, so
+    /// a call either runs with its caller waiting or not at all.
     fn begin<'a>(
         &'a self,
         request: LanguageRuntimeRequest,
         running: &RunningRequest,
         as_read: bool,
-    ) -> Option<LocalBoxFuture<'a, Finished>> {
-        let LanguageRuntimeRequest {
-            operation,
-            response_tx,
-            queued_at,
-            id,
-        } = request;
-        let addr = &self.language_address;
-        debug!("[lang:{}] Processing operation: {:?}", addr, operation);
-        // Time in this runtime's queue (#1133 symptom ①): the counterpart of the
-        // `[hc-actor] … waited` line.
-        let waited = queued_at.elapsed();
-        if waited > Duration::from_secs(1) {
-            warn!(
-                "⚠️ 📚 [lang:{}] {} waited {} ms in queue",
-                addr,
-                operation.name(),
-                waited.as_millis()
-            );
-        } else {
-            debug!(
-                "📚 [lang:{}] {} waited {} ms in queue",
-                addr,
-                operation.name(),
-                waited.as_millis()
-            );
-        }
-
-        // An `Execute` whose caller has gone (the call deadline, or a dropped future) is not
-        // run: nobody would get the result, and the caller may have queued the work again (a
-        // commit goes to the pending diffs).
-        let skip = {
-            let mut running = running.lock().unwrap();
-            let skip =
-                matches!(operation, LanguageOperation::Execute(..)) && response_tx.is_closed();
-            if !skip {
-                if as_read {
-                    running.reads.insert(id);
-                } else {
-                    running.ordered = Some((id, Instant::now()));
-                }
+    ) -> LocalBoxFuture<'a, Finished> {
+        let running = running.clone();
+        Box::pin(async move {
+            let LanguageRuntimeRequest {
+                operation,
+                response_tx,
+                queued_at,
+                id,
+            } = request;
+            let addr = &self.language_address;
+            debug!("[lang:{}] Processing operation: {:?}", addr, operation);
+            // Time in this runtime's queue (#1133 symptom ①): the counterpart of the
+            // `[hc-actor] … waited` line.
+            let waited = queued_at.elapsed();
+            if waited > Duration::from_secs(1) {
+                warn!(
+                    "⚠️ 📚 [lang:{}] {} waited {} ms in queue",
+                    addr,
+                    operation.name(),
+                    waited.as_millis()
+                );
+            } else {
+                debug!(
+                    "📚 [lang:{}] {} waited {} ms in queue",
+                    addr,
+                    operation.name(),
+                    waited.as_millis()
+                );
             }
-            skip
-        };
-        if skip {
-            let e = format!(
-                "Call to language {} not started: its caller stopped waiting",
-                addr
-            );
-            error!("[lang:{}] Operation failed: {}", addr, e);
-            let _ = response_tx.send(Err(e));
-            return None;
-        }
-        let is_teardown = matches!(operation, LanguageOperation::Teardown);
-        Some(Box::pin(async move {
+
+            // An `Execute` whose caller has gone (the call deadline, or a dropped future) is
+            // not run: nobody would get the result, and the caller may have queued the work
+            // again (a commit goes to the pending diffs).
+            let skip = {
+                let mut running = running.lock().unwrap();
+                let skip =
+                    matches!(operation, LanguageOperation::Execute(..)) && response_tx.is_closed();
+                if !skip {
+                    if as_read {
+                        running.reads.insert(id);
+                    } else {
+                        running.ordered = Some((id, Instant::now()));
+                    }
+                }
+                skip
+            };
+            if skip {
+                return Finished {
+                    id,
+                    response_tx,
+                    result: Err(format!(
+                        "Call to language {} not started: its caller stopped waiting",
+                        addr
+                    )),
+                    is_teardown: false,
+                };
+            }
+            let is_teardown = matches!(operation, LanguageOperation::Teardown);
             let result = self.run(operation, id).await;
             Finished {
                 id,
@@ -442,7 +463,7 @@ impl LanguageRuntime {
                 result,
                 is_teardown,
             }
-        }))
+        })
     }
 
     async fn run(&self, operation: LanguageOperation, id: u64) -> Result<String, String> {
@@ -451,21 +472,21 @@ impl LanguageRuntime {
                 self.execute_call(id, &script, agent_ctx).await
             }
             LanguageOperation::LoadModule(path, context) => self
-                .load_module(&path, &context)
+                .load_module(id, &path, &context)
                 .await
                 .map(|_| String::new()),
             LanguageOperation::LoadLanguage(context) => {
-                self.load_language(context).await.map(|_| String::new())
+                self.load_language(id, context).await.map(|_| String::new())
             }
             LanguageOperation::RegisterCallbacks => {
-                self.register_callbacks().await.and_then(|caps| {
+                self.register_callbacks(id).await.and_then(|caps| {
                     // Serialize the capability set as a JSON array of kebab-case wire names
                     // so the handle side can parse it back into the same enum.
                     let names: Vec<&'static str> = caps.iter().map(|c| c.wire_name()).collect();
                     serde_json::to_string(&names).map_err(|e| e.to_string())
                 })
             }
-            LanguageOperation::Teardown => self.teardown().await.map(|_| String::new()),
+            LanguageOperation::Teardown => self.teardown(id).await.map(|_| String::new()),
         }
     }
 
@@ -550,13 +571,12 @@ impl LanguageRuntime {
                             break;
                         }
                         let request = queue.pop_front().unwrap();
-                        if let Some(call) = this.begin(request, &running, is_read) {
-                            if is_read {
-                                reads.push(call);
-                            } else {
-                                ordered = Some(call);
-                                ordered_is_lifecycle = is_lifecycle;
-                            }
+                        let call = this.begin(request, &running, is_read);
+                        if is_read {
+                            reads.push(call);
+                        } else {
+                            ordered = Some(call);
+                            ordered_is_lifecycle = is_lifecycle;
                         }
                     }
                     if closed && queue.is_empty() && ordered.is_none() && reads.is_empty() {
@@ -577,9 +597,7 @@ impl LanguageRuntime {
                                         && !ordered_is_lifecycle
                                         && !queue.iter().any(|r| r.operation.is_lifecycle());
                                     if read_now {
-                                        if let Some(call) = this.begin(request, &running, true) {
-                                            reads.push(call);
-                                        }
+                                        reads.push(this.begin(request, &running, true));
                                     } else {
                                         queue.push_back(request);
                                     }

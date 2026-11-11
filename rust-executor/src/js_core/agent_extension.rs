@@ -25,9 +25,18 @@ use std::collections::HashMap;
 // once (`agent_call_token`) as a `CallAgent`, a cppgc object JS cannot forge,
 // and keeps it in a V8 async-context variable. V8 carries that variable with
 // every continuation the call creates (awaits, promise reactions, timers). The
-// ops below act as the `CallAgent` JS hands them, and as the main agent when
-// there is none: code that runs outside any call (a language's init, a signal
-// handler).
+// ops below act as the `CallAgent` JS hands them, and as no agent when there is
+// none: they refuse. Authority comes only from a token. The host's own entries
+// into a language (module evaluation, `init`, callback registration, teardown:
+// `LanguageRuntime::execute_as_host`) and the calls it makes as the node (a
+// Holochain signal, a sync) run with a main-agent token like any call, so code
+// that clears its async context, or calls an op with no token, during a call
+// for a managed user cannot sign or open sealed data as the main agent.
+//
+// Not enforced: a token is a JS value, so language code can keep one. Code that
+// saves the async context (`getAsyncContext`) during Bob's call and restores it
+// in a later call for Alice signs as Bob. Separating agents needs per-agent
+// isolation (SEC-4); see `languages/AGENTS.md`.
 
 /// The agent of one call into a language. Only `agent_call_token` makes one.
 pub struct CallAgent(AgentContext);
@@ -57,10 +66,15 @@ pub(crate) fn forget_call_agent(id: u64) {
     CALL_AGENTS.with(|calls| calls.borrow_mut().remove(&id));
 }
 
-/// The agent the ops act as: the call's, or the main agent outside any call.
-fn agent_of(call: Option<&CallAgent>) -> AgentContext {
-    call.map(|call| call.0.clone())
-        .unwrap_or_else(AgentContext::main_agent)
+/// The agent the ops act as: the call's. With no token the code acts as no agent, and the
+/// ops refuse: falling back to the main agent would let code in a managed user's call sign as
+/// the node by clearing its async context.
+fn agent_of(call: Option<&CallAgent>) -> Result<AgentContext, anyhow::Error> {
+    call.map(|call| call.0.clone()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No agent: this code runs outside any call into the language, so it acts as no agent"
+        )
+    })
 }
 
 /// Takes out the agent of call `id`, once. The call's script runs this before any other JS.
@@ -82,13 +96,13 @@ fn agent_did_document() -> Result<did_key::Document, AnyhowWrapperError> {
 #[op2]
 #[string]
 fn agent_signing_key_id(#[cppgc] call: Option<&CallAgent>) -> Result<String, AnyhowWrapperError> {
-    signing_key_id_for_context(&agent_of(call)).map_err(AnyhowWrapperError::from)
+    signing_key_id_for_context(&agent_of(call)?).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
 #[string]
 fn agent_did(#[cppgc] call: Option<&CallAgent>) -> Result<String, AnyhowWrapperError> {
-    did_for_context(&agent_of(call)).map_err(AnyhowWrapperError::from)
+    did_for_context(&agent_of(call)?).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
@@ -97,7 +111,7 @@ fn agent_create_signed_expression(
     #[serde] data: serde_json::Value,
     #[cppgc] call: Option<&CallAgent>,
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
-    let ctx = agent_of(call);
+    let ctx = agent_of(call)?;
     let sorted_json = sort_json_value(&data);
     let signed_expression =
         create_signed_expression(sorted_json, &ctx).map_err(AnyhowWrapperError::from)?;
@@ -110,7 +124,7 @@ fn agent_create_signed_expression_stringified(
     #[string] data: String,
     #[cppgc] call: Option<&CallAgent>,
 ) -> Result<String, AnyhowWrapperError> {
-    let ctx = agent_of(call);
+    let ctx = agent_of(call)?;
     let data: serde_json::Value = serde_json::from_str(&data)?;
     let sorted_json = sort_json_value(&data);
     let signed_expression = create_signed_expression(sorted_json, &ctx)?;
@@ -126,7 +140,7 @@ fn agent_create_signed_expression_for_user(
     #[serde] data: serde_json::Value,
     #[cppgc] call: Option<&CallAgent>,
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
-    create_signed_expression_for_user(&user_email, &data, &agent_of(call))
+    create_signed_expression_for_user(&user_email, &data, &agent_of(call)?)
         .map_err(AnyhowWrapperError::from)
 }
 
@@ -209,7 +223,7 @@ fn agent_sign(
     #[buffer] payload: &[u8],
     #[cppgc] call: Option<&CallAgent>,
 ) -> Result<Vec<u8>, AnyhowWrapperError> {
-    sign_for_context(payload, &agent_of(call)).map_err(AnyhowWrapperError::from)
+    sign_for_context(payload, &agent_of(call)?).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
@@ -218,7 +232,7 @@ fn agent_sign_string_hex(
     #[string] payload: String,
     #[cppgc] call: Option<&CallAgent>,
 ) -> Result<String, AnyhowWrapperError> {
-    sign_string_hex_for_context(payload, &agent_of(call)).map_err(AnyhowWrapperError::from)
+    sign_string_hex_for_context(payload, &agent_of(call)?).map_err(AnyhowWrapperError::from)
 }
 
 /// Opens a box sealed to the agent the call runs for, and returns the plaintext as hex.
@@ -229,7 +243,7 @@ fn agent_open_sealed(
     #[serde] sealed: SealedBox,
     #[cppgc] call: Option<&CallAgent>,
 ) -> Result<String, AnyhowWrapperError> {
-    open_sealed_for_context(&sealed, &agent_of(call))
+    open_sealed_for_context(&sealed, &agent_of(call)?)
         .map(hex::encode)
         .map_err(AnyhowWrapperError::from)
 }

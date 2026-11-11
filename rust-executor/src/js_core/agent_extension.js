@@ -12,7 +12,9 @@ import {
     // The agent of the call this code runs for: a token from `agent_call_token`, kept in a
     // V8 async-context variable, so every await, promise reaction and timer of the call
     // keeps it while other calls into this language run (agent_extension.rs, "The agent a
-    // call acts as"). Outside any call it is null and the ops act as the main agent.
+    // call acts as"). Outside any call it is null and the ops refuse: no token, no agent.
+    // The host enters a language only through `__ad4mRunCall`, with a main-agent token for
+    // its own entries (loading, init, callback registration, teardown).
     const callAgent = new core.AsyncVariable();
     const caller = () => callAgent.get() ?? null;
 

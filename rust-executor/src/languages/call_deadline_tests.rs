@@ -571,6 +571,137 @@ async fn a_read_that_cannot_start_by_the_deadline_gets_an_error_and_is_not_run()
     assert_eq!(ran.trim(), "false", "a read ran after its caller gave up");
 }
 
+/// A JS expression that holds the isolate's thread for `ms`, after logging `label` in
+/// `globalThis.__ran`, and returns `label`.
+fn busy_js(label: &str, ms: u64) -> String {
+    format!(
+        r#"(() => {{
+            globalThis.__ran.push("{label}");
+            const end = Date.now() + {ms};
+            while (Date.now() < end) {{}}
+            return "{label}";
+        }})()"#
+    )
+}
+
+/// Sends an ordered call that holds the thread for 300 ms, so the requests sent in the next
+/// 300 ms are all in the channel when the runtime next receives: it admits them in one burst.
+fn hold_the_thread(
+    handle: &LanguageRuntimeHandle,
+) -> tokio::task::JoinHandle<Result<String, String>> {
+    let handle = handle.clone();
+    tokio::spawn(async move { handle.execute(busy_js("blocker", 300)).await })
+}
+
+/// Two reads admitted together: the first to start holds the thread past the deadline. The
+/// other has not started, so its caller gets the deadline error, and it never runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_the_deadline() {
+    let (handle, _dir) = spawn_runtime("QmReadBurstDeadline");
+    let handle = handle.with_call_deadline(Duration::from_millis(500));
+    handle
+        .execute("(globalThis.__ran = [], 0)".into())
+        .await
+        .unwrap();
+
+    let blocker = hold_the_thread(&handle);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let read = |label: &'static str| {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let t = Instant::now();
+            let result = handle.execute_read(busy_js(label, 1500)).await;
+            (label, t.elapsed(), result)
+        })
+    };
+    let (first, second) = (read("first"), read("second"));
+    let first = within(Duration::from_secs(10), "the first read", first)
+        .await
+        .unwrap();
+    let second = within(Duration::from_secs(10), "the second read", second)
+        .await
+        .unwrap();
+    within(Duration::from_secs(10), "the blocker", blocker)
+        .await
+        .unwrap()
+        .expect("the blocker answers");
+
+    // Either read may start first; the other one must not run.
+    let (started, refused) = if first.2.is_ok() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(
+        started.2.expect("the read that started answers").trim(),
+        started.0
+    );
+    let error = refused.2.expect_err(
+        "a read that had not started while another held the thread past the deadline answered",
+    );
+    assert!(error.contains("deadline"), "unexpected error: {error}");
+    assert!(
+        refused.1 < Duration::from_millis(1200),
+        "the read that had not started waited {:?}, past its deadline",
+        refused.1
+    );
+    let ran = handle
+        .execute("JSON.stringify(globalThis.__ran)".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        ran.trim(),
+        format!(r#"["blocker","{}"]"#, started.0),
+        "a read ran after its caller got the deadline error"
+    );
+}
+
+/// A read whose caller stops waiting after the runtime admitted it, but before it started (a
+/// read ahead of it holds the thread), is never run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_whose_caller_left_before_it_started_is_not_run() {
+    let (handle, _dir) = spawn_runtime("QmReadCallerLeft");
+    handle
+        .execute("(globalThis.__ran = [], 0)".into())
+        .await
+        .unwrap();
+
+    let blocker = hold_the_thread(&handle);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Admitted at about 300 ms with the read below, and started first: holds the thread until
+    // about 1300 ms.
+    let holder = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.execute_read(busy_js("holder", 1000)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Its caller gives up at about 470 ms: after the admission, before the read can start.
+    let left = tokio::time::timeout(
+        Duration::from_millis(400),
+        handle.execute_read("(globalThis.__ran.push(\"left\"), 0)".into()),
+    )
+    .await;
+    assert!(left.is_err(), "the read answered before its caller gave up");
+    within(Duration::from_secs(10), "the holder", holder)
+        .await
+        .unwrap()
+        .expect("the holder answers");
+    within(Duration::from_secs(10), "the blocker", blocker)
+        .await
+        .unwrap()
+        .expect("the blocker answers");
+
+    let ran = handle
+        .execute("JSON.stringify(globalThis.__ran)".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        ran.trim(),
+        r#"["blocker","holder"]"#,
+        "a read ran after its caller had gone"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
