@@ -54,6 +54,8 @@ pub struct TurnDeps {
     pub completion: Option<Arc<dyn CompletionSource>>,
     /// The tools the turn may call, in place of the session's MCP surface.
     pub provider: Option<Arc<dyn ToolProvider>>,
+    /// How long the turn may run, in place of `service`'s 15 minutes.
+    pub timeout: Option<std::time::Duration>,
 }
 
 /// What the model is told at the head of the conversation.

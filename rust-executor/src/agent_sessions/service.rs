@@ -413,6 +413,7 @@ pub async fn send(
     let task_session_id = session_id.to_string();
     let task_reply_id = reply_id.clone();
     let caller = ctx.session.clone();
+    let timeout = deps.timeout.unwrap_or(TURN_TIMEOUT);
     let run = run_turn(session, caller, agent.clone(), store.clone(), deps);
     let handle = tokio::spawn(async move {
         if until.await.is_err() {
@@ -423,7 +424,7 @@ pub async fn send(
             session_id: task_session_id.clone(),
             reply: task_reply_id.clone(),
         };
-        let outcome = tokio::time::timeout(TURN_TIMEOUT, run).await;
+        let outcome = tokio::time::timeout(timeout, run).await;
         if !release(&task_session_id, &task_reply_id) {
             // A cancel or delete took the slot and settled the row already.
             return;

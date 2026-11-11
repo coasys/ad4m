@@ -192,6 +192,7 @@ fn deps(completion: Arc<dyn CompletionSource>) -> TurnDeps {
     TurnDeps {
         completion: Some(completion),
         provider: Some(StubProvider::named(&[])),
+        ..Default::default()
     }
 }
 
@@ -257,6 +258,7 @@ async fn steps_of(
         TurnDeps {
             completion: Some(model),
             provider,
+            ..Default::default()
         },
     )
     .await
@@ -683,6 +685,7 @@ async fn a_cancelled_turn_leaves_no_step_running() {
         TurnDeps {
             completion: Some(Scripted::answering(vec![calls("wait", json!({}))])),
             provider: Some(Arc::new(Stuck)),
+            ..Default::default()
         },
     )
     .await
@@ -697,6 +700,46 @@ async fn a_cancelled_turn_leaves_no_step_running() {
     let step = settled(Some(did), &step.id).await;
     assert_eq!(step.status, Some(AgentTurnStatus::Interrupted));
     assert!(step.error.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_that_runs_out_of_time_ends_failed_and_frees_its_session() {
+    setup();
+    let did = "did:key:alice-a12";
+    let alice = user(did, everything());
+    let session = create(&alice);
+
+    // The turn is inside a tool call that never returns, with 200 ms to live.
+    let started = service::send(
+        &alice,
+        &session.id,
+        "go",
+        TurnDeps {
+            completion: Some(Scripted::answering(vec![calls("wait", json!({}))])),
+            provider: Some(Arc::new(Stuck)),
+            timeout: Some(Duration::from_millis(200)),
+        },
+    )
+    .await
+    .unwrap();
+
+    let reply = settled(Some(did), &started.reply_id).await;
+    assert_eq!(reply.status, Some(AgentTurnStatus::Failed));
+    assert_eq!(reply.error.as_deref(), Some("the turn ran out of time"));
+    // The call it was inside ended with it, and the session takes the next message.
+    let step = first_step(did, &session.id).await;
+    assert_eq!(step.status, Some(AgentTurnStatus::Interrupted));
+    assert!(!running_for_test(&session.id));
+    let next = service::send(
+        &alice,
+        &session.id,
+        "again",
+        deps(Scripted::answering(vec![])),
+    )
+    .await
+    .unwrap();
+    let reply = settled(Some(did), &next.reply_id).await;
+    assert_eq!(reply.status, Some(AgentTurnStatus::Done));
 }
 
 #[test]
@@ -766,6 +809,7 @@ async fn a_tool_call_becomes_a_step_row_the_history_reads_back() {
                 json!({"perspective_id": "px"}),
             )])),
             provider: Some(provider.clone()),
+            ..Default::default()
         },
     )
     .await
@@ -819,6 +863,7 @@ async fn the_next_turn_reads_the_last_one_in_the_order_it_happened() {
                 json!({"perspective_id": "px"}),
             )])),
             provider: Some(StubProvider::named(&["describe_perspective"])),
+            ..Default::default()
         },
     )
     .await
@@ -889,6 +934,7 @@ async fn a_failing_tool_call_ends_its_step_failed() {
                 json!({"perspective_id": "px"}),
             )])),
             provider: Some(StubProvider::named(&[])),
+            ..Default::default()
         },
     )
     .await
@@ -995,6 +1041,7 @@ async fn a_sessions_events_reach_its_owners_agent_readers_and_no_one_else() {
                 json!({"perspective_id": "px"}),
             )])),
             provider: Some(StubProvider::named(&["describe_perspective"])),
+            ..Default::default()
         },
     )
     .await
