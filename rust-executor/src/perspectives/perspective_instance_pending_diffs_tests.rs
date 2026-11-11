@@ -80,7 +80,8 @@ fn add(target: &str) -> PerspectiveDiff {
     }
 }
 
-/// A neighbourhood perspective whose link language is `fake`.
+/// A neighbourhood perspective whose link language is `fake`, owned by
+/// `did:key:alice`, the author of the links these tests store.
 async fn neighbourhood_perspective(fake: &Arc<FakeLanguage>) -> PerspectiveInstance {
     Ad4mDb::init_global_instance(":memory:").unwrap();
     let perspective = PerspectiveInstance::new(
@@ -90,7 +91,7 @@ async fn neighbourhood_perspective(fake: &Arc<FakeLanguage>) -> PerspectiveInsta
             shared_url: Some("neighbourhood://test".to_string()),
             neighbourhood: Some(DecoratedNeighbourhoodExpression::default()),
             state: PerspectiveState::Synced,
-            owners: None,
+            owners: Some(vec!["did:key:alice".to_string()]),
         },
         None,
     );
@@ -481,6 +482,41 @@ async fn the_fallback_sync_does_not_send_a_parked_diff_again() {
 
     assert!(perspective.ensure_public_links_are_shared().await);
     assert_eq!(fake.committed(), vec!["+b", "+missing"]);
+}
+
+/// Staging, 3 Nov: an executor that wrote nothing to a neighbourhood committed
+/// other members' links on every fallback pass (80 duplicate diffs overnight),
+/// whenever its render lacked them. The fallback sends only the links of the
+/// perspective's local agents (its owners, main or managed); another agent's
+/// link is its author's to share, and sending it again could bring back a link
+/// its author removed.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_sends_only_the_local_agents_links() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    // A second local agent (a managed user who joined).
+    perspective.persisted.lock().await.owners =
+        Some(vec!["did:key:alice".to_string(), "did:key:bob".to_string()]);
+    for (author, target) in [
+        ("did:key:alice", "alice's"),
+        ("did:key:bob", "bob's"),
+        ("did:key:carol", "carol's"),
+    ] {
+        perspective
+            .sparql_store
+            .add_link(&LinkExpression {
+                status: Some(LinkStatus::Shared),
+                ..link(author, target)
+            })
+            .unwrap();
+    }
+    *perspective.link_language.write().await = Some(rendering_language(&fake, vec![]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    let mut committed = fake.committed();
+    committed.sort();
+    assert_eq!(committed, vec!["+alice's", "+bob's"]);
 }
 
 /// A fallback sync that starts while the commit loop is parking a diff waits
@@ -934,6 +970,30 @@ async fn the_push_after_publish_sends_the_whole_shared_set() {
     assert!(perspective.share_links_after_publish().await);
 
     assert_eq!(fake.committed().len(), 100);
+}
+
+/// The push after publish is not the fallback: the new room has none of the
+/// perspective's links yet, so it sends those of other authors too (links
+/// copied into the perspective before it was published).
+#[tokio::test(start_paused = true)]
+async fn the_push_after_publish_sends_other_authors_links_too() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    store_shared(&perspective, "alice's");
+    perspective
+        .sparql_store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..link("did:key:carol", "carol's")
+        })
+        .unwrap();
+    *perspective.link_language.write().await = Some(rendering_language(&fake, vec![]));
+
+    assert!(perspective.share_links_after_publish().await);
+
+    let mut committed = fake.committed();
+    committed.sort();
+    assert_eq!(committed, vec!["+alice's", "+carol's"]);
 }
 
 /// The push after publish can fail: the language refuses the commit, or does

@@ -144,7 +144,7 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   (`storeRevision`, src/sync.ts) must hash to the revision stored with the
   cursor. `render()` returns null (unknown) while a render is stored or when
   the store does not hash to it: the executor's fallback sync pushes every
-  shared link `render()` lacks, so a short store made it push most of the
+  shared link of its own agents that `render()` lacks, so a short store made it push most of the
   room again (12,303 of 12,803 links on staging, 2026-11-10). `currentRevision()` stays the stored revision, never null:
   the executor reads a null revision as "nothing committed yet".
   `healIfShort`: once per start, after a catch-up that reached the room's
