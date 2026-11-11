@@ -94,8 +94,9 @@ pub const SESSION_READS: &[&str] = &[
 ];
 
 /// The writes a caller may hand a session: each writes only to the perspective it is given as
-/// `perspective_id`, except that `template_create` may make its record in the caller's library,
-/// a perspective the caller also binds ([`AgentSessionRequest::library`]).
+/// `perspective_id`, except the template tools in the caller's library, a perspective the caller
+/// also binds ([`AgentSessionRequest::library`]): `template_update` saves a template it found
+/// there, and `template_create` may make its record there.
 pub const SESSION_WRITES: &[&str] = &[
     "add_link",
     "add_model",

@@ -26,7 +26,7 @@
 //! The batch commits only if the record's version links are still those of that last read
 //! (`commit_batch_if`), so a save from the app landing after it is refused as well.
 //!
-//! The two tools' descriptions and arguments are the bundle's own ([`from_bundle`]), so they
+//! The tools' descriptions and arguments are the bundle's own ([`from_bundle`]), so they
 //! follow WE when `build.rs` is pinned to a newer WE release.
 
 use super::{check_setters, class_properties, error_json, fetch_instance, instance_uri};
@@ -494,6 +494,7 @@ impl Ad4mMcpHandler {
             .map_err(|e| format!("The new record was not committed: {e:#}."))?;
         Ok(base_uri)
     }
+
     /// Write what a tool answered with through the class's setters, every property in one batch,
     /// committed only if the store still holds `expected`.
     async fn write_record(
