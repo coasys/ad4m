@@ -746,6 +746,10 @@ export const STATIC_TOOL_DEFS: McpTool[] =
         "base_uri": {
           "type": "string",
           "description": "URI of the Template record"
+        },
+        "library_perspective_id": {
+          "type": "string",
+          "description": "UUID of the perspective that holds the person's own templates: a template is looked for there too, and one made with place `library` goes there"
         }
       },
       "required": [
@@ -858,6 +862,10 @@ export const STATIC_TOOL_DEFS: McpTool[] =
         "base_uri": {
           "type": "string",
           "description": "URI of the Template record"
+        },
+        "library_perspective_id": {
+          "type": "string",
+          "description": "UUID of the perspective that holds the person's own templates: a template is looked for there too, and one made with place `library` goes there"
         }
       },
       "required": [
@@ -865,6 +873,68 @@ export const STATIC_TOOL_DEFS: McpTool[] =
         "base_uri",
         "version",
         "patches"
+      ]
+    }
+  },
+  {
+    "name": "template_create",
+    "description": "Make a new template and SAVE it. A shell is a space\u2019s whole interface, a view is one section of a space, an app is the chrome around every space. `place` is `library` \u2014 the person\u2019s own, the default \u2014 or `space`, only when they asked for it to be in this space; an app is always the person\u2019s. It starts from a working template of its role, from the template the call names (a fork), or from `schema`, a whole template you write. Then read the new record with template_read and change it with template_update. `dry_run` checks it and saves nothing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "What the template is called, as the person will see it."
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "shell",
+            "view",
+            "app"
+          ],
+          "description": "shell (the default), view or app."
+        },
+        "place": {
+          "type": "string",
+          "enum": [
+            "library",
+            "space"
+          ],
+          "description": "library (the default) or space."
+        },
+        "description": {
+          "type": "string",
+          "description": "One line on what it is for."
+        },
+        "icon": {
+          "type": "string",
+          "description": "A Phosphor icon name, e.g. \"kanban\"."
+        },
+        "schema": {
+          "type": "object",
+          "description": "A whole template to start from, instead of the starting one."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Check the template and save nothing."
+        },
+        "perspective_id": {
+          "type": "string",
+          "description": "Perspective UUID"
+        },
+        "base_uri": {
+          "type": "string",
+          "description": "URI of a Template record to start from (a fork)"
+        },
+        "library_perspective_id": {
+          "type": "string",
+          "description": "UUID of the perspective that holds the person's own templates: a template is looked for there too, and one made with place `library` goes there"
+        }
+      },
+      "required": [
+        "perspective_id",
+        "name"
       ]
     }
   }

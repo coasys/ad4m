@@ -2105,6 +2105,13 @@ describe("ad4mPlugin", () => {
     const update = registeredTools.find((t) => t.name === "ad4m_template_update");
     expect(update!.parameters.required).toEqual(["perspective_id", "base_uri", "version", "patches"]);
     expect(registeredTools.map((t) => t.name)).toContain("ad4m_template_read");
+    const create = registeredTools.find((t) => t.name === "ad4m_template_create");
+    expect(create!.parameters.required).toEqual(["perspective_id", "name"]);
+    // All three take the caller's library, where a template may live or be made.
+    const read = registeredTools.find((t) => t.name === "ad4m_template_read");
+    for (const t of [read, update, create]) {
+      expect(t!.parameters.properties).toHaveProperty("library_perspective_id");
+    }
     const transcript = registeredTools.find((t) => t.name === "ad4m_instance_transcript");
     // The transcript reads through the built-in TextContent (#1446): no
     // class, no text property to pick.
