@@ -187,14 +187,14 @@ the guard checked:
 | `ai.prompt` | `Owns(Task taskId, artificial intelligence:PROMPT)` |
 | `ai.removeModel` | `Executor(artificial intelligence:CREATE)` |
 | `ai.removeTask` | `Owns(Task id, artificial intelligence:CREATE)` |
-| `ai.session` | `Owns(AiSession id, agent:READ)` |
-| `ai.sessionCancel` | `Owns(AiSession sessionId, agent:UPDATE)` |
-| `ai.sessionCreate` | `Cap(agent:CREATE)` |
-| `ai.sessionDelete` | `Owns(AiSession id, agent:UPDATE)` |
-| `ai.sessionList` | `Cap(agent:READ)` |
-| `ai.sessionMessages` | `Owns(AiSession sessionId, agent:READ)` |
-| `ai.sessionSend` | `Owns(AiSession sessionId, agent:UPDATE)` |
-| `ai.sessionUpdate` | `Owns(AiSession id, agent:UPDATE)` |
+| `ai.session` | `Owns(AiSession id, artificial intelligence:READ)` |
+| `ai.sessionCancel` | `Owns(AiSession sessionId, artificial intelligence:CREATE)` |
+| `ai.sessionCreate` | `Cap(artificial intelligence:CREATE)` |
+| `ai.sessionDelete` | `Owns(AiSession id, artificial intelligence:CREATE)` |
+| `ai.sessionList` | `Cap(artificial intelligence:READ)` |
+| `ai.sessionMessages` | `Owns(AiSession sessionId, artificial intelligence:READ)` |
+| `ai.sessionSend` | `Owns(AiSession sessionId, artificial intelligence:CREATE)` |
+| `ai.sessionUpdate` | `Owns(AiSession id, artificial intelligence:CREATE)` |
 | `ai.setDefaultModel` | `Executor(artificial intelligence:CREATE)` |
 | `ai.tasks` | `Cap(artificial intelligence:READ)` |
 | `ai.transcriptionClose` | `Cap(artificial intelligence:TRANSCRIBE)` |

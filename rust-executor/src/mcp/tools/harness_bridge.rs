@@ -24,7 +24,7 @@
 //! use: every tool but the ones that open or widen a session (login, signup, the
 //! capability request, the token mint). What a caller is offered is narrowed further
 //! by its own provider (the interpretation pass and `perspective.runAgent` take a
-//! named subset; an agent session takes all of it).
+//! named subset; an AI session takes all of it).
 //! Any tool not in the match delegates to `handle_dynamic_tool`, which
 //! covers ALL per-class SHACL tools (`Task_query`, `Channel_create`, etc.)
 //! — that path already exists and works without any context.

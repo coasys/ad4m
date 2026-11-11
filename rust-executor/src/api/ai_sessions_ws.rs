@@ -107,38 +107,38 @@ async fn messages(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<service::AiSessionCreate, AiSession>("ai.sessionCreate", session_create)
-        .guard(Guard::Cap(AGENT_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(AI_CREATE_CAPABILITY.clone()));
     map.method::<NoParams, Vec<AiSession>>("ai.sessionList", session_list)
         .read()
-        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
     map.method::<AiIdParams, AiSession>("ai.session", session_get)
         .read()
         .guard(Guard::Owns {
-            cap: |_| AGENT_READ_CAPABILITY.clone(),
+            cap: |_| AI_READ_CAPABILITY.clone(),
             id: ID_PARAM,
             owner: Owner::AiSession,
         });
     map.method::<AiSessionUpdateRequest, AiSession>("ai.sessionUpdate", session_update)
         .guard(Guard::Owns {
-            cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
+            cap: |_| AI_CREATE_CAPABILITY.clone(),
             id: ID_PARAM,
             owner: Owner::AiSession,
         });
     map.method::<AiIdParams, bool>("ai.sessionDelete", session_delete)
         .guard(Guard::Owns {
-            cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
+            cap: |_| AI_CREATE_CAPABILITY.clone(),
             id: ID_PARAM,
             owner: Owner::AiSession,
         });
     map.method::<AiSessionSendParams, service::AiSessionSendStarted>("ai.sessionSend", send)
         .guard(Guard::Owns {
-            cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
+            cap: |_| AI_CREATE_CAPABILITY.clone(),
             id: SESSION_ID_PARAM,
             owner: Owner::AiSession,
         });
     map.method::<AiSessionCancelParams, bool>("ai.sessionCancel", cancel)
         .guard(Guard::Owns {
-            cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
+            cap: |_| AI_CREATE_CAPABILITY.clone(),
             id: SESSION_ID_PARAM,
             owner: Owner::AiSession,
         });
@@ -148,7 +148,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(Guard::Owns {
-        cap: |_| AGENT_READ_CAPABILITY.clone(),
+        cap: |_| AI_READ_CAPABILITY.clone(),
         id: SESSION_ID_PARAM,
         owner: Owner::AiSession,
     });

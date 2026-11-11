@@ -19,7 +19,7 @@ use super::service::{
 use super::store::{ai_session_store, DbAiSessionStore};
 use super::types::{AiSession, AiSessionMessage, AiSessionMessageRole, AiTurnStatus};
 use crate::agent::capabilities::{
-    perspective_query_capability, perspective_update_capability, Capability, AGENT_READ_CAPABILITY,
+    perspective_query_capability, perspective_update_capability, Capability, AI_READ_CAPABILITY,
     ALL_CAPABILITY,
 };
 use crate::agent::session::{Principal, Session};
@@ -702,8 +702,8 @@ async fn a_caller_who_may_only_read_changes_no_session_and_starts_no_turn() {
     let did = "did:key:alice-a15";
     let alice = user(did, everything());
     let session = create(&alice);
-    // One of Alice's apps, holding `agent:READ` and nothing else.
-    let reader = || Arc::new(user(did, vec![AGENT_READ_CAPABILITY.clone()]));
+    // One of Alice's apps, holding `artificial intelligence:READ` and nothing else.
+    let reader = || Arc::new(user(did, vec![AI_READ_CAPABILITY.clone()]));
     let methods = crate::api::ws_handler::build_handler_map();
 
     for (method, params) in [
@@ -1395,15 +1395,15 @@ async fn a_sessions_events_reach_its_owners_agent_readers_and_no_one_else() {
 
     // Who is listening: the owner's apps with and without `agent:READ`, another user,
     // the operator (the main agent) and a session nobody logged in on.
-    let reader = user(did, vec![AGENT_READ_CAPABILITY.clone()]);
-    let no_agent_read = user(did, vec![perspective_query_capability(vec!["px".into()])]);
+    let reader = user(did, vec![AI_READ_CAPABILITY.clone()]);
+    let no_ai_read = user(did, vec![perspective_query_capability(vec!["px".into()])]);
     let bob = user("did:key:bob-c2", everything());
     let operator = operator();
     let anonymous = ctx_for(Session::for_test(Principal::Anonymous));
     let listeners = [
         ("the owner", &alice, true),
-        ("the owner's app holding agent:READ", &reader, true),
-        ("the owner's app without agent:READ", &no_agent_read, false),
+        ("the owner's app holding artificial intelligence:READ", &reader, true),
+        ("the owner's app without artificial intelligence:READ", &no_ai_read, false),
         ("another user", &bob, false),
         ("the operator", &operator, false),
         ("an anonymous session", &anonymous, false),

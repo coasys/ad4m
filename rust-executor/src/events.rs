@@ -126,11 +126,9 @@ impl Topic {
         // No `_` arm: a new topic does not compile until someone chooses its capability.
         match self {
             // `agent.status`, `agent.get`; a fork shows in `identity.status`.
-            // `ai.session*` reads agent data of the same owner.
-            Topic::AiSessionChanged
-            | Topic::AgentStatusChanged
-            | Topic::AgentUpdated
-            | Topic::IdentityFork => caps::AGENT_READ_CAPABILITY.clone(),
+            Topic::AgentStatusChanged | Topic::AgentUpdated | Topic::IdentityFork => {
+                caps::AGENT_READ_CAPABILITY.clone()
+            }
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead
@@ -168,8 +166,10 @@ impl Topic {
             Topic::ExceptionOccurred => caps::RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
             // `ai.transcriptionOpen`.
             Topic::AiTranscriptionText => caps::AI_TRANSCRIBE_CAPABILITY.clone(),
-            // `ai.modelLoadingStatus`.
-            Topic::AiModelLoadingStatus => caps::AI_READ_CAPABILITY.clone(),
+            // `ai.modelLoadingStatus`, the `ai.session*` reads.
+            Topic::AiSessionChanged | Topic::AiModelLoadingStatus => {
+                caps::AI_READ_CAPABILITY.clone()
+            }
             // The `sfu.*` reads check NEIGHBOURHOOD_READ (#712 gave the SFU streams the same).
             // A call names its neighbourhood by URL, not by perspective, so on every
             // perspective.
