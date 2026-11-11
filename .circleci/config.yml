@@ -1021,7 +1021,8 @@ jobs:
       WE_REF: << pipeline.parameters.we-ref >>
       COASYS_SPACES_TIER: real
       COASYS_SPACES_LLM_BASE_URL: http://localhost:11434/v1
-      COASYS_SPACES_LLM_MODEL: gemma3:12b
+      # The model staging and llm-e2e use, which Marvin keeps loaded: one load on the GPU.
+      COASYS_SPACES_LLM_MODEL: qwen3.8-27b-48k
       # Not /tmp/test-artifacts: other jobs on this host write there at the same time.
       COASYS_SPACES_ARTIFACTS: /tmp/coasys-spaces-artifacts
     steps:

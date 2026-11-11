@@ -30,7 +30,7 @@
 #                               the build job's "Publish the executor on this host" step writes
 #   COASYS_SPACES_TIER          real (host model, Whisper) or stub; default real
 #   COASYS_SPACES_LLM_BASE_URL  OpenAI-compatible base URL (http://localhost:11434/v1)
-#   COASYS_SPACES_LLM_MODEL     model id (gemma3:12b)
+#   COASYS_SPACES_LLM_MODEL     model id (qwen3.8-27b-48k)
 #   COASYS_SPACES_LLM_NUM_CTX   context window an Ollama server runs it with (16384; empty: as is)
 #   SOCIAL_DNA_PACKAGE          passed to the suite when set
 set -euo pipefail
@@ -45,7 +45,7 @@ STATE="${COASYS_SPACES_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/ad4m-ci/coas
 PUBLISH_DIR="${EXECUTOR_PUBLISH_DIR:-/mnt/hdd/executor-artifacts}"
 TIER="${COASYS_SPACES_TIER:-real}"
 LLM_BASE_URL="${COASYS_SPACES_LLM_BASE_URL:-http://localhost:11434/v1}"
-LLM_MODEL="${COASYS_SPACES_LLM_MODEL:-gemma3:12b}"
+LLM_MODEL="${COASYS_SPACES_LLM_MODEL:-qwen3.8-27b-48k}"
 LLM_NUM_CTX="${COASYS_SPACES_LLM_NUM_CTX-16384}"
 
 WE_DIR="$WORK/we"
@@ -314,13 +314,21 @@ cmd_llm_check() {
 # and cuts a longer prompt without an error; extraction's prompt is about 6,000 tokens. A request
 # cannot raise it there, so on an Ollama server this makes a variant of the model with
 # LLM_NUM_CTX tokens (`/api/create`, no download) and names it in $WORK/llm-model for `test`.
-# Another server keeps the model as it is.
+# A model whose own num_ctx is already that large is used as it is: a variant would be a second
+# load on the GPU, beside the one staging and llm-e2e keep loaded. Another server keeps the model.
 with_context_window() {
-    local root="${LLM_BASE_URL%/}" variant answer
+    local root="${LLM_BASE_URL%/}" variant answer own
     root="${root%/v1}"
     [ -n "$LLM_NUM_CTX" ] || return 0
     if ! curl -sf --max-time 15 "$root/api/version" >/dev/null; then
         log "$root is not an Ollama server; the model keeps its own context window"
+        return 0
+    fi
+    own="$(curl -sf --max-time 15 "$root/api/show" -H 'content-type: application/json' \
+        -d "$(jq -nc --arg m "$LLM_MODEL" '{model: $m}')" |
+        jq -r '(.parameters // "") | (capture("num_ctx\\s+(?<n>[0-9]+)").n // empty)' 2>/dev/null || true)"
+    if [ -n "$own" ] && [ "$own" -ge "$LLM_NUM_CTX" ]; then
+        log "$LLM_MODEL already has a $own-token context; no variant"
         return 0
     fi
     variant="coasys-spaces-$(printf '%s' "$LLM_MODEL" | tr ':/' '--'):ctx$LLM_NUM_CTX"

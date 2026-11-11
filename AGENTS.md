@@ -119,12 +119,14 @@ A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marv
 
 `coasys-spaces` runs WE's product suite (`pnpm --filter @we/app-web test:spaces`,
 WE `apps/we-web/tests/live/coasys-spaces/`): a Coasys space, a call, its
-transcript (executor Whisper), extraction on Ollama `gemma3:12b`, and flows.
+transcript (executor Whisper), extraction on Ollama `qwen3.8-27b-48k` (the
+model staging and `llm-e2e` use, which Marvin keeps loaded), and flows.
 Ollama's OpenAI endpoint runs a model with the server's default context window
-and cuts a longer prompt silently, so `llm-check` makes the variant
-`coasys-spaces-gemma3-12b:ctx16384` (`/api/create`, `num_ctx`;
-`COASYS_SPACES_LLM_NUM_CTX`) and the suite runs on it. It uses this commit's
-executor and SDK:
+and cuts a longer prompt silently. So when the model's own `num_ctx` is below
+`COASYS_SPACES_LLM_NUM_CTX` (16384), `llm-check` makes a variant such as
+`coasys-spaces-gemma3-12b:ctx16384` (`/api/create`) and the suite runs on it.
+A model with a large enough `num_ctx` (the 48k tag) runs as it is, so the GPU
+holds one load. It uses this commit's executor and SDK:
 
 - The executor is the one the `build` job published for the commit
   (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,

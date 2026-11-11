@@ -133,7 +133,7 @@ test_preflight() {
     # record notes the WE commit the clone had.
     mkdir -p "$COASYS_SPACES_WORK" && echo "$WE_HEAD" >"$COASYS_SPACES_WORK/we.sha"
     bash "$SCRIPT" record >/dev/null || fail "record failed"
-    [ "$(cat "$COASYS_SPACES_STATE/last-success")" = "$SHA $WE_HEAD real gemma3:12b ctx16384" ] ||
+    [ "$(cat "$COASYS_SPACES_STATE/last-success")" = "$SHA $WE_HEAD real qwen3.8-27b-48k ctx16384" ] ||
         fail "record wrote the wrong key: $(cat "$COASYS_SPACES_STATE/last-success")"
 
     preflight_exits 10
@@ -186,10 +186,10 @@ test_test_needs_the_suite() {
 }
 
 # A model server on a free port that lists the given model ids at /v1/models. With OLLAMA=1 it
-# also answers Ollama's /api/version and /api/create, and writes each create request to
-# $TMP/created.
+# also answers Ollama's /api/version, /api/show (num_ctx $OWN_CTX when set) and /api/create, and
+# writes each create request to $TMP/created.
 serve_models() {
-    OLLAMA="${OLLAMA:-}" CREATED="$TMP/created" node -e '
+    OLLAMA="${OLLAMA:-}" OWN_CTX="${OWN_CTX:-}" CREATED="$TMP/created" node -e '
       const ids = process.argv.slice(1);
       const s = require("http").createServer((req, res) => {
         res.setHeader("content-type", "application/json");
@@ -197,6 +197,10 @@ serve_models() {
           return res.end(JSON.stringify({ object: "list", data: ids.map((id) => ({ id, object: "model" })) }));
         }
         if (process.env.OLLAMA && req.url === "/api/version") return res.end(JSON.stringify({ version: "0.12.0" }));
+        if (process.env.OLLAMA && req.url === "/api/show" && req.method === "POST") {
+          const p = process.env.OWN_CTX ? "num_ctx                        " + process.env.OWN_CTX + "\ntemperature 0.6" : "temperature 0.6";
+          return res.end(JSON.stringify({ parameters: p }));
+        }
         if (process.env.OLLAMA && req.url === "/api/create" && req.method === "POST") {
           let body = "";
           req.on("data", (c) => (body += c));
@@ -238,6 +242,15 @@ test_llm_context_window() {
         "$TMP/created" >/dev/null || fail "the variant was not asked for as expected: $(cat "$TMP/created" 2>/dev/null)"
     [ "$(cat "$COASYS_SPACES_WORK/llm-model" 2>/dev/null)" = "coasys-spaces-gemma3-12b:ctx16384" ] ||
         fail "test is not told to use the variant"
+    kill "$SERVER"
+    wait "$SERVER" 2>/dev/null
+
+    # A model whose own num_ctx is large enough runs as it is: no second load on the GPU.
+    rm -f "$TMP/created"
+    OLLAMA=1 OWN_CTX=49152 serve_models "qwen3.8-27b-48k"
+    COASYS_SPACES_LLM_MODEL=qwen3.8-27b-48k bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "llm-check failed on a 48k model"
+    [ ! -e "$TMP/created" ] || fail "a variant was made of a model with a 48k context: $(cat "$TMP/created")"
+    [ ! -e "$COASYS_SPACES_WORK/llm-model" ] || fail "test is told to use a variant of a 48k model"
     kill "$SERVER"
     wait "$SERVER" 2>/dev/null
 
