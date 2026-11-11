@@ -1307,3 +1307,162 @@ async fn a_rotated_secret_and_a_reencrypted_store_open_everything_after_a_restar
     assert_eq!(status["lastError"], "wrong-secret", "{status}");
     assert!(third.running());
 }
+
+/// An executor that ran before at-rest encryption, as far as the binary alone can make one: a
+/// language with a plaintext storage file beside its bundle (the plaintext database is the
+/// library's migration fixture). The first start with a secret moves it under its keys before
+/// it opens: the file is sealed, the bundle stays, the database is SQLCipher and takes a new
+/// perspective, and the keyring's migration record is finished. A second start opens at once
+/// with the record untouched. `storage reset` is refused while the executor runs, only lists
+/// without `--confirm`, refuses a wrong id, and with the keyring id moves the sealed data into
+/// a `lost-` folder while the language bundle stays.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plaintext_executor_is_sealed_at_its_first_start_and_a_reset_moves_it_aside() {
+    let _serial = SERIAL.lock().await;
+    let folder = DataFolder::new();
+    let data = folder.data();
+    let database = data.join("ad4m_db.sqlite");
+    let language = data.join("ad4m/languages/QmPlaintextLanguage");
+    std::fs::create_dir_all(&language).unwrap();
+    std::fs::write(language.join("store.json"), b"{\"plaintext\":true}").unwrap();
+    std::fs::write(language.join("bundle.js"), b"bundle").unwrap();
+
+    let port = free_port();
+    let mut first = spawn(
+        &folder,
+        port,
+        run_args(&folder, port, &[]),
+        Stdio::null(),
+        "migrate.log",
+        &[("AD4M_ADMIN_CREDENTIAL", ADMIN)],
+    );
+    first.ready();
+    let url = first.url();
+    let admin = WsRpcClient::connect(&url, ADMIN).await.unwrap();
+    let status: Value = admin
+        .call("runtime.storageStatus", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "open", "{status}\n{}", first.output());
+    let keyring_id = status["keyringId"].as_str().unwrap().to_string();
+    let handle: Value = admin
+        .call("perspective.create", json!({ "name": "after the move" }))
+        .await
+        .unwrap();
+    assert!(handle["uuid"].is_string(), "{handle}");
+    assert!(!std::fs::read(&database)
+        .unwrap()
+        .starts_with(b"SQLite format 3"));
+    assert!(std::fs::read(language.join("store.json"))
+        .unwrap()
+        .starts_with(b"AD4MSEAL"));
+    assert_eq!(
+        std::fs::read(language.join("bundle.js")).unwrap(),
+        b"bundle"
+    );
+    let record = keyring_json(&folder)["migration"].clone();
+    assert_eq!(
+        record["done"],
+        json!(["database", "persons", "language-storage"]),
+        "{record}"
+    );
+    assert!(record["finished_at"].is_string(), "{record}");
+
+    let (code, out, err) = cli(
+        &[
+            "storage",
+            "reset",
+            "--data-path",
+            data.to_str().unwrap(),
+            "--confirm",
+            &keyring_id,
+        ],
+        &[],
+    );
+    assert_ne!(code, Some(0), "{out}{err}");
+    assert!(data.join("ad4m/keyring.json").exists(), "{out}{err}");
+    drop(admin);
+    drop(first);
+
+    // The next start opens at once: nothing left to move.
+    let port = free_port();
+    let mut second = spawn(
+        &folder,
+        port,
+        run_args(&folder, port, &[]),
+        Stdio::null(),
+        "migrated.log",
+        &[("AD4M_ADMIN_CREDENTIAL", ADMIN)],
+    );
+    second.ready();
+    let admin = WsRpcClient::connect(&second.url(), ADMIN).await.unwrap();
+    let status: Value = admin
+        .call("runtime.storageStatus", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "open", "{status}");
+    assert_eq!(keyring_json(&folder)["migration"], record);
+    drop(admin);
+    drop(second);
+
+    let path = data.to_str().unwrap();
+    let (code, out, err) = cli(&["storage", "reset", "--data-path", path], &[]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(
+        out.contains(&format!("--confirm {keyring_id}")) && out.contains("keyring.json"),
+        "{out}"
+    );
+    assert!(data.join("ad4m/keyring.json").exists());
+    let (code, out, err) = cli(
+        &[
+            "storage",
+            "reset",
+            "--data-path",
+            path,
+            "--confirm",
+            "wrong",
+        ],
+        &[],
+    );
+    assert_ne!(code, Some(0), "{out}{err}");
+    assert!(err.contains("not confirmed"), "{err}");
+    assert!(data.join("ad4m/keyring.json").exists());
+
+    let (code, out, err) = cli(
+        &[
+            "storage",
+            "reset",
+            "--data-path",
+            path,
+            "--confirm",
+            &keyring_id,
+        ],
+        &[],
+    );
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains("Moved"), "{out}");
+    assert!(!data.join("ad4m/keyring.json").exists());
+    assert!(!database.exists());
+    assert!(!language.join("store.json").exists());
+    assert_eq!(
+        std::fs::read(language.join("bundle.js")).unwrap(),
+        b"bundle"
+    );
+    let lost: Vec<PathBuf> = std::fs::read_dir(&data)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("lost-")
+        })
+        .collect();
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(lost[0].join("ad4m/keyring.json").exists());
+    assert!(lost[0].join("ad4m_db.sqlite").exists());
+    assert!(lost[0]
+        .join("ad4m/languages/QmPlaintextLanguage/store.json")
+        .exists());
+}

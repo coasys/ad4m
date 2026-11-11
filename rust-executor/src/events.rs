@@ -47,11 +47,12 @@ pub enum Topic {
     LinkTicket,
     InboxMessage,
     StorageStateChanged,
+    StorageMigrationProgress,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 30] = [
+    pub const ALL: [Topic; 31] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -82,6 +83,7 @@ impl Topic {
         Topic::LinkTicket,
         Topic::InboxMessage,
         Topic::StorageStateChanged,
+        Topic::StorageMigrationProgress,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -118,6 +120,7 @@ impl Topic {
             Topic::LinkTicket => "link-ticket",
             Topic::InboxMessage => "inbox-message",
             Topic::StorageStateChanged => "storage-state-changed",
+            Topic::StorageMigrationProgress => "storage-migration-progress",
         }
     }
 
@@ -146,6 +149,7 @@ impl Topic {
             | Topic::IdentityFork
             | Topic::ConfigChanged
             | Topic::StorageStateChanged
+            | Topic::StorageMigrationProgress
             | Topic::LinkTicket
             | Topic::InboxMessage => caps::AGENT_READ_CAPABILITY.clone(),
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).

@@ -650,15 +650,44 @@ pub fn migrate(
     languages: &Path,
     gate: Option<&StorageGate>,
 ) -> Result<LanguageStorageStep, String> {
-    migrate_with(keys, languages, gate, |from, to| std::fs::rename(from, to))
+    migrate_with(
+        keys,
+        languages,
+        gate,
+        |from, to| std::fs::rename(from, to),
+        |_| {},
+    )
 }
 
-/// [`migrate`] with the step that puts each sealed file in place given: tests make it fail.
+/// The addresses of the language folders under `languages` that hold a plaintext file, sorted.
+pub(crate) fn plaintext_folders(languages: &Path) -> io::Result<Vec<String>> {
+    let mut addresses: Vec<String> = plaintext_files(languages)?
+        .into_iter()
+        .map(|(address, _, _)| address)
+        .collect();
+    addresses.sort();
+    addresses.dedup();
+    Ok(addresses)
+}
+
+/// The sealed files of every language folder under `languages`, sorted; links are not
+/// followed.
+pub(crate) fn sealed_files(languages: &Path) -> io::Result<Vec<PathBuf>> {
+    Ok(language_files(languages, true)?
+        .into_iter()
+        .map(|(_, _, path)| path)
+        .collect())
+}
+
+/// [`migrate`] with the step that puts each sealed file in place given (tests make it fail),
+/// and `sealing`, told the address of each file's language before the file is sealed: the files
+/// come folder by folder.
 pub(crate) fn migrate_with(
     keys: &DataKeys,
     languages: &Path,
     gate: Option<&StorageGate>,
     rename: impl Fn(&Path, &Path) -> io::Result<()>,
+    mut sealing: impl FnMut(&str),
 ) -> Result<LanguageStorageStep, String> {
     let fail = |sealed: usize, error: String| -> Result<LanguageStorageStep, String> {
         log::error!("The languages' storage did not move under its keys: {error}");
@@ -691,6 +720,7 @@ pub(crate) fn migrate_with(
     )?;
     let mut sealed = 0;
     for (address, file, full) in &pending {
+        sealing(address);
         let one = || -> Result<(), String> {
             let plain = std::fs::read(full).map_err(|e| format!("{}: {e}", full.display()))?;
             let scope = scope_for(keys, address);
@@ -1158,13 +1188,19 @@ mod tests {
         let (a, b) = language_folders(&languages);
 
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let step = migrate_with(&keys, &languages, None, |from, to| {
-            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-                Err(io::Error::other("the disk is full"))
-            } else {
-                std::fs::rename(from, to)
-            }
-        })
+        let step = migrate_with(
+            &keys,
+            &languages,
+            None,
+            |from, to| {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    Err(io::Error::other("the disk is full"))
+                } else {
+                    std::fs::rename(from, to)
+                }
+            },
+            |_| {},
+        )
         .unwrap();
         let LanguageStorageStep::KeptPlain { sealed, error } = step else {
             panic!("the migration did not fail: {step:?}");

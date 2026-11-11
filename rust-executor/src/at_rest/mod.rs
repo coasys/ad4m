@@ -6,8 +6,11 @@
 //! [`ANSWERED_WHILE_GATED`], and a socket whose token needs the wallet is closed with 1013. With
 //! the secret (from the embedding shell, the secret file, or `storage.unlock` on a loopback
 //! listener) the keyring opens, the gate goes to [`StorageState::Unlocking`] while `run` opens
-//! the stores, then to [`StorageState::Open`]. Each change is published as
-//! `storage-state-changed` to the operator.
+//! the stores, then to [`StorageState::Open`]. An executor that still holds plaintext data goes
+//! through [`StorageState::Migrating`] while [`migration`] moves it under its keys; a failed
+//! move sends it back to [`StorageState::Sealed`] with `migration-failed`, its plaintext kept,
+//! and the next unlock tries again. Each change is published as `storage-state-changed` to the
+//! operator, and the move's progress as `storage-migration-progress`.
 //!
 //! Without an installed gate (unit tests, an embedder that never called `run`) nothing is
 //! gated.
@@ -20,7 +23,9 @@ pub mod executor_secrets;
 pub mod files;
 pub mod keyring_file;
 pub mod lang_storage;
+pub mod migration;
 pub mod persons;
+pub mod reset;
 pub mod rotation;
 pub mod secret_source;
 pub mod sqlite;
@@ -33,6 +38,7 @@ use tokio::sync::watch;
 use ts_rs::TS;
 
 pub use data_keys::{DataKeys, KeyringError, KeyringSummary, StoreStateName, UnlockOutcome};
+pub use keyring_file::MigrationStep;
 use keyring_file::StoreId;
 pub use secret_source::{SecretSourceKind, StorageSecret};
 
@@ -51,6 +57,9 @@ pub enum StorageState {
     Sealed,
     /// The keyring is open; the executor is opening its stores.
     Unlocking,
+    /// The keyring is open; plaintext data from before at-rest encryption is moving under its
+    /// keys. Nothing but the status and the unlock is answered until it is done.
+    Migrating,
     /// Every store is open.
     Open,
 }
@@ -84,6 +93,21 @@ pub struct StoreStates {
     pub links: StoreStateName,
 }
 
+/// How far the move of a plaintext executor's data under its keys is: the status's `migration`
+/// and the payload of `storage-migration-progress`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageMigrationProgress {
+    /// The step running, or the last one once every store is done.
+    pub step: MigrationStep,
+    /// Stores moved so far: the database, the persons, and one per language folder.
+    pub stores_done: u32,
+    pub stores_total: u32,
+    /// The store being moved: `executor`, `persons`, or `language:<address>`; `null` once done.
+    pub store: Option<String>,
+}
+
 /// `runtime.storageStatus` and the payload of `storage-state-changed`. The operator's view
 /// carries the fields after `keyring_id`; every other caller gets them `null`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -106,6 +130,8 @@ pub struct StorageStatus {
     pub root_generation: Option<u32>,
     /// Operator only: why the last unlock failed, or which store did not move under its key.
     pub last_error: Option<StorageErrorKind>,
+    /// Operator only: how far the move of plaintext data under its keys is, while `migrating`.
+    pub migration: Option<StorageMigrationProgress>,
 }
 
 /// What a refused unlock tells the caller.
@@ -137,6 +163,7 @@ struct GateInfo {
     source: Option<SecretSourceKind>,
     on_data_disk: bool,
     last_error: Option<StorageErrorKind>,
+    migration: Option<StorageMigrationProgress>,
 }
 
 /// The storage gate of one executor process.
@@ -251,7 +278,41 @@ impl StorageGate {
 
     /// Every store is open: the gate opens and says so.
     pub fn mark_open(&self) {
+        self.info().migration = None;
         self.state.send_replace(StorageState::Open);
+        self.publish();
+    }
+
+    /// The move of plaintext data under its keys begins: the gate goes to
+    /// [`StorageState::Migrating`] with `progress`, and says so.
+    pub fn begin_migration(&self, progress: StorageMigrationProgress) {
+        self.info().migration = Some(progress);
+        self.state.send_replace(StorageState::Migrating);
+        self.publish();
+    }
+
+    /// The move's progress, read by the status. `storage-migration-progress` carries it to
+    /// the operator (`migration::Progress`, which spaces the events out).
+    pub fn set_migration_progress(&self, progress: StorageMigrationProgress) {
+        self.info().migration = Some(progress);
+    }
+
+    /// The move is done: back to [`StorageState::Unlocking`] while `run` opens the stores.
+    pub fn end_migration(&self) {
+        self.info().migration = None;
+        self.state.send_replace(StorageState::Unlocking);
+        self.publish();
+    }
+
+    /// The move failed and its plaintext stays: the gate goes back to
+    /// [`StorageState::Sealed`] with `migration-failed`, so the next unlock tries again.
+    pub fn migration_failed(&self) {
+        {
+            let mut info = self.info();
+            info.migration = None;
+            info.last_error = Some(StorageErrorKind::MigrationFailed);
+        }
+        self.state.send_replace(StorageState::Sealed);
         self.publish();
     }
 
@@ -309,6 +370,7 @@ impl StorageGate {
             secret_on_data_disk: (operator && self.keys.is_open()).then_some(info.on_data_disk),
             root_generation: operator.then(|| self.keys.root_generation()).flatten(),
             last_error: operator.then_some(info.last_error).flatten(),
+            migration: operator.then(|| info.migration.clone()).flatten(),
         }
     }
 
@@ -385,6 +447,7 @@ pub fn refusal(gate: Option<&StorageGate>, method: &str) -> Option<String> {
             match gate.state() {
                 StorageState::Sealed => "sealed",
                 StorageState::Unlocking => "opening its stores",
+                StorageState::Migrating => "moving its plaintext data under its keys",
                 StorageState::Open => "open",
             },
             ANSWERED_WHILE_GATED.join(" and ")

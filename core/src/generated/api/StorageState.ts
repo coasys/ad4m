@@ -3,4 +3,4 @@
 /**
  * Where the executor is on the way to its stores.
  */
-export type StorageState = "sealed" | "unlocking" | "open";
+export type StorageState = "sealed" | "unlocking" | "migrating" | "open";

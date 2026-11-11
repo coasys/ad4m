@@ -121,7 +121,9 @@ access check: a call that fails both gets the access answer.
 `runtime.storageStatus` and `storage.unlock` answer (`at_rest::ANSWERED_WHILE_GATED`); every
 other method gets 503 `storage-sealed` from `HandlerMap::check_gate`, before its guard, in
 dispatch and admission alike. `events.watch` is not gated, so a client can wait for
-`storage-state-changed` (operator audience). While sealed, the admin credential and an empty
+`storage-state-changed` (operator audience). The same holds while the gate is `Migrating`
+(plaintext data moving under its keys right after the unlock), which publishes
+`storage-migration-progress` (operator audience). While sealed, the admin credential and an empty
 token open a session; a JWT is refused (close 1013 on the socket, 503 on REST), since checking
 it needs the stores. `/health` answers throughout.
 

@@ -92,6 +92,25 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `allow_secret_on_data_disk` (`AD4M_ALLOW_SECRET_ON_DATA_DISK`), and the config file may
   never carry the secret. The data folder is 0700, its files 0600. The gate is a global
   (`at_rest::gate`); dispatch and admission check it (`HandlerMap::check_gate`).
+- **Plaintext migration.** Right after the unlock, `at_rest::migration::run` moves an
+  executor that ran before at-rest encryption under its keys, in a fixed order: the
+  executor database (SQLCipher copy, verified, then renamed over the plaintext), the
+  persons of its legacy users, then each language's storage files (sealed, read back,
+  renamed over). The keyring file's `migration` record (started, steps done, finished)
+  is the resume marker; it is written after each verified step, so a crash reruns at most
+  one step, and each step skips what is already sealed. The gate stays `Migrating` (only
+  `runtime.storageStatus` and `storage.unlock` answer) and publishes
+  `storage-migration-progress` (`step`, `storesDone`, `storesTotal`, `store`; operator
+  audience, at most one a second plus the first and last). A failed step keeps the
+  plaintext, seals the gate with `migration-failed`, and the next `storage.unlock` resumes.
+  A second run finds nothing to do. Holochain and lair files are never re-keyed.
+- **Storage reset.** `ad4m-executor storage reset --data-path <dir> [--confirm <keyring id>]`
+  (`at_rest::reset`) is offline only (it takes the data-folder lock) and never reaches
+  outside the data dir. Without `--confirm` it only lists the moves. With the keyring id
+  (`unreadable-keyring` for a keyring that does not parse) it moves the keyring, agent
+  file, users, persons and their stores, perspectives, the executor database and every
+  sealed language file into `<data>/lost-<time>/`. Language bundles, settings, the seed,
+  logs and app data stay.
 - **Local only.** A method registered `.local_only()` answers only the operator on this
   machine (`Session::is_operator_on_this_machine`: the admin credential, or no token on an
   executor without one, on a loopback listener). The method's guard answers first (403 "Admin

@@ -351,6 +351,10 @@ async fn main() -> Result<()> {
             storage::StorageCommand::RotateSecret { given } => {
                 storage_rotate_secret(args.executor_url, args.admin_credential, &given).await
             }
+            storage::StorageCommand::Reset { data_path, confirm } => {
+                let data_dir = data_path.unwrap_or_else(startup::executor_data_path);
+                storage::reset(&data_dir, confirm.as_deref()).map(|text| println!("{text}"))
+            }
             storage::StorageCommand::Status => {
                 async {
                     let executor_url = match args.executor_url {

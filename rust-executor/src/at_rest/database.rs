@@ -61,7 +61,9 @@ fn set_state(keys: &DataKeys, gate: Option<&StorageGate>, state: StoreState) -> 
     Ok(())
 }
 
-fn key_file(
+/// Puts the database file at `path` under the database key, without installing the keys: the
+/// database step of [`super::migration`], and the first half of [`prepare`].
+pub(crate) fn key_file(
     keys: &Arc<DataKeys>,
     path: &Path,
     gate: Option<&StorageGate>,

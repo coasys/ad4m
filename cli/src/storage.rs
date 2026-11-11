@@ -1,5 +1,6 @@
 //! `ad4m-executor storage`: make an operator secret, unlock a sealed executor, read its
-//! storage status, move it to a new secret. A secret is typed at the terminal with echo off and checked here before it
+//! storage status, move it to a new secret, or give up the data a lost secret locked (`reset`,
+//! offline). A secret is typed at the terminal with echo off and checked here before it
 //! is sent; it is never taken from an argument or the environment (other processes of the user
 //! read both), and nothing but its fingerprint is printed.
 
@@ -27,8 +28,25 @@ pub enum StorageCommand {
         #[arg(hide = true, trailing_var_arg = true)]
         given: Vec<String>,
     },
-    /// Print the executor's storage status: sealed, unlocking or open, and its keyring id.
+    /// Print the executor's storage status: sealed, unlocking, migrating or open, and its
+    /// keyring id.
     Status,
+    /// For a lost storage secret: move the data the keyring guards (the keyring, the database,
+    /// the agent, the managed users' profiles, Holochain's folder, the sealed executor secrets,
+    /// the perspectives' stores, the languages' sealed storage files) into a `lost-<time>`
+    /// folder in the data folder, so the next start begins from nothing. Nothing is deleted:
+    /// the old secret still opens the moved data. Runs offline, with the executor stopped;
+    /// never touches a path outside the data folder. Without `--confirm <keyring id>` it only
+    /// prints what would move and the id to confirm with.
+    Reset {
+        /// The executor's data folder (`run`'s --app-data-path); default `~/.ad4m`.
+        #[arg(long)]
+        data_path: Option<std::path::PathBuf>,
+        /// The keyring's id (from `storage status` or the plan this prints), or
+        /// `unreadable-keyring` for a keyring file that does not read.
+        #[arg(long)]
+        confirm: Option<String>,
+    },
     /// Move a running executor on this machine to a new operator secret: type the current
     /// secret, then the new one twice, when asked (none is echoed; make the new one with
     /// `storage new-secret`). From then on only the new secret opens this executor's data.
@@ -93,6 +111,7 @@ fn state_name(state: StorageState) -> &'static str {
     match state {
         StorageState::Sealed => "sealed",
         StorageState::Unlocking => "unlocking",
+        StorageState::Migrating => "migrating",
         StorageState::Open => "open",
     }
 }
@@ -122,14 +141,26 @@ pub fn describe_status(status: &StorageStatus) -> String {
     if status.state == StorageState::Sealed {
         text.push_str(": waiting for `ad4m-executor storage unlock`");
     }
+    if let Some(migration) = &status.migration {
+        text.push_str(&format!(
+            "\nMoving plaintext data under its keys: {} of {} stores done{}",
+            migration.stores_done,
+            migration.stores_total,
+            migration
+                .store
+                .as_ref()
+                .map(|s| format!(", now {s}"))
+                .unwrap_or_default()
+        ));
+    }
     if let Some(error) = status.last_error {
         let line = match error {
             StorageErrorKind::WrongSecret => "The last unlock failed: wrong-secret",
             StorageErrorKind::CorruptKeyring => "The last unlock failed: corrupt-keyring",
             StorageErrorKind::SecretOnDataDisk => "The last unlock failed: secret-on-data-disk",
             StorageErrorKind::MigrationFailed => {
-                "The database did not move under its key (migration-failed): it stays in the \
-                 clear, see the executor log"
+                "The plaintext data did not move under its keys (migration-failed): it stays \
+                 as it was, see the executor log; the next unlock tries again"
             }
         };
         text.push_str(&format!("\n{line}"));
@@ -237,6 +268,36 @@ pub async fn rotate_secret(
     Ok(describe_rotation(&answer))
 }
 
+/// `storage reset`: without `confirm`, the lines that list what would move and the id to
+/// confirm with; with it, the reset done, or why it was refused.
+pub fn reset(data_dir: &std::path::Path, confirm: Option<&str>) -> Result<String> {
+    use rust_executor::at_rest::reset;
+    let plan = reset::plan(data_dir)?;
+    let Some(confirm) = confirm else {
+        let listed = plan
+            .moves
+            .iter()
+            .map(|p| format!("  {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(format!(
+            "A reset of {} moves into a lost- folder there:\n{listed}\nThe next start makes a new \
+             keyring and a new agent. Nothing is deleted: the old secret still opens the moved \
+             data. Stop the executor, then run `ad4m-executor storage reset --data-path {} \
+             --confirm {}`.",
+            data_dir.display(),
+            data_dir.display(),
+            plan.confirmation
+        ));
+    };
+    let report = reset::reset(data_dir, confirm)?;
+    Ok(format!(
+        "Moved {} pieces into {}. The next start makes a new keyring.",
+        report.moved.len(),
+        report.lost.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +352,7 @@ mod tests {
                 secret_on_data_disk: None,
                 root_generation: Some(1),
                 last_error: None,
+                migration: None,
             },
             fingerprint: fingerprint(&[1; 32]),
             created: true,
@@ -314,16 +376,70 @@ mod tests {
             secret_on_data_disk: None,
             root_generation: Some(1),
             last_error,
+            migration: None,
         };
         let text = describe_status(&status(Some(StorageErrorKind::MigrationFailed)));
         assert!(text.contains("migration-failed"), "{text}");
-        assert!(text.contains("stays in the clear"), "{text}");
+        assert!(text.contains("the next unlock tries again"), "{text}");
         assert!(!text.contains("unlock failed"), "{text}");
         let text = describe_status(&status(Some(StorageErrorKind::WrongSecret)));
         assert!(
             text.contains("The last unlock failed: wrong-secret"),
             "{text}"
         );
+    }
+
+    /// A migrating executor's status names the state and how far the move is.
+    #[test]
+    fn status_shows_the_migration_progress() {
+        let status = StorageStatus {
+            state: StorageState::Migrating,
+            encrypted_at_rest: false,
+            stores: None,
+            keyring_id: "ab".repeat(16),
+            secret_source: None,
+            secret_on_data_disk: None,
+            root_generation: Some(1),
+            last_error: None,
+            migration: Some(rust_executor::at_rest::StorageMigrationProgress {
+                step: rust_executor::at_rest::MigrationStep::LanguageStorage,
+                stores_done: 2,
+                stores_total: 5,
+                store: Some("language:QmA".into()),
+            }),
+        };
+        let text = describe_status(&status);
+        assert!(text.starts_with("Storage migrating"), "{text}");
+        assert!(
+            text.contains("2 of 5 stores done, now language:QmA"),
+            "{text}"
+        );
+    }
+
+    /// Without the confirmation the reset only lists what would move and the id to confirm
+    /// with; with it, the keyring moves out; a data folder without a keyring is refused.
+    #[test]
+    fn reset_lists_first_and_moves_only_when_confirmed() {
+        let data = tempfile::tempdir().unwrap();
+        assert!(
+            reset(data.path(), None).is_err(),
+            "no keyring, nothing to reset"
+        );
+        let keys = rust_executor::at_rest::DataKeys::load(
+            rust_executor::at_rest::keyring_file::path_in(data.path()),
+        )
+        .unwrap();
+        keys.unlock(Zeroizing::new([5u8; 32])).unwrap();
+        let id = keys.keyring_id().to_hex();
+        let text = reset(data.path(), None).unwrap();
+        assert!(text.contains(&format!("--confirm {id}")), "{text}");
+        assert!(text.contains("keyring.json"), "{text}");
+        assert!(data.path().join("ad4m/keyring.json").exists());
+        let err = reset(data.path(), Some("no")).unwrap_err().to_string();
+        assert!(err.contains("not confirmed"), "{err}");
+        let text = reset(data.path(), Some(&id)).unwrap();
+        assert!(text.contains("Moved 1 pieces"), "{text}");
+        assert!(!data.path().join("ad4m/keyring.json").exists());
     }
 
     /// The unlock goes only to a loopback address, and a malformed secret is not sent.

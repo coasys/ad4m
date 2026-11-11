@@ -26,6 +26,7 @@ import type { SfuCallRenegotiationOffer } from "./SfuCallRenegotiationOffer";
 import type { SfuDataMessage } from "./SfuDataMessage";
 import type { SfuMigrateEvent } from "./SfuMigrateEvent";
 import type { SfuRoomRoster } from "./SfuRoomRoster";
+import type { StorageMigrationProgress } from "./StorageMigrationProgress";
 import type { StorageStatus } from "./StorageStatus";
 import type { SubscriptionEndedEvent } from "./SubscriptionEndedEvent";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
@@ -62,6 +63,7 @@ export interface EventMap {
   "link-ticket": LinkTicketEvent;
   "inbox-message": InboxMessageEvent;
   "storage-state-changed": StorageStatus;
+  "storage-migration-progress": StorageMigrationProgress;
 }
 
 export type EventName = keyof EventMap;

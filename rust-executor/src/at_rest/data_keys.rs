@@ -18,9 +18,9 @@ use ts_rs::TS;
 use zeroize::Zeroizing;
 
 use super::keyring_file::{
-    derive_root, AgentPassphrase, FileError, KeyOwner, KeyringFile, KeyringId, PersonEntry,
-    StoreEntry, StoreId, StoreKeyWraps, StoreState, Tombstone, TombstoneKind, VersionState,
-    Wrapper,
+    derive_root, AgentPassphrase, FileError, KeyOwner, KeyringFile, KeyringId, MigrationRecord,
+    PersonEntry, StoreEntry, StoreId, StoreKeyWraps, StoreState, Tombstone, TombstoneKind,
+    VersionState, Wrapper,
 };
 
 /// Why a data keys call failed. No variant carries key material.
@@ -735,6 +735,21 @@ impl DataKeys {
         self.with_open(|open| {
             let mut next = open.file.clone();
             next.language_storage = state;
+            Self::commit(&path, open, next)
+        })
+    }
+
+    /// The record of the move of a plaintext executor's data under its keys, if one began.
+    pub fn migration(&self) -> Result<Option<MigrationRecord>, KeyringError> {
+        self.with_open(|open| Ok(open.file.migration.clone()))
+    }
+
+    /// Sets the migration record, written to the keyring file before this returns.
+    pub fn set_migration(&self, record: MigrationRecord) -> Result<(), KeyringError> {
+        let path = self.path.clone();
+        self.with_open(|open| {
+            let mut next = open.file.clone();
+            next.migration = Some(record);
             Self::commit(&path, open, next)
         })
     }

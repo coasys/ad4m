@@ -296,6 +296,50 @@ pub enum AgentPassphrase {
     Held { generation: u32, sealed: SymWrap },
 }
 
+/// One step of the move of a plaintext executor's data under its keys, in the order the steps
+/// run.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ts_rs::TS,
+)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum MigrationStep {
+    /// The executor's database file moves under the database key, its sealed columns sealed.
+    Database,
+    /// Every managed user gets a person and a person store.
+    Persons,
+    /// Every plaintext file of the languages' storage folders is sealed.
+    LanguageStorage,
+}
+
+impl MigrationStep {
+    /// Every step, in the order they run.
+    pub const ALL: [MigrationStep; 3] = [
+        MigrationStep::Database,
+        MigrationStep::Persons,
+        MigrationStep::LanguageStorage,
+    ];
+}
+
+/// The durable record of the move of a plaintext executor's data under its keys. Written
+/// before the first step and after each one; a start that finds it unfinished runs the steps
+/// not in `done`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationRecord {
+    pub started_at: DateTime<Utc>,
+    /// The steps finished, in the order they finished.
+    pub done: Vec<MigrationStep>,
+    /// When the last step finished; `None` while the move is unfinished.
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+impl MigrationRecord {
+    pub fn finished(&self) -> bool {
+        self.finished_at.is_some()
+    }
+}
+
 /// The keyring file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -322,6 +366,10 @@ pub struct KeyringFile {
     /// `held_agent_passphrase`, always `null`.
     #[serde(default, alias = "held_agent_passphrase")]
     pub agent_passphrase: Option<AgentPassphrase>,
+    /// The move of a plaintext executor's data under its keys: absent on an executor that
+    /// never had plaintext data, and in keyrings from before the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration: Option<MigrationRecord>,
 }
 
 /// Why the keyring file did not read.
@@ -384,6 +432,7 @@ impl KeyringFile {
             tombstones: vec![],
             language_storage: StoreState::Plain,
             agent_passphrase: None,
+            migration: None,
         };
         let executor_wrap = file.wrap_store_key(
             &StoreId::Executor,

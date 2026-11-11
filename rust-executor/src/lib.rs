@@ -612,20 +612,42 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         None => false,
     };
     drop(storage_secret);
-    let mut early_api = None;
-    if !unlocked {
-        find_and_set_port(&mut config.port, 4000, "REST API");
-        warn!(
-            "Storage sealed (keyring {}): waiting for storage.unlock, e.g. `ad4m-executor storage unlock` on this machine",
-            gate.keys().keyring_id().to_hex()
-        );
-        let (api, api_ended) = spawn_api_thread(config.clone());
-        tokio::select! {
-            _ = gate.unsealed() => early_api = Some(api),
-            // The API could not start (port taken) or stopped: nobody can unlock any more.
-            _ = api_ended => return api,
+    // An executor that ran before at-rest encryption moves its plaintext data under its keys
+    // now, before any store opens (`at_rest::migration`). A failed move keeps the plaintext
+    // and seals the gate again: the next `storage.unlock` runs the steps not done.
+    let mut early = None;
+    let mut unlocked = unlocked;
+    loop {
+        if !unlocked {
+            let (_, api_ended) = early.get_or_insert_with(|| {
+                find_and_set_port(&mut config.port, 4000, "REST API");
+                spawn_api_thread(config.clone())
+            });
+            warn!(
+                "Storage sealed (keyring {}): waiting for storage.unlock, e.g. `ad4m-executor storage unlock` on this machine",
+                gate.keys().keyring_id().to_hex()
+            );
+            let api_stopped = tokio::select! {
+                _ = gate.unsealed() => false,
+                // The API could not start (port taken) or stopped: nobody can unlock any more.
+                _ = api_ended => true,
+            };
+            if api_stopped {
+                if let Some((api, _)) = early.take() {
+                    return api;
+                }
+            }
+        }
+        match at_rest::migration::run(&gate, &at_rest::migration::Paths::in_data_dir(&data_root)) {
+            Ok(at_rest::migration::Outcome::NothingToDo) => break,
+            Ok(at_rest::migration::Outcome::Migrated { steps }) => {
+                info!("This executor's plaintext data is under its keys ({steps:?})");
+                break;
+            }
+            Err(_) => unlocked = false,
         }
     }
+    let early_api = early.map(|(api, _)| api);
 
     // Initialise the wallet backend based on config.
     // "shared" mode connects to an external HTTP wallet service;
@@ -730,8 +752,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         .install_default()
         .expect("Failed to install rustls' aws_lc_rs crypto provider");
 
-    // The database file goes under its key before anything opens it: a plaintext one from an
-    // older executor moves now, and on failure the executor runs on it in the clear.
+    // The database file is under its key (a plaintext one moved in the migration above): it is
+    // checked under the key and the database keys are installed before anything opens it.
     match at_rest::database::prepare(gate.keys(), &data_root.join("ad4m_db.sqlite"), Some(&gate)) {
         Ok(at_rest::database::DatabaseStep::Keyed(_)) => {}
         Ok(at_rest::database::DatabaseStep::KeptPlain(e)) => {
@@ -976,14 +998,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // language's files are sealed under its neighbourhood's perspective store, so the routing
     // cache learns every neighbourhood's link language first.
     match db_backend::db_backend().get_all_perspectives() {
-        Ok(handles) => {
-            for handle in handles {
-                if let Some(nh) = handle.neighbourhood.as_ref() {
-                    let language = nh.data.link_language.clone();
-                    perspectives::register_link_language_perspective(language, handle.clone());
-                }
-            }
-        }
+        Ok(handles) => at_rest::migration::route_link_languages(&handles),
         Err(e) => {
             warn!("Could not list the perspectives before sealing the languages' storage: {e}")
         }
