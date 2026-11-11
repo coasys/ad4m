@@ -1,5 +1,5 @@
-import { SfuManager, SfuNeighbourhoodApi } from "./SfuManager"
-import { MeshManager, type SignallingChannel } from "./MeshManager"
+import { defaultDeviceId, SfuManager, SfuNeighbourhoodApi } from "./SfuManager"
+import { agentOfMeshPeer, MeshManager, meshPeerId, type MeshParticipant, type SignallingChannel } from "./MeshManager"
 import type { OnlineAgent } from "../language/Language"
 import type {
     SfuConfig,
@@ -30,7 +30,7 @@ export type SessionEvent =
     | "state-changed"
     /**
      * `(SfuSessionReplaced)` — the call was joined again from this device (another tab), and
-     * that join took it over: this session's call has ended, and it is idle again. SFU only.
+     * that join took it over: this session's call has ended, and it is idle again.
      */
     | "replaced"
     | "error"
@@ -90,8 +90,8 @@ export interface SessionCreateOptions {
     /** NAT traversal for both paths, each server as given. Takes precedence over `sfuConfig.iceServers`. */
     iceServers?: IceServer[]
     /**
-     * The device this session calls from, for the SFU path: a join from the same device
-     * replaces this agent's earlier session (another tab); another device joins beside it.
+     * The device this session calls from: a join from the same device replaces this agent's
+     * earlier session (another tab); another device joins beside it, as a participant of its own.
      * Unset, the browser profile's id (`localStorage`), or one per process outside a browser.
      */
     deviceId?: string
@@ -107,13 +107,16 @@ interface SessionImplConfig {
     iceServers?: IceServer[]
     /** See `SessionCreateOptions.deviceId`. */
     deviceId?: string
-    /** Signalling channel for mesh topology — required when topology resolves to mesh. */
+    /** Signalling channel for mesh topology — required when topology resolves to mesh. It must
+     *  speak as this session's peer, {@link meshPeerId} of `agentDid` and the device. */
     channel?: SignallingChannel
     /** Publish call-presence via telepresence.  The session broadcasts
      *  membership so other agents' roster polls can discover it. */
     setOnlineStatus?: (status: { links: StatusLink[] }) => Promise<boolean>
     /** This agent's current online status. The session adds its presence
-     *  link to it and takes it out again, leaving the app's own links. */
+     *  link to it and takes it out again, leaving the app's own links and
+     *  the presence of this agent's other devices — which the mesh roster
+     *  reads from here too. */
     ownOnlineStatus?: () => Promise<{ data?: { links?: { data?: Partial<StatusLink> }[] } } | null>
     /** Poll for agents currently online in the neighbourhood.  The
      *  session reconciles the result against its mesh connections. */
@@ -129,9 +132,10 @@ interface SessionImplConfig {
 
 /**
  * Call-presence predicate.  When the session joins, it publishes an
- * online-status link with this predicate and the room id as target.
- * Other agents polling `onlineAgents()` use this to discover the
- * roster without a join message.
+ * online-status link with this predicate, its mesh peer id as source and
+ * the room id as target.  Other agents polling `onlineAgents()` use this
+ * to discover the roster without a join message; one agent's devices each
+ * add a link of their own to the agent's one status.
  */
 const CALL_PRESENCE_PREDICATE = "ad4m://session/in-call"
 
@@ -140,6 +144,33 @@ type StatusLink = { source: string; predicate?: string; target: string }
 /** How often (ms) the mesh session polls `onlineAgents` for roster changes. */
 const ROSTER_POLL_INTERVAL_MS = 3_000
 
+/**
+ * The mesh peer a call-presence link of `did` announces, or `null`. A link
+ * counts only for a peer of the agent whose status carries it, so no agent
+ * can place another in a call.
+ */
+function presencePeer(did: string, link: Partial<StatusLink> | undefined, roomId: string): string | null {
+    if (link?.predicate !== CALL_PRESENCE_PREDICATE || link.target !== roomId) return null
+    const source = link.source
+    if (typeof source !== "string" || source === did || agentOfMeshPeer(source) !== did) return null
+    return source
+}
+
+/**
+ * Where a mesh session hears that this device joined the same call again,
+ * from another tab. `BroadcastChannel` reaches every tab of one browser
+ * profile — the same reach as the `localStorage` the device id lives in.
+ */
+function sameDeviceChannel(agentDid: string, device: string, roomId: string): BroadcastChannel | null {
+    const Channel = (globalThis as { BroadcastChannel?: typeof BroadcastChannel }).BroadcastChannel
+    if (typeof Channel !== "function") return null
+    try {
+        return new Channel(`ad4m-call:${agentDid}:${device}:${roomId}`)
+    } catch {
+        return null
+    }
+}
+
 export function createSession(config: SessionImplConfig): Session {
     const {
         api, roomId, agentDid, neighbourhoodUrl,
@@ -147,6 +178,8 @@ export function createSession(config: SessionImplConfig): Session {
         channel, setOnlineStatus, ownOnlineStatus, onlineAgents,
         localSfuStatus, sfuServesAllMembers,
     } = config
+    const device = deviceId || defaultDeviceId()
+    const selfPeer = meshPeerId(agentDid, device)
 
     let state: SessionState = "idle"
     let sfuManager: SfuManager | null = null
@@ -160,6 +193,8 @@ export function createSession(config: SessionImplConfig): Session {
     const trackListeners: ((stream: MediaStream, track: MediaStreamTrack) => void)[] = []
     const dataListeners: ((message: SfuDataMessage) => void)[] = []
     let dataUnsubscribe: (() => void) | null = null
+    /** The mesh call's line to this device's other tabs; see {@link sameDeviceChannel}. */
+    let sameDevice: BroadcastChannel | null = null
 
     function emit(event: SessionEvent, ...args: any[]) {
         const cbs = callbacks.get(event)
@@ -214,14 +249,14 @@ export function createSession(config: SessionImplConfig): Session {
     let statusBeforeCall: StatusLink[] = []
     let announced = false
 
-    /** This agent's status links, without this call's presence link. */
+    /** This agent's status links, without this device's presence link for this call. */
     async function ownLinksWithoutCall(): Promise<StatusLink[]> {
         const status = ownOnlineStatus ? await ownOnlineStatus() : null
         const links: StatusLink[] = []
         for (const link of status?.data?.links ?? []) {
             const l = link.data
             if (!l?.source || l.target === undefined) continue
-            if (l.predicate === CALL_PRESENCE_PREDICATE && l.target === roomId) continue
+            if (presencePeer(agentDid, l, roomId) === selfPeer) continue
             links.push({ source: l.source, target: l.target, ...(l.predicate ? { predicate: l.predicate } : {}) })
         }
         return links
@@ -238,7 +273,7 @@ export function createSession(config: SessionImplConfig): Session {
                 console.warn("session: reading own status failed:", err)
                 return []
             })
-            const presence = { source: agentDid, predicate: CALL_PRESENCE_PREDICATE, target: roomId }
+            const presence = { source: selfPeer, predicate: CALL_PRESENCE_PREDICATE, target: roomId }
             await setOnlineStatus({ links: [...statusBeforeCall, presence] })
             announced = true
         } catch (err) {
@@ -264,10 +299,11 @@ export function createSession(config: SessionImplConfig): Session {
     /**
      * Poll online agents and reconcile the mesh roster.
      *
-     * Agents in the same call carry a link with predicate
-     * `CALL_PRESENCE_PREDICATE` and target matching the room id.
-     * The poll reads the full online-agents list, filters to those
-     * links, and passes the resulting DID set to `mesh.setRoster()`.
+     * Each device in the call carries a link with predicate
+     * `CALL_PRESENCE_PREDICATE`, its peer id as source and the room id as
+     * target, in its agent's status. The poll reads other agents' statuses
+     * from the online-agents list and this agent's own — its other devices —
+     * from `ownOnlineStatus`, and passes the peers to `mesh.setRoster()`.
      * That function opens connections to new arrivals and tears down
      * connections to departed peers.
      */
@@ -277,23 +313,25 @@ export function createSession(config: SessionImplConfig): Session {
         polling = true
         try {
             const agents = await onlineAgents()
+            const own = ownOnlineStatus ? await ownOnlineStatus() : null
             // The session left while the poll was in flight.
             if (meshManager !== mesh) return
-            const inCall: string[] = []
-            for (const agent of agents) {
-                if (agent.did === agentDid) continue
-                // Each agent's status is a signed perspective: its links
-                // sit under `data`.  Check for the call-presence link
-                // matching this room.
-                for (const link of agent.status?.data?.links ?? []) {
-                    const l = link.data
-                    if (l?.predicate === CALL_PRESENCE_PREDICATE && l.target === roomId) {
-                        inCall.push(agent.did)
-                        break
-                    }
+            const inCall = new Set<string>()
+            const collect = (did: string, links: { data?: Partial<StatusLink> }[] | undefined) => {
+                for (const link of links ?? []) {
+                    const peer = presencePeer(did, link.data, roomId)
+                    if (peer && peer !== selfPeer) inCall.add(peer)
                 }
             }
-            mesh.setRoster(inCall)
+            // Each agent's status is a signed perspective: its links sit
+            // under `data`. Whether an executor lists the caller among the
+            // online agents varies, so this agent's own status is read here
+            // from where it was set, never from the list.
+            for (const agent of agents) {
+                if (agent.did !== agentDid) collect(agent.did, agent.status?.data?.links)
+            }
+            collect(agentDid, own?.data?.links)
+            mesh.setRoster([...inCall])
         } catch (err) {
             console.warn("session: roster poll failed:", err)
         } finally {
@@ -317,8 +355,12 @@ export function createSession(config: SessionImplConfig): Session {
     // ── Mesh wiring helpers ─────────────────────────────────────────
 
     function wireMeshEvents(mesh: MeshManager): void {
-        for (const event of ["participant-joined", "participant-left", "participant-updated", "peer-state", "peer-recovery", "error"] as const) {
+        for (const event of ["peer-state", "peer-recovery", "error"] as const) {
             mesh.on(event, (...args: any[]) => emit(event, ...args))
+        }
+        // As the SFU path reports them: the session (here, the device) and the agent it belongs to.
+        for (const event of ["participant-joined", "participant-left", "participant-updated"] as const) {
+            mesh.on(event, (p: MeshParticipant) => emit(event, { ...p, participantId: p.did, did: agentOfMeshPeer(p.did) }))
         }
         mesh.on("stream-added", (stream: MediaStream, track: MediaStreamTrack) => {
             emit("stream-added", stream, track)
@@ -327,6 +369,38 @@ export function createSession(config: SessionImplConfig): Session {
         mesh.on("stream-removed", (stream: MediaStream, track: MediaStreamTrack) => {
             emit("stream-removed", stream, track)
         })
+    }
+
+    /**
+     * Listen for this device joining the same mesh call from another tab,
+     * and tell any tab already in it. Both tabs are one peer, so only one
+     * can hold the call: the earlier lets go, without withdrawing the
+     * presence link the two share, and says `replaced`.
+     */
+    function claimDevice(mesh: MeshManager): void {
+        sameDevice = sameDeviceChannel(agentDid, device, roomId)
+        if (!sameDevice) return
+        const channel = sameDevice
+        channel.onmessage = (event: MessageEvent) => {
+            if (meshManager !== mesh || (event.data as { joined?: unknown })?.joined !== true) return
+            releaseDevice()
+            stopRosterPolling()
+            if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
+            meshManager = null
+            announced = false
+            void mesh.leave()
+            // Idle before listeners hear it: one may join again at once.
+            setState("idle")
+            emit("replaced", { targetDid: agentDid, neighbourhoodUrl, roomName: roomId, participantId: selfPeer })
+        }
+        channel.postMessage({ joined: true })
+    }
+
+    function releaseDevice(): void {
+        if (!sameDevice) return
+        sameDevice.onmessage = null
+        sameDevice.close()
+        sameDevice = null
     }
 
     // ── SFU wiring helpers ──────────────────────────────────────────
@@ -403,7 +477,7 @@ export function createSession(config: SessionImplConfig): Session {
                 const mesh = new MeshManager({
                     channel,
                     callId: roomId,
-                    selfId: agentDid,
+                    selfId: selfPeer,
                     ...(meshIce.length > 0 ? { iceServers: meshIce } : {}),
                     onNetworkChange: (cb: () => void) => api.onNetworkChange(cb),
                     checkConnection: () => api.checkConnection(),
@@ -415,10 +489,13 @@ export function createSession(config: SessionImplConfig): Session {
                     for (const cb of dataListeners) cb(msg)
                 })
 
+                claimDevice(mesh)
                 await mesh.join(localStream)
                 // Destroyed while the mesh joined: destroy() already let the
                 // mesh go and found nothing to leave.
                 if (destroyed()) throw new Error("Session destroyed")
+                // Replaced while joining: the session is idle again.
+                if (meshManager !== mesh) return
 
                 // Announce this agent's presence in the call, then
                 // start polling so the mesh reconciles connections
@@ -428,6 +505,8 @@ export function createSession(config: SessionImplConfig): Session {
                     await withdrawCallPresence()
                     throw new Error("Session destroyed")
                 }
+                // Replaced while announcing: the link stays, for the tab that took over.
+                if (meshManager !== mesh) return
                 startRosterPolling()
 
                 emit("topology-changed", "mesh")
@@ -440,7 +519,7 @@ export function createSession(config: SessionImplConfig): Session {
                 ? { servers: iceServers.map(s => ({ urls: s.urls, ...(s.username ? { username: s.username } : {}), ...(s.credential ? { credential: s.credential } : {}) })) }
                 : undefined
 
-            const manager = new SfuManager(api, roomId, agentDid, neighbourhoodUrl, iceConfig, sfuConfig, deviceId)
+            const manager = new SfuManager(api, roomId, agentDid, neighbourhoodUrl, iceConfig, sfuConfig, device)
             sfuManager = manager
             wireSfuEvents(manager)
 
@@ -460,6 +539,7 @@ export function createSession(config: SessionImplConfig): Session {
             if (state !== "active") return
             setState("leaving")
             stopRosterPolling()
+            releaseDevice()
             await withdrawCallPresence()
             if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
             if (meshManager) { await meshManager.leave(); meshManager = null }
@@ -471,7 +551,7 @@ export function createSession(config: SessionImplConfig): Session {
             if (meshManager) {
                 return meshManager.getParticipants().map(p => ({
                     participantId: p.did,
-                    agentDid: p.did,
+                    agentDid: agentOfMeshPeer(p.did),
                     stream: p.stream,
                     hasAudio: p.hasAudio,
                     hasVideo: p.hasVideo,
@@ -566,6 +646,7 @@ export function createSession(config: SessionImplConfig): Session {
             const sfu = sfuManager
             if (state === "active" || state === "joining") await session.leave()
             stopRosterPolling()
+            releaseDevice()
             if (mesh) { await mesh.destroy() }
             if (sfu) { await sfu.destroy() }
             meshManager = null
