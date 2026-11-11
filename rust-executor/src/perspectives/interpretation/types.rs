@@ -108,6 +108,12 @@ pub struct InstanceContext {
     /// existing instance or belongs to a fresh one on a different topic.
     /// `BTreeMap` for deterministic prompt ordering across calls.
     pub properties: BTreeMap<String, String>,
+    /// Parent-relation values: relation name → target base URI, for each of
+    /// the class's forward `hasOne` relations currently set on the instance.
+    /// Read alongside the scalars so the prompt can render the existing
+    /// items as a nested `outline` — an item under its parent — instead of a
+    /// flat list. `BTreeMap` for deterministic ordering.
+    pub parents: BTreeMap<String, String>,
 }
 
 /// One transcript turn the interpretation engine (and AutoProcessor gather)

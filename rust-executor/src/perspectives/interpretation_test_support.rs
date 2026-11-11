@@ -148,6 +148,66 @@ pub(crate) const PLAN_SDNA: &str = r#"{
   ]
 }"#;
 
+// ---- auto-accept fixtures ---------------------------------------------------
+//
+// Generic two-class tree used by the `auto_accept` rule tests: a root class
+// that accepts every inferred item (`always`), a child class that accepts
+// only once it sits under a parent (`when_placed` + a forward `hasOne`), and
+// the negative cases (`never`, undeclared). Names are deliberately neutral —
+// the rule must stay DNA-agnostic.
+
+/// Root class: `auto_accept: "always"` — every inferred item is accepted at
+/// the end of the pass that touched it.
+pub(crate) const AA_PARENT_SDNA: &str = r#"{
+  "target_class":"ns://Chapter",
+  "auto_accept":"always",
+  "interpretation_hint":"A top-level grouping node.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://chapter"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://chapter","min_count":1,"max_count":1},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+  ]
+}"#;
+
+/// Child class: `auto_accept: "when_placed"` — inferred items are accepted
+/// only once a parent relation value exists. `partOf` is the generic
+/// forward `hasOne` parent slot (structural definition, no domain names).
+pub(crate) const AA_CHILD_SDNA: &str = r#"{
+  "target_class":"ns://Note",
+  "auto_accept":"when_placed",
+  "interpretation_hint":"An item that belongs under a chapter.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://note"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://note","min_count":1,"max_count":1},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://partOf","name":"partOf","relation_kind":"hasOne","target_class_name":"Chapter","class":"ns://ChapterShape"}
+  ]
+}"#;
+
+/// Explicit opt-out: `auto_accept: "never"` keeps every inferred item
+/// pending for a human.
+pub(crate) const AA_NEVER_SDNA: &str = r#"{
+  "target_class":"ns://Draft",
+  "auto_accept":"never",
+  "interpretation_hint":"A draft that always needs human review.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://draft"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://draft","min_count":1,"max_count":1},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+  ]
+}"#;
+
+/// No `auto_accept` key at all — the pre-feature behaviour: pending forever.
+pub(crate) const AA_PLAIN_SDNA: &str = r#"{
+  "target_class":"ns://Plain",
+  "interpretation_hint":"A class that pre-dates the auto_accept key.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://plain"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://plain","min_count":1,"max_count":1},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+  ]
+}"#;
+
 /// The Flux-shaped grouping class: `name` is the identity (dedup key), `summary`
 /// is a mutable rolling scalar the extractor is asked to *grow* rather than
 /// replace. Used by the Flux-grouping / persistent-topics e2e tests: the model
@@ -896,6 +956,7 @@ pub(crate) fn existing_ids(ids: &[&str]) -> ExistingInstances {
                 title: String::new(),
                 class: String::new(),
                 properties: BTreeMap::new(),
+                parents: BTreeMap::new(),
             })
             .collect(),
     )
@@ -914,6 +975,7 @@ pub(crate) fn existing_by_identity(entries: &[(&str, &str)]) -> ExistingInstance
                 title: (*title).to_string(),
                 class: (*class).to_string(),
                 properties: BTreeMap::new(),
+                parents: BTreeMap::new(),
             })
             .collect(),
     )

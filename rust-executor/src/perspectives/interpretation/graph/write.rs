@@ -503,6 +503,7 @@ mod tests {
             title: "Write the design doc".to_string(),
             class: "Intention".to_string(),
             properties: std::collections::BTreeMap::new(),
+            parents: std::collections::BTreeMap::new(),
         }]);
         let ops = plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &known);
         assert_eq!(ops.len(), 2);
@@ -579,6 +580,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: std::collections::BTreeMap::new(),
+            parents: std::collections::BTreeMap::new(),
         }]);
         // …but the LLM emits an Intention pointing at the Task's id.
         let raw = r#"[
@@ -873,6 +875,7 @@ mod tests {
             title: "Existing".to_string(),
             class: "Task".to_string(),
             properties: std::collections::BTreeMap::new(),
+            parents: std::collections::BTreeMap::new(),
         }]);
         let ops = plan_interpretation_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
 
@@ -935,6 +938,7 @@ mod tests {
             title: "Existing Title".to_string(),
             class: "Task".to_string(),
             properties: std::collections::BTreeMap::new(),
+            parents: std::collections::BTreeMap::new(),
         }]);
         let ops = plan_interpretation_ops_resolved(
             &[shape],
@@ -992,12 +996,14 @@ mod tests {
                 title: "Child".to_string(),
                 class: "Task".to_string(),
                 properties: std::collections::BTreeMap::new(),
+                parents: std::collections::BTreeMap::new(),
             },
             InstanceContext {
                 id: parent.clone(),
                 title: "Parent".to_string(),
                 class: "Task".to_string(),
                 properties: std::collections::BTreeMap::new(),
+                parents: std::collections::BTreeMap::new(),
             },
         ]);
         let proposed = vec![proposal(
@@ -1065,6 +1071,7 @@ mod tests {
                     title: (**id).clone(),
                     class: "Task".to_string(),
                     properties: std::collections::BTreeMap::new(),
+                    parents: std::collections::BTreeMap::new(),
                 })
                 .collect(),
         );

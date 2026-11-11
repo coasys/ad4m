@@ -2164,6 +2164,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Intention".to_string(),
             properties: std::collections::BTreeMap::new(),
+            parents: std::collections::BTreeMap::new(),
         }]);
 
         let ops = vec![
@@ -2567,6 +2568,7 @@ mod tests {
                     title: format!("title of {id}"),
                     class: class.to_string(),
                     properties: Default::default(),
+                    parents: Default::default(),
                 });
         }
         out

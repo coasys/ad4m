@@ -4,7 +4,7 @@ use super::{
 use crate::perspectives::flow_context::{render_consensus_rule, ContentionStatus, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// assemble the per-call LLM input from the target shapes' interpretation hints
 /// plus the transcript. Pure — this is exactly where `interpretation_hint` enters
@@ -39,6 +39,16 @@ use std::collections::HashMap;
 /// is the SDNA `interpretationHint` declared on the property whose predicate
 /// matches the relation (matched via the `properties`/`include_relations`
 /// overlap that `load_shape` guarantees); `None` when no hint was declared.
+///
+/// `outline` is the placement view over the same `existing` set: one indented
+/// line `- [Class] title (id)` per item, nested under the item its first
+/// declared parent relation (forward `hasOne`, in shape order) points to.
+/// The per-class `existing` rows also carry a `parents` object
+/// (`relation name → target id`) when the class has parent relations. Both
+/// exist so the model can see where existing items sit and pick the right
+/// parent for what it extracts. Omitted when `existing` is empty; items
+/// with no parent value — and parents that dangle or cycle — render as
+/// roots, so nothing loops or vanishes.
 ///
 /// `active_flows` is the slice 10.2 payoff: any FlowInstance currently running
 /// on the extraction scope is summarized (via [`FlowContext`]) so the LLM can
@@ -178,6 +188,19 @@ pub fn build_interpretation_input(
                                     .collect();
                                 entry.insert("properties".into(), serde_json::Value::Object(props));
                             }
+                            // `parents` is the relation-name → target-id map of
+                            // the class's parent relations (forward `hasOne`)
+                            // that carry a value — the row-level view of the
+                            // same placement data the top-level `outline`
+                            // renders as a tree.
+                            if !r.parents.is_empty() {
+                                let parents: serde_json::Map<String, serde_json::Value> = r
+                                    .parents
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                                    .collect();
+                                entry.insert("parents".into(), serde_json::Value::Object(parents));
+                            }
                             serde_json::Value::Object(entry)
                         })
                         .collect()
@@ -233,6 +256,10 @@ pub fn build_interpretation_input(
         })
         .collect();
     let mut out = serde_json::json!({ "classes": classes, "transcript": turns });
+    let outline = render_existing_outline(existing, shapes);
+    if !outline.is_empty() {
+        out["outline"] = serde_json::json!(outline);
+    }
     if !active_flows.is_empty() {
         out["active_flows"] = serde_json::Value::Array(
             active_flows
@@ -242,6 +269,150 @@ pub fn build_interpretation_input(
         );
     }
     out.to_string()
+}
+
+/// The compact top-level `outline` over the `existing` set: one indented
+/// line `- [Class] title (id)` per item, children nested under the item
+/// their first declared parent relation points to.
+///
+/// An item's parent is the target of the *first* forward `hasOne` relation
+/// (in the shape's declared order) that carries a value — the same
+/// "parent relation" definition the `when_placed` auto-accept rule uses.
+/// Items with no parent value, a parent id outside the `existing` set
+/// (dangling), or membership in a cycle all render as roots: nothing loops
+/// and nothing vanishes — at worst a malformed graph degrades to a flat
+/// list. Deterministic throughout: ids and each level's children are sorted
+/// by id (unique, stable across runs; titles may collide or change).
+///
+/// Pure — called by [`build_interpretation_input`]; returns `""` when
+/// `existing` is empty so the caller can omit the key entirely.
+fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) -> String {
+    if existing.is_empty() {
+        return String::new();
+    }
+    // class label → shape, so each item's parent relations resolve in the
+    // shape's declared (property) order rather than map order.
+    let shape_by_label: HashMap<String, &ModelShape> = shapes
+        .iter()
+        .map(|s| (class_label(&s.target_class, shapes), s))
+        .collect();
+
+    struct Node {
+        class: String,
+        title: String,
+        parent: Option<String>,
+    }
+
+    let mut ids: Vec<&str> = existing.keys().map(String::as_str).collect();
+    ids.sort_unstable();
+    let mut nodes: HashMap<&str, Node> = HashMap::with_capacity(ids.len());
+    for id in &ids {
+        let entries = &existing[*id];
+        let Some(first) = entries.first() else {
+            continue;
+        };
+        // A base can conform to several classes — `existing[id]` holds one
+        // view per class. Walk each view's parent relations in that class's
+        // shape order; the first view that yields a parent wins. The row
+        // shows the first view's class/title.
+        let parent = entries
+            .iter()
+            .filter_map(|e| {
+                let shape = shape_by_label.get(&e.class)?;
+                shape
+                    .include_relations
+                    .iter()
+                    .filter(|r| r.direction == "forward" && r.kind == "hasOne")
+                    .find_map(|r| e.parents.get(&r.name).cloned())
+            })
+            .next();
+        nodes.insert(
+            id,
+            Node {
+                class: first.class.clone(),
+                title: first.title.clone(),
+                parent,
+            },
+        );
+    }
+
+    // children: parent id → child ids. A parent id outside `nodes` is
+    // dangling → the item is a root.
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut roots: Vec<&str> = Vec::new();
+    for id in &ids {
+        match nodes[id].parent.as_deref() {
+            Some(p) if nodes.contains_key(p) => children.entry(p).or_default().push(id),
+            _ => roots.push(id),
+        }
+    }
+    for kids in children.values_mut() {
+        kids.sort_unstable();
+    }
+    roots.sort_unstable();
+
+    fn emit<'a>(
+        id: &'a str,
+        depth: usize,
+        nodes: &HashMap<&'a str, Node>,
+        children: &HashMap<&'a str, Vec<&'a str>>,
+        rendered: &mut HashSet<&'a str>,
+        on_stack: &mut HashSet<&'a str>,
+        lines: &mut Vec<String>,
+    ) {
+        if !rendered.insert(id) {
+            return;
+        }
+        let node = &nodes[id];
+        lines.push(format!(
+            "{}- [{}] {} ({})",
+            "  ".repeat(depth),
+            node.class,
+            node.title,
+            id
+        ));
+        on_stack.insert(id);
+        if let Some(kids) = children.get(id) {
+            for kid in kids {
+                // A back-edge into an ancestor on the current path is a
+                // cycle — skip it; the member still renders once (as its
+                // own root below if nothing else reached it).
+                if !on_stack.contains(kid) {
+                    emit(kid, depth + 1, nodes, children, rendered, on_stack, lines);
+                }
+            }
+        }
+        on_stack.remove(id);
+    }
+
+    let mut lines: Vec<String> = Vec::with_capacity(nodes.len());
+    let mut rendered: HashSet<&str> = HashSet::new();
+    let mut on_stack: HashSet<&str> = HashSet::new();
+    for id in roots {
+        emit(
+            id,
+            0,
+            &nodes,
+            &children,
+            &mut rendered,
+            &mut on_stack,
+            &mut lines,
+        );
+    }
+    // Cycle members unreachable from any root (e.g. A→B→A) still get a
+    // line each, as roots in id order.
+    for id in ids {
+        emit(
+            id,
+            0,
+            &nodes,
+            &children,
+            &mut rendered,
+            &mut on_stack,
+            &mut lines,
+        );
+    }
+    lines.join("\n")
 }
 
 /// Render one live [`FlowContext`] as the JSON object the LLM sees under
@@ -375,10 +546,18 @@ You receive a JSON object with these fields:
     `cardinality`, and optional `hint`), and an `existing` array of instances already present in
     the graph for that class. Each existing entry is `{id, title, class}`, and
     may also carry a `properties` object holding the instance's current
-    secondary-scalar values (e.g. a rolling summary). `id` is the stable
+    secondary-scalar values (e.g. a rolling summary), and a `parents` object
+    (`relation name → target id`) naming the items it is attached to.
+    `id` is the stable
     handle you emit to update that entry; `title` is its identity label; the
     optional `properties` object shows its *current state* so you can judge
     whether new turns continue that instance or belong to a fresh one.
+  - `outline` (OPTIONAL — present only when items already exist): a compact
+    indented tree of ALL existing items across classes, one line
+    `- [Class] title (id)` per item, children indented under the item their
+    parent relation points to. Read it BEFORE choosing relation targets: it
+    shows where existing items sit in the hierarchy, so new items attach to
+    the right parent instead of drifting to a top level or the wrong branch.
   - `transcript`: an array of turns `{speaker, text}` and, when known,
     `timestamp` (the source link's RFC3339 time). Use `speaker` for identity
     reasoning. When two different participants share the same display name,
@@ -876,6 +1055,7 @@ mod tests {
             title: "Draft the design doc".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
         }]);
         let input = build_interpretation_input(
             &shapes,
@@ -940,6 +1120,7 @@ mod tests {
             title: "Payments infrastructure".to_string(),
             class: "ConversationSubgroup".to_string(),
             properties,
+            parents: BTreeMap::new(),
         }]);
         let input = build_interpretation_input(
             &shapes,
@@ -1697,5 +1878,255 @@ mod tests {
             v["transcript"][0].get("speakerDid").is_none(),
             "speakerDid must be absent when the DID was not resolved"
         );
+    }
+
+    // ---- the `outline` tree + per-row `parents` map -------------------------
+    //
+    // The shape literals below hand-order `include_relations` (the SPARQL
+    // read order is not guaranteed), so the "first declared parent relation
+    // wins" rule is exercised deterministically.
+
+    fn outline_shape(class: &str, parent_rels: &[&str]) -> ModelShape {
+        ModelShape {
+            target_class: format!("ns://{class}"),
+            shape_uri: format!("ns://{class}Shape"),
+            properties: vec![],
+            include_relations: parent_rels
+                .iter()
+                .map(
+                    |name| crate::perspectives::model_query::types::ShapeRelation {
+                        name: (*name).to_string(),
+                        predicate: format!("ns://{name}"),
+                        direction: "forward".to_string(),
+                        kind: "hasOne".to_string(),
+                        max_count: Some(1),
+                        target_class_name: "Chapter".to_string(),
+                        target_class_uri: "ns://ChapterShape".to_string(),
+                    },
+                )
+                .collect(),
+            interpretation_hint: None,
+            auto_accept: None,
+        }
+    }
+
+    fn ic(id: &str, title: &str, class: &str, parents: &[(&str, &str)]) -> InstanceContext {
+        InstanceContext {
+            id: id.to_string(),
+            title: title.to_string(),
+            class: class.to_string(),
+            properties: BTreeMap::new(),
+            parents: parents
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        }
+    }
+
+    /// The canonical case: children nest under the item their parent
+    /// relation points to; parentless items are roots, roots and children
+    /// sorted by id.
+    #[test]
+    fn outline_nests_items_under_their_parents() {
+        let shapes = vec![
+            outline_shape("Chapter", &[]),
+            outline_shape("Note", &["partOf"]),
+        ];
+        let existing = existing_map(vec![
+            ic("soa://c/1", "Chapter A", "Chapter", &[]),
+            ic("soa://n/1", "Note 1", "Note", &[("partOf", "soa://c/1")]),
+            ic("soa://n/2", "Note 2", "Note", &[("partOf", "soa://c/1")]),
+            ic("soa://n/3", "Orphan note", "Note", &[]),
+        ]);
+        assert_eq!(
+            render_existing_outline(&existing, &shapes),
+            "- [Chapter] Chapter A (soa://c/1)\n  \
+             - [Note] Note 1 (soa://n/1)\n  \
+             - [Note] Note 2 (soa://n/2)\n\
+             - [Note] Orphan note (soa://n/3)"
+        );
+    }
+
+    /// Two levels of nesting: grandchild under child under root.
+    #[test]
+    fn outline_renders_multiple_levels() {
+        let shapes = vec![
+            outline_shape("Root", &[]),
+            outline_shape("Mid", &["partOf"]),
+            outline_shape("Leaf", &["partOf"]),
+        ];
+        let existing = existing_map(vec![
+            ic("soa://r", "Root", "Root", &[]),
+            ic("soa://m", "Mid", "Mid", &[("partOf", "soa://r")]),
+            ic("soa://l", "Leaf", "Leaf", &[("partOf", "soa://m")]),
+        ]);
+        assert_eq!(
+            render_existing_outline(&existing, &shapes),
+            "- [Root] Root (soa://r)\n  - [Mid] Mid (soa://m)\n    - [Leaf] Leaf (soa://l)"
+        );
+    }
+
+    /// With several parent relations carrying values, the first in the
+    /// shape's declared order wins — the deterministic tie-break.
+    #[test]
+    fn outline_uses_the_first_declared_parent_relation() {
+        let shapes = vec![
+            outline_shape("Chapter", &[]),
+            outline_shape("Note", &["partOf", "alsoPartOf"]),
+        ];
+        let existing = existing_map(vec![
+            ic("soa://c/1", "First parent", "Chapter", &[]),
+            ic("soa://c/2", "Second parent", "Chapter", &[]),
+            // `parents` is a BTreeMap: alphabetical order puts alsoPartOf
+            // first — the outline must still follow *shape* order.
+            ic(
+                "soa://n",
+                "Dual-parented",
+                "Note",
+                &[("partOf", "soa://c/1"), ("alsoPartOf", "soa://c/2")],
+            ),
+        ]);
+        assert_eq!(
+            render_existing_outline(&existing, &shapes),
+            "- [Chapter] First parent (soa://c/1)\n  \
+             - [Note] Dual-parented (soa://n)\n\
+             - [Chapter] Second parent (soa://c/2)"
+        );
+    }
+
+    /// A parent id that is not in `existing` (deleted, filtered out, or
+    /// never existed) renders the item as a root — nothing dangles.
+    #[test]
+    fn outline_renders_a_dangling_parent_as_a_root() {
+        let shapes = vec![outline_shape("Note", &["partOf"])];
+        let existing = existing_map(vec![ic(
+            "soa://n",
+            "Points nowhere",
+            "Note",
+            &[("partOf", "soa://gone")],
+        )]);
+        assert_eq!(
+            render_existing_outline(&existing, &shapes),
+            "- [Note] Points nowhere (soa://n)"
+        );
+    }
+
+    /// Cycles must not loop: A→B→A renders both items exactly once — as
+    /// roots, in id order — rather than recursing forever or dropping one.
+    #[test]
+    fn outline_renders_cycle_members_as_roots_without_looping() {
+        let shapes = vec![outline_shape("Note", &["partOf"])];
+        let existing = existing_map(vec![
+            ic("soa://a", "A", "Note", &[("partOf", "soa://b")]),
+            ic("soa://b", "B", "Note", &[("partOf", "soa://a")]),
+            ic("soa://r", "Independent root", "Note", &[]),
+        ]);
+        let outline = render_existing_outline(&existing, &shapes);
+        assert_eq!(
+            outline,
+            "- [Note] Independent root (soa://r)\n\
+             - [Note] A (soa://a)\n  \
+             - [Note] B (soa://b)",
+        );
+        assert_eq!(outline.matches("soa://a").count(), 1);
+        assert_eq!(outline.matches("soa://b").count(), 1);
+    }
+
+    /// A cycle with an inbound edge from a non-cycle member: the DFS from
+    /// the second pass must not loop on the back-edge — every node still
+    /// renders exactly once.
+    #[test]
+    fn outline_skips_a_cycle_back_edge_reached_from_a_root() {
+        let shapes = vec![outline_shape("Note", &["partOf"])];
+        // a→b→a is a pure cycle (neither is a root); c→a points into it.
+        let existing = existing_map(vec![
+            ic("soa://a", "A", "Note", &[("partOf", "soa://b")]),
+            ic("soa://b", "B", "Note", &[("partOf", "soa://a")]),
+            ic("soa://c", "C", "Note", &[("partOf", "soa://a")]),
+        ]);
+        let outline = render_existing_outline(&existing, &shapes);
+        // Nothing has a resolvable parent outside the cycle, so 'a' is the
+        // first root in id order; b nests under it (children of a), c too;
+        // b's edge back to a is skipped as a back-edge.
+        assert_eq!(
+            outline,
+            "- [Note] A (soa://a)\n  \
+             - [Note] B (soa://b)\n  \
+             - [Note] C (soa://c)"
+        );
+    }
+
+    /// No relations anywhere: the outline is the flat id-sorted list.
+    #[test]
+    fn outline_is_flat_when_nothing_has_a_parent() {
+        let shapes = vec![
+            outline_shape("Note", &["partOf"]),
+            outline_shape("Task", &[]),
+        ];
+        let existing = existing_map(vec![
+            ic("soa://t/2", "Task B", "Task", &[]),
+            ic("soa://n/1", "Note A", "Note", &[]),
+            ic("soa://t/1", "Task A", "Task", &[]),
+        ]);
+        assert_eq!(
+            render_existing_outline(&existing, &shapes),
+            "- [Note] Note A (soa://n/1)\n- [Task] Task A (soa://t/1)\n- [Task] Task B (soa://t/2)"
+        );
+    }
+
+    /// `build_interpretation_input` surfaces both views: `parents` on the
+    /// row that declares them, `outline` at the top level — and neither
+    /// when the existing set is empty.
+    #[test]
+    fn prompt_carries_parents_per_row_and_the_top_level_outline() {
+        let shapes = vec![
+            outline_shape("Chapter", &[]),
+            outline_shape("Note", &["partOf"]),
+        ];
+        let existing = existing_map(vec![
+            ic("soa://c/1", "Chapter A", "Chapter", &[]),
+            ic("soa://n/1", "Note 1", "Note", &[("partOf", "soa://c/1")]),
+        ]);
+        let input = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text("Ana", "a turn")],
+            &existing,
+            &[],
+            &HashMap::new(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let note_class = v["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Note")
+            .expect("Note class");
+        let entry = &note_class["existing"].as_array().unwrap()[0];
+        assert_eq!(entry["parents"]["partOf"], "soa://c/1");
+        // The parent row carries no `parents` key (nothing set → omitted).
+        let chapter_class = v["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Chapter")
+            .expect("Chapter class");
+        assert!(chapter_class["existing"].as_array().unwrap()[0]
+            .get("parents")
+            .is_none());
+        assert_eq!(
+            v["outline"].as_str().unwrap(),
+            "- [Chapter] Chapter A (soa://c/1)\n  - [Note] Note 1 (soa://n/1)"
+        );
+
+        // Empty existing → no outline key at all (compact prompt).
+        let input2 = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text("Ana", "a turn")],
+            &no_existing(),
+            &[],
+            &HashMap::new(),
+        );
+        let v2: serde_json::Value = serde_json::from_str(&input2).unwrap();
+        assert!(v2.get("outline").is_none());
     }
 }

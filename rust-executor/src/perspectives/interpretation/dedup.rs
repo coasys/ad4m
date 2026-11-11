@@ -522,6 +522,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
         }]);
         let mut identity_props = HashMap::new();
         identity_props.insert("Task".to_string(), "title".to_string());
@@ -731,6 +732,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
         }]);
         let string_res: Vec<Resolution> =
             resolve_already_present(proposed_str, &existing, &identity_props)
@@ -846,6 +848,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
         }]);
         let mut identity_props = HashMap::new();
         identity_props.insert("Task".to_string(), "title".to_string());
@@ -900,6 +903,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
         }]);
         let kept = filter_already_present(proposed, &existing_trusted, &identity_props);
         assert_eq!(kept.len(), 1, "a trusted id bypasses dedup; got {kept:#?}");

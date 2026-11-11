@@ -308,7 +308,7 @@ pub async fn existing_instance_context(
             anyhow::anyhow!("existing_instance_context: bad model_query result for {class}: {e:#}")
         })?;
 
-        let rows: Vec<InstanceContext> = result
+        let mut rows: Vec<InstanceContext> = result
             .get("instances")
             .and_then(|v| v.as_array())
             .map(|rows| {
@@ -343,11 +343,78 @@ pub async fn existing_instance_context(
                             title: title.to_string(),
                             class: class.clone(),
                             properties,
+                            parents: BTreeMap::new(),
                         })
                     })
                     .collect()
             })
             .unwrap_or_default();
+
+        // Parent relations — every declared forward `hasOne` on this shape
+        // (the generic definition the outline and the `when_placed`
+        // auto-accept rule share). One `get_links` per distinct predicate;
+        // each row whose id is a link's source gets `name → target` in
+        // `parents`. get_links returns index-scan order, not chronological,
+        // so when several links share a source+predicate (a hasOne that was
+        // overwritten without removing the old edge) we keep the newest by
+        // comparing RFC3339 timestamps.
+        // Only *real* links: relation writes (`AddLinks`) are always real —
+        // they never travel through the `inferred/<p>` snapshot — which
+        // matches how the `existing` rows already show staged overlay items'
+        // real fields today.
+        let parent_rels: Vec<&crate::perspectives::model_query::types::ShapeRelation> = shape
+            .include_relations
+            .iter()
+            .filter(|r| r.direction == "forward" && r.kind == "hasOne")
+            .collect();
+        if !parent_rels.is_empty() && !rows.is_empty() {
+            use crate::types::LinkQuery;
+            let mut by_predicate: HashMap<&str, HashMap<String, (i64, String)>> = HashMap::new();
+            for rel in &parent_rels {
+                if by_predicate.contains_key(rel.predicate.as_str()) {
+                    continue;
+                }
+                let links = perspective
+                    .get_links(&LinkQuery {
+                        predicate: Some(rel.predicate.clone()),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "existing_instance_context: get_links({}) failed: {e:#}",
+                            rel.predicate
+                        )
+                    })?;
+                // source → (millis, target); the newest write wins.
+                // Timestamps are parsed rather than string-compared:
+                // RFC3339 offsets can differ ("Z" vs "+00:00"), which
+                // breaks lexicographic order.
+                let mut by_source: HashMap<String, (i64, String)> = HashMap::new();
+                for l in links {
+                    let l_ts = chrono::DateTime::parse_from_rfc3339(&l.timestamp)
+                        .map(|d| d.timestamp_millis())
+                        .unwrap_or_default();
+                    match by_source.get(&l.data.source) {
+                        Some((ts, _)) if *ts >= l_ts => {}
+                        _ => {
+                            by_source.insert(l.data.source, (l_ts, l.data.target));
+                        }
+                    }
+                }
+                by_predicate.insert(rel.predicate.as_str(), by_source);
+            }
+            for row in &mut rows {
+                for rel in &parent_rels {
+                    if let Some((_, target)) = by_predicate
+                        .get(rel.predicate.as_str())
+                        .and_then(|m| m.get(&row.id))
+                    {
+                        row.parents.insert(rel.name.clone(), target.clone());
+                    }
+                }
+            }
+        }
 
         for row in rows {
             out.entry(row.id.clone()).or_default().push(row);
@@ -709,5 +776,139 @@ mod tests {
         );
         assert!(!inst.properties.contains_key("name"));
         assert!(!inst.properties.contains_key("type"));
+    }
+
+    #[tokio::test]
+    async fn existing_instance_context_populates_parents_from_has_one_links() {
+        // The `parents` map carries each row's declared forward `hasOne`
+        // relation values (relation name → target id), so the prompt's
+        // per-row `parents` and the top-level `outline` can show where an
+        // existing item sits. Here a Note with a real `partOf` edge to a
+        // Chapter must surface `partOf → <chapter>` on its context row.
+        use crate::types::{Link, LinkStatus};
+
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("Chapter", AA_PARENT_SDNA), ("Note", AA_CHILD_SDNA)]).await;
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "soa://existing/chapter/1",
+            "Chapter one",
+        )
+        .await;
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[1],
+            "soa://existing/note/1",
+            "Note one",
+        )
+        .await;
+        // A second note with no parent — its row must carry no `parents`.
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[1],
+            "soa://existing/note/2",
+            "Note two",
+        )
+        .await;
+        perspective
+            .add_link(
+                Link {
+                    source: "soa://existing/note/1".into(),
+                    predicate: Some("ns://partOf".into()),
+                    target: "soa://existing/chapter/1".into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("partOf link");
+
+        let ctx_map = existing_instance_context(&perspective, &shapes, None)
+            .await
+            .expect("existing_instance_context");
+
+        let note = &ctx_map["soa://existing/note/1"][0];
+        assert_eq!(
+            note.parents.get("partOf").map(String::as_str),
+            Some("soa://existing/chapter/1"),
+            "the hasOne parent value must land on the row's `parents`; got {:?}",
+            note.parents
+        );
+        // No scalar property may leak the relation into `properties`.
+        assert!(
+            !note.properties.contains_key("partOf"),
+            "relations stay out of `properties`; got {:?}",
+            note.properties
+        );
+        // Chapter row and the unplaced note carry no `parents` entries.
+        assert!(ctx_map["soa://existing/chapter/1"][0].parents.is_empty());
+        assert!(ctx_map["soa://existing/note/2"][0].parents.is_empty());
+    }
+
+    #[tokio::test]
+    async fn existing_instance_context_parents_keeps_the_newest_value() {
+        // `get_links` returns links timestamp-ascending; when a hasOne was
+        // overwritten such that two links coexist for the same source +
+        // predicate, the newest target must win — matching what the model
+        // would see as the current value.
+        use crate::types::{Link, LinkStatus};
+
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("Chapter", AA_PARENT_SDNA), ("Note", AA_CHILD_SDNA)]).await;
+        for (base, title) in [
+            ("soa://existing/chapter/old", "Old chapter"),
+            ("soa://existing/chapter/new", "New chapter"),
+        ] {
+            seed_instance(&mut perspective, &ctx, &shapes[0], base, title).await;
+        }
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[1],
+            "soa://existing/note/1",
+            "Moved note",
+        )
+        .await;
+
+        for (i, target) in ["soa://existing/chapter/old", "soa://existing/chapter/new"]
+            .iter()
+            .enumerate()
+        {
+            if i > 0 {
+                // Link timestamps carry millisecond resolution — give the
+                // second write its own later timestamp deterministically.
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            perspective
+                .add_link(
+                    Link {
+                        source: "soa://existing/note/1".into(),
+                        predicate: Some("ns://partOf".into()),
+                        target: (*target).into(),
+                    },
+                    LinkStatus::Local,
+                    None,
+                    &ctx,
+                )
+                .await
+                .expect("partOf link");
+        }
+
+        let ctx_map = existing_instance_context(&perspective, &shapes, None)
+            .await
+            .expect("existing_instance_context");
+        assert_eq!(
+            ctx_map["soa://existing/note/1"][0]
+                .parents
+                .get("partOf")
+                .map(String::as_str),
+            Some("soa://existing/chapter/new"),
+            "the newest link's target must win"
+        );
     }
 }
