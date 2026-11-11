@@ -74,10 +74,12 @@ write_stamp() {
 }
 
 # Whether the stamp names these inputs and the outputs here are the ones it
-# was written for. A stamp without checksums (older script) vouches for none.
+# was written for: the whole stamp equals the one write_stamp would write now,
+# so a stamp that lacks a checksum (an older script, a write cut short)
+# vouches for none.
 stamp_vouches() {
-  [[ "$(head -n 1 "$stamp" 2>/dev/null)" == "$hash" ]] && have_outputs . \
-    && tail -n +2 "$stamp" | sha256 -c --status 2>/dev/null
+  have_outputs . \
+    && [[ "$(cat "$stamp" 2>/dev/null)" == "$(echo "$hash"; sha256 "${outputs[@]}")" ]]
 }
 
 cache=${CI_ARTIFACT_DIR:+$CI_ARTIFACT_DIR/deno-snapshot}

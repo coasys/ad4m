@@ -125,6 +125,22 @@ echo "test: a stamp without checksums (older script) vouches for nothing"
     exit "$FAILED"
 ) || FAILED=1
 
+echo "test: a stamp that lists only some outputs vouches for nothing"
+(
+    unset CI_ARTIFACT_DIR FORCE_DENO_SNAPSHOT
+    make_workspace
+    run_script
+    # A write cut short: the hash and the binary's checksum, not the residual files'.
+    head -n 2 "$EXE/CUSTOM_DENO_SNAPSHOT.inputs" >"$EXE/stamp.tmp"
+    mv "$EXE/stamp.tmp" "$EXE/CUSTOM_DENO_SNAPSHOT.inputs"
+    echo "residual of another branch" >"$EXE/CUSTOM_DENO_SNAPSHOT.residual_js.rs"
+    run_script
+    [[ "$(builds)" == 2 ]] || fail "a partial stamp was trusted ($OUT)"
+    [[ "$(cat "$EXE/CUSTOM_DENO_SNAPSHOT.residual_js.rs")" == "snapshot of ops v1" ]] \
+        || fail "the unlisted residual file was kept"
+    exit "$FAILED"
+) || FAILED=1
+
 echo "test: changed JS builds again"
 (
     unset CI_ARTIFACT_DIR FORCE_DENO_SNAPSHOT
