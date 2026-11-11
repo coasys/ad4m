@@ -689,12 +689,22 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     }
 
     // Restore perspective data from the platform backend if running in shared mode.
-    // Downloads the tar.gz snapshot and extracts to the data directory
-    // before perspectives initialise (so OxiGraph opens with restored data).
+    // Downloads the sealed snapshot, opens it under the keyring (open by now) and
+    // extracts it to the data directory before perspectives initialise (so OxiGraph
+    // opens with restored data). A plain snapshot from before snapshots were sealed
+    // is restored once and replaced by a sealed one as soon as perspectives are open.
+    let mut reseal_snapshot = false;
     if config.wallet_backend.as_deref() == Some("shared") {
+        use crate::perspective_snapshot::Restored;
         match crate::perspective_snapshot::restore_perspectives(&config) {
-            Ok(true) => info!("Restored perspectives from remote snapshot"),
-            Ok(false) => info!("No remote snapshot found — starting with fresh perspectives"),
+            Ok(Restored::Sealed) => info!("Restored perspectives from remote snapshot"),
+            Ok(Restored::Plain) => {
+                info!("Restored perspectives from a plain remote snapshot; resealing it");
+                reseal_snapshot = true;
+            }
+            Ok(Restored::Nothing) => {
+                info!("No remote snapshot found — starting with fresh perspectives")
+            }
             Err(e) => log::warn!("Perspective restore failed (continuing without): {}", e),
         }
     }
@@ -1006,7 +1016,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     // Start periodic perspective snapshots in shared mode.
     if config.wallet_backend.as_deref() == Some("shared") {
-        crate::perspective_snapshot::spawn_periodic_backup(config.clone());
+        crate::perspective_snapshot::spawn_periodic_backup(config.clone(), reseal_snapshot);
     }
 
     // Start periodic memory diagnostics (logs RSS, jemalloc stats,

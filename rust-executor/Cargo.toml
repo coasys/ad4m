@@ -116,7 +116,8 @@ serde = "1.0.159"
 serde_ignored = "0.1"
 secp256k1 = { version = "0.27.0", features = ["rand", "serde"] }
 crypto_box = "0.8.2"
-chacha20poly1305 = "0.10.1"
+# `stream`: the STREAM construction that seals the platform snapshot (at_rest/archive.rs).
+chacha20poly1305 = { version = "0.10.1", features = ["stream"] }
 # Sealed boxes to an agent's DID key (agent/sealed_box.rs).
 aes-gcm = "0.10.3"
 curve25519-dalek = "4.1.3"
