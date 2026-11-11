@@ -13,7 +13,8 @@ use serde_json::{json, Value};
 
 use super::run::{run_turn, TurnDeps};
 use super::service::{
-    self, running_for_test, AgentSessionCreate, AgentSessionUpdateParams, SessionError,
+    self, lifecycle_entry_for_test, running_for_test, AgentSessionCreate, AgentSessionUpdateParams,
+    SessionError,
 };
 use super::store::{agent_session_store, DbAgentSessionStore};
 use super::types::{AgentSession, AgentSessionMessage, AgentSessionMessageRole, AgentTurnStatus};
@@ -883,6 +884,33 @@ async fn a_send_started_while_a_delete_is_midway_leaves_no_turn_running() {
     released.store(true, Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(provider.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_owners_delete_leaves_the_sessions_lifecycle_lock_in_place() {
+    setup();
+    let did = "did:key:alice-a17";
+    let alice = user(did, everything());
+    let session = create(&alice);
+    // A send leaves the session's lifecycle lock in the table: the session lives on.
+    let started = service::send(&alice, &session.id, "hi", deps(Scripted::answering(vec![])))
+        .await
+        .unwrap();
+    settled(Some(did), &started.reply_id).await;
+    assert!(lifecycle_entry_for_test(Some(did), &session.id));
+
+    // Bob's delete of an id that is not his answers not-found. It must not retire
+    // Alice's lock: a send of hers would take a fresh one while her own delete still
+    // holds the old, and the two would no longer exclude each other.
+    let bob = user("did:key:bob-a17", everything());
+    assert!(matches!(
+        service::delete(&bob, &session.id),
+        Err(SessionError::NotFound(_))
+    ));
+    assert!(
+        lifecycle_entry_for_test(Some(did), &session.id),
+        "another owner's not-found retires no lock of this owner's session"
+    );
 }
 
 /// A model that panics when asked: the turn's task dies without settling anything.

@@ -691,6 +691,12 @@ pub(crate) fn running_for_test(session_id: &str) -> bool {
     RUNNING.lock().unwrap().contains_key(session_id)
 }
 
+/// For tests: whether the lifecycle table holds a lock for `owner`'s session.
+#[cfg(test)]
+pub(crate) fn lifecycle_entry_for_test(_owner: Option<&str>, session_id: &str) -> bool {
+    LIFECYCLE.lock().unwrap().contains_key(session_id)
+}
+
 #[cfg(test)]
 pub(crate) fn clear_running_for_test() {
     RUNNING.lock().unwrap().clear();
