@@ -9,6 +9,11 @@ parameters:
   run-nightly-llm:
     type: boolean
     default: false
+  # The WE branch, tag or full commit the nightly `coasys-spaces` job tests with this commit's
+  # executor and SDK.
+  we-ref:
+    type: string
+    default: dev
 
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
@@ -111,10 +116,12 @@ commands:
           # tests fail with "No space left on device" and then en masse
           # with PoisonError (#1123, 2026-09-25). Skip dirs that a live
           # executor still uses; a concurrent job's dir is younger than 60 min.
+          # WE's live harness (coasys-spaces) makes /tmp/we-live-web-<random> and
+          # removes it when the suite ends; a killed run leaves it.
           name: Clean up stale test executor dirs in /tmp (older than 60 min)
           command: |
-            in_use=$(pgrep -a -f 'ad4m-executor run' | grep -oE '/tmp/ad4m-[0-9a-f]+' | sort -u || true)
-            find /tmp -maxdepth 1 -name 'ad4m-*' -user "$(id -u)" -mmin +60 -print 2>/dev/null \
+            in_use=$(pgrep -a -f 'ad4m-executor run' | grep -oE '/tmp/(ad4m-[0-9a-f]+|we-live-web-[A-Za-z0-9]+)' | sort -u || true)
+            find /tmp -maxdepth 1 \( -name 'ad4m-*' -o -name 'we-live-web-*' \) -user "$(id -u)" -mmin +60 -print 2>/dev/null \
               | grep -vxF -f <(printf '%s\n' $in_use /nonexistent) \
               | xargs -r -d '\n' rm -rf || true
             df -h /tmp | tail -1
@@ -380,6 +387,11 @@ jobs:
           # block above against healthy and deliberately broken workdirs (#1325).
           name: Test the fix_workdir step
           command: bash scripts/ci-fix-workdir.test.sh
+      - run:
+          # Fake executor, local git repo, local HTTP server; about a second. The nightly
+          # coasys-spaces job's executor fetch, skip and model check.
+          name: Test coasys-spaces.sh
+          command: bash scripts/coasys-spaces.test.sh
       - build_adam
       - build_integration_inputs
       - run:
@@ -982,6 +994,89 @@ jobs:
           path: /tmp/test-artifacts
           destination: sfu-test-logs
 
+  # The Coasys product path in WE, end to end, on this commit: a space, a call, its
+  # transcript, extraction into the social DNA's classes, and the flows on what was found
+  # (WE apps/we-web/tests/live/coasys-spaces/, `test:spaces`). The suite lives in WE because
+  # it drives WE's UI; this job runs it with this commit's executor and SDK, so the client
+  # and the executor are one commit and a failure has one owner. WE comes from the `we-ref`
+  # parameter (default dev). Nightly only, in `nightly-llm-e2e`.
+  #
+  # The shell steps are in scripts/coasys-spaces.sh, which also runs by hand (`all`):
+  # - the executor published on this host for the commit (the `build` job's publish step),
+  #   checked against its manifest; a build only when there is none;
+  # - core and connect built and packed, and WE's ad4m pin (root pnpm.overrides) pointed at
+  #   the two tarballs; WE installs with its own pnpm (its packageManager, pnpm 10);
+  # - we-web built with WE_SEED=seeds/coasys.seed.json, then `test:spaces` in the real tier:
+  #   Whisper in the executor, extraction on the host's Ollama.
+  # It halts green when this ad4m commit and the WE commit `we-ref` names already passed
+  # here: the pipeline fires several times a night, and WE moves on its own, so either repo
+  # moving runs it again. The record is a file on the runner host (no API token).
+  # Playwright's Chromium: the debian13 builds and browsers path of integration-tests-sfu-browsers.
+  coasys-spaces:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian13-x64
+      PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
+      WE_REF: << pipeline.parameters.we-ref >>
+      COASYS_SPACES_TIER: real
+      COASYS_SPACES_LLM_BASE_URL: http://localhost:11434/v1
+      # The model staging and llm-e2e use, which Marvin keeps loaded: one load on the GPU.
+      COASYS_SPACES_LLM_MODEL: qwen3.8-27b-48k
+      # Not /tmp/test-artifacts: other jobs on this host write there at the same time.
+      COASYS_SPACES_ARTIFACTS: /tmp/coasys-spaces-artifacts
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: Skip if this ad4m commit and this WE commit already passed
+          command: |
+            rc=0
+            bash scripts/coasys-spaces.sh preflight || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+              exit 0
+            fi
+            exit "$rc"
+      - run:
+          # Before any build: a missing model fails in seconds, with what to do.
+          name: Check that Ollama answers and has the model
+          command: bash scripts/coasys-spaces.sh llm-check
+      - run:
+          name: Get the executor for this commit (published, else build)
+          command: bash scripts/coasys-spaces.sh executor
+          no_output_timeout: 30m
+      - run:
+          name: Build and pack core and connect
+          command: bash scripts/coasys-spaces.sh sdk
+          no_output_timeout: 20m
+      - run:
+          name: Clone WE at we-ref and install it with this commit's SDK
+          command: bash scripts/coasys-spaces.sh we
+          no_output_timeout: 20m
+      - run:
+          # Usually a no-op: integration-tests-sfu-browsers installs the same libraries nightly.
+          name: Install Chromium's system libraries
+          command: |
+            sudo apt-get update -qq
+            ./tests/js/scripts/install-browser-deps.sh
+      - run:
+          name: Build we-web with the Coasys seed
+          command: bash scripts/coasys-spaces.sh build-web
+          no_output_timeout: 20m
+      - run:
+          name: Run the coasys-spaces suite (WE test:spaces)
+          command: bash scripts/coasys-spaces.sh test
+          no_output_timeout: 60m
+      - run:
+          name: Record this commit pair as passed
+          command: bash scripts/coasys-spaces.sh record
+      - store_artifacts:
+          when: always
+          path: /tmp/coasys-spaces-artifacts
+          destination: coasys-spaces
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin-light
@@ -1115,12 +1210,14 @@ workflows:
 
   # Nightly against `dev`. An API trigger (or a Project Trigger) sets
   # `run-nightly-llm`. In-config cron does not reach this project.
-  # Same resource class (Marvin) so Ollama is local. llm-e2e and the SFU
-  # wind tunnel start together and do not build on each other's result:
-  # an llm-e2e failure must not skip the tunnel, and a tunnel failure must
-  # not skip llm-e2e. Three API triggers fire this pipeline every night on
+  # Same resource class (Marvin) so Ollama is local. llm-e2e, the SFU
+  # wind tunnel and coasys-spaces start together and do not build on each
+  # other's result: an llm-e2e failure must not skip the tunnel, and a tunnel
+  # failure must not skip llm-e2e. Three API triggers fire this pipeline every night on
   # one host. Each job has its own serial group, so a second trigger waits
-  # instead of sharing ports, DIDs and the GPU with the first.
+  # instead of sharing ports, DIDs and the GPU with the first. llm-e2e and
+  # coasys-spaces share one group: both run models on the host's Ollama and
+  # GPU, and together they make extraction timeouts likelier.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -1133,3 +1230,5 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-sfu
       - integration-tests-sfu-browsers:
           serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
+      - coasys-spaces:
+          serial-group: << pipeline.project.slug >>/nightly-llm
