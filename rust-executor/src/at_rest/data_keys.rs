@@ -18,8 +18,9 @@ use ts_rs::TS;
 use zeroize::Zeroizing;
 
 use super::keyring_file::{
-    derive_root, FileError, KeyOwner, KeyringFile, KeyringId, PersonEntry, StoreEntry, StoreId,
-    StoreKeyWraps, StoreState, Tombstone, TombstoneKind, VersionState, Wrapper,
+    derive_root, AgentPassphrase, FileError, KeyOwner, KeyringFile, KeyringId, PersonEntry,
+    StoreEntry, StoreId, StoreKeyWraps, StoreState, Tombstone, TombstoneKind, VersionState,
+    Wrapper,
 };
 
 /// Why a data keys call failed. No variant carries key material.
@@ -47,6 +48,8 @@ pub enum KeyringError {
     MainPerson,
     #[error("cannot write the keyring file: {0}")]
     Io(String),
+    #[error("the keyring already holds another agent passphrase")]
+    AgentPassphraseExists,
 }
 
 impl From<FileError> for KeyringError {
@@ -65,6 +68,8 @@ pub enum SubkeyPurpose {
     LanguageStorage,
     Rows,
     Archive,
+    /// The executor's own secrets outside the stores (the local-network certificate's key).
+    Secret,
 }
 
 /// Why a key was destroyed: the reason its tombstone keeps.
@@ -113,6 +118,7 @@ impl SubkeyPurpose {
             SubkeyPurpose::LanguageStorage => "ad4m:at-rest:lang:v1",
             SubkeyPurpose::Rows => "ad4m:at-rest:row:v1",
             SubkeyPurpose::Archive => "ad4m:at-rest:archive:v1",
+            SubkeyPurpose::Secret => "ad4m:at-rest:secret:v1",
         }
     }
 }
@@ -733,6 +739,57 @@ impl DataKeys {
     pub fn has_store(&self, id: &StoreId) -> Result<bool, KeyringError> {
         self.with_open(|open| Ok(open.file.store(id).is_some()))
     }
+
+    /// The agent passphrase the keyring holds or derives; `None` while it has neither (an
+    /// agent made before the keyring, not unlocked since).
+    pub fn agent_passphrase(&self) -> Result<Option<Zeroizing<String>>, KeyringError> {
+        self.with_open(|open| agent_passphrase_of(open))
+    }
+
+    /// The passphrase for an agent made now: the one the keyring already gives, else one
+    /// derived from the root key, recorded in the keyring file before this returns.
+    pub fn derive_agent_passphrase(&self) -> Result<Zeroizing<String>, KeyringError> {
+        let path = self.path.clone();
+        self.with_open(|open| {
+            if let Some(given) = agent_passphrase_of(open)? {
+                return Ok(given);
+            }
+            let mut next = open.file.clone();
+            next.agent_passphrase = Some(AgentPassphrase::Derived {
+                generation: open.file.root_generation,
+            });
+            Self::commit(&path, open, next)?;
+            Ok(super::agent_passphrase::derive(&open.root))
+        })
+    }
+
+    /// Holds `passphrase` (one that opened the wallet file) sealed under the root key,
+    /// written to the keyring file before this returns. Answers whether it is new: holding
+    /// the passphrase the keyring already gives changes nothing; another one is refused
+    /// (`AgentPassphraseExists`).
+    pub fn hold_agent_passphrase(&self, passphrase: &str) -> Result<bool, KeyringError> {
+        let path = self.path.clone();
+        self.with_open(|open| {
+            match agent_passphrase_of(open)? {
+                None => {}
+                Some(current) if current.as_str() == passphrase => return Ok(false),
+                Some(_) => return Err(KeyringError::AgentPassphraseExists),
+            }
+            let generation = open.file.root_generation;
+            let mut next = open.file.clone();
+            next.agent_passphrase = Some(AgentPassphrase::Held {
+                generation,
+                sealed: super::agent_passphrase::seal_held(
+                    passphrase,
+                    &open.root,
+                    &open.file.keyring_id,
+                    generation,
+                ),
+            });
+            Self::commit(&path, open, next)?;
+            Ok(true)
+        })
+    }
 }
 
 fn store_mut<'a>(
@@ -793,6 +850,30 @@ fn wrap_for_owner(
         },
         person_key,
     ))
+}
+
+/// The agent passphrase `open`'s keyring gives, if any.
+fn agent_passphrase_of(open: &OpenKeys) -> Result<Option<Zeroizing<String>>, KeyringError> {
+    let current = open.file.root_generation;
+    match &open.file.agent_passphrase {
+        None => Ok(None),
+        Some(AgentPassphrase::Derived { generation }) if *generation == current => {
+            Ok(Some(super::agent_passphrase::derive(&open.root)))
+        }
+        Some(AgentPassphrase::Held { generation, sealed }) if *generation == current => {
+            super::agent_passphrase::open_held(sealed, &open.root, &open.file.keyring_id, current)
+                .map(Some)
+                .ok_or_else(|| {
+                    KeyringError::CorruptKeyring("the held agent passphrase does not open".into())
+                })
+        }
+        Some(AgentPassphrase::Derived { generation })
+        | Some(AgentPassphrase::Held { generation, .. }) => {
+            Err(KeyringError::CorruptKeyring(format!(
+                "the agent passphrase is of root generation {generation}, the root of {current}"
+            )))
+        }
+    }
 }
 
 /// Opens every key of `file` under `root`. A wrap that does not open is a damaged keyring:

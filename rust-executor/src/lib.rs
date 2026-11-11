@@ -229,18 +229,26 @@ async fn holochain_signal_receiver() {
     }
 }
 
-/// Unlocks the main agent with the passphrase an operator supplied at
-/// startup (`AD4M_UNLOCK_PASSPHRASE_FILE`), the way `agent.unlock` does, so
-/// a restarted headless executor serves requests without a person or a
-/// script unlocking it. Call after [`run`] has returned. Without an agent
-/// (not generated yet) it only logs. Neither path logs the passphrase.
+/// Unlocks the main agent with the passphrase an operator supplied at startup
+/// (`AD4M_UNLOCK_PASSPHRASE_FILE`), the way `agent.unlock` does, and so puts it in the
+/// keyring: later starts unlock from the keyring ([`unlock_agent_from_keyring`]) and the file
+/// is no longer needed. When the keyring already gives the passphrase, the file is not read
+/// and a warning says it can go. Call after [`run`] has returned. Without an agent (not
+/// generated yet) it only logs. No path logs the passphrase.
 pub async fn unlock_agent_at_startup(passphrase: String) {
+    const RETIRED: &str = "AD4M_UNLOCK_PASSPHRASE_FILE is no longer needed: the keyring holds \
+                           the agent passphrase. Remove the file and the variable.";
     let initialized = AgentService::with_global_instance(|agent| agent.is_initialized());
     if !initialized {
         warn!(
-            "AD4M_UNLOCK_PASSPHRASE_FILE is set but there is no agent yet: generate one \
-             (agent.generate); later starts unlock it from the file"
+            "AD4M_UNLOCK_PASSPHRASE_FILE is set but there is no agent yet: a new agent's \
+             passphrase comes from the keyring, so remove the file and the variable"
         );
+        return;
+    }
+    let keys = at_rest::agent_passphrase::keys();
+    if at_rest::agent_passphrase::from_keyring(keys.as_deref()).is_some() {
+        warn!("{RETIRED}");
         return;
     }
     const FAILED: &str = "Unlocking the agent at startup with the passphrase from \
@@ -248,21 +256,66 @@ pub async fn unlock_agent_at_startup(passphrase: String) {
     const STAYS_LOCKED: &str = "The executor stays up with the agent locked; check the file, \
                                 then unlock with agent.unlock or restart";
     match api::agent_ws::unlock_main_agent(passphrase).await {
-        Ok(status) if status.is_unlocked => match status.error {
-            None => info!(
-                "Agent unlocked at startup with the passphrase from AD4M_UNLOCK_PASSPHRASE_FILE"
-            ),
-            Some(error) => error!(
-                "Agent unlocked at startup with the passphrase from \
-                 AD4M_UNLOCK_PASSPHRASE_FILE, but starting its services failed: {error}"
-            ),
-        },
+        Ok(status) if status.is_unlocked => {
+            match status.error {
+                None => info!(
+                    "Agent unlocked at startup with the passphrase from AD4M_UNLOCK_PASSPHRASE_FILE"
+                ),
+                Some(error) => error!(
+                    "Agent unlocked at startup with the passphrase from \
+                     AD4M_UNLOCK_PASSPHRASE_FILE, but starting its services failed: {error}"
+                ),
+            }
+            if at_rest::agent_passphrase::from_keyring(keys.as_deref()).is_some() {
+                warn!("{RETIRED}");
+            }
+        }
         Ok(status) => error!(
             "{FAILED}: {}. {STAYS_LOCKED}",
             status.error.unwrap_or_default()
         ),
         Err(e) => error!("{FAILED}: {}. {STAYS_LOCKED}", e.message),
     }
+}
+
+/// The start's unlock of the main agent from the keyring, decided now: when an agent exists
+/// and the keyring gives its passphrase (derived, or held since an operator's unlock), a task
+/// unlocks it the way `agent.unlock` does and starts Holochain with it. Otherwise the agent
+/// stays locked until an operator unlocks it once; that unlock puts the passphrase in the
+/// keyring. `run` calls it once its stores are open.
+fn unlock_agent_from_keyring() {
+    let initialized = AgentService::with_global_instance(|agent| agent.is_initialized());
+    if !initialized {
+        return;
+    }
+    let keys = at_rest::agent_passphrase::keys();
+    let Some(passphrase) = at_rest::agent_passphrase::from_keyring(keys.as_deref()) else {
+        info!(
+            "The agent stays locked until it is unlocked once with its passphrase \
+             (agent.unlock or AD4M_UNLOCK_PASSPHRASE_FILE); the keyring then holds it"
+        );
+        return;
+    };
+    let passphrase = passphrase.to_string();
+    tokio::spawn(async move {
+        match api::agent_ws::unlock_main_agent(passphrase).await {
+            Ok(status) if status.is_unlocked => match status.error {
+                None => info!("Agent unlocked at startup from the keyring"),
+                Some(error) => error!(
+                    "Agent unlocked at startup from the keyring, but starting its services \
+                     failed: {error}"
+                ),
+            },
+            Ok(status) => error!(
+                "Unlocking the agent at startup from the keyring failed: {}",
+                status.error.unwrap_or_default()
+            ),
+            Err(e) => error!(
+                "Unlocking the agent at startup from the keyring failed: {}",
+                e.message
+            ),
+        }
+    });
 }
 
 /// How long the graceful shutdown that a signal starts may take before the process exits anyway.
@@ -1143,14 +1196,16 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     gate.mark_open();
     info!("Storage open");
 
-    match early_api {
+    let api = match early_api {
         // It has served the storage methods since the start.
         Some(api) => api,
         None => {
             info!("Starting REST API server...");
             spawn_api_thread(config).0
         }
-    }
+    };
+    unlock_agent_from_keyring();
+    api
 }
 
 /// The REST API on a thread of its own, and a receiver that resolves when that thread's

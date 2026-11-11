@@ -321,6 +321,8 @@ pub(crate) const INLINE_SECRETS: &[(&str, &str)] = &[
 pub struct ExecutorSecrets {
     pub admin_credential: Option<Secret>,
     pub smtp_password: Option<String>,
+    /// Retired: an agent made before the keyring is unlocked with it once, which puts its
+    /// passphrase in the keyring; after that the file is not read.
     pub unlock_passphrase: Option<String>,
     /// The operator secret that opens the keyring (`AD4M_STORAGE_SECRET_FILE`).
     pub storage_secret: Option<crate::at_rest::StorageSecret>,
@@ -355,7 +357,7 @@ impl ExecutorSecrets {
     /// |---|---|---|---|
     /// | admin credential | `AD4M_ADMIN_CREDENTIAL` | `AD4M_ADMIN_CREDENTIAL_FILE` | |
     /// | SMTP password | `AD4M_SMTP_PASSWORD` | `AD4M_SMTP_PASSWORD_FILE` | `smtp_config.password_file` |
-    /// | unlock passphrase | | `AD4M_UNLOCK_PASSPHRASE_FILE` | |
+    /// | unlock passphrase (retired) | | `AD4M_UNLOCK_PASSPHRASE_FILE` | |
     /// | storage secret | | `AD4M_STORAGE_SECRET_FILE` | |
     ///
     /// The storage secret is 64 hex characters; `AD4M_STORAGE_SECRET` set is an error, the

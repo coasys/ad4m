@@ -285,6 +285,17 @@ impl Tombstone {
     }
 }
 
+/// Where the agent passphrase comes from (see `super::agent_passphrase`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum AgentPassphrase {
+    /// Derived from the root key of `generation`: the agent was made after the keyring.
+    Derived { generation: u32 },
+    /// The passphrase an operator typed for an agent made before the keyring, sealed under
+    /// the root key of `generation`.
+    Held { generation: u32, sealed: SymWrap },
+}
+
 /// The keyring file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -306,8 +317,11 @@ pub struct KeyringFile {
     /// those keys. Absent in a keyring from before sealed language storage: `plain`.
     #[serde(default)]
     pub language_storage: StoreState,
-    /// Reserved for the agent passphrase held for the unlock; never set by this executor.
-    pub held_agent_passphrase: Option<SymWrap>,
+    /// Where the agent passphrase (the wallet's and Holochain's) comes from: absent until the
+    /// executor first needs it. Keyrings from before it named the field
+    /// `held_agent_passphrase`, always `null`.
+    #[serde(default, alias = "held_agent_passphrase")]
+    pub agent_passphrase: Option<AgentPassphrase>,
 }
 
 /// Why the keyring file did not read.
@@ -369,7 +383,7 @@ impl KeyringFile {
             stores: BTreeMap::new(),
             tombstones: vec![],
             language_storage: StoreState::Plain,
-            held_agent_passphrase: None,
+            agent_passphrase: None,
         };
         let executor_wrap = file.wrap_store_key(
             &StoreId::Executor,
@@ -613,7 +627,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(opened.expose_secret(), main_key.expose_secret());
-        assert_eq!(read.held_agent_passphrase, None);
+        assert_eq!(read.agent_passphrase, None);
+    }
+
+    #[test]
+    fn a_file_with_the_earlier_field_name_still_reads() {
+        let id = KeyringId::random();
+        let (file, _, _) = KeyringFile::create(id, &derive_root(&secret(7), &id));
+        let mut value = serde_json::to_value(&file).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("agent_passphrase");
+        object.insert("held_agent_passphrase".into(), serde_json::Value::Null);
+        let read: KeyringFile = serde_json::from_value(value).unwrap();
+        assert_eq!(read, file);
+
+        let mut value = serde_json::to_value(&file).unwrap();
+        value["agent_passphrase"] = serde_json::json!({ "kind": "derived", "generation": 1 });
+        let read: KeyringFile = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            read.agent_passphrase,
+            Some(AgentPassphrase::Derived { generation: 1 })
+        );
     }
 
     #[test]
