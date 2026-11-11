@@ -303,6 +303,11 @@ pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
     let agent = ctx.acts_as();
     let owner = agent.managed_did();
     let store = agent_session_store();
+    // Whose it is comes first: only its owner's delete may end the turn running on it.
+    let session = store
+        .session(owner, id)
+        .map_err(SessionError::Failed)?
+        .ok_or_else(|| SessionError::NotFound(id.to_string()))?;
     // A running turn writes on rows the delete is about to take: end it first.
     let taken = RUNNING.lock().unwrap().remove(id);
     if let Some(turn) = taken {
@@ -310,10 +315,6 @@ pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
             abort.abort();
         }
     }
-    let session = store
-        .session(owner, id)
-        .map_err(SessionError::Failed)?
-        .ok_or_else(|| SessionError::NotFound(id.to_string()))?;
     if !store
         .delete_session(owner, id)
         .map_err(SessionError::Failed)?
