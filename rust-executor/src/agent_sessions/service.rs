@@ -163,16 +163,24 @@ impl Drop for TurnSlot {
 /// the delete (its turn ends with the session) or starts after (and answers not-found
 /// like any send on a deleted session). A `std::sync::Mutex`: no work under it awaits.
 /// An entry leaves with its session — a delete drops it, and a send that finds the
-/// session gone drops the one it took.
-static LIFECYCLE: Lazy<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+/// session gone drops the one it took. Keyed by owner and id: a not-found is a verdict
+/// on the asker's sessions only, so another owner's miss on the same id retires nothing
+/// of this owner's.
+static LIFECYCLE: Lazy<Mutex<HashMap<LifecycleKey, Arc<Mutex<()>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+type LifecycleKey = (Option<String>, String);
+
+fn lifecycle_key(owner: Option<&str>, session_id: &str) -> LifecycleKey {
+    (owner.map(str::to_string), session_id.to_string())
+}
+
 /// The session's lifecycle lock (see [`LIFECYCLE`]), creating its entry on first use.
-fn lifecycle_lock(session_id: &str) -> Arc<Mutex<()>> {
+fn lifecycle_lock(owner: Option<&str>, session_id: &str) -> Arc<Mutex<()>> {
     LIFECYCLE
         .lock()
         .unwrap()
-        .entry(session_id.to_string())
+        .entry(lifecycle_key(owner, session_id))
         .or_default()
         .clone()
 }
@@ -180,13 +188,11 @@ fn lifecycle_lock(session_id: &str) -> Arc<Mutex<()>> {
 /// Drops the session's lifecycle entry when it is still `lock`'s — nothing keeps a lock
 /// for a session that is gone. The caller holds it, so a send waiting on it wakes to the
 /// same not-found.
-fn retire_lifecycle_lock(session_id: &str, lock: &Arc<Mutex<()>>) {
+fn retire_lifecycle_lock(owner: Option<&str>, session_id: &str, lock: &Arc<Mutex<()>>) {
+    let key = lifecycle_key(owner, session_id);
     let mut lifecycle = LIFECYCLE.lock().unwrap();
-    if lifecycle
-        .get(session_id)
-        .is_some_and(|l| Arc::ptr_eq(l, lock))
-    {
-        lifecycle.remove(session_id);
+    if lifecycle.get(&key).is_some_and(|l| Arc::ptr_eq(l, lock)) {
+        lifecycle.remove(&key);
     }
 }
 
@@ -340,11 +346,11 @@ pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
     let store = agent_session_store();
     // Admission and teardown on one session are mutually exclusive: a send may not slip
     // a turn into the gap between the slot clear below and the transcript delete.
-    let lifecycle = lifecycle_lock(id);
+    let lifecycle = lifecycle_lock(owner, id);
     let _guard = lifecycle.lock().unwrap();
     // Whose it is comes first: only its owner's delete may end the turn running on it.
     let Some(session) = store.session(owner, id).map_err(SessionError::Failed)? else {
-        retire_lifecycle_lock(id, &lifecycle);
+        retire_lifecycle_lock(owner, id, &lifecycle);
         return Err(SessionError::NotFound(id.to_string()));
     };
     // A running turn writes on rows the delete is about to take: end it first.
@@ -361,11 +367,11 @@ pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
         .delete_session(owner, id)
         .map_err(SessionError::Failed)?
     {
-        retire_lifecycle_lock(id, &lifecycle);
+        retire_lifecycle_lock(owner, id, &lifecycle);
         return Err(SessionError::NotFound(id.to_string()));
     }
     publish_session(&ctx.acts_as(), "deleted", &session);
-    retire_lifecycle_lock(id, &lifecycle);
+    retire_lifecycle_lock(owner, id, &lifecycle);
     Ok(true)
 }
 
@@ -384,13 +390,13 @@ pub async fn send(
     // Admission holds the session's lifecycle lock through the read, the slot take and
     // the task registration below: a delete may not land between them. It is a std
     // mutex across synchronous work only — nothing under it awaits.
-    let lifecycle = lifecycle_lock(session_id);
+    let lifecycle = lifecycle_lock(owner, session_id);
     let _guard = lifecycle.lock().unwrap();
     let Some(session) = store
         .session(owner, session_id)
         .map_err(SessionError::Failed)?
     else {
-        retire_lifecycle_lock(session_id, &lifecycle);
+        retire_lifecycle_lock(owner, session_id, &lifecycle);
         return Err(SessionError::NotFound(session_id.to_string()));
     };
     if text.trim().is_empty() {
@@ -693,8 +699,11 @@ pub(crate) fn running_for_test(session_id: &str) -> bool {
 
 /// For tests: whether the lifecycle table holds a lock for `owner`'s session.
 #[cfg(test)]
-pub(crate) fn lifecycle_entry_for_test(_owner: Option<&str>, session_id: &str) -> bool {
-    LIFECYCLE.lock().unwrap().contains_key(session_id)
+pub(crate) fn lifecycle_entry_for_test(owner: Option<&str>, session_id: &str) -> bool {
+    LIFECYCLE
+        .lock()
+        .unwrap()
+        .contains_key(&lifecycle_key(owner, session_id))
 }
 
 #[cfg(test)]
