@@ -464,6 +464,10 @@ mod tests {
             .list_agent_messages(bob, "s1", 100, None)
             .unwrap()
             .is_empty());
+        // Nor read one of its messages by id.
+        assert!(db.get_agent_message(alice, "m1").unwrap().is_some());
+        assert!(db.get_agent_message(bob, "m1").unwrap().is_none());
+        assert!(db.get_agent_message(None, "m1").unwrap().is_none());
 
         assert!(db
             .update_agent_session(

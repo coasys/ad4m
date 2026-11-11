@@ -575,11 +575,24 @@ async fn cancel_ends_the_running_turn() {
     let session = create(&alice);
     let hold = Arc::new(AtomicBool::new(false));
 
-    let started = service::send(&alice, &session.id, "go", deps(Scripted::holding(hold)))
-        .await
-        .unwrap();
+    let started = service::send(
+        &alice,
+        &session.id,
+        "go",
+        deps(Scripted::holding(hold.clone())),
+    )
+    .await
+    .unwrap();
     assert!(service::cancel(&alice, &session.id).unwrap());
     let reply = settled(Some("did:key:alice-a7"), &started.reply_id).await;
+    assert_eq!(reply.status, Some(AgentTurnStatus::Cancelled));
+    // The model answering afterwards changes nothing: the row stays as the cancel left it.
+    hold.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let reply = agent_session_store()
+        .message(Some("did:key:alice-a7"), &started.reply_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(reply.status, Some(AgentTurnStatus::Cancelled));
 
     // Nothing running now: cancel says so, and a new send is free to go.
@@ -646,6 +659,12 @@ async fn only_its_owner_ends_a_sessions_running_turn() {
             service::cancel(&other, &session.id),
             Err(SessionError::NotFound(_))
         ));
+        // A send answers "not found" too, not "busy": the answer does not say a turn is
+        // running there.
+        assert!(matches!(
+            service::send(&other, &session.id, "hi", deps(Scripted::answering(vec![]))).await,
+            Err(SessionError::NotFound(_))
+        ));
         assert!(running_for_test(&session.id));
     }
     // The operator passes the `owns` guard of any id, so over the socket its call reaches
@@ -668,6 +687,54 @@ async fn only_its_owner_ends_a_sessions_running_turn() {
     assert_eq!(reply.status, Some(AgentTurnStatus::Done));
     assert_eq!(reply.content["text"], "done");
     assert!(service::get(&alice, &session.id).is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_who_may_only_read_changes_no_session_and_starts_no_turn() {
+    setup();
+    let did = "did:key:alice-a15";
+    let alice = user(did, everything());
+    let session = create(&alice);
+    // One of Alice's apps, holding `agent:READ` and nothing else.
+    let reader = || Arc::new(user(did, vec![AGENT_READ_CAPABILITY.clone()]));
+    let methods = crate::api::ws_handler::build_handler_map();
+
+    for (method, params) in [
+        ("agent.sessionList", json!({})),
+        ("agent.session", json!({ "id": session.id })),
+        ("agent.messages", json!({ "sessionId": session.id })),
+    ] {
+        let answer = methods.dispatch(method, params, reader()).await;
+        assert!(answer.is_ok(), "{method}: {:?}", answer.err());
+    }
+    for (method, params) in [
+        ("agent.sessionCreate", json!({})),
+        (
+            "agent.sessionUpdate",
+            json!({ "id": session.id, "title": "theirs" }),
+        ),
+        (
+            "agent.send",
+            json!({ "sessionId": session.id, "text": "hi" }),
+        ),
+        ("agent.cancel", json!({ "sessionId": session.id })),
+        ("agent.sessionDelete", json!({ "id": session.id })),
+    ] {
+        let refused = methods
+            .dispatch(method, params, reader())
+            .await
+            .expect_err(method);
+        assert_eq!(refused.code, 403, "{method}: {}", refused.message);
+    }
+
+    // The session is as Alice made it, with nothing said on it.
+    let kept = service::get(&alice, &session.id).unwrap();
+    assert_eq!(kept.title, "test");
+    assert_eq!(service::list(&alice).unwrap().len(), 1);
+    assert!(service::messages(&alice, &session.id, None, None)
+        .unwrap()
+        .is_empty());
+    assert!(!running_for_test(&session.id));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -700,6 +767,99 @@ async fn a_cancelled_turn_leaves_no_step_running() {
     let step = settled(Some(did), &step.id).await;
     assert_eq!(step.status, Some(AgentTurnStatus::Interrupted));
     assert!(step.error.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_sessions_turn_calls_no_tool_afterwards() {
+    setup();
+    let alice = user("did:key:alice-a13", everything());
+    let session = create(&alice);
+
+    // The turn waits on a model that is about to ask for a tool.
+    let hold = Arc::new(AtomicBool::new(false));
+    let model = Arc::new(Scripted {
+        script: Mutex::new(vec![calls("note", json!({}))]),
+        released: hold.clone(),
+        asked: Mutex::new(Vec::new()),
+    });
+    let provider = StubProvider::named(&["note"]);
+    service::send(
+        &alice,
+        &session.id,
+        "go",
+        TurnDeps {
+            completion: Some(model.clone()),
+            provider: Some(provider.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    while model.times_asked() == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(service::delete(&alice, &session.id).unwrap());
+    // The model answers after the delete: the turn is gone, so nothing runs its tool call
+    // and nothing asks the model again.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    hold.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(provider.calls.lock().unwrap().is_empty());
+    assert_eq!(model.times_asked(), 1);
+}
+
+/// A model that panics when asked: the turn's task dies without settling anything.
+struct Panicking;
+
+#[async_trait::async_trait]
+impl CompletionSource for Panicking {
+    async fn complete(
+        &self,
+        _model_id: &str,
+        _messages: &[Value],
+        _tools: Vec<ToolSchema>,
+    ) -> anyhow::Result<HarnessCompletion> {
+        panic!("the model fell over")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_whose_task_died_frees_its_session_and_the_next_send_ends_its_rows() {
+    setup();
+    let did = "did:key:alice-a14";
+    let alice = user(did, everything());
+    let session = create(&alice);
+
+    let died = service::send(&alice, &session.id, "go", deps(Arc::new(Panicking)))
+        .await
+        .unwrap();
+    // The task is gone and so is its hold on the session; its reply row was never settled.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while running_for_test(&session.id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dead task still holds the session after 10 s"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let store = agent_session_store();
+    let left = store.message(Some(did), &died.reply_id).unwrap().unwrap();
+    assert_eq!(left.status, Some(AgentTurnStatus::Running));
+
+    // The next send ends what the dead task left running, and runs its own turn.
+    let next = service::send(
+        &alice,
+        &session.id,
+        "again",
+        deps(Scripted::answering(vec![])),
+    )
+    .await
+    .unwrap();
+    let left = store.message(Some(did), &died.reply_id).unwrap().unwrap();
+    assert_eq!(left.status, Some(AgentTurnStatus::Interrupted));
+    let reply = settled(Some(did), &next.reply_id).await;
+    assert_eq!(reply.status, Some(AgentTurnStatus::Done));
 }
 
 #[tokio::test(flavor = "multi_thread")]
