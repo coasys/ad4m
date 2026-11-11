@@ -707,11 +707,26 @@ jobs:
           name: Install Chromium, Firefox and WebKit
           command: |
             cd ./tests/js
-            if sudo -n true 2>/dev/null; then
-              pnpm exec playwright-core install --with-deps chromium firefox webkit
-            else
-              echo "no passwordless sudo: installing the browsers without their system libraries"
-              pnpm exec playwright-core install chromium firefox webkit
+            pnpm exec playwright-core install chromium firefox webkit
+            # Not `--with-deps`: on a release Playwright does not list (this runner is Ubuntu
+            # 25.04) it falls back to 24.04's package names, and one missing name aborts the
+            # whole install. Find the libraries the browsers cannot load, and install each
+            # one's package by its Debian name (libfoo.so.N -> libfooN or libfoo-N).
+            # A library the browsers ship themselves is not missing: ldd without their rpath
+            # reports it as not found.
+            shipped=$(find ~/.cache/ms-playwright -name '*.so*' -printf '%f\n' | sort -u)
+            missing=$(find ~/.cache/ms-playwright -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
+              | xargs -0 ldd 2>/dev/null | awk '/=> not found/ {print $1}' | sort -u \
+              | grep -vxF -f <(echo "$shipped") || true)
+            echo "libraries not found: ${missing:-none}"
+            if [ -n "$missing" ] && sudo -n true 2>/dev/null; then
+              sudo apt-get update -qq
+              for lib in $missing; do
+                base=${lib%%.so*}; ver=${lib##*.so.}; ver=${ver%%.*}
+                sudo apt-get install -y -qq --no-install-recommends "$base$ver" 2>/dev/null \
+                  || sudo apt-get install -y -qq --no-install-recommends "$base-$ver" 2>/dev/null \
+                  || echo "no package found for $lib"
+              done
             fi
       - run:
           name: Run cross-browser SFU and mesh call tests
