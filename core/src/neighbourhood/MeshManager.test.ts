@@ -2540,6 +2540,11 @@ describe("mesh peer ids", () => {
         expect(agentOfMeshPeer("did:key:z6Mk#laptop")).toBe("did:key:z6Mk")
         expect(agentOfMeshPeer("did:key:z6Mk")).toBe("did:key:z6Mk")
     })
+
+    it("refuse a device id that is empty or holds '#', which would name another agent", () => {
+        expect(() => meshPeerId("did:key:z6Mk", "")).toThrow(/device id/)
+        expect(() => meshPeerId("did:key:z6Mk", "x#y")).toThrow(/device id/)
+    })
 })
 
 describe("createTelepresenceChannel", () => {
@@ -2662,6 +2667,24 @@ describe("createTelepresenceChannel", () => {
 
         unsubscribe()
         expect(handlers.size).toBe(0)
+    })
+
+    it("ignores a device id with '#', and says once that a sender names no device", async () => {
+        const { proxy, signal } = fakeProxy()
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
+        const heard: [string, unknown][] = []
+        channel.onMessage((from, payload) => heard.push([from, payload]))
+        await settle()
+        const consoleWarn = jest.spyOn(console, "warn").mockImplementation()
+
+        signal("did:bob", { source: wire({ n: 1 }, "x#y"), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: JSON.stringify({ message: { n: 2 } }), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: JSON.stringify({ message: { n: 3 } }), predicate: PREDICATE, target: "*" })
+
+        expect(heard).toEqual([])
+        expect(consoleWarn).toHaveBeenCalledTimes(1)
+        expect(consoleWarn.mock.calls[0][0]).toMatch(/did:bob sends no device id/)
+        consoleWarn.mockRestore()
     })
 
     it("reports one result per publish, failed when the send is refused or rejected", async () => {

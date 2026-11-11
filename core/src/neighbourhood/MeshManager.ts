@@ -204,7 +204,13 @@ export interface TelepresenceProxy {
  * media or teardown can stand in for the other's.
  */
 export function meshPeerId(did: string, device: string): string {
+    if (!isMeshDevice(device)) throw new Error(`mesh: device id must be non-empty and without '#': ${JSON.stringify(device)}`)
     return `${did}#${device}`
+}
+
+/** A device id a mesh peer id can carry: `#` would move the split in {@link agentOfMeshPeer}. */
+function isMeshDevice(device: unknown): device is string {
+    return typeof device === "string" && device.length > 0 && !device.includes("#")
 }
 
 /** The agent a mesh peer id belongs to. */
@@ -242,6 +248,7 @@ export function createTelepresenceChannel(
     const self = meshPeerId(selfDid, selfDevice)
     const resultListeners = new Set<(result: { ok: boolean; ms: number }) => void>()
     let subscribed: Promise<void> = Promise.resolve()
+    let warnedNoDevice = false
     const report = (result: { ok: boolean; ms: number }) => {
         for (const cb of resultListeners) {
             try { cb(result) } catch (e) {
@@ -308,7 +315,14 @@ export function createTelepresenceChannel(
                 }
                 if (typeof parsed !== "object" || parsed === null) return
                 const { device, message } = parsed
-                if (typeof device !== "string" || !device) return
+                if (!isMeshDevice(device)) {
+                    // An SDK from before peers were devices sends none: say so once, or a mixed call just looks empty.
+                    if (device === undefined && !warnedNoDevice) {
+                        warnedNoDevice = true
+                        console.warn(`mesh: ${link.author} sends no device id (an older SDK); its mesh messages are ignored`)
+                    }
+                    return
+                }
 
                 const from = meshPeerId(link.author, device)
                 // Drop this device's own echo, and only that.
