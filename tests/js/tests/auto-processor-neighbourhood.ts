@@ -28,6 +28,9 @@ import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
+// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). Without it the
+// Ollama provider requests num_ctx 131072 and Ollama reloads the model out of staging's residency.
+const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 
 // Speaker and timestamp come off the body link's reifier, not an app-level
@@ -47,7 +50,7 @@ ORDER BY ?timestamp`;
 async function registerLlm(ad4m: any): Promise<void> {
   const modelId = await ad4m.ai.addModel({
     name: "interpretation-llm",
-    api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA" },
+    api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA", maxNumCtx: MAX_NUM_CTX },
     modelType: "LLM",
   });
   await ad4m.ai.setDefaultModel("LLM", modelId);

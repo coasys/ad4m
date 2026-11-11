@@ -44,6 +44,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
+// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). Without it the
+// Ollama provider requests num_ctx 131072 and Ollama reloads the model out of staging's residency.
+const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 const ADMIN_CREDENTIAL = "auto-processor-multi-user-admin";
 
@@ -117,7 +120,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     // resolve to it.
     const modelId = await admin.ai.addModel({
       name: "interpretation-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA" },
+      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA", maxNumCtx: MAX_NUM_CTX },
       modelType: "LLM",
     } as any);
     await admin.ai.setDefaultModel("LLM", modelId);
