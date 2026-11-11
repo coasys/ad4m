@@ -289,6 +289,15 @@ macro_rules! ad4m_db_methods {
             fn destroy_perspective_store(&self, uuid: &str) -> Ad4mDbResult<()>;
             fn perspective_stores_without_handle(&self) -> Ad4mDbResult<Vec<String>>;
             fn delete_person_rows(&self, did: &str) -> Ad4mDbResult<usize>;
+            fn reseal_store_values(
+                &self,
+                store: &crate::at_rest::keyring_file::StoreId
+            ) -> Ad4mDbResult<crate::db::sealed::ResealReport>;
+            fn count_store_values_not_under(
+                &self,
+                store: &crate::at_rest::keyring_file::StoreId,
+                version: ad4m_keyring::KeyVersion
+            ) -> Ad4mDbResult<usize>;
             fn add_owner_to_neighbourhood(
                 &self,
                 neighbourhood_url: &str,

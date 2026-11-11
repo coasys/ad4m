@@ -50,6 +50,10 @@ pub enum KeyringError {
     Io(String),
     #[error("the keyring already holds another agent passphrase")]
     AgentPassphraseExists,
+    #[error("same-secret: the new secret is the current one")]
+    SameSecret,
+    #[error("the key has no version left to move to")]
+    VersionsExhausted,
 }
 
 impl From<FileError> for KeyringError {
@@ -790,6 +794,307 @@ impl DataKeys {
             Ok(true)
         })
     }
+
+    /// Moves the keyring from the root key of `current` to the root key of `new`, generation
+    /// one higher: every wrap under the old root (each version of each person's data key, each
+    /// store key wrapped under the root, the executor's among them) is wrapped again under the
+    /// new one, and the agent passphrase is held sealed under it. A passphrase that was derived
+    /// from the old root keeps its value: from now on the keyring holds it, as it holds one
+    /// typed before the keyring, since the wallet and Holochain's keystore are never re-keyed.
+    ///
+    /// All of it is one write of the keyring file, so a crash leaves the file the old secret
+    /// opens or the file the new one opens, never a mix. From the write on only `new` opens
+    /// the keyring. No store key changes, so no data is touched. Answers the new generation.
+    pub fn rotate_root(
+        &self,
+        current: Zeroizing<[u8; 32]>,
+        new: Zeroizing<[u8; 32]>,
+    ) -> Result<u32, KeyringError> {
+        if *current == *new {
+            return Err(KeyringError::SameSecret);
+        }
+        let current = SecretKey::from_slice(&*current).expect("32 bytes");
+        let new = SecretKey::from_slice(&*new).expect("32 bytes");
+        let path = self.path.clone();
+        self.with_open(|open| {
+            let keyring_id = open.file.keyring_id;
+            if !open.file.root_matches(&derive_root(&current, &keyring_id)) {
+                return Err(KeyringError::WrongSecret);
+            }
+            let generation = open
+                .file
+                .root_generation
+                .checked_add(1)
+                .ok_or(KeyringError::VersionsExhausted)?;
+            let new_root = derive_root(&new, &keyring_id);
+            let passphrase = agent_passphrase_of(open)?;
+            let mut next = open.file.clone();
+            next.set_root(generation, &new_root);
+
+            let mut person_wraps = Vec::new();
+            for (owner, entry) in &next.persons {
+                for (version, _) in entry.key.iter() {
+                    let key = open
+                        .persons
+                        .get(&(owner.clone(), version))
+                        .ok_or_else(|| not_held(&owner.to_string(), version))?;
+                    person_wraps.push((
+                        owner.clone(),
+                        version,
+                        next.wrap_person_key(owner, version, key, &new_root),
+                    ));
+                }
+            }
+            for (owner, version, wrapped) in person_wraps {
+                *next
+                    .persons
+                    .get_mut(&owner)
+                    .ok_or(KeyringError::UnknownOwner)?
+                    .key
+                    .get_mut(version)
+                    .map_err(|e| KeyringError::CorruptKeyring(e.to_string()))? = wrapped;
+            }
+
+            let root_wrapper = Wrapper::Root { generation };
+            let mut store_wraps = Vec::new();
+            for store in next.all_stores() {
+                for (version, wraps) in store.key.iter() {
+                    for (index, wrap) in wraps.wraps.iter().enumerate() {
+                        if let Wrapper::Root { .. } = wrap.wrapper {
+                            let key = open
+                                .stores
+                                .get(&(store.id.clone(), version))
+                                .ok_or_else(|| not_held(&store.id.to_string(), version))?;
+                            store_wraps.push((
+                                store.id.clone(),
+                                version,
+                                index,
+                                next.wrap_store_key(
+                                    &store.id,
+                                    version,
+                                    key,
+                                    &root_wrapper,
+                                    &new_root,
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            for (id, version, index, wrapped) in store_wraps {
+                store_mut(&mut next, &id)?
+                    .key
+                    .get_mut(version)
+                    .map_err(|e| KeyringError::CorruptKeyring(e.to_string()))?
+                    .wraps[index] = wrapped;
+            }
+
+            next.agent_passphrase = passphrase.map(|passphrase| AgentPassphrase::Held {
+                generation,
+                sealed: super::agent_passphrase::seal_held(
+                    &passphrase,
+                    &new_root,
+                    &keyring_id,
+                    generation,
+                ),
+            });
+            Self::commit(&path, open, next)?;
+            open.root = new_root;
+            Ok(generation)
+        })
+    }
+
+    /// Makes a new version of `owner`'s data key and moves every wrap under the person's old
+    /// versions to it, then drops the old versions, in one write of the keyring file. The
+    /// store keys the person holds do not change, so no data file is touched and everything
+    /// the person's stores hold reads as before; to change those keys too, re-encrypt the
+    /// stores. Answers the new version.
+    pub fn rotate_person(&self, owner: &KeyOwner) -> Result<KeyVersion, KeyringError> {
+        let path = self.path.clone();
+        self.with_open(|open| {
+            let entry = open
+                .file
+                .persons
+                .get(owner)
+                .ok_or(KeyringError::UnknownOwner)?;
+            let old: Vec<KeyVersion> = entry.key.iter().map(|(v, _)| v).collect();
+            let version = entry
+                .key
+                .next_version()
+                .map_err(|_| KeyringError::VersionsExhausted)?;
+            let key = SecretKey::random();
+            let mut next = open.file.clone();
+            let wrapped = next.wrap_person_key(owner, version, &key, &open.root);
+            let person = next
+                .persons
+                .get_mut(owner)
+                .ok_or(KeyringError::UnknownOwner)?;
+            person
+                .key
+                .push(wrapped)
+                .map_err(|_| KeyringError::VersionsExhausted)?;
+            for v in &old {
+                person
+                    .key
+                    .retire(*v)
+                    .map_err(|e| KeyringError::CorruptKeyring(e.to_string()))?;
+            }
+
+            let wrapper = Wrapper::Person {
+                owner: owner.clone(),
+                version,
+            };
+            let mut store_wraps = Vec::new();
+            for store in next.all_stores() {
+                for (store_version, wraps) in store.key.iter() {
+                    for (index, wrap) in wraps.wraps.iter().enumerate() {
+                        if matches!(&wrap.wrapper, Wrapper::Person { owner: o, .. } if o == owner) {
+                            let store_key = open
+                                .stores
+                                .get(&(store.id.clone(), store_version))
+                                .ok_or_else(|| not_held(&store.id.to_string(), store_version))?;
+                            store_wraps.push((
+                                store.id.clone(),
+                                store_version,
+                                index,
+                                next.wrap_store_key(
+                                    &store.id,
+                                    store_version,
+                                    store_key,
+                                    &wrapper,
+                                    &key,
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            for (id, store_version, index, wrapped) in store_wraps {
+                store_mut(&mut next, &id)?
+                    .key
+                    .get_mut(store_version)
+                    .map_err(|e| KeyringError::CorruptKeyring(e.to_string()))?
+                    .wraps[index] = wrapped;
+            }
+            Self::commit(&path, open, next)?;
+            open.persons.retain(|(o, _), _| o != owner);
+            open.persons.insert((owner.clone(), version), key);
+            Ok(version)
+        })
+    }
+
+    /// Starts moving store `id` to a new key: a fresh version, wrapped as the current one is
+    /// (under each owner's current data key, or under the root key), becomes current, and
+    /// every older version is marked retiring. New data is sealed under the new version while
+    /// data under a retiring one still opens, until [`DataKeys::retire_store_versions`] drops
+    /// them. A store already moving (some version retiring) is left as it is, so a move
+    /// interrupted by a crash resumes. Answers the current version and whether it resumed.
+    pub fn begin_store_rotation(&self, id: &StoreId) -> Result<(KeyVersion, bool), KeyringError> {
+        let path = self.path.clone();
+        self.with_open(|open| {
+            let store = open.file.store(id).ok_or(KeyringError::UnknownStore)?;
+            if store
+                .key
+                .iter()
+                .any(|(_, w)| w.state == VersionState::Retiring)
+            {
+                return Ok((store.key.current(), true));
+            }
+            let version = store
+                .key
+                .next_version()
+                .map_err(|_| KeyringError::VersionsExhausted)?;
+            let wrappers: Vec<Wrapper> = store
+                .key
+                .current_value()
+                .wraps
+                .iter()
+                .map(|w| w.wrapper.clone())
+                .collect();
+            let old: Vec<KeyVersion> = store.key.iter().map(|(v, _)| v).collect();
+            let key = SecretKey::random();
+            let mut next = open.file.clone();
+            let mut wraps = Vec::with_capacity(wrappers.len());
+            for wrapper in wrappers {
+                wraps.push(match wrapper {
+                    Wrapper::Root { .. } => next.wrap_store_key(
+                        id,
+                        version,
+                        &key,
+                        &Wrapper::Root {
+                            generation: next.root_generation,
+                        },
+                        &open.root,
+                    ),
+                    Wrapper::Person { owner, .. } => {
+                        wrap_for_owner(open, &next, id, version, &key, &owner)?
+                    }
+                });
+            }
+            let entry = store_mut(&mut next, id)?;
+            for v in old {
+                entry
+                    .key
+                    .get_mut(v)
+                    .map_err(|e| KeyringError::CorruptKeyring(e.to_string()))?
+                    .state = VersionState::Retiring;
+            }
+            entry
+                .key
+                .push(StoreKeyWraps {
+                    state: VersionState::Active,
+                    wraps,
+                })
+                .map_err(|_| KeyringError::VersionsExhausted)?;
+            Self::commit(&path, open, next)?;
+            open.stores.insert((id.clone(), version), key);
+            Ok((version, false))
+        })
+    }
+
+    /// The versions of store `id`'s key marked retiring.
+    pub fn retiring_versions(&self, id: &StoreId) -> Result<Vec<KeyVersion>, KeyringError> {
+        self.with_open(|open| {
+            let store = open.file.store(id).ok_or(KeyringError::UnknownStore)?;
+            Ok(store
+                .key
+                .iter()
+                .filter(|(_, w)| w.state == VersionState::Retiring)
+                .map(|(v, _)| v)
+                .collect())
+        })
+    }
+
+    /// Drops every retiring version of store `id`'s key, from the keyring file and from
+    /// memory: data still sealed under one of them no longer opens. The caller re-seals that
+    /// data first. Answers the versions dropped.
+    pub fn retire_store_versions(&self, id: &StoreId) -> Result<Vec<KeyVersion>, KeyringError> {
+        let path = self.path.clone();
+        self.with_open(|open| {
+            let store = open.file.store(id).ok_or(KeyringError::UnknownStore)?;
+            let retiring: Vec<KeyVersion> = store
+                .key
+                .iter()
+                .filter(|(_, w)| w.state == VersionState::Retiring)
+                .map(|(v, _)| v)
+                .collect();
+            if retiring.is_empty() {
+                return Ok(retiring);
+            }
+            let mut next = open.file.clone();
+            let entry = store_mut(&mut next, id)?;
+            for v in &retiring {
+                entry
+                    .key
+                    .retire(*v)
+                    .map_err(|e| KeyringError::CorruptKeyring(e.to_string()))?;
+            }
+            Self::commit(&path, open, next)?;
+            open.stores
+                .retain(|(s, v), _| !(s == id && retiring.contains(v)));
+            Ok(retiring)
+        })
+    }
 }
 
 fn store_mut<'a>(
@@ -800,6 +1105,10 @@ fn store_mut<'a>(
         StoreId::Executor => Ok(&mut file.executor_store),
         other => file.stores.get_mut(other).ok_or(KeyringError::UnknownStore),
     }
+}
+
+fn not_held(what: &str, version: KeyVersion) -> KeyringError {
+    KeyringError::CorruptKeyring(format!("{what} {version} is not held"))
 }
 
 fn wrapped_by(store: &StoreEntry, owner: &KeyOwner) -> bool {
@@ -1342,6 +1651,386 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    fn reload(folder: &Path) -> DataKeys {
+        DataKeys::load(super::super::keyring_file::path_in(folder)).unwrap()
+    }
+
+    fn cell(row: &str) -> super::super::sqlite::Cell<'_> {
+        super::super::sqlite::Cell {
+            table: "t",
+            column: "c",
+            row,
+        }
+    }
+
+    /// Every store's Rows subkey of every version, to compare before and after a change.
+    fn every_subkey(keys: &DataKeys) -> Vec<(String, KeyVersion, Vec<u8>)> {
+        keys.with_open(|open| {
+            let mut all: Vec<_> = open
+                .stores
+                .iter()
+                .map(|((id, v), key)| {
+                    (
+                        id.to_string(),
+                        *v,
+                        hkdf_subkey(key, &[], SubkeyPurpose::Rows.info())
+                            .expose_secret()
+                            .to_vec(),
+                    )
+                })
+                .collect();
+            all.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+            Ok(all)
+        })
+        .unwrap()
+    }
+
+    /// A keyring with a person store, a perspective shared by two persons and a store wrapped
+    /// under the root key alone.
+    fn populated(byte: u8) -> (tempfile::TempDir, DataKeys) {
+        let (folder, keys) = sealed();
+        keys.unlock(secret(byte)).unwrap();
+        let alice = KeyOwner::User("alice".into());
+        let bob = KeyOwner::User("bob".into());
+        keys.create_person(alice.clone()).unwrap();
+        keys.set_store_owners(&StoreId::Perspective(uuid::Uuid::new_v4()), &[alice, bob])
+            .unwrap();
+        keys.create_store(StoreId::Perspective(uuid::Uuid::new_v4()), &[])
+            .unwrap();
+        (folder, keys)
+    }
+
+    /// Rotating the root: the old secret no longer opens the keyring, in memory or from the
+    /// file, and the new one opens every store with the same keys as before.
+    #[test]
+    fn after_a_root_rotation_only_the_new_secret_opens_and_it_opens_every_store() {
+        let (folder, keys) = populated(20);
+        let before = every_subkey(&keys);
+        assert_eq!(keys.rotate_root(secret(20), secret(21)).unwrap(), 2);
+        assert_eq!(keys.root_generation(), Some(2));
+        assert_eq!(keys.unlock(secret(20)), Err(KeyringError::WrongSecret));
+        assert_eq!(
+            keys.unlock(secret(21)).unwrap(),
+            UnlockOutcome { created: false }
+        );
+        assert_eq!(every_subkey(&keys), before, "no store key changed");
+        drop(keys);
+
+        let keys = reload(folder.path());
+        assert_eq!(keys.unlock(secret(20)), Err(KeyringError::WrongSecret));
+        assert!(!keys.is_open());
+        keys.unlock(secret(21)).unwrap();
+        assert_eq!(keys.root_generation(), Some(2));
+        assert_eq!(
+            every_subkey(&keys),
+            before,
+            "the new secret opens every store"
+        );
+        let file = KeyringFile::read(keys.path()).unwrap().unwrap();
+        for entry in file.persons.values() {
+            assert!(entry.key.iter().all(|(_, w)| w.generation == 2));
+        }
+        for store in file.all_stores() {
+            for (_, wraps) in store.key.iter() {
+                for wrap in &wraps.wraps {
+                    if let Wrapper::Root { generation } = wrap.wrapper {
+                        assert_eq!(generation, 2, "{}", store.id);
+                    }
+                }
+            }
+        }
+
+        // A second rotation starts from the new secret.
+        assert_eq!(
+            keys.rotate_root(secret(20), secret(22)),
+            Err(KeyringError::WrongSecret)
+        );
+        assert_eq!(keys.rotate_root(secret(21), secret(22)).unwrap(), 3);
+        drop(keys);
+        let keys = reload(folder.path());
+        keys.unlock(secret(22)).unwrap();
+        assert_eq!(every_subkey(&keys), before);
+    }
+
+    #[test]
+    fn a_root_rotation_with_the_wrong_or_the_same_secret_changes_nothing() {
+        let (_folder, keys) = populated(23);
+        let before = std::fs::read(keys.path()).unwrap();
+        assert_eq!(
+            keys.rotate_root(secret(24), secret(25)),
+            Err(KeyringError::WrongSecret)
+        );
+        assert_eq!(
+            keys.rotate_root(secret(23), secret(23)),
+            Err(KeyringError::SameSecret)
+        );
+        assert_eq!(std::fs::read(keys.path()).unwrap(), before);
+        assert_eq!(keys.root_generation(), Some(1));
+        keys.unlock(secret(23)).unwrap();
+
+        let (_other, sealed_keys) = sealed();
+        assert_eq!(
+            sealed_keys.rotate_root(secret(1), secret(2)),
+            Err(KeyringError::Sealed)
+        );
+    }
+
+    /// A passphrase derived from the root keeps its value through a rotation: the keyring
+    /// holds it from then on, sealed under the new root, and a restart with the new secret
+    /// gives it.
+    #[test]
+    fn a_derived_agent_passphrase_is_held_unchanged_after_a_root_rotation() {
+        let (folder, keys) = populated(26);
+        let derived = keys.derive_agent_passphrase().unwrap();
+        keys.rotate_root(secret(26), secret(27)).unwrap();
+        assert_eq!(keys.agent_passphrase().unwrap(), Some(derived.clone()));
+        let file = KeyringFile::read(keys.path()).unwrap().unwrap();
+        assert!(matches!(
+            file.agent_passphrase,
+            Some(AgentPassphrase::Held { generation: 2, .. })
+        ));
+        let raw = std::fs::read_to_string(keys.path()).unwrap();
+        assert!(!raw.contains(derived.as_str()));
+        // Holding it again changes nothing; deriving answers it too.
+        assert_eq!(keys.hold_agent_passphrase(&derived), Ok(false));
+        assert_eq!(keys.derive_agent_passphrase().unwrap(), derived);
+        drop(keys);
+
+        let keys = reload(folder.path());
+        keys.unlock(secret(27)).unwrap();
+        assert_eq!(keys.agent_passphrase().unwrap(), Some(derived.clone()));
+        assert_eq!(
+            super::super::agent_passphrase::from_keyring(Some(&keys)),
+            Some(derived.clone())
+        );
+        keys.rotate_root(secret(27), secret(28)).unwrap();
+        drop(keys);
+        let keys = reload(folder.path());
+        keys.unlock(secret(28)).unwrap();
+        assert_eq!(keys.agent_passphrase().unwrap(), Some(derived));
+    }
+
+    #[test]
+    fn a_held_agent_passphrase_is_sealed_again_under_the_new_root() {
+        let (folder, keys) = populated(29);
+        keys.hold_agent_passphrase("typed before the keyring")
+            .unwrap();
+        keys.rotate_root(secret(29), secret(30)).unwrap();
+        drop(keys);
+        let keys = reload(folder.path());
+        keys.unlock(secret(30)).unwrap();
+        assert_eq!(
+            keys.agent_passphrase().unwrap(),
+            Some(Zeroizing::new("typed before the keyring".to_string()))
+        );
+    }
+
+    /// The rotation is one write of the keyring file: a crash before the rename leaves the
+    /// old file (and a temporary file beside it) that the old secret alone opens; after it,
+    /// the new file that the new secret alone opens.
+    #[test]
+    fn a_crash_during_a_root_rotation_leaves_a_keyring_one_of_the_secrets_opens() {
+        let (folder, keys) = populated(31);
+        let before = every_subkey(&keys);
+        let old_bytes = std::fs::read(keys.path()).unwrap();
+        keys.rotate_root(secret(31), secret(32)).unwrap();
+        let new_bytes = std::fs::read(keys.path()).unwrap();
+        let path = keys.path().to_path_buf();
+        drop(keys);
+
+        // Before the rename: the old file in place, the new one in a temporary file.
+        std::fs::write(&path, &old_bytes).unwrap();
+        let leftover = folder
+            .path()
+            .join(format!(".keyring.json.{}.tmp", uuid::Uuid::new_v4()));
+        std::fs::write(&leftover, &new_bytes).unwrap();
+        let keys = reload(folder.path());
+        assert_eq!(keys.unlock(secret(32)), Err(KeyringError::WrongSecret));
+        keys.unlock(secret(31)).unwrap();
+        assert_eq!(every_subkey(&keys), before);
+        drop(keys);
+
+        // After the rename.
+        std::fs::write(&path, &new_bytes).unwrap();
+        let keys = reload(folder.path());
+        assert_eq!(keys.unlock(secret(31)), Err(KeyringError::WrongSecret));
+        keys.unlock(secret(32)).unwrap();
+        assert_eq!(every_subkey(&keys), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_rotation_that_cannot_write_leaves_the_old_secret_in_charge() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_folder, keys) = populated(33);
+        let before = std::fs::read(keys.path()).unwrap();
+        let folder = keys.path().parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let refused = keys.rotate_root(secret(33), secret(34));
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if nix_is_root() {
+            return;
+        }
+        assert!(matches!(refused, Err(KeyringError::Io(_))), "{refused:?}");
+        assert_eq!(std::fs::read(keys.path()).unwrap(), before);
+        assert_eq!(keys.root_generation(), Some(1));
+        keys.unlock(secret(33)).unwrap();
+        assert_eq!(keys.unlock(secret(34)), Err(KeyringError::WrongSecret));
+        // The keys in memory are still the old root's: the next change writes a file the old
+        // secret opens.
+        keys.create_person(KeyOwner::User("carol".into())).unwrap();
+        drop(keys);
+        let keys = DataKeys::load(super::super::keyring_file::path_in(&folder)).unwrap();
+        keys.unlock(secret(33)).unwrap();
+    }
+
+    /// Rotating a person's data key wraps the person's stores under the new version and drops
+    /// the old one; no data sealed under the stores' keys changes, so it all reads as before.
+    #[test]
+    fn rotating_a_persons_key_touches_no_store_file_and_leaves_no_wrap_under_the_old_version() {
+        let (folder, keys) = sealed();
+        keys.unlock(secret(35)).unwrap();
+        let alice = KeyOwner::User("alice".into());
+        let bob = KeyOwner::User("bob".into());
+        keys.create_person(alice.clone()).unwrap();
+        let stores = [
+            StoreId::Person(alice.clone()),
+            StoreId::Perspective(uuid::Uuid::new_v4()),
+            StoreId::Perspective(uuid::Uuid::new_v4()),
+        ];
+        keys.set_store_owners(&stores[1], std::slice::from_ref(&alice))
+            .unwrap();
+        keys.set_store_owners(&stores[2], &[alice.clone(), bob.clone()])
+            .unwrap();
+        let data = folder.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let mut files = Vec::new();
+        for (i, store) in stores.iter().enumerate() {
+            let sealed =
+                super::super::sqlite::seal_value(&keys, store, &cell("r"), &format!("plain {i}"))
+                    .unwrap();
+            let file = data.join(format!("store-{i}"));
+            std::fs::write(&file, sealed).unwrap();
+            files.push(file);
+        }
+        let mtimes = |files: &[PathBuf]| -> Vec<std::time::SystemTime> {
+            files
+                .iter()
+                .map(|f| std::fs::metadata(f).unwrap().modified().unwrap())
+                .collect()
+        };
+        let before = mtimes(&files);
+        let subkeys = every_subkey(&keys);
+
+        assert_eq!(keys.rotate_person(&alice).unwrap(), KeyVersion(2));
+        assert_eq!(mtimes(&files), before, "no store file was touched");
+        let file = KeyringFile::read(keys.path()).unwrap().unwrap();
+        let versions: Vec<KeyVersion> = file.persons[&alice].key.iter().map(|(v, _)| v).collect();
+        assert_eq!(versions, vec![KeyVersion(2)]);
+        let mut alices_wraps = 0;
+        for store in file.all_stores() {
+            for (_, wraps) in store.key.iter() {
+                for wrap in &wraps.wraps {
+                    if let Wrapper::Person { owner, version } = &wrap.wrapper {
+                        if *owner == alice {
+                            alices_wraps += 1;
+                            assert_eq!(*version, KeyVersion(2), "{}", store.id);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(alices_wraps, 3);
+        assert_eq!(keys.store_owners(&stores[2]).unwrap(), vec![alice, bob]);
+        drop(keys);
+
+        let keys = reload(folder.path());
+        keys.unlock(secret(35)).unwrap();
+        assert_eq!(every_subkey(&keys), subkeys, "the store keys are the same");
+        for (i, (store, file)) in stores.iter().zip(&files).enumerate() {
+            let sealed = std::fs::read_to_string(file).unwrap();
+            assert_eq!(
+                super::super::sqlite::open_value(&keys, store, &cell("r"), &sealed).unwrap(),
+                format!("plain {i}")
+            );
+        }
+        assert_eq!(
+            keys.rotate_person(&KeyOwner::User("nobody".into())),
+            Err(KeyringError::UnknownOwner)
+        );
+    }
+
+    /// A store moving to a new key: data sealed under the old version opens until the old
+    /// version is retired; a second start resumes instead of adding a version.
+    #[test]
+    fn a_store_rotation_keeps_old_data_readable_until_its_version_is_retired() {
+        let (folder, keys) = populated(36);
+        let alice = KeyOwner::User("alice".into());
+        let store = StoreId::Person(alice.clone());
+        let open = super::super::sqlite::open_value;
+        let old = super::super::sqlite::seal_value(&keys, &store, &cell("1"), "old").unwrap();
+        assert_eq!(
+            keys.begin_store_rotation(&store).unwrap(),
+            (KeyVersion(2), false)
+        );
+        assert_eq!(
+            keys.begin_store_rotation(&store).unwrap(),
+            (KeyVersion(2), true),
+            "resumes"
+        );
+        assert_eq!(keys.retiring_versions(&store).unwrap(), vec![KeyVersion(1)]);
+        let new = super::super::sqlite::seal_value(&keys, &store, &cell("1"), "new").unwrap();
+        drop(keys);
+        let keys = reload(folder.path());
+        keys.unlock(secret(36)).unwrap();
+        assert_eq!(open(&keys, &store, &cell("1"), &old).unwrap(), "old");
+        assert_eq!(open(&keys, &store, &cell("1"), &new).unwrap(), "new");
+        assert_eq!(keys.store_owners(&store).unwrap(), vec![alice.clone()]);
+
+        assert_eq!(
+            keys.retire_store_versions(&store).unwrap(),
+            vec![KeyVersion(1)]
+        );
+        assert!(keys.retiring_versions(&store).unwrap().is_empty());
+        assert!(open(&keys, &store, &cell("1"), &old).is_err());
+        let summary = keys.summary().unwrap();
+        let entry = summary
+            .stores
+            .iter()
+            .find(|s| s.id == store.to_string())
+            .unwrap();
+        assert_eq!((entry.current, entry.retiring.clone()), (2, vec![]));
+        drop(keys);
+        let keys = reload(folder.path());
+        keys.unlock(secret(36)).unwrap();
+        assert!(open(&keys, &store, &cell("1"), &old).is_err());
+        assert_eq!(open(&keys, &store, &cell("1"), &new).unwrap(), "new");
+
+        // A store under the root key alone moves too, and its versions survive a root
+        // rotation in the middle of the move.
+        let root_store = keys
+            .store_states()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .find(|id| {
+                matches!(id, StoreId::Perspective(_)) && keys.store_owners(id).unwrap().is_empty()
+            })
+            .unwrap();
+        keys.begin_store_rotation(&root_store).unwrap();
+        keys.rotate_root(secret(36), secret(37)).unwrap();
+        drop(keys);
+        let keys = reload(folder.path());
+        keys.unlock(secret(37)).unwrap();
+        assert_eq!(
+            keys.retiring_versions(&root_store).unwrap(),
+            vec![KeyVersion(1)]
+        );
+        keys.subkey(&root_store, Some(KeyVersion(1)), SubkeyPurpose::Rows)
+            .unwrap();
+        keys.subkey(&root_store, None, SubkeyPurpose::Rows).unwrap();
     }
 
     #[cfg(unix)]

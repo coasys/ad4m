@@ -419,6 +419,14 @@ impl KeyringFile {
         unwrap(&self.root_check, root, &ctx).is_ok()
     }
 
+    /// Makes `root` of `generation` this keyring's root key: from now on `root_matches`
+    /// answers yes for it alone, and new wraps under the root name `generation`. The wraps
+    /// already in the file are the caller's to wrap again.
+    pub fn set_root(&mut self, generation: u32, root: &SecretKey) {
+        self.root_generation = generation;
+        self.root_check = root_check(&self.keyring_id, root, generation);
+    }
+
     /// `key`, a version of `owner`'s data key, wrapped under the current root key.
     pub fn wrap_person_key(
         &self,

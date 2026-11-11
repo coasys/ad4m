@@ -215,6 +215,19 @@ pub fn is_sealed(value: &str) -> bool {
     value.starts_with(SEALED_PREFIX)
 }
 
+/// The version of the store key a sealed value is sealed under; `None` for a value that is
+/// not a sealed value.
+pub fn sealed_version(value: &str) -> Option<KeyVersion> {
+    let encoded = value.strip_prefix(SEALED_PREFIX)?;
+    // The version is the first 4 bytes: the first 8 base64 characters hold them.
+    let head = encoded.get(..8)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(head)
+        .ok()?;
+    let version: [u8; VERSION_LEN] = bytes.get(..VERSION_LEN)?.try_into().ok()?;
+    Some(KeyVersion(u32::from_be_bytes(version)))
+}
+
 fn associated_data(store: &StoreId, cell: &Cell) -> Vec<u8> {
     let store = store.to_string();
     let mut ad = Vec::with_capacity(

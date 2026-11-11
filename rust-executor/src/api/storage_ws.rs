@@ -1,6 +1,7 @@
-//! The storage methods: `storage.unlock`, `storage.keys` and `runtime.storageStatus`. The first
-//! and the last answer while the executor is sealed (`at_rest::ANSWERED_WHILE_GATED`); the
-//! rules are in `at_rest`.
+//! The storage methods: `storage.unlock`, `storage.keys`, `runtime.storageStatus` and the
+//! rotations (`storage.rotateSecret`, `storage.rotatePersonKey`, `storage.reencrypt`). The
+//! unlock and the status answer while the executor is sealed
+//! (`at_rest::ANSWERED_WHILE_GATED`); the rules are in `at_rest`.
 
 use std::sync::Arc;
 
@@ -11,6 +12,9 @@ use zeroize::Zeroizing;
 
 use super::guards::Guard;
 use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
+use crate::at_rest::keyring_file::{KeyOwner, StoreId};
+use crate::at_rest::rotation::{self, Claim, ExecutorRows, ReencryptError};
+use crate::at_rest::secret_source::{fingerprint, parse_hex};
 use crate::at_rest::{
     KeyringError, KeyringSummary, SecretSourceKind, StorageGate, StorageSecret, StorageStatus,
     UnlockError,
@@ -34,6 +38,69 @@ pub struct StorageUnlockResult {
     pub fingerprint: String,
     /// This unlock made the keyring: the data folder had none.
     pub created: bool,
+}
+
+/// `storage.rotateSecret`: the secret that opens the keyring now and the one that will open it
+/// from now on, 64 hex characters each.
+#[derive(Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageRotateSecretParams {
+    pub current_secret: String,
+    pub new_secret: String,
+}
+
+/// `storage.rotateSecret`'s answer: the keyring's new root generation and the fingerprints of
+/// both secrets (the first 8 hex characters of their SHA-256).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageRotateSecretResult {
+    pub generation: u32,
+    pub old_fingerprint: String,
+    pub new_fingerprint: String,
+}
+
+/// `storage.rotatePersonKey`: whose data key gets a new version: `main` (the default), or a
+/// managed user as `user:<name>` or by its name.
+#[derive(Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageRotatePersonKeyParams {
+    #[serde(default)]
+    #[ts(optional)]
+    pub owner: Option<String>,
+}
+
+/// `storage.rotatePersonKey`'s answer: the owner and its data key's new version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageRotatePersonKeyResult {
+    pub owner: String,
+    pub version: u32,
+}
+
+/// `storage.reencrypt`: the store whose data moves to a new key version, as `storage.keys`
+/// names it (`perspective:<uuid>`, `person:main`, `person:user:<name>`).
+#[derive(Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageReencryptParams {
+    pub store: String,
+}
+
+/// `storage.reencrypt`'s answer, given when the job starts: the store, the key version its
+/// data moves to, and whether the job resumes one that stopped. The job runs on; when it ends
+/// `storage-state-changed` is published, and `storage.keys` shows the store with no retiring
+/// version once its old versions are retired.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageReencryptResult {
+    pub store: String,
+    pub version: u32,
+    pub resumed: bool,
 }
 
 /// The gate the handlers answer from: the one they were registered with (tests), else the
@@ -82,6 +149,150 @@ async fn status(
     )?)
 }
 
+/// A keyring error as the caller sees it.
+fn keyring_refusal(e: KeyringError) -> WsRpcError {
+    match e {
+        KeyringError::WrongSecret => WsRpcError::forbidden(e.to_string()),
+        KeyringError::SameSecret => WsRpcError::bad_request(e.to_string()),
+        KeyringError::Sealed => WsRpcError::unavailable(e.to_string()),
+        KeyringError::UnknownOwner | KeyringError::UnknownStore => {
+            WsRpcError::not_found(e.to_string())
+        }
+        e => WsRpcError::internal(e.to_string()),
+    }
+}
+
+async fn rotate_secret(gate: Option<Arc<StorageGate>>, params: Value) -> Result<Value, WsRpcError> {
+    let gate = resolve(&gate)?;
+    let params: StorageRotateSecretParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let current_text = Zeroizing::new(params.current_secret);
+    let new_text = Zeroizing::new(params.new_secret);
+    let current = parse_hex(&current_text)
+        .map_err(|e| WsRpcError::bad_request(format!("currentSecret: {e}")))?;
+    let new =
+        parse_hex(&new_text).map_err(|e| WsRpcError::bad_request(format!("newSecret: {e}")))?;
+    let old_fingerprint = fingerprint(&current);
+    let new_fingerprint = fingerprint(&new);
+    // The keyring file is written and synced: off the async workers.
+    let generation = tokio::task::spawn_blocking(move || gate.rotate_secret(current, new))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .map_err(keyring_refusal)?;
+    Ok(serde_json::to_value(StorageRotateSecretResult {
+        generation,
+        old_fingerprint,
+        new_fingerprint,
+    })?)
+}
+
+/// The owner `storage.rotatePersonKey` names: absent or `main` is the main agent; `user:<name>`
+/// or a bare name is a managed user.
+fn owner_of(text: Option<&str>) -> Result<KeyOwner, WsRpcError> {
+    match text.map(str::trim) {
+        None | Some("main") => Ok(KeyOwner::Main),
+        Some("") => Err(WsRpcError::bad_request("owner: empty")),
+        Some(text) if text.starts_with("user:") => text
+            .parse()
+            .map_err(|e: String| WsRpcError::bad_request(format!("owner: {e}"))),
+        Some(name) => Ok(KeyOwner::User(name.to_string())),
+    }
+}
+
+async fn rotate_person_key(
+    gate: Option<Arc<StorageGate>>,
+    params: Value,
+) -> Result<Value, WsRpcError> {
+    let gate = resolve(&gate)?;
+    let params: StorageRotatePersonKeyParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let owner = owner_of(params.owner.as_deref())?;
+    let keys = gate.keys().clone();
+    let rotated = owner.clone();
+    let version = tokio::task::spawn_blocking(move || keys.rotate_person(&rotated))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .map_err(keyring_refusal)?;
+    log::info!(
+        "🔑 The data key of {owner} is now version {}: its stores' keys are wrapped under it",
+        version.0
+    );
+    gate.publish();
+    Ok(serde_json::to_value(StorageRotatePersonKeyResult {
+        owner: owner.to_string(),
+        version: version.0,
+    })?)
+}
+
+fn reencrypt_refusal(e: ReencryptError) -> WsRpcError {
+    match e {
+        ReencryptError::ExecutorStore => WsRpcError::bad_request(e.to_string()),
+        ReencryptError::UnknownStore => WsRpcError::not_found(e.to_string()),
+        ReencryptError::Running(_) => WsRpcError::conflict(e.to_string()),
+        ReencryptError::Keyring(e) => keyring_refusal(e),
+        e @ (ReencryptError::Rows(_) | ReencryptError::Files(_)) => {
+            WsRpcError::internal(e.to_string())
+        }
+    }
+}
+
+async fn reencrypt(gate: Option<Arc<StorageGate>>, params: Value) -> Result<Value, WsRpcError> {
+    let gate = resolve(&gate)?;
+    let params: StorageReencryptParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let store: StoreId = params
+        .store
+        .trim()
+        .parse()
+        .map_err(|e: String| WsRpcError::bad_request(format!("store: {e}")))?;
+    let claim = Claim::take(&store).map_err(reencrypt_refusal)?;
+    let keys = gate.keys().clone();
+    let (version, resumed) = {
+        let (keys, store) = (keys.clone(), store.clone());
+        tokio::task::spawn_blocking(move || rotation::begin(&keys, &store))
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?
+            .map_err(reencrypt_refusal)?
+    };
+    log::info!(
+        "🔑 Re-encrypting {store} under its key version {}{}",
+        version.0,
+        if resumed { " (resumed)" } else { "" }
+    );
+    gate.publish();
+    let job_store = store.clone();
+    let job_gate = gate.clone();
+    tokio::task::spawn_blocking(move || {
+        let _claim = claim;
+        let languages = crate::utils::languages_directory();
+        match rotation::finish(
+            &keys,
+            &ExecutorRows,
+            &languages,
+            &job_store,
+            version,
+            resumed,
+        ) {
+            Ok(report) => log::info!(
+                "🔑 Re-encrypted {job_store}: {} values and {} files sealed again, {} left \
+                 under an older version ({} do not open), versions retired: {:?}",
+                report.resealed_values,
+                report.resealed_files,
+                report.left,
+                report.unopenable,
+                report.retired.iter().map(|v| v.0).collect::<Vec<_>>()
+            ),
+            Err(e) => log::error!("🔑 The re-encryption of {job_store} stopped: {e}"),
+        }
+        job_gate.publish();
+    });
+    Ok(serde_json::to_value(StorageReencryptResult {
+        store: store.to_string(),
+        version: version.0,
+        resumed,
+    })?)
+}
+
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     register(map, None);
 }
@@ -94,6 +305,28 @@ pub(crate) fn register(map: &mut HandlerMap, gate: Option<Arc<StorageGate>>) {
     map.method::<StorageUnlockParams, StorageUnlockResult>(
         "storage.unlock",
         move |params: Value, _ctx: Arc<RequestContext>| unlock(g.clone(), params),
+    )
+    .local_only()
+    .guard(Guard::Operator);
+    // Both secrets are typed on this machine, as for the unlock.
+    let g = gate.clone();
+    map.method::<StorageRotateSecretParams, StorageRotateSecretResult>(
+        "storage.rotateSecret",
+        move |params: Value, _ctx: Arc<RequestContext>| rotate_secret(g.clone(), params),
+    )
+    .local_only()
+    .guard(Guard::Operator);
+    let g = gate.clone();
+    map.method::<StorageRotatePersonKeyParams, StorageRotatePersonKeyResult>(
+        "storage.rotatePersonKey",
+        move |params: Value, _ctx: Arc<RequestContext>| rotate_person_key(g.clone(), params),
+    )
+    .guard(Guard::Operator);
+    // A long job over the whole store: started from this machine only.
+    let g = gate.clone();
+    map.method::<StorageReencryptParams, StorageReencryptResult>(
+        "storage.reencrypt",
+        move |params: Value, _ctx: Arc<RequestContext>| reencrypt(g.clone(), params),
     )
     .local_only()
     .guard(Guard::Operator);
@@ -300,5 +533,222 @@ mod tests {
                 .code,
             403
         );
+    }
+
+    /// An open gate on `folder`, unlocked with [`SECRET`].
+    fn open_gate(folder: &std::path::Path) -> Arc<StorageGate> {
+        let gate = Arc::new(StorageGate::new(folder, false));
+        gate.unlock(&StorageSecret::in_process([1; 32])).unwrap();
+        gate.mark_open();
+        gate
+    }
+
+    fn network_operator() -> Arc<RequestContext> {
+        Arc::new(RequestContext::for_session(
+            Session::for_test(Principal::Operator).on_network(),
+        ))
+    }
+
+    fn app() -> Arc<RequestContext> {
+        Arc::new(RequestContext::app_for_test(vec![
+            crate::agent::capabilities::ALL_CAPABILITY.clone(),
+        ]))
+    }
+
+    /// `storage.rotateSecret` moves the keyring to the new secret: after it a restarted
+    /// executor opens with the new secret and refuses the old one. A wrong current secret, the
+    /// same secret twice or text that is not a secret change nothing; neither secret appears
+    /// in an answer; only the operator on this machine calls it.
+    #[tokio::test]
+    async fn rotate_secret_moves_the_keyring_to_the_new_secret_only() {
+        let folder = tempfile::tempdir().unwrap();
+        let gate = open_gate(folder.path());
+        let map = map_with(&gate);
+        let new = "02".repeat(32);
+        let file = crate::at_rest::keyring_file::path_in(folder.path());
+        let before = std::fs::read(&file).unwrap();
+
+        for caller in [network_operator(), app()] {
+            let refused = map
+                .dispatch(
+                    "storage.rotateSecret",
+                    json!({ "currentSecret": SECRET, "newSecret": new }),
+                    caller,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, 403);
+        }
+        for (current, next, code) in [
+            ("03".repeat(32), new.clone(), 403),
+            (SECRET.to_string(), SECRET.to_string(), 400),
+            (SECRET.to_string(), "xyz".to_string(), 400),
+            ("xyz".to_string(), new.clone(), 400),
+        ] {
+            let refused = map
+                .dispatch(
+                    "storage.rotateSecret",
+                    json!({ "currentSecret": current, "newSecret": next }),
+                    operator(),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, code, "{}", refused.message);
+            assert!(!refused.message.contains(SECRET) && !refused.message.contains(&new));
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), before, "nothing written");
+
+        let answer = map
+            .dispatch(
+                "storage.rotateSecret",
+                json!({ "currentSecret": SECRET, "newSecret": new }),
+                operator(),
+            )
+            .await
+            .unwrap();
+        let text = answer.to_string();
+        assert!(!text.contains(SECRET) && !text.contains(&new));
+        let answer: StorageRotateSecretResult = serde_json::from_value(answer).unwrap();
+        assert_eq!(
+            answer,
+            StorageRotateSecretResult {
+                generation: 2,
+                old_fingerprint: fingerprint(&[1; 32]),
+                new_fingerprint: fingerprint(&[2; 32]),
+            }
+        );
+        assert_eq!(gate.status(true).root_generation, Some(2));
+        // The running executor keeps its keys: the keyring answers.
+        assert!(gate.keys().summary().is_ok());
+        // Rotating again needs the new secret as the current one.
+        let stale = map
+            .dispatch(
+                "storage.rotateSecret",
+                json!({ "currentSecret": SECRET, "newSecret": "04".repeat(32) }),
+                operator(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, 403);
+
+        let restarted = Arc::new(StorageGate::new(folder.path(), false));
+        let map = map_with(&restarted);
+        let old = map
+            .dispatch("storage.unlock", json!({ "secret": SECRET }), operator())
+            .await
+            .unwrap_err();
+        assert_eq!(old.code, 403, "the old secret no longer opens");
+        let opened: StorageUnlockResult = serde_json::from_value(
+            map.dispatch("storage.unlock", json!({ "secret": new }), operator())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!opened.created);
+        assert_eq!(opened.status.root_generation, Some(2));
+    }
+
+    /// `storage.rotatePersonKey` gives the named owner's data key a new version; the main
+    /// agent by default, a managed user by `user:<name>` or its name. An owner the keyring does
+    /// not know is 404.
+    #[tokio::test]
+    async fn rotate_person_key_gives_the_owner_a_new_version() {
+        let folder = tempfile::tempdir().unwrap();
+        let gate = open_gate(folder.path());
+        gate.keys()
+            .create_person(KeyOwner::User("alice".into()))
+            .unwrap();
+        let map = map_with(&gate);
+
+        let main: StorageRotatePersonKeyResult = serde_json::from_value(
+            map.dispatch("storage.rotatePersonKey", json!({}), operator())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(main.owner, "main");
+        assert_eq!(main.version, 2);
+        for (name, version) in [("user:alice", 2), ("alice", 3)] {
+            let alice: StorageRotatePersonKeyResult = serde_json::from_value(
+                map.dispatch(
+                    "storage.rotatePersonKey",
+                    json!({ "owner": name }),
+                    operator(),
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(alice.owner, "user:alice");
+            assert_eq!(alice.version, version);
+        }
+        let unknown = map
+            .dispatch(
+                "storage.rotatePersonKey",
+                json!({ "owner": "bob" }),
+                operator(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.code, 404);
+        let refused = map
+            .dispatch("storage.rotatePersonKey", json!({}), app())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 403);
+    }
+
+    /// `storage.reencrypt` refuses the executor's own store, a name that is no store, a store
+    /// the keyring does not have and a store whose job runs; only the operator on this machine
+    /// starts one. A refused call makes no key version.
+    #[tokio::test]
+    async fn reencrypt_starts_a_job_on_a_known_store_only() {
+        let folder = tempfile::tempdir().unwrap();
+        let gate = open_gate(folder.path());
+        let map = map_with(&gate);
+        let known = StoreId::Perspective(uuid::Uuid::new_v4());
+        gate.keys()
+            .create_store(known.clone(), &[KeyOwner::Main])
+            .unwrap();
+        let unknown = StoreId::Perspective(uuid::Uuid::new_v4());
+        for (store, code) in [
+            ("executor".to_string(), 400),
+            ("nothing".to_string(), 400),
+            (unknown.to_string(), 404),
+        ] {
+            let refused = map
+                .dispatch("storage.reencrypt", json!({ "store": store }), operator())
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, code, "{store}: {}", refused.message);
+        }
+        for caller in [network_operator(), app()] {
+            let refused = map
+                .dispatch(
+                    "storage.reencrypt",
+                    json!({ "store": known.to_string() }),
+                    caller,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, 403);
+        }
+        {
+            let _running = Claim::take(&known).unwrap();
+            let refused = map
+                .dispatch(
+                    "storage.reencrypt",
+                    json!({ "store": known.to_string() }),
+                    operator(),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, 409);
+        }
+        assert!(
+            gate.keys().retiring_versions(&known).unwrap().is_empty(),
+            "a refused call makes no version"
+        );
+        assert_eq!(gate.keys().summary().unwrap().stores.len(), 2);
     }
 }

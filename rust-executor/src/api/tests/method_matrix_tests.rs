@@ -667,6 +667,11 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("identity.unwrapRecordKey", || json!({ "wrapped": "w" })),
     // Storage.
     ("storage.unlock", || json!({ "secret": "5a".repeat(32) })),
+    (
+        "storage.rotateSecret",
+        || json!({ "currentSecret": "5a".repeat(32), "newSecret": "5b".repeat(32) }),
+    ),
+    ("storage.reencrypt", || json!({ "store": "person:main" })),
     // Key sessions.
     (
         "user.loginWithKey",
@@ -1154,6 +1159,8 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
             "identity.unwrapRecordKey",
             "runtime.quit",
             "runtime.restart",
+            "storage.reencrypt",
+            "storage.rotateSecret",
             "storage.unlock",
         ]
     );
@@ -1432,6 +1439,9 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "runtime.unytWalletHistory",
             "sfu.ensureMembership",
             "storage.keys",
+            "storage.reencrypt",
+            "storage.rotatePersonKey",
+            "storage.rotateSecret",
             "storage.unlock",
             "user.credits",
             "user.freeAccess",

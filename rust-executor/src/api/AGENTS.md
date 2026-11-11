@@ -17,8 +17,9 @@ REST/WS shim. Split plan: spec item 6.
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
 handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`,
 `key_login` (login with a device key and the calls of key sessions; the work is in
-`identity::key_login`), `storage` (`storage.unlock`, `storage.keys`, `runtime.storageStatus`;
-the work is in `at_rest`), and `agent_session` (`perspective.runAgent`). Each exposes
+`identity::key_login`), `storage` (`storage.unlock`, `storage.keys`, `runtime.storageStatus`,
+`storage.rotateSecret`, `storage.rotatePersonKey`, `storage.reencrypt`; the work is in
+`at_rest`), and `agent_session` (`perspective.runAgent`). Each exposes
 `register_ws_handlers(&mut HandlerMap)` called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -199,7 +200,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-237 methods: Cap 87, Executor 38, Open 10, Operator 32, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 12.
+240 methods: Cap 87, Executor 38, Open 10, Operator 35, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 14.
 
 | Method | Guard |
 |---|---|
@@ -421,6 +422,9 @@ the guard checked:
 | `sfu.status` | `Cap(neighbourhood:READ)` |
 | `sfu.stopRoom` | `Cap(neighbourhood:UPDATE)` |
 | `storage.keys` | `Operator` |
+| `storage.reencrypt` | `Operator`, local only |
+| `storage.rotatePersonKey` | `Operator` |
+| `storage.rotateSecret` | `Operator`, local only |
 | `storage.unlock` | `Operator`, local only |
 | `user.create` | `Cap(runtime.user_management:CREATE)` |
 | `user.credits` | `Operator` |

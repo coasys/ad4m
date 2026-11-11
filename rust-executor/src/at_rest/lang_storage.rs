@@ -444,6 +444,12 @@ pub enum LanguageStorageStep {
 /// The plaintext files of every language folder under `languages`: (address, path inside the
 /// folder, full path).
 fn plaintext_files(languages: &Path) -> io::Result<Vec<(String, String, PathBuf)>> {
+    language_files(languages, false)
+}
+
+/// The sealed (`sealed`) or plaintext files of every language folder under `languages`,
+/// the executor's own files left out.
+fn language_files(languages: &Path, sealed: bool) -> io::Result<Vec<(String, String, PathBuf)>> {
     let mut found = Vec::new();
     let entries = match std::fs::read_dir(languages) {
         Ok(entries) => entries,
@@ -461,10 +467,106 @@ fn plaintext_files(languages: &Path) -> io::Result<Vec<(String, String, PathBuf)
         if address == NOT_A_LANGUAGE {
             continue;
         }
-        collect(&entry.path(), "", &address, &mut found)?;
+        collect(&entry.path(), "", &address, &mut found, sealed)?;
     }
     found.sort_by(|a, b| a.2.cmp(&b.2));
     Ok(found)
+}
+
+/// The store and key version a sealed file names in its header; `None` for bytes that are
+/// not a sealed file of this format.
+pub fn sealed_header(bytes: &[u8]) -> Option<(StoreId, KeyVersion)> {
+    let rest = bytes.strip_prefix(&MAGIC[..])?;
+    let (&format, rest) = rest.split_first()?;
+    if format != FORMAT || rest.len() < 2 {
+        return None;
+    }
+    let store_len = u16::from_be_bytes([rest[0], rest[1]]) as usize;
+    let rest = &rest[2..];
+    if rest.len() < store_len + 4 {
+        return None;
+    }
+    let store = std::str::from_utf8(&rest[..store_len]).ok()?.parse().ok()?;
+    let v = &rest[store_len..store_len + 4];
+    Some((
+        store,
+        KeyVersion(u32::from_be_bytes([v[0], v[1], v[2], v[3]])),
+    ))
+}
+
+/// What [`reseal_store`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResealFiles {
+    /// Files now sealed under the store key's current version.
+    pub resealed: usize,
+    /// Files under an older version that did not open, left as they are.
+    pub unopenable: usize,
+}
+
+/// Seals again, under the current version of store `store`'s key, every language file under
+/// `languages` sealed under an older version of it. Each file is written whole and atomically,
+/// and only if it still holds the bytes read: a file a language wrote meanwhile is sealed
+/// under the current version already. A file that does not open is left and counted.
+pub fn reseal_store(
+    keys: &DataKeys,
+    languages: &Path,
+    store: &StoreId,
+) -> Result<ResealFiles, LangStorageError> {
+    let mut report = ResealFiles::default();
+    let (current, _) = keys.subkey(store, None, SubkeyPurpose::LanguageStorage)?;
+    let found = language_files(languages, true).map_err(|e| io_error(languages, e))?;
+    for (address, file, path) in found {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(io_error(&path, e)),
+        };
+        match sealed_header(&bytes) {
+            Some((named, version)) if named == *store && version != current => {}
+            _ => continue,
+        }
+        let shown = path.display().to_string();
+        let plain = match open(keys, &address, &file, &bytes, &shown) {
+            Ok((_, plain)) => plain,
+            Err(LangStorageError::DoesNotOpen { .. }) | Err(LangStorageError::Keyring(_)) => {
+                log::warn!("{shown} does not open under the key of {store}: left as it is");
+                report.unopenable += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let sealed = seal(keys, store, &address, &file, &plain)?;
+        match std::fs::read(&path) {
+            Ok(again) if again == bytes => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(io_error(&path, e)),
+        }
+        files::write_atomic(&path, &sealed).map_err(|e| io_error(&path, e))?;
+        report.resealed += 1;
+    }
+    Ok(report)
+}
+
+/// How many language files under `languages` are sealed under a version of store `store`'s
+/// key other than `version`.
+pub fn count_store_files_not_under(
+    languages: &Path,
+    store: &StoreId,
+    version: KeyVersion,
+) -> io::Result<usize> {
+    let mut count = 0;
+    for (_, _, path) in language_files(languages, true)? {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        if matches!(sealed_header(&bytes), Some((named, v)) if named == *store && v != version) {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn collect(
@@ -472,6 +574,7 @@ fn collect(
     prefix: &str,
     address: &str,
     found: &mut Vec<(String, String, PathBuf)>,
+    sealed: bool,
 ) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -485,7 +588,7 @@ fn collect(
         };
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            collect(&entry.path(), &file, address, found)?;
+            collect(&entry.path(), &file, address, found, sealed)?;
             continue;
         }
         if !kind.is_file()
@@ -507,7 +610,7 @@ fn collect(
             }
             read
         };
-        if !is_sealed(&head[..read]) {
+        if is_sealed(&head[..read]) == sealed {
             found.push((address.to_string(), file, entry.path()));
         }
     }

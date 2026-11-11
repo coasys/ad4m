@@ -21,6 +21,7 @@ pub mod files;
 pub mod keyring_file;
 pub mod lang_storage;
 pub mod persons;
+pub mod rotation;
 pub mod secret_source;
 pub mod sqlite;
 
@@ -259,6 +260,21 @@ impl StorageGate {
     pub fn report_error(&self, kind: StorageErrorKind) {
         self.info().last_error = Some(kind);
         self.publish();
+    }
+
+    /// Moves the keyring from the root key of `current` to that of `new`
+    /// ([`DataKeys::rotate_root`]) and publishes the new status. Answers the new generation.
+    pub fn rotate_secret(
+        &self,
+        current: zeroize::Zeroizing<[u8; 32]>,
+        new: zeroize::Zeroizing<[u8; 32]>,
+    ) -> Result<u32, KeyringError> {
+        let generation = self.keys.rotate_root(current, new)?;
+        log::info!(
+            "🔑 The storage secret changed: the keyring's root is now generation {generation}"
+        );
+        self.publish();
+        Ok(generation)
     }
 
     /// Waits until the gate is no longer sealed.

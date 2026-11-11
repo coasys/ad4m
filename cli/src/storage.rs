@@ -1,5 +1,5 @@
 //! `ad4m-executor storage`: make an operator secret, unlock a sealed executor, read its
-//! storage status. The secret is typed at the terminal with echo off and checked here before it
+//! storage status, move it to a new secret. A secret is typed at the terminal with echo off and checked here before it
 //! is sent; it is never taken from an argument or the environment (other processes of the user
 //! read both), and nothing but its fingerprint is printed.
 
@@ -29,6 +29,15 @@ pub enum StorageCommand {
     },
     /// Print the executor's storage status: sealed, unlocking or open, and its keyring id.
     Status,
+    /// Move a running executor on this machine to a new operator secret: type the current
+    /// secret, then the new one twice, when asked (none is echoed; make the new one with
+    /// `storage new-secret`). From then on only the new secret opens this executor's data.
+    /// Takes no secret as an argument or from the environment; prints only fingerprints.
+    RotateSecret {
+        /// Refused: a secret on the command line is visible to every process of the machine.
+        #[arg(hide = true, trailing_var_arg = true)]
+        given: Vec<String>,
+    },
 }
 
 /// What `storage new-secret` prints.
@@ -41,29 +50,33 @@ pub fn new_secret_text() -> Zeroizing<String> {
     ))
 }
 
-/// Refuses a secret given on the command line or in `AD4M_STORAGE_SECRET`, without repeating
-/// it.
-pub fn refuse_given_secret(given: &[String], env: impl Fn(&str) -> Option<String>) -> Result<()> {
+/// Refuses a secret given to `storage <command>` on the command line or in
+/// `AD4M_STORAGE_SECRET`, without repeating it.
+pub fn refuse_given_secret(
+    command: &str,
+    given: &[String],
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<()> {
     if !given.is_empty() {
         bail!(
-            "storage unlock takes no argument: a secret on the command line is visible to \
-             every process of this machine. Run `ad4m-executor storage unlock` and type the \
-             secret when asked, or start the executor with {SECRET_FILE_VAR}."
+            "storage {command} takes no argument: a secret on the command line is visible to \
+             every process of this machine. Run `ad4m-executor storage {command}` and type the \
+             secret when asked."
         );
     }
     if env(SECRET_VALUE_VAR).is_some() {
         bail!(
             "{SECRET_VALUE_VAR} is set: the environment is readable by your other processes. \
-             Unset it, run `ad4m-executor storage unlock` and type the secret when asked, or \
-             start the executor with {SECRET_FILE_VAR}."
+             Unset it, run `ad4m-executor storage {command}` and type the secret when asked, \
+             or start the executor with {SECRET_FILE_VAR}."
         );
     }
     Ok(())
 }
 
-/// Reads the secret from the terminal with echo off.
-pub fn read_secret_from_terminal() -> Result<Zeroizing<String>> {
-    rpassword::prompt_password("Storage secret (not shown): ")
+/// Reads a secret from the terminal with echo off, after `prompt`.
+pub fn read_secret_from_terminal(prompt: &str) -> Result<Zeroizing<String>> {
+    rpassword::prompt_password(format!("{prompt} (not shown): "))
         .map(Zeroizing::new)
         .context("cannot read the secret from the terminal")
 }
@@ -160,6 +173,70 @@ pub async fn status(executor_url: &str, token: &str) -> Result<String> {
     Ok(describe_status(&status))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RotateAnswer {
+    generation: u32,
+    old_fingerprint: String,
+    new_fingerprint: String,
+}
+
+/// The lines `storage rotate-secret` prints: the fingerprints and the root generation.
+fn describe_rotation(answer: &RotateAnswer) -> String {
+    format!(
+        "The storage secret changed: fingerprint {} -> {} (root generation {}).\nFrom now on \
+         only the new secret opens this executor's data: replace the old one wherever the \
+         executor reads it at start (the secret file), and keep the new one safe.",
+        answer.old_fingerprint, answer.new_fingerprint, answer.generation
+    )
+}
+
+/// `storage rotate-secret`: checks the three typed texts (the current secret, the new one and
+/// its confirmation), sends the two secrets to the executor at `executor_url` (a loopback
+/// address) and answers the lines to print.
+pub async fn rotate_secret(
+    executor_url: &str,
+    token: &str,
+    current: &str,
+    new: &str,
+    confirmed: &str,
+) -> Result<String> {
+    if !crate::identity::is_loopback_url(executor_url) {
+        bail!(
+            "storage rotate-secret runs only on the executor's own machine: {executor_url} is \
+             not a loopback address (use http://127.0.0.1:<port>)"
+        );
+    }
+    let current_bytes =
+        parse_hex(current).map_err(|e| anyhow::anyhow!("the current secret: {e}"))?;
+    let new_bytes = parse_hex(new).map_err(|e| anyhow::anyhow!("the new secret: {e}"))?;
+    if new.trim() != confirmed.trim() {
+        bail!("the new secret and its confirmation differ: nothing changed");
+    }
+    if *current_bytes == *new_bytes {
+        bail!("the new secret is the current one: nothing changed");
+    }
+    let (old_expected, new_expected) = (fingerprint(&current_bytes), fingerprint(&new_bytes));
+    let client = WsRpcClient::connect(executor_url, token)
+        .await
+        .with_context(|| format!("cannot reach the executor at {executor_url}"))?;
+    let answer: RotateAnswer = client
+        .call(
+            "storage.rotateSecret",
+            json!({ "currentSecret": current.trim(), "newSecret": new.trim() }),
+        )
+        .await?;
+    if answer.old_fingerprint != old_expected || answer.new_fingerprint != new_expected {
+        bail!(
+            "the executor answered for other secrets (fingerprints {} -> {}, typed {old_expected} \
+             -> {new_expected})",
+            answer.old_fingerprint,
+            answer.new_fingerprint
+        );
+    }
+    Ok(describe_rotation(&answer))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,16 +258,23 @@ mod tests {
     #[test]
     fn unlock_refuses_a_secret_in_an_argument_or_the_environment() {
         let none = |_: &str| None;
-        refuse_given_secret(&[], none).unwrap();
-        let err = refuse_given_secret(&[SECRET.to_string()], none)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("takes no argument"), "{err}");
-        assert!(!err.contains(SECRET));
-        let env = |name: &str| (name == SECRET_VALUE_VAR).then(|| SECRET.to_string());
-        let err = refuse_given_secret(&[], env).unwrap_err().to_string();
-        assert!(err.contains(SECRET_VALUE_VAR), "{err}");
-        assert!(!err.contains(SECRET));
+        for command in ["unlock", "rotate-secret"] {
+            refuse_given_secret(command, &[], none).unwrap();
+            let err = refuse_given_secret(command, &[SECRET.to_string()], none)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("storage {command} takes no argument")),
+                "{err}"
+            );
+            assert!(!err.contains(SECRET));
+            let env = |name: &str| (name == SECRET_VALUE_VAR).then(|| SECRET.to_string());
+            let err = refuse_given_secret(command, &[], env)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(SECRET_VALUE_VAR), "{err}");
+            assert!(!err.contains(SECRET));
+        }
     }
 
     /// What the unlock prints names the state, the keyring and the fingerprint, and no byte of
@@ -256,5 +340,55 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("64 hex characters"), "{err}");
+    }
+
+    /// The rotation goes only to a loopback address; a malformed secret, a confirmation that
+    /// differs and a new secret equal to the current one are refused before anything is sent,
+    /// and no message repeats a secret.
+    #[tokio::test]
+    async fn rotate_secret_checks_the_address_and_the_secrets_before_sending() {
+        let new = "02".repeat(32);
+        let err = rotate_secret("http://203.0.113.1:12000", "", SECRET, &new, &new)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("own machine"), "{err}");
+        // Port 9 on loopback: nothing listens, so each refusal comes before the connect.
+        let local = "http://127.0.0.1:9";
+        for (current, next, confirmed, expected) in [
+            ("xyz", new.as_str(), new.as_str(), "the current secret"),
+            (SECRET, "xyz", "xyz", "the new secret"),
+            (SECRET, new.as_str(), SECRET, "differ"),
+            (SECRET, SECRET, SECRET, "is the current one"),
+        ] {
+            let err = rotate_secret(local, "", current, next, confirmed)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "{err}");
+            assert!(!err.contains(SECRET) && !err.contains(&new), "{err}");
+        }
+        let err = rotate_secret(local, "", SECRET, &new, &new)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot reach"), "{err}");
+    }
+
+    /// What the rotation prints names both fingerprints and the generation, no secret.
+    #[test]
+    fn rotate_secret_prints_only_the_fingerprints() {
+        let answer = RotateAnswer {
+            generation: 2,
+            old_fingerprint: fingerprint(&[1; 32]),
+            new_fingerprint: fingerprint(&[2; 32]),
+        };
+        let text = describe_rotation(&answer);
+        assert!(text.contains(&format!(
+            "{} -> {}",
+            answer.old_fingerprint, answer.new_fingerprint
+        )));
+        assert!(text.contains("root generation 2"));
+        assert!(!text.contains(SECRET) && !text.contains(&"02".repeat(32)));
     }
 }

@@ -25,12 +25,22 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::{Ad4mDb, Ad4mDbResult};
-use crate::at_rest::data_keys::DestroyReason;
+use crate::at_rest::data_keys::{DestroyReason, KeyringError, SubkeyPurpose};
 use crate::at_rest::keyring_file::{KeyOwner, StoreId};
 use crate::at_rest::sqlite::{self, Cell, SealError};
+use ad4m_keyring::KeyVersion;
 
 /// A row as `seal_plain_values` reads it: rowid, owner, key values, column values.
 type StoredRow = (i64, Option<String>, Vec<String>, Vec<Option<String>>);
+
+/// What [`Ad4mDb::reseal_store_values`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResealReport {
+    /// Values now sealed under the store key's current version.
+    pub resealed: usize,
+    /// Values under an older version that did not open, left as they are.
+    pub unopenable: usize,
+}
 
 /// What names the store of a sealed table's row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -485,6 +495,169 @@ impl Ad4mDb {
         }
         tx.commit()?;
         Ok(sealed)
+    }
+
+    /// Seals again, under the current version of store `store`'s key, every value of a sealed
+    /// column that belongs to that store and is sealed under an older version. Each value is
+    /// written only if it is still the one read, so a value changed meanwhile (already sealed
+    /// under the current version) is left as it is. A value that does not open is left too
+    /// and counted: the store's old version must then stay.
+    pub(crate) fn reseal_store_values(&self, store: &StoreId) -> Ad4mDbResult<ResealReport> {
+        let mut report = ResealReport::default();
+        let Some(keys) = &self.rows else {
+            return Ok(report);
+        };
+        let current = match keys.subkey(store, None, SubkeyPurpose::Rows) {
+            Ok((version, _)) => version,
+            Err(KeyringError::UnknownStore) => return Ok(report),
+            Err(e) => return Err(e.into()),
+        };
+        for table in SEALED_TABLES {
+            let Some(rows) = self.rows_maybe_of(table, store)? else {
+                continue;
+            };
+            let tx = self.conn.unchecked_transaction()?;
+            for (rowid, owner, keys, values) in rows {
+                let stale = |v: &String| {
+                    sqlite::sealed_version(v).is_some_and(|version| version != current)
+                };
+                if !values.iter().flatten().any(stale) {
+                    continue;
+                }
+                let key: Vec<&str> = keys.iter().map(String::as_str).collect();
+                let sealer = self.reader(table, owner.as_deref(), &key)?;
+                if sealer.store.as_ref() != Some(store) {
+                    continue;
+                }
+                for (column, value) in table.columns.iter().zip(values) {
+                    let Some(old) = value.filter(stale) else {
+                        continue;
+                    };
+                    let plain = match sealer.open(column, old.clone()) {
+                        Ok(plain) => plain,
+                        Err(e) if is_unreadable(&e) => {
+                            log::warn!(
+                                "{}.{column} of a row of {store} does not open: left under its old key",
+                                table.table
+                            );
+                            report.unopenable += 1;
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
+                    let new = sealer.seal(column, &plain)?;
+                    report.resealed += tx.execute(
+                        &format!(
+                            "UPDATE {} SET {column} = ?1 WHERE rowid = ?2 AND {column} = ?3",
+                            table.table
+                        ),
+                        params![new, rowid, old],
+                    )?;
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(report)
+    }
+
+    /// How many values of a sealed column of store `store` are sealed under a version of its
+    /// key other than `version`.
+    pub(crate) fn count_store_values_not_under(
+        &self,
+        store: &StoreId,
+        version: KeyVersion,
+    ) -> Ad4mDbResult<usize> {
+        if self.rows.is_none() {
+            return Ok(0);
+        }
+        let mut count = 0;
+        for table in SEALED_TABLES {
+            let Some(rows) = self.rows_maybe_of(table, store)? else {
+                continue;
+            };
+            for (_, owner, keys, values) in rows {
+                let stale = values
+                    .iter()
+                    .flatten()
+                    .filter(|v| sqlite::sealed_version(v).is_some_and(|v| v != version))
+                    .count();
+                if stale == 0 {
+                    continue;
+                }
+                let key: Vec<&str> = keys.iter().map(String::as_str).collect();
+                if self.reader(table, owner.as_deref(), &key)?.store.as_ref() == Some(store) {
+                    count += stale;
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// The rows of `table` that may belong to store `store` (a perspective's rows selected by
+    /// its uuid; a person's or the executor's by the owner each names, which the caller
+    /// checks), or `None` when no row of the table can.
+    fn rows_maybe_of(
+        &self,
+        table: &SealedTable,
+        store: &StoreId,
+    ) -> rusqlite::Result<Option<Vec<StoredRow>>> {
+        let filter = match (table.owner, store) {
+            (OwnerColumn::Perspective(column), StoreId::Perspective(uuid)) => {
+                Some((column, uuid.to_string()))
+            }
+            (OwnerColumn::Perspective(_), _)
+            | (_, StoreId::Perspective(_))
+            | (OwnerColumn::Person(_), StoreId::Executor) => return Ok(None),
+            _ => None,
+        };
+        // A notification of an older executor names its owner by `user_email` until
+        // `migrate_notification_owners` gives it the user's DID.
+        let legacy_email = table.table == "notifications"
+            && self.conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('notifications') WHERE name = 'user_email'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?;
+        let owner = if legacy_email {
+            "COALESCE(owner_did, (SELECT NULLIF(did, '') FROM users WHERE username = notifications.user_email))".to_string()
+        } else {
+            table.owner.column().to_string()
+        };
+        let select = format!(
+            "SELECT rowid, {owner}, {}, {} FROM {}{}",
+            table
+                .key
+                .iter()
+                .map(|k| format!("CAST({k} AS TEXT)"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            table.columns.join(", "),
+            table.table,
+            match &filter {
+                Some((column, _)) => format!(" WHERE {column} = ?1"),
+                None => String::new(),
+            }
+        );
+        let mut statement = self.conn.prepare(&select)?;
+        let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<StoredRow> {
+            let keys = (0..table.key.len())
+                .map(|i| {
+                    row.get::<_, Option<String>>(2 + i)
+                        .map(Option::unwrap_or_default)
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let values = (0..table.columns.len())
+                .map(|i| row.get::<_, Option<String>>(2 + table.key.len() + i))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((row.get(0)?, row.get(1)?, keys, values))
+        };
+        let rows = match &filter {
+            Some((_, uuid)) => statement
+                .query_map(params![uuid], read)?
+                .collect::<Result<_, _>>()?,
+            None => statement.query_map([], read)?.collect::<Result<_, _>>()?,
+        };
+        Ok(Some(rows))
     }
 }
 

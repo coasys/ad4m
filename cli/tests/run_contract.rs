@@ -1113,3 +1113,197 @@ async fn without_a_secret_the_executor_is_sealed_until_the_operator_unlocks_it()
     assert_eq!(code, Some(0), "{out}{err}");
     assert!(out.contains("Storage open"), "{out}");
 }
+
+/// The keyring file as JSON.
+fn keyring_json(folder: &DataFolder) -> Value {
+    let path = rust_executor::at_rest::keyring_file::path_in(&folder.data());
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// `storage.keys`'s entry for `store`.
+async fn store_summary(admin: &WsRpcClient, store: &str) -> Value {
+    let keys: Value = admin.call("storage.keys", json!({})).await.unwrap();
+    keys["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == store)
+        .unwrap_or_else(|| panic!("{store} in {keys}"))
+        .clone()
+}
+
+/// The rotations end to end. An agent made after the keyring (its passphrase derived from the
+/// root key) and a perspective; `storage.rotateSecret` moves the keyring to a new secret and
+/// `storage.reencrypt` moves the perspective's data to a new key version. A restart with the
+/// new secret opens everything: the agent unlocks with no passphrase given (the keyring now
+/// holds the one derived from the old root), the perspective reads, and its store carries only
+/// the new version. A restart with the old secret stays sealed (`wrong-secret`).
+/// `storage rotate-secret` takes no secret as an argument or in the environment.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotated_secret_and_a_reencrypted_store_open_everything_after_a_restart() {
+    let _serial = SERIAL.lock().await;
+    let folder = DataFolder::new();
+    let old = "5a".repeat(32);
+    let new = "6b".repeat(32);
+
+    let port = free_port();
+    let mut first = spawn(
+        &folder,
+        port,
+        run_args(&folder, port, &[]),
+        Stdio::null(),
+        "rotate.log",
+        &[("AD4M_ADMIN_CREDENTIAL", ADMIN)],
+    );
+    first.ready();
+    let url = first.url();
+    let admin = WsRpcClient::connect(&url, ADMIN).await.unwrap();
+    let _: Value = admin
+        .call("agent.generate", json!({ "passphrase": "run-contract" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        keyring_json(&folder)["agent_passphrase"]["kind"],
+        "derived",
+        "an agent made after the keyring has a derived passphrase"
+    );
+    let handle: Value = admin
+        .call(
+            "perspective.create",
+            json!({ "name": "rotated perspective" }),
+        )
+        .await
+        .unwrap();
+    let uuid = handle["uuid"].as_str().unwrap().to_string();
+    let store = format!("perspective:{uuid}");
+    assert_eq!(store_summary(&admin, &store).await["current"], 1);
+
+    let (code, out, err) = cli(
+        &["-e", &url, "-a", ADMIN, "storage", "rotate-secret", &new],
+        &[],
+    );
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert!(
+        err.contains("storage rotate-secret takes no argument"),
+        "{err}"
+    );
+    assert!(!out.contains(&new) && !err.contains(&new));
+    let (code, out, err) = cli(
+        &["-e", &url, "-a", ADMIN, "storage", "rotate-secret"],
+        &[("AD4M_STORAGE_SECRET", &new)],
+    );
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert!(err.contains("AD4M_STORAGE_SECRET is set"), "{err}");
+    assert!(!out.contains(&new) && !err.contains(&new));
+
+    let rotated: Value = admin
+        .call(
+            "storage.rotateSecret",
+            json!({ "currentSecret": old, "newSecret": new }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotated["generation"], 2, "{rotated}");
+    let keyring = keyring_json(&folder);
+    assert_eq!(keyring["root_generation"], 2);
+    assert_eq!(keyring["agent_passphrase"]["kind"], "held", "{keyring}");
+    assert_eq!(keyring["agent_passphrase"]["generation"], 2);
+
+    let started: Value = admin
+        .call("storage.reencrypt", json!({ "store": store }))
+        .await
+        .unwrap();
+    assert_eq!(started["version"], 2, "{started}");
+    assert_eq!(started["resumed"], false, "{started}");
+    let since = Instant::now();
+    loop {
+        let summary = store_summary(&admin, &store).await;
+        if summary["retiring"].as_array().unwrap().is_empty() {
+            assert_eq!(summary["current"], 2, "{summary}");
+            break;
+        }
+        assert!(
+            since.elapsed() < Duration::from_secs(60),
+            "the re-encryption did not end: {summary}\n{}",
+            first.output()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    drop(admin);
+    drop(first);
+
+    // The new secret opens everything; the agent unlocks from the keyring alone.
+    let new_file = folder.file("new-storage-secret");
+    write_private(&new_file, &format!("{new}\n"));
+    let port = free_port();
+    let mut second = spawn(
+        &folder,
+        port,
+        run_args(&folder, port, &[]),
+        Stdio::null(),
+        "rotated.log",
+        &[
+            ("AD4M_ADMIN_CREDENTIAL", ADMIN),
+            (SECRET_FILE_VAR, new_file.to_str().unwrap()),
+        ],
+    );
+    second.ready();
+    let admin = WsRpcClient::connect(&second.url(), ADMIN).await.unwrap();
+    let status: Value = admin
+        .call("runtime.storageStatus", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "open", "{status}");
+    assert_eq!(status["rootGeneration"], 2, "{status}");
+    let since = Instant::now();
+    loop {
+        let agent: Value = admin.call("agent.status", json!({})).await.unwrap();
+        if agent["isUnlocked"] == true {
+            assert_eq!(agent["isInitialized"], true, "{agent}");
+            break;
+        }
+        assert!(
+            since.elapsed() < Duration::from_secs(60),
+            "the agent did not unlock from the keyring: {agent}\n{}",
+            second.output()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let read: Value = admin
+        .call("perspective.get", json!({ "uuid": uuid }))
+        .await
+        .unwrap();
+    assert_eq!(read["name"], "rotated perspective", "{read}");
+    let summary = store_summary(&admin, &store).await;
+    assert_eq!(summary["current"], 2, "{summary}");
+    let versions: Vec<String> = keyring_json(&folder)["stores"][&store]["key"]["versions"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(versions, vec!["2".to_string()], "only the new version");
+    drop(admin);
+    drop(second);
+
+    // The old secret no longer opens the keyring.
+    let port = free_port();
+    let mut third = spawn(
+        &folder,
+        port,
+        run_args(&folder, port, &[]),
+        Stdio::null(),
+        "old-secret.log",
+        &[("AD4M_ADMIN_CREDENTIAL", ADMIN)],
+    );
+    third.ready();
+    let admin = WsRpcClient::connect(&third.url(), ADMIN).await.unwrap();
+    let status: Value = admin
+        .call("runtime.storageStatus", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "sealed", "{status}");
+    assert_eq!(status["lastError"], "wrong-secret", "{status}");
+    assert!(third.running());
+}
