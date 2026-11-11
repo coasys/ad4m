@@ -1327,19 +1327,49 @@ async fn a_turn_reaches_no_further_than_the_caller_who_sends_it() {
     clean_up(cleanup).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_turn_is_offered_no_tool_that_opens_or_widens_a_session() {
-    setup();
-    let ctx = user("did:key:alice-d3", everything());
-    let session = create(&ctx);
-    // The tools that answer before a caller is authenticated, less the two that only read:
-    // what is left logs in, signs up, asks for a capability or mints a token.
+/// The tools that answer before a caller is authenticated, less the two that only read:
+/// what is left logs in, signs up, asks for a capability or mints a token.
+fn session_opening_tools() -> Vec<&'static str> {
     let opening: Vec<&str> = crate::mcp::tools::AUTH_TOOLS
         .iter()
         .copied()
         .filter(|tool| !["get_documentation", "auth_status"].contains(tool))
         .collect();
     assert_eq!(opening.len(), 6, "{opening:?}");
+    opening
+}
+
+// The second lock behind the turn's tool filter: the bridge every in-process caller
+// dispatches through has no arm for these, whoever holds the handler.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_in_process_bridge_dispatches_no_tool_that_opens_or_widens_a_session() {
+    setup();
+    let operator =
+        crate::mcp::tools::test_support::handler_as(crate::mcp::tools::test_support::operator());
+    for tool in session_opening_tools() {
+        let answer = match operator.call_tool_by_name(tool, json!({})).await {
+            Ok(answer) => answer,
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            answer.contains(&format!("Unknown tool: {tool}")),
+            "`{tool}` was dispatched: {answer}"
+        );
+    }
+    // The tools beside them that only read still answer.
+    let status = operator
+        .call_tool_by_name("auth_status", json!({}))
+        .await
+        .expect("auth_status answers");
+    assert!(!status.contains("Unknown tool"), "{status}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_is_offered_no_tool_that_opens_or_widens_a_session() {
+    setup();
+    let ctx = user("did:key:alice-d3", everything());
+    let session = create(&ctx);
+    let opening = session_opening_tools();
 
     let model = Scripted::answering(opening.iter().map(|tool| calls(tool, json!({}))).collect());
     let steps = steps_of(&session, &ctx, model.clone(), None).await;

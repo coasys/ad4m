@@ -20,9 +20,11 @@
 //! attributes the MCP transport reads. Only the DISPATCH is duplicated,
 //! because rmcp's router entrypoint requires a `Peer` we cannot construct.
 //!
-//! The dispatch match below covers the interpretation-pass read subset first
-//! (see [[planning/llm-harness-design-2026-08-21-v3.md]] §1). Additional
-//! tools are one match arm each; extend as harness use cases surface them.
+//! The dispatch match below has one arm per static tool an in-process caller may
+//! use: every tool but the ones that open or widen a session (login, signup, the
+//! capability request, the token mint). What a caller is offered is narrowed further
+//! by its own provider (the interpretation pass and `perspective.runAgent` take a
+//! named subset; an agent session takes all of it).
 //! Any tool not in the match delegates to `handle_dynamic_tool`, which
 //! covers ALL per-class SHACL tools (`Task_query`, `Channel_create`, etc.)
 //! — that path already exists and works without any context.
@@ -63,7 +65,7 @@ impl Ad4mMcpHandler {
     /// (what the LLM sees as the next `role: "tool"` message content).
     ///
     /// Dispatch strategy:
-    /// 1. If `name` matches one of the interpretation-relevant static tools,
+    /// 1. If `name` matches one of the static tools below,
     ///    deserialize `args` into the tool's `Parameters<T>` and call the
     ///    method directly. The method returns `String` already.
     /// 2. Otherwise, delegate to `handle_dynamic_tool` — that covers every
@@ -72,9 +74,8 @@ impl Ad4mMcpHandler {
     /// 3. If neither matches, error — the harness turns errors into
     ///    `role: "tool"` content prefixed `error:` so the LLM can recover.
     ///
-    /// The static-tool arm covers the read subset needed by the initial
-    /// harness wiring. Additional static tools land here one arm at a time;
-    /// the pattern is mechanical.
+    /// A static tool without an arm answers `Unknown tool`. The tools that open
+    /// or widen a session have none on purpose.
     pub(crate) async fn call_tool_by_name(&self, name: &str, args: Value) -> Result<String> {
         // The static-tool arms below all deserialize into a distinct
         // `Parameters<T>` where T is the argument struct on the
@@ -177,29 +178,10 @@ impl Ad4mMcpHandler {
                     })
                     .await);
             }
-            "login_email" => dispatch_static_tool!(login_email),
-            "signup" => dispatch_static_tool!(signup),
-            "request_login_verification" => {
-                dispatch_static_tool!(request_login_verification)
-            }
-            "verify_email_code" => dispatch_static_tool!(verify_email_code),
-            // `request_capability` also names an rmcp `RequestContext`; `request_capability_as`
-            // takes the params and resolves the same held session.
-            "request_capability" => {
-                let params = serde_json::from_value(args).map_err(|e| {
-                    anyhow!("failed to deserialize `request_capability` arguments: {e}")
-                })?;
-                return Ok(self
-                    .request_capability_as(
-                        crate::mcp::tools::RequestAuth {
-                            header: None,
-                            reach: None,
-                        },
-                        params,
-                    )
-                    .await);
-            }
-            "generate_jwt" => dispatch_static_tool!(generate_jwt),
+            // The tools that open or widen a session (`login_email`, `signup`,
+            // `request_login_verification`, `verify_email_code`, `request_capability`,
+            // `generate_jwt`) have no arm: work the executor runs in-process holds the
+            // session it was given and never trades it for another.
             // ── fallback: per-class dynamic tools ───────────────────────
             _ => {
                 // `handle_dynamic_tool` expects the args as a
