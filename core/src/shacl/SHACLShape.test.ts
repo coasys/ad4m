@@ -507,6 +507,32 @@ describe('SHACLShape', () => {
       expect(prop?.resolveLanguage).toBe('lang://custom');
     });
 
+    it('round-trips autoAccept through toJSON/fromJSON and toLinks/fromLinks', () => {
+      const original = new SHACLShape('test://Model');
+      original.autoAccept = 'when_placed';
+
+      expect(SHACLShape.fromJSON(original.toJSON()).autoAccept).toBe('when_placed');
+
+      const links = original.toLinks();
+      expect(links).toContainEqual({
+        source: 'test://ModelShape',
+        predicate: 'ad4m://auto_accept',
+        target: 'literal:string:when_placed',
+      });
+      expect(SHACLShape.fromLinks(links, 'test://ModelShape').autoAccept)
+        .toBe('when_placed');
+
+      // Absent stays absent (behaves as "never" on the executor).
+      const plain = new SHACLShape('test://Model');
+      expect(plain.toLinks().some(l => l.predicate === 'ad4m://auto_accept')).toBe(false);
+      expect(SHACLShape.fromJSON(plain.toJSON()).autoAccept).toBeUndefined();
+    });
+
+    it('rejects an invalid auto_accept in fromJSON', () => {
+      const shape = { ...new SHACLShape('test://Model').toJSON(), auto_accept: 'sometimes' };
+      expect(() => SHACLShape.fromJSON(shape)).toThrow(/auto_accept/);
+    });
+
     it('preserves constructor and destructor actions', () => {
       const original = new SHACLShape('test://Model');
       original.constructor_actions = [
