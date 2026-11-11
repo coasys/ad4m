@@ -67,6 +67,16 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `ensure_public_links_are_shared` and the fallback pass. Immediate sends from `commit` are
   outside this lock, so a fallback sync can run while an immediate send is in flight and submit
   the same link again.
+- The fallback sync never pushes most of the shared set (`fallback_sync.rs`,
+  `fallback_push_refused`): more than 20 links and more than half of the Shared links missing
+  from `render()` means the language's view of the remote is short (a partial or empty
+  mirror), so it logs an error, commits nothing and returns false. A language that does not
+  know the remote returns null from `render()` (skip). Only the creator's push at publish
+  (`share_links_after_publish`: `publish` and `attach_link_language` in
+  `NeighbourhoodCreationInitiated`) sends the whole set: the links made before the
+  neighbourhood existed were never sent. When that push fails (commit error, or `render()`
+  null while the language's first render runs), it queues them as one pending diff, so the
+  queue, not the refusing fallback, delivers them.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.

@@ -81,6 +81,8 @@ import {
     MeshManager,
     parseCallMessage,
     createTelepresenceChannel,
+    agentOfMeshPeer,
+    meshPeerId,
     CALL_PROTOCOL_VERSION,
     DEFAULT_ICE_SERVERS,
     DISCONNECT_GRACE_MS,
@@ -359,6 +361,8 @@ interface MeshOptions extends ChannelOptions {
     now?: () => number
     /** What `join` is handed. An empty stream unless a test says otherwise. */
     localStream?: MediaStream
+    onNetworkChange?: (callback: () => void) => () => void
+    checkConnection?: () => void
 }
 
 /** Every mesh a test made, so each is left afterwards and no timer or listener outlives its test. */
@@ -382,6 +386,8 @@ async function makeMesh(bus: InMemoryBus, selfId: string, callId: string, option
         selfId,
         iceServers: options.iceServers,
         now: options.now,
+        onNetworkChange: options.onNetworkChange,
+        checkConnection: options.checkConnection,
         // No timer: every test drives `tick()` itself, so a sweep never fires
         // between an act and its assertion. The interval has its own test.
         sweepMs: 0,
@@ -1484,6 +1490,89 @@ describe("recovering a pair that did not connect", () => {
         expect(alice.recoveries).toEqual([])
     })
 
+    it("restarts ICE on every pair at once when the network changes, connected or not", async () => {
+        // A Wi-Fi switch: every path is gone, though ICE has noticed on none yet.
+        const networkListeners = new Set<() => void>()
+        const onNetworkChange = (cb: () => void) => {
+            networkListeners.add(cb)
+            return () => { networkListeners.delete(cb) }
+        }
+        const roster = ["did:alice", "did:bob", "did:carol"]
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, { onNetworkChange })
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        const carol = await makeMesh(bus, "did:carol", CALL_ID)
+        for (const m of [alice, bob, carol]) m.mesh.setRoster(roster)
+        await settleAll()
+        expect(alice.connections).toHaveLength(2)
+        alice.connections[0].setConnectionState("connected")
+        alice.connections[1].setConnectionState("disconnected")
+
+        for (const cb of networkListeners) cb()
+        await settle()
+
+        expect(alice.connections.map((pc) => pc.restartIceCalls)).toEqual([1, 1])
+        expect(alice.recoveries.map((r) => [r.peerId, r.rung]).sort()).toEqual([
+            ["did:bob", "ice-restart"],
+            ["did:carol", "ice-restart"],
+        ])
+        expect(alice.connections).toHaveLength(2)
+
+        await alice.mesh.leave()
+        expect(networkListeners.size).toBe(0)
+    })
+
+    it("does not charge network-change restarts to a pair's repair budget", async () => {
+        // A network change judges no pair lost. Several in a row (Wi-Fi flapping)
+        // must not leave a pair that then fails without any repair.
+        const clock = makeClock()
+        const networkListeners = new Set<() => void>()
+        const onNetworkChange = (cb: () => void) => {
+            networkListeners.add(cb)
+            return () => { networkListeners.delete(cb) }
+        }
+        // The restart offers go out on a path that is gone: none is answered.
+        let pathGone = false
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, {
+            now: clock.now,
+            onNetworkChange,
+            drop: (payload) => pathGone && (payload as { kind?: string }).kind === "description",
+        })
+        const bob = await makeMesh(bus, "did:bob", CALL_ID, { now: clock.now })
+        for (const m of [alice, bob]) m.mesh.setRoster(["did:alice", "did:bob"])
+        await settleAll()
+        alice.live().setConnectionState("connected")
+        pathGone = true
+
+        for (let n = 0; n < MAX_RECOVERY_ATTEMPTS + 1; n += 1) {
+            for (const cb of networkListeners) cb()
+            await settle()
+        }
+        const restarts = alice.recoveries.length
+        alice.live().setConnectionState("failed")
+        await settle()
+        clock.advance(RECOVERY_INTERVAL_MS + 1)
+        alice.mesh.tick()
+        await settle()
+
+        expect(alice.recoveries.length).toBe(restarts + 1)
+        expect(alice.recoveries.at(-1)).toMatchObject({ rung: "ice-restart", attempts: 1 })
+    })
+
+    it("checks the executor socket when a pair goes disconnected", async () => {
+        // The signals of every rung go over that socket; a dead one is found in
+        // seconds, and its reconnect restarts every pair through onNetworkChange.
+        const checkConnection = jest.fn()
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, { checkConnection })
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        for (const m of [alice, bob]) m.mesh.setRoster(["did:alice", "did:bob"])
+        await settleAll()
+        alice.live().setConnectionState("connected")
+        expect(checkConnection).not.toHaveBeenCalled()
+
+        alice.live().setConnectionState("disconnected")
+        expect(checkConnection).toHaveBeenCalledTimes(1)
+    })
+
     it("rebuilds the pair, and says so, once the cheaper rungs have not worked", async () => {
         const clock = makeClock()
         const alice = await makeMesh(bus, "did:alice", CALL_ID, { now: clock.now })
@@ -2445,8 +2534,25 @@ describe("a description from a different connection", () => {
 
 // ── Telepresence channel ────────────────────────────────────────────
 
+describe("mesh peer ids", () => {
+    it("name one agent on one device, and give the agent back", () => {
+        expect(meshPeerId("did:key:z6Mk", "laptop")).toBe("did:key:z6Mk#laptop")
+        expect(agentOfMeshPeer("did:key:z6Mk#laptop")).toBe("did:key:z6Mk")
+        expect(agentOfMeshPeer("did:key:z6Mk")).toBe("did:key:z6Mk")
+    })
+
+    it("refuse a device id that is empty or holds '#', which would name another agent", () => {
+        expect(() => meshPeerId("did:key:z6Mk", "")).toThrow(/device id/)
+        expect(() => meshPeerId("did:key:z6Mk", "x#y")).toThrow(/device id/)
+    })
+})
+
 describe("createTelepresenceChannel", () => {
     const PREDICATE = "ad4m://session/rtc"
+    const ALICE = "did:alice#laptop"
+    const BOB = "did:bob#desk"
+    /** A link's source as a channel writes it: the sending device, and the message. */
+    const wire = (message: unknown, device = "desk") => JSON.stringify({ device, message })
 
     function fakeProxy() {
         const handlers = new Set<(payload: PerspectiveExpression) => void>()
@@ -2480,11 +2586,11 @@ describe("createTelepresenceChannel", () => {
         // The mesh acts on the sender id — offers, answers, resets, rebuilds —
         // so an author claim the executor could not verify must never reach it.
         const { proxy, signal } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const heard: [string, unknown][] = []
         channel.onMessage((from, payload) => heard.push([from, payload]))
         await settle()
-        const message = (n: number) => ({ source: JSON.stringify({ n }), predicate: PREDICATE, target: "*" })
+        const message = (n: number) => ({ source: wire({ n }), predicate: PREDICATE, target: "*" })
 
         signal("did:bob", message(1), { linkValid: false })
         signal("did:bob", message(2), { signalValid: false })
@@ -2492,7 +2598,7 @@ describe("createTelepresenceChannel", () => {
         signal("did:bob", message(4), { signalValid: null })
         signal("did:bob", message(5))
 
-        expect(heard).toEqual([["did:bob", { n: 5 }]])
+        expect(heard).toEqual([[BOB, { n: 5 }]])
     })
 
     it("lets a forged reset change nothing on the mesh", async () => {
@@ -2500,21 +2606,21 @@ describe("createTelepresenceChannel", () => {
         // whose proof does not hold must not rebuild Alice's pair with Bob.
         const { proxy, signal } = fakeProxy()
         const alice = new MeshManager({
-            channel: createTelepresenceChannel(proxy, "did:alice"),
+            channel: createTelepresenceChannel(proxy, "did:alice", "laptop"),
             callId: CALL_ID,
-            selfId: "did:alice",
+            selfId: ALICE,
             createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
             sweepMs: 0,
         })
         meshes.push(alice)
         await alice.join(stream())
-        alice.setRoster(["did:alice", "did:bob"])
+        alice.setRoster([ALICE, BOB])
         await settle()
         const before = alice.getParticipants()[0]?.stream
         const recoveries: unknown[] = []
         alice.on("peer-recovery", (...args: unknown[]) => recoveries.push(args))
 
-        const reset = { source: JSON.stringify({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: "did:alice", kind: "reset" }), predicate: PREDICATE, target: "did:alice" }
+        const reset = { source: wire({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: ALICE, kind: "reset" }), predicate: PREDICATE, target: ALICE }
         signal("did:bob", reset, { linkValid: false })
         signal("did:bob", reset, { signer: "did:mallory" })
         await settleAll()
@@ -2527,42 +2633,63 @@ describe("createTelepresenceChannel", () => {
         expect(recoveries).toHaveLength(1)
     })
 
-    it("publishes over broadcast, addressed in the link target", () => {
+    it("publishes over broadcast, from this device, addressed to a peer in the link target", () => {
         const { proxy, sends } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
 
-        channel.publish({ hello: 1 }, { agentId: "did:bob" })
+        channel.publish({ hello: 1 }, { agentId: BOB })
         channel.publish({ hello: 2 })
 
         expect(sends.map((send) => send.links)).toEqual([
-            [{ source: JSON.stringify({ hello: 1 }), predicate: PREDICATE, target: "did:bob" }],
-            [{ source: JSON.stringify({ hello: 2 }), predicate: PREDICATE, target: "*" }],
+            [{ source: wire({ hello: 1 }, "laptop"), predicate: PREDICATE, target: BOB }],
+            [{ source: wire({ hello: 2 }, "laptop"), predicate: PREDICATE, target: "*" }],
         ])
     })
 
-    it("delivers what is for this agent, with the author as the sender", async () => {
+    it("delivers what is for this device, with the author's device as the sender", async () => {
         const { proxy, signal, handlers } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const heard: [string, unknown][] = []
         const unsubscribe = channel.onMessage((from, payload) => heard.push([from, payload]))
         await settle()
 
-        signal("did:bob", { source: JSON.stringify({ n: 1 }), predicate: PREDICATE, target: "did:alice" })
-        signal("did:bob", { source: JSON.stringify({ n: 2 }), predicate: PREDICATE, target: "*" })
-        signal("did:bob", { source: JSON.stringify({ n: 3 }), predicate: PREDICATE, target: "did:carol" })
-        signal("did:bob", { source: JSON.stringify({ n: 4 }), predicate: "other://predicate", target: "*" })
-        signal("did:alice", { source: JSON.stringify({ n: 5 }), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: wire({ n: 1 }), predicate: PREDICATE, target: ALICE })
+        signal("did:bob", { source: wire({ n: 2 }), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: wire({ n: 3 }), predicate: PREDICATE, target: "did:carol#x" })
+        signal("did:bob", { source: wire({ n: 4 }), predicate: "other://predicate", target: "*" })
+        signal("did:alice", { source: wire({ n: 5 }, "laptop"), predicate: PREDICATE, target: "*" })
         signal("did:bob", { source: "{not json", predicate: PREDICATE, target: "*" })
+        // To this agent on another device, and from a sender that names no device.
+        signal("did:bob", { source: wire({ n: 6 }), predicate: PREDICATE, target: "did:alice#phone" })
+        signal("did:bob", { source: JSON.stringify({ n: 7 }), predicate: PREDICATE, target: "*" })
 
-        expect(heard).toEqual([["did:bob", { n: 1 }], ["did:bob", { n: 2 }]])
+        expect(heard).toEqual([[BOB, { n: 1 }], [BOB, { n: 2 }]])
 
         unsubscribe()
         expect(handlers.size).toBe(0)
     })
 
+    it("ignores a device id with '#', and says once that a sender names no device", async () => {
+        const { proxy, signal } = fakeProxy()
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
+        const heard: [string, unknown][] = []
+        channel.onMessage((from, payload) => heard.push([from, payload]))
+        await settle()
+        const consoleWarn = jest.spyOn(console, "warn").mockImplementation()
+
+        signal("did:bob", { source: wire({ n: 1 }, "x#y"), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: JSON.stringify({ message: { n: 2 } }), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: JSON.stringify({ message: { n: 3 } }), predicate: PREDICATE, target: "*" })
+
+        expect(heard).toEqual([])
+        expect(consoleWarn).toHaveBeenCalledTimes(1)
+        expect(consoleWarn.mock.calls[0][0]).toMatch(/did:bob sends no device id/)
+        consoleWarn.mockRestore()
+    })
+
     it("reports one result per publish, failed when the send is refused or rejected", async () => {
         const { proxy, sends } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const results: { ok: boolean; ms: number }[] = []
         const unwatch = channel.onPublishResult!((result) => results.push(result))
         const consoleError = jest.spyOn(console, "error").mockImplementation()
@@ -2599,7 +2726,7 @@ describe("createTelepresenceChannel", () => {
             addSignalHandler: async () => {},
             removeSignalHandler: () => {},
         }
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const results: { ok: boolean; ms: number }[] = []
         channel.onPublishResult!((result) => results.push(result))
         const consoleError = jest.spyOn(console, "error").mockImplementation()
@@ -2615,9 +2742,9 @@ describe("createTelepresenceChannel", () => {
         const { proxy, sends } = fakeProxy()
         const clock = makeClock()
         const mesh = new MeshManager({
-            channel: createTelepresenceChannel(proxy, "did:alice"),
+            channel: createTelepresenceChannel(proxy, "did:alice", "laptop"),
             callId: CALL_ID,
-            selfId: "did:alice",
+            selfId: ALICE,
             now: clock.now,
             sweepMs: 0,
             createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
@@ -2627,7 +2754,7 @@ describe("createTelepresenceChannel", () => {
         mesh.on("peer-recovery", (_peerId: string, attempt: { rung: RecoveryRung }) => rungs.push(attempt.rung))
         await mesh.join(stream())
 
-        mesh.setRoster(["did:alice", "did:bob"])
+        mesh.setRoster([ALICE, BOB])
         await settle()
         clock.advance(HANDSHAKE_GRACE_MS + 1)
         mesh.tick()

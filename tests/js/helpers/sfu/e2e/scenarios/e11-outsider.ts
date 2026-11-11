@@ -34,9 +34,10 @@ export const e11Outsider = e2eScenario({
     });
 
     const attempts: [string, () => Promise<unknown>][] = [
-      ["join the room", () => eve.neighbourhood.sfuCallJoin(url, "e11", "{}")],
+      ["join the room", () => eve.neighbourhood.sfuCallJoin(url, "e11", "{}", "eve-laptop")],
       ["read the call config", () => eve.neighbourhood.sfuGetConfig(url)],
-      ["send data into the room", () => eve.neighbourhood.sfuSendData(url, "e11", "chat", "hi")],
+      ["send data into the room", () => eve.neighbourhood.sfuSendData(url, "e11", "P1", "chat", "hi")],
+      ["end a session in the room", () => eve.neighbourhood.sfuCallLeave(url, "e11", "P1")],
     ];
     for (const [what, attempt] of attempts) {
       await step(`eve cannot ${what}`, async () => {

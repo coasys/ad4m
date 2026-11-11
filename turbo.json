@@ -1,6 +1,6 @@
 {
   "$schema": "https://turborepo.org/schema.json",
-  "globalPassThroughEnv": ["CARGO_PROFILE_RELEASE_STRIP"],
+  "globalPassThroughEnv": ["CARGO_PROFILE_RELEASE_STRIP", "AD4M_GIT_COMMIT", "GITHUB_SHA", "CIRCLE_SHA1"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -96,6 +96,7 @@
     "@coasys/rust-ad4m-executor#build": {
       "dependsOn": ["@coasys/dapp#build"],
       "outputs": ["dist/**", "lib/**", "build/**", "CUSTOM_DENO_SNAPSHOT.bin"],
+      "passThroughEnv": ["CI_ARTIFACT_DIR", "FORCE_DENO_SNAPSHOT"],
       "cache": false
     },
 

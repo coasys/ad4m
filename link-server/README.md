@@ -240,7 +240,7 @@ The server cannot see inside a box, so a member could grant a key that opens but
 - **ACL** gates every room endpoint. Only the admin can add/remove DIDs.
 - **Links** are stored as an append-only diff log (`PerspectiveDiff` = additions/removals of signed `LinkExpression`s) plus a derived active-set table. The diff log is never pruned: it is what `/sync?since=N` answers from, and a member whose cursor is N gets every diff after N. Rooms on a server that ran an earlier version may already have lost early diffs to its pruning; their active set is complete, so `/render` still gives a member behind that gap the room's whole state. Compacting the log would need an answer that tells a client its cursor is too old, so that client re-renders; the server has none. Each commit adds one row, so a deployment's disk grows with its rooms' history: size the volume for it, since a write fails once SQLite cannot grow its file. The **revision** is a content hash of the active set's link hashes — order-independent, so two servers with the same active links converge to the same revision regardless of how they got there.
 - **WebSocket** push delivers committed diffs and telepresence events in real time.
-- **E2E encryption** is on from creation in every room: the entire `LinkExpression` (author, timestamp, proof, and data) becomes an opaque ciphertext blob. The server sees only `{ciphertext, nonce}` plus a client-computed `link_hash` for OR-Set dedup, and rejects plaintext commits.
+- **E2E encryption** is on from creation in every room: the entire `LinkExpression` (author, timestamp, proof, and data) becomes an opaque ciphertext blob. The server sees only `{ciphertext, nonce}` (base64) plus a client-computed `link_hash` for OR-Set dedup, stores and sends them as the client wrote them, and rejects plaintext commits.
 
 See [`AGENTS.md`](./AGENTS.md) for architecture, file layout, and implementation decisions made where the spec was ambiguous.
 
@@ -252,9 +252,9 @@ All endpoints except `/rooms/:roomId/auth` require `Authorization: Bearer <jwt>`
 POST /rooms/:roomId/auth      { did } -> { challenge }
                                { did, challenge, signature } -> { token, expiresAt }
 POST /rooms/:roomId/commit    { additions: LinkExpression[], removals: LinkExpression[] } -> { sequence, revision }
-                               (every link encrypted: data { ciphertext, nonce } and a link_hash; 400 for plaintext)
-GET  /rooms/:roomId/sync      ?since=<sequence> -> { diffs: PerspectiveDiff[], revision, sequence }
-GET  /rooms/:roomId/render    -> { links: LinkExpression[], revision }
+                               (400 unless every link has data exactly { ciphertext, nonce } (strings; base64 by client convention, not checked) and a link_hash, and key_version, when sent, is a positive integer)
+GET  /rooms/:roomId/sync      ?since=<sequence>[&limit=<n>] -> { diffs: (PerspectiveDiff & {sequence})[], revision, sequence, next }
+GET  /rooms/:roomId/render    ?[limit=<n>][&next=<cursor>] -> { links: LinkExpression[], revision, sequence, upto, next }
 GET  /rooms/:roomId/revision  -> { revision, sequence }
 GET  /rooms/:roomId/peers     -> { peers: string[] }               (currently online agents)
 POST /rooms/:roomId/acl       { action: "add"|"remove", did } (admin only)
@@ -282,6 +282,27 @@ GET  /api/logs                  -> text/event-stream; the last 1000 lines, then 
                                      data = { level, time, msg, ...pino fields } (a non-JSON line: { msg })
                                      (404 when logging is off, 429 past 8 open streams)
 ```
+
+JSON answers over 1 kB are compressed (br or gzip) when the request sends `Accept-Encoding`, and sent plain when it does not. `/render` and `/sync` always answer one page: `limit` is 1 to 5000 (anything else is a 400), and a request without it gets a page of 500. See the next section.
+
+### Paged snapshot, then tail
+
+A large room's full link set does not fit one request: 30 000 encrypted links are 28 MB of JSON, more than a client's 10 s fetch deadline receives on a slow link, and the server serialises it on its one event loop while every other member waits. So a client loads a room in two bounded phases. This is the pattern for any HTTP link language that syncs through this server:
+
+1. **Snapshot, pinned at a sequence.** `GET /render?limit=N` returns the first page and `upto`, the room's latest sequence at that moment. Each later `GET /render?limit=N&next=<cursor>` returns the next page of the same snapshot: links added at or before `upto`, ordered by `(sequence, link_hash)`, after the cursor. `next` is `null` on the last page. The cursor is opaque and carries `upto`, so a client stores it and resumes after a restart at the page it reached.
+2. **Tail the log from `upto`.** `GET /sync?since=<upto>&limit=M` returns at most `M` diffs after `since`, each with its `sequence`; `next` is the `since` of the following page, `null` on the last. The revision of the last page belongs to the room's latest sequence.
+
+The snapshot is for a client's first load only. A client that has applied anything holds a cursor, and on every later start it tails `/sync` from that cursor instead: the diff log after it carries every add and remove. That relies on the server keeping the whole diff log.
+
+Why this is correct under concurrent writes: a link added after `upto` gets a later sequence, so it never appears in a snapshot page; a link removed while the pages are read drops out of the pages not yet read. Every add and remove after `upto` is in the diff log, so the tail brings each change the pages missed, and applying a removal of a link the client never got is a no-op.
+
+What a client does:
+
+- On its first load (an empty store, cursor 0), apply and emit each page as its own diff as it arrives; store the render cursor after each.
+- Leave WebSocket pushes that arrive before the last page to the render: one before the first page is inside the snapshot, one after it is in the tail.
+- Then tail `/sync?since=upto` page by page, moving its cursor to each entry's `sequence` as it applies it. Nothing needs removing: the store held nothing before the snapshot but the client's own commits, which are in the snapshot or the tail.
+
+`npm run bench` measures a 30 000-link room (`LINKS=` to change it): bytes and time for every page of `/render` and `/sync`, and for the largest and slowest one, with and without compression.
 
 ### WebSocket messages
 
@@ -319,11 +340,15 @@ could swap: a member's X25519 key follows from its DID.
   above).
 - **A member can spoil a grant.** The server cannot check the key inside a
   box. A member that grants a box holding a wrong key for a version stores the
-  first box for that member and version; the recipient's language leaves the
-  version out of its key ring and cannot open the links of that version. No
-  route removes a stored box, so this lasts. The next rotation gives the
-  recipient a new version sealed by the admin. Only a member of the room can
-  do this, and only for versions it holds.
+  first box for that member and version. The recipient's language finds that
+  the key does not match the version's `commitment`, leaves the version out of
+  its key ring and drops its own box (`DELETE /rooms/:roomId/keys/:version`).
+  The version then shows as missing again, and a member holding it grants it
+  again. Until then the recipient cannot open the links of that version. Only
+  a member of the room can do this, and only for versions it holds. A member
+  that grants a wrong box again after each drop can win that race every time;
+  removing it from the ACL stops it in allowlist mode. With `AUTO_ADMIT` the
+  server admits it again at its next sign-in.
 
 ### E2E encryption — other future requirements
 

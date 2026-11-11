@@ -49,6 +49,12 @@ impl WsRpcError {
             message: msg.into(),
         }
     }
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            code: 409,
+            message: msg.into(),
+        }
+    }
     pub fn too_many_requests(msg: impl Into<String>) -> Self {
         Self {
             code: 429,
@@ -243,6 +249,10 @@ pub struct MethodSpec {
     /// Can run for minutes (LLM work, Holochain, publishing): the client's
     /// default timeout is its long one.
     pub long: bool,
+    /// Opens something on the executor that lives past the call (a live query): the
+    /// connection caps how many run at once and cancels them when it closes, and the
+    /// client cancels one that timed out (`request.cancel`), as it does one it aborted.
+    pub opens: bool,
 }
 
 type Check = fn(&Value) -> Result<(), String>;
@@ -259,9 +269,11 @@ struct Entry {
     guard: Option<Guard>,
     /// [`MethodFlags::or_null`]: answer `null` where the method would answer 404.
     or_null: bool,
+    /// [`MethodFlags::opens`].
+    opens: bool,
 }
 
-/// Returned by [`HandlerMap::method`] to mark a method `read` or `long` and to set its
+/// Returned by [`HandlerMap::method`] to mark a method `read`, `long` or `opens` and to set its
 /// guard.
 pub struct MethodFlags<'a> {
     spec: &'a mut MethodSpec,
@@ -277,6 +289,20 @@ impl MethodFlags<'_> {
     pub fn long(self) -> Self {
         self.spec.long = true;
         self
+    }
+    /// The method opens something that outlives the call: a live query, which belongs to
+    /// the connection that opened it ([`MethodSpec::opens`]).
+    pub fn opens(self) -> Self {
+        let name = &self.spec.name;
+        let entry = self
+            .entry
+            .unwrap_or_else(|| panic!("'{name}' is not dispatched through the map: no opens"));
+        entry.opens = true;
+        self.spec.opens = true;
+        MethodFlags {
+            spec: self.spec,
+            entry: Some(entry),
+        }
     }
     /// The method answers `null` where it would answer 404: a resource that is missing or not
     /// the caller's (the guard's answer, D6), or one that went away before the handler read
@@ -321,6 +347,7 @@ where
         result: TsType::of::<R>(),
         read: false,
         long: false,
+        opens: false,
     });
     specs.last_mut().expect("just pushed")
 }
@@ -362,6 +389,7 @@ impl HandlerMap {
             result: check::<R>,
             guard: None,
             or_null: false,
+            opens: false,
         });
         MethodFlags {
             spec: push_spec::<P, R>(&mut self.specs, name),
@@ -405,6 +433,11 @@ impl HandlerMap {
             .collect();
         names.sort();
         names
+    }
+
+    /// Whether `name` is a dispatched method flagged [`MethodFlags::opens`].
+    pub fn opens(&self, name: &str) -> bool {
+        self.handlers.get(name).is_some_and(|entry| entry.opens)
     }
 
     /// Every method contract, sorted by name.
@@ -519,6 +552,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::users_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
     super::sfu_ws::register_ws_handlers(&mut map);
+    super::identity_ws::register_ws_handlers(&mut map);
     // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.
     map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
     map.inline::<NoParams, bool>(super::event_interest::UNWATCH);

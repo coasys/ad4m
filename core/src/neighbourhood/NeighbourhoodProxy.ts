@@ -12,10 +12,12 @@ import type {
     SfuParticipantQualityPreference,
     SfuQualityPreference,
     SfuRoomInfo,
+    SfuSessionReplaced,
     SfuStatus,
 } from "./SfuTypes";
 import { createSession, type Session, type SessionCreateOptions } from "./Session";
 import { createTelepresenceChannel } from "./MeshManager";
+import { defaultDeviceId } from "./SfuManager";
 
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
@@ -132,6 +134,7 @@ export class NeighbourhoodProxy {
             }
         }
         const proxy = this
+        const deviceId = options?.deviceId || defaultDeviceId()
         const session = createSession({
             api: this.#client,
             roomId: roomName,
@@ -140,12 +143,13 @@ export class NeighbourhoodProxy {
             topology: options?.topology ?? "auto",
             sfuConfig: options?.sfuConfig,
             iceServers: options?.iceServers,
+            deviceId,
             localSfuStatus: this.#sfuStatusCache ?? undefined,
             sfuServesAllMembers: () => proxy.#client.sfuServesAllMembers(proxy.#pID),
             // Mesh needs a signalling channel and presence callbacks.
             // SFU ignores these — they remain unused when the resolved
             // topology selects the SFU path.
-            channel: createTelepresenceChannel(proxy, proxy.#agentDid),
+            channel: createTelepresenceChannel(proxy, proxy.#agentDid, deviceId),
             ownOnlineStatus: () => proxy.ownOnlineStatus(),
             setOnlineStatus: (status) => proxy.setOnlineStatusU(status),
             onlineAgents: () => proxy.onlineAgents(),
@@ -195,26 +199,31 @@ export class NeighbourhoodProxy {
         return await this.#client.sfuListRooms()
     }
 
+    /** Join from `deviceId`: a join from the same device replaces this agent's session there. */
     async callJoin(
         neighbourhoodUrl: string,
         roomName: string,
         sdpOffer: string,
+        deviceId: string,
     ): Promise<CallSessionInfo> {
-        return await this.#client.sfuCallJoin(neighbourhoodUrl, roomName, sdpOffer)
+        return await this.#client.sfuCallJoin(neighbourhoodUrl, roomName, sdpOffer, deviceId)
     }
 
-    async callLeave(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
-        return await this.#client.sfuCallLeave(neighbourhoodUrl, roomName)
+    /** Leave the session `participantId` (the join's). */
+    async callLeave(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<boolean> {
+        return await this.#client.sfuCallLeave(neighbourhoodUrl, roomName, participantId)
     }
 
     async callSetQualityPreference(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         preference: SfuQualityPreference,
     ): Promise<boolean> {
         return await this.#client.sfuCallSetQualityPreference(
             neighbourhoodUrl,
             roomName,
+            participantId,
             preference,
         )
     }
@@ -222,9 +231,19 @@ export class NeighbourhoodProxy {
     async callAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         sdpAnswer: string,
     ): Promise<boolean> {
-        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, sdpAnswer)
+        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, participantId, sdpAnswer)
+    }
+
+    /**
+     * Subscribe to the executor's notices that a session of this agent was
+     * replaced by a later join from the same device. Returns an unsubscribe
+     * function.
+     */
+    subscribeSessionReplaced(callback: (event: SfuSessionReplaced) => void): () => void {
+        return this.#client.subscribeSfuSessionReplaced(callback)
     }
 
     /**
@@ -256,9 +275,10 @@ export class NeighbourhoodProxy {
     async addIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         candidate: string,
     ): Promise<boolean> {
-        return await this.#client.sfuAddIceCandidate(neighbourhoodUrl, roomName, candidate)
+        return await this.#client.sfuAddIceCandidate(neighbourhoodUrl, roomName, participantId, candidate)
     }
 
     // ── SFU data channel relay ────────────────────────────────────────
@@ -266,6 +286,7 @@ export class NeighbourhoodProxy {
     async sendData(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         channelLabel: string,
         data: string,
         binary: boolean = false,
@@ -273,6 +294,7 @@ export class NeighbourhoodProxy {
         return await this.#client.sfuSendData(
             neighbourhoodUrl,
             roomName,
+            participantId,
             channelLabel,
             data,
             binary,

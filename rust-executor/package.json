@@ -6,9 +6,9 @@
   "type": "module",
   "types": "",
   "scripts": {
-    "build": "pnpm build-deno-snapshot && pnpm build-lib",
+    "build": "pnpm build-deno-snapshot",
     "build-lib": "cargo build --release",
-    "build-deno-snapshot": "cargo run --release --features generate_snapshot --bin generate_snapshot",
+    "build-deno-snapshot": "bash scripts/build-deno-snapshot.sh",
     "test": "cargo test --release -- --test-threads=1"
   },
   "repository": {
@@ -31,5 +31,5 @@
   },
   "devDependencies": {},
   "dependencies": {},
-  "version": "0.13.1-staging.6"
+  "version": "0.13.1-staging.8"
 }

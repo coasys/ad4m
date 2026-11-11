@@ -183,15 +183,28 @@ commands:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
-          name: Build deno snapshot
-          command: pnpm run build-deno-snapshot
-          no_output_timeout: 30m
-      - run:
           name: Remove stale binaries (self-hosted runner incremental cache)
           command: rm -f target/release/ad4m target/release/ad4m-executor
       - run:
+          # Makes the Deno snapshot too: build-libs runs @coasys/rust-ad4m-executor#build
+          # (`build-deno-snapshot`) before the cli builds the executor. The script
+          # skips the snapshot when its inputs did not change since this workdir's
+          # last build, or copies it from the host-wide cache in
+          # $CI_ARTIFACT_DIR/deno-snapshot/ when another runner built those inputs.
           name: Build ADAM (without bootstrap languages)
-          command: pnpm run build-libs
+          command: |
+            export CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            pnpm run build-libs
+          no_output_timeout: 30m
+      - run:
+          # The identity suite's tools: the integration runners compile no Rust.
+          # One invocation with `ad4m`: the holder reaches the executor through rust-client,
+          # whose TLS needs OpenSSL, and only `ad4m`'s graph vendors it (no system OpenSSL here).
+          name: Build identity-store and the identity test holder
+          command: |
+            cargo build --release -p ad4m -p identity-store -p ad4m-identity-client \
+              --bin identity-store --example holder \
+              --features ad4m-identity-client/ws,ad4m-identity-client/test-vault
           no_output_timeout: 30m
 
   build_integration_inputs:
@@ -231,13 +244,14 @@ commands:
             set -eo pipefail
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
-            for bin in ad4m ad4m-executor; do
+            for bin in ad4m ad4m-executor identity-store holder; do
               test -s "$src/$bin" || { echo "missing $src/$bin: rerun build"; exit 1; }
             done
-            mkdir -p target/release
+            mkdir -p target/release/examples
             # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
-            rm -f target/release/ad4m target/release/ad4m-executor
-            cp "$src/ad4m" "$src/ad4m-executor" target/release/
+            rm -f target/release/ad4m target/release/ad4m-executor target/release/identity-store target/release/examples/holder
+            cp "$src/ad4m" "$src/ad4m-executor" "$src/identity-store" target/release/
+            cp "$src/holder" target/release/examples/holder
 
   restore_integration_inputs:
     description: "Restore the JS build outputs and hc toolchain that build produced (bootstrap languages, link-server, core, ALDK)"
@@ -354,7 +368,9 @@ jobs:
           name: Clean up stale local artifact stashes (older than 12 hours)
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -mmin +720 -exec rm -rf {} + 2>/dev/null || true
+            # deno-snapshot/ prunes its own entries by last use (build-deno-snapshot.sh);
+            # its directory's mtime moves only when an entry is added or removed.
+            find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 ! -name deno-snapshot -mmin +720 -exec rm -rf {} + 2>/dev/null || true
       - run:
           # Local git repo + fake cargo, no network; about a second.
           name: Test install-hc-toolchain.sh
@@ -386,10 +402,11 @@ jobs:
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
             mkdir -p "$dst"
-            for bin in ad4m ad4m-executor; do
+            for bin in ad4m ad4m-executor identity-store examples/holder; do
               # `a && b` inside a loop does not stop the step under bash -e.
-              cp "target/release/$bin" "$dst/$bin.tmp" || exit 1
-              mv "$dst/$bin.tmp" "$dst/$bin"
+              name="$(basename "$bin")"
+              cp "target/release/$bin" "$dst/$name.tmp" || exit 1
+              mv "$dst/$name.tmp" "$dst/$name"
             done
       # The executor for this commit, for use outside this host. Written on the runner's
       # magnetic disk and served at https://executor.ad4m.dev/<commit>/manifest.json.
@@ -501,6 +518,9 @@ jobs:
             mv "$dst.tmp" "$dst"
             ls -l "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
 
+  # Clippy and the Rust tests outside rust-executor. They run here, beside rust-tests,
+  # because rust-executor's single-threaded suite alone fills rust-tests; both jobs are
+  # required checks. Each test step runs even if an earlier step failed.
   clippy:
     machine: true
     resource_class: coasys/marvin
@@ -513,6 +533,46 @@ jobs:
           name: cargo clippy
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
+      - run:
+          # The cli and the identity client in one cargo run: the client's ws feature needs
+          # OpenSSL, which only `ad4m`'s graph vendors, and one run builds `ad4m` once, with
+          # one feature set. Testing them apart builds `ad4m` twice.
+          name: cli and identity client tests
+          when: always
+          command: |
+            cargo test --release -p ad4m -p ad4m-identity-client \
+              --features ad4m-identity-client/ws,ad4m-identity-client/test-vault
+          no_output_timeout: 30m
+      - run:
+          # The other identity crates: one run per crate, because each tests its own feature set.
+          name: identity crates tests
+          when: always
+          command: |
+            cargo test --release -p ad4m-hash-chain --all-features
+            cargo test --release -p ad4m-identity-core --all-features
+            cargo test --release -p identity-store
+          no_output_timeout: 30m
+      - run:
+          # ad4m-hash-chain on wasm32 under Node: the shared vectors, the RFC 8785 data, the
+          # text checks and the wasm-bindgen exports. The test runner must be the locked
+          # wasm-bindgen version; it is installed once into the (persistent) target dir.
+          name: identity crates wasm tests
+          when: always
+          command: |
+            WASM_BINDGEN=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+            RUNNER=$PWD/target/wasm-tools/bin/wasm-bindgen-test-runner
+            if ! "$RUNNER" --version 2>/dev/null | grep -q " $WASM_BINDGEN\$"; then
+              cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked --root target/wasm-tools
+            fi
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER \
+              cargo test -p ad4m-hash-chain --target wasm32-unknown-unknown --features wasm
+          no_output_timeout: 30m
+      - run:
+          # ad4m-ldk/rust is its own workspace, so the commands above skip it.
+          name: ad4m-ldk (Rust) tests
+          when: always
+          command: cd ad4m-ldk/rust && cargo test
+          no_output_timeout: 30m
 
   fmt:
     # rustfmt only parses the sources, so it needs no build and no warm target/.
@@ -539,16 +599,6 @@ jobs:
           # the crate's `pnpm test` script.
           name: rust-executor tests
           command: cd rust-executor && cargo test --release -- --test-threads=1
-          no_output_timeout: 30m
-      - run:
-          name: cli tests
-          command: cd cli && cargo test --release
-          no_output_timeout: 30m
-      - run:
-          # ad4m-ldk/rust is its own workspace, so the commands above skip it. Here
-          # rather than in a separate job because rust-tests is a required check.
-          name: ad4m-ldk (Rust) tests
-          command: cd ad4m-ldk/rust && cargo test
           no_output_timeout: 30m
 
   js-unit-tests:
@@ -637,6 +687,51 @@ jobs:
           path: /tmp/test-artifacts
           destination: test-logs
 
+  # SFU and mesh calls in real Chromium, Firefox and WebKit, mixed, through the
+  # SDK's browser build (tests/js/tests/sfu-browsers.test.ts). One executor,
+  # local languages. Nightly against `dev`, in `nightly-llm-e2e`, with the SFU
+  # wind tunnel: it is the only check that a browser other than Chromium can
+  # call (#1684 broke Firefox on the SFU while every Chromium-based suite stayed
+  # green). It builds its own binaries: that pipeline has no `build` job.
+  # The runner is Ubuntu 25.04, which Playwright has no builds for: it falls back
+  # to the 24.04 builds, whose WebKit needs ICU 74 and ffmpeg 6, absent on 25.04.
+  # Debian 13's builds use the same ICU (76) and ffmpeg (7) as 25.04, so the job
+  # takes those, in their own browsers path so they never mix with the 24.04
+  # builds other jobs on the runner use. The path persists on the runner, so the
+  # install is a download only when playwright-core's version changes.
+  # `SFU_BROWSERS_REQUIRED` makes a browser that cannot start fail the job
+  # instead of skipping its tests.
+  integration-tests-sfu-browsers:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian13-x64
+      PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
+    steps:
+      - setup_integration_test_environment:
+          local: true
+          build_binaries: true
+      - run:
+          name: Install Chromium, Firefox and WebKit
+          command: |
+            cd ./tests/js
+            # The install's own host check knows no 25.04 package names, so it is skipped
+            # here; the script installs the libraries, and the launch checks them again.
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm exec playwright-core install chromium firefox webkit
+            sudo apt-get update -qq
+            ./scripts/install-browser-deps.sh
+      - run:
+          name: Run cross-browser SFU and mesh call tests
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && SFU_BROWSERS_REQUIRED=1 pnpm run test-main-sfu-browsers 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 20m
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
   # Multi-node suite over the server-link-language: Alice + Bob on local
   # languages (no Holochain), links syncing through a link-server the suite
   # starts (tests/js/tests/integration-server-link.test.ts).
@@ -670,6 +765,38 @@ jobs:
               cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
             done
             lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
+  # Identity end to end: a real identity-store and three executors (create, link,
+  # first-link refusal, revoke, a store restored behind the cache, cache after restart).
+  # No Holochain. The suite builds identity-store and the holder example with cargo.
+  integration-tests-identity:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_integration_test_environment:
+          local: true
+      - run:
+          name: Run identity integration tests (identity-store, three executors)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-identity 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
       - store_artifacts:
           when: always
           path: /tmp/test-artifacts
@@ -967,6 +1094,9 @@ workflows:
       - integration-tests-multi-node-server-link:
           requires:
             - build
+      - integration-tests-identity:
+          requires:
+            - build
       - integration-tests-multi-node-holochain:
           requires:
             - build
@@ -1001,3 +1131,5 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-llm
       - integration-tests-sfu:
           serial-group: << pipeline.project.slug >>/nightly-sfu
+      - integration-tests-sfu-browsers:
+          serial-group: << pipeline.project.slug >>/nightly-sfu-browsers

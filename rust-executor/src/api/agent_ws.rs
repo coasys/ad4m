@@ -84,7 +84,7 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
                 perspective: Some(DomainPerspective { links: vec![] }),
             },
         };
-        return Ok(serde_json::to_value(agent)?);
+        return Ok(serde_json::to_value(with_identity(agent).await)?);
     }
 
     // Fallback to main agent for admin/legacy mode.
@@ -103,7 +103,14 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         Ok::<Agent, WsRpcError>(agent)
     })?;
 
-    Ok(serde_json::to_value(agent)?)
+    Ok(serde_json::to_value(with_identity(agent).await)?)
+}
+
+/// `agent.get`'s answer: the profile, and the `did:scid` its device key speaks for (`null` once
+/// a revocation of the key reaches the log's trusted seq).
+async fn with_identity(agent: Agent) -> crate::identity::types::AgentWithIdentity {
+    let identity = crate::identity::service::identity_of_agent(&agent.did).await;
+    crate::identity::types::AgentWithIdentity { agent, identity }
 }
 
 /// agent.apps — the grants of the agent the caller acts as: a user lists the apps (and
@@ -378,12 +385,25 @@ fn spawn_main_agent_publish() {
     });
 }
 
-/// agent.generate — generate agent identity
+/// agent.generate — create the main agent's keys and DID on first run.
+/// Refuses (409) when the agent is already initialised — the notion
+/// `agent.status` reports as `isInitialized`; unlock it instead. Always the
+/// main agent: the `Executor` guard keeps sessions acting as a managed user
+/// out entirely.
 async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: GenerateAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
+        // Inside the lock so a concurrent generate cannot slip between the
+        // check and the write: re-generating would replace the agent's keys
+        // (and its DID) under a caller that only found it uninitialised a
+        // moment ago.
+        if agent_service.is_initialized() {
+            return Err(WsRpcError::conflict(
+                "the agent is already initialised; unlock it with agent.unlock instead",
+            ));
+        }
         agent_service.create_new_keys();
 
         let dm_language = crate::runtime_service::RuntimeService::with_global_instance(|rt| {
@@ -396,8 +416,10 @@ async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
         agent_service.save(body.passphrase.clone());
         agent_service.passphrase = Some(body.passphrase.clone());
 
-        agent_service.dump().clone()
-    });
+        Ok(agent_service.dump().clone())
+    })?
+    .with_identity()
+    .await;
 
     let mut init_errors: Vec<String> = Vec::new();
     let config = crate::config::get_global_config();
@@ -446,7 +468,9 @@ async fn lock_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
     let agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(body.passphrase.clone());
         agent_service.dump().clone()
-    });
+    })
+    .with_identity()
+    .await;
 
     get_global_pubsub()
         .await
@@ -521,7 +545,16 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
 
         log::info!("AD4M init complete");
 
-        spawn_main_agent_publish();
+        // The main agent's profile, then every managed user's, so the profiles an earlier
+        // agent language held reach the configured store.
+        tokio::spawn(async {
+            if let Err(e) =
+                AgentService::publish_agent_to_language(&AgentContext::main_agent()).await
+            {
+                log::warn!("Error publishing agent expression: {}", e);
+            }
+            AgentService::publish_managed_profiles().await;
+        });
     }
 
     let mut agent = {
@@ -532,7 +565,9 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
             .as_ref()
             .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         agent_ref.dump().clone()
-    };
+    }
+    .with_identity()
+    .await;
 
     if !is_unlocked {
         agent.error = Some("Failed to unlock agent".to_string());
@@ -729,22 +764,27 @@ async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
             WsRpcError::internal(format!("Failed to get DID document for user: {}", e))
         })?;
 
-        return Ok(serde_json::to_value(AgentStatus {
-            did: Some(did),
-            did_document: Some(serde_json::Value::String(
-                serde_json::to_string(&did_document).map_err(|e| {
-                    WsRpcError::internal(format!("Failed to serialize DID document: {}", e))
-                })?,
-            )),
-            error: None,
-            is_initialized: true,
-            is_unlocked: true,
-        })?);
+        return Ok(serde_json::to_value(
+            AgentStatus {
+                did: Some(did),
+                did_document: Some(serde_json::Value::String(
+                    serde_json::to_string(&did_document).map_err(|e| {
+                        WsRpcError::internal(format!("Failed to serialize DID document: {}", e))
+                    })?,
+                )),
+                error: None,
+                is_initialized: true,
+                is_unlocked: true,
+                identity: None,
+            }
+            .with_identity()
+            .await,
+        )?);
     }
 
     // Fallback to main agent status
     let status = AgentService::with_global_instance(|agent_service| agent_service.dump());
-    Ok(serde_json::to_value(status)?)
+    Ok(serde_json::to_value(status.with_identity().await)?)
 }
 
 /// agent.isLocked — check if agent is locked
@@ -925,7 +965,7 @@ async fn entanglement_proof_preflight(
 /// Message types match the client SDK's `apiClient.call()` type strings.
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The caller's own agent: a user's, else the main agent.
-    map.method::<NoParams, Agent>("agent.get", get_agent)
+    map.method::<NoParams, crate::identity::types::AgentWithIdentity>("agent.get", get_agent)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     // The grants on the caller's own agent (without tokens).
@@ -2240,6 +2280,171 @@ mod capability_request_tests {
         assert!(
             !PendingRequests::global().is_approved(&managed),
             "auto-permit never approves a request on a managed agent"
+        );
+    }
+}
+
+#[cfg(test)]
+mod generate_agent_tests {
+    use crate::agent::AgentService;
+    use crate::api::agent_ws::register_ws_handlers;
+    use crate::api::ws_handler::HandlerMap;
+    use crate::config::{set_global_config, Ad4mConfig};
+    use crate::runtime_service::RuntimeService;
+    use crate::test_utils::{
+        ensure_test_db, init_v8_platform, setup_agent, setup_wallet, test_languages_directory,
+    };
+    use crate::types::RequestContext;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    /// A RuntimeService on an inert bootstrap seed: `generate_agent` reads the
+    /// DM language from it inside the agent lock, where a missing service
+    /// panics and poisons the lock for the rest of the test process. The seed's
+    /// language-language bundle is not a language, so the post-generate system
+    /// language load fails fast into `init_errors` instead of starting
+    /// runtimes. Drop puts the slot back to `None` (same pattern as
+    /// `secret_leak_tests::RuntimeServiceGuard`).
+    struct RuntimeServiceGuard;
+
+    impl RuntimeServiceGuard {
+        fn start() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let seed = dir.path().join("seed.json");
+            let empty = json!({
+                "trustedAgents": [], "knownLinkLanguages": [],
+                "directMessageLanguage": "", "agentLanguage": "",
+                "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+                "languageLanguageBundle": "throw new Error('not a language')",
+            });
+            std::fs::write(&seed, empty.to_string()).unwrap();
+            RuntimeService::init_global_instance(seed.to_string_lossy().into_owned());
+            assert!(RuntimeService::global_instance().lock().unwrap().is_some());
+            RuntimeServiceGuard
+        }
+    }
+
+    impl Drop for RuntimeServiceGuard {
+        fn drop(&mut self) {
+            let instance = RuntimeService::global_instance();
+            *instance.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+    }
+
+    /// A global AgentService on a fresh app dir without `agent.json`: the main
+    /// agent is uninitialised (the notion `agent.status` reports as
+    /// `isInitialized`) until a `save` writes it. `run_holochain=false` sends
+    /// `generate_agent` down its local-language path, never at a conductor.
+    /// Drop restores `setup_agent` (which also restores the default config) so
+    /// the next test finds the globals it expects.
+    struct FreshAgent {
+        _tmp: tempfile::TempDir,
+        app_path: String,
+    }
+
+    impl FreshAgent {
+        fn new() -> Self {
+            init_v8_platform();
+            test_languages_directory();
+            setup_wallet();
+            ensure_test_db();
+            let mut config = Ad4mConfig::default();
+            config.run_holochain = Some(false);
+            set_global_config(config);
+
+            let tmp = tempfile::tempdir().unwrap();
+            let app_path = tmp.path().to_str().unwrap().to_string();
+            std::fs::create_dir_all(format!("{app_path}/ad4m")).unwrap();
+            AgentService::init_global_instance(app_path.clone());
+            FreshAgent {
+                _tmp: tmp,
+                app_path,
+            }
+        }
+
+        fn agent_file(&self) -> String {
+            format!("{}/ad4m/agent.json", self.app_path)
+        }
+    }
+
+    impl Drop for FreshAgent {
+        fn drop(&mut self) {
+            setup_agent();
+        }
+    }
+
+    async fn generate(passphrase: &str) -> Result<Value, (u16, String)> {
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        map.dispatch(
+            "agent.generate",
+            json!({ "passphrase": passphrase }),
+            Arc::new(RequestContext::operator_for_test()),
+        )
+        .await
+        .map_err(|e| (e.code, e.message))
+    }
+
+    #[tokio::test]
+    async fn generate_on_a_fresh_executor_initialises_the_agent() {
+        let _runtime = RuntimeServiceGuard::start();
+        let fresh = FreshAgent::new();
+
+        let reply = generate("pw-generate-test")
+            .await
+            .expect("agent.generate on a fresh executor");
+
+        assert_eq!(reply["isInitialized"], json!(true), "{reply}");
+        assert_eq!(reply["isUnlocked"], json!(true), "{reply}");
+        assert!(
+            reply["did"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("did:"),
+            "{reply}"
+        );
+        assert!(
+            std::path::Path::new(&fresh.agent_file()).exists(),
+            "generate must have written agent.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_refuses_an_initialised_agent_without_touching_it() {
+        let _runtime = RuntimeServiceGuard::start();
+        let fresh = FreshAgent::new();
+        AgentService::with_mutable_global_instance(|s| {
+            s.create_new_keys();
+            s.save("pw-generate-test".to_string());
+        });
+        let did_before = AgentService::with_global_instance(|s| s.did.clone().unwrap());
+        let key_before = crate::wallet::wallet_backend()
+            .get_public_key("main")
+            .unwrap();
+        let file_before = std::fs::read_to_string(fresh.agent_file()).unwrap();
+
+        let (code, message) = generate("a-different-passphrase")
+            .await
+            .expect_err("agent.generate on an initialised agent must be refused");
+
+        assert_eq!(code, 409, "{message}");
+        assert!(message.contains("initialised"), "{message}");
+        assert_eq!(
+            AgentService::with_global_instance(|s| s.did.clone().unwrap()),
+            did_before,
+            "the refusal must not have replaced the DID"
+        );
+        assert_eq!(
+            crate::wallet::wallet_backend()
+                .get_public_key("main")
+                .unwrap(),
+            key_before,
+            "the refusal must not have replaced the main key"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fresh.agent_file()).unwrap(),
+            file_before,
+            "the refusal must not have rewritten agent.json"
         );
     }
 }
