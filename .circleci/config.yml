@@ -687,6 +687,51 @@ jobs:
           path: /tmp/test-artifacts
           destination: test-logs
 
+  # SFU and mesh calls in real Chromium, Firefox and WebKit, mixed, through the
+  # SDK's browser build (tests/js/tests/sfu-browsers.test.ts). One executor,
+  # local languages. Nightly against `dev`, in `nightly-llm-e2e`, with the SFU
+  # wind tunnel: it is the only check that a browser other than Chromium can
+  # call (#1684 broke Firefox on the SFU while every Chromium-based suite stayed
+  # green). It builds its own binaries: that pipeline has no `build` job.
+  # The runner is Ubuntu 25.04, which Playwright has no builds for: it falls back
+  # to the 24.04 builds, whose WebKit needs ICU 74 and ffmpeg 6, absent on 25.04.
+  # Debian 13's builds use the same ICU (76) and ffmpeg (7) as 25.04, so the job
+  # takes those, in their own browsers path so they never mix with the 24.04
+  # builds other jobs on the runner use. The path persists on the runner, so the
+  # install is a download only when playwright-core's version changes.
+  # `SFU_BROWSERS_REQUIRED` makes a browser that cannot start fail the job
+  # instead of skipping its tests.
+  integration-tests-sfu-browsers:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian13-x64
+      PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
+    steps:
+      - setup_integration_test_environment:
+          local: true
+          build_binaries: true
+      - run:
+          name: Install Chromium, Firefox and WebKit
+          command: |
+            cd ./tests/js
+            # The install's own host check knows no 25.04 package names, so it is skipped
+            # here; the script installs the libraries, and the launch checks them again.
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm exec playwright-core install chromium firefox webkit
+            sudo apt-get update -qq
+            ./scripts/install-browser-deps.sh
+      - run:
+          name: Run cross-browser SFU and mesh call tests
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && SFU_BROWSERS_REQUIRED=1 pnpm run test-main-sfu-browsers 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 20m
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
   # Multi-node suite over the server-link-language: Alice + Bob on local
   # languages (no Holochain), links syncing through a link-server the suite
   # starts (tests/js/tests/integration-server-link.test.ts).
@@ -1086,3 +1131,5 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-llm
       - integration-tests-sfu:
           serial-group: << pipeline.project.slug >>/nightly-sfu
+      - integration-tests-sfu-browsers:
+          serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
