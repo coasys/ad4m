@@ -908,6 +908,10 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     // scoped to *created* instances (design §10 v1), and the returned
     // `bases` mix created and updated indistinguishably.
     let created = crate::perspectives::flow_spawn::created_bases_of(&ops);
+    // Same capture for the class each Create/Update op names — the auto-accept
+    // pass resolves classes for its candidates after `ops` has moved.
+    let op_classes = super::overlay::op_classes_of(&ops);
+    let run_id_for_auto_accept = run_id.clone();
     let bases = apply_with_overlay(
         perspective,
         shapes,
@@ -920,6 +924,24 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
         debug,
     )
     .await?;
+
+    // Auto-accept the inferred items whose class declared it, before the flow
+    // passes so `requires` read their values as real. Kept one small call so
+    // the run.rs tail refactor (PR #1414) rebases cleanly.
+    let accepted = super::overlay::auto_accept_pass(
+        perspective,
+        &bases,
+        &op_classes,
+        &run_id_for_auto_accept,
+        context,
+    )
+    .await;
+    if !accepted.is_empty() {
+        log::info!(
+            "🧠 interpretation: auto-accepted {} inferred item(s)",
+            accepted.len()
+        );
+    }
 
     let spawned = crate::perspectives::flow_spawn::run_flow_spawn_pass(
         perspective,
@@ -2516,6 +2538,63 @@ mod tests {
             live.is_empty(),
             "deselected flows must not spawn, got {live:?}"
         );
+    }
+
+    /// The auto-accept pass runs inside this tail, after the overlay write
+    /// and before flow spawning: an `always` class's created item is
+    /// accepted (overlay gone, `auto_accepted` marker written) AND still
+    /// gets its FlowInstance in the same pass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_auto_accepts_and_still_spawns_flows() {
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("Chapter", AA_PARENT_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Chapter"),
+            "Delivery",
+        )
+        .await;
+
+        let base = "soa://tail/chapter/auto";
+        let (bases, _proposals) = run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![InterpretationOp::Create {
+                base: base.to_string(),
+                class: "Chapter".to_string(),
+                values: serde_json::Map::from_iter([(
+                    "title".to_string(),
+                    serde_json::json!("auto-accepted chapter"),
+                )]),
+            }],
+            None,
+        )
+        .await;
+
+        assert!(bases.iter().any(|b| b == base));
+        // Auto-accepted: no overlay left, marker present.
+        assert!(
+            crate::perspectives::interpretation::overlay::list_overlays(&perspective)
+                .await
+                .unwrap()
+                .iter()
+                .all(|o| o.base != base),
+            "auto-accepted base must not remain pending"
+        );
+        let marker = perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(base.to_string()),
+                predicate: Some("ad4m://interp/auto_accepted".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links marker");
+        assert_eq!(marker.len(), 1, "one auto_accepted marker");
+        // Flow spawning still ran on the created item.
+        let live = live_on(&perspective, base).await;
+        assert_eq!(live.len(), 1, "flow spawned on the auto-accepted item");
     }
 
     #[tokio::test(flavor = "multi_thread")]

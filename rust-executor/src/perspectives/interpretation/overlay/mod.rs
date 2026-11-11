@@ -35,16 +35,21 @@
 //!     the per-pass run node and its provenance metadata.
 //!   * [`gate`] — the §4 human-divergence gate and the graph reads it needs.
 //!   * [`write`] — persisting an overlay (mint-or-bump + `inferred/<p>` links).
+//!   * [`auto_accept`] — the class-level `auto_accept` rule: accepting eligible
+//!     inferred items at the end of a pass through the human path's own
+//!     [`accept_interpretation`].
 //!   * this module — the orchestration ([`apply_with_overlay`]) tying them
 //!     together, plus the shared predicate vocabulary. The generic
 //!     single-valued link upsert (`replace_link`) lives in the `graph` submodule.
 
 mod accept;
+mod auto_accept;
 mod classes;
 mod gate;
 mod write;
 
 pub(crate) use accept::{accept_interpretation, list_overlays, reject_interpretation, OverlayView};
+pub(crate) use auto_accept::{auto_accept_pass, op_classes_of};
 pub use classes::InterpretationRunCursor;
 pub(crate) use classes::{
     ensure_interpretation_overlay_classes, mint_interpretation_run, InterpretationRunMeta,
