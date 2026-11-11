@@ -1121,13 +1121,17 @@ impl SparqlStore {
         let store = match data_path {
             Some(path) => {
                 let store_path = std::path::PathBuf::from(path).join("sparql_store");
-                std::fs::create_dir_all(&store_path).map_err(|e| {
-                    anyhow!(
-                        "Failed to create SPARQL store directory {:?}: {}",
-                        store_path,
-                        e
-                    )
-                })?;
+                // 0700, also for a folder an older executor made: RocksDB makes its files
+                // with the process umask, and the folder keeps others out of them.
+                crate::at_rest::files::create_private_dir_all(&store_path)
+                    .and_then(|()| crate::at_rest::files::restrict(&store_path))
+                    .map_err(|e| {
+                        anyhow!(
+                            "Failed to create SPARQL store directory {:?}: {}",
+                            store_path,
+                            e
+                        )
+                    })?;
                 log::info!("Opening persistent SPARQL store at {:?}", store_path);
                 Store::open_with_options(
                     &store_path,
@@ -4200,6 +4204,25 @@ mod tests {
             let store = SparqlStore::new(Some(path)).unwrap();
             assert!(store.has_data());
         }
+    }
+
+    /// The store's folder is the owner's only, also one an older executor made open.
+    #[cfg(unix)]
+    #[test]
+    fn the_sparql_store_folder_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let fresh = dir.path().join("fresh");
+        drop(SparqlStore::new(Some(fresh.to_str().unwrap())).unwrap());
+        assert_eq!(mode(&fresh.join("sparql_store")), 0o700);
+        assert_eq!(mode(&fresh), 0o700, "a missing parent is made private too");
+
+        let old = dir.path().join("old").join("sparql_store");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(SparqlStore::new(Some(dir.path().join("old").to_str().unwrap())).unwrap());
+        assert_eq!(mode(&old), 0o700);
     }
 
     // ── query_links optimization tests ──

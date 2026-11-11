@@ -54,6 +54,7 @@ ignored, and the error names the key by its path, e.g.
 | `sfu_udp_port` | number | a free port, new at each start | `--sfu-udp-port` / `AD4M_SFU_UDP_PORT` |
 | `sfu_public_addr` | string (IP) | the STUN probe's address | `--sfu-public-addr` / `AD4M_SFU_PUBLIC_ADDR` |
 | `sfu_stun_server` | string (`host:port`) | no probe | `--sfu-stun-server` / `AD4M_SFU_STUN_SERVER` |
+| `allow_secret_on_data_disk` | bool | `false`: a storage secret file on the data folder's disk is refused | `--allow-secret-on-data-disk` / `AD4M_ALLOW_SECRET_ON_DATA_DISK` |
 | `log_config` | object: crate → level | see below | `RUST_LOG` overrides it |
 | `log_dir` | string (folder) | stdout | `--log-dir` / `AD4M_LOG_DIR` |
 | `multi_user_config.enabled` | bool | `false` | `--enable-multi-user` / `AD4M_ENABLE_MULTI_USER` |
@@ -307,6 +308,17 @@ Secrets come from files or environment variables:
 | Admin credential | `AD4M_ADMIN_CREDENTIAL_FILE` | `AD4M_ADMIN_CREDENTIAL` | — |
 | SMTP password | `AD4M_SMTP_PASSWORD_FILE` | `AD4M_SMTP_PASSWORD` | `smtp_config.password_file` |
 | Agent passphrase | `AD4M_UNLOCK_PASSPHRASE_FILE` | — | — |
+| Storage secret | `AD4M_STORAGE_SECRET_FILE` | — (`AD4M_STORAGE_SECRET` stops `run`) | — |
+
+- The storage secret is 64 hex characters (`ad4m-executor storage new-secret`
+  prints one). Without it the executor starts **sealed**: `/health` and
+  `runtime.storageStatus` answer, every other call gets `storage-sealed`, and
+  nothing in the data folder is opened until the operator runs
+  `ad4m-executor storage unlock` on the same machine and types the secret.
+  `ad4m-executor storage status` shows the state.
+- A storage secret file on the same disk as the data folder stops the unlock
+  (`secret-on-data-disk`) unless `allow_secret_on_data_disk` is `true`
+  (`AD4M_ALLOW_SECRET_ON_DATA_DISK`, `--allow-secret-on-data-disk`).
 
 - Setting both variables of one secret stops `run`. The variables win over
   `smtp_config.password_file`.

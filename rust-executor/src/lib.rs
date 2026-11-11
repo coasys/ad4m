@@ -2,6 +2,7 @@
 extern crate lazy_static;
 
 pub mod api;
+pub mod at_rest;
 pub mod bots;
 pub mod config;
 pub mod config_file;
@@ -450,8 +451,12 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         panic!("{}", message);
     }
 
-    // The wallet's keys are in this process's memory once unlocked.
-    #[cfg(target_os = "linux")]
+    // Out of the config before it is copied anywhere (the global config, the API thread).
+    let storage_secret = config.storage_secret.take();
+
+    // The storage keys and the wallet's keys are in this process's memory once unlocked. The
+    // executor binaries did this first thing; an embedder's process gets it here.
+    #[cfg(unix)]
     if let Err(e) = exit::forbid_core_dumps() {
         warn!("Could not turn off core dumps for the executor: {e}");
     }
@@ -481,6 +486,89 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it
     crate::config::set_global_config(config.clone());
+
+    // The data folders, before the keyring is read from one. Each new one is 0700, and the data
+    // folder itself is closed to 0700 whoever made it (the data-folder lock, an older executor).
+    let data_root = std::path::PathBuf::from(
+        config
+            .app_data_path
+            .as_ref()
+            .expect("App data path not set in Ad4mConfig"),
+    );
+    {
+        let base = data_root.join("ad4m");
+        let dirs = [
+            data_root.clone(),
+            base.clone(),
+            base.join("data"),
+            base.join("languages"),
+            base.join("languages").join("temp"),
+            base.join("h"),
+            base.join("h").join("d"),
+            base.join("h").join("c"),
+        ];
+        for dir in &dirs {
+            if let Err(e) = at_rest::files::create_private_dir_all(dir) {
+                error!("Failed to create data directory {:?}: {}", dir, e);
+                panic!(
+                    "Cannot continue without required data directory {:?}: {}",
+                    dir, e
+                );
+            }
+        }
+        at_rest::files::close_if_open(&data_root);
+        at_rest::files::close_if_open(&base);
+    }
+
+    // No store opens before the storage secret arrived. With the secret from the embedding
+    // shell or the secret file the keyring opens here; without it, or when it does not open
+    // the keyring, the API starts now and answers only `runtime.storageStatus` and
+    // `storage.unlock` until the operator unlocks (`at_rest`).
+    let gate = std::sync::Arc::new(at_rest::StorageGate::new(
+        &data_root,
+        config.allow_secret_on_data_disk.unwrap_or(false),
+    ));
+    if at_rest::install(gate.clone()).is_err() {
+        return failed_start(
+            "The executor already ran in this process: one executor per process".to_string(),
+        );
+    }
+    let unlocked = match &storage_secret {
+        Some(secret) => match gate.unlock(secret) {
+            Ok(outcome) => {
+                info!(
+                    "Storage unlocked with the secret from {:?}{}",
+                    secret.source,
+                    if outcome.created {
+                        "; keyring made"
+                    } else {
+                        ""
+                    }
+                );
+                true
+            }
+            Err(e) => {
+                error!("The storage secret of this start did not open the keyring: {e}");
+                false
+            }
+        },
+        None => false,
+    };
+    drop(storage_secret);
+    let mut early_api = None;
+    if !unlocked {
+        find_and_set_port(&mut config.port, 4000, "REST API");
+        warn!(
+            "Storage sealed (keyring {}): waiting for storage.unlock, e.g. `ad4m-executor storage unlock` on this machine",
+            gate.keys().keyring_id().to_hex()
+        );
+        let (api, api_ended) = spawn_api_thread(config.clone());
+        tokio::select! {
+            _ = gate.unsealed() => early_api = Some(api),
+            // The API could not start (port taken) or stopped: nobody can unlock any more.
+            _ = api_ended => return api,
+        }
+    }
 
     // Initialise the wallet backend based on config.
     // "shared" mode connects to an external HTTP wallet service;
@@ -571,34 +659,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     }
 
-    // Create data directories that were previously created by the JS executor's Config.init().
-    // These must exist before any service tries to write to them.
-    {
-        let app_data_path = config
-            .app_data_path
-            .as_ref()
-            .expect("App data path not set in Ad4mConfig");
-        let base = std::path::Path::new(app_data_path).join("ad4m");
-        let dirs = [
-            base.clone(),
-            base.join("data"),
-            base.join("languages"),
-            base.join("languages").join("temp"),
-            base.join("h"),
-            base.join("h").join("d"),
-            base.join("h").join("c"),
-        ];
-        for dir in &dirs {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                error!("Failed to create data directory {:?}: {}", dir, e);
-                panic!(
-                    "Cannot continue without required data directory {:?}: {}",
-                    dir, e
-                );
-            }
-        }
-    }
-
     aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls' aws_lc_rs crypto provider");
@@ -619,6 +679,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .as_str(),
     )
     .expect("Failed to initialize Ad4mDb");
+    // SQLite makes its files with the process umask: only the owner reads them.
+    for name in ["ad4m_db.sqlite", "ad4m_db.sqlite-wal", "ad4m_db.sqlite-shm"] {
+        let file = data_root.join(name);
+        if file.exists() {
+            if let Err(e) = at_rest::files::restrict(&file) {
+                warn!("Could not make {} private: {e}", file.display());
+            }
+        }
+    }
 
     // The bots and their grants, which every call of a bot's session reads. Without them no
     // managed agent's session is served (`bots::classify`): a bot must not pass as a user.
@@ -1005,9 +1074,30 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         });
     }
 
-    info!("Starting REST API server...");
+    // Every store is open: the gate lets every method through.
+    gate.mark_open();
+    info!("Storage open");
 
-    std::thread::spawn(move || {
+    match early_api {
+        // It has served the storage methods since the start.
+        Some(api) => api,
+        None => {
+            info!("Starting REST API server...");
+            spawn_api_thread(config).0
+        }
+    }
+}
+
+/// The REST API on a thread of its own, and a receiver that resolves when that thread's
+/// server ended (it failed to start, or stopped).
+fn spawn_api_thread(
+    config: Ad4mConfig,
+) -> (
+    JoinHandle<Result<(), AnyError>>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let (ended_tx, ended_rx) = tokio::sync::oneshot::channel();
+    let api = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .thread_name(String::from("rest_server"))
             .enable_all()
@@ -1017,8 +1107,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         if let Err(e) = &result {
             error!("REST API server failed: {:?}", e);
         }
+        let _ = ended_tx.send(());
         result
-    })
+    });
+    (api, ended_rx)
 }
 
 /// `run`'s order for the start-up pass over the key-bound grants: the persisted agent is

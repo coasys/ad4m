@@ -143,6 +143,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::config_rpc::ConfigChanged>(ConfigChanged, false),
         EventSpec::of::<crate::identity::types::LinkTicketEvent>(LinkTicket, false),
         EventSpec::of::<crate::identity::types::InboxMessageEvent>(InboxMessage, false),
+        EventSpec::of::<crate::at_rest::StorageStatus>(StorageStateChanged, false),
     ]
 }
 
@@ -340,7 +341,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::IdentityFork
         | Topic::ConfigChanged
         | Topic::LinkTicket
-        | Topic::InboxMessage => None,
+        | Topic::InboxMessage
+        | Topic::StorageStateChanged => None,
     }
 }
 
@@ -881,6 +883,12 @@ mod audience_matrix_tests {
             (
                 "config-changed".into(),
                 event(Topic::ConfigChanged, Audience::Operator),
+                vec!["operator"],
+            ),
+            // The storage gate changed state: the operator's status, so the operator only.
+            (
+                "storage-state-changed".into(),
+                event(Topic::StorageStateChanged, Audience::Operator),
                 vec!["operator"],
             ),
         ];
@@ -2477,6 +2485,19 @@ mod event_spec_tests {
                 serde_json::to_value(crate::identity::types::InboxMessageEvent {
                     id: "m".into(),
                     kind: crate::identity::types::InboxMessageType::Master,
+                }),
+            ),
+            (
+                Topic::StorageStateChanged,
+                serde_json::to_value(crate::at_rest::StorageStatus {
+                    state: crate::at_rest::StorageState::Sealed,
+                    encrypted_at_rest: false,
+                    stores: None,
+                    keyring_id: "00".repeat(16),
+                    secret_source: None,
+                    secret_on_data_disk: None,
+                    root_generation: None,
+                    last_error: Some(crate::at_rest::StorageErrorKind::WrongSecret),
                 }),
             ),
         ];

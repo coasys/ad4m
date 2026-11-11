@@ -665,6 +665,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("identity.deleteRequest", || json!({ "id": "r" })),
     ("identity.unwrapRecordKey", || json!({ "wrapped": "w" })),
+    // Storage.
+    ("storage.unlock", || json!({ "secret": "5a".repeat(32) })),
     // Key sessions.
     (
         "user.loginWithKey",
@@ -1133,7 +1135,8 @@ async fn no_local_only_method_admits_an_operator_from_a_key_login() {
 }
 
 /// The calls that stay on this machine: opening and replacing the executor's own key, signing
-/// as this device, the custody channel and stopping or restarting its process.
+/// as this device, the custody channel, unlocking its storage and stopping or restarting its
+/// process.
 /// [`OPERATOR_ANYWHERE`] are not among them.
 #[test]
 fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
@@ -1151,6 +1154,7 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
             "identity.unwrapRecordKey",
             "runtime.quit",
             "runtime.restart",
+            "storage.unlock",
         ]
     );
 }
@@ -1427,6 +1431,8 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "runtime.unytWalletBalance",
             "runtime.unytWalletHistory",
             "sfu.ensureMembership",
+            "storage.keys",
+            "storage.unlock",
             "user.credits",
             "user.freeAccess",
             "user.setMultiUserEnabled",
@@ -1729,6 +1735,7 @@ fn only_methods_whose_guard_checks_no_capability_are_open() {
             "agent.isLocked",
             "runtime.freeHostingEnabled",
             "runtime.info",
+            "runtime.storageStatus",
             "runtime.tlsDomain",
             "user.currentSession",
             "user.endAllSessions",

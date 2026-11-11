@@ -144,6 +144,8 @@ did-key = "0.2.1"
 ad4m-hash-chain = { path = "../ad4m-hash-chain", features = ["sqlite"] }
 ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build"] }
 ad4m-ldk = { path = "../ad4m-ldk/rust" }
+# Data at rest: the keys of the keyring file and their wraps (at_rest/).
+ad4m-keyring = { path = "../ad4m-keyring" }
 ed25519-dalek = "2.2.0"
 bs58 = "0.5.1"
 zip = "0.6.4"

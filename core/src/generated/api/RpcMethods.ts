@@ -85,6 +85,7 @@ import type { JsonValue } from "./serde_json/JsonValue";
 import type { KeyOwner } from "./KeyOwner";
 import type { KeyOwnerParams } from "./KeyOwnerParams";
 import type { KeySessionResult } from "./KeySessionResult";
+import type { KeyringSummary } from "./KeyringSummary";
 import type { LanguageAddressParams } from "./LanguageAddressParams";
 import type { LanguageHandle } from "./LanguageHandle";
 import type { LanguageListParams } from "./LanguageListParams";
@@ -224,6 +225,9 @@ import type { SignMessageRequest } from "./SignMessageRequest";
 import type { SignSessionStatementParams } from "./SignSessionStatementParams";
 import type { SignedHead } from "./SignedHead";
 import type { SignedKeyStatement } from "./SignedKeyStatement";
+import type { StorageStatus } from "./StorageStatus";
+import type { StorageUnlockParams } from "./StorageUnlockParams";
+import type { StorageUnlockResult } from "./StorageUnlockResult";
 import type { StoredRecord } from "./StoredRecord";
 import type { TakenMaster } from "./TakenMaster";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
@@ -437,6 +441,7 @@ export interface RpcMethods {
   "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
   "runtime.setStatus": { params: SetStatusRequest; result: boolean };
   "runtime.setUnytMembraneProof": { params: SetUnytMembraneProofRequest; result: boolean };
+  "runtime.storageStatus": { params: Record<string, never>; result: StorageStatus };
   "runtime.tlsDomain": { params: Record<string, never>; result: string | null };
   "runtime.unytAgentKey": { params: Record<string, never>; result: null };
   "runtime.unytHotAgentPubkey": { params: Record<string, never>; result: null };
@@ -465,6 +470,8 @@ export interface RpcMethods {
   "sfu.startRoom": { params: SfuRoomParams; result: SfuRoomInfo };
   "sfu.status": { params: Record<string, never>; result: SfuStatus };
   "sfu.stopRoom": { params: SfuRoomParams; result: boolean };
+  "storage.keys": { params: Record<string, never>; result: KeyringSummary };
+  "storage.unlock": { params: StorageUnlockParams; result: StorageUnlockResult };
   "user.create": { params: CreateUserRequest; result: UserCreationResult };
   "user.credits": { params: UsersSetCreditsParams; result: boolean };
   "user.currentSession": { params: Record<string, never>; result: SessionInfo };
@@ -564,6 +571,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.networkMetrics",
   "runtime.notifications",
   "runtime.outbox",
+  "runtime.storageStatus",
   "runtime.tlsDomain",
   "runtime.unytAgentKey",
   "runtime.unytHotAgentPubkey",
@@ -579,6 +587,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "sfu.sfuPeerForNeighbourhood",
   "sfu.sfuPeersForNeighbourhood",
   "sfu.status",
+  "storage.keys",
   "user.currentSession",
   "user.list",
   "user.multiUserEnabled",

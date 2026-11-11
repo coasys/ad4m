@@ -62,6 +62,37 @@ fn get_encryption_key() -> Result<Key<Aes256Gcm>, Box<dyn std::error::Error>> {
     }
 }
 
+/// The launcher's operator secret, which opens the embedded executor's data at rest.
+#[cfg(not(test))]
+const STORAGE_SECRET_USER: &str = "storage-secret";
+
+/// The operator secret the launcher hands its executor in-process: kept in the OS keyring (not
+/// on the data folder's disk), made from the OS random source on the first start.
+#[cfg(not(test))]
+pub fn storage_secret() -> Result<rust_executor::at_rest::StorageSecret, Box<dyn std::error::Error>>
+{
+    use rust_executor::at_rest::{secret_source, SecretSourceKind, StorageSecret};
+    let _lock = KEYRING_MUTEX.lock().unwrap();
+    let entry = Entry::new(KEYRING_SERVICE, STORAGE_SECRET_USER)?;
+    let secret = match entry.get_password() {
+        Ok(hex) => StorageSecret::from_hex(&hex, SecretSourceKind::InProcess, None)?,
+        Err(keyring::Error::NoEntry) => {
+            let hex = secret_source::new_secret_hex();
+            entry.set_password(&hex)?;
+            StorageSecret::from_hex(&hex, SecretSourceKind::InProcess, None)?
+        }
+        Err(e) => return Err(Box::new(e)),
+    };
+    Ok(secret)
+}
+
+/// Tests never touch the OS keyring: a fixed secret stands in.
+#[cfg(test)]
+pub fn storage_secret() -> Result<rust_executor::at_rest::StorageSecret, Box<dyn std::error::Error>>
+{
+    Ok(rust_executor::at_rest::StorageSecret::in_process([7u8; 32]))
+}
+
 /// Encrypt a password using AES-256-GCM
 pub fn encrypt_password(password: &str) -> Result<String, Box<dyn std::error::Error>> {
     let key = get_encryption_key()?;

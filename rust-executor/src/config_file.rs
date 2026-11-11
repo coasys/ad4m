@@ -71,6 +71,14 @@ pub enum ConfigFileError {
     CustodyCredentialInEnvironment {
         variable: &'static str,
     },
+    /// The storage secret read from `source` (a file) is not 64 hex characters.
+    InvalidStorageSecret {
+        source: String,
+        reason: String,
+    },
+    /// `AD4M_STORAGE_SECRET` is set: the storage secret comes only from a file, the shell that
+    /// embeds the executor, or `storage.unlock`.
+    StorageSecretInEnvironment,
 }
 
 impl fmt::Display for ConfigFileError {
@@ -118,6 +126,17 @@ impl fmt::Display for ConfigFileError {
             ),
             Self::CustodyCredentialInEnvironment { variable } => f.write_str(
                 &crate::config::custody_credential_in_environment_error(variable),
+            ),
+            Self::InvalidStorageSecret { source, reason } => {
+                write!(f, "the storage secret in {source} is not usable: {reason}")
+            }
+            Self::StorageSecretInEnvironment => write!(
+                f,
+                "{} is set; the storage secret is not read from the environment: put it in a \
+                 file (mode 0600) on another disk and set {}, or unlock with \
+                 `ad4m-executor storage unlock`",
+                crate::at_rest::secret_source::SECRET_VALUE_VAR,
+                crate::at_rest::secret_source::SECRET_FILE_VAR
             ),
         }
     }
@@ -244,6 +263,11 @@ pub struct ExecutorConfigFile {
     /// key logins come only from this machine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_origins: Option<Vec<String>>,
+    /// Accept a storage secret file (`AD4M_STORAGE_SECRET_FILE`) on the same disk as the data
+    /// folder. Whoever takes that disk then has both, so the status reports the data as not
+    /// encrypted at rest. Default false: such a file is refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_secret_on_data_disk: Option<bool>,
 }
 
 /// `identity` in the config file.
@@ -283,6 +307,12 @@ pub(crate) const INLINE_SECRETS: &[(&str, &str)] = &[
         "custody_credential is not allowed in the config file; with --custody-channel the \
          custody service writes it as the first line of the executor's stdin",
     ),
+    (
+        "/storage_secret",
+        "storage_secret is not allowed in the config file; put it in a file (mode 0600) on \
+         another disk than the data folder and set AD4M_STORAGE_SECRET_FILE, or unlock with \
+         `ad4m-executor storage unlock`",
+    ),
 ];
 
 /// The secret values, resolved outside the config file. `Debug` shows only
@@ -292,6 +322,8 @@ pub struct ExecutorSecrets {
     pub admin_credential: Option<Secret>,
     pub smtp_password: Option<String>,
     pub unlock_passphrase: Option<String>,
+    /// The operator secret that opens the keyring (`AD4M_STORAGE_SECRET_FILE`).
+    pub storage_secret: Option<crate::at_rest::StorageSecret>,
 }
 
 impl fmt::Debug for ExecutorSecrets {
@@ -304,6 +336,10 @@ impl fmt::Debug for ExecutorSecrets {
             )
             .field("smtp_password", &shown(&self.smtp_password))
             .field("unlock_passphrase", &shown(&self.unlock_passphrase))
+            .field(
+                "storage_secret",
+                &self.storage_secret.as_ref().map(|_| REDACTED),
+            )
             .finish()
     }
 }
@@ -320,6 +356,10 @@ impl ExecutorSecrets {
     /// | admin credential | `AD4M_ADMIN_CREDENTIAL` | `AD4M_ADMIN_CREDENTIAL_FILE` | |
     /// | SMTP password | `AD4M_SMTP_PASSWORD` | `AD4M_SMTP_PASSWORD_FILE` | `smtp_config.password_file` |
     /// | unlock passphrase | | `AD4M_UNLOCK_PASSPHRASE_FILE` | |
+    /// | storage secret | | `AD4M_STORAGE_SECRET_FILE` | |
+    ///
+    /// The storage secret is 64 hex characters; `AD4M_STORAGE_SECRET` set is an error, the
+    /// environment is readable by the user's other processes.
     ///
     /// Setting both variables of one secret is an error. The custody credential is not here: it
     /// comes only from stdin ([`crate::config::read_custody_credential`]), and
@@ -339,7 +379,14 @@ impl ExecutorSecrets {
         {
             return Err(ConfigFileError::CustodyCredentialInEnvironment { variable });
         }
+        if env(crate::at_rest::secret_source::SECRET_VALUE_VAR).is_some() {
+            return Err(ConfigFileError::StorageSecretInEnvironment);
+        }
+        let storage_secret = env(crate::at_rest::secret_source::SECRET_FILE_VAR)
+            .map(|path| crate::at_rest::StorageSecret::read_file(Path::new(&path)))
+            .transpose()?;
         Ok(ExecutorSecrets {
+            storage_secret,
             admin_credential: secret_from_env(
                 &env,
                 Some("AD4M_ADMIN_CREDENTIAL"),
@@ -574,6 +621,8 @@ impl ExecutorConfigFile {
             log_dir: self.log_dir.clone(),
             public_origins: self.public_origins.clone(),
             admin_credential: secrets.admin_credential.clone(),
+            storage_secret: secrets.storage_secret.clone(),
+            allow_secret_on_data_disk: self.allow_secret_on_data_disk,
             ..Ad4mConfig::unprepared()
         })
     }
@@ -856,6 +905,57 @@ mod tests {
         let echoed = crate::config_rpc::runtime_config(Some(&file), &[]).unwrap();
         assert!(!echoed.values.contains_key("custody_credential"));
         assert_eq!(echoed.values["port"], 4000);
+    }
+
+    /// A storage secret pasted into the config file stops the start, names where it belongs,
+    /// and is never echoed.
+    #[test]
+    fn a_config_file_carrying_the_storage_secret_is_refused() {
+        let err = parse(&format!(r#"{{"storage_secret": "{}"}}"#, "ab".repeat(32)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("storage_secret is not allowed"), "{err}");
+        assert!(err.contains("AD4M_STORAGE_SECRET_FILE"), "{err}");
+        assert!(!err.contains("abab"), "{err}");
+    }
+
+    /// The storage secret comes from `AD4M_STORAGE_SECRET_FILE`, never from a variable that
+    /// holds it; `allow_secret_on_data_disk` and the secret reach the executor's config.
+    #[cfg(unix)]
+    #[test]
+    fn the_storage_secret_comes_from_its_file_and_not_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("storage-secret");
+        write_secret(&path, &format!("{}\n", "0f".repeat(32)), 0o600);
+        let file = parse(r#"{"allow_secret_on_data_disk": true}"#).unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+        let env = |name: &str| (name == "AD4M_STORAGE_SECRET_FILE").then(|| path_text.clone());
+        let secrets = ExecutorSecrets::from_env(env, &file).unwrap();
+        let secret = secrets.storage_secret.as_ref().expect("read from the file");
+        assert_eq!(secret.bytes(), &[0x0f; 32]);
+        assert_eq!(secret.file.as_deref(), Some(path.as_path()));
+        assert!(!format!("{secrets:?}").contains("0f0f"));
+        let config = file.to_ad4m_config(&secrets).unwrap();
+        assert_eq!(config.allow_secret_on_data_disk, Some(true));
+        assert!(config.storage_secret.is_some());
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("storageSecret"), "never serialised: {json}");
+
+        let env = |name: &str| (name == "AD4M_STORAGE_SECRET").then(|| "0f".repeat(32));
+        let err = ExecutorSecrets::from_env(env, &file).unwrap_err();
+        assert!(matches!(err, ConfigFileError::StorageSecretInEnvironment));
+        assert!(
+            err.to_string().contains("AD4M_STORAGE_SECRET_FILE"),
+            "{err}"
+        );
+
+        write_secret(&path, "not hex at all\n", 0o600);
+        let env = |name: &str| (name == "AD4M_STORAGE_SECRET_FILE").then(|| path_text.clone());
+        let err = ExecutorSecrets::from_env(env, &file)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("64 hex"), "{err}");
+        assert!(!err.contains("not hex at all"), "{err}");
     }
 
     #[test]

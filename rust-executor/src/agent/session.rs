@@ -100,6 +100,10 @@ pub enum AuthError {
     /// executor, not of the token: the token may be good, and the caller should try again
     /// after the unlock.
     Locked,
+    /// The executor waits sealed for its storage secret (`storage.unlock`): no store and no
+    /// wallet are open, so no token can be checked yet. Like [`AuthError::Locked`], a state of
+    /// the executor; the caller reconnects after the unlock.
+    Sealed,
 }
 
 impl AuthError {
@@ -108,7 +112,7 @@ impl AuthError {
     /// later", clients keep the token and reconnect) for a locked wallet.
     pub fn close_code(&self) -> u16 {
         match self {
-            AuthError::Locked => 1013,
+            AuthError::Locked | AuthError::Sealed => 1013,
             _ => 1008,
         }
     }
@@ -123,6 +127,11 @@ impl std::fmt::Display for AuthError {
             AuthError::NoIdentity(e) => write!(
                 f,
                 "Could not load the identity of this user session; reconnect: {e}"
+            ),
+            AuthError::Sealed => write!(
+                f,
+                "storage-sealed: the executor waits for its storage secret; reconnect after \
+                 the operator unlocks it"
             ),
             AuthError::Locked => write!(
                 f,
@@ -196,6 +205,10 @@ impl Session {
             });
         }
 
+        // A sealed executor has opened no wallet yet: nothing can check the token.
+        if crate::at_rest::is_gated() {
+            return Err(AuthError::Sealed);
+        }
         // Checking a token needs the wallet's signing key. A locked wallet says nothing about
         // the token, so it gets its own outcome: the client keeps the token and retries.
         if !crate::wallet::wallet_backend().is_unlocked() {

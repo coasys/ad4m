@@ -25,6 +25,7 @@ dependencies = [
  "rand 0.8.5",
  "ratatui",
  "regex",
+ "rpassword",
  "rustyline 10.1.1",
  "serde",
  "serde_cbor",
@@ -36,6 +37,7 @@ dependencies = [
  "unicode-width 0.1.14",
  "url",
  "urlencoding",
+ "zeroize",
 ]
 
 [[package]]
@@ -64,6 +66,7 @@ dependencies = [
  "ad4m-client",
  "ad4m-hash-chain",
  "ad4m-identity-core",
+ "ad4m-keyring",
  "ad4m-ldk",
  "aes-gcm",
  "anyhow",

@@ -17,7 +17,8 @@ REST/WS shim. Split plan: spec item 6.
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
 handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`,
 `key_login` (login with a device key and the calls of key sessions; the work is in
-`identity::key_login`), and `agent_session` (`perspective.runAgent`). Each exposes
+`identity::key_login`), `storage` (`storage.unlock`, `storage.keys`, `runtime.storageStatus`;
+the work is in `at_rest`), and `agent_session` (`perspective.runAgent`). Each exposes
 `register_ws_handlers(&mut HandlerMap)` called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -115,6 +116,14 @@ without that check. A guard runs before the handler's own checks. A handler chec
 part of the guard (compute credits, param validation beyond the contract type) runs after the
 access check: a call that fails both gets the access answer.
 
+**Sealed storage.** Until the operator secret unlocks the keyring (`at_rest::StorageGate`), only
+`runtime.storageStatus` and `storage.unlock` answer (`at_rest::ANSWERED_WHILE_GATED`); every
+other method gets 503 `storage-sealed` from `HandlerMap::check_gate`, before its guard, in
+dispatch and admission alike. `events.watch` is not gated, so a client can wait for
+`storage-state-changed` (operator audience). While sealed, the admin credential and an empty
+token open a session; a JWT is refused (close 1013 on the socket, 503 on REST), since checking
+it needs the stores. `/health` answers throughout.
+
 **Local only.** A method flagged `.local_only()` (`MethodFlags::local_only`) answers only the
 operator on this machine (`Session::is_operator_on_this_machine`: the admin credential, or no
 token on an executor without one, on a loopback listener). The dispatcher checks it after the
@@ -190,7 +199,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-234 methods: Cap 87, Executor 38, Open 9, Operator 30, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 11.
+237 methods: Cap 87, Executor 38, Open 10, Operator 32, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 12.
 
 | Method | Guard |
 |---|---|
@@ -382,6 +391,7 @@ the guard checked:
 | `runtime.setHostRates` | `Operator` |
 | `runtime.setStatus` | `Cap(runtime.my_status:UPDATE)` |
 | `runtime.setUnytMembraneProof` | `Operator` |
+| `runtime.storageStatus` | `Open` |
 | `runtime.tlsDomain` | `Open` |
 | `runtime.unytAgentKey` | `Operator` |
 | `runtime.unytHotAgentPubkey` | `Operator` |
@@ -410,6 +420,8 @@ the guard checked:
 | `sfu.startRoom` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.status` | `Cap(neighbourhood:READ)` |
 | `sfu.stopRoom` | `Cap(neighbourhood:UPDATE)` |
+| `storage.keys` | `Operator` |
+| `storage.unlock` | `Operator`, local only |
 | `user.create` | `Cap(runtime.user_management:CREATE)` |
 | `user.credits` | `Operator` |
 | `user.currentSession` | `Open` |

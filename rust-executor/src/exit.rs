@@ -150,13 +150,13 @@ impl DataFolderLock {
     /// another, is [`ExitReason::DataFolderBusy`]; a folder that cannot hold the file is a
     /// crash (1).
     pub fn take(folder: &Path) -> Result<DataFolderLock, AnyError> {
-        std::fs::create_dir_all(folder)?;
+        crate::at_rest::files::create_private_dir_all(folder)?;
         let path = folder.join(Self::FILE_NAME);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, crate::at_rest::files::FILE_MODE);
+        let file = options.open(&path)?;
         match file.try_lock() {
             Ok(()) => Ok(DataFolderLock { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => Err(StartRefused::new(
@@ -191,9 +191,10 @@ pub(crate) fn hold_data_folder(folder: &Path) -> Result<(), AnyError> {
     Ok(())
 }
 
-/// No core file and no debugger attach for the executor: its memory holds the wallet's keys
-/// once unlocked. Linux only; macOS writes no core file by default.
-#[cfg(target_os = "linux")]
+/// No core file and no debugger attach for the executor: its memory holds the storage keys and
+/// the wallet's keys. Linux: `RLIMIT_CORE` 0 and `PR_SET_DUMPABLE` 0; macOS: `RLIMIT_CORE` 0.
+/// The executor binaries call it first thing in `main`, `run` again for embedders.
+#[cfg(unix)]
 pub fn forbid_core_dumps() -> std::io::Result<()> {
     let none = libc::rlimit {
         rlim_cur: 0,
@@ -203,6 +204,7 @@ pub fn forbid_core_dumps() -> std::io::Result<()> {
     if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    #[cfg(target_os = "linux")]
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -280,12 +282,12 @@ mod tests {
         assert!(folder.join(DataFolderLock::FILE_NAME).exists());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn the_executor_is_not_dumpable_and_writes_no_core_file() {
         forbid_core_dumps().unwrap();
-        let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
-        assert_eq!(dumpable, 0);
+        #[cfg(target_os = "linux")]
+        assert_eq!(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) }, 0);
         let mut limit = libc::rlimit {
             rlim_cur: 1,
             rlim_max: 1,

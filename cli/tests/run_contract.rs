@@ -44,6 +44,7 @@ impl DataFolder {
             .tempdir()
             .expect("a temp folder");
         let folder = DataFolder { root };
+        write_private(&folder.secret(), &format!("{}\n", "5a".repeat(32)));
         let init = Command::new(BINARY)
             .args(["init", "--data-path"])
             .arg(folder.data())
@@ -64,7 +65,29 @@ impl DataFolder {
     fn file(&self, name: &str) -> PathBuf {
         self.root.path().join(name)
     }
+
+    /// The storage secret file the executor opens its data with (beside the data folder, on
+    /// its disk: `run_args` allows that).
+    fn secret(&self) -> PathBuf {
+        self.file("storage-secret")
+    }
 }
+
+/// Writes `content` to a new file of mode 0600.
+fn write_private(path: &std::path::Path, content: &str) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+}
+
+/// The variable naming the storage secret file. A test that gives it empty starts the
+/// executor without a secret: sealed.
+const SECRET_FILE_VAR: &str = "AD4M_STORAGE_SECRET_FILE";
 
 /// A port nothing listens on right now.
 fn free_port() -> u16 {
@@ -106,6 +129,8 @@ fn run_args(folder: &DataFolder, port: u16, extra: &[&str]) -> Vec<String> {
         "true",
         "--run-dapp-server",
         "false",
+        "--allow-secret-on-data-disk",
+        "true",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -137,8 +162,13 @@ fn spawn(
     for (name, _) in std::env::vars().filter(|(name, _)| name.starts_with("AD4M_")) {
         command.env_remove(name);
     }
+    command.env(SECRET_FILE_VAR, folder.secret());
     for (name, value) in env {
-        command.env(name, value);
+        if *name == SECRET_FILE_VAR && value.is_empty() {
+            command.env_remove(name);
+        } else {
+            command.env(name, value);
+        }
     }
     Executor {
         child: command.spawn().expect("ad4m-executor starts"),
@@ -929,4 +959,148 @@ async fn a_local_only_method_on_a_network_listener_answers_403_local_only() {
         }
     }
     assert!(executor.running(), "{}", executor.output());
+}
+
+/// `ad4m-executor <args>` with no inherited `AD4M_*` variable plus `env`: its exit code, stdout
+/// and stderr.
+fn cli(args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String, String) {
+    let mut command = Command::new(BINARY);
+    command.args(args).stdin(Stdio::null());
+    for (name, _) in std::env::vars().filter(|(name, _)| name.starts_with("AD4M_")) {
+        command.env_remove(name);
+    }
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let out = command.output().expect("ad4m-executor runs");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[cfg(unix)]
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Without a storage secret the executor comes up sealed: `/health`, the storage status and
+/// the unlock answer, every other method is `storage-sealed`, and no store is opened. The
+/// `storage` subcommands read the status and refuse a secret given on the command line or in
+/// the environment without repeating it. `storage.unlock` opens it under the same keyring id;
+/// the next start with the secret file opens at once, under that id again. The folder is 0700,
+/// the database and the keyring 0600.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_secret_the_executor_is_sealed_until_the_operator_unlocks_it() {
+    let _serial = SERIAL.lock().await;
+    let folder = DataFolder::new();
+    let database = folder.data().join("ad4m_db.sqlite");
+    let keyring = rust_executor::at_rest::keyring_file::path_in(&folder.data());
+    let secret = "5a".repeat(32);
+
+    let port = free_port();
+    let args = run_args(&folder, port, &[]);
+    let mut sealed = spawn(
+        &folder,
+        port,
+        args,
+        Stdio::null(),
+        "sealed.log",
+        &[("AD4M_ADMIN_CREDENTIAL", ADMIN), (SECRET_FILE_VAR, "")],
+    );
+    sealed.ready();
+    let url = sealed.url();
+    let admin = WsRpcClient::connect(&url, ADMIN).await.unwrap();
+    let status: Value = admin
+        .call("runtime.storageStatus", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "sealed", "{status}");
+    assert_eq!(status["stores"], Value::Null, "{status}");
+    let keyring_id = status["keyringId"].as_str().unwrap().to_string();
+    let refused = refusal(admin.call::<Value>("agent.status", json!({})).await);
+    assert!(
+        refused.starts_with("RPC error 503: storage-sealed"),
+        "{refused}"
+    );
+    assert!(!database.exists(), "no store opens while sealed");
+    assert!(!keyring.exists(), "no keyring is written before the secret");
+
+    let (code, out, err) = cli(&["-e", &url, "-a", ADMIN, "storage", "status"], &[]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(
+        out.contains("Storage sealed") && out.contains(&keyring_id),
+        "{out}"
+    );
+    let (code, out, err) = cli(
+        &["-e", &url, "-a", ADMIN, "storage", "unlock", &secret],
+        &[],
+    );
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert!(err.contains("takes no argument"), "{err}");
+    assert!(!out.contains(&secret) && !err.contains(&secret));
+    let (code, out, err) = cli(
+        &["-e", &url, "-a", ADMIN, "storage", "unlock"],
+        &[("AD4M_STORAGE_SECRET", &secret)],
+    );
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert!(err.contains("AD4M_STORAGE_SECRET is set"), "{err}");
+    assert!(!out.contains(&secret) && !err.contains(&secret));
+
+    let unlocked: Value = admin
+        .call("storage.unlock", json!({ "secret": secret }))
+        .await
+        .unwrap();
+    assert_eq!(unlocked["created"], true, "{unlocked}");
+    assert_eq!(unlocked["status"]["keyringId"], keyring_id.as_str());
+    let started = Instant::now();
+    loop {
+        let status: Value = admin
+            .call("runtime.storageStatus", json!({}))
+            .await
+            .unwrap();
+        if status["state"] == "open" {
+            assert_eq!(status["keyringId"], keyring_id.as_str());
+            assert!(status["stores"].is_object(), "{status}");
+            break;
+        }
+        assert!(started.elapsed() < READY, "not open: {}", sealed.output());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let _: Value = admin.call("agent.status", json!({})).await.unwrap();
+    assert_eq!(mode(&folder.data()), 0o700);
+    assert_eq!(mode(&database), 0o600);
+    assert_eq!(mode(&keyring), 0o600);
+    drop(admin);
+    drop(sealed);
+
+    // The secret file opens it at the next start, under the same keyring.
+    let port = free_port();
+    let args = run_args(&folder, port, &[]);
+    let mut opened = spawn(
+        &folder,
+        port,
+        args,
+        Stdio::null(),
+        "opened.log",
+        &[("AD4M_ADMIN_CREDENTIAL", ADMIN)],
+    );
+    opened.ready();
+    let admin = WsRpcClient::connect(&opened.url(), ADMIN).await.unwrap();
+    let status: Value = admin
+        .call("runtime.storageStatus", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "open", "{status}");
+    assert_eq!(status["keyringId"], keyring_id.as_str());
+    assert_eq!(status["secretSource"], "file", "{status}");
+    let (code, out, err) = cli(
+        &["-e", &opened.url(), "-a", ADMIN, "storage", "status"],
+        &[],
+    );
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains("Storage open"), "{out}");
 }

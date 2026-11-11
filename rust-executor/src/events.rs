@@ -46,11 +46,12 @@ pub enum Topic {
     ConfigChanged,
     LinkTicket,
     InboxMessage,
+    StorageStateChanged,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 29] = [
+    pub const ALL: [Topic; 30] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -80,6 +81,7 @@ impl Topic {
         Topic::ConfigChanged,
         Topic::LinkTicket,
         Topic::InboxMessage,
+        Topic::StorageStateChanged,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -115,6 +117,7 @@ impl Topic {
             Topic::ConfigChanged => "config-changed",
             Topic::LinkTicket => "link-ticket",
             Topic::InboxMessage => "inbox-message",
+            Topic::StorageStateChanged => "storage-state-changed",
         }
     }
 
@@ -136,10 +139,13 @@ impl Topic {
             // `config-changed` keeps it from every other session. `identity.prepareDevice` and
             // `identity.inbox` are the operator's on this machine: the local operator audience
             // of `link-ticket` and `inbox-message` keeps them from every other session.
+            // `storage-state-changed` carries the operator's view of `runtime.storageStatus`:
+            // the operator audience keeps it from apps, as for `config-changed`.
             Topic::AgentStatusChanged
             | Topic::AgentUpdated
             | Topic::IdentityFork
             | Topic::ConfigChanged
+            | Topic::StorageStateChanged
             | Topic::LinkTicket
             | Topic::InboxMessage => caps::AGENT_READ_CAPABILITY.clone(),
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).

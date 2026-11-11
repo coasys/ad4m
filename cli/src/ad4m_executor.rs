@@ -58,6 +58,7 @@ mod perspectives;
 mod repl;
 mod run_config;
 mod runtime;
+mod storage;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -160,6 +161,12 @@ enum Domain {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// The operator secret that encrypts this executor's data at rest: make one, unlock a
+    /// sealed executor with it, or read the storage status
+    Storage {
+        #[command(subcommand)]
+        command: storage::StorageCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -167,6 +174,24 @@ enum ConfigCommand {
     /// Print the merged settings (config file < AD4M_* env < flags) as JSON,
     /// with every secret replaced by "<redacted>". Takes the flags of `run`.
     Print(RunArgs),
+}
+
+/// `storage unlock`: refuses a secret given as an argument or in the environment, reads it from
+/// the terminal, and prints what the executor answered.
+async fn storage_unlock(
+    executor_url: Option<String>,
+    admin_credential: Option<String>,
+    given: &[String],
+) -> Result<()> {
+    storage::refuse_given_secret(given, process_env)?;
+    let executor_url = match executor_url {
+        Some(url) => url,
+        None => startup::get_executor_url()?,
+    };
+    let token = identity::admin_credential(admin_credential, process_env)?;
+    let secret = storage::read_secret_from_terminal()?;
+    println!("{}", storage::unlock(&executor_url, &token, &secret).await?);
+    Ok(())
 }
 
 /// The exit code for a command line clap does not run: 0 for `--help` and `--version`, else 78
@@ -181,6 +206,12 @@ fn command_line_exit_code(error: &clap::Error) -> i32 {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    // Before anything holds a key: no core file, no debugger attach.
+    #[cfg(unix)]
+    if let Err(e) = rust_executor::exit::forbid_core_dumps() {
+        eprintln!("Cannot turn off core dumps: {e}");
+        std::process::exit(1);
+    }
     let args = ClapApp::try_parse().unwrap_or_else(|e| {
         let code = command_line_exit_code(&e);
         let _ = e.print();
@@ -280,6 +311,35 @@ async fn main() -> Result<()> {
         };
         if let Err(e) = shown {
             eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if let Domain::Storage { command } = args.domain {
+        let done = match command {
+            storage::StorageCommand::NewSecret => {
+                println!("{}", &*storage::new_secret_text());
+                Ok(())
+            }
+            storage::StorageCommand::Unlock { given } => {
+                storage_unlock(args.executor_url, args.admin_credential, &given).await
+            }
+            storage::StorageCommand::Status => {
+                async {
+                    let executor_url = match args.executor_url {
+                        Some(url) => url,
+                        None => startup::get_executor_url()?,
+                    };
+                    let token = identity::admin_credential(args.admin_credential, process_env)?;
+                    println!("{}", storage::status(&executor_url, &token).await?);
+                    Ok(())
+                }
+                .await
+            }
+        };
+        if let Err(e) = done {
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
         return Ok(());
