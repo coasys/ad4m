@@ -199,8 +199,32 @@ export interface TelepresenceProxy {
 }
 
 /**
+ * A mesh peer: one agent on one device. An agent calling from two devices is
+ * two peers, each with its own connection to everyone else, so neither device's
+ * media or teardown can stand in for the other's.
+ */
+export function meshPeerId(did: string, device: string): string {
+    return `${did}#${device}`
+}
+
+/** The agent a mesh peer id belongs to. */
+export function agentOfMeshPeer(peerId: string): string {
+    const at = peerId.lastIndexOf("#")
+    return at === -1 ? peerId : peerId.slice(0, at)
+}
+
+/**
  * Bridge NeighbourhoodProxy telepresence to the SignallingChannel
- * the mesh consumes.
+ * the mesh consumes, as the peer `selfDid` on `selfDevice`.
+ *
+ * ## Peers are devices
+ *
+ * The sender a message reports is a {@link meshPeerId}: the link's author,
+ * which the executor verified, and the device the author's payload names. A
+ * device is only the author's own claim, so it can tell this agent's devices
+ * apart but never speak for another agent. Only this device's own echo is
+ * dropped: a broadcast from another device of this agent — the executor hands
+ * one to every client of the agent — is a peer like any other.
  *
  * ## Why unicast runs emulated over broadcast
  *
@@ -213,7 +237,9 @@ export interface TelepresenceProxy {
 export function createTelepresenceChannel(
     proxy: TelepresenceProxy,
     selfDid: string,
+    selfDevice: string,
 ): SignallingChannel {
+    const self = meshPeerId(selfDid, selfDevice)
     const resultListeners = new Set<(result: { ok: boolean; ms: number }) => void>()
     let subscribed: Promise<void> = Promise.resolve()
     const report = (result: { ok: boolean; ms: number }) => {
@@ -233,7 +259,7 @@ export function createTelepresenceChannel(
             try {
                 sent = proxy.sendBroadcastU({
                     links: [{
-                        source: JSON.stringify(payload),
+                        source: JSON.stringify({ device: selfDevice, message: payload }),
                         predicate: RTC_PREDICATE,
                         target: to?.agentId ?? TARGET_ALL,
                     }],
@@ -272,18 +298,23 @@ export function createTelepresenceChannel(
                 if (typeof predicate !== "string" || predicate !== RTC_PREDICATE) return
 
                 // Emulated unicast: drop messages addressed to someone else
-                if (target && target !== TARGET_ALL && target !== selfDid) return
-                // Drop our own echo
-                if (link.author === selfDid) return
+                if (target && target !== TARGET_ALL && target !== self) return
 
-                let parsed: unknown
+                let parsed: { device?: unknown; message?: unknown }
                 try {
                     parsed = JSON.parse(source as string)
                 } catch {
                     return
                 }
+                if (typeof parsed !== "object" || parsed === null) return
+                const { device, message } = parsed
+                if (typeof device !== "string" || !device) return
 
-                cb(link.author as string, parsed)
+                const from = meshPeerId(link.author, device)
+                // Drop this device's own echo, and only that.
+                if (from === self) return
+
+                cb(from, message)
             }
 
             subscribed = proxy.addSignalHandler(handler).catch((err) => {

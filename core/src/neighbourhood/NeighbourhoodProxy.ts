@@ -17,6 +17,7 @@ import type {
 } from "./SfuTypes";
 import { createSession, type Session, type SessionCreateOptions } from "./Session";
 import { createTelepresenceChannel } from "./MeshManager";
+import { defaultDeviceId } from "./SfuManager";
 
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
@@ -133,6 +134,7 @@ export class NeighbourhoodProxy {
             }
         }
         const proxy = this
+        const deviceId = options?.deviceId || defaultDeviceId()
         const session = createSession({
             api: this.#client,
             roomId: roomName,
@@ -141,13 +143,13 @@ export class NeighbourhoodProxy {
             topology: options?.topology ?? "auto",
             sfuConfig: options?.sfuConfig,
             iceServers: options?.iceServers,
-            deviceId: options?.deviceId,
+            deviceId,
             localSfuStatus: this.#sfuStatusCache ?? undefined,
             sfuServesAllMembers: () => proxy.#client.sfuServesAllMembers(proxy.#pID),
             // Mesh needs a signalling channel and presence callbacks.
             // SFU ignores these — they remain unused when the resolved
             // topology selects the SFU path.
-            channel: createTelepresenceChannel(proxy, proxy.#agentDid),
+            channel: createTelepresenceChannel(proxy, proxy.#agentDid, deviceId),
             ownOnlineStatus: () => proxy.ownOnlineStatus(),
             setOnlineStatus: (status) => proxy.setOnlineStatusU(status),
             onlineAgents: () => proxy.onlineAgents(),

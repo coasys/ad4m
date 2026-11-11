@@ -81,6 +81,8 @@ import {
     MeshManager,
     parseCallMessage,
     createTelepresenceChannel,
+    agentOfMeshPeer,
+    meshPeerId,
     CALL_PROTOCOL_VERSION,
     DEFAULT_ICE_SERVERS,
     DISCONNECT_GRACE_MS,
@@ -2532,8 +2534,20 @@ describe("a description from a different connection", () => {
 
 // ── Telepresence channel ────────────────────────────────────────────
 
+describe("mesh peer ids", () => {
+    it("name one agent on one device, and give the agent back", () => {
+        expect(meshPeerId("did:key:z6Mk", "laptop")).toBe("did:key:z6Mk#laptop")
+        expect(agentOfMeshPeer("did:key:z6Mk#laptop")).toBe("did:key:z6Mk")
+        expect(agentOfMeshPeer("did:key:z6Mk")).toBe("did:key:z6Mk")
+    })
+})
+
 describe("createTelepresenceChannel", () => {
     const PREDICATE = "ad4m://session/rtc"
+    const ALICE = "did:alice#laptop"
+    const BOB = "did:bob#desk"
+    /** A link's source as a channel writes it: the sending device, and the message. */
+    const wire = (message: unknown, device = "desk") => JSON.stringify({ device, message })
 
     function fakeProxy() {
         const handlers = new Set<(payload: PerspectiveExpression) => void>()
@@ -2567,11 +2581,11 @@ describe("createTelepresenceChannel", () => {
         // The mesh acts on the sender id — offers, answers, resets, rebuilds —
         // so an author claim the executor could not verify must never reach it.
         const { proxy, signal } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const heard: [string, unknown][] = []
         channel.onMessage((from, payload) => heard.push([from, payload]))
         await settle()
-        const message = (n: number) => ({ source: JSON.stringify({ n }), predicate: PREDICATE, target: "*" })
+        const message = (n: number) => ({ source: wire({ n }), predicate: PREDICATE, target: "*" })
 
         signal("did:bob", message(1), { linkValid: false })
         signal("did:bob", message(2), { signalValid: false })
@@ -2579,7 +2593,7 @@ describe("createTelepresenceChannel", () => {
         signal("did:bob", message(4), { signalValid: null })
         signal("did:bob", message(5))
 
-        expect(heard).toEqual([["did:bob", { n: 5 }]])
+        expect(heard).toEqual([[BOB, { n: 5 }]])
     })
 
     it("lets a forged reset change nothing on the mesh", async () => {
@@ -2587,21 +2601,21 @@ describe("createTelepresenceChannel", () => {
         // whose proof does not hold must not rebuild Alice's pair with Bob.
         const { proxy, signal } = fakeProxy()
         const alice = new MeshManager({
-            channel: createTelepresenceChannel(proxy, "did:alice"),
+            channel: createTelepresenceChannel(proxy, "did:alice", "laptop"),
             callId: CALL_ID,
-            selfId: "did:alice",
+            selfId: ALICE,
             createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
             sweepMs: 0,
         })
         meshes.push(alice)
         await alice.join(stream())
-        alice.setRoster(["did:alice", "did:bob"])
+        alice.setRoster([ALICE, BOB])
         await settle()
         const before = alice.getParticipants()[0]?.stream
         const recoveries: unknown[] = []
         alice.on("peer-recovery", (...args: unknown[]) => recoveries.push(args))
 
-        const reset = { source: JSON.stringify({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: "did:alice", kind: "reset" }), predicate: PREDICATE, target: "did:alice" }
+        const reset = { source: wire({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: ALICE, kind: "reset" }), predicate: PREDICATE, target: ALICE }
         signal("did:bob", reset, { linkValid: false })
         signal("did:bob", reset, { signer: "did:mallory" })
         await settleAll()
@@ -2614,34 +2628,37 @@ describe("createTelepresenceChannel", () => {
         expect(recoveries).toHaveLength(1)
     })
 
-    it("publishes over broadcast, addressed in the link target", () => {
+    it("publishes over broadcast, from this device, addressed to a peer in the link target", () => {
         const { proxy, sends } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
 
-        channel.publish({ hello: 1 }, { agentId: "did:bob" })
+        channel.publish({ hello: 1 }, { agentId: BOB })
         channel.publish({ hello: 2 })
 
         expect(sends.map((send) => send.links)).toEqual([
-            [{ source: JSON.stringify({ hello: 1 }), predicate: PREDICATE, target: "did:bob" }],
-            [{ source: JSON.stringify({ hello: 2 }), predicate: PREDICATE, target: "*" }],
+            [{ source: wire({ hello: 1 }, "laptop"), predicate: PREDICATE, target: BOB }],
+            [{ source: wire({ hello: 2 }, "laptop"), predicate: PREDICATE, target: "*" }],
         ])
     })
 
-    it("delivers what is for this agent, with the author as the sender", async () => {
+    it("delivers what is for this device, with the author's device as the sender", async () => {
         const { proxy, signal, handlers } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const heard: [string, unknown][] = []
         const unsubscribe = channel.onMessage((from, payload) => heard.push([from, payload]))
         await settle()
 
-        signal("did:bob", { source: JSON.stringify({ n: 1 }), predicate: PREDICATE, target: "did:alice" })
-        signal("did:bob", { source: JSON.stringify({ n: 2 }), predicate: PREDICATE, target: "*" })
-        signal("did:bob", { source: JSON.stringify({ n: 3 }), predicate: PREDICATE, target: "did:carol" })
-        signal("did:bob", { source: JSON.stringify({ n: 4 }), predicate: "other://predicate", target: "*" })
-        signal("did:alice", { source: JSON.stringify({ n: 5 }), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: wire({ n: 1 }), predicate: PREDICATE, target: ALICE })
+        signal("did:bob", { source: wire({ n: 2 }), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: wire({ n: 3 }), predicate: PREDICATE, target: "did:carol#x" })
+        signal("did:bob", { source: wire({ n: 4 }), predicate: "other://predicate", target: "*" })
+        signal("did:alice", { source: wire({ n: 5 }, "laptop"), predicate: PREDICATE, target: "*" })
         signal("did:bob", { source: "{not json", predicate: PREDICATE, target: "*" })
+        // To this agent on another device, and from a sender that names no device.
+        signal("did:bob", { source: wire({ n: 6 }), predicate: PREDICATE, target: "did:alice#phone" })
+        signal("did:bob", { source: JSON.stringify({ n: 7 }), predicate: PREDICATE, target: "*" })
 
-        expect(heard).toEqual([["did:bob", { n: 1 }], ["did:bob", { n: 2 }]])
+        expect(heard).toEqual([[BOB, { n: 1 }], [BOB, { n: 2 }]])
 
         unsubscribe()
         expect(handlers.size).toBe(0)
@@ -2649,7 +2666,7 @@ describe("createTelepresenceChannel", () => {
 
     it("reports one result per publish, failed when the send is refused or rejected", async () => {
         const { proxy, sends } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const results: { ok: boolean; ms: number }[] = []
         const unwatch = channel.onPublishResult!((result) => results.push(result))
         const consoleError = jest.spyOn(console, "error").mockImplementation()
@@ -2686,7 +2703,7 @@ describe("createTelepresenceChannel", () => {
             addSignalHandler: async () => {},
             removeSignalHandler: () => {},
         }
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const results: { ok: boolean; ms: number }[] = []
         channel.onPublishResult!((result) => results.push(result))
         const consoleError = jest.spyOn(console, "error").mockImplementation()
@@ -2702,9 +2719,9 @@ describe("createTelepresenceChannel", () => {
         const { proxy, sends } = fakeProxy()
         const clock = makeClock()
         const mesh = new MeshManager({
-            channel: createTelepresenceChannel(proxy, "did:alice"),
+            channel: createTelepresenceChannel(proxy, "did:alice", "laptop"),
             callId: CALL_ID,
-            selfId: "did:alice",
+            selfId: ALICE,
             now: clock.now,
             sweepMs: 0,
             createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
@@ -2714,7 +2731,7 @@ describe("createTelepresenceChannel", () => {
         mesh.on("peer-recovery", (_peerId: string, attempt: { rung: RecoveryRung }) => rungs.push(attempt.rung))
         await mesh.join(stream())
 
-        mesh.setRoster(["did:alice", "did:bob"])
+        mesh.setRoster([ALICE, BOB])
         await settle()
         clock.advance(HANDSHAKE_GRACE_MS + 1)
         mesh.tick()

@@ -26,6 +26,7 @@ const mockSfuManagerInstance = {
 
 jest.mock("./SfuManager", () => ({
     SfuManager: jest.fn().mockImplementation(() => mockSfuManagerInstance),
+    defaultDeviceId: () => "this-device",
 }))
 
 const mockMeshManagerInstance = {
@@ -41,6 +42,7 @@ const mockMeshManagerInstance = {
 }
 
 jest.mock("./MeshManager", () => ({
+    ...jest.requireActual("./MeshManager"),
     MeshManager: jest.fn().mockImplementation(() => mockMeshManagerInstance),
 }))
 
@@ -251,7 +253,8 @@ describe("mesh path", () => {
         expect(MeshManager).toHaveBeenCalledWith({
             channel,
             callId: "my-room",
-            selfId: "did:me",
+            // A mesh peer is the agent on this device.
+            selfId: "did:me#this-device",
             onNetworkChange: expect.any(Function),
             checkConnection: expect.any(Function),
         })
@@ -290,7 +293,7 @@ describe("mesh path", () => {
         await session.join(fakeMediaStream())
 
         expect(setOnlineStatus).toHaveBeenCalledWith({
-            links: [{ source: "did:me", predicate: "ad4m://session/in-call", target: "my-room" }],
+            links: [{ source: "did:me#this-device", predicate: "ad4m://session/in-call", target: "my-room" }],
         })
     })
 
@@ -298,7 +301,8 @@ describe("mesh path", () => {
     // must survive the call, and the presence must go when the call ends.
     describe("call presence in the agent's status", () => {
         const appLink = { source: "did:me", predicate: "app://mood", target: "literal:string:busy" }
-        const inCall = { source: "did:me", predicate: "ad4m://session/in-call", target: "my-room" }
+        const inCall = { source: "did:me#this-device", predicate: "ad4m://session/in-call", target: "my-room" }
+        const phoneInCall = { source: "did:me#phone", predicate: "ad4m://session/in-call", target: "my-room" }
         const statusWith = (...links: object[]) => ({ data: { links: links.map((data) => ({ data })) } })
 
         function presenceSession(ownOnlineStatus: jest.Mock) {
@@ -327,6 +331,16 @@ describe("mesh path", () => {
             own.mockResolvedValue(statusWith(appLink, inCall))
             await session.leave()
             expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink] })
+        })
+
+        it("adds its link beside another device's, and leaving takes out only its own", async () => {
+            const own = jest.fn().mockResolvedValue(statusWith(appLink, phoneInCall))
+            const { session, setOnlineStatus } = presenceSession(own)
+            await session.join(fakeMediaStream())
+            expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink, phoneInCall, inCall] })
+            own.mockResolvedValue(statusWith(appLink, phoneInCall, inCall))
+            await session.leave()
+            expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink, phoneInCall] })
         })
 
         it("takes the presence link out on destroy", async () => {
@@ -380,46 +394,132 @@ describe("mesh path", () => {
         jest.useRealTimers()
     })
 
-    it("filters roster to agents in the same call room", async () => {
+    describe("the roster", () => {
         // A status is a signed perspective: its links sit under `data`.
-        const inCall = (did: string, room: string) => ({
-            did,
-            status: {
-                author: did,
-                timestamp: "2026-01-01T00:00:00Z",
-                data: {
-                    links: [{
-                        author: did,
-                        timestamp: "2026-01-01T00:00:00Z",
-                        data: { source: did, predicate: "ad4m://session/in-call", target: room },
-                    }],
-                },
+        const statusOf = (did: string, ...links: { source: string; target: string }[]) => ({
+            author: did,
+            timestamp: "2026-01-01T00:00:00Z",
+            data: {
+                links: links.map(({ source, target }) => ({
+                    author: did,
+                    timestamp: "2026-01-01T00:00:00Z",
+                    data: { source, predicate: "ad4m://session/in-call", target },
+                })),
             },
         })
-        const onlineAgents = jest.fn().mockResolvedValue([
-            inCall("did:bob", "my-room"),
-            inCall("did:carol", "other-room"),
-            inCall("did:me", "my-room"),
-        ])
+        const agent = (did: string, ...links: { source: string; target: string }[]) => ({ did, status: statusOf(did, ...links) })
 
-        const session = createSession(baseConfig({
-            topology: "mesh",
-            channel: fakeChannel(),
-            onlineAgents,
-            roomId: "my-room",
-            agentDid: "did:me",
-        }))
-        await session.join(fakeMediaStream())
-        // Wait for the async pollRoster to settle
-        await new Promise((r) => setTimeout(r, 10))
+        async function rosterOf(agents: unknown[], own: unknown = null) {
+            const session = createSession(baseConfig({
+                topology: "mesh",
+                channel: fakeChannel(),
+                onlineAgents: jest.fn().mockResolvedValue(agents),
+                ownOnlineStatus: jest.fn().mockResolvedValue(own),
+                roomId: "my-room",
+                agentDid: "did:me",
+            }))
+            await session.join(fakeMediaStream())
+            // Wait for the async pollRoster to settle
+            await new Promise((r) => setTimeout(r, 10))
+            return mockMeshManagerInstance.setRoster.mock.calls.at(-1)?.[0]
+        }
 
-        expect(mockMeshManagerInstance.setRoster).toHaveBeenCalledWith(["did:bob"])
+        it("is each device in this room, of every agent", async () => {
+            const roster = await rosterOf([
+                agent("did:bob", { source: "did:bob#desk", target: "my-room" }, { source: "did:bob#phone", target: "my-room" }),
+                agent("did:carol", { source: "did:carol#desk", target: "other-room" }),
+            ])
+            expect(roster).toEqual(["did:bob#desk", "did:bob#phone"])
+        })
+
+        it("holds this agent's other devices, read from its own status, never this one", async () => {
+            const own = statusOf("did:me", { source: "did:me#this-device", target: "my-room" }, { source: "did:me#phone", target: "my-room" })
+            // An executor may or may not list the caller; the roster is the same either way.
+            expect(await rosterOf([], own)).toEqual(["did:me#phone"])
+            expect(await rosterOf([{ did: "did:me", status: own }], own)).toEqual(["did:me#phone"])
+        })
+
+        it("takes no agent's word for another agent's device, nor a link that names no device", async () => {
+            const roster = await rosterOf([
+                agent("did:carol", { source: "did:bob#desk", target: "my-room" }, { source: "did:carol", target: "my-room" }),
+            ])
+            expect(roster).toEqual([])
+        })
+    })
+
+    // Two tabs of one device are one mesh peer, so only one of them can hold the call.
+    describe("joined again from this device", () => {
+        const delivered = () => new Promise((r) => setTimeout(r, 20))
+
+        function tab(overrides: Record<string, unknown> = {}) {
+            const setOnlineStatus = jest.fn().mockResolvedValue(true)
+            const session = createSession(baseConfig({
+                topology: "mesh",
+                channel: fakeChannel(),
+                setOnlineStatus,
+                // A room no other test's session is still in: tabs of one device hear each other per room.
+                roomId: "tab-room",
+                agentDid: "did:me",
+                ...overrides,
+            }))
+            const replaced: unknown[] = []
+            session.on("replaced", (event: unknown) => replaced.push(event))
+            return { session, setOnlineStatus, replaced }
+        }
+
+        it("hands the call to the later tab: the earlier says replaced, goes idle and leaves the presence link", async () => {
+            const a = tab()
+            await a.session.join(fakeMediaStream())
+            const announced = a.setOnlineStatus.mock.calls.length
+            const b = tab()
+            await b.session.join(fakeMediaStream())
+            await delivered()
+
+            expect(a.replaced).toEqual([{
+                targetDid: "did:me", neighbourhoodUrl: "neighbourhood://test", roomName: "tab-room", participantId: "did:me#this-device",
+            }])
+            expect(a.session.getState()).toBe("idle")
+            expect(mockMeshManagerInstance.leave).toHaveBeenCalledTimes(1)
+            // The link is the device's, and the later tab holds the call on it.
+            expect(a.setOnlineStatus).toHaveBeenCalledTimes(announced)
+            expect(b.replaced).toEqual([])
+            expect(b.session.getState()).toBe("active")
+
+            await Promise.all([a.session.destroy(), b.session.destroy()])
+        })
+
+        it("leaves a call on another device alone", async () => {
+            const a = tab()
+            await a.session.join(fakeMediaStream())
+            const b = tab({ deviceId: "phone" })
+            await b.session.join(fakeMediaStream())
+            await delivered()
+
+            expect(a.replaced).toEqual([])
+            expect(a.session.getState()).toBe("active")
+
+            await Promise.all([a.session.destroy(), b.session.destroy()])
+        })
+
+        it("lets a tab that left be joined from again without replacing anyone", async () => {
+            const a = tab()
+            await a.session.join(fakeMediaStream())
+            await a.session.leave()
+            const b = tab()
+            await b.session.join(fakeMediaStream())
+            await delivered()
+
+            expect(a.replaced).toEqual([])
+            expect(b.session.getState()).toBe("active")
+
+            await Promise.all([a.session.destroy(), b.session.destroy()])
+        })
     })
 
     it("delegates participants to mesh manager (includes stream)", async () => {
         const bobStream = fakeMediaStream()
         mockMeshManagerInstance.getParticipants.mockReturnValue([
-            { did: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+            { did: "did:bob#desk", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
         ])
         const session = createSession(baseConfig({
             topology: "mesh",
@@ -427,9 +527,28 @@ describe("mesh path", () => {
         }))
         await session.join(fakeMediaStream())
 
-        // The mesh keys its peers by DID: the DID is the participant id.
+        // The mesh keys its peers by device: the peer id is the participant id.
         expect(session.participants).toEqual([
-            { participantId: "did:bob", agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+            { participantId: "did:bob#desk", agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+        ])
+    })
+
+    it("reports a mesh participant's events as the SFU path does: the device's session and its agent", async () => {
+        const session = createSession(baseConfig({ topology: "mesh", channel: fakeChannel() }))
+        await session.join(fakeMediaStream())
+        const heard: [string, unknown][] = []
+        for (const event of ["participant-joined", "participant-left", "participant-updated"] as const) {
+            session.on(event, (p: unknown) => heard.push([event, p]))
+        }
+        const stream = fakeMediaStream()
+        const bob = { did: "did:bob#desk", stream, hasAudio: true, hasVideo: true, isActiveSpeaker: false }
+        for (const [, handler] of mockMeshManagerInstance.on.mock.calls) handler(bob)
+
+        const reported = { participantId: "did:bob#desk", did: "did:bob", stream, hasAudio: true, hasVideo: true, isActiveSpeaker: false }
+        expect(heard).toEqual([
+            ["participant-joined", reported],
+            ["participant-left", reported],
+            ["participant-updated", reported],
         ])
     })
 
@@ -505,7 +624,7 @@ describe("SFU path", () => {
             "neighbourhood://sfu",
             undefined, // iceConfig
             undefined, // sfuConfig
-            undefined, // deviceId: the SDK's default
+            "this-device", // deviceId: the SDK's default
         )
     })
 
