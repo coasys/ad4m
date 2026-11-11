@@ -3,6 +3,9 @@
 //! The test binary's allocator scans every buffer as it is freed for the watched keys. The
 //! file holds one test, so no other test allocates while the watch is on.
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 

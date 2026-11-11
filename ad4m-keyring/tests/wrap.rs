@@ -6,6 +6,8 @@ use ad4m_keyring::{
     random_key, unwrap, wrap, KeyRef, KeyringError, SecretKey, SymWrap, WrapAlg, WrapContext,
     WRAP_NONCE_LEN,
 };
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
 
 const KEYRING: [u8; 16] = [7u8; 16];
 const OTHER_KEYRING: [u8; 16] = [8u8; 16];

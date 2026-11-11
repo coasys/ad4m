@@ -551,10 +551,12 @@ jobs:
             cargo test --release -p ad4m-hash-chain --all-features
             cargo test --release -p ad4m-identity-core --all-features
             cargo test --release -p identity-store
+            cargo test --release -p ad4m-keyring
           no_output_timeout: 30m
       - run:
           # ad4m-hash-chain on wasm32 under Node: the shared vectors, the RFC 8785 data, the
-          # text checks and the wasm-bindgen exports. The test runner must be the locked
+          # text checks and the wasm-bindgen exports. ad4m-keyring's own tests on wasm32, where
+          # its randomness is `crypto.getRandomValues`. The test runner must be the locked
           # wasm-bindgen version; it is installed once into the (persistent) target dir.
           name: identity crates wasm tests
           when: always
@@ -566,6 +568,8 @@ jobs:
             fi
             CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER \
               cargo test -p ad4m-hash-chain --target wasm32-unknown-unknown --features wasm
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER \
+              cargo test --release -p ad4m-keyring --target wasm32-unknown-unknown
           no_output_timeout: 30m
       - run:
           # ad4m-ldk/rust is its own workspace, so the commands above skip it.
@@ -971,8 +975,8 @@ jobs:
           command: npm test
 
   deploy-scripts:
-    # Checks the shell scripts in deploy/staging on every pipeline (about
-    # 20 s, no build needed), in two steps:
+    # Checks the shell scripts in deploy/staging and the release's checksum
+    # script on every pipeline (about 20 s, no build needed), in these steps:
     #
     # 1. shellcheck, a static linter for shell scripts. It parses the script
     #    without running it and reports the classic shell bugs: unquoted
@@ -1002,6 +1006,9 @@ jobs:
     #    and a bug there is what turns a failed deploy into a node that stays
     #    down. The stubs make the whole run take seconds and touch nothing
     #    outside a temp dir.
+    #
+    # 3. scripts/release-checksum.test.sh checks the SHA-256 line that the
+    #    release workflows publish beside each executor binary.
     machine: true
     resource_class: coasys/marvin-light
     steps:
@@ -1016,12 +1023,18 @@ jobs:
             echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  $dir/shellcheck.tar.xz" | sha256sum -c -
             tar -xJf "$dir/shellcheck.tar.xz" -C "$dir"
             # -x follows `source`d files, so a sourced helper is checked too.
-            "$dir/shellcheck-v0.10.0/shellcheck" -x deploy/staging/update.sh deploy/staging/test/update.test.sh
+            "$dir/shellcheck-v0.10.0/shellcheck" -x deploy/staging/update.sh deploy/staging/test/update.test.sh \
+              scripts/release-checksum.sh scripts/release-checksum.test.sh
             rm -rf "$dir"
       - run:
           name: update.sh test
           # Stubbed build and systemd; see the job comment above.
           command: deploy/staging/test/update.test.sh
+      - run:
+          # The `.sha256` line the release workflows publish beside each executor binary
+          # checks a download with `sha256sum -c` and refuses an altered one. No network.
+          name: release-checksum.sh test
+          command: bash scripts/release-checksum.test.sh
 
 workflows:
   version: 2

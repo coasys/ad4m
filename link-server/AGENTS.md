@@ -15,6 +15,8 @@ node dist/index.js --port 3456 --data ./my-data
 
 If `npm install` reports "N packages have install scripts not yet covered by allowScripts" (better-sqlite3's native build, esbuild's postinstall), run `npm approve-scripts <pkg>` for each and re-run install. This writes an `allowScripts` block into `package.json` — that's expected and should stay committed.
 
+Releases: pushing the tag `link-server-v<version>` (the version in `package.json`) makes `.github/workflows/publish-images.yml` run `npm ci`, the build and the tests on Node 22, push `ghcr.io/coasys/link-server:<version>` and write the image's digest into the tag's GitHub release. Deploy by that digest.
+
 ## Architecture
 
 Composition root is `src/server.ts` (`buildServer(opts)`), wired in this dependency order (no cycles):

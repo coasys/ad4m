@@ -4,6 +4,11 @@ use ad4m_keyring::{
     hkdf_subkey, random_key, KeyVersion, KeyringError, SecretKey, VersionedKey, KEY_LEN,
 };
 
+// On wasm32 the same tests run under Node (`wasm-bindgen-test-runner`), where `random_key`
+// draws from `crypto.getRandomValues`.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 #[test]
 fn a_key_has_exactly_32_bytes() {
     assert_eq!(KEY_LEN, 32);

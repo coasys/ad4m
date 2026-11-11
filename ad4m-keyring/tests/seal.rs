@@ -8,6 +8,8 @@ use ad4m_keyring::{
 };
 use rand_core::{CryptoRng, RngCore};
 use serde::Deserialize;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

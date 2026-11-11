@@ -31,3 +31,7 @@ getrandom = { version = "0.2.17", features = ["js"] }
 
 [dev-dependencies]
 serde_json = "1.0"
+
+# The tests run on wasm32 too, under Node: `wasm-bindgen-test-runner` as the target's runner.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

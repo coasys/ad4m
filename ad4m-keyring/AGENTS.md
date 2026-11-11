@@ -44,6 +44,8 @@ public key (room keys, opened by one member's executor). No executor dependency;
 ```bash
 cargo test --release -p ad4m-keyring
 cargo check --release -p ad4m-keyring --target wasm32-unknown-unknown
+# the same tests on wasm32 under Node; the runner is wasm-bindgen-cli at Cargo.lock's wasm-bindgen version
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --release -p ad4m-keyring --target wasm32-unknown-unknown
 cargo clippy --release -p ad4m-keyring --all-targets
 cargo fmt -p ad4m-keyring --check
 ```

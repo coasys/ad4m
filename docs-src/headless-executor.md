@@ -56,6 +56,29 @@ sha=$(git rev-parse --short HEAD) && install -D -m 0755 -t ~/.local/share/ad4m/r
 Expected: no output. `readlink ~/.local/share/ad4m/current` prints
 `releases/<sha>`.
 
+### Or download a release build
+
+Each release on GitHub carries the headless executor for Linux x86_64
+(`ad4m-cli-executor-linux-<version>-x64`) and macOS on Apple silicon
+(`ad4m-cli-executor-macos-<version>-aarch64`), each with a `.sha256` file
+beside it. There is no macOS Intel or Windows headless build. Download the
+binary and its `.sha256` into one directory and check it there:
+
+```bash
+sha256sum -c ad4m-cli-executor-linux-<version>-x64.sha256
+```
+
+On macOS: `shasum -a 256 -c ad4m-cli-executor-macos-<version>-aarch64.sha256`.
+Expected: `ad4m-cli-executor-...: OK`. Anything else is a damaged or altered
+download; do not run it. Then install it under its version:
+
+```bash
+v=<version> && install -D -m 0755 ad4m-cli-executor-linux-$v-x64 ~/.local/share/ad4m/releases/$v/ad4m-executor && ln -sfn releases/$v ~/.local/share/ad4m/current
+```
+
+The release build already holds the dapp and the Deno snapshot; the steps
+below are the same for both.
+
 ## First-time setup
 
 1. **Lingering**, so the user's units run without a login session:
