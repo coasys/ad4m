@@ -592,6 +592,78 @@ fn load_shape_degrades_an_unknown_stored_auto_accept_value() {
     );
 }
 
+/// The class `ns://Item` registered with `declared`, plus one raw
+/// `ad4m://auto_accept` link per entry of `extra` on the same shape node:
+/// what the store holds after a second member registered the class with a
+/// different rule and the two definitions synced together.
+fn load_item_shape_with_auto_accept_links(declared: &str, extra: &[&str]) -> ModelShape {
+    let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    let shacl_json = format!(
+        r#"{{
+            "target_class": "ns://Item",
+            "auto_accept": "{declared}",
+            "properties": [
+                {{ "path": "ns://title", "name": "title", "datatype": "xsd://string" }}
+            ]
+        }}"#
+    );
+    let mut all_links = vec![
+        Link {
+            source: "ns://Item".to_string(),
+            predicate: Some("rdf://type".to_string()),
+            target: "ad4m://SubjectClass".to_string(),
+        },
+        Link {
+            source: "ns://Item".to_string(),
+            predicate: Some("ad4m://shape".to_string()),
+            target: "ns://ItemShape".to_string(),
+        },
+    ];
+    all_links.extend(parse_shacl_to_links(&shacl_json, "Item").expect("parse SHACL"));
+    all_links.extend(extra.iter().map(|value| Link {
+        source: "ns://ItemShape".to_string(),
+        predicate: Some("ad4m://auto_accept".to_string()),
+        target: format!("literal:string:{value}"),
+    }));
+    for link in all_links {
+        store
+            .add_link(&make_link_for_round_trip(&signer, link))
+            .unwrap();
+    }
+    load_shape(&store, "Item").expect("load shape")
+}
+
+/// Two different stored rules on one shape node must not resolve to
+/// whichever row the store returns first: the class falls back to `None`
+/// ("never"). Checked with the permissive value on either side, so a reader
+/// that keeps the first or the last row fails one of the two.
+#[test]
+fn load_shape_reads_conflicting_auto_accept_values_as_none() {
+    for (declared, synced) in [("never", "always"), ("always", "never")] {
+        let shape = load_item_shape_with_auto_accept_links(declared, &[synced]);
+        assert_eq!(
+            shape.auto_accept, None,
+            "'{declared}' next to '{synced}' must read as None (never)"
+        );
+    }
+    let shape = load_item_shape_with_auto_accept_links("always", &["sometimes"]);
+    assert_eq!(
+        shape.auto_accept, None,
+        "a valid value next to an unknown one must read as None (never)"
+    );
+}
+
+/// The same rule stored twice is not a conflict.
+#[test]
+fn load_shape_reads_a_repeated_auto_accept_value_once() {
+    let shape = load_item_shape_with_auto_accept_links("when_placed", &["when_placed"]);
+    assert_eq!(
+        shape.auto_accept,
+        Some(super::types::AutoAccept::WhenPlaced)
+    );
+}
+
 /// A custom (non-"literal") resolveLanguage round-trips and is never treated
 /// as deterministic-literal storage.
 #[test]
