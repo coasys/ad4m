@@ -398,6 +398,63 @@ async fn the_fallback_sync_leaves_a_queued_diff_to_the_queue() {
     assert_eq!(pending(&perspective), 1);
 }
 
+/// The store reads a link without a predicate back as `None`; a language may
+/// render the same link with `""`. They are one link, so the fallback sync
+/// does not send it again.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_matches_an_empty_predicate_to_none() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let without = |predicate: Option<&str>| LinkExpression {
+        data: Link {
+            predicate: predicate.map(str::to_string),
+            ..link("did:key:alice", "plain").data
+        },
+        ..link("did:key:alice", "plain")
+    };
+    perspective
+        .sparql_store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..without(None)
+        })
+        .unwrap();
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, vec![without(Some(""))]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert!(fake.committed().is_empty(), "{:?}", fake.committed());
+}
+
+/// Two links that differ only in a nonempty predicate are two links: the
+/// fallback sync sends the one the remote lacks.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_tells_two_predicates_apart() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let with = |predicate: &str| LinkExpression {
+        data: Link {
+            predicate: Some(predicate.to_string()),
+            ..link("did:key:alice", "plain").data
+        },
+        ..link("did:key:alice", "plain")
+    };
+    perspective
+        .sparql_store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..with("ad4m://other")
+        })
+        .unwrap();
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, vec![with("ad4m://has")]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.committed(), vec!["+plain"]);
+}
+
 /// The fallback sync sends the Shared links the remote lacks, but never the
 /// links of a parked diff: they stay Shared in the store, and sending them
 /// would put them behind the diffs that went through after them. The parked
@@ -815,4 +872,197 @@ async fn a_removal_does_not_overtake_a_slow_failed_addition() {
     task.abort();
 
     assert_eq!(*seen.lock().unwrap(), vec!["+x", "-x"]);
+}
+
+/// Store `count` Shared links, targets `{prefix}0..`, and return them.
+fn store_many_shared(
+    perspective: &PerspectiveInstance,
+    prefix: &str,
+    count: usize,
+) -> Vec<LinkExpression> {
+    (0..count)
+        .map(|i| {
+            let target = format!("{prefix}{i}");
+            store_shared(perspective, &target);
+            link("did:key:alice", &target)
+        })
+        .collect()
+}
+
+/// The staging case (2026-11-10): the link language's mirror held about 500
+/// of the perspective's 12,803 shared links, while the server held them all.
+/// Pushing the other 12,303 would only send duplicates (or, from an empty
+/// mirror, the whole room again), so the fallback sync commits nothing and
+/// reports failure: its backoff tries again later.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_does_not_push_most_of_the_shared_set_again() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 12_803);
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, shared[..500].to_vec()));
+
+    assert!(!perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.attempts(), 0, "nothing is committed");
+}
+
+/// A catch-up of more than 20 links that is still a minority of the shared
+/// set goes through as before.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_still_sends_a_minority_of_the_shared_set() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 100);
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, shared[..70].to_vec()));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.committed().len(), 30);
+}
+
+/// After a publish the creator sends every shared link the new room lacks:
+/// the links made before the neighbourhood existed were never sent.
+#[tokio::test(start_paused = true)]
+async fn the_push_after_publish_sends_the_whole_shared_set() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    store_many_shared(&perspective, "l", 100);
+    *perspective.link_language.write().await = Some(rendering_language(&fake, vec![]));
+
+    assert!(perspective.share_links_after_publish().await);
+
+    assert_eq!(fake.committed().len(), 100);
+}
+
+/// The push after publish can fail: the language refuses the commit, or does
+/// not know the room yet (`render()` null while its first render is stored).
+/// The background fallback refuses a push of the whole set, so the creator's
+/// links go to the pending-diffs queue, which retries them (across restarts)
+/// until the language takes them.
+#[tokio::test(start_paused = true)]
+async fn a_failed_push_after_publish_leaves_the_shared_set_to_the_queue() {
+    for render_known in [true, false] {
+        let fake = Arc::new(FakeLanguage::default());
+        let perspective = neighbourhood_perspective(&fake).await;
+        store_many_shared(&perspective, "l", 100);
+        let language = if render_known {
+            fake.fail_next.store(1, Ordering::SeqCst);
+            rendering_language(&fake, vec![])
+        } else {
+            let f = fake.clone();
+            Language::with_test_commit(
+                "fake-link-language".to_string(),
+                Arc::new(move |diff| f.commit(diff)),
+            )
+            .with_test_render(Arc::new(|| Ok(None)))
+        };
+        *perspective.link_language.write().await = Some(language);
+
+        perspective.share_links_after_publish().await;
+        assert!(fake.committed().is_empty(), "render known: {render_known}");
+        assert_eq!(pending(&perspective), 1, "render known: {render_known}");
+
+        let task = start_loop(&perspective);
+        run_until(Duration::from_secs(60), || pending(&perspective) == 0)
+            .await
+            .expect("the queue sends the creator's links");
+        task.abort();
+        assert_eq!(fake.committed().len(), 100, "render known: {render_known}");
+    }
+}
+
+/// Staging.8 on a neighbourhood published before it: the link language is
+/// the old clone, whose `render()` answers its short mirror and is never null.
+/// The fallback loop refuses on every pass, backs off to 5 minutes, and
+/// neither commits nor queues anything, however long it runs.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_loop_never_pushes_from_an_old_languages_short_mirror() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 2_000);
+    let renders = Arc::new(AtomicUsize::new(0));
+    let (f, r, mirror) = (fake.clone(), renders.clone(), shared[..100].to_vec());
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| f.commit(diff)),
+        )
+        .with_test_render(Arc::new(move || {
+            r.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(Perspective {
+                links: mirror.clone(),
+            }))
+        })),
+    );
+
+    let looping = perspective.clone();
+    let task = tokio::spawn(async move { looping.fallback_sync_loop().await });
+    tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+    perspective.is_teardown.store(true, Ordering::Release);
+    task.await.unwrap();
+
+    assert_eq!(fake.attempts(), 0, "nothing is committed");
+    assert_eq!(pending(&perspective), 0, "nothing is queued");
+    // Passes at 0, 60, 180, 420, 720 and 1020 s: the backoff doubles to 5 minutes.
+    assert_eq!(renders.load(Ordering::SeqCst), 6);
+    assert_eq!(
+        *perspective.fallback_sync_interval.lock().await,
+        Duration::from_secs(300)
+    );
+}
+
+/// A failed push after publish queues the shared links no queued or parked
+/// diff holds: a link already waiting in the queue is not queued twice, so
+/// the queue sends it once.
+#[tokio::test(start_paused = true)]
+async fn a_failed_push_after_publish_does_not_queue_a_queued_link_again() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    store_many_shared(&perspective, "l", 30);
+    store_shared(&perspective, "queued");
+    enqueue(&perspective, &add("queued"));
+    fake.fail_next.store(1, Ordering::SeqCst);
+    *perspective.link_language.write().await = Some(rendering_language(&fake, vec![]));
+
+    assert!(perspective.share_links_after_publish().await);
+
+    let mut queued = queued_targets(&perspective);
+    queued.sort();
+    assert_eq!(queued.len(), 31, "{queued:?}");
+    assert_eq!(queued.iter().filter(|t| *t == "queued").count(), 1);
+}
+
+/// An executor that was offline wrote most of its shared set while away:
+/// those commits failed and wait in the queue. The fallback leaves queued
+/// links to the queue, so it neither refuses nor sends them, and the queue
+/// delivers all of them.
+#[tokio::test(start_paused = true)]
+async fn an_offline_backlog_larger_than_half_the_shared_set_goes_through_the_queue() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let on_server = store_many_shared(&perspective, "s", 20);
+    for target in targets("offline", 80) {
+        store_shared(&perspective, &target);
+        enqueue(&perspective, &add(&target));
+    }
+    *perspective.link_language.write().await = Some(rendering_language(&fake, on_server));
+
+    assert!(
+        perspective.ensure_public_links_are_shared().await,
+        "not refused"
+    );
+    assert_eq!(
+        fake.attempts(),
+        0,
+        "the fallback leaves the backlog to the queue"
+    );
+
+    let task = start_loop(&perspective);
+    run_until(Duration::from_secs(600), || pending(&perspective) == 0)
+        .await
+        .expect("the queue drains the backlog");
+    task.abort();
+    assert_eq!(fake.committed().len(), 80);
 }
