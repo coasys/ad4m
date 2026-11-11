@@ -164,6 +164,13 @@ the origin from the connection's `Host` or `Origin` header, which a caller
 chooses. A value that is not an origin (a path, a query, no host) stops the
 start with an error that names `public_origins`.
 
+`user.sessionChallenge` counts open challenges by the address the caller
+connects from: at most 100 per address. The executor does not read forwarding
+headers for this. Behind a reverse proxy every caller connects from the proxy,
+so all of them share the proxy's budget. Callers without connect info share one
+budget too. Rate-limit `user.sessionChallenge` at the proxy. A key session's
+renewal does not draw from this budget: each key session has its own slot.
+
 **`log_config`** sets a level (`error`, `warn`, `info`, `debug`, `trace`)
 per crate over the defaults `rust_executor: info`, `holochain: warn`,
 `wasmer_compiler_cranelift: warn`, `warp::server: info`.
