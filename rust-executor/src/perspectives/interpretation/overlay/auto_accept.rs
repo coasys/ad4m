@@ -21,9 +21,18 @@
 //! and does not abort the pass; the marker link is kept tiny so removing the
 //! feature is one commit.
 //!
-//! # Which class decides
+//! # What auto-accept never does
 //!
-//! A `Create`/`Update` op
+//! **It never changes a real value.** The §4 gate (see [`super`]) stages a
+//! proposal instead of writing it when the real value is not the LLM's to
+//! overwrite: the item was written or accepted by a person, or a person
+//! edited it after the last inference. Accepting such an overlay replaces
+//! the real value with the staged one, which is a person's decision. So an
+//! item is auto-accepted only while every staged `inferred/<p>` equals the
+//! real `<p>` it would replace, or `<p>` is unset: the accept then overwrites
+//! nothing. Anything else stays pending.
+//!
+//! **It never lets one class overrule another.** A `Create`/`Update` op
 //! names the item's class and that class decides. An item the ops do not
 //! name a class for (an `AddLinks` source) is classified by its links, and
 //! that answer is a set: the item is accepted only if every class in the set
@@ -122,6 +131,30 @@ fn rule_allows(shape: &ModelShape, links: &[DecoratedLinkExpression]) -> bool {
     }
 }
 
+/// Whether accepting the overlay on this base would change a real value:
+/// some staged `inferred/<p>` differs from a real `<p>` link the base
+/// carries. That is the state the §4 gate leaves when it declines to
+/// overwrite a value the LLM does not own, and the state a person creates
+/// by editing a pending item. Values are compared decoded, the way the gate
+/// compares them.
+fn accept_would_change_a_real_value(links: &[DecoratedLinkExpression]) -> bool {
+    links.iter().any(|staged| {
+        let Some(real_pred) = staged
+            .data
+            .predicate
+            .as_deref()
+            .and_then(|p| p.strip_prefix(INFERRED_PREFIX))
+        else {
+            return false;
+        };
+        let staged_value = parse_literal_value(&staged.data.target);
+        links.iter().any(|real| {
+            real.data.predicate.as_deref() == Some(real_pred)
+                && parse_literal_value(&real.data.target) != staged_value
+        })
+    })
+}
+
 /// Write the auto-accepted marker on `base`. The marker is this function and
 /// its single call site, and nothing reads it: removing both removes it.
 async fn mark_auto_accepted(
@@ -153,6 +186,9 @@ async fn mark_auto_accepted(
 /// skipped, so `always` never re-accepts. `when_placed` re-evaluates against
 /// the base's current links, so an earlier-pass item that gains a parent in
 /// this pass (it shows up here as an `AddLinks` source) is accepted now.
+///
+/// A candidate whose accept would change a real value is left pending (see
+/// the module docs).
 ///
 /// Per-item failures are logged at warn and never abort the pass. Returns
 /// the bases that were actually accepted, in accept order.
@@ -252,6 +288,12 @@ pub(crate) async fn auto_accept_pass(
             continue;
         }
         if !shapes.iter().all(|s| rule_allows(s, &links)) {
+            continue;
+        }
+        if accept_would_change_a_real_value(&links) {
+            log::debug!(
+                "interpretation: {base} stays pending: accepting it would change a real value"
+            );
             continue;
         }
 
@@ -378,6 +420,15 @@ mod tests {
                     .to_string(),
             )
         })
+    }
+
+    /// The real `title` of `base`, read the way app code reads it.
+    async fn title_of(p: &PerspectiveInstance, class: &str, base: &str) -> Option<String> {
+        model_instances(p, class, &["title"])
+            .await
+            .iter()
+            .find(|r| r["id"] == json!(base))
+            .and_then(|r| r["title"].as_str().map(str::to_string))
     }
 
     /// An `always` class: the Create lands its real value *and* the overlay
@@ -672,13 +723,12 @@ mod tests {
         assert_eq!(remaining, vec![AUTO_ACCEPTED_PRED.to_string()]);
     }
 
-    /// Acceptance promotes staged suggestions to real values — the half of
-    /// "accept" that changes graph state, not just overlay bookkeeping.
-    /// A human-seeded value + a gated Update proposal + `always` ⇒ the
-    /// LLM's value is the real one at the end of the pass (the class
-    /// opted in to trusting the interpreter over its instances).
+    /// A value a person wrote is not the LLM's to overwrite: the §4 gate
+    /// stages the proposal instead of writing it, and auto-accept must not
+    /// then write it anyway. The item stays pending with the person's value
+    /// intact, whatever the class declares.
     #[tokio::test]
-    async fn accept_materializes_a_gated_suggestion_to_the_real_value() {
+    async fn a_suggestion_that_would_change_a_real_value_stays_pending() {
         let (mut p, shapes, ctx) = setup_perspective_no_llm(AA_CLASSES).await;
         let base = "soa://ext/chapter/edited";
         seed_instance(&mut p, &ctx, &shapes[0], base, "human title").await;
@@ -696,13 +746,107 @@ mod tests {
         )
         .await;
 
-        assert_eq!(accepted, vec![base.to_string()]);
-        let rows = model_instances(&p, "Chapter", &["title"]).await;
-        let title = rows
-            .iter()
-            .find(|r| r["id"] == json!(base))
-            .and_then(|r| r["title"].as_str());
-        assert_eq!(title, Some("llm title"), "staged value promoted to real");
+        assert!(accepted.is_empty(), "a person decides on this suggestion");
+        assert_eq!(
+            title_of(&p, "Chapter", base).await.as_deref(),
+            Some("human title")
+        );
+        assert_eq!(pending(&p).await, vec![base.to_string()]);
+        assert!(marker_on(&p, base).await.is_none());
+    }
+
+    /// A person edits an item while it is still pending; a later pass then
+    /// places it. Accepting would put the LLM's older value back over the
+    /// edit, so the item stays pending and the edit survives.
+    #[tokio::test]
+    async fn an_edit_on_a_pending_item_survives_later_placement() {
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(AA_CLASSES).await;
+        let child = "soa://ext/note/edited";
+        let parent = "soa://ext/chapter/edited-parent";
+
+        pass(
+            &mut p,
+            &shapes,
+            vec![
+                create_op(parent, "Chapter", "Chapter"),
+                create_op(child, "Note", "llm title"),
+            ],
+            "run-1",
+            &ctx,
+        )
+        .await;
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+
+        // The person's edit: the real value changes, the overlay does not.
+        let edited = ad4m_client::literal::Literal::from_string("human title".to_string())
+            .to_url()
+            .unwrap();
+        replace_link(&mut p, child, "ns://title", &edited, None, &ctx)
+            .await
+            .expect("human edit");
+
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![addlinks_op(child, "ns://partOf", parent)],
+            "run-2",
+            &ctx,
+        )
+        .await;
+
+        assert!(accepted.is_empty(), "placed, but no longer untouched");
+        assert_eq!(
+            title_of(&p, "Note", child).await.as_deref(),
+            Some("human title")
+        );
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+    }
+
+    /// An item the LLM wrote and nobody touched is still accepted when a
+    /// later pass refines its value: the gate lets the LLM overwrite its own
+    /// inference, so real and staged values agree again by accept time.
+    #[tokio::test]
+    async fn an_untouched_item_is_accepted_after_the_llm_refines_it() {
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(AA_CLASSES).await;
+        let child = "soa://ext/note/refined";
+        let parent = "soa://ext/chapter/refined-parent";
+
+        pass(
+            &mut p,
+            &shapes,
+            vec![
+                create_op(parent, "Chapter", "Chapter"),
+                create_op(child, "Note", "first wording"),
+            ],
+            "run-1",
+            &ctx,
+        )
+        .await;
+
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![
+                InterpretationOp::Update {
+                    base: child.to_string(),
+                    class: "Note".to_string(),
+                    values: serde_json::Map::from_iter([(
+                        "title".to_string(),
+                        json!("second wording"),
+                    )]),
+                },
+                addlinks_op(child, "ns://partOf", parent),
+            ],
+            "run-2",
+            &ctx,
+        )
+        .await;
+
+        assert_eq!(accepted, vec![child.to_string()]);
+        assert_eq!(
+            title_of(&p, "Note", child).await.as_deref(),
+            Some("second wording")
+        );
         assert!(pending(&p).await.is_empty());
     }
 
