@@ -58,6 +58,10 @@ where
                 log::warn!(
                     "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
                 );
+                log::debug!(
+                    "interpretation: raw response that failed to parse ({} bytes): {raw}",
+                    raw.len()
+                );
                 last_err = Some(e);
             }
         }
