@@ -48,7 +48,7 @@ pub use store::{
 pub use vault::MemoryVault;
 pub use vault::{
     CustodyNote, Forgot, MasterSigner, MasterUse, NoteToken, PendingPush, StageToken, Standing,
-    Stored, Unlocked, Vault, VaultError,
+    Stored, Unlocked, Vault, VaultError, VAULT_NOTE,
 };
 
 /// Unix seconds, from the surface.

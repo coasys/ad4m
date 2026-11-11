@@ -86,11 +86,21 @@
 //! that reads the epoch, and then sees it move, starts again: so its release never goes over a
 //! store that it did not see.
 //!
+//! **The vault's release.** A removal also puts its release on the note of the vault itself
+//! ([`VAULT_NOTE`]), after its own and before its record write. Every app sharing the vault
+//! reads it. It holds while its epoch is the current custody epoch ([`vault_emptying`]); a
+//! store, a promote or a forget moves the epoch past it. The removal takes it out right after
+//! its forget, and on every failure before it takes out its own release. A removal cut off
+//! before that leaves it: marks on the vault under-claim until the epoch moves, or until the
+//! same device's next removal retires it with its older releases. A refresh never takes it
+//! out: it cannot tell a removal that was cut off from one still in flight in another flow of
+//! the same app.
+//!
 //! **The mark** ([`hold_mark`]) writes `holdsMaster: true` with the vault id only for a
-//! receipt whose index the vault keeps, and `false` for a release or for a vault that keeps no
-//! key. Otherwise it leaves
+//! receipt whose index the vault keeps, while the vault's release does not hold, and `false`
+//! for a release or for a vault that keeps no key. Otherwise it leaves
 //! the device's holding unchanged: a key in a shared vault without a receipt of this device can
-//! be another device's.
+//! be another device's, and a key in a vault that a removal is emptying can be gone soon.
 //!
 //! Why a mark never outlives a release (a happens-before argument, not one atomic step): every
 //! holder mark reads the note again inside its record write, after the record version it
@@ -98,7 +108,11 @@
 //! `false`. So a `true` either builds on a version older than the `false` — and the `false`,
 //! written on a newer version, replaces it — or it read that version after the `false`
 //! landed, hence after the release was written, and its check sees the release and writes
-//! `false` instead.
+//! `false` instead. The same holds for the vault's release and the marks through every other
+//! device key on the vault: the removal writes it before its `VaultEmptied` write, so a
+//! sibling's `true` either builds on a version that write replaces, or its check sees the
+//! vault's release and writes no `true`. So while a removal of the vault can still forget the
+//! key, no other removal counts an entry on that vault as a copy.
 //!
 //! **After a rotation** ([`refresh_master`]): a device whose own rotation was cut off after
 //! its publish promotes the key its vault staged once the log's current master index is the
@@ -126,15 +140,19 @@
 //! marks this device `holdsMaster: false` and every other entry on this vault `false` in one
 //! write, then the vault forgets the key and its retry list for the identity. When the custody
 //! epoch moved between the release and that write (a store came between), the write marks only
-//! this device: the other entries can name the new key. After the forget, entries on this vault
-//! that a mark wrote in between go `false` while the vault keeps no key ([`sweep_emptied`]).
+//! this device: the other entries can name the new key. Before that write the release goes on
+//! the vault's own note too, so no mark through another device key on this vault writes `true`
+//! while the removal is pending. After the forget, entries on this vault that a mark wrote in
+//! between go `false` while the vault keeps no key ([`sweep_emptied`]). A forget that keeps a
+//! key installed since released nothing: the other entries on this vault that the write marked
+//! `false` are marked `true` again with the index the vault keeps ([`mark_cleared_again`]).
 //! The check runs on the version the record write builds on, again after each stale version,
 //! so two holders removing it at once leave one copy.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{InboxAddress, InboxError};
 use ad4m_identity_core::link::may_keep_master;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use ad4m_identity_core::record::{
     DeviceEntry, DeviceKind, HoldsMaster, PrivateRecord, RecordError, VaultId,
@@ -149,7 +167,7 @@ use crate::request::{
 };
 use crate::vault::{
     CustodyNote, Forgot, KeySigner, MasterSigner, MasterUse, NoteToken, PendingPush, Standing,
-    Stored, Vault,
+    Stored, Vault, VAULT_NOTE,
 };
 use crate::{ClientError, Clock, Random};
 
@@ -780,7 +798,9 @@ fn note_busy() -> ClientError {
 /// custody. The note's standing ([`CustodyNote::standing`]) decides the write:
 ///
 /// - a receipt for the index that [`Vault::master_index`] authenticates: `holdsMaster: true`
-///   with that index. The mark meets that receipt ([`Marked::met`]);
+///   with that index. The mark meets that receipt ([`Marked::met`]). Not while a removal of
+///   the vault is pending ([`vault_emptying`]): then the holding is left as the record says,
+///   and the receipt stays owed;
 /// - a release ([`CustodyNote::Released`]), or a vault that keeps no key: `false`. A copy this
 ///   device gave up is not its own, whoever installed the key in the shared vault since;
 /// - else (open intents only, a receipt for another index, no note): the device's holding is
@@ -789,9 +809,9 @@ fn note_busy() -> ClientError {
 ///
 /// Two fences:
 ///
-/// - the note is read again inside the record write, after the version it builds on was read
-///   (a precondition of [`record::write_as_if`]): a release written since is seen there, and
-///   the mark is decided again from it — so a `true` decided before a removal's release never
+/// - the note and the vault's note ([`VAULT_NOTE`]) are read again inside the record write,
+///   after the version it builds on was read (a precondition of [`record::write_as_if`]): a
+///   release written since is seen there, and the mark is decided again from it — so a `true` decided before a removal's release never
 ///   lands after that removal's `false`, which is written only after the release;
 /// - the custody epoch is read before and after: while it moved under a write, a custody
 ///   operation won in between — a forget, or another app's store — and the entry is written
@@ -887,6 +907,9 @@ async fn hold_mark_gated<R: ExecutorRpc>(
         // The epoch first: a custody change after it lands in `held` or in the re-read.
         let fenced = vault.custody_epoch(scid)?;
         let note = vault.custody_note(scid, key_id)?;
+        // A removal of this vault pending at this epoch: whatever this device's note says, the
+        // vault is about to be emptied, so no mark on it says `true` now.
+        let emptying = vault_emptying(vault, scid, fenced)?;
         if let Gate::Repair(decided) = &gate {
             if note != *decided {
                 return Err(ClientError::CustodyNoteMoved);
@@ -896,9 +919,13 @@ async fn hold_mark_gated<R: ExecutorRpc>(
         // the device's holding as the record says.
         let kept = vault.master_index(scid)?;
         let held = match (&gate, note.as_ref().map(CustodyNote::standing)) {
+            (_, Some(Standing::Released)) => Some(None),
+            // Another device key's removal of this vault is pending: its write marks every
+            // entry on the vault `false`, and its forget follows. This device's holding is
+            // left as the record says (`false` once that write landed).
+            _ if emptying => None,
             // A listed holder without a note: the write is guarded by its listed `true`.
             (Gate::Repair(None), _) => Some(kept),
-            (_, Some(Standing::Released)) => Some(None),
             (_, Some(Standing::Acquired(index))) if kept == Some(index) => Some(kept),
             // No receipt for the key the vault keeps: it can be another device's on the same
             // vault, so nothing here says this device holds it. When the vault keeps none,
@@ -952,7 +979,9 @@ async fn hold_mark_gated<R: ExecutorRpc>(
         };
         // Checked on the version the write builds on, after it was read.
         let still = |record: Option<&PrivateRecord>, _: &KelChain| {
-            if vault.custody_note(scid, key_id)? != note {
+            if vault.custody_note(scid, key_id)? != note
+                || vault_emptying(vault, scid, fenced)? != emptying
+            {
                 return Err(ClientError::CustodyNoteMoved);
             }
             // A listed `true` is carried only on the vault it names: on another vault the key
@@ -1501,7 +1530,9 @@ async fn mark_gated<R: ExecutorRpc>(
 ///
 /// The order: the custody epoch is read; a [`CustodyNote::Released`] layer with it goes on
 /// top of this device's custody note; the epoch is read again, and when it moved (a store
-/// came between) the release is removed and the steps start again ([`release`]); the record
+/// came between) the release is removed and the steps start again ([`release`]); the same
+/// release goes on the vault's own note ([`VAULT_NOTE`]), so no mark through another device
+/// key on this vault writes `true` while this removal is pending; the record
 /// marks this device `holdsMaster: false`, only while the release is still the top layer; the
 /// vault forgets the key ([`Vault::forget_master_at`] that epoch, so a key another app sharing
 /// the vault installed in between, the same one included, is never removed); and, when it
@@ -1514,8 +1545,11 @@ async fn mark_gated<R: ExecutorRpc>(
 /// with [`ClientError::CustodyNoteMoved`]. A refused or failed record write removes only this
 /// removal's own release (its token), wherever it is, and leaves the key where it was: it never
 /// puts back a note that another operation owns. A forget that finds a key installed since
-/// ([`Forgot::Kept`]) released nothing: the release is removed, and the entry is marked from
-/// the vault and the note in place ([`hold_mark`]). When the removal finished with its release
+/// ([`Forgot::Kept`]) released nothing: the release is removed, the entry is marked from
+/// the vault and the note in place ([`hold_mark`]), and the other entries on this vault that
+/// the write marked `false` are marked again from the vault ([`mark_cleared_again`]). The
+/// vault's release is taken out right after the forget, and before this device's release on
+/// every failure. When the removal finished with its release
 /// in place, it retires the releases below that release ([`retire_below`]), so a repeat removal
 /// (a retry after an uncertain answer, on a vault that is empty already) keeps one release in
 /// the note, not one per removal. Answers the record version written.
@@ -1535,6 +1569,16 @@ pub async fn remove_master<R: ExecutorRpc>(
     // Before the only-copy check: the forget below holds only while this custody state lasts.
     let (epoch, released) = release(vault, &scid, &own, random)?;
     let token = released.token();
+    // The same release on the vault's own note, before the write that marks every entry on
+    // this vault `false`: a mark through another device key on this vault reads it, so it
+    // writes no `true` while this removal is pending. Taken out after the forget.
+    if let Err(e) = push_note(vault, &scid, VAULT_NOTE, &released) {
+        pop_own(vault, &scid, &own, token)?;
+        return Err(e);
+    }
+    // The other entries on this vault that the write marks `false`, read on the version it
+    // builds on: a forget that keeps a key installed since marks them again.
+    let cleared: RefCell<Vec<KeyId>> = RefCell::new(Vec::new());
     let removed = async {
         let (events, log_chain) = log_of(executor, did).await?;
         // Set when a store on this vault came after the release: the forget will keep that
@@ -1556,6 +1600,19 @@ pub async fn remove_master<R: ExecutorRpc>(
                 moved.set(true);
                 return Err(ClientError::CustodyNoteMoved);
             }
+            *cleared.borrow_mut() = match record {
+                Some(r) if !moved.get() => r
+                    .devices
+                    .iter()
+                    .filter(|(id, entry)| {
+                        *id != &own
+                            && entry.holds_master == HoldsMaster::Yes
+                            && entry.vault == Some(here)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                _ => Vec::new(),
+            };
             Ok(())
         };
         let own_false = Change::HoldsMaster {
@@ -1578,7 +1635,9 @@ pub async fn remove_master<R: ExecutorRpc>(
     let (mut version, log_chain) = match removed {
         Ok(removed) => removed,
         Err(e) => {
-            // Nothing was released: this removal's release is taken out, wherever it is now.
+            // Nothing was released: this removal's releases are taken out, wherever they are
+            // now. The vault's first, so a release there never outlives the device's.
+            pop_own(vault, &scid, VAULT_NOTE, token)?;
             pop_own(vault, &scid, &own, token)?;
             return Err(e);
         }
@@ -1587,8 +1646,16 @@ pub async fn remove_master<R: ExecutorRpc>(
     // app sharing the vault installed since (a duplicate delivery of the same master taken, a
     // promote) is never removed, whatever its index, since the check did not see it; an
     // unknown index (`None`) forgets nothing.
-    if vault.master_index(&scid)?.is_some() {
-        match vault.forget_master_at(&scid, epoch)? {
+    let forgot = match vault.master_index(&scid) {
+        Ok(Some(_)) => vault.forget_master_at(&scid, epoch).map(Some),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e),
+    };
+    // The forget is done (or failed, or there was none): the vault keeps no key at the epoch
+    // the release read any more, or keeps it on purpose. The vault's release goes.
+    pop_own(vault, &scid, VAULT_NOTE, token)?;
+    if let Some(forgot) = forgot? {
+        match forgot {
             Forgot::Forgot => {
                 // A holder mark that read the custody before this forget (between the write
                 // above and here) may have written `true` back: mark again from the vault and
@@ -1616,12 +1683,29 @@ pub async fn remove_master<R: ExecutorRpc>(
                 version = hold_mark(executor, vault, did, &scid, &own, &Reader::Executor, random)
                     .await?
                     .version;
+                // The write above marked the other entries on this vault `false`, and the
+                // vault still keeps a key: they are marked again from it.
+                let cleared = cleared.take();
+                if let Some(marked) =
+                    mark_cleared_again(executor, vault, did, &scid, here, &cleared, random).await?
+                {
+                    version = marked;
+                }
             }
         }
     }
     // The release stands now: this removal never takes it out again. The releases below it are
     // retired, so repeat removals do not grow the note.
-    retire_below(vault, &scid, &own, token)?;
+    let retired = retire_below(vault, &scid, &own, token)?;
+    // The vault's releases of those older removals (cut off before they took theirs out) go
+    // with them.
+    if !retired.is_empty() {
+        swap_layers(vault, &scid, VAULT_NOTE, |layers| {
+            let before = layers.len();
+            layers.retain(|layer| !retired.contains(&layer.token()));
+            (layers.len() != before).then_some(())
+        })?;
+    }
     // A stage at or behind the log would be promoted or kept by the next refresh, bringing back
     // the key the person just removed. One ahead is a rotation in flight: its owner decides.
     let current = log_chain.state().masters.len().saturating_sub(1);
@@ -1702,23 +1786,124 @@ fn release(
 /// one, and its clear takes that one out; a clear removes every layer below its receipt. So no
 /// flow can see a release below a release that stands. Intents and receipts stay: an open
 /// intent can be a take still in flight, and only its own operation changes it. No change when
-/// the release is not in the note.
+/// the release is not in the note. Answers the tokens of the releases retired.
 fn retire_below(
     vault: &dyn Vault,
     scid: &str,
     key_id: &str,
     token: NoteToken,
-) -> Result<(), ClientError> {
-    swap_layers(vault, scid, key_id, |layers| {
+) -> Result<Vec<NoteToken>, ClientError> {
+    let retired = swap_layers(vault, scid, key_id, |layers| {
         let at = layers.iter().position(|layer| layer.token() == token)?;
+        let mut retired = Vec::new();
         let mut i = 0;
         layers.retain(|layer| {
             i += 1;
-            i <= at + 1 || !matches!(layer, CustodyNote::Released { .. })
+            let keep = i <= at + 1 || !matches!(layer, CustodyNote::Released { .. });
+            if !keep {
+                retired.push(layer.token());
+            }
+            keep
         });
-        Some(())
+        Some(retired)
     })?;
-    Ok(())
+    Ok(retired.unwrap_or_default())
+}
+
+/// Whether a removal of this vault is pending for `scid` at custody epoch `epoch`: the vault's
+/// own note ([`VAULT_NOTE`]) has a release that read `epoch`. A release that read an older
+/// epoch is past: a store, a promote or a forget came after it, so its forget no longer takes
+/// the key the vault keeps (or already took it).
+fn vault_emptying(vault: &dyn Vault, scid: &str, epoch: u64) -> Result<bool, ClientError> {
+    Ok(vault.custody_note(scid, VAULT_NOTE)?.is_some_and(|note| {
+        note.layers().iter().any(
+            |layer| matches!(layer, CustodyNote::Released { epoch: read, .. } if *read == epoch),
+        )
+    }))
+}
+
+/// After a removal's forget kept a key installed since ([`Forgot::Kept`]): marks the entries
+/// `cleared` (the other device keys on vault `here` that the removal's write marked `false`)
+/// `holdsMaster: true` again with the index the vault keeps, as they were before a removal that
+/// released nothing. An entry is left as it is when its device's own note stands released (it
+/// gave its copy up), or the record no longer lists it or lists it `true` already (its own
+/// mark, or the carry of another mark on this vault, came first). Nothing is written while a
+/// removal of this vault is pending ([`vault_emptying`]) or the vault keeps no key.
+///
+/// Fenced like [`hold_mark`]: the notes are read again on the version the write builds on, and
+/// the custody epoch before and after the write. When the epoch moved under the write, the
+/// marks follow the vault again: a vault that keeps no key then is swept
+/// ([`sweep_emptied`]). Answers the version written, `None` when nothing was written.
+#[allow(clippy::too_many_arguments)]
+async fn mark_cleared_again<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    scid: &str,
+    here: VaultId,
+    cleared: &[KeyId],
+    random: &dyn Random,
+) -> Result<Option<u64>, ClientError> {
+    // Entries the record no longer lists, or lists `true` already: never written here.
+    let skipped: RefCell<Vec<KeyId>> = RefCell::new(Vec::new());
+    let mut written = None;
+    for _ in 0..record::MAX_WRITES {
+        let fenced = vault.custody_epoch(scid)?;
+        let Some(kept) = vault.master_index(scid)? else {
+            return Ok(sweep_emptied(executor, vault, did, scid, here, random)
+                .await?
+                .or(written));
+        };
+        if vault_emptying(vault, scid, fenced)? {
+            return Ok(written);
+        }
+        let mut planned = Vec::new();
+        for key_id in cleared {
+            if skipped.borrow().contains(key_id) {
+                continue;
+            }
+            let note = vault.custody_note(scid, key_id)?;
+            if note.as_ref().map(CustodyNote::standing) != Some(Standing::Released) {
+                planned.push((key_id.clone(), note));
+            }
+        }
+        if planned.is_empty() {
+            return Ok(written);
+        }
+        let changes: Vec<Change> = planned
+            .iter()
+            .map(|(key_id, _)| Change::Holds {
+                key_id: key_id.clone(),
+                index: kept,
+                vault: here,
+            })
+            .collect();
+        let still = |record: Option<&PrivateRecord>, _: &KelChain| {
+            if vault_emptying(vault, scid, fenced)? {
+                return Err(ClientError::CustodyNoteMoved);
+            }
+            for (key_id, note) in &planned {
+                if vault.custody_note(scid, key_id)? != *note {
+                    return Err(ClientError::CustodyNoteMoved);
+                }
+                let listed = record.and_then(|r| r.devices.get(key_id));
+                if listed.is_none_or(|entry| entry.holds_master == HoldsMaster::Yes) {
+                    skipped.borrow_mut().push(key_id.clone());
+                    return Err(ClientError::CustodyNoteMoved);
+                }
+            }
+            Ok(())
+        };
+        match record::write_if(executor, vault, did, &changes, &still, random).await {
+            // A note, the vault's note or an entry changed: decide again.
+            Err(ClientError::CustodyNoteMoved) => continue,
+            Err(e) => return Err(e),
+            Ok(version) if vault.custody_epoch(scid)? == fenced => return Ok(Some(version)),
+            // Custody moved under the write: follow what it moved to.
+            Ok(version) => written = Some(version),
+        }
+    }
+    Err(ClientError::RecordBusy)
 }
 
 /// Whether `record` lists a copy of the current master key of `chain` on a vault other than

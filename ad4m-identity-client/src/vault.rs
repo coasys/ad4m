@@ -336,6 +336,10 @@ pub trait Vault: Send + Sync {
     /// The custody note of device `key_id` for `scid` ([`CustodyNote`]); `None` when it has
     /// none. Not secret, needs no unlock. Kept per (`scid`, `key_id`), never per `scid` alone:
     /// every app sharing the vault has its own.
+    ///
+    /// `key_id` is a device key id of the log (`d<n>`) or [`VAULT_NOTE`], the note of the
+    /// vault itself: the releases of removals that empty this vault, which every app sharing
+    /// it reads. Keep [`VAULT_NOTE`] like any other key id; no log key id is equal to it.
     fn custody_note(&self, scid: &str, key_id: &str) -> Result<Option<CustodyNote>, VaultError>;
     /// Sets the custody note of device `key_id` for `scid` to `note` (`None` clears it) only
     /// while it is still `expected` (`None`: none kept), as one atomic step under the same
@@ -581,6 +585,12 @@ impl CustodyNote {
         Ok(vault.master_index(scid)? == Some(index))
     }
 }
+
+/// The key under which [`Vault::custody_note`] keeps the note of the vault itself, not of one
+/// device key: the releases of the removals that empty this vault for an identity
+/// ([`crate::flows::master`]). Every app sharing the vault reads it before a holder mark. Log key
+/// ids are `m<n>` and `d<n>`, so no device key id is equal to it.
+pub const VAULT_NOTE: &str = "vault";
 
 /// The operation that wrote a [`CustodyNote`]: 16 random bytes, drawn once per take, promote,
 /// rotation, restore or removal. Not secret.
