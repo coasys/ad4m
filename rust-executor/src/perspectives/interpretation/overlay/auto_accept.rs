@@ -7,8 +7,8 @@
 //!
 //! * `always` — every inferred item of the class is accepted,
 //! * `when_placed` — only items that are *placed*: at least one of the
-//!   class's parent relations has a value, either an accepted link or a
-//!   still-staged `inferred/<p>` overlay value,
+//!   class's parent relations points at another item, either as an accepted
+//!   link or as a still-staged `inferred/<p>` overlay value,
 //! * `never` / absent — nothing is auto-accepted; the overlay stays pending.
 //!
 //! A **parent relation** is any declared forward `hasOne` relation
@@ -39,6 +39,7 @@ use super::{accept_interpretation, INFERRED_PREFIX, OVERLAY_KIND_PRED};
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation::{replace_link, InterpretationOp};
 use crate::perspectives::model_query::types::{AutoAccept, ModelShape};
+use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedLinkExpression, LinkQuery};
 use std::collections::HashMap;
@@ -86,18 +87,23 @@ fn parent_predicates(shape: &ModelShape) -> Vec<&str> {
         .collect()
 }
 
-/// Whether at least one parent relation carries a value on this base — an
+/// Whether at least one parent relation points at another item — as an
 /// accepted real link **or** a still-staged `inferred/<p>` overlay value
 /// (from this pass's own writes or an earlier pass that left the item
-/// pending).
+/// pending). `links` are the base's own outgoing links.
+///
+/// A parent link from an item to itself does not count: it places the item
+/// under nothing.
 fn is_placed(links: &[DecoratedLinkExpression], parent_predicates: &[&str]) -> bool {
     parent_predicates.iter().any(|p| {
         let inferred = format!("{INFERRED_PREFIX}{p}");
         links.iter().any(|l| {
-            l.data
-                .predicate
-                .as_deref()
-                .is_some_and(|q| q == *p || q == inferred)
+            let parent = match l.data.predicate.as_deref() {
+                Some(q) if q == *p => serde_json::Value::String(l.data.target.clone()),
+                Some(q) if q == inferred => parse_literal_value(&l.data.target),
+                _ => return false,
+            };
+            parent != serde_json::Value::String(l.data.source.clone())
         })
     })
 }
@@ -700,6 +706,29 @@ mod tests {
         assert!(pending(&p).await.is_empty());
     }
 
+    /// A parent link from an item to itself places it under nothing, so a
+    /// `when_placed` item carrying only that stays pending.
+    #[tokio::test]
+    async fn a_parent_link_to_itself_does_not_place_an_item() {
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(AA_CLASSES).await;
+        let child = "soa://ext/note/self";
+
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![
+                create_op(child, "Note", "Points at itself"),
+                addlinks_op(child, "ns://partOf", child),
+            ],
+            "run-self",
+            &ctx,
+        )
+        .await;
+
+        assert!(accepted.is_empty());
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+    }
+
     fn remark_op(base: &str, class: &str, remark: &str) -> InterpretationOp {
         InterpretationOp::Create {
             base: base.to_string(),
@@ -867,5 +896,13 @@ mod tests {
         assert!(!is_placed(&[], &preds), "no links at all");
         // The overlay marker itself is not a parent value.
         assert!(!is_placed(&[mk(AUTO_ACCEPTED_PRED)], &preds));
+        // A parent link back to the item itself is not a placement, real or
+        // staged.
+        let mut own = mk("ns://partOf");
+        own.data.target = own.data.source.clone();
+        assert!(!is_placed(&[own], &preds), "real self link");
+        let mut own_staged = mk("ad4m://interp/inferred/ns://partOf");
+        own_staged.data.target = "literal:string:soa%3A%2F%2Fx".into();
+        assert!(!is_placed(&[own_staged], &preds), "staged self link");
     }
 }
