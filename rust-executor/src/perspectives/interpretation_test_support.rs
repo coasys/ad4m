@@ -208,6 +208,43 @@ pub(crate) const AA_PLAIN_SDNA: &str = r#"{
   ]
 }"#;
 
+/// A `when_placed` class with no type flag: one required property is all an
+/// instance must carry. That is the same number of required triples as the
+/// executor's own overlay class, which every pending item also conforms to.
+pub(crate) const AA_UNFLAGGED_SDNA: &str = r#"{
+  "target_class":"ns://Remark",
+  "auto_accept":"when_placed",
+  "interpretation_hint":"An item that belongs under a chapter.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://remark","target":"placeholder"}],
+  "properties":[
+    {"path":"ns://remark","name":"remark","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://remark","target":"value"}]},
+    {"path":"ns://partOf","name":"partOf","relation_kind":"hasOne","target_class_name":"Chapter","class":"ns://ChapterShape"}
+  ]
+}"#;
+
+/// A `never` class that requires exactly what [`AA_UNFLAGGED_SDNA`] requires,
+/// so every instance of one is an instance of the other.
+pub(crate) const AA_UNFLAGGED_NEVER_SDNA: &str = r#"{
+  "target_class":"ns://Sealed",
+  "auto_accept":"never",
+  "interpretation_hint":"An item a person always reviews.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://remark","target":"placeholder"}],
+  "properties":[
+    {"path":"ns://remark","name":"remark","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://remark","target":"value"}]}
+  ]
+}"#;
+
+/// An `always` class that requires exactly what [`AA_UNFLAGGED_SDNA`] requires.
+pub(crate) const AA_UNFLAGGED_ALWAYS_SDNA: &str = r#"{
+  "target_class":"ns://Open",
+  "auto_accept":"always",
+  "interpretation_hint":"An item nobody needs to review.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://remark","target":"placeholder"}],
+  "properties":[
+    {"path":"ns://remark","name":"remark","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://remark","target":"value"}]}
+  ]
+}"#;
+
 /// The Flux-shaped grouping class: `name` is the identity (dedup key), `summary`
 /// is a mutable rolling scalar the extractor is asked to *grow* rather than
 /// replace. Used by the Flux-grouping / persistent-topics e2e tests: the model

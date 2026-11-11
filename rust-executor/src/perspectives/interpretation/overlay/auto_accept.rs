@@ -21,11 +21,20 @@
 //! and does not abort the pass; the marker link is kept tiny so removing the
 //! feature is one commit.
 //!
+//! # Which class decides
+//!
+//! A `Create`/`Update` op
+//! names the item's class and that class decides. An item the ops do not
+//! name a class for (an `AddLinks` source) is classified by its links, and
+//! that answer is a set: the item is accepted only if every class in the set
+//! allows it.
+//!
 //! Ordering: items whose class declares no parent relations are accepted
 //! first — a parent-class item is real before any children that link to it
 //! are materialized. Within each group, the op/touched-base order is kept,
 //! so the whole pass is deterministic.
 
+use super::classes::INTERP_OVERLAY_CLASS;
 use super::{accept_interpretation, INFERRED_PREFIX, OVERLAY_KIND_PRED};
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation::{replace_link, InterpretationOp};
@@ -93,9 +102,22 @@ fn is_placed(links: &[DecoratedLinkExpression], parent_predicates: &[&str]) -> b
     })
 }
 
-/// Write the auto-accepted marker on `base`. One small function so Nico's
-/// call on whether to keep the marker is a one-commit change — delete this
-/// fn and its single call site.
+/// The class's declared rule. An absent declaration is `never`.
+fn rule_of(shape: &ModelShape) -> AutoAccept {
+    shape.auto_accept.unwrap_or(AutoAccept::Never)
+}
+
+/// Whether this class's rule allows accepting the item that carries `links`.
+fn rule_allows(shape: &ModelShape, links: &[DecoratedLinkExpression]) -> bool {
+    match rule_of(shape) {
+        AutoAccept::Always => true,
+        AutoAccept::WhenPlaced => is_placed(links, &parent_predicates(shape)),
+        AutoAccept::Never => false,
+    }
+}
+
+/// Write the auto-accepted marker on `base`. The marker is this function and
+/// its single call site, and nothing reads it: removing both removes it.
 async fn mark_auto_accepted(
     perspective: &mut PerspectiveInstance,
     base: &str,
@@ -139,9 +161,9 @@ pub(crate) async fn auto_accept_pass(
         return Vec::new();
     }
 
-    // Bases the ops do not name a class for (AddLinks sources only): resolve
-    // structurally, most specific class first — the same definition of
-    // "what is this node" the rest of the executor uses.
+    // Bases the ops do not name a class for (AddLinks sources only) are
+    // classified by their links — the same definition of "what is this node"
+    // the rest of the executor uses.
     let uncovered: Vec<String> = bases
         .iter()
         .filter(|b| !op_classes.contains_key(*b))
@@ -155,38 +177,52 @@ pub(crate) async fn auto_accept_pass(
         }
     };
 
-    // Root-class items first (their class declares no parent relation), then
+    // Root-class items first (their classes declare no parent relation), then
     // nested ones — so a parent is real before its children are materialized.
-    let mut order: Vec<(String, Arc<ModelShape>)> = Vec::new();
-    let mut nested: Vec<(String, Arc<ModelShape>)> = Vec::new();
+    let mut order: Vec<(String, Vec<Arc<ModelShape>>)> = Vec::new();
+    let mut nested: Vec<(String, Vec<Arc<ModelShape>>)> = Vec::new();
     for base in bases {
-        let class = op_classes
-            .get(base)
-            .or_else(|| resolved.get(base).and_then(|v| v.first()));
-        let Some(class) = class else { continue };
-        let shape = match perspective.get_shape(class) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!(
-                    "interpretation: auto-accept could not load shape for class \
-                     '{class}' (base {base}): {e:#}"
-                );
-                continue;
-            }
+        // The classes that decide for this base. An op names exactly one. A
+        // structural classification is a set, and every pending base is in
+        // it as an overlay: that class is the executor's own bookkeeping and
+        // says nothing about the item, so it is dropped. Every class left
+        // must allow the accept.
+        let classes: Vec<&String> = match op_classes.get(base) {
+            Some(class) => vec![class],
+            None => resolved
+                .get(base)
+                .map(|all| all.iter().filter(|c| *c != INTERP_OVERLAY_CLASS).collect())
+                .unwrap_or_default(),
         };
-        let entry = (base.clone(), shape);
-        if parent_predicates(&entry.1).is_empty() {
-            order.push(entry);
+        let mut shapes = Vec::with_capacity(classes.len());
+        for class in classes {
+            match perspective.get_shape(class) {
+                Ok(s) => shapes.push(s),
+                Err(e) => {
+                    // A class whose rule cannot be read cannot allow anything.
+                    log::warn!(
+                        "interpretation: auto-accept could not load shape for class \
+                         '{class}' (base {base}): {e:#}"
+                    );
+                    shapes.clear();
+                    break;
+                }
+            }
+        }
+        if shapes.is_empty() {
+            continue;
+        }
+        if shapes.iter().all(|s| parent_predicates(s).is_empty()) {
+            order.push((base.clone(), shapes));
         } else {
-            nested.push(entry);
+            nested.push((base.clone(), shapes));
         }
     }
     order.extend(nested);
 
     let mut accepted = Vec::new();
-    for (base, shape) in order {
-        let rule = shape.auto_accept.unwrap_or(AutoAccept::Never);
-        if rule == AutoAccept::Never {
+    for (base, shapes) in order {
+        if shapes.iter().any(|s| rule_of(s) == AutoAccept::Never) {
             continue;
         }
 
@@ -209,9 +245,7 @@ pub(crate) async fn auto_accept_pass(
         if !has_overlay {
             continue;
         }
-        let eligible = rule == AutoAccept::Always
-            || (rule == AutoAccept::WhenPlaced && is_placed(&links, &parent_predicates(&shape)));
-        if !eligible {
+        if !shapes.iter().all(|s| rule_allows(s, &links)) {
             continue;
         }
 
@@ -664,6 +698,144 @@ mod tests {
             .and_then(|r| r["title"].as_str());
         assert_eq!(title, Some("llm title"), "staged value promoted to real");
         assert!(pending(&p).await.is_empty());
+    }
+
+    fn remark_op(base: &str, class: &str, remark: &str) -> InterpretationOp {
+        InterpretationOp::Create {
+            base: base.to_string(),
+            class: class.to_string(),
+            values: serde_json::Map::from_iter([("remark".to_string(), json!(remark))]),
+        }
+    }
+
+    /// Every pending item also conforms to the executor's overlay class (it
+    /// carries the overlay's `kind` link). When a later pass places an item
+    /// through an `AddLinks` op, its class is read from its links, and the
+    /// overlay class must not be taken for the item's class: it declares no
+    /// rule, so the item would never be accepted. The class here has one
+    /// required triple, like the overlay class, and sorts after it by name.
+    #[tokio::test]
+    async fn a_later_pass_reads_the_item_class_not_the_overlay_class() {
+        let (mut p, shapes, ctx) =
+            setup_perspective_no_llm(&[("Chapter", AA_PARENT_SDNA), ("Remark", AA_UNFLAGGED_SDNA)])
+                .await;
+        let child = "soa://ext/remark/late";
+        let parent = "soa://ext/chapter/remark-parent";
+
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![
+                create_op(parent, "Chapter", "Chapter"),
+                remark_op(child, "Remark", "Unplaced remark"),
+            ],
+            "run-1",
+            &ctx,
+        )
+        .await;
+        assert_eq!(accepted, vec![parent.to_string()]);
+
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![addlinks_op(child, "ns://partOf", parent)],
+            "run-2",
+            &ctx,
+        )
+        .await;
+        assert_eq!(accepted, vec![child.to_string()]);
+        assert!(pending(&p).await.is_empty());
+    }
+
+    /// An item whose class is read from its links can conform to several
+    /// classes. If one of them says `never`, a person decides — a class that
+    /// allows the accept does not overrule one that does not.
+    #[tokio::test]
+    async fn an_item_of_two_classes_needs_both_rules_to_allow_it() {
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[
+            ("Chapter", AA_PARENT_SDNA),
+            ("Remark", AA_UNFLAGGED_SDNA),
+            ("Sealed", AA_UNFLAGGED_NEVER_SDNA),
+        ])
+        .await;
+        let child = "soa://ext/remark/two-classes";
+        let parent = "soa://ext/chapter/two-classes-parent";
+
+        pass(
+            &mut p,
+            &shapes,
+            vec![
+                create_op(parent, "Chapter", "Chapter"),
+                remark_op(child, "Remark", "Also a Sealed"),
+            ],
+            "run-1",
+            &ctx,
+        )
+        .await;
+        let classes = p.subject_classes_of(&[child.to_string()]).unwrap();
+        assert!(
+            ["Remark", "Sealed"]
+                .iter()
+                .all(|c| classes[child].iter().any(|have| have == c)),
+            "fixture: the item conforms to both classes, got {:?}",
+            classes[child]
+        );
+
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![addlinks_op(child, "ns://partOf", parent)],
+            "run-2",
+            &ctx,
+        )
+        .await;
+
+        assert!(accepted.is_empty(), "one of its classes says never");
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+    }
+
+    /// The same with the roles turned round: one class says `always`, the
+    /// other `when_placed` and the item is not placed. The item waits.
+    #[tokio::test]
+    async fn an_always_class_does_not_overrule_a_class_that_waits() {
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[
+            ("Chapter", AA_PARENT_SDNA),
+            ("Remark", AA_UNFLAGGED_SDNA),
+            ("Open", AA_UNFLAGGED_ALWAYS_SDNA),
+        ])
+        .await;
+        let child = "soa://ext/remark/open-and-waiting";
+        let other = "soa://ext/chapter/not-a-parent";
+
+        pass(
+            &mut p,
+            &shapes,
+            vec![
+                create_op(other, "Chapter", "Chapter"),
+                remark_op(child, "Remark", "Also an Open"),
+            ],
+            "run-1",
+            &ctx,
+        )
+        .await;
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+
+        // A link that is no parent relation of either class: the item is
+        // touched, and still unplaced.
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![addlinks_op(child, "ns://seeAlso", other)],
+            "run-2",
+            &ctx,
+        )
+        .await;
+
+        assert!(
+            accepted.is_empty(),
+            "its when_placed class is not satisfied"
+        );
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
     }
 
     /// Direct unit check on the eligibility helpers: `is_placed` sees both
