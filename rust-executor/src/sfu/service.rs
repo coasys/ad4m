@@ -895,6 +895,11 @@ impl SfuService {
     async fn publish_roster(&self, room_id: &RoomId, departed: Option<&str>) {
         let _order = self.roster_order.lock().await;
         let mut participants = self.local_sessions(room_id).await;
+        let recipients: Vec<String> = participants
+            .iter()
+            .map(|p| p.agent_did.clone())
+            .chain(departed.map(str::to_string))
+            .collect();
         participants.extend(
             self.cascade_manager
                 .read()
@@ -909,7 +914,7 @@ impl SfuService {
         };
         crate::pubsub::get_global_pubsub()
             .await
-            .publish_event(crate::events::Event::sfu_room_roster(&roster, departed));
+            .publish_event(crate::events::Event::sfu_room_roster(&roster, recipients));
     }
 
     /// Get the local address of the SFU server.
@@ -1999,11 +2004,18 @@ mod tests {
         events: &mut tokio::sync::broadcast::Receiver<Arc<crate::events::Event>>,
         url: &str,
     ) -> serde_json::Value {
+        next_roster_event(events, url).await.payload["participants"].clone()
+    }
+
+    async fn next_roster_event(
+        events: &mut tokio::sync::broadcast::Receiver<Arc<crate::events::Event>>,
+        url: &str,
+    ) -> Arc<crate::events::Event> {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let event = events.recv().await.unwrap();
                 if event.topic == Topic::SfuRoomRoster && event.payload["neighbourhoodUrl"] == url {
-                    return event.payload["participants"].clone();
+                    return event;
                 }
             }
         })
@@ -2043,12 +2055,19 @@ mod tests {
         })
         .await
         .unwrap();
+        let roster = next_roster_event(&mut events, url).await;
         assert_eq!(
-            next_roster(&mut events, url).await,
+            roster.payload["participants"],
             serde_json::json!([
                 { "agentDid": "did:a", "participantId": local },
                 { "agentDid": "did:b", "participantId": "P1@did:other" },
             ])
+        );
+        // Only this node's sessions get it from here: did:b hears from its own
+        // node, and an announce naming any DID must not send it this room.
+        assert_eq!(
+            roster.audience,
+            crate::events::Audience::Dids(vec!["did:a".into()])
         );
 
         tx.send(CascadeSignal::Leave {

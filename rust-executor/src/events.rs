@@ -362,20 +362,19 @@ impl Event {
         Event::new(Topic::SfuData, Audience::Dids(recipients), message)
     }
 
-    /// `sfu-room-roster`: who is in a call room now, to the agents it lists
-    /// (once each, however many sessions an agent has) and, on departure, the
-    /// departed session's DID so that session can see it is no longer listed.
-    /// The departed DID is a recipient, not a member of the payload's roster.
-    pub fn sfu_room_roster(roster: &crate::sfu::SfuRoomRoster, departed: Option<&str>) -> Event {
-        let mut dids: Vec<String> = roster
-            .participants
-            .iter()
-            .map(|p| p.agent_did.clone())
-            .chain(departed.map(str::to_string))
-            .collect();
-        dids.sort();
-        dids.dedup();
-        Event::new(Topic::SfuRoomRoster, Audience::Dids(dids), roster)
+    /// `sfu-room-roster`: who is in a call room now, to `recipients` (once
+    /// each). The caller picks them: this executor's sessions in the room and,
+    /// on departure, the departed session's DID so that session can see it is
+    /// no longer listed. Sessions of other cascade nodes are in the payload but
+    /// never recipients: their own executor tells them, and an announce must
+    /// not choose who here hears about the room.
+    pub fn sfu_room_roster(
+        roster: &crate::sfu::SfuRoomRoster,
+        mut recipients: Vec<String>,
+    ) -> Event {
+        recipients.sort();
+        recipients.dedup();
+        Event::new(Topic::SfuRoomRoster, Audience::Dids(recipients), roster)
     }
 
     /// `sfu-session-replaced`: a later join from the same device took one of `targetDid`'s
@@ -526,7 +525,7 @@ mod tests {
                         },
                     ],
                 },
-                None,
+                vec!["did:alice".into(), "did:bob".into()],
             ),
             Event::sfu_data(
                 &SfuDataMessage::new(
