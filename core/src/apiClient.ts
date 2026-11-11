@@ -1,5 +1,5 @@
 import { callSafely } from './notifyListeners'
-import { LONG_METHODS, READ_METHODS } from './generated/api/RpcMethods'
+import { LONG_METHODS, OPENS_METHODS, READ_METHODS } from './generated/api/RpcMethods'
 import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
 import type { EventMap, EventName } from './generated/api/Events'
 
@@ -32,17 +32,11 @@ export interface CallOptions {
      */
     signal?: AbortSignal
     /** Timeout in ms, from the call to the reply. Defaults to 30 s, or
-     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. */
+     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. A call
+     *  that opens something on the executor (`OPENS_METHODS`, a live query) is
+     *  cancelled there when it times out, as when `signal` aborts it; any other
+     *  call that times out still runs to its end. */
     timeoutMs?: number
-    /**
-     * For a call whose result holds something on the executor that the caller
-     * must release, such as a live query's subscription. Such a call is
-     * cancelled on the executor when it times out, as when `signal` aborts it.
-     * When the executor answered before the cancel reached it, the reply
-     * still arrives: the call has already rejected, so its result goes here,
-     * and the caller releases it.
-     */
-    onLateResult?: (result: unknown) => void
 }
 
 /** Narrows an {@link ApiClient.on} handler to one perspective's events. */
@@ -168,10 +162,6 @@ export class ApiClient {
     private _ws: WebSocket | null = null
     /** Settles when `_ws` opens (resolve) or closes first (reject). */
     private _wsOpen: Promise<void> | null = null
-    /** Calls given up on after they went out that take an `onLateResult`, by
-     *  request id, with the socket they went out on. An entry goes when its
-     *  reply arrives or its socket closes. */
-    private _abandoned = new Map<string, { ws: WebSocket, onLateResult: (result: unknown) => void }>()
     /** `on()` handlers by event type; a type with none has no entry. */
     private _handlers = new Map<string, Set<Registration>>()
     private _reconnectCallbacks = new Set<() => void>()
@@ -262,14 +252,7 @@ export class ApiClient {
             // Events carry a `type`; RPC responses never do.
             if (parsed.type === undefined) {
                 const pending = this._pendingCalls.get(parsed.id as string)
-                if (!pending) {
-                    // A late reply to a timed-out or aborted call, or a cancel ack.
-                    const abandoned = this._abandoned.get(parsed.id as string)
-                    if (abandoned?.ws !== ws) return
-                    this._abandoned.delete(parsed.id as string)
-                    if (parsed.error === undefined) callSafely(abandoned.onLateResult, 'Error in late-result callback:', parsed.result)
-                    return
-                }
+                if (!pending) return // late reply to a timed-out or aborted call, or a cancel ack
                 const error = parsed.error as { code?: number; message?: string } | undefined
                 if (!error) {
                     pending.resolve(parsed.result)
@@ -392,7 +375,6 @@ export class ApiClient {
 
     /** `reason` is set when the executor asked to try again later; calls that fail carry it. */
     private _onClose(ws: WebSocket, reason?: string): void {
-        this._forgetAbandoned(ws)
         // A socket closed by _closeWs() can report after a new one exists.
         if (this._ws !== ws) return
         this._stopPing()
@@ -555,7 +537,6 @@ export class ApiClient {
 
     private _request(type: string, params?: unknown, options?: CallOptions): Promise<unknown> {
         const signal = options?.signal
-        const onLateResult = options?.onLateResult
         if (signal?.aborted) {
             return Promise.reject(new DOMException('Aborted', 'AbortError'))
         }
@@ -571,18 +552,17 @@ export class ApiClient {
                 signal?.removeEventListener('abort', onAbort)
                 fn()
             }
-            // Tell the executor the call is no longer wanted, so it stops the work, and keep
-            // `onLateResult` for a reply already on its way.
-            const abandon = () => {
-                const ws = this._ws
-                if (!pending.sent || !ws || ws.readyState !== 1 /* OPEN */) return
-                this._send(ws, JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
-                if (onLateResult) this._abandoned.set(id, { ws, onLateResult })
+            // Tell the executor the call is no longer wanted, so it stops the work. A late
+            // reply finds no pending call and is dropped.
+            const cancel = () => {
+                if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
+                    this._send(this._ws, JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
+                }
             }
             const timer = setTimeout(() => {
-                // Only a call that holds something is cancelled on timeout: a write that
+                // Only a call that opens something is cancelled on timeout: a write that
                 // timed out still runs to its end on the executor, as it always has.
-                if (onLateResult) abandon()
+                if ((OPENS_METHODS as ReadonlySet<string>).has(type)) cancel()
                 settle(() => reject(new RpcError(408, `RPC call '${type}' timed out after ${timeoutMs}ms`)))
                 // A connect that never completes (a black-holed port) would hold every later
                 // call. Drop it once no call waits on it, so the next call dials again.
@@ -592,7 +572,7 @@ export class ApiClient {
                 }
             }, timeoutMs)
             const onAbort = () => {
-                abandon()
+                cancel()
                 settle(() => reject(new DOMException('Aborted', 'AbortError')))
             }
             const pending: PendingCall = {
@@ -733,16 +713,7 @@ export class ApiClient {
         const ws = this._ws
         this._ws = null
         this._wsOpen = null
-        if (ws) this._forgetAbandoned(ws)
         ws?.close()
-    }
-
-    /** No late reply comes on a closed socket, and the executor ended what
-     *  the socket's calls opened. */
-    private _forgetAbandoned(ws: WebSocket): void {
-        for (const [id, abandoned] of this._abandoned) {
-            if (abandoned.ws === ws) this._abandoned.delete(id)
-        }
     }
 
     /** Register a callback that fires after a successful WebSocket reconnect.

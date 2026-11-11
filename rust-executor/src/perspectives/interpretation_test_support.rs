@@ -4,10 +4,15 @@
 //! e2e suite in `interpretation_e2e.rs` share one set of fixtures + one harness
 //! (DRY). Nothing here is compiled outside `cfg(test)`.
 //!
-//! The real-LLM harness targets an **OpenAI-compatible endpoint** (Ollama),
-//! env-overridable via `INTERPRETATION_E2E_BASE_URL` / `INTERPRETATION_E2E_MODEL` /
-//! `INTERPRETATION_E2E_API_KEY`; the defaults hit Ollama at `localhost:11434`
-//! (directly on the CI runner = Marvin, or over an SSH tunnel from a dev box).
+//! The real-LLM harness targets Ollama's **native** `/api/chat` endpoint
+//! (`ModelApiType::Ollama`), env-overridable via `INTERPRETATION_E2E_BASE_URL` /
+//! `INTERPRETATION_E2E_MODEL` / `INTERPRETATION_E2E_API_KEY` /
+//! `INTERPRETATION_E2E_MAX_NUM_CTX`; the defaults hit Ollama at
+//! `localhost:11434` (directly on the CI runner = Marvin, or over an SSH
+//! tunnel from a dev box). The OpenAI-compatible `/v1` endpoint cannot carry
+//! native tool calls the way the harness needs them — the model answers with
+//! `<tool_call>` text and Ollama's tool parser fails the request outright —
+//! and it ignores `options.num_ctx`.
 
 #![cfg(test)]
 
@@ -257,7 +262,7 @@ pub(crate) async fn setup_perspective_no_llm(
     (perspective, shapes, ctx)
 }
 
-// ---- real-LLM harness (Ollama over the OpenAI-compatible API) --------------
+// ---- real-LLM harness (Ollama native /api/chat) ----------------------------
 
 /// Stand up `AIService` with the Ollama-backed default model on top of
 /// [`setup_perspective_no_llm`]. Returns everything a test needs to drive
@@ -267,6 +272,19 @@ pub(crate) async fn setup_interpretation_e2e(
 ) -> (PerspectiveInstance, Vec<ModelShape>, AgentContext) {
     use crate::ai_service::AIService;
     use crate::types::{ModelInput, ModelType};
+
+    // Surface `log::warn!`/`log::debug!` diagnostics (harness per-round
+    // choices, raw responses on parse failure). Without an env_logger init,
+    // tests are blind to what the model actually emitted — observed
+    // 2026-08-24 when harness_intention_links_to_seeded_beliefs failed
+    // 8/8 and the placements list alone couldn't tell us which tool the
+    // model was reaching for. `try_init` makes this idempotent across
+    // scenarios, and defaulting RUST_LOG to `warn` if unset keeps output
+    // scoped to what the harness explicitly emits. `RUST_LOG=...interpretation=debug`
+    // adds the raw response on every parse retry.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(false) // route to stderr so --nocapture shows it
+        .try_init();
 
     let (perspective, shapes, ctx) = setup_perspective_no_llm(class_sdnas).await;
 
@@ -280,12 +298,27 @@ pub(crate) async fn setup_interpretation_e2e(
         .expect("AIService global instance");
     let base_url = std::env::var("INTERPRETATION_E2E_BASE_URL")
         .unwrap_or_else(|_| "http://localhost:11434/v1".into());
-    let model = std::env::var("INTERPRETATION_E2E_MODEL").unwrap_or_else(|_| "gemma3:12b".into());
+    let model =
+        std::env::var("INTERPRETATION_E2E_MODEL").unwrap_or_else(|_| "qwen3.8-27b-48k".into());
     eprintln!("[e2e] interpretation against model '{model}' at {base_url}");
+    // The native Ollama endpoint: tools go to `/api/chat` as definitions. On an
+    // OpenAI-shaped endpoint they are written into the prompt, and Ollama 0.40's Qwen
+    // parser answers the `<tool_call>` text with a 500. The provider otherwise discovers
+    // `context_length` (262144 on the qwen3.8-27b-48k tag) and requests
+    // `num_ctx=131072`, which makes Ollama reload the model out of the staging server's
+    // 49152-token residency — a ~3 min reload per ping-pong. Pin the Modelfile's own
+    // window so the tests ask for what is already loaded.
     let endpoint = e2e_endpoint(
         "e2e-llm",
+        crate::types::EndpointKind::Ollama,
         &base_url,
         &std::env::var("INTERPRETATION_E2E_API_KEY").unwrap_or_else(|_| "ollama".into()),
+        Some(
+            std::env::var("INTERPRETATION_E2E_MAX_NUM_CTX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(49_152),
+        ),
     );
     let model_id = service
         .add_model(ModelInput {
@@ -328,8 +361,10 @@ pub(crate) async fn register_interpretation_embedding_model() {
     eprintln!("[e2e] semantic dedup embeds with '{remote_model}' at {base_url}");
     let endpoint = e2e_endpoint(
         "e2e-embed",
+        crate::types::EndpointKind::OpenAiCompatible,
         &base_url,
         &std::env::var("INTERPRETATION_EMBED_API_KEY").unwrap_or_else(|_| "ollama".into()),
+        None,
     );
     service
         .add_model(ModelInput {
@@ -343,20 +378,28 @@ pub(crate) async fn register_interpretation_embedding_model() {
         .expect("add_model(Embedding)");
 }
 
-/// The OpenAI-shaped endpoint at `base_url` with `api_key`: the one saved already (the LLM
-/// and the embedding model share an Ollama), else a new one named `name`, saved without a
-/// probe.
-fn e2e_endpoint(name: &str, base_url: &str, api_key: &str) -> crate::types::Endpoint {
-    let endpoint = crate::types::Endpoint::for_test(
-        name,
-        crate::types::EndpointKind::OpenAiCompatible,
-        base_url,
-        api_key,
-    );
+/// The `kind` endpoint at `base_url` with `api_key` and `max_num_ctx`: the one saved
+/// already, else a new one named `name`, saved without a probe. The LLM and the embedding
+/// model share an Ollama but not an endpoint: the LLM's is native Ollama, the embedding
+/// model's OpenAI-shaped.
+fn e2e_endpoint(
+    name: &str,
+    kind: crate::types::EndpointKind,
+    base_url: &str,
+    api_key: &str,
+    max_num_ctx: Option<u32>,
+) -> crate::types::Endpoint {
+    let mut endpoint = crate::types::Endpoint::for_test(name, kind, base_url, api_key);
+    endpoint.max_num_ctx = max_num_ctx;
     let saved = Ad4mDb::with_global_instance(|db| db.get_endpoints())
         .expect("read the endpoints")
         .into_iter()
-        .find(|e| e.base_url == endpoint.base_url && e.api_key.expose_for_compare(api_key));
+        .find(|e| {
+            e.kind == endpoint.kind
+                && e.max_num_ctx == endpoint.max_num_ctx
+                && e.base_url == endpoint.base_url
+                && e.api_key.expose_for_compare(api_key)
+        });
     if let Some(saved) = saved {
         return saved;
     }
@@ -525,17 +568,6 @@ pub(crate) async fn run_harness_e2e(
     Vec<ModelShape>,
     Vec<(String, Vec<Link>)>,
 ) {
-    // Surface the harness `log::warn!` diagnostics (round=, tool_calls=,
-    // content_preview=) added in commit 5c34ed868. Without an env_logger
-    // init, tests are blind to the LLM's per-round choices — observed
-    // 2026-08-24 when harness_intention_links_to_seeded_beliefs failed
-    // 8/8 and the placements list alone couldn't tell us which tool the
-    // model was reaching for. `try_init` makes this idempotent across
-    // scenarios, and defaulting RUST_LOG to `warn` if unset keeps output
-    // scoped to what the harness explicitly emits.
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
-        .is_test(false) // route to stderr so --nocapture shows it
-        .try_init();
     let (mut perspective, shapes, ctx) = setup_interpretation_e2e(class_sdnas).await;
     let placements =
         run_interpretation_harness_e2e(&mut perspective, &shapes, transcript, &ctx, max_tool_calls)
