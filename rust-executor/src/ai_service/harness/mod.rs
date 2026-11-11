@@ -1641,4 +1641,136 @@ mod tests {
         assert_eq!(out, "done");
         assert_eq!(llm.call_count(), 3);
     }
+
+    /// Records every `ToolObserver` callback as (called|returned, name, arguments, result).
+    struct RecordingObserver {
+        seen: Mutex<Vec<(String, String, Value, Option<String>)>>,
+    }
+
+    impl RecordingObserver {
+        fn new() -> Self {
+            Self {
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolObserver for RecordingObserver {
+        async fn tool_called(&self, name: &str, arguments: &Value) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(("called".into(), name.into(), arguments.clone(), None));
+        }
+        async fn tool_returned(&self, name: &str, arguments: &Value, result: &str) {
+            self.seen.lock().unwrap().push((
+                "returned".into(),
+                name.into(),
+                arguments.clone(),
+                Some(result.into()),
+            ));
+        }
+    }
+
+    /// A provider whose "fails" tool errors and whose "ok" tool echoes its args.
+    struct FlakyProvider;
+    #[async_trait::async_trait]
+    impl ToolProvider for FlakyProvider {
+        async fn tools(&self) -> Vec<ToolSchema> {
+            vec![
+                ToolSchema::zero_arg("ok", ""),
+                ToolSchema::zero_arg("fails", ""),
+            ]
+        }
+        async fn call(&self, name: &str, args: Value) -> Result<String> {
+            match name {
+                "fails" => Err(anyhow::anyhow!("no such tool")),
+                _ => Ok(format!("{name}({args})")),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_observer_sees_the_start_and_end_of_every_tool_call() {
+        let script = vec![
+            HarnessCompletion {
+                content: String::new(),
+                tool_calls: vec![
+                    HarnessToolCall {
+                        id: "c1".into(),
+                        name: "ok".into(),
+                        arguments: json!({"x": 1}),
+                    },
+                    HarnessToolCall {
+                        id: "c2".into(),
+                        name: "fails".into(),
+                        arguments: json!({"y": 2}),
+                    },
+                ],
+            },
+            plain_answer("done"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let observer = RecordingObserver::new();
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            Arc::new(FlakyProvider),
+            llm.clone(),
+            HarnessConfig::default(),
+            Some(&observer),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "done");
+        let seen = observer.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                ("called".into(), "ok".into(), json!({"x": 1}), None),
+                (
+                    "returned".into(),
+                    "ok".into(),
+                    json!({"x": 1}),
+                    Some("ok({\"x\":1})".into())
+                ),
+                ("called".into(), "fails".into(), json!({"y": 2}), None),
+                (
+                    "returned".into(),
+                    "fails".into(),
+                    json!({"y": 2}),
+                    Some("error: no such tool".into())
+                ),
+            ],
+            "every call must be reported before it runs and after it answers, failure included"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_observer_keeps_the_same_behaviour() {
+        let script = vec![
+            tool_call_turn("c1", "ok", json!({})),
+            plain_answer("done"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script));
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            Arc::new(FlakyProvider),
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "done");
+        assert_eq!(llm.call_count(), 2);
+    }
 }
