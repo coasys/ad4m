@@ -20,6 +20,7 @@ import {
   kindLabel,
   localAction,
   localChatReady,
+  localDefaults,
   preselectedChat,
   registerModel,
   serves,
@@ -213,7 +214,10 @@ export default function AISetup(props: {
         try {
           const status = await client.ai.localStatus();
           setLocalStatus(status);
-          if (localChatReady(status)) return true;
+          if (localChatReady(status)) {
+            for (const [modelType, id] of localDefaults(status)) await client.ai.setDefaultModel(modelType, id);
+            return true;
+          }
           setError("Local AI's chat model does not run: start local AI first.");
         } catch (e) {
           setError(`${e}`);

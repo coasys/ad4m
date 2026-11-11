@@ -9,6 +9,7 @@ import {
   endpointLabel,
   localAction,
   localChatReady,
+  localDefaults,
   parseMaxNumCtx,
   preselectedChat,
   withMaxNumCtx,
@@ -180,4 +181,18 @@ test("the local panel offers start, install, or says local AI runs", () => {
   // Nothing installed, or files missing: install.
   assert.equal(localAction({ installed: false, runtimes: [], models: [] }, all, false), "install");
   assert.equal(localAction(installed([stopped], [chatModel]), planWith(["llm"], 10), false), "install");
+});
+
+test("picking local AI makes each registered local model the default of its type", () => {
+  const models = [
+    { service: "llm", modelId: "qwen3", model: "m1" },
+    { service: "embeddings", modelId: "nomic", model: "m2" },
+    { service: "stt", modelId: "parakeet", model: "m3" },
+    { service: "tts", modelId: "kokoro", model: null },
+  ];
+  assert.deepEqual(localDefaults({ models }), [
+    ["LLM", "m1"],
+    ["EMBEDDING", "m2"],
+    ["TRANSCRIPTION", "m3"],
+  ]);
 });

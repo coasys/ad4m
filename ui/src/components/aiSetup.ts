@@ -178,6 +178,22 @@ export async function registerModel(
  * Whether local AI's chat model is registered here and the runtime that serves it runs. A
  * failed or stopped runtime keeps its registered model: that alone is not ready.
  */
+const LOCAL_SERVICE_TYPES: Record<LocalAiStatus["models"][number]["service"], ModelType> = {
+  llm: "LLM",
+  embeddings: "EMBEDDING",
+  stt: "TRANSCRIPTION",
+  tts: "SPEECH",
+};
+
+/**
+ * The registered local models, each with the model type it becomes the default for. A start
+ * (`ai.localStart`, autostart) keeps the defaults it finds, which may be on a remote server, so
+ * onboarding sets these when the person picks local AI: the panel says nothing leaves the device.
+ */
+export function localDefaults(status: Pick<LocalAiStatus, "models">): [ModelType, string][] {
+  return status.models.flatMap((m) => (m.model ? [[LOCAL_SERVICE_TYPES[m.service], m.model]] : []));
+}
+
 export function localChatReady(status: Pick<LocalAiStatus, "models" | "runtimes"> | null): boolean {
   if (!status) return false;
   const registered = status.models.some((m) => m.service === "llm" && !!m.model);
