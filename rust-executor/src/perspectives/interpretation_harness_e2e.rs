@@ -86,9 +86,10 @@ async fn harness_read_only_transcript_produces_no_writes() {
 // ---- Scenario B: propose-write pass (tools land typed instances) ----------
 
 /// The task-tracking conversation from `interpretation_e2e.rs::e2e_task_tracking_counts`,
-/// but through the harness. Three assignments in the transcript should each
-/// route through a `Task_propose_create` tool call, buffer drains via
-/// `apply_with_overlay`, model_query reads back 2-4 Task instances.
+/// but through the harness. The two explicit assignments (and possibly
+/// James's extension) should each route through a `Task_propose_create` tool
+/// call, buffer drains via `apply_with_overlay`, model_query reads back 2-4
+/// Task instances.
 ///
 /// Uses the same 2-4 tolerance as the single-shot equivalent (LLM may
 /// merge/split slightly). Retries a small budget of times for LLM flake.
@@ -107,8 +108,8 @@ async fn harness_propose_writes_land_typed_tasks() {
                 "Yes, I'll wrap up the call module and port the transcription over.",
             ),
             (
-                "Josh",
-                "I'll set up the wind-tunnel Docker scenario for the agent test.",
+                "Nico",
+                "Josh, can you set up the wind-tunnel Docker scenario for the agent test?",
             ),
         ],
         16,

@@ -17,7 +17,7 @@
  * Requires a reachable LLM (Ollama, OpenAI-compatible). Endpoint + model are
  * env-overridable to match the Rust e2e suite:
  *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default gemma3:12b)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-48k)
  *
  * Run (from tests/js, executor built + `pnpm run prepare-test` once):
  *   pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/auto-processor.test.ts
@@ -26,11 +26,14 @@
 import { expect } from "chai";
 import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
 import type { AutoProcessorEvent, AutoProcessorStep } from "@coasys/ad4m";
-import { addOpenAiShapedLlm, startAgent, waitUntil } from "../../helpers/index.js";
+import { addOllamaLlm, startAgent, waitUntil } from "../../helpers/index.js";
 import { ConversationSubgroup } from "./auto-processor-models.js";
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). Without it the
+// Ollama provider requests num_ctx 131072 and Ollama reloads the model out of staging's residency.
+const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 
 // Speaker and timestamp come off the body link's reifier, not an app-level
 // `ns://author` predicate: `?timestamp` is required (it is what makes a turn
@@ -72,7 +75,7 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
     ad4m = agent.client;
     stopAgent = agent.stop;
 
-    const modelId = await addOpenAiShapedLlm(ad4m, "interpretation-llm", BASE_URL, MODEL);
+    const modelId = await addOllamaLlm(ad4m, "interpretation-llm", BASE_URL, MODEL, MAX_NUM_CTX);
     await ad4m.ai.setDefaultModel("LLM", modelId);
   });
 

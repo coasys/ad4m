@@ -6,4 +6,4 @@ export {
   BOOTSTRAP_SEED,
 } from "./executor.js";
 export { waitUntil } from "./assertions.js";
-export { addOpenAiShapedLlm } from "./ai-models.js";
+export { addOllamaLlm } from "./ai-models.js";
