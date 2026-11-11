@@ -336,7 +336,8 @@ export class PerspectiveClient {
      * that read this perspective, and only the writing tools named in `writeTools`. Every tool a
      * session offers acts on this perspective alone, so tools about other perspectives, the agent
      * or the node (listing or publishing perspectives, the profile) are not available. Runs as the
-     * caller, with the caller's capabilities, and answers with the model's final reply.
+     * caller, with the caller's capabilities, and answers with the model's final reply. The
+     * template tools may also act in the person's library, when `library` names it.
      *
      * Defaults to {@link LONG_TIMEOUT_MS}: an agent may read documentation and make many tool
      * calls before it answers.
@@ -345,6 +346,11 @@ export class PerspectiveClient {
         uuid: string,
         messages: AgentMessage[],
         settings?: {
+            /**
+             * The person's library: the perspective that holds their own templates. The template
+             * tools look for a template there too, and `template_create` may make one there.
+             */
+            library?: string,
             /** What the person is looking at, as a hint for the model (`{ recordId }`). */
             context?: Record<string, unknown>,
             /** Tools that write which the model may call. Absent: the session only reads. */

@@ -624,6 +624,7 @@ const NOT_WRAPPED: &[&str] = &[
     "instance_update",
     "template_read",
     "template_update",
+    "template_create",
 ];
 
 /// The session of `caller`, holding `caps` where the row gives it capabilities: the matrix's
@@ -947,6 +948,7 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
                 h.template_read(Parameters(instances::template_tools::TemplateToolParams {
                     perspective_id: uuid,
                     base_uri: "matrix://e".into(),
+                    library_perspective_id: None,
                     arguments: Default::default(),
                 }))
                 .await
@@ -957,8 +959,28 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
                 h.template_update(Parameters(instances::template_tools::TemplateToolParams {
                     perspective_id: uuid,
                     base_uri: "matrix://e".into(),
+                    library_perspective_id: None,
                     arguments: Default::default(),
                 }))
+                .await
+            })
+        }),
+        // In the space, so the perspective the call works in is the one it writes to.
+        tool("template_create", Write, |h, uuid| {
+            Box::pin(async move {
+                // An admitted call runs WE's bundle: V8 is set up once, before any isolate.
+                crate::test_utils::init_v8_platform();
+                h.template_create(Parameters(
+                    instances::template_tools::TemplateCreateParams {
+                        perspective_id: uuid,
+                        library_perspective_id: None,
+                        base_uri: None,
+                        arguments: serde_json::json!({ "name": "Matrix", "place": "space" })
+                            .as_object()
+                            .cloned()
+                            .unwrap(),
+                    },
+                ))
                 .await
             })
         }),

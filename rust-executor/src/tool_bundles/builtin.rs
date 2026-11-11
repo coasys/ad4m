@@ -43,6 +43,17 @@ pub struct TemplateTool {
     pub parameters: Value,
     /// Whether a call can answer with properties to write to the record.
     pub writes: bool,
+    /// Present on a tool that makes a new record instead of changing the one a call names.
+    #[serde(default)]
+    pub creates: Option<Creates>,
+}
+
+/// What a tool that makes records makes, and where a new one may go: `library` (the caller's own)
+/// or `space` (the perspective the call works in). The call's answer names one of them.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Creates {
+    pub entity: String,
+    pub places: Vec<String>,
 }
 
 /// What the release's manifest says about the template toolset in the bundle.
@@ -383,5 +394,13 @@ mod tests {
         assert!(answer["text"].as_str().unwrap().starts_with("Error"));
         assert_eq!(tool("no_such_tool"), None);
         assert!(tool("template_update").unwrap().writes);
+    }
+
+    #[test]
+    fn template_create_says_what_it_makes_and_where_it_may_go() {
+        let creates = tool("template_create").unwrap().creates.clone().unwrap();
+        assert_eq!(creates.entity, "Template");
+        assert_eq!(creates.places, vec!["library", "space"]);
+        assert_eq!(tool("template_update").unwrap().creates, None);
     }
 }

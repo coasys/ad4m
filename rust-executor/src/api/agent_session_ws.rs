@@ -28,9 +28,20 @@ async fn run_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     // The guard has checked the capability, and answered 404 for a perspective this caller
     // cannot reach, before any model is asked.
     let uuid = crate::api::guards::UUID_PARAM.require(&params)?;
-    check_credits(ctx.user_did())?;
     let body: RunAgentRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    // The library is a second perspective the agent may act in: the same guard as `uuid`'s.
+    if let Some(library) = &body.library {
+        Guard::perspective(perspective_update_capability)
+            .admit(
+                "perspective.runAgent",
+                &serde_json::json!({ "uuid": library }),
+                &ctx,
+            )
+            .await?;
+    }
+    check_credits(ctx.user_did())?;
 
     let agent_context = ctx.acts_as();
     let credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>> = Some(Arc::new(
@@ -39,6 +50,7 @@ async fn run_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 
     let request = AgentSessionRequest {
         perspective_uuid: &uuid,
+        library: body.library.as_deref(),
         messages: &body.messages,
         context: body.context.as_ref(),
         write_tools: body.write_tools.as_deref().unwrap_or_default(),
@@ -79,6 +91,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 #[ts(export)]
 pub struct RunAgentRequest {
     pub uuid: String,
+    /// The person's library: the perspective holding their own templates, where the template
+    /// tools also look and `template_create` may make one. Absent: only `uuid`.
+    #[ts(optional)]
+    pub library: Option<String>,
     /// The conversation so far, the person's request last.
     pub messages: Vec<AgentMessage>,
     /// What the person is looking at, as a hint for the model (`{ "recordId": "…" }`).
