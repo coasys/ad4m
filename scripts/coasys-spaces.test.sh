@@ -255,6 +255,14 @@ test_llm_check() {
     grep -qF "ollama pull gemma3:27b" <<<"$out" || fail "a missing model does not say what to pull: $out"
     kill "$SERVER"
     wait "$SERVER" 2>/dev/null
+    # Ollama's /v1/models lists an untagged model as `<name>:latest`; the bare name is that model.
+    serve_models "qwen3.8-27b-48k:latest"
+    COASYS_SPACES_LLM_MODEL=qwen3.8-27b-48k bash "$SCRIPT" llm-check >/dev/null 2>&1 ||
+        fail "llm-check failed on a model Ollama lists as :latest"
+    COASYS_SPACES_LLM_MODEL=qwen3.8-27b bash "$SCRIPT" llm-check >/dev/null 2>&1 &&
+        fail "llm-check passed on a name that is only a prefix of a served model"
+    kill "$SERVER"
+    wait "$SERVER" 2>/dev/null
     out="$(bash "$SCRIPT" llm-check 2>&1)" && fail "llm-check passed with no server"
     grep -qF "does not answer" <<<"$out" || fail "no server is not reported as such: $out"
     COASYS_SPACES_TIER=stub bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "the stub tier needs no model server"
