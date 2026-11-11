@@ -9904,7 +9904,7 @@ mod tests {
             predicate = watched.data.predicate.clone().unwrap()
         );
         let (id, _, first) = perspective
-            .subscribe_and_query(query, "c".into(), None)
+            .subscribe_and_query(query, uuid::Uuid::new_v4().to_string(), "c".into(), None)
             .await
             .unwrap();
         let target = watched.data.target.clone();
