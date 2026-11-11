@@ -12,6 +12,13 @@ sdpOffer: string,
  */
 deviceId: string, 
 /**
+ * The client's random key for this call session (1 to 128 characters,
+ * never published). A rebuild of the session sends it again and
+ * replaces its own dead session; a join whose key a later join from the
+ * same device replaced is refused with 409: that session must stop.
+ */
+sessionKey: string, 
+/**
  * The caller can reach other cascade nodes, so a busy room may answer
  * with `redirectTo` instead of a session. Off by default: an SDK client
  * reaches only this executor.

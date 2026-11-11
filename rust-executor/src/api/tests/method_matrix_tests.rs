@@ -601,7 +601,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "sfu.callJoin",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}", "deviceId": "d" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}", "deviceId": "d", "sessionKey": "k" }),
     ),
     (
         "sfu.callSetQualityPreference",
