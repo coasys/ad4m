@@ -208,6 +208,27 @@ pub fn judge(facts: &LinkFacts) -> LinkVerdict {
     Valid
 }
 
+/// Whether a new judgement `new` of a stored link replaces its stored verdict `stored`, on a
+/// write of the same proof and on a re-check.
+///
+/// A stored `Valid` is never replaced by `CantCheck`. `CantCheck` only says the executor cannot
+/// tell right now (the signer's log is not in the key map: before the held logs load, after an
+/// eviction, after a log reset), while a stored `Valid` is the one order the executor knows: the
+/// link counted before any revocation the key map holds. That order is read from the stored
+/// verdict (`entered_after_revoke`), so writing `CantCheck` over it would lose it, and a later
+/// revocation would flag the link for good. A stored `Valid` still moves to `Invalid` or
+/// `Flagged`, which the log decides.
+///
+/// No other stored verdict needs this: `Invalid` and `Flagged` are computed again from the log,
+/// the signature and the clock alone, never from the stored verdict, so a link that passes
+/// through `CantCheck` comes back to them on the re-check that runs once the log is known.
+pub fn replaces(stored: Option<&LinkVerdict>, new: &LinkVerdict) -> bool {
+    !matches!(
+        (stored, new),
+        (Some(LinkVerdict::Valid), LinkVerdict::CantCheck)
+    )
+}
+
 /// A key's verdict at the head of its log, for the sessions that use the key and for the
 /// re-check of links.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -497,6 +518,23 @@ mod tests {
         }
         let invalid = LinkVerdict::Invalid(InvalidReason::Revoked);
         assert!(!invalid.counts() && !invalid.shown());
+    }
+
+    #[test]
+    fn only_a_stored_valid_is_kept_over_cant_check() {
+        let all = [
+            LinkVerdict::Valid,
+            LinkVerdict::CantCheck,
+            LinkVerdict::Flagged,
+            LinkVerdict::Invalid(InvalidReason::Revoked),
+        ];
+        for new in &all {
+            assert!(replaces(None, new));
+            for stored in &all {
+                let kept = *stored == LinkVerdict::Valid && *new == LinkVerdict::CantCheck;
+                assert_eq!(replaces(Some(stored), new), !kept, "{stored:?} -> {new:?}");
+            }
+        }
     }
 
     #[test]

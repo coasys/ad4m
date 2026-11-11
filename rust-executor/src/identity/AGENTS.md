@@ -314,7 +314,12 @@ the offer's state).
 - **The re-check** (`run_recheck`, started by `init`): on each `VerdictChange` the links of
   that key; every 60 s the links of bot keys whose scope `expires` fell since the last tick
   (`KeyMap::expiring`), then the `cantCheck` links. Each is judged again and rewritten when
-  the verdict or person changed (`PerspectiveInstance::recheck_links`). Reads page by
+  the verdict or person changed (`PerspectiveInstance::recheck_links`), except that neither
+  a re-check nor a write of the same proof ever replaces a stored `valid` with `cantCheck`
+  (`verdict::replaces`): the stored `valid` is the order the executor knows, and a log that
+  is out of the key map for a while (before `load_held`, an eviction, `identity.resetLog`)
+  must not cost it. `invalid` and `flagged` need no such guard: they are judged again from
+  the log alone once it is back. Reads page by
   reifier IRI (`RECHECK_BATCH` rows): a key's links are read to the last page; the
   `cantCheck` pass reads one page per tick from `recheck_cursor` and wraps at the end, so
   links that stay unresolvable do not hide the ones after them. Rewritten links go through

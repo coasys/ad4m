@@ -4668,6 +4668,11 @@ impl PerspectiveInstance {
             if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
                 continue;
             }
+            // A link that counts stays counted while its signer's log is not known: no
+            // `cantCheck` over a stored `valid`, and so no event for it. The store keeps it too.
+            if !crate::identity::verdict::replaces(before.verdict.as_ref(), &now.verdict) {
+                continue;
+            }
             let held = self
                 .sparql_store
                 .query_links(
@@ -8447,6 +8452,161 @@ mod tests {
             0,
             "a re-check is idempotent"
         );
+        map.forget(&log.scid());
+    }
+
+    /// A link the store counts, written again while its signer's log is not in the key map,
+    /// keeps its place: after a later revocation the re-check still counts it. The control
+    /// (no second write) shows the same end state.
+    #[tokio::test]
+    async fn a_counted_link_written_again_while_its_log_is_unknown_keeps_its_place() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+
+        let mut seen = Vec::new();
+        for (seed, replay) in [(110u8, false), (111u8, true)] {
+            let perspective = setup().await;
+            let mut log = TestLog::new(seed);
+            let map = global_key_map();
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted: 0,
+                },
+            );
+            map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+            let device = log.device.clone();
+            let key = device.key();
+            let data = create_link().normalize();
+            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes =
+                crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+            let link = LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(device.sign(&bytes)),
+                    anchor: Some(0),
+                },
+                status: Some(LinkStatus::Shared),
+            };
+            assert!(perspective.sparql_store.add_remote_link(&link).unwrap());
+            let stored = perspective.sparql_store.get_all_links().unwrap();
+            assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+
+            let mut after_replay = None;
+            if replay {
+                // The log leaves the key map (a restart before the held logs load, an
+                // eviction), and the same link arrives again.
+                map.forget(&log.scid());
+                let _ = perspective.sparql_store.add_remote_link(&link).unwrap();
+                let stored = perspective.sparql_store.get_all_links().unwrap();
+                assert_eq!(stored.len(), 1);
+                after_replay = stored[0].verdict.clone();
+            }
+
+            // The log comes back with the device revoked at seq 1; both re-checks run.
+            log.revoke_d1();
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted: 1,
+                },
+            );
+            map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+            let signers = std::collections::BTreeSet::from([link.author.clone()]);
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap();
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::CantCheck)
+                .await
+                .unwrap();
+            let stored = perspective.sparql_store.get_all_links().unwrap();
+            seen.push((replay, after_replay, stored[0].verdict.clone()));
+            map.forget(&log.scid());
+        }
+        assert_eq!(seen[0].2, Some(LinkVerdict::Valid), "control");
+        assert_eq!(seen[1].1, Some(LinkVerdict::Valid), "after the replay");
+        assert_eq!(seen[1].2, Some(LinkVerdict::Valid), "after the revocation");
+    }
+
+    /// A re-check while the signer's log is not in the key map leaves a counted link as it is:
+    /// no `cantCheck` is stored over its `valid`, and no rewrite goes out for it. Once the log
+    /// is back with the key revoked, the link still counts: it was here first.
+    #[tokio::test]
+    async fn a_recheck_while_the_log_is_unknown_keeps_a_counted_link_counted() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+
+        let perspective = setup().await;
+        let mut log = TestLog::new(112);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+        let person = ad4m_identity_core::did_of(&log.scid());
+        let device = log.device.clone();
+        let key = device.key();
+        let data = create_link().normalize();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(device.sign(&bytes)),
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        assert!(perspective.sparql_store.add_remote_link(&link).unwrap());
+
+        // The log leaves the key map (an eviction, a reset) and the re-check for the key runs.
+        map.forget(&log.scid());
+        let signers = std::collections::BTreeSet::from([link.author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers.clone()))
+                .await
+                .unwrap(),
+            0,
+            "no rewrite of a counted link to cantCheck"
+        );
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
+
+        // The log comes back with the device revoked at seq 1.
+        log.revoke_d1();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 1,
+            },
+        );
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+        perspective
+            .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+            .await
+            .unwrap();
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
         map.forget(&log.scid());
     }
 

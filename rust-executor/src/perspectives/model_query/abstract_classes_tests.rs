@@ -684,5 +684,7 @@ fn definition_reads_do_not_scale_with_the_perspectives_links() {
     );
     assert_eq!(concrete.len(), 37, "{concrete:?}");
     // Linear in the records before the fix: ~9 s here in a release build; ~0.4 s after.
-    assert!(elapsed.as_millis() < 1000, "{elapsed:?}");
+    // The bound sits at 3 s, well under the old query's ~9 s and far above the ~0.4 s it
+    // takes now, so a loaded runner does not fail it while a return of the old query does.
+    assert!(elapsed.as_millis() < 3000, "{elapsed:?}");
 }
