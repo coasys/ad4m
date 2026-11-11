@@ -115,7 +115,7 @@ so the same file runs on both link languages.
 | Suite | Languages | CI |
 |---|---|---|
 | `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | every push, `integration-tests-sfu-e2e` |
-| `test-sfu-browsers`: SFU and mesh calls in real Chromium, Firefox and WebKit, mixed (about 1 min past the world's start) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-browsers` does both) | every push, `integration-tests-sfu-browsers` |
+| `test-sfu-browsers`: SFU and mesh calls in real Chromium, Firefox and WebKit, mixed (about 1 min past the world's start) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-browsers` does both) | nightly, `integration-tests-sfu-browsers` |
 | `test-sfu`: `sfu-cascade`, `sfu-session` (T20, T21), `sfu-mesh` (network baselines) | Holochain: `pnpm run prepare-test` | nightly, `integration-tests-sfu` |
 
 - **Browser suite (`tests/js/tests/sfu-browsers.test.ts`, helpers in
@@ -134,7 +134,11 @@ so the same file runs on both link languages.
   (ICE stays `checking`, the SFU's DTLS times out), while Chromium and
   WebKit connect. `SFU_BROWSERS_SFU_ADDR=127.0.0.1` shows that case.
 - Install the browsers with `pnpm exec playwright-core install --with-deps
-  chromium firefox webkit` in `tests/js`. A browser that cannot start makes
+  chromium firefox webkit` in `tests/js`. On an Ubuntu release Playwright has
+  no builds for (CI's runner is 25.04), it falls back to the 24.04 builds,
+  whose WebKit needs ICU 74: set `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE` to the
+  build with the host's library versions (`debian13-x64` on 25.04), with its
+  own `PLAYWRIGHT_BROWSERS_PATH`. A browser that cannot start makes
   its tests pending with the reason; `SFU_BROWSERS_REQUIRED=1` (CI) fails
   instead. Without root for WebKit's system libraries, extract the missing
   packages (`apt-get download`, `dpkg -x`) and list the `.so` files,

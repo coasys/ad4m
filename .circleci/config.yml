@@ -689,45 +689,37 @@ jobs:
 
   # SFU and mesh calls in real Chromium, Firefox and WebKit, mixed, through the
   # SDK's browser build (tests/js/tests/sfu-browsers.test.ts). One executor,
-  # local languages. Every push, not nightly: the suite takes about a minute
-  # past the world's start, and it is the only check that a browser other than
-  # Chromium can call (#1684 broke Firefox on the SFU while every Chromium-based
-  # suite stayed green), so a regression must stop the PR that makes it.
-  # Playwright's browsers persist in the runner's ~/.cache/ms-playwright, so
-  # the install is a download only when playwright-core's version changes; their
-  # system libraries need root. `SFU_BROWSERS_REQUIRED` makes a browser that
-  # cannot start fail the job instead of skipping its tests.
+  # local languages. Nightly against `dev`, in `nightly-llm-e2e`, with the SFU
+  # wind tunnel: it is the only check that a browser other than Chromium can
+  # call (#1684 broke Firefox on the SFU while every Chromium-based suite stayed
+  # green). It builds its own binaries: that pipeline has no `build` job.
+  # The runner is Ubuntu 25.04, which Playwright has no builds for: it falls back
+  # to the 24.04 builds, whose WebKit needs ICU 74 and ffmpeg 6, absent on 25.04.
+  # Debian 13's builds use the same ICU (76) and ffmpeg (7) as 25.04, so the job
+  # takes those, in their own browsers path so they never mix with the 24.04
+  # builds other jobs on the runner use. The path persists on the runner, so the
+  # install is a download only when playwright-core's version changes.
+  # `SFU_BROWSERS_REQUIRED` makes a browser that cannot start fail the job
+  # instead of skipping its tests.
   integration-tests-sfu-browsers:
     machine: true
     resource_class: coasys/marvin
+    environment:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian13-x64
+      PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
     steps:
       - setup_integration_test_environment:
           local: true
+          build_binaries: true
       - run:
           name: Install Chromium, Firefox and WebKit
           command: |
             cd ./tests/js
-            pnpm exec playwright-core install chromium firefox webkit
-            # Not `--with-deps`: on a release Playwright does not list (this runner is Ubuntu
-            # 25.04) it falls back to 24.04's package names, and one missing name aborts the
-            # whole install. Find the libraries the browsers cannot load, and install each
-            # one's package by its Debian name (libfoo.so.N -> libfooN or libfoo-N).
-            # A library the browsers ship themselves is not missing: ldd without their rpath
-            # reports it as not found.
-            shipped=$(find ~/.cache/ms-playwright -name '*.so*' -printf '%f\n' | sort -u)
-            missing=$(find ~/.cache/ms-playwright -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
-              | xargs -0 ldd 2>/dev/null | awk '/=> not found/ {print $1}' | sort -u \
-              | grep -vxF -f <(echo "$shipped") || true)
-            echo "libraries not found: ${missing:-none}"
-            if [ -n "$missing" ] && sudo -n true 2>/dev/null; then
-              sudo apt-get update -qq
-              for lib in $missing; do
-                base=${lib%%.so*}; ver=${lib##*.so.}; ver=${ver%%.*}
-                sudo apt-get install -y -qq --no-install-recommends "$base$ver" 2>/dev/null \
-                  || sudo apt-get install -y -qq --no-install-recommends "$base-$ver" 2>/dev/null \
-                  || echo "no package found for $lib"
-              done
-            fi
+            # The install's own host check knows no 25.04 package names, so it is skipped
+            # here; the script installs the libraries, and the launch checks them again.
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm exec playwright-core install chromium firefox webkit
+            sudo apt-get update -qq
+            ./scripts/install-browser-deps.sh
       - run:
           name: Run cross-browser SFU and mesh call tests
           command: |
@@ -1099,9 +1091,6 @@ workflows:
       - integration-tests-sfu-e2e:
           requires:
             - build
-      - integration-tests-sfu-browsers:
-          requires:
-            - build
       - integration-tests-multi-node-server-link:
           requires:
             - build
@@ -1142,3 +1131,5 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-llm
       - integration-tests-sfu:
           serial-group: << pipeline.project.slug >>/nightly-sfu
+      - integration-tests-sfu-browsers:
+          serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
