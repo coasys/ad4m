@@ -44,7 +44,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 const ADMIN_CREDENTIAL = "auto-processor-multi-user-admin";
 
 // Same shape as the two-executor test uses: speaker + timestamp come off the

@@ -21,7 +21,7 @@
  * self-hosted CI runner (Marvin) it is local; from a dev box, tunnel it.
  * Endpoint + model are env-overridable (identical to the single-shot test):
  *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default gemma3:12b)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-48k)
  *
  * Run with (from tests/js, executor built + `pnpm run prepare-test` once):
  *   LLM_E2E=1 pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/run-interpretation-harness.test.ts
@@ -34,7 +34,7 @@ import { startAgent } from "../../helpers/index.js";
 import { ExtBelief, ExtIntention } from "./interpretation-models.js";
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 
 // LLM E2E gate — these suites drive the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs them

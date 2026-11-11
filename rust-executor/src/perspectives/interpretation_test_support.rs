@@ -280,7 +280,8 @@ pub(crate) async fn setup_interpretation_e2e(
         .expect("AIService global instance");
     let base_url = std::env::var("INTERPRETATION_E2E_BASE_URL")
         .unwrap_or_else(|_| "http://localhost:11434/v1".into());
-    let model = std::env::var("INTERPRETATION_E2E_MODEL").unwrap_or_else(|_| "gemma3:12b".into());
+    let model =
+        std::env::var("INTERPRETATION_E2E_MODEL").unwrap_or_else(|_| "qwen3.8-27b-48k".into());
     eprintln!("[e2e] interpretation against model '{model}' at {base_url}");
     let model_id = service
         .add_model(ModelInput {

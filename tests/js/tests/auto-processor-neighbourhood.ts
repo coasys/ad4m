@@ -28,7 +28,7 @@ import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 
 // Speaker and timestamp come off the body link's reifier, not an app-level
 // `ns://author` predicate: `?timestamp` is required (it is what makes a turn
