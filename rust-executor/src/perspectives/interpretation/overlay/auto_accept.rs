@@ -151,8 +151,10 @@ fn rule_allows(shape: &ModelShape, links: &[DecoratedLinkExpression]) -> bool {
 /// person creates by editing a pending item. Values are compared decoded,
 /// the way the gate compares them.
 ///
-/// Predicates the item's classes declare as relations are exempt: a staged
-/// `inferred/<p>` relation is a proposed edge, not a deleted value.
+/// A missing real value does not count for predicates the item's classes
+/// declare as relations: a staged `inferred/<p>` relation is a proposed edge,
+/// not a deleted value. A real relation that differs from the staged one
+/// still blocks, like any other real value.
 fn accept_would_change_a_real_value(
     links: &[DecoratedLinkExpression],
     shapes: &[Arc<ModelShape>],
@@ -170,16 +172,16 @@ fn accept_would_change_a_real_value(
         else {
             return false;
         };
-        if relation_preds.contains(real_pred) {
-            return false;
-        }
         let staged_value = parse_literal_value(&staged.data.target);
         let reals: Vec<serde_json::Value> = links
             .iter()
             .filter(|l| l.data.predicate.as_deref() == Some(real_pred))
             .map(|l| parse_literal_value(&l.data.target))
             .collect();
-        reals.is_empty() || reals.iter().any(|v| *v != staged_value)
+        if reals.is_empty() {
+            return !relation_preds.contains(real_pred);
+        }
+        reals.iter().any(|v| *v != staged_value)
     })
 }
 
@@ -668,6 +670,68 @@ mod tests {
 
         assert_eq!(accepted, vec![child.to_string()]);
         assert!(pending(&p).await.is_empty());
+    }
+
+    /// The relation exemption only covers a *missing* real value. A person
+    /// who moved a pending item under another parent left a real relation
+    /// that differs from the staged one: accepting would move it back, so
+    /// the item stays pending.
+    #[tokio::test]
+    async fn a_real_parent_that_differs_from_the_staged_one_stays_pending() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(AA_CLASSES).await;
+        let child = "soa://ext/note/moved-parent";
+        for (pred, target) in [
+            ("ns://title", "literal:string:Staged note"),
+            ("ns://partOf", "soa://ext/chapter/person-picked"),
+        ] {
+            p.add_link(
+                Link {
+                    source: child.into(),
+                    predicate: Some(pred.into()),
+                    target: target.into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link");
+        }
+        seed_overlay(
+            &mut p,
+            child,
+            std::collections::BTreeMap::from_iter([
+                ("ns://title".to_string(), json!("Staged note")),
+                (
+                    "ns://partOf".to_string(),
+                    json!("soa://ext/chapter/llm-picked"),
+                ),
+            ]),
+            &ctx,
+        )
+        .await
+        .expect("seed_overlay");
+
+        let accepted = auto_accept_pass(
+            &mut p,
+            &[child.to_string()],
+            &HashMap::from_iter([(child.to_string(), "Note".to_string())]),
+            "run-moved",
+            &ctx,
+        )
+        .await;
+
+        assert!(
+            accepted.is_empty(),
+            "accepting would undo the person's move"
+        );
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+        let parents: Vec<String> = links_of(&p, child, "ns://partOf")
+            .await
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        assert_eq!(parents, vec!["soa://ext/chapter/person-picked".to_string()]);
     }
 
     /// A `when_placed` item whose parent predicate carries nothing stays
