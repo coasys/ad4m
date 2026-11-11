@@ -92,8 +92,18 @@ we_remote_sha() {
 
 cmd_preflight() {
     rm -rf "$ARTIFACTS"
-    mkdir -p "$ARTIFACTS"
-    local we_sha last
+    mkdir -p "$ARTIFACTS" "$WORK"
+    local we_sha last changes
+    # A checkout with changes tests more than AD4M_SHA: the run goes on, but does not skip and is
+    # not recorded as a pass of the commit. Checked here, before the steps' own installs.
+    rm -f "$WORK/unrecorded"
+    changes="$(git -C "$REPO" status --porcelain)"
+    if [ -n "$changes" ]; then
+        printf '%s\n' "$changes" >"$WORK/unrecorded"
+        log "the checkout has changes; this run will not be recorded:"
+        printf '%s\n' "$changes" | head -20
+        return 0
+    fi
     we_sha="$(we_remote_sha || true)"
     if [ -z "$we_sha" ]; then
         log "cannot resolve WE ref '$WE_REF' on $WE_REPO; running"
@@ -383,6 +393,10 @@ cmd_test() {
 
 cmd_record() {
     local we_sha
+    if [ -e "$WORK/unrecorded" ]; then
+        log "not recorded: the checkout had changes at preflight ($(wc -l <"$WORK/unrecorded") paths)"
+        return 0
+    fi
     we_sha="$(cat "$WORK/we.sha")"
     is_sha "$we_sha" || die "no tested WE commit in $WORK/we.sha"
     mkdir -p "$STATE"

@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT="$(cd "$(dirname "$0")" && pwd)/coasys-spaces.sh"
+SOURCE="$(cd "$(dirname "$0")" && pwd)/coasys-spaces.sh"
 FAILED=0
 SHA=0123456789abcdef0123456789abcdef01234567
 
@@ -17,9 +17,16 @@ fail() {
     FAILED=1
 }
 
-# Fresh dirs under $TMP, and the script's environment pointed at them.
+# Fresh dirs under $TMP, and the script's environment pointed at them. The script runs from a
+# clean git repository of its own ($TMP/ad4m), which stands in for the ad4m checkout.
 setup() {
     TMP="$(mktemp -d)"
+    mkdir -p "$TMP/ad4m/scripts"
+    cp "$SOURCE" "$TMP/ad4m/scripts/"
+    git init -q "$TMP/ad4m"
+    git -C "$TMP/ad4m" add -A
+    git -C "$TMP/ad4m" -c user.name=t -c user.email=t@t commit -q -m ad4m
+    SCRIPT="$TMP/ad4m/scripts/coasys-spaces.sh"
     export AD4M_SHA="$SHA"
     export COASYS_SPACES_WORK="$TMP/work"
     export COASYS_SPACES_ARTIFACTS="$TMP/artifacts"
@@ -154,6 +161,27 @@ test_preflight() {
     preflight_exits 0
 }
 
+# A checkout with changes runs, but neither skips nor records a pass of the commit.
+test_dirty_checkout_is_not_recorded() {
+    make_we
+    mkdir -p "$COASYS_SPACES_WORK" && echo "$WE_HEAD" >"$COASYS_SPACES_WORK/we.sha"
+    preflight_exits 0
+    bash "$SCRIPT" record >/dev/null || fail "record failed"
+    preflight_exits 10
+
+    echo '# an edit' >>"$SCRIPT"
+    preflight_exits 0
+    grep -qF "will not be recorded" <<<"$out" || fail "preflight does not say the run is not recorded: $out"
+    rm "$COASYS_SPACES_STATE/last-success"
+    out="$(bash "$SCRIPT" record 2>&1)" || fail "record failed on a dirty checkout: $out"
+    [ ! -e "$COASYS_SPACES_STATE/last-success" ] || fail "a dirty checkout was recorded as a pass"
+
+    git -C "$TMP/ad4m" checkout -q -- scripts/coasys-spaces.sh
+    touch "$TMP/ad4m/untracked"
+    preflight_exits 0
+    grep -qF "will not be recorded" <<<"$out" || fail "an untracked file does not count as a change: $out"
+}
+
 test_record_needs_we_sha() {
     bash "$SCRIPT" record >/dev/null 2>&1 && fail "record passed without a cloned WE commit"
     [ ! -e "$COASYS_SPACES_STATE/last-success" ] || fail "record wrote a pair without a WE commit"
@@ -264,7 +292,7 @@ test_llm_context_window() {
 
 for t in test_executor_from_zst test_executor_from_gz test_executor_missing \
     test_executor_checksum_mismatch test_executor_other_commit test_executor_size_mismatch \
-    test_executor_unknown_file test_preflight test_record_needs_we_sha test_we_ref_must_be_a_name \
+    test_executor_unknown_file test_preflight test_dirty_checkout_is_not_recorded test_record_needs_we_sha test_we_ref_must_be_a_name \
     test_sdk_needs_the_checkout_at_ad4m_sha test_test_needs_the_suite test_llm_check \
     test_llm_context_window; do
     echo "$t"

@@ -138,7 +138,8 @@ holds one load. It uses this commit's executor and SDK:
 
 The job halts green when the same ad4m commit, WE commit, tier and model already
 passed on the host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
-`COASYS_SPACES_FORCE=1` to run anyway. It shares the serial group
+`COASYS_SPACES_FORCE=1` to run anyway. A checkout with changes (a run by hand
+with local edits) runs, but neither skips nor records a pass. It shares the serial group
 `nightly-llm` with `llm-e2e`: both use the host's Ollama and GPU, so they run
 one after the other. Screenshots, traces and logs are under the
 job's artifacts, `coasys-spaces/`.
