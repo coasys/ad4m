@@ -115,7 +115,38 @@ so the same file runs on both link languages.
 | Suite | Languages | CI |
 |---|---|---|
 | `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | every push, `integration-tests-sfu-e2e` |
+| `test-sfu-browsers`: SFU and mesh calls in real Chromium, Firefox and WebKit, mixed (about 1 min past the world's start) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-browsers` does both) | nightly, `integration-tests-sfu-browsers` |
 | `test-sfu`: `sfu-cascade`, `sfu-session` (T20, T21), `sfu-mesh` (network baselines) | Holochain: `pnpm run prepare-test` | nightly, `integration-tests-sfu` |
+
+- **Browser suite (`tests/js/tests/sfu-browsers.test.ts`, helpers in
+  `tests/js/helpers/sfu/browser/`).** Each user calls from its own
+  Playwright browser context, loading `core/lib/index.js` from a loopback
+  page server, and joins through `createSession` as an app does. Per
+  topology: Chromium with each browser, a Chromium + Firefox + WebKit call,
+  and a Firefox tab lost mid-call that rejoins. Asserts come from getStats
+  (packets and decoded frames growing), a Web Audio analyser (audible) and a
+  canvas (not black; headless WebKit never plays a `<video>`, so not there).
+  On the SFU, Chromium + Firefox also asserts the payload types differ per
+  leg and each receiver gets its own numbers (#1684).
+- The suite binds the SFU to the host's outbound IPv4
+  (`AD4M_SFU_BIND_ADDR`), not loopback: Firefox gathers no loopback
+  candidate and never pairs its LAN candidates with an SFU on 127.0.0.1
+  (ICE stays `checking`, the SFU's DTLS times out), while Chromium and
+  WebKit connect. `SFU_BROWSERS_SFU_ADDR=127.0.0.1` shows that case.
+- Install the browsers with `pnpm exec playwright-core install --with-deps
+  chromium firefox webkit` in `tests/js`. On an Ubuntu release Playwright has
+  no builds for (CI's runner is 25.04), it falls back to the 24.04 builds,
+  whose WebKit needs ICU 74: set `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE` to the
+  build with the host's library versions (`debian13-x64` on 25.04), with its
+  own `PLAYWRIGHT_BROWSERS_PATH`. A browser that cannot start makes
+  its tests pending with the reason; `SFU_BROWSERS_REQUIRED=1` (CI) fails
+  instead. Without root for WebKit's system libraries, extract the missing
+  packages (`apt-get download`, `dpkg -x`) and list the `.so` files,
+  dependencies first, in `WEBKIT_LD_PRELOAD`. `SFU_BROWSERS_DEBUG=1` dumps
+  every tab's SDPs when a wait times out.
+- Each test hangs up (`session.leave()`) before closing its tabs: a tab
+  closed mid-call keeps its SFU slot until the server drops it, and a DID
+  is in at most 4 calls per node.
 
 - **E2E worlds use one executor without Holochain.** Users of one executor
   share a neighbourhood's perspective as its owners, so links, the call
@@ -156,10 +187,25 @@ so the same file runs on both link languages.
   recoveries per participant, and world phase timings. `E2E_DEBUG=stack`
   adds the caller of each local description.
 
-SFU behaviour the scenarios pin: the executor publishes `sfu-room-roster`
-(to the listed DIDs, plus the removed DID on departure) after every join and departure, and the SDK keys
-participants by DID from it; tracks are attributed only by the `trackMapping`
-mids; `sfu-data` never echoes to its sender; room capacity comes from the
+SFU behaviour the scenarios pin: one session per device. `sfu.callJoin`
+names a `deviceId`; a join from the same DID and device (another tab)
+replaces the earlier session, which gets `sfu-session-replaced` and stops
+without rejoining, even mid-reconnect (E20); another device joins beside it as a participant of
+its own (E22; at most `MAX_DEVICES_PER_DID` = 4 per room). Every call about
+a session (`callLeave`, `callAnswerServerOffer`, `addIceCandidate`,
+`callSetQualityPreference`, `callRestartIce`, `sendData`) names the `participantId` its join
+returned, and acts only on that session of the caller's DID; the SDK sends
+none of them without one, so a tab that never joined cannot end another
+tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
+listed DIDs, plus the departed session's DID on departure) after every join
+and departure, listing sessions (`participantId` + `agentDid`), and the SDK
+keys participants by participant id from it; when the roster stops listing
+this session (its `participantId`) for 3 s, the SDK rebuilds the call, but a
+replaced session never does; tracks are attributed only by the `trackMapping`
+mids (which name
+the participant id); a session never receives its own media or its own
+`sfu-data` (`senderParticipantId`), but does receive its agent's other
+device; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer only after
 10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
@@ -168,9 +214,12 @@ on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 5 s; a
 failed connection is rebuilt at once, and a rebuild retries the join for
-120 s. A room roster that leaves this agent out for 3 s also rebuilds the
-call (the executor sends the departure roster to the departed DID too); a
-roster that lists it, as during a restart in place, changes nothing.
+120 s. The restart names the session's `participantId` (only that session
+restarts, never another device of the agent), and a manager with no session
+(join not back, left, replaced) sends none. A room roster that leaves this
+session out for 3 s also rebuilds the call (the executor sends the departure
+roster to the departed DID too); a roster that lists it, as during a restart
+in place, changes nothing.
 `ApiClient` drops an executor socket whose ping stays unanswered for a ping
 interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
 still be crossing a 16 kB/s link) and dials a new one, so a

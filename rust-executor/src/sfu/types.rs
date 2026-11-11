@@ -124,19 +124,24 @@ pub struct SfuRoomInfo {
 #[serde(rename_all = "camelCase")]
 #[ts(export, rename = "SfuRoomParticipantInfo")]
 pub struct SfuParticipantInfo {
+    /// The session: an agent in the call from two devices is two participants.
+    pub participant_id: String,
     pub agent_did: String,
     pub has_audio: bool,
     pub has_video: bool,
     pub is_active_speaker: bool,
 }
 
-/// Maps one outbound SDP m-line to the originating participant's DID.
+/// Maps one outbound SDP m-line to the originating participant.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct TrackMapEntry {
     /// The SDP mid (media-line identifier) in the offer.
     pub mid: String,
+    /// The session whose media this m-line carries: one agent on two
+    /// devices sends two.
+    pub participant_id: String,
     /// DID of the participant whose media this m-line carries.
     pub agent_did: String,
     /// `"audio"` or `"video"`.
@@ -156,6 +161,9 @@ pub struct SfuCallRenegotiationOffer {
     /// DID of the participant this offer is addressed to.  Used by the
     /// events_ws fanout to filter per-user.
     pub target_did: String,
+    /// The session the offer is for. Every session of `target_did` gets
+    /// it; only this one applies it.
+    pub participant_id: String,
     pub neighbourhood_url: String,
     pub room_name: String,
     /// JSON-encoded `RTCSessionDescriptionInit` for the new offer.
@@ -229,8 +237,33 @@ pub struct SfuMigrateEvent {
 pub struct SfuRoomRoster {
     pub neighbourhood_url: String,
     pub room_name: String,
-    /// DIDs of the room's participants on this node, sorted.
-    pub participants: Vec<String>,
+    /// The room's sessions on this node, sorted by DID, then participant id.
+    /// An agent in the call from two devices is listed twice.
+    pub participants: Vec<SfuRosterParticipant>,
+}
+
+/// One session in an [`SfuRoomRoster`].
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuRosterParticipant {
+    pub agent_did: String,
+    pub participant_id: String,
+}
+
+/// A later join from the same device (another tab) replaced one of this
+/// agent's call sessions: the executor has dropped it. Delivered to the
+/// agent (`targetDid`); the session whose participant id it names stops and
+/// does not rejoin.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuSessionReplaced {
+    pub target_did: String,
+    pub neighbourhood_url: String,
+    pub room_name: String,
+    /// The replaced session.
+    pub participant_id: String,
 }
 
 /// Data channel message relayed through the SFU, published on the
@@ -241,6 +274,10 @@ pub struct SfuRoomRoster {
 pub struct SfuDataMessage {
     /// DID of the participant who sent the data.
     pub sender_did: String,
+    /// The session that sent it. A message reaches the sender's agent when
+    /// it is in the call on another device too; the sending session itself
+    /// drops it by this id.
+    pub sender_participant_id: String,
     pub neighbourhood_url: String,
     pub room_name: String,
     /// Label of the data channel.
@@ -256,6 +293,7 @@ impl SfuDataMessage {
     /// text (lossy).
     pub fn new(
         sender_did: String,
+        sender_participant_id: String,
         neighbourhood_url: String,
         room_name: String,
         channel_label: String,
@@ -269,6 +307,7 @@ impl SfuDataMessage {
         };
         Self {
             sender_did,
+            sender_participant_id,
             neighbourhood_url,
             room_name,
             channel_label,
@@ -295,7 +334,7 @@ pub struct CallSessionInfo {
     #[ts(optional)]
     pub redirect_to: Option<String>,
     /// Roster of existing participants at join time, format:
-    /// `"participantId:did"` (local) or `"remote-did:did"` (cascade).
+    /// `"participantId:did"`.
     /// For track-to-DID attribution, use the `track_mapping` field on
     /// each renegotiation offer — the SDP mids are assigned there.
     pub stream_mapping: Vec<String>,
