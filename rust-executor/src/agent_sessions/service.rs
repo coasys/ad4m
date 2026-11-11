@@ -155,6 +155,41 @@ impl Drop for TurnSlot {
     }
 }
 
+/// The send-vs-delete serializer: one lock per session id. A send holds its session's
+/// across admission — the session read, the slot take, the transcript rows and the task
+/// registration — and a delete holds it across the slot clear, the transcript delete
+/// and the task abort, so a send can no longer slip a turn start into the gap a delete
+/// opens between clearing [`RUNNING`] and committing: the send either finished before
+/// the delete (its turn ends with the session) or starts after (and answers not-found
+/// like any send on a deleted session). A `std::sync::Mutex`: no work under it awaits.
+/// An entry leaves with its session — a delete drops it, and a send that finds the
+/// session gone drops the one it took.
+static LIFECYCLE: Lazy<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// The session's lifecycle lock (see [`LIFECYCLE`]), creating its entry on first use.
+fn lifecycle_lock(session_id: &str) -> Arc<Mutex<()>> {
+    LIFECYCLE
+        .lock()
+        .unwrap()
+        .entry(session_id.to_string())
+        .or_default()
+        .clone()
+}
+
+/// Drops the session's lifecycle entry when it is still `lock`'s — nothing keeps a lock
+/// for a session that is gone. The caller holds it, so a send waiting on it wakes to the
+/// same not-found.
+fn retire_lifecycle_lock(session_id: &str, lock: &Arc<Mutex<()>>) {
+    let mut lifecycle = LIFECYCLE.lock().unwrap();
+    if lifecycle
+        .get(session_id)
+        .is_some_and(|l| Arc::ptr_eq(l, lock))
+    {
+        lifecycle.remove(session_id);
+    }
+}
+
 /// The row's new state published to its owner, so a watching client draws each message,
 /// status change and step as it lands.
 fn publish(agent: &AgentContext, changed: AgentSessionChanged) {
@@ -303,11 +338,18 @@ pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
     let agent = ctx.acts_as();
     let owner = agent.managed_did();
     let store = agent_session_store();
+    // Admission and teardown on one session are mutually exclusive: a send may not slip
+    // a turn into the gap between the slot clear below and the transcript delete.
+    let lifecycle = lifecycle_lock(id);
+    let _guard = lifecycle.lock().unwrap();
     // Whose it is comes first: only its owner's delete may end the turn running on it.
-    let session = store
+    let Some(session) = store
         .session(owner, id)
         .map_err(SessionError::Failed)?
-        .ok_or_else(|| SessionError::NotFound(id.to_string()))?;
+    else {
+        retire_lifecycle_lock(id, &lifecycle);
+        return Err(SessionError::NotFound(id.to_string()));
+    };
     // A running turn writes on rows the delete is about to take: end it first.
     let taken = RUNNING.lock().unwrap().remove(id);
     if let Some(turn) = taken {
@@ -322,9 +364,11 @@ pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
         .delete_session(owner, id)
         .map_err(SessionError::Failed)?
     {
+        retire_lifecycle_lock(id, &lifecycle);
         return Err(SessionError::NotFound(id.to_string()));
     }
     publish_session(&ctx.acts_as(), "deleted", &session);
+    retire_lifecycle_lock(id, &lifecycle);
     Ok(true)
 }
 
@@ -340,10 +384,18 @@ pub async fn send(
     let agent = ctx.acts_as();
     let owner = agent.managed_did();
     let store = agent_session_store();
-    let session = store
+    // Admission holds the session's lifecycle lock through the read, the slot take and
+    // the task registration below: a delete may not land between them. It is a std
+    // mutex across synchronous work only — nothing under it awaits.
+    let lifecycle = lifecycle_lock(session_id);
+    let _guard = lifecycle.lock().unwrap();
+    let Some(session) = store
         .session(owner, session_id)
         .map_err(SessionError::Failed)?
-        .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+    else {
+        retire_lifecycle_lock(session_id, &lifecycle);
+        return Err(SessionError::NotFound(session_id.to_string()));
+    };
     if text.trim().is_empty() {
         return Err(SessionError::Invalid("the message is empty".to_string()));
     }
@@ -645,6 +697,7 @@ pub(crate) fn running_for_test(session_id: &str) -> bool {
 #[cfg(test)]
 pub(crate) fn clear_running_for_test() {
     RUNNING.lock().unwrap().clear();
+    LIFECYCLE.lock().unwrap().clear();
 }
 
 #[cfg(test)]
