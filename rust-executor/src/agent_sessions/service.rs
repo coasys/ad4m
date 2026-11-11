@@ -343,10 +343,7 @@ pub fn delete(ctx: &RequestContext, id: &str) -> Result<bool, SessionError> {
     let lifecycle = lifecycle_lock(id);
     let _guard = lifecycle.lock().unwrap();
     // Whose it is comes first: only its owner's delete may end the turn running on it.
-    let Some(session) = store
-        .session(owner, id)
-        .map_err(SessionError::Failed)?
-    else {
+    let Some(session) = store.session(owner, id).map_err(SessionError::Failed)? else {
         retire_lifecycle_lock(id, &lifecycle);
         return Err(SessionError::NotFound(id.to_string()));
     };
