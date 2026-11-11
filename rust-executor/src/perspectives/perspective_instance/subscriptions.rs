@@ -171,8 +171,8 @@ pub(crate) fn result_json(result: &str) -> Value {
 /// The change from `old` to `new`.
 ///
 /// - Model results (`{ instances, totalCount }`): `ids` (the new order, which
-///   also defines membership), `upsert` (instances that are new or differ) and
-///   `totalCount`.
+///   also defines membership), `upsert` (instances that are new or differ) and,
+///   when the query asked for it, `totalCount`.
 /// - Query results (a JSON array of rows): a row has no id, so rows are a
 ///   multiset: `added` and `removed` rows, or `result` when applying them
 ///   would not give the new row order.
@@ -203,17 +203,18 @@ fn model_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
             (id, changed.then_some(v))
         })
         .unzip();
-    Some(Map::from_iter([
+    let mut delta = Map::from_iter([
         ("ids".into(), json!(ids)),
         (
             "upsert".into(),
             json!(upsert.into_iter().flatten().collect::<Vec<_>>()),
         ),
-        (
-            "totalCount".into(),
-            new.get("totalCount").cloned().unwrap_or(Value::Null),
-        ),
-    ]))
+    ]);
+    // Present only when the subscription asked for it (`count: true`).
+    if let Some(total) = new.get("totalCount") {
+        delta.insert("totalCount".into(), total.clone());
+    }
+    Some(delta)
 }
 
 fn rows_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
@@ -503,6 +504,7 @@ mod tests {
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
         assert_eq!(initial["instances"], json!([]));
+        assert!(initial.get("totalCount").is_none(), "{initial}");
 
         add(&mut p, "test://t1", "rdf://type", "test://Todo").await;
         add(&mut p, "test://t1", "test://title", "literal://string:one").await;
@@ -532,7 +534,10 @@ mod tests {
             "t1 is unchanged: {u}"
         );
         assert_eq!(u["upsert"][0]["id"], json!("test://t2"));
-        assert_eq!(u["totalCount"], json!(2));
+        assert!(
+            u.get("totalCount").is_none(),
+            "no totalCount unless the subscription asked for it: {u}"
+        );
     }
 
     #[tokio::test]

@@ -51,11 +51,15 @@ async fn selection_link_status_restricts_selection_and_order() {
         vec!["sg://g/a", "sg://g/b"],
         "a Local flag conformed"
     );
-    assert_eq!(all.total_count, 2, "totalCount");
+    assert_eq!(all.total_count.unwrap(), 2, "totalCount");
     let count = run(&store, shared(json!({ "limit": 0 }))).await;
-    assert_eq!(count.total_count, 2, "a Local flag was counted");
+    assert_eq!(count.total_count.unwrap(), 2, "a Local flag was counted");
     let unrestricted = run(&store, json!({ "limit": 0 })).await;
-    assert_eq!(unrestricted.total_count, 3, "without linkStatus it counts");
+    assert_eq!(
+        unrestricted.total_count.unwrap(),
+        3,
+        "without linkStatus it counts"
+    );
 
     for clause in [
         json!({ "agent": "secret" }),
@@ -66,7 +70,7 @@ async fn selection_link_status_restricts_selection_and_order() {
             let query = shared(json!({ "where": clause, "limit": limit }));
             let got = run(&store, query.clone()).await;
             assert!(ids(&got).is_empty(), "{query}: {:?}", ids(&got));
-            assert_eq!(got.total_count, 0, "{query}: totalCount");
+            assert_eq!(got.total_count.unwrap(), 0, "{query}: totalCount");
         }
     }
     let got = run(&store, json!({ "where": { "agent": "secret" } })).await;
@@ -201,12 +205,12 @@ async fn selection_link_status_local_needs_a_local_flag() {
             vec!["sg://g/l"],
             "{query}: a Shared flag conformed"
         );
-        assert_eq!(got.total_count, 1, "{query}: totalCount");
+        assert_eq!(got.total_count.unwrap(), 1, "{query}: totalCount");
 
         let query = local_q(json!({ "where": { "agent": "secret" }, "limit": limit }));
         let got = run(&store, query.clone()).await;
         assert!(ids(&got).is_empty(), "{query}: {:?}", ids(&got));
-        assert_eq!(got.total_count, 0, "{query}: totalCount");
+        assert_eq!(got.total_count.unwrap(), 0, "{query}: totalCount");
     }
     let count = run(
         &store,
@@ -214,12 +218,14 @@ async fn selection_link_status_local_needs_a_local_flag() {
     )
     .await;
     assert_eq!(
-        count.total_count, 0,
+        count.total_count.unwrap(),
+        0,
         "limit 0 counted the Shared-flagged card"
     );
     let count = run(&store, local_q(json!({ "limit": 0 }))).await;
     assert_eq!(
-        count.total_count, 1,
+        count.total_count.unwrap(),
+        1,
         "limit 0 counted the Shared-flagged card"
     );
 
@@ -233,6 +239,6 @@ async fn selection_link_status_local_needs_a_local_flag() {
             json!("secret"),
             "{query}: the note"
         );
-        assert_eq!(got.total_count, 1, "{query}: totalCount");
+        assert_eq!(got.total_count.unwrap(), 1, "{query}: totalCount");
     }
 }

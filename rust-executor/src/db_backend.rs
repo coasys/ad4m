@@ -308,12 +308,12 @@ macro_rules! ad4m_db_methods {
                 agent_did: &str,
                 proposals: &[String]
             ) -> Ad4mDbResult<HashSet<String>>;
-            fn get_flow_fired_for_instance(
+            fn get_flow_fired_for_instances(
                 &self,
                 perspective: &str,
                 agent_did: &str,
-                instance: &str
-            ) -> Ad4mDbResult<Vec<String>>;
+                instances: &[String]
+            ) -> Ad4mDbResult<Vec<Vec<String>>>;
 
             // Links, link migration and pending diffs
             fn add_link(

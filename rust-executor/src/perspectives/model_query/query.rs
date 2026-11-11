@@ -404,7 +404,7 @@ pub(super) async fn execute_model_query_inner(
         );
         return Ok(ModelQueryResult {
             instances: vec![],
-            total_count: 0,
+            total_count: query_input.count.unwrap_or(false).then_some(0),
         });
     }
 
@@ -493,7 +493,14 @@ pub(super) async fn execute_model_query_inner(
     // full pipeline was just taught not to report; leaving it here would mean the same walk answers
     // two different figures depending on whether the caller asked for rows alongside it, and
     // `count()` in TypeScript is exactly `limit: 0`. A walk has to be walked to be counted.
+    let wants_count = query_input.count.unwrap_or(false);
     let is_count_only = query_input.limit == Some(0);
+    if is_count_only && !wants_count {
+        return Ok(ModelQueryResult {
+            instances: vec![],
+            total_count: None,
+        });
+    }
     let count_only_can_skip_the_walk = !matches!(
         query_input.parent,
         Some(Scope::Traverse {
@@ -519,7 +526,7 @@ pub(super) async fn execute_model_query_inner(
                 .unwrap_or(0);
             return Ok(ModelQueryResult {
                 instances: vec![],
-                total_count: count,
+                total_count: Some(count),
             });
         }
     }
@@ -919,10 +926,12 @@ pub(super) async fn execute_model_query_inner(
     } else {
         None
     };
-    let total_count = if walk.is_some() {
-        instances.len()
+    let total_count = if !wants_count {
+        None
+    } else if walk.is_some() {
+        Some(instances.len())
     } else if let Some(total) = page_total {
-        total
+        Some(total)
     } else if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&count_sparql)?;
@@ -935,12 +944,12 @@ pub(super) async fn execute_model_query_inner(
                         .and_then(|s| s.parse::<usize>().ok())
                         .or_else(|| r["cnt"].as_u64().map(|n| n as usize))
                 })
-                .unwrap_or(instances.len())
+                .or(Some(instances.len()))
         } else {
-            instances.len()
+            Some(instances.len())
         }
     } else {
-        instances.len()
+        Some(instances.len())
     };
 
     // Apply ordering and pagination

@@ -92,6 +92,7 @@ fn note(store: &SparqlStore, id: &str, rank: Option<i64>, ts: &str) {
 fn query(json: serde_json::Value) -> ModelQueryInput {
     let mut q: ModelQueryInput = serde_json::from_value(json).unwrap();
     q.include_unverified = Some(true);
+    q.count.get_or_insert(true);
     q
 }
 
@@ -126,7 +127,22 @@ async fn union_pages_once_over_interleaved_sort_keys() {
         .unwrap();
 
     assert_eq!(ids(&result), vec!["app://n2", "app://t3", "app://n4"]);
-    assert_eq!(result.total_count, 6, "totalCount is the whole union");
+    assert_eq!(
+        result.total_count.unwrap(),
+        6,
+        "totalCount is the whole union"
+    );
+    let uncounted = query(serde_json::json!({
+        "order": {"rank": "ASC"}, "limit": 3, "offset": 1, "count": false
+    }));
+    let without = execute_union_query(&store, &classes(&["Task", "Note"]), &uncounted, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        without.instances, result.instances,
+        "same page without count"
+    );
+    assert_eq!(without.total_count, None, "no totalCount unless asked");
     let class_of: Vec<&str> = result
         .instances
         .iter()
@@ -158,7 +174,7 @@ async fn union_where_on_a_property_one_class_declares_excludes_the_other() {
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://t1"]);
-    assert_eq!(result.total_count, 1);
+    assert_eq!(result.total_count.unwrap(), 1);
 }
 
 /// Rows without the order key — a class that does not declare it, or a record
@@ -216,7 +232,7 @@ async fn union_returns_a_record_of_two_classes_once_with_both_classes() {
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://both", "app://n2"]);
-    assert_eq!(result.total_count, 2);
+    assert_eq!(result.total_count.unwrap(), 2);
     let both = &result.instances[0];
     assert_eq!(both["__subjectClass"], "Note");
     let mut all: Vec<&str> = both["__subjectClasses"]
@@ -255,7 +271,7 @@ async fn union_pages_by_timestamp_when_no_order_is_given() {
         .await
         .unwrap();
     assert!(result.instances.is_empty());
-    assert_eq!(result.total_count, 3);
+    assert_eq!(result.total_count.unwrap(), 3);
 }
 
 /// What has no single meaning over several classes is refused, not approximated.
@@ -344,5 +360,5 @@ async fn union_reads_a_class_named_twice_once() {
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://t1", "app://n2"]);
-    assert_eq!(result.total_count, 2);
+    assert_eq!(result.total_count.unwrap(), 2);
 }

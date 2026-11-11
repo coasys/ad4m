@@ -583,7 +583,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.mintFlowReceipt",
         || json!({ "instanceUri": "i" }),
     ),
-    ("perspective.flowFired", || json!({ "instance": "i" })),
+    ("perspective.flowFired", || json!({ "instances": ["i"] })),
     // #712's SFU. `sfu.servesAllMembers` names its perspective in `uuid`; the reads without
     // params take `{}`.
     ("sfu.startRoom", sfu_room),
