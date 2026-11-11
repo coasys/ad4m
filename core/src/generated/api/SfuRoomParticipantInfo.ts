@@ -5,4 +5,8 @@
  * `SfuRoomParticipantInfo`: its `SfuParticipantInfo` carries a live
  * `MediaStream`.
  */
-export type SfuRoomParticipantInfo = { agentDid: string, hasAudio: boolean, hasVideo: boolean, isActiveSpeaker: boolean, };
+export type SfuRoomParticipantInfo = { 
+/**
+ * The session: an agent in the call from two devices is two participants.
+ */
+participantId: string, agentDid: string, hasAudio: boolean, hasVideo: boolean, isActiveSpeaker: boolean, };

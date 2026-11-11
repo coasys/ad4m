@@ -4857,8 +4857,10 @@ async fn instance_create_writes_a_collection_local_when_its_local_is_unresolved(
     let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
     let links = store_shacl_links(&perspective, "VerdictedChannel", VERDICT_CHANNEL_SDNA, &[]);
 
-    // Rewrite the `ad4m://local` link's stored verdict to `cantCheck`, as it
-    // stands while the signer's log is still pending.
+    // Store the `ad4m://local` link with the verdict `cantCheck`, as it stands
+    // when it arrives while the signer's log is still pending. A write never
+    // turns a stored `valid` into `cantCheck`, so the link is removed and
+    // written again.
     let local_decl = links
         .iter()
         .find(|l| {
@@ -4873,6 +4875,7 @@ async fn instance_create_writes_a_collection_local_when_its_local_is_unresolved(
         .unwrap()
         .to_string();
     let map = crate::identity::cache::global_key_map();
+    perspective.sparql_store.remove_link(&local_decl).unwrap();
     map.note_pending(&key);
     perspective.sparql_store.rejudge_link(&local_decl).unwrap();
     map.note_no_log(&key);

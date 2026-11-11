@@ -264,8 +264,12 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
   A listener is loopback by the address it binds, not by the
   address a caller connects from: on `--localhost false` without TLS the
   executor binds 0.0.0.0, has no loopback listener, and these calls answer
-  no one. On an executor with no admin credential
-  (`--insecure-no-admin-credential`), a loopback connection without a token
+  no one. A request with a `Forwarded`, `X-Forwarded-For` or `X-Real-IP`
+  header counts as network, even on a loopback listener. So these calls
+  refuse through a proxy such as nginx, Caddy or cloudflared. A raw TCP
+  forward (`ssh -R`) sets none of these headers and still counts as
+  loopback. Only the admin credential guards that case. On an executor with
+  no admin credential (`--insecure-no-admin-credential`), a loopback connection without a token
   is the operator, and the WebSocket endpoint does not check `Origin`: a web
   page in a browser on the same machine can reach these methods. Run with an
   admin credential. An operator who logged in with a device key is never on

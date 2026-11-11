@@ -628,12 +628,37 @@ async fn fixture_minted_receipt(
     nonce: &str,
     task: &str,
 ) -> crate::perspectives::flow_instance::receipt::FlowReceipt {
+    fixture_receipt_signed_by(f, nonce, task, "alice").await
+}
+
+/// [`fixture_minted_receipt`] proposed and signed by the persona `signer`.
+async fn fixture_receipt_signed_by(
+    f: &Fixture,
+    nonce: &str,
+    task: &str,
+    signer: &str,
+) -> crate::perspectives::flow_instance::receipt::FlowReceipt {
+    use crate::perspectives::flow_instance::test_support::{did_of, signed_link, T1};
+    fixture_receipt_with(f, nonce, task, did_of(signer), |uri, predicate, target| {
+        signed_link(uri, predicate, target, signer, true, None, T1)
+    })
+    .await
+}
+
+/// [`fixture_minted_receipt`] proposed by `proposer`, each link signed by
+/// `sign(proposal uri, predicate, target)`.
+async fn fixture_receipt_with(
+    f: &Fixture,
+    nonce: &str,
+    task: &str,
+    proposer: &str,
+    sign: impl Fn(&str, &str, &str) -> crate::types::DecoratedLinkExpression,
+) -> crate::perspectives::flow_instance::receipt::FlowReceipt {
     use crate::perspectives::flow_instance::atom::{
         proposal_uri, EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE, FROM_STATE_PREDICATE,
         OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE, PROPOSER_PREDICATE,
     };
     use crate::perspectives::flow_instance::receipt::FlowReceipt;
-    use crate::perspectives::flow_instance::test_support::{did_of, signed_link, T1};
     use crate::perspectives::flow_instance::ProposalLinks;
 
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
@@ -647,7 +672,6 @@ async fn fixture_minted_receipt(
     let committed = outputs_hash(&outputs);
     let seal = crate::perspectives::flow_evaluator::evidence_hash(&[], &[]);
     let instance_uri = format!("ad4m://flow/instance/honest-{nonce}");
-    let proposer = did_of("alice");
     let uri = proposal_uri(
         &instance_uri,
         "identified",
@@ -657,9 +681,7 @@ async fn fixture_minted_receipt(
         proposer,
         nonce,
     );
-    let signed = |predicate: &str, target: &str| {
-        signed_link(&uri, predicate, target, "alice", true, None, T1)
-    };
+    let signed = |predicate: &str, target: &str| sign(&uri, predicate, target);
     let links = vec![
         signed(PROPOSER_PREDICATE, proposer),
         signed(FLOW_INSTANCE_PREDICATE, &instance_uri),
@@ -990,4 +1012,232 @@ async fn the_perspectives_memo_saves_re_verification_and_follows_the_dna() {
         .await
         .expect("valid outputs");
     assert_eq!(memo.verifications(), before + 2);
+}
+
+/// A person's log whose device `d1` signs a receipt for the fixture's flow,
+/// with a resolver on a fake store that serves the log — the setup of the
+/// receipt-read prepare tests. The cache feeds the executor's global key
+/// map, as the production `KelCache::open` does, so what the prepare fills
+/// is what the verifier reads.
+struct DeviceSigned {
+    log: crate::identity::cache::tests::TestLog,
+    cache: std::sync::Arc<crate::identity::cache::KelCache>,
+    store: std::sync::Arc<crate::identity::cache::tests::FakeStore>,
+    resolver: std::sync::Arc<crate::identity::resolver::Resolver>,
+    receipt: crate::perspectives::flow_instance::receipt::FlowReceipt,
+    _dir: tempfile::TempDir,
+}
+
+impl DeviceSigned {
+    async fn new(f: &mut Fixture, seed: u8, task: &str) -> Self {
+        use crate::identity::cache::tests::{accept_signed, store_key, FakeStore, TestLog};
+        use crate::identity::cache::{global_key_map, KelCache};
+        use crate::identity::resolver::Resolver;
+        use crate::perspectives::flow_instance::test_support::device_link;
+        use ad4m_identity_core::build::Signer;
+        use std::sync::Arc;
+
+        let log = TestLog::new(seed);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(
+            KelCache::open(
+                dir.path().join("ad4m_db.sqlite"),
+                vec![store_key().multikey()],
+            )
+            .unwrap(),
+        );
+        accept_signed(&cache, &log.events).await;
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let backend: Arc<dyn crate::identity::backend::IdentityBackend> = store.clone();
+        let resolver = Arc::new(Resolver::new(cache.clone(), backend, None, false));
+        let now = chrono::Utc::now().timestamp() as u64;
+        global_key_map().note_confirmed(&log.scid(), now);
+        cache.note_refreshed(&log.scid(), now);
+
+        f.seed_task(task, "Delivered by a device").await;
+        let proposer = format!("did:key:{}", log.device.key());
+        let device = log.device.clone();
+        let receipt = fixture_receipt_with(f, "device-run", task, &proposer, |uri, p, t| {
+            device_link(
+                uri,
+                p,
+                t,
+                &device,
+                0,
+                crate::perspectives::flow_instance::test_support::T1,
+            )
+        })
+        .await;
+        Self {
+            log,
+            cache,
+            store,
+            resolver,
+            receipt,
+            _dir: dir,
+        }
+    }
+
+    /// The store last confirmed the signer's head, and this replica last
+    /// read its log, longer ago than the admission window: a carried link is
+    /// `cantCheck` until a prepare refreshes the log.
+    fn age_past_the_window(&self) {
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+        let stale = chrono::Utc::now().timestamp() as u64 - ADMIT_FRESHNESS - 10;
+        crate::identity::cache::global_key_map().note_confirmed(&self.log.scid(), stale);
+        self.cache.note_refreshed(&self.log.scid(), stale);
+    }
+}
+
+impl Drop for DeviceSigned {
+    fn drop(&mut self) {
+        crate::identity::cache::global_key_map().forget(&self.log.scid());
+    }
+}
+
+/// Data's P3 on #1597, point 1: `verify_flow_receipt` refreshes the carried
+/// signers' logs before it judges them. An honest receipt signed by a
+/// person's device verifies after the signer's head aged past the admission
+/// window, because the entry point's prepare reads the log again; the store
+/// answers, so nothing about the receipt is in doubt.
+///
+/// Red with `prepare_carried_signers` removed from `verify_flow_receipt`:
+/// the stale head leaves every carried link `cantCheck`, so the honest
+/// receipt stays undecided. The resolver stands in for the started identity
+/// module's (`with_test_resolver`); before `init`, the prepare does nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_flow_receipt_refreshes_the_carried_signers_before_it_judges() {
+    use crate::perspectives::flow_instance::produced::verify_flow_receipt;
+    use std::sync::atomic::Ordering;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let signed = DeviceSigned::new(&mut f, 140, "ad4m://task/by-device").await;
+    signed.age_past_the_window();
+    let reads = signed.store.log_calls.load(Ordering::SeqCst);
+
+    let verdict = crate::identity::with_test_resolver(
+        signed.resolver.clone(),
+        verify_flow_receipt(&f.perspective, &signed.receipt),
+    )
+    .await
+    .expect("verify");
+    assert!(
+        verdict.is_verified(),
+        "the entry point refreshes the stale signer and the honest receipt verifies: {verdict}"
+    );
+    assert!(
+        signed.store.log_calls.load(Ordering::SeqCst) > reads,
+        "the signer's log was read again"
+    );
+}
+
+/// Data's P3 on #1597, point 2: a read prepares the carried signers of all
+/// its receipts in one call, so `DISCOVERY_PER_BATCH` caps the key-index
+/// lookups of the read, not of each receipt. `DISCOVERY_PER_BATCH + 6`
+/// receipts, each signed by a `did:key` no log lists: the first read asks
+/// about one batch, and its receipts verify; the other six wait (`cantCheck`,
+/// not memoised) and the next read asks about them only.
+///
+/// Red while `flow_valid_outputs` prepares receipt by receipt: each call
+/// gets its own cap, so the first read asks about all `N` signers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_asks_the_key_index_about_one_batch_of_signers_across_its_receipts() {
+    use crate::identity::cache::tests::{store_key, FakeStore};
+    use crate::identity::cache::KelCache;
+    use crate::identity::resolver::{Resolver, DISCOVERY_PER_BATCH};
+    use crate::perspectives::flow_instance::produced::flow_valid_outputs;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    const N: usize = DISCOVERY_PER_BATCH + 6;
+    let mut f = seed_satisfied_fixture(None).await;
+    let flow = f.flow_uri.clone();
+    for i in 0..N {
+        let task = format!("ad4m://task/fresh-signer-{i:03}");
+        f.seed_task(&task, &format!("Fresh {i}")).await;
+        // A persona per receipt: a fresh `did:key`, unknown to the key map.
+        let signer = format!("fresh-signer-{}-{i}", std::process::id());
+        let receipt = fixture_receipt_signed_by(&f, &format!("fresh-{i:03}"), &task, &signer).await;
+        plant_receipt(&mut f, &receipt).await;
+    }
+    // A cache on a scratch file that feeds the executor's global key map,
+    // which the verifier reads.
+    let dir = tempfile::tempdir().unwrap();
+    let cache = KelCache::open(
+        dir.path().join("ad4m_db.sqlite"),
+        vec![store_key().multikey()],
+    )
+    .unwrap();
+    let store = Arc::new(FakeStore::new(vec![]));
+    let backend: Arc<dyn crate::identity::backend::IdentityBackend> = store.clone();
+    let resolver = Arc::new(Resolver::new(Arc::new(cache), backend, None, false));
+    let read = || {
+        crate::identity::with_test_resolver(
+            resolver.clone(),
+            flow_valid_outputs(&f.perspective, &flow, None),
+        )
+    };
+
+    let first = read().await.expect("valid outputs");
+    assert_eq!(
+        store.key_owner_calls.load(Ordering::SeqCst),
+        DISCOVERY_PER_BATCH,
+        "one read asks about one batch of new signers, whatever the receipt count"
+    );
+    assert_eq!(
+        first.len(),
+        DISCOVERY_PER_BATCH,
+        "the asked signers' receipts verify"
+    );
+
+    let second = read().await.expect("valid outputs");
+    assert_eq!(
+        store.key_owner_calls.load(Ordering::SeqCst),
+        N,
+        "the next read asks about the six left, and about no signer it already knows"
+    );
+    assert_eq!(
+        second.len(),
+        N,
+        "every receipt verifies once its signer was asked about"
+    );
+}
+
+/// Data's P3 on #1597, point 2: a receipt the perspective's memo already
+/// holds as settled is not prepared again. Its verdict is final under the
+/// memo key, so refreshing its signers' logs could change nothing the read
+/// returns. The device-signed receipt verifies on the first read; then its
+/// signer's head ages past the window, and the second read still lists the
+/// output, from the memo, without reading the signer's log again.
+///
+/// Red while every read prepares every receipt: the second read refreshes
+/// the stale log once more.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_receipt_the_memo_holds_as_settled_is_not_prepared_again() {
+    use crate::perspectives::flow_instance::produced::flow_valid_outputs;
+    use std::sync::atomic::Ordering;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let signed = DeviceSigned::new(&mut f, 141, "ad4m://task/memo-settled").await;
+    plant_receipt(&mut f, &signed.receipt).await;
+    let flow = f.flow_uri.clone();
+    let read = || {
+        crate::identity::with_test_resolver(
+            signed.resolver.clone(),
+            flow_valid_outputs(&f.perspective, &flow, None),
+        )
+    };
+
+    let first = read().await.expect("valid outputs");
+    assert_eq!(first.len(), 1, "the device-signed receipt verifies");
+
+    signed.age_past_the_window();
+    let reads = signed.store.log_calls.load(Ordering::SeqCst);
+    let second = read().await.expect("valid outputs");
+    assert_eq!(second, first, "the memo still answers for the settled run");
+    assert_eq!(
+        signed.store.log_calls.load(Ordering::SeqCst),
+        reads,
+        "a settled receipt's signers are not refreshed again"
+    );
 }
