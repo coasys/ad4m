@@ -21,7 +21,12 @@
 //! The engine overwrites a real value **only when it can prove the LLM owns it**;
 //! otherwise it stages the proposal in the overlay and leaves the real value
 //! untouched:
-//!   * real field unset → the LLM is filling in a fresh value → write it.
+//!   * real field unset and the overlay stages nothing for it → the LLM is
+//!     filling in a fresh value → write it. Real field unset *while* the
+//!     overlay still stages a value for it → the value existed at snapshot
+//!     time and a person deleted it since → leave it unset; the re-proposed
+//!     value is staged as a suggestion only, or the deletion is silently
+//!     undone.
 //!   * base has an overlay and real == last-recorded `inferred/<p>` → the LLM
 //!     wrote it and it's untouched → overwrite *and* bump `inferred/<p>` to match.
 //!   * base has an overlay and real ≠ `inferred/<p>` → a human diverged → **leave

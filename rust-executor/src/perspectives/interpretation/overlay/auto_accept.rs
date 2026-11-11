@@ -29,14 +29,19 @@
 //! leaves the item pending for that agent (or a person) to resolve, instead
 //! of this pass re-signing its values as its own.
 //!
-//! **It never changes a real value.** The §4 gate (see [`super`]) stages a
-//! proposal instead of writing it when the real value is not the LLM's to
-//! overwrite: the item was written or accepted by a person, or a person
-//! edited it after the last inference. Accepting such an overlay replaces
-//! the real value with the staged one, which is a person's decision. So an
-//! item is auto-accepted only while every staged `inferred/<p>` equals the
-//! real `<p>` it would replace, or `<p>` is unset: the accept then overwrites
-//! nothing. Anything else stays pending.
+//! **It never changes a real value, and never restores a removed one.** The
+//! §4 gate (see [`super`]) stages a proposal instead of writing it when the
+//! real value is not the LLM's to overwrite: the item was written or accepted
+//! by a person, or a person edited it after the last inference. Accepting
+//! such an overlay replaces the real value with the staged one, which is a
+//! person's decision. So an item is auto-accepted only while every staged
+//! `inferred/<p>` equals the real `<p>` it would replace: the accept then
+//! overwrites nothing. A staged value whose real `<p>` is gone means a person
+//! deleted the field since the snapshot was taken — accepting would write it
+//! back over their deletion, so the item stays pending for them instead.
+//! Relation predicates are exempt from the deleted-field check: a staged
+//! `inferred/<p>` relation is a suggestion that never had a real counterpart
+//! (scalar provenance is all the overlay records today).
 //!
 //! **It never lets one class overrule another.** A `Create`/`Update` op
 //! names the item's class and that class decides. An item the ops do not
@@ -137,13 +142,25 @@ fn rule_allows(shape: &ModelShape, links: &[DecoratedLinkExpression]) -> bool {
     }
 }
 
-/// Whether accepting the overlay on this base would change a real value:
-/// some staged `inferred/<p>` differs from a real `<p>` link the base
-/// carries. That is the state the §4 gate leaves when it declines to
-/// overwrite a value the LLM does not own, and the state a person creates
-/// by editing a pending item. Values are compared decoded, the way the gate
-/// compares them.
-fn accept_would_change_a_real_value(links: &[DecoratedLinkExpression]) -> bool {
+/// Whether accepting the overlay on this base would change real state: some
+/// staged `inferred/<p>` differs from a real `<p>` link the base carries —
+/// or the real `<p>` is gone entirely, which is the state a person leaves by
+/// deleting a field of a pending item (the accept would write the value back
+/// over their deletion). The first half is the state the §4 gate leaves when
+/// it declines to overwrite a value the LLM does not own, and the state a
+/// person creates by editing a pending item. Values are compared decoded,
+/// the way the gate compares them.
+///
+/// Predicates the item's classes declare as relations are exempt: a staged
+/// `inferred/<p>` relation is a proposed edge, not a deleted value.
+fn accept_would_change_a_real_value(
+    links: &[DecoratedLinkExpression],
+    shapes: &[Arc<ModelShape>],
+) -> bool {
+    let relation_preds: std::collections::HashSet<&str> = shapes
+        .iter()
+        .flat_map(|s| s.include_relations.iter().map(|r| r.predicate.as_str()))
+        .collect();
     links.iter().any(|staged| {
         let Some(real_pred) = staged
             .data
@@ -153,11 +170,16 @@ fn accept_would_change_a_real_value(links: &[DecoratedLinkExpression]) -> bool {
         else {
             return false;
         };
+        if relation_preds.contains(real_pred) {
+            return false;
+        }
         let staged_value = parse_literal_value(&staged.data.target);
-        links.iter().any(|real| {
-            real.data.predicate.as_deref() == Some(real_pred)
-                && parse_literal_value(&real.data.target) != staged_value
-        })
+        let reals: Vec<serde_json::Value> = links
+            .iter()
+            .filter(|l| l.data.predicate.as_deref() == Some(real_pred))
+            .map(|l| parse_literal_value(&l.data.target))
+            .collect();
+        reals.is_empty() || reals.iter().any(|v| *v != staged_value)
     })
 }
 
@@ -324,7 +346,7 @@ pub(crate) async fn auto_accept_pass(
         if !shapes.iter().all(|s| rule_allows(s, &links)) {
             continue;
         }
-        if accept_would_change_a_real_value(&links) {
+        if accept_would_change_a_real_value(&links, &shapes) {
             log::debug!(
                 "interpretation: {base} stays pending: accepting it would change a real value"
             );
@@ -608,6 +630,21 @@ mod tests {
     async fn when_placed_counts_a_staged_inferred_parent_value() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(AA_CLASSES).await;
         let child = "soa://ext/note/inferred-parent";
+        // The staged scalar needs its real counterpart, or the base reads as
+        // "a person deleted title since the snapshot" and the pass leaves it
+        // pending (a staged value with no real link blocks the accept now).
+        p.add_link(
+            Link {
+                source: child.into(),
+                predicate: Some("ns://title".into()),
+                target: "literal:string:Staged note".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("add_link");
         seed_overlay(
             &mut p,
             child,
@@ -1001,6 +1038,152 @@ mod tests {
         let (author, run) = marker_on(&p, child).await.expect("marker");
         assert_eq!(run, "run-2");
         assert_eq!(author, crate::agent::did_for_context(&ctx).unwrap());
+    }
+
+    /// A person trims an optional field off a pending `when_placed` item:
+    /// the real `note` link goes, its `inferred/<p>` snapshot stays behind.
+    /// When a later pass then places the item, accepting would write that
+    /// value back over the deletion — so the item must stay pending and the
+    /// field must not come back.
+    #[tokio::test]
+    async fn a_field_a_person_removed_is_not_restored_when_the_item_is_placed() {
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[
+            ("Chapter", AA_PARENT_SDNA),
+            ("Memo", AA_CHILD_OPTIONAL_SDNA),
+        ])
+        .await;
+        let child = "soa://ext/memo/trimmed";
+        let parent = "soa://ext/chapter/trimmed-parent";
+
+        // Pass 1: the item lands with `note` set, unplaced → pending.
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![
+                create_op(parent, "Chapter", "Chapter"),
+                InterpretationOp::Create {
+                    base: child.to_string(),
+                    class: "Memo".to_string(),
+                    values: serde_json::Map::from_iter([
+                        ("title".to_string(), json!("the memo")),
+                        ("note".to_string(), json!("a field the person trims")),
+                    ]),
+                },
+            ],
+            "run-1",
+            &ctx,
+        )
+        .await;
+        assert_eq!(accepted, vec![parent.to_string()]);
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+
+        // The person deletes `note` from the pending item — the generic
+        // remove path drops the real link; the suggestion stays staged.
+        let note = links_of(&p, child, "ns://note").await;
+        assert_eq!(note.len(), 1);
+        p.remove_links(note.into_iter().map(Into::into).collect(), None)
+            .await
+            .expect("person removes the field");
+
+        // Pass 2: only the parent link lands — nothing re-stages `note`.
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![addlinks_op(child, "ns://partOf", parent)],
+            "run-2",
+            &ctx,
+        )
+        .await;
+
+        assert!(
+            accepted.is_empty(),
+            "a person trimmed it — a person resolves it"
+        );
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+        assert!(marker_on(&p, child).await.is_none());
+        assert!(
+            links_of(&p, child, "ns://note").await.is_empty(),
+            "the removed value must not come back as a real link"
+        );
+        let staged = links_of(&p, child, "ad4m://interp/inferred/ns://note").await;
+        assert_eq!(
+            staged.len(),
+            1,
+            "the suggestion stays staged for the person to decide"
+        );
+        assert_eq!(title_of(&p, "Memo", child).await.as_deref(), Some("the memo"));
+    }
+
+    /// The same deletion, then a pass that *re-emits* the removed field as an
+    /// Update (what the LLM path does when it proposes the value again): the
+    /// value must not be written back as a real link either — the snapshot
+    /// records it was deleted, so the proposal stays a staged suggestion.
+    #[tokio::test]
+    async fn a_removed_field_comes_back_only_as_a_suggestion() {
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[
+            ("Chapter", AA_PARENT_SDNA),
+            ("Memo", AA_CHILD_OPTIONAL_SDNA),
+        ])
+        .await;
+        let child = "soa://ext/memo/reemitted";
+        let parent = "soa://ext/chapter/reemitted-parent";
+
+        pass(
+            &mut p,
+            &shapes,
+            vec![
+                create_op(parent, "Chapter", "Chapter"),
+                InterpretationOp::Create {
+                    base: child.to_string(),
+                    class: "Memo".to_string(),
+                    values: serde_json::Map::from_iter([
+                        ("title".to_string(), json!("the memo")),
+                        ("note".to_string(), json!("first wording")),
+                    ]),
+                },
+            ],
+            "run-1",
+            &ctx,
+        )
+        .await;
+        let note = links_of(&p, child, "ns://note").await;
+        p.remove_links(note.into_iter().map(Into::into).collect(), None)
+            .await
+            .expect("person removes the field");
+
+        // Pass 2: the field is proposed again and the parent link lands.
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![
+                InterpretationOp::Update {
+                    base: child.to_string(),
+                    class: "Memo".to_string(),
+                    values: serde_json::Map::from_iter([(
+                        "note".to_string(),
+                        json!("second wording"),
+                    )]),
+                },
+                addlinks_op(child, "ns://partOf", parent),
+            ],
+            "run-2",
+            &ctx,
+        )
+        .await;
+
+        assert!(accepted.is_empty());
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+        assert!(
+            links_of(&p, child, "ns://note").await.is_empty(),
+            "the re-emitted value stays a suggestion, not a real write"
+        );
+        // The staged suggestion updates to the new wording for the person.
+        let staged = links_of(&p, child, "ad4m://interp/inferred/ns://note").await;
+        assert_eq!(staged.len(), 1);
+        assert_eq!(
+            parse_literal_value(&staged[0].data.target),
+            json!("second wording")
+        );
     }
 
     /// A parent link from an item to itself places it under nothing, so a

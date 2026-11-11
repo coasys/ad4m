@@ -184,6 +184,26 @@ pub(crate) const AA_CHILD_SDNA: &str = r#"{
   ]
 }"#;
 
+/// A `when_placed` class carrying an *optional* scalar (`note`,
+/// `min_count: 0`) beside the required `title`: a person trimming a pending
+/// item removes an optional field — the instance keeps conforming to its
+/// class (membership reads required predicates only) while that field's
+/// `inferred/<p>` snapshot stays behind on the overlay. That is exactly the
+/// state a field deletion leaves, which `AA_CHILD_SDNA` cannot produce (its
+/// only scalar is required).
+pub(crate) const AA_CHILD_OPTIONAL_SDNA: &str = r#"{
+  "target_class":"ns://Memo",
+  "auto_accept":"when_placed",
+  "interpretation_hint":"An item that belongs under a chapter.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://memo"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://memo","min_count":1,"max_count":1},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://note","name":"note","min_count":0,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://note","target":"value"}]},
+    {"path":"ns://partOf","name":"partOf","relation_kind":"hasOne","target_class_name":"Chapter","class":"ns://ChapterShape"}
+  ]
+}"#;
+
 /// Explicit opt-out: `auto_accept: "never"` keeps every inferred item
 /// pending for a human.
 pub(crate) const AA_NEVER_SDNA: &str = r#"{
