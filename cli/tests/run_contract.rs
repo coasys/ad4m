@@ -345,20 +345,24 @@ fn closing_stdin_with_watch_stdin_stops_the_executor_with_0() {
 }
 
 /// A supervisor that is gone before the executor starts: with `--watch-stdin` and stdin
-/// already closed, the executor stops with 0 instead of running on without one.
+/// already closed, the executor stops with 0 instead of running on without one. The stop comes
+/// while start-up still opens the databases; it used to end one start in three with
+/// SIGSEGV (the exit ran SQLCipher's `atexit` teardown under them), so the test stops several.
 #[test]
 fn watch_stdin_with_stdin_closed_at_start_stops_the_executor_with_0() {
     let _serial = serial();
-    let folder = DataFolder::new();
-    let port = free_port();
-    let args = run_args(
-        &folder,
-        port,
-        &["--insecure-no-admin-credential", "--watch-stdin", "true"],
-    );
-    let mut executor = spawn(&folder, port, args, Stdio::null(), "watch-closed.log", &[]);
-    let status = executor.exit_within(EXIT);
-    assert_eq!(code(status), Some(0), "{}", executor.output());
+    for _ in 0..8 {
+        let folder = DataFolder::new();
+        let port = free_port();
+        let args = run_args(
+            &folder,
+            port,
+            &["--insecure-no-admin-credential", "--watch-stdin", "true"],
+        );
+        let mut executor = spawn(&folder, port, args, Stdio::null(), "watch-closed.log", &[]);
+        let status = executor.exit_within(EXIT);
+        assert_eq!(code(status), Some(0), "{}", executor.output());
+    }
 }
 
 /// One executor per data folder: a second on the same folder exits 79 and the first keeps
@@ -553,27 +557,32 @@ async fn a_refused_start_exits_78() {
     drop(admin);
     drop(earlier);
 
-    let port = free_port();
-    let args = run_args(&folder, port, &["--custody-channel"]);
-    let mut custody = spawn_with_stdin(
-        &folder,
-        port,
-        args,
-        Some(&custody_line()),
-        "custody.log",
-        &credential,
-    );
-    assert_eq!(
-        code(custody.exit_within(READY)),
-        Some(78),
-        "{}",
-        custody.output()
-    );
-    assert!(
-        custody.output().contains("custody channel"),
-        "{}",
-        custody.output()
-    );
+    // `run` refuses this one with the databases open and start-up work still running: the exit
+    // used to run SQLCipher's `atexit` teardown under that work and end three starts in four
+    // with SIGSEGV, so the test refuses several.
+    for _ in 0..4 {
+        let port = free_port();
+        let args = run_args(&folder, port, &["--custody-channel"]);
+        let mut custody = spawn_with_stdin(
+            &folder,
+            port,
+            args,
+            Some(&custody_line()),
+            "custody.log",
+            &credential,
+        );
+        assert_eq!(
+            code(custody.exit_within(READY)),
+            Some(78),
+            "{}",
+            custody.output()
+        );
+        assert!(
+            custody.output().contains("custody channel"),
+            "{}",
+            custody.output()
+        );
+    }
 }
 
 /// The custody channel over a real WebSocket on a loopback listener: with `--custody-channel`

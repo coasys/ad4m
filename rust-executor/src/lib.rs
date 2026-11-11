@@ -353,7 +353,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     SHUTDOWN_DEADLINE
                 ),
             }
-            std::process::exit(1);
+            exit::exit_now(1);
         });
     }
 
@@ -384,7 +384,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 "Graceful shutdown complete, exiting with {}.",
                 reason.code()
             );
-            std::process::exit(reason.code());
+            exit::exit_now(reason.code());
         }
     });
 
@@ -435,7 +435,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     )
                 });
                 std::thread::sleep(SHUTDOWN_DEADLINE);
-                std::process::exit(1);
+                exit::exit_now(1);
             })
             .expect("failed to start the parent-watch thread");
     }
@@ -1291,7 +1291,7 @@ pub fn exit_when_api_fails(api_thread: JoinHandle<Result<(), AnyError>>) {
             Err(_) => (String::from("the REST API thread panicked"), 1),
         };
         error!("REST API server failed, exiting with {code}: {reason}");
-        std::process::exit(code);
+        exit::exit_now(code);
     });
 }
 
