@@ -52,8 +52,9 @@ EOF
     PATH="$tmp/bin:$PATH"
 }
 
+# Without BASH_ENV: CI points it at a file that puts the real cargo first on PATH again.
 run_script() {
-    OUT="$(bash "$EXE/scripts/build-deno-snapshot.sh" 2>&1)" || fail "script failed: $OUT"
+    OUT="$(env -u BASH_ENV bash "$EXE/scripts/build-deno-snapshot.sh" 2>&1)" || fail "script failed: $OUT"
 }
 
 builds() { wc -l <"$CARGO_LOG" | tr -d ' '; }
