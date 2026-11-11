@@ -450,7 +450,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     // Guard::Owns on a perspective: the params beside `uuid`.
     ("perspective.queryProlog", || json!({ "query": "true." })),
     ("perspective.querySparql", || json!({ "query": "ASK {}" })),
-    ("perspective.subscribeQuery", || json!({ "query": "true." })),
+    (
+        "perspective.subscribeQuery",
+        || json!({ "query": "true.", "subscriptionId": "s" }),
+    ),
     (
         "perspective.subscribeSparql",
         || json!({ "query": "ASK {}" }),
@@ -477,7 +480,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "perspective.modelSubscribe",
-        || json!({ "class_name": "C", "query_json": "{}" }),
+        || json!({ "class_name": "C", "query_json": "{}", "subscriptionId": "s" }),
     ),
     (
         "perspective.evaluateGetters",

@@ -10,9 +10,10 @@
  *
  * These tests run the real ApiClient, PerspectiveClient, QuerySubscriptionProxy
  * and WakerSubscriptionManager against a fake executor socket that keeps
- * subscriptions as the executor does: registered when the subscribe call
- * arrives, dropped again by a `request.cancel` that arrives while the call is
- * in flight, kept once the call has answered, ended by `perspective.disposeQuery`.
+ * subscriptions as the executor does: registered under the id the client minted
+ * when the subscribe call arrives (a taken id is refused), dropped again by a
+ * `request.cancel` that arrives while the call is in flight, kept once the call
+ * has answered, ended by `perspective.disposeQuery`.
  */
 import { ApiClient } from '../apiClient'
 import { PerspectiveClient } from './PerspectiveClient'
@@ -40,8 +41,6 @@ const executor = {
         this.subscribes = 0
     },
 }
-
-let nextSub = 0
 
 /** A socket to the fake executor. Client messages are handled when sent. */
 class ExecutorSocket {
@@ -73,8 +72,12 @@ class ExecutorSocket {
         }
         if (OPENS.has(msg.type)) {
             executor.subscribes++
+            const subscriptionId: string | undefined = msg.params.subscriptionId
+            if (!subscriptionId) return this.#reply({ id: msg.id, error: { code: 400, message: 'subscriptionId is required' } })
+            if (executor.live.has(subscriptionId)) {
+                return this.#reply({ id: msg.id, error: { code: 409, message: `Subscription id ${subscriptionId} is already in use on this perspective` } })
+            }
             // `open_subscription` registers before it computes the first result.
-            const subscriptionId = `sub-${++nextSub}`
             executor.live.add(subscriptionId)
             const timer = setTimeout(() => {
                 this.#inflight.delete(msg.id)
@@ -199,17 +202,17 @@ describe('a subscribe the client gave up on', () => {
         manager.disposeAll()
     })
 
-    it('disposes the subscription a late reply names, for a live query opened directly', async () => {
+    it('disposes the subscription it opened when the reply crossed the cancel, for a live query opened directly', async () => {
         executor.firstResultMs = 1_000
         executor.transitMs = 50
         const controller = new AbortController()
         const call = perspectives.modelSubscribe('p', 'ad4m://TextContent', '{}', { signal: controller.signal })
         call.catch(() => {})
-        // Abort after the executor answered, before the answer arrives.
+        // Abort after the executor answered, before the answer arrives: the cancel finds nothing in flight.
         await jest.advanceTimersByTimeAsync(1_020)
+        expect(executor.live.size).toBe(1)
         controller.abort()
         await expect(call).rejects.toMatchObject({ name: 'AbortError' })
-        expect(executor.live.size).toBe(1)
         await jest.advanceTimersByTimeAsync(200)
         expect([...executor.live]).toEqual([])
     })

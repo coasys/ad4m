@@ -76,11 +76,23 @@ async fn a_model_subscriber_keeps_its_updates_when_another_disposes() {
     let query_json = r#"{"where":{"owner":"alice"}}"#;
 
     let (id1, _, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into(), None)
+        .model_subscribe_and_query(
+            "Task".into(),
+            query_json.into(),
+            uuid::Uuid::new_v4().to_string(),
+            "c".into(),
+            None,
+        )
         .await
         .expect("first model subscribe");
     let (id2, _, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into(), None)
+        .model_subscribe_and_query(
+            "Task".into(),
+            query_json.into(),
+            uuid::Uuid::new_v4().to_string(),
+            "c".into(),
+            None,
+        )
         .await
         .expect("second model subscribe");
     assert_ne!(id1, id2, "each subscriber gets its own subscription");
@@ -132,11 +144,21 @@ async fn a_query_subscriber_keeps_its_updates_when_another_connection_disposes()
     let query = "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".to_string();
 
     let (id1, _, _) = perspective
-        .subscribe_and_query(query.clone(), "a".into(), None)
+        .subscribe_and_query(
+            query.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "a".into(),
+            None,
+        )
         .await
         .expect("first subscribe");
     let (id2, _, _) = perspective
-        .subscribe_and_query(query.clone(), "b".into(), None)
+        .subscribe_and_query(
+            query.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "b".into(),
+            None,
+        )
         .await
         .expect("second subscribe");
     assert_ne!(id1, id2, "each subscriber gets its own subscription");
@@ -193,11 +215,21 @@ async fn a_rerun_update_reaches_only_its_subscriber() {
     let query = "SELECT ?s ?o WHERE { ?s <ns://audience-title> ?o . }".to_string();
 
     let (id_u, _, _) = perspective
-        .subscribe_and_query(query.clone(), "u-connection".into(), Some(u.clone()))
+        .subscribe_and_query(
+            query.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "u-connection".into(),
+            Some(u.clone()),
+        )
         .await
         .expect("U subscribes");
     let (id_v, _, _) = perspective
-        .subscribe_and_query(query.clone(), "v-connection".into(), Some(v.clone()))
+        .subscribe_and_query(
+            query.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "v-connection".into(),
+            Some(v.clone()),
+        )
         .await
         .expect("V subscribes");
     assert_ne!(id_u, id_v, "two agents' subscriptions are not shared");
@@ -284,6 +316,7 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
         .model_subscribe_and_query(
             classes,
             r#"{"includeUnverified":true}"#.into(),
+            uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
         )
@@ -354,6 +387,7 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
         .model_subscribe_and_query(
             classes,
             r#"{"includeUnverified":true}"#.into(),
+            uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
         )
@@ -411,6 +445,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .model_subscribe_and_query(
             QueryClasses::union(vec!["Task".into(), "Note".into()]),
             query_json.into(),
+            uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
         )
@@ -420,6 +455,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .model_subscribe_and_query(
             QueryClasses::union(vec!["Note".into(), "Task".into(), "Note".into()]),
             query_json.into(),
+            uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
         )
@@ -443,13 +479,25 @@ async fn identical_subscriptions_share_one_evaluation_per_pass() {
     let mut copies = vec![];
     for connection in ["c", "c", "c", "d"] {
         let (id, _, _) = perspective
-            .model_subscribe_and_query("Task".into(), query_json.into(), connection.into(), None)
+            .model_subscribe_and_query(
+                "Task".into(),
+                query_json.into(),
+                uuid::Uuid::new_v4().to_string(),
+                connection.into(),
+                None,
+            )
             .await
             .expect("model subscribe");
         copies.push((id, connection));
     }
     let (other, _, _) = perspective
-        .model_subscribe_and_query("Task".into(), other_json.into(), "c".into(), None)
+        .model_subscribe_and_query(
+            "Task".into(),
+            other_json.into(),
+            uuid::Uuid::new_v4().to_string(),
+            "c".into(),
+            None,
+        )
         .await
         .expect("model subscribe to another query");
     let ids: HashSet<&String> = copies.iter().map(|(id, _)| id).collect();
