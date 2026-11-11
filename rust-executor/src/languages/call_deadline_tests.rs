@@ -12,12 +12,10 @@ use super::language_runtime_handle::LanguageRuntimeHandle;
 use crate::agent::AgentContext;
 use std::time::{Duration, Instant};
 
+/// The process-wide V8 start: a second `Once` here set the flags after another test had
+/// started V8, which aborts the process (`Check failed: !IsFrozen()`).
 fn init_v8_platform() {
-    static V8_INIT: std::sync::Once = std::sync::Once::new();
-    V8_INIT.call_once(|| {
-        deno_core::v8::V8::set_flags_from_string("--max-opt=0");
-        deno_core::JsRuntime::init_platform(None);
-    });
+    crate::test_utils::init_v8_platform();
 }
 
 fn spawn_runtime(name: &str) -> (LanguageRuntimeHandle, tempfile::TempDir) {
@@ -276,7 +274,7 @@ async fn a_call_sent_while_the_running_call_is_past_the_deadline_is_not_queued()
     let running = handle.running_request();
 
     // A call that has run for 100 ms: the next call is queued behind it.
-    *running.lock().unwrap() = Some((u64::MAX, Instant::now() - Duration::from_millis(100)));
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_millis(100)));
     let queued = tokio::spawn({
         let handle = handle.clone();
         async move { handle.execute("1 + 1".into()).await }
@@ -286,7 +284,7 @@ async fn a_call_sent_while_the_running_call_is_past_the_deadline_is_not_queued()
         .expect("the call is queued");
 
     // The same call, 1 s on.
-    *running.lock().unwrap() = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
     let refused = within(Duration::from_secs(1), "the refused call", async {
         handle.execute("1 + 1".into()).await
     })
@@ -362,6 +360,215 @@ async fn a_started_call_whose_caller_has_gone_signs_as_its_own_agent() {
         outcome.signer, alice,
         "alice's call signed as another agent after her caller had gone"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Reads run beside other calls
+// ---------------------------------------------------------------------------
+
+/// An expression read does not wait for a slow call to the same language: a model query's
+/// expression reads used to queue behind every upload and commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_does_not_wait_for_a_slow_call() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentRead");
+    let slow = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(format!("({}, \"slow\")", sleep_js(2000)))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let t = Instant::now();
+    let read = within(
+        Duration::from_secs(10),
+        "the read",
+        handle.execute_read("1 + 1".into()),
+    )
+    .await;
+    let read_after = t.elapsed();
+
+    assert_eq!(read.expect("the read answers").trim(), "2");
+    assert!(
+        read_after < Duration::from_millis(500),
+        "the read waited {read_after:?} for the slow call"
+    );
+    let slow = within(Duration::from_secs(10), "the slow call", slow)
+        .await
+        .unwrap();
+    assert_eq!(slow.expect("the slow call answers").trim(), "slow");
+}
+
+/// Reads overlap each other: 8 reads that each await 500 ms end together.
+#[tokio::test(flavor = "multi_thread")]
+async fn reads_to_one_language_overlap() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentReads");
+    let t = Instant::now();
+    let reads = (0..8).map(|i| handle.execute_read(format!("({}, {i})", sleep_js(500))));
+    let results = within(
+        Duration::from_secs(10),
+        "the reads",
+        futures::future::join_all(reads),
+    )
+    .await;
+    let wall = t.elapsed();
+
+    for (i, result) in results.into_iter().enumerate() {
+        assert_eq!(result.expect("every read answers").trim(), i.to_string());
+    }
+    assert!(
+        wall < Duration::from_millis(1500),
+        "8 reads of 500 ms took {wall:?}: they ran one at a time"
+    );
+}
+
+/// A call that reads the agent it acts as, awaits `ms`, reads it again and signs. Logs `label`
+/// in `globalThis.__ends` when it ends. Returns `[did before, did after, author]`.
+fn agent_probe_js(label: &str, ms: u64) -> String {
+    format!(
+        r#"(async () => {{
+            const before = AGENT.did();
+            {sleep};
+            const after = AGENT.did();
+            const author = AGENT.createSignedExpression({{ note: "{label}" }}).author;
+            globalThis.__ends.push("{label}");
+            return JSON.stringify([before, after, author]);
+        }})()"#,
+        sleep = sleep_js(ms)
+    )
+}
+
+/// Calls that overlap act each as its own agent, also after an await: Alice's call awaits
+/// while a read as the main agent and a read as Bob start and end.
+#[tokio::test(flavor = "multi_thread")]
+async fn overlapping_calls_each_act_as_their_own_agent() {
+    let (alice, bob) = two_users();
+    let main = crate::agent::did();
+    let (handle, _dir) = spawn_runtime("QmConcurrentAgents");
+    handle
+        .execute("(globalThis.__ends = [], 0)".into())
+        .await
+        .unwrap();
+
+    // Alice: 0 to 800 ms. Main agent: 100 to 500 ms. Bob: 200 to 400 ms.
+    let alice_call = handle.execute_with_context(
+        agent_probe_js("alice", 800),
+        AgentContext::managed(alice.clone()),
+    );
+    let main_call = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.execute_read(agent_probe_js("main", 400)).await
+    };
+    let bob_call = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        handle
+            .execute_read_with_context(
+                agent_probe_js("bob", 200),
+                AgentContext::managed(bob.clone()),
+            )
+            .await
+    };
+    let (alice_seen, main_seen, bob_seen) = within(
+        Duration::from_secs(10),
+        "the three calls",
+        futures::future::join3(alice_call, main_call, bob_call),
+    )
+    .await;
+
+    let seen = |result: Result<String, String>| -> Vec<String> {
+        serde_json::from_str(result.expect("the call answers").trim()).unwrap()
+    };
+    assert_eq!(seen(alice_seen), vec![alice.clone(); 3], "alice's call");
+    assert_eq!(
+        seen(main_seen),
+        vec![main.clone(); 3],
+        "the main agent's call"
+    );
+    assert_eq!(seen(bob_seen), vec![bob.clone(); 3], "bob's call");
+    let ends = handle
+        .execute("JSON.stringify(globalThis.__ends)".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        ends.trim(),
+        r#"["bob","main","alice"]"#,
+        "the calls did not overlap"
+    );
+}
+
+/// Calls other than reads (commits, uploads, sync) still start and end in send order while
+/// reads run beside them.
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_stay_in_send_order_while_reads_run_beside_them() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentOrder");
+    let reads = (0..20).map(|i| {
+        let latency = (i * 29) % 40;
+        handle.execute_read(format!("({}, {i})", sleep_js(latency)))
+    });
+    let ((started, ended), reads) = within(
+        Duration::from_secs(20),
+        "the burst",
+        futures::future::join(ordered_burst(&handle, 20), futures::future::join_all(reads)),
+    )
+    .await;
+
+    let sent: Vec<usize> = (0..20).collect();
+    assert_eq!(
+        started, sent,
+        "the language received the writes out of order"
+    );
+    assert_eq!(ended, sent, "a later write finished before an earlier one");
+    for (i, read) in reads.into_iter().enumerate() {
+        assert_eq!(read.expect("every read answers").trim(), i.to_string());
+    }
+}
+
+/// A read that cannot start by the deadline (a call holds the isolate's thread) gets an error
+/// and is never run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_that_cannot_start_by_the_deadline_gets_an_error_and_is_not_run() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentReadDeadline");
+    let handle = handle.with_call_deadline(Duration::from_millis(500));
+
+    let busy = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    "(() => { const end = Date.now() + 2000; while (Date.now() < end) {} return 1; })()"
+                        .into(),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let t = Instant::now();
+    let read = within(Duration::from_secs(10), "the read", async {
+        handle
+            .execute_read("(globalThis.__readRan = true)".into())
+            .await
+    })
+    .await;
+    let read_after = t.elapsed();
+    within(Duration::from_secs(10), "the busy call", busy)
+        .await
+        .unwrap()
+        .expect("the busy call answers its caller");
+
+    assert!(read
+        .expect_err("the read could not start by its deadline")
+        .contains("deadline"));
+    assert!(
+        read_after < Duration::from_millis(1500),
+        "the read waited {read_after:?}, past the deadline"
+    );
+    let ran = handle
+        .execute("String(globalThis.__readRan === true)".into())
+        .await
+        .unwrap();
+    assert_eq!(ran.trim(), "false", "a read ran after its caller gave up");
 }
 
 // ---------------------------------------------------------------------------
@@ -677,4 +884,44 @@ async fn call_deadline_bench_f_identity() {
         let _ = handle.teardown().await;
     }
     println!("BENCH F | n={RUNS} | signed as alice {as_alice} | as bob {as_bob} | other {other}");
+}
+
+/// H: a fast call sent 100 ms into a 2 s call to the same language: its latency as an ordered
+/// call (the path every call took before reads) and as a read.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn call_deadline_bench_h_fast_read_beside_a_slow_call() {
+    let mut as_ordered = Vec::new();
+    let mut as_read = Vec::new();
+    for run in 0..RUNS {
+        for read in [false, true] {
+            let (handle, _dir) = spawn_runtime(&format!("QmBenchH{run}{read}"));
+            let slow = {
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    handle
+                        .execute(format!("({}, \"slow\")", sleep_js(2000)))
+                        .await
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let t = Instant::now();
+            let fast = if read {
+                handle.execute_read("1 + 1".into()).await
+            } else {
+                handle.execute("1 + 1".into()).await
+            };
+            let latency = t.elapsed();
+            assert_eq!(fast.unwrap().trim(), "2");
+            slow.await.unwrap().unwrap();
+            if read {
+                as_read.push(latency);
+            } else {
+                as_ordered.push(latency);
+            }
+            let _ = handle.teardown().await;
+        }
+    }
+    report("H", "fast call beside a 2 s call, ordered", as_ordered);
+    report("H", "fast call beside a 2 s call, read", as_read);
 }

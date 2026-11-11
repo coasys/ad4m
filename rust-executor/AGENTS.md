@@ -70,7 +70,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **JS ↔ Rust bridge**: `#[op2]` extensions in `js_core/*_extension.rs`, `holochain_service/`,
   `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every Language
   runtime gets every one of these extensions, so third-party language code reaches every op: an op
-  that signs must sign as `get_runtime_agent_context()`, never as the main agent directly. The one
+  that signs must take the call's agent token (`#[cppgc] call: Option<&CallAgent>`, passed by
+  `caller()` in `agent_extension.js`) and sign as `agent_of(call)`, never as the main agent
+  directly: calls into one language overlap, so the agent travels with the call, not the thread
+  (`js_core/agent_extension.rs`, "The agent a call acts as"). The one
   other kind of JS runtime is a tool bundle's (`tool_bundles/sandbox.rs`), and it gets none of
   them: only its own `tool_bundle_host` extension. Never register a `js_core` extension there.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).

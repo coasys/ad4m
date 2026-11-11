@@ -231,7 +231,7 @@ impl Language {
         let script = r#"JSON.stringify((await language.peersRemote()) ?? [])"#;
 
         let result = controller
-            .execute_on_language(&self.address, script)
+            .execute_read_on_language(&self.address, script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let others_vec = serde_json::from_str(&result)?;
@@ -284,7 +284,7 @@ impl Language {
         let script = r#"JSON.stringify((await language.telepresenceGetOnlineAgents()) ?? [])"#;
 
         let result = controller
-            .execute_on_language(&self.address, script)
+            .execute_read_on_language(&self.address, script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let online_agents = serde_json::from_str(&result)?;

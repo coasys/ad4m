@@ -169,6 +169,10 @@ impl JsCore {
         worker_options: WorkerOptions,
         permissions: PermissionsContainer,
     ) -> Self {
+        // In tests, start V8 with the process's flags before the worker can start it without
+        // them: a test that sets them after that aborts the process (`!IsFrozen()`).
+        #[cfg(test)]
+        crate::test_utils::init_v8_platform();
         let fs = Arc::new(RealFs);
 
         let worker = MainWorker::bootstrap_from_options(

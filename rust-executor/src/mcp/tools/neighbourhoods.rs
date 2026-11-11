@@ -446,7 +446,7 @@ mod guard_tests {
         let asked = format!("expressionGet(\"{template}\")");
         tokio::spawn(async move {
             while let Some(request) = requests.recv().await {
-                let LanguageOperation::Execute(script, _) = &request.operation else {
+                let LanguageOperation::Execute(script, ..) = &request.operation else {
                     continue;
                 };
                 let answer = if script.contains(&asked) {
