@@ -960,6 +960,105 @@ pub(crate) mod test_support {
             .get("status")?
             .as_u64()
     }
+
+    /// A subject class `attack://{class}` with a `body` text and an `items` collection.
+    pub(crate) fn class_shape(class: &str) -> String {
+        json!({
+            "target_class": format!("attack://{class}"),
+            "constructor_actions": [{
+                "action": "addLink", "source": "this",
+                "predicate": "rdf://type", "target": format!("attack://{class}"),
+            }],
+            "properties": [
+                {
+                    "path": "attack://body", "name": "body", "datatype": "xsd:string",
+                    "min_count": 1, "max_count": 1, "writable": true,
+                    "setter": [{
+                        "action": "setSingleTarget", "source": "this",
+                        "predicate": "attack://body", "target": "value",
+                    }],
+                },
+                {
+                    "path": "ad4m://has_child", "name": "items", "collection": true,
+                    "writable": true,
+                    "adder": [{
+                        "action": "addLink", "source": "this",
+                        "predicate": "ad4m://has_child", "target": "value",
+                    }],
+                    "remover": [{
+                        "action": "removeLink", "source": "this",
+                        "predicate": "ad4m://has_child", "target": "value",
+                    }],
+                },
+            ],
+        })
+        .to_string()
+    }
+
+    /// Gives the perspective `uuid` the class `class`, one instance `item://{name}` of it
+    /// whose body is `secret`, and a plain link to `secret` — written by the operator.
+    pub(crate) async fn seed(uuid: &str, class: &str, name: &str, secret: &str) {
+        let operator = handler_as(self::operator());
+        let base = format!("item://{name}");
+        for (tool, arguments) in [
+            (
+                "add_model",
+                json!({"perspective_id": uuid, "class_name": class, "shacl_json": class_shape(class)}),
+            ),
+            (
+                "instance_create",
+                json!({
+                    "perspective_id": uuid, "class_name": class, "base_uri": base,
+                    "properties": {"body": secret},
+                }),
+            ),
+            (
+                "add_link",
+                json!({
+                    "perspective_id": uuid, "source": base,
+                    "predicate": "attack://holds", "target": format!("literal:string:{secret}"),
+                }),
+            ),
+        ] {
+            operator
+                .call_tool_by_name(tool, arguments)
+                .await
+                .unwrap_or_else(|e| panic!("seeding with {tool}: {e}"));
+        }
+    }
+
+    /// Every link of the perspective `uuid` as (source, predicate, target), sorted.
+    pub(crate) async fn links_of(uuid: &str) -> Vec<(String, String, String)> {
+        let mut links: Vec<_> = crate::perspectives::get_perspective(uuid)
+            .expect("the perspective")
+            .get_links(&crate::types::LinkQuery::default())
+            .await
+            .expect("its links")
+            .into_iter()
+            .map(|link| {
+                (
+                    link.data.source,
+                    link.data.predicate.unwrap_or_default(),
+                    link.data.target,
+                )
+            })
+            .collect();
+        links.sort();
+        links
+    }
+
+    /// Two perspectives of `did`'s; the returned ids unregister on `clean_up`.
+    pub(crate) async fn two_perspectives_of(did: &str) -> (String, String, Vec<String>) {
+        let a = perspective(Some(vec![did.to_string()])).await;
+        let b = perspective(Some(vec![did.to_string()])).await;
+        (a.clone(), b.clone(), vec![a, b])
+    }
+
+    pub(crate) async fn clean_up(perspectives: Vec<String>) {
+        for uuid in perspectives {
+            crate::perspectives::unregister_perspective(&uuid);
+        }
+    }
 }
 
 #[cfg(test)]

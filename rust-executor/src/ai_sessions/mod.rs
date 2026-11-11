@@ -25,6 +25,10 @@ pub mod run;
 pub mod service;
 pub mod store;
 #[cfg(test)]
+mod surface_tests;
+#[cfg(test)]
+mod testkit;
+#[cfg(test)]
 mod tests;
 pub mod types;
 
