@@ -5,8 +5,9 @@
 //! acts on; `tool_returned` ends it `done` or `failed` with the result or the error. The
 //! loop runs calls one at a time in order, so a FIFO of open step ids pairs each return
 //! with its call; a return without a call (never from the loop; kept safe) appends a
-//! finished step. A step still `running` when the turn ends stays `running` until the
-//! startup sweep marks it `interrupted` — it answers the model `"error: …"` in the rebuilt
+//! finished step. A step still open when the turn ends — cancelled, out of time, or its
+//! task gone mid-call — is marked `interrupted` as the observer drops, so no step reads
+//! `running` on a turn that has ended; it answers the model `"error: …"` in the rebuilt
 //! history.
 
 use std::collections::VecDeque;
@@ -49,6 +50,36 @@ impl StepObserver {
     fn push(&self, step: super::types::AgentSessionMessage) -> Option<()> {
         service::publish_step(&self.agent, &self.session_id, step);
         Some(())
+    }
+}
+
+/// The turn is over and nothing will return for the steps still open: each is marked
+/// `interrupted` and told to the owner. Runs on every way a turn ends, an abort included —
+/// the observer lives in the turn's future.
+impl Drop for StepObserver {
+    fn drop(&mut self) {
+        let open = std::mem::take(self.open.get_mut().unwrap_or_else(|e| e.into_inner()));
+        for id in open {
+            match self.store.finish_message(
+                self.owner_did.as_deref(),
+                &id,
+                AgentTurnStatus::Interrupted,
+                Some("the turn ended before this call returned"),
+                None,
+            ) {
+                Ok(true) => {
+                    if let Ok(Some(step)) = self.store.message(self.owner_did.as_deref(), &id) {
+                        self.push(step);
+                    }
+                }
+                // The session was deleted with its rows: nothing is left to mark.
+                Ok(false) => {}
+                Err(e) => log::error!(
+                    "agent session {}: could not mark a cut-off tool step: {e}",
+                    self.session_id
+                ),
+            }
+        }
     }
 }
 
