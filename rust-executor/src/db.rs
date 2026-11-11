@@ -26,6 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
+mod agent_sessions;
 mod grants;
 mod identity;
 mod tasks;
@@ -590,6 +591,8 @@ impl Ad4mDb {
             "CREATE INDEX IF NOT EXISTS idx_flow_fired_mark_instance
              ON flow_fired_mark(perspective, agent_did, instance)",
         )?;
+
+        agent_sessions::create_agent_session_tables(&conn)?;
 
         Ok(Self { conn })
     }

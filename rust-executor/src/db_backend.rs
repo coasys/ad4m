@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 
+use crate::agent_sessions::types::{AgentSession, AgentSessionMessage, AgentSessionUpdate};
 use crate::db::{
     Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinRow,
     OperatorRecordRow, PaymentRequest,
@@ -381,6 +382,69 @@ macro_rules! ad4m_db_methods {
             fn agents_of_identity(&self, scid: &str) -> Ad4mDbResult<Vec<String>>;
             fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
+
+            // Agent sessions (`agent_sessions/`): a run's state lives in these tables,
+            // never only in memory. Every method scopes by `owner_did` (`None` = the main
+            // agent), so a caller can never reach another agent's session.
+            fn create_agent_session(&self, session: &AgentSession) -> Result<(), rusqlite::Error>;
+            fn get_agent_session(
+                &self,
+                owner_did: Option<&str>,
+                id: &str
+            ) -> Result<Option<AgentSession>, rusqlite::Error>;
+            fn get_agent_session_any(
+                &self,
+                id: &str
+            ) -> Result<Option<AgentSession>, rusqlite::Error>;
+            fn list_agent_sessions(
+                &self,
+                owner_did: Option<&str>
+            ) -> Result<Vec<AgentSession>, rusqlite::Error>;
+            fn update_agent_session(
+                &self,
+                owner_did: Option<&str>,
+                id: &str,
+                update: &AgentSessionUpdate
+            ) -> Result<bool, rusqlite::Error>;
+            fn delete_agent_session(
+                &self,
+                owner_did: Option<&str>,
+                id: &str
+            ) -> Result<bool, rusqlite::Error>;
+            fn append_agent_message(
+                &self,
+                owner_did: Option<&str>,
+                id: &str,
+                session_id: &str,
+                role: &str,
+                content: &str,
+                status: Option<&str>
+            ) -> Result<Option<AgentSessionMessage>, rusqlite::Error>;
+            fn get_agent_message(
+                &self,
+                owner_did: Option<&str>,
+                id: &str
+            ) -> Result<Option<AgentSessionMessage>, rusqlite::Error>;
+            fn finish_agent_message(
+                &self,
+                owner_did: Option<&str>,
+                id: &str,
+                status: &str,
+                error: Option<&str>,
+                content_patch: Option<&Value>
+            ) -> Result<bool, rusqlite::Error>;
+            fn list_agent_messages(
+                &self,
+                owner_did: Option<&str>,
+                session_id: &str,
+                limit: u32,
+                before: Option<i64>
+            ) -> Result<Vec<AgentSessionMessage>, rusqlite::Error>;
+            fn count_running_agent_turns(&self, owner_did: Option<&str>) -> Result<i64, rusqlite::Error>;
+            fn interrupt_running_agent_messages(
+                &self,
+                session_id: Option<&str>
+            ) -> Result<u64, rusqlite::Error>;
 
             // Expression cache
             fn _add_expression(&self, url: &str, expression: &Expression<Value>) -> Ad4mDbResult<()>;

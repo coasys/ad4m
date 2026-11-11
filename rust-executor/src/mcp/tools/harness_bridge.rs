@@ -107,7 +107,10 @@ impl Ad4mMcpHandler {
             "get_documentation" => dispatch_static_tool!(get_documentation),
             // ── perspectives.rs ─────────────────────────────────────────
             "list_perspectives" => dispatch_static_tool!(list_perspectives),
+            "add_perspective" => dispatch_static_tool!(add_perspective),
+            "add_link" => dispatch_static_tool!(add_link),
             "query_links" => dispatch_static_tool!(query_links),
+            "add_model" => dispatch_static_tool!(add_model),
             // ── instances/ ──────────────────────────────────────────────
             // The static class-agnostic surface is on the router, so
             // `list_tool_schemas` advertises it to the harness LLM; these
@@ -129,6 +132,74 @@ impl Ad4mMcpHandler {
             "execute_commands" => dispatch_static_tool!(execute_commands),
             "template_read" => dispatch_static_tool!(template_read),
             "template_update" => dispatch_static_tool!(template_update),
+            // ── flows.rs ────────────────────────────────────────────────
+            "add_flow" => dispatch_static_tool!(add_flow),
+            "get_flows" => dispatch_static_tool!(get_flows),
+            "flow_state" => dispatch_static_tool!(flow_state),
+            "flow_actions" => dispatch_static_tool!(flow_actions),
+            "flow_proposal_accept" => dispatch_static_tool!(flow_proposal_accept),
+            "flow_proposal_reject" => dispatch_static_tool!(flow_proposal_reject),
+            "flow_valid_outputs" => dispatch_static_tool!(flow_valid_outputs),
+            // ── subscriptions.rs ────────────────────────────────────────
+            "generate_waker_query" => dispatch_static_tool!(generate_waker_query),
+            "get_mention_waker_config" => dispatch_static_tool!(get_mention_waker_config),
+            // ── languages.rs ────────────────────────────────────────────
+            "language_meta" => dispatch_static_tool!(language_meta),
+            // ── neighbourhoods.rs ───────────────────────────────────────
+            "list_link_language_templates" => {
+                return Ok(self.list_link_language_templates().await);
+            }
+            "neighbourhood_publish_from_perspective" => {
+                dispatch_static_tool!(neighbourhood_publish_from_perspective)
+            }
+            "neighbourhood_join_from_url" => {
+                dispatch_static_tool!(neighbourhood_join_from_url)
+            }
+            // ── profiles.rs ─────────────────────────────────────────────
+            "get_my_did" => dispatch_static_tool!(get_my_did),
+            "get_agent_profile" => dispatch_static_tool!(get_agent_profile),
+            "set_agent_profile" => dispatch_static_tool!(set_agent_profile),
+            "set_agent_profile_picture" => dispatch_static_tool!(set_agent_profile_picture),
+            "get_agent_public_perspective" => {
+                dispatch_static_tool!(get_agent_public_perspective)
+            }
+            "set_agent_public_perspective" => {
+                dispatch_static_tool!(set_agent_public_perspective)
+            }
+            // ── auth.rs ─────────────────────────────────────────────────
+            // `auth_status` needs an rmcp `RequestContext` nothing in-process can
+            // build; `auth_status_as` resolves the same held session.
+            "auth_status" => {
+                return Ok(self
+                    .auth_status_as(crate::mcp::tools::RequestAuth {
+                        header: None,
+                        reach: None,
+                    })
+                    .await);
+            }
+            "login_email" => dispatch_static_tool!(login_email),
+            "signup" => dispatch_static_tool!(signup),
+            "request_login_verification" => {
+                dispatch_static_tool!(request_login_verification)
+            }
+            "verify_email_code" => dispatch_static_tool!(verify_email_code),
+            // `request_capability` also names an rmcp `RequestContext`; `request_capability_as`
+            // takes the params and resolves the same held session.
+            "request_capability" => {
+                let params = serde_json::from_value(args).map_err(|e| {
+                    anyhow!("failed to deserialize `request_capability` arguments: {e}")
+                })?;
+                return Ok(self
+                    .request_capability_as(
+                        crate::mcp::tools::RequestAuth {
+                            header: None,
+                            reach: None,
+                        },
+                        params,
+                    )
+                    .await);
+            }
+            "generate_jwt" => dispatch_static_tool!(generate_jwt),
             // ── fallback: per-class dynamic tools ───────────────────────
             _ => {
                 // `handle_dynamic_tool` expects the args as a

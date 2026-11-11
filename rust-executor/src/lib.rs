@@ -27,6 +27,7 @@ pub mod utils;
 pub mod wallet;
 
 pub mod agent;
+pub mod agent_sessions;
 pub mod ai_service;
 pub mod billing;
 mod dapp_server;
@@ -582,6 +583,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .as_str(),
     )
     .expect("Failed to initialize Ad4mDb");
+
+    // A turn left `running` by the process that just died is interrupted, not still going.
+    agent_sessions::service::startup_sweep();
 
     // The seed names the network's identity store, which the identity module reads below.
     info!("Initializing Runtime service...");

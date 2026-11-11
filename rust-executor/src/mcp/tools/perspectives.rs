@@ -330,16 +330,22 @@ impl Ad4mMcpHandler {
     pub async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;
 
-        if let Err(message) = validate_class_name(&p.class_name, &p.shacl_json) {
-            return message;
-        }
-
         let params = json!({
             "uuid": p.perspective_id,
             "name": p.class_name,
             "sdnaType": "subject_class",
             "shaclJson": p.shacl_json,
         });
+        // The method's guard answers before the caller's own arguments are read: a
+        // perspective the caller may not write is refused, not validated against.
+        if let Err(e) = self.admit_method("perspective.addSdna", &params).await {
+            return method_error(e);
+        }
+
+        if let Err(message) = validate_class_name(&p.class_name, &p.shacl_json) {
+            return message;
+        }
+
         let added = self
             .call::<serde_json::Value>("perspective.addSdna", params, labelled("Error adding SDNA"))
             .await;

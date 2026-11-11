@@ -197,12 +197,12 @@ const DEFAULT_LINK_WRITE: f64 = 0.25;
 /// fire-and-forget deduction that logs on `InsufficientCredits` but
 /// doesn't halt the loop. A pass that ends with zero bases used to be
 /// free regardless of how many completions it burned.
-pub(super) struct WsHarnessCreditGate {
+pub(crate) struct WsHarnessCreditGate {
     agent_did: Option<String>,
 }
 
 impl WsHarnessCreditGate {
-    pub(super) fn new(agent_did: Option<String>) -> Self {
+    pub(crate) fn new(agent_did: Option<String>) -> Self {
         Self { agent_did }
     }
 }

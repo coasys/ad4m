@@ -17,6 +17,7 @@ use serde_json::Value;
 /// (`agent-updated`): the one list of wire names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Topic {
+    AgentSessionChanged,
     AgentStatusChanged,
     AgentUpdated,
     AppsChanged,
@@ -47,7 +48,8 @@ pub enum Topic {
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 26] = [
+    pub const ALL: [Topic; 27] = [
+        Topic::AgentSessionChanged,
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -80,6 +82,7 @@ impl Topic {
     /// of `events.watch` params.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Topic::AgentSessionChanged => "agent-session-changed",
             Topic::AgentStatusChanged => "agent-status-changed",
             Topic::AgentUpdated => "agent-updated",
             Topic::AppsChanged => "apps-changed",
@@ -123,9 +126,11 @@ impl Topic {
         // No `_` arm: a new topic does not compile until someone chooses its capability.
         match self {
             // `agent.status`, `agent.get`; a fork shows in `identity.status`.
-            Topic::AgentStatusChanged | Topic::AgentUpdated | Topic::IdentityFork => {
-                caps::AGENT_READ_CAPABILITY.clone()
-            }
+            // `agent.session*` reads agent data of the same owner.
+            Topic::AgentSessionChanged
+            | Topic::AgentStatusChanged
+            | Topic::AgentUpdated
+            | Topic::IdentityFork => caps::AGENT_READ_CAPABILITY.clone(),
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead
