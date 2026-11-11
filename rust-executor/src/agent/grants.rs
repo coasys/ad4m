@@ -543,10 +543,15 @@ impl Grants {
         grants
     }
 
-    /// Revokes every grant bound to the device key `key` (a multikey): its key stopped being
-    /// valid in its identity's log. Returns how many were active.
-    pub fn revoke_key(&self, key: &str) -> Result<usize, GrantError> {
-        self.revoke_unexpired_where(|g| g.key.as_ref().is_some_and(|k| k.key == key))
+    /// Revokes every grant bound to the device key `key` (a multikey) of the identity `scid`
+    /// (`did:scid:…`): its key stopped being valid in that identity's log. Returns how many
+    /// were active.
+    pub fn revoke_key(&self, scid: &str, key: &str) -> Result<usize, GrantError> {
+        self.revoke_unexpired_where(|g| {
+            g.key
+                .as_ref()
+                .is_some_and(|k| k.scid == scid && k.key == key)
+        })
     }
 
     /// Revokes every grant bound to a key of the identity `scid` (`did:scid:…`), except the

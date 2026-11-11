@@ -1,4 +1,4 @@
-use crate::identity::verdict::{InvalidReason, LinkVerdict};
+use crate::identity::verdict::{replaces, InvalidReason, LinkVerdict};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
 use crate::types::LinkStatus;
 use crate::types::{
@@ -552,6 +552,9 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 /// as stored) is the link the store holds, judged anew: its judgement is
 /// rewritten whichever way it moved, so a re-check records a log learned
 /// since (`cantCheck` to `valid`) or a revocation (`valid` to `flagged`).
+/// The one move it does not make is `valid` to `cantCheck`
+/// ([`crate::identity::verdict::replaces`]): [`write_link_quads_proof`]
+/// keeps the stored judgement then.
 ///
 /// One partial write heals rows stored before #1141, which kept no
 /// `wireTarget`: a verified row without one, re-inserted with the same
@@ -771,6 +774,10 @@ fn write_link_quads_proof(
     } else {
         link.check_entered(entered)
     };
+    // A stored `valid` is not replaced by `cantCheck` ([`replaces`]): the stored judgement
+    // (`proofValid`, the verdict, the person) stays as it is, and with it the order above.
+    let stored = counted_before.then_some(LinkVerdict::Valid);
+    let keep_judgement = !replaces(stored.as_ref(), &checked.verdict);
     let incoming_valid = checked.verdict.counts();
     let valid_str = incoming_valid.to_string();
     let verdict_str = checked.verdict.stored();
@@ -797,11 +804,15 @@ fn write_link_quads_proof(
             wire_target.as_deref(),
         )?
     };
-    let judgement = [
-        (ONT_PROOF_VALID, Some(valid_str.as_str())),
-        (ONT_LINK_VERDICT, Some(verdict_str.as_str())),
-        (ONT_PERSON, checked.person.as_deref()),
-    ];
+    let judgement = if keep_judgement {
+        vec![]
+    } else {
+        vec![
+            (ONT_PROOF_VALID, Some(valid_str.as_str())),
+            (ONT_LINK_VERDICT, Some(verdict_str.as_str())),
+            (ONT_PERSON, checked.person.as_deref()),
+        ]
+    };
     match write {
         ProofWrite::Whole => {
             annotations.extend([
@@ -3736,6 +3747,77 @@ mod tests {
         assert_eq!(links[0].proof.anchor, Some(1));
         assert_eq!(links[0].verdict, Some(LinkVerdict::CantCheck));
         global_key_map().forget(&log.scid());
+    }
+
+    /// The same link written again while its signer's log is not in the key map keeps its
+    /// stored `valid` (and person): `cantCheck` never replaces it. The stored `valid` is the
+    /// order the store knows, so once the log is back with the key revoked after the anchor,
+    /// a third write still counts the link.
+    #[test]
+    fn a_write_while_the_log_is_unknown_keeps_a_stored_valid() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+        let mut log = TestLog::new(113);
+        let map = global_key_map();
+        let publish = |log: &TestLog, trusted: u64| {
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted,
+                },
+            );
+            map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+        };
+        publish(&log, 0);
+        let person = ad4m_identity_core::did_of(&log.scid());
+        let key = log.device.key();
+        let data = Link {
+            source: "ad4m://post".into(),
+            predicate: Some("we://mention".into()),
+            target: "ad4m://someone".into(),
+        };
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, T1, 0).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp: T1.into(),
+            data,
+            proof: crate::types::ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        let svc = new_service();
+        let judged = |svc: &SparqlStore| {
+            let links = svc.get_all_links().unwrap();
+            assert_eq!(links.len(), 1, "{links:?}");
+            (
+                links[0].verdict.clone(),
+                links[0].proof.valid,
+                links[0].person.clone(),
+            )
+        };
+        let counted = (Some(LinkVerdict::Valid), Some(true), Some(person.clone()));
+        assert!(svc.add_remote_link(&link).unwrap());
+        assert_eq!(judged(&svc), counted);
+
+        // The log leaves the key map: the link alone would judge `cantCheck` now.
+        map.forget(&log.scid());
+        assert_eq!(link.check_entered(None).verdict, LinkVerdict::CantCheck);
+        assert!(svc.add_remote_link(&link).unwrap());
+        assert_eq!(judged(&svc), counted, "the stored valid stays");
+        svc.rejudge_link(&link).unwrap();
+        assert_eq!(judged(&svc), counted, "a re-check write keeps it too");
+
+        // The log comes back with the device revoked at seq 1, after the anchor.
+        log.revoke_d1();
+        publish(&log, 1);
+        assert!(svc.add_remote_link(&link).unwrap());
+        assert_eq!(judged(&svc), counted, "counted before the revocation");
+        map.forget(&log.scid());
     }
 
     /// A link stating, in the store's bookkeeping vocabulary, that the store

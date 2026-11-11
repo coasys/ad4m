@@ -13,7 +13,7 @@ export type CallSessionInfo = { roomName: string, neighbourhoodUrl: string, part
 redirectTo?: string, 
 /**
  * Roster of existing participants at join time, format:
- * `"participantId:did"` (local) or `"remote-did:did"` (cascade).
+ * `"participantId:did"`.
  * For track-to-DID attribution, use the `track_mapping` field on
  * each renegotiation offer — the SDP mids are assigned there.
  */

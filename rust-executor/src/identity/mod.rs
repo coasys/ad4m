@@ -456,10 +456,34 @@ pub(crate) fn is_local_agent(did: &str) -> bool {
 /// [`resolver::ADMIT_FRESHNESS`] ago, which is what the receipt paths lean on before they
 /// re-judge carried links under the same window a live write is admitted under.
 pub async fn prepare_link_signers(links: &[LinkExpression]) {
+    #[cfg(test)]
+    if let Ok(resolver) = TEST_RESOLVER.try_with(Arc::clone) {
+        resolver.prepare(&signers_to_prepare(links)).await;
+        return;
+    }
     let Some(service) = SERVICE.get() else {
         return;
     };
     service.resolver.prepare(&signers_to_prepare(links)).await;
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Test-only: the resolver [`prepare_link_signers`] uses inside [`with_test_resolver`],
+    /// in place of the one [`init`] puts in [`SERVICE`]. Scoped to one test's task, so a test
+    /// can drive an entry point through the prepare step on a fake store without setting the
+    /// process-wide `SERVICE` (a `OnceLock`) under every other test in the binary.
+    static TEST_RESOLVER: Arc<Resolver>;
+}
+
+/// Test-only: runs `fut` with `resolver` standing in for the started module's resolver in
+/// [`prepare_link_signers`].
+#[cfg(test)]
+pub(crate) async fn with_test_resolver<F: std::future::Future>(
+    resolver: Arc<Resolver>,
+    fut: F,
+) -> F::Output {
+    TEST_RESOLVER.scope(resolver, fut).await
 }
 
 /// The `(did:key, anchor)` pairs of `links` worth asking the key index about: those whose
