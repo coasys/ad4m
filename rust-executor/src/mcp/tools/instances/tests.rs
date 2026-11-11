@@ -4741,6 +4741,19 @@ async fn template_create_refuses_a_place_it_was_not_given() {
         .await;
     assert!(elsewhere.contains("not in 'attic'"), "{elsewhere}");
 
+    // A `place` that is there but not a string is refused, not read as the library.
+    for place in [json!(null), json!(3)] {
+        let odd = handler
+            .template_create(create_params(
+                &space,
+                Some(&library),
+                None,
+                json!({ "name": "Odd", "place": place }),
+            ))
+            .await;
+        assert!(odd.contains("takes `place` as a string"), "{odd}");
+    }
+
     assert_eq!(templates_in(&space).await.len(), 1);
     assert_eq!(templates_in(&library).await.len(), 0);
 }

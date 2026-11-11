@@ -219,7 +219,11 @@ impl Ad4mMcpHandler {
         places.extend(library.filter(|l| *l != perspective_id));
         for uuid in places {
             let perspective = self.template_perspective(uuid, writes).await?;
-            if find_template(&perspective, base_uri).await.is_some() {
+            if find_template(&perspective, base_uri)
+                .await
+                .map_err(error_json)?
+                .is_some()
+            {
                 return Ok((uuid.to_string(), perspective));
             }
         }
@@ -265,7 +269,11 @@ impl Ad4mMcpHandler {
         } else {
             None
         };
-        let Some((class_name, instance)) = find_template(&perspective, &base_uri).await else {
+        let found = match find_template(&perspective, &base_uri).await {
+            Ok(found) => found,
+            Err(e) => return error_json(e),
+        };
+        let Some((class_name, instance)) = found else {
             return error_json(format!(
                 "'{name}' works on {}, and there is no such record at '{base_uri}'.",
                 builtin::declared().applies_to.join(" or ")
@@ -333,12 +341,17 @@ impl Ad4mMcpHandler {
 
         // Where the new record goes is the call's to choose, among the places the tool allows:
         // the bundle answers with the same place, or refuses.
-        let place = p
-            .arguments
-            .get("place")
-            .and_then(Value::as_str)
-            .unwrap_or("library")
-            .to_string();
+        // Absent means the library; a `place` that is there must name one.
+        let place = match p.arguments.get("place") {
+            None => "library".to_string(),
+            Some(Value::String(place)) => place.clone(),
+            Some(other) => {
+                return error_json(format!(
+                    "'{name}' takes `place` as a string ({}), not {other}.",
+                    creates.places.join(" or ")
+                ))
+            }
+        };
         if !creates.places.contains(&place) {
             return error_json(format!(
                 "'{name}' makes a {} in {}, not in '{place}'.",
@@ -401,7 +414,11 @@ impl Ad4mMcpHandler {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let Some((class_name, instance)) = find_template(&perspective, &base_uri).await else {
+            let found = match find_template(&perspective, &base_uri).await {
+                Ok(found) => found,
+                Err(e) => return error_json(e),
+            };
+            let Some((class_name, instance)) = found else {
                 return error_json(format!(
                     "There is no template at '{base_uri}' to start from."
                 ));
@@ -558,20 +575,22 @@ fn named(uuid: &Option<String>) -> Option<&str> {
 }
 
 /// The template at `base_uri` in `perspective`, as a class the tools work on: its class and
-/// properties, or `None` when there is none.
+/// properties, or `None` when there is none. A query that fails in a perspective defining the
+/// class is an error, not a miss: a miss sends `locate_template` on to the library.
 async fn find_template(
     perspective: &PerspectiveInstance,
     base_uri: &str,
-) -> Option<(String, Value)> {
+) -> Result<Option<(String, Value)>, String> {
     for class_name in &builtin::declared().applies_to {
-        match fetch_instance(perspective, class_name, base_uri).await {
-            Ok(Some(instance)) => return Some((class_name.clone(), instance)),
-            Ok(None) => {}
-            // A class this perspective does not define is simply not this record's.
-            Err(_) => {}
+        // A class this perspective does not define is simply not this record's.
+        if perspective.get_shape(class_name).is_err() {
+            continue;
+        }
+        if let Some(instance) = fetch_instance(perspective, class_name, base_uri).await? {
+            return Ok(Some((class_name.clone(), instance)));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Why [`Ad4mMcpHandler::write_record`] wrote nothing.
