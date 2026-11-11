@@ -92,14 +92,25 @@ fn system_prompt(session: &AgentSession) -> String {
 /// The transcript a new turn of `session` continues: the last [`HISTORY_MAX_MESSAGES`]
 /// entries, tool calls and their results included, the running assistant row the turn is
 /// writing left out. Capped by [`HISTORY_MAX_BYTES`] too — oldest groups fall off first.
+///
+/// A turn's rows are in the order `service::send` and the observer write them: the
+/// person's message, the assistant row (the answer lands on it when the turn ends), then
+/// the steps. The model reads them in the order they happened: the message, the calls and
+/// their results, then the answer.
 pub(crate) fn history(messages: Vec<AgentSessionMessage>) -> Vec<Value> {
     // Group a run of tool steps into the OpenAI shape the loop itself appends: one
     // assistant message carrying `tool_calls`, then one `tool` message per call. A step
     // still `running` (its task died mid-call) answers a synthetic `error: …` result.
     let mut out: Vec<Value> = Vec::new();
     let mut tool_group: Vec<&AgentSessionMessage> = Vec::new();
-    let flush = |out: &mut Vec<Value>, group: &mut Vec<&AgentSessionMessage>| {
+    // The answer of the turn being read, held back until the steps that follow its row
+    // are out.
+    let mut answer: Option<Value> = None;
+    let flush = |out: &mut Vec<Value>,
+                 group: &mut Vec<&AgentSessionMessage>,
+                 answer: &mut Option<Value>| {
         if group.is_empty() {
+            out.extend(answer.take());
             return;
         }
         let calls: Vec<Value> = group
@@ -127,17 +138,18 @@ pub(crate) fn history(messages: Vec<AgentSessionMessage>) -> Vec<Value> {
                 "content": step.tool_result_text(),
             }));
         }
+        out.extend(answer.take());
     };
     for message in &messages {
         match message.role {
             AgentSessionMessageRole::User => {
-                flush(&mut out, &mut tool_group);
+                flush(&mut out, &mut tool_group, &mut answer);
                 if let Some(text) = message.content.get("text").and_then(Value::as_str) {
                     out.push(json!({ "role": "user", "content": text }));
                 }
             }
             AgentSessionMessageRole::Assistant => {
-                flush(&mut out, &mut tool_group);
+                flush(&mut out, &mut tool_group, &mut answer);
                 // The turn this history feeds is `running`: not part of the past. A
                 // finished turn contributes its answer; a failed one its error text, so
                 // the model sees it stumbled.
@@ -151,25 +163,26 @@ pub(crate) fn history(messages: Vec<AgentSessionMessage>) -> Vec<Value> {
                             .filter(|t| !t.is_empty())
                             .map(str::to_string)
                             .or_else(|| message.error.as_ref().map(|e| format!("error: {e}")));
-                        if let Some(text) = text {
-                            out.push(json!({ "role": "assistant", "content": text }));
-                        }
+                        answer = text.map(|text| json!({ "role": "assistant", "content": text }));
                     }
                 }
             }
             AgentSessionMessageRole::Tool => tool_group.push(message),
         }
     }
-    flush(&mut out, &mut tool_group);
+    flush(&mut out, &mut tool_group, &mut answer);
 
-    // Cap by size: drop the oldest entries until the transcript fits. The loop keeps
-    // tool groups contiguous — dropping can split one, and that is fine: the model gets
-    // the suffix, not a corrupted middle.
+    // Cap by size: drop the oldest entries until the transcript fits.
     while serde_json::to_string(&out).map(|s| s.len()).unwrap_or(0) > HISTORY_MAX_BYTES
         && out.len() > 1
     {
         out.remove(0);
     }
+    // The cut can fall inside a tool group and leave results whose call went with it. A
+    // `tool` message that answers no call is one a provider refuses the whole request
+    // for: those go too.
+    let orphans = out.iter().take_while(|m| m["role"] == "tool").count();
+    out.drain(..orphans);
     out
 }
 
@@ -331,6 +344,8 @@ mod tests {
         }
     }
 
+    // The rows in the order a send and its turn write them: the person's message, the
+    // assistant row the answer lands on, then the steps.
     #[test]
     fn the_model_sees_past_tool_calls_and_their_results() {
         let messages = vec![
@@ -342,17 +357,17 @@ mod tests {
                 None,
             ),
             row(
-                "t1",
+                "a1",
                 2,
-                AgentSessionMessageRole::Tool,
-                json!({ "name": "query_links", "arguments": {"perspective_id": "p"}, "result": "3 links" }),
+                AgentSessionMessageRole::Assistant,
+                assistant_content("3 links"),
                 Some(AgentTurnStatus::Done),
             ),
             row(
-                "a1",
+                "t1",
                 3,
-                AgentSessionMessageRole::Assistant,
-                assistant_content("3 links"),
+                AgentSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {"perspective_id": "p"}, "result": "3 links" }),
                 Some(AgentTurnStatus::Done),
             ),
             row(
@@ -371,7 +386,8 @@ mod tests {
             ),
         ];
         let history = history(messages);
-        // user, assistant(tool_calls), tool result, assistant, user — the running reply is out.
+        // As it happened: user, assistant(tool_calls), tool result, the answer, user — the
+        // running reply is out.
         assert_eq!(history.len(), 5);
         assert_eq!(
             history[0],
@@ -412,17 +428,17 @@ mod tests {
                 None,
             ),
             row(
-                "t1",
+                "a1",
                 2,
-                AgentSessionMessageRole::Tool,
-                tool_content("add_link", &json!({"perspective_id": "p"}), Some("p")),
+                AgentSessionMessageRole::Assistant,
+                assistant_content(""),
                 Some(AgentTurnStatus::Running),
             ),
             row(
-                "a1",
+                "t1",
                 3,
-                AgentSessionMessageRole::Assistant,
-                assistant_content(""),
+                AgentSessionMessageRole::Tool,
+                tool_content("add_link", &json!({"perspective_id": "p"}), Some("p")),
                 Some(AgentTurnStatus::Running),
             ),
         ];
@@ -432,5 +448,103 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("error: "));
+    }
+
+    // A turn that failed after its steps still reads calls first, then what went wrong.
+    #[test]
+    fn a_failed_turns_error_follows_its_steps() {
+        let mut failed = row(
+            "a1",
+            2,
+            AgentSessionMessageRole::Assistant,
+            assistant_content(""),
+            Some(AgentTurnStatus::Failed),
+        );
+        failed.error = Some("the turn ran out of time".into());
+        let messages = vec![
+            row(
+                "u1",
+                1,
+                AgentSessionMessageRole::User,
+                user_content("go"),
+                None,
+            ),
+            failed,
+            row(
+                "t1",
+                3,
+                AgentSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {}, "result": "3 links" }),
+                Some(AgentTurnStatus::Done),
+            ),
+        ];
+        let history = history(messages);
+        let roles: Vec<&str> = history
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "assistant"]);
+        assert!(history[1].get("tool_calls").is_some());
+        assert_eq!(history[3]["content"], "error: the turn ran out of time");
+    }
+
+    // The size cap drops the oldest entries; when the cut falls inside a tool group, the
+    // results left without their call go too — a provider refuses a request that carries a
+    // `tool` message answering no call.
+    #[test]
+    fn a_cut_inside_a_tool_group_leaves_no_result_without_its_call() {
+        let step = |id: &str, seq: i64, bytes: usize| {
+            row(
+                id,
+                seq,
+                AgentSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {}, "result": "x".repeat(bytes) }),
+                Some(AgentTurnStatus::Done),
+            )
+        };
+        let messages = vec![
+            row(
+                "u1",
+                1,
+                AgentSessionMessageRole::User,
+                user_content("read it all"),
+                None,
+            ),
+            row(
+                "a1",
+                2,
+                AgentSessionMessageRole::Assistant,
+                assistant_content("read"),
+                Some(AgentTurnStatus::Done),
+            ),
+            // Together over the cap; the second alone fits.
+            step("t1", 3, HISTORY_MAX_BYTES - 1024),
+            step("t2", 4, 8 * 1024),
+            row(
+                "u2",
+                5,
+                AgentSessionMessageRole::User,
+                user_content("and now?"),
+                None,
+            ),
+        ];
+        let history = history(messages);
+        let called: Vec<&str> = history
+            .iter()
+            .filter_map(|m| m.get("tool_calls"))
+            .flat_map(|calls| calls.as_array().unwrap())
+            .map(|call| call["id"].as_str().unwrap())
+            .collect();
+        for result in history.iter().filter(|m| m["role"] == "tool") {
+            let id = result["tool_call_id"].as_str().unwrap();
+            assert!(called.contains(&id), "{id} answers no call in the history");
+        }
+        assert_eq!(
+            history,
+            vec![
+                json!({"role": "assistant", "content": "read"}),
+                json!({"role": "user", "content": "and now?"}),
+            ]
+        );
     }
 }
