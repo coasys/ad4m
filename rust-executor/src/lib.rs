@@ -460,6 +460,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     if let Err(e) = exit::forbid_core_dumps() {
         warn!("Could not turn off core dumps for the executor: {e}");
     }
+    // Files and folders made from here on are private to this user, the ones libraries make
+    // with the default mode too (the perspectives' SPARQL stores, which add files while they
+    // run). For an embedder this applies to its whole process.
+    at_rest::files::private_umask();
 
     // Write PID file if requested via config.
     // Test harnesses can set pid_file to get a reliable PID for targeted cleanup.

@@ -28,6 +28,9 @@ use super::{Ad4mDb, Ad4mDbResult};
 use crate::at_rest::keyring_file::{KeyOwner, StoreId};
 use crate::at_rest::sqlite::{self, Cell, SealError};
 
+/// The tombstone reason of a perspective's store destroyed with the perspective.
+pub(crate) const PERSPECTIVE_REMOVED: &str = "perspective-removed";
+
 /// A row as `seal_plain_values` reads it: rowid, owner, key values, column values.
 type StoredRow = (i64, Option<String>, Vec<String>, Vec<Option<String>>);
 
@@ -323,8 +326,10 @@ impl Ad4mDb {
     }
 
     /// The sealer of a row to write. Makes the store (and its owners' persons) when it does
-    /// not exist yet. A perspective's store is wrapped for `perspective_owners` when given
-    /// (a handle being written), else for its handle's owners.
+    /// not exist yet. A perspective's handle being written (`perspective_owners` given) sets
+    /// the store's owners to the persons its owner DIDs name: an owner added to the handle
+    /// gets a wrap of the key, one dropped from it loses its wrap. Any other row of a
+    /// perspective only makes sure its handle's owners hold the key.
     pub(crate) fn writer(
         &self,
         table: &SealedTable,
@@ -334,21 +339,59 @@ impl Ad4mDb {
     ) -> rusqlite::Result<RowSealer<'_>> {
         let sealer = self.reader(table, owner, key)?;
         if let (Some(keys), Some(store)) = (&self.rows, &sealer.store) {
-            let owners = match store {
-                StoreId::Executor => Vec::new(),
-                StoreId::Person(person) => vec![person.clone()],
-                StoreId::Perspective(uuid) => {
-                    let dids = match perspective_owners {
-                        Some(dids) => dids.to_vec(),
-                        None => self.perspective_owner_dids(&uuid.to_string())?,
-                    };
-                    self.perspective_key_owners(&dids)?
-                }
+            let keyed = match store {
+                StoreId::Executor => keys.ensure_store(store, &[]),
+                StoreId::Person(person) => keys.ensure_store(store, std::slice::from_ref(person)),
+                StoreId::Perspective(uuid) => match perspective_owners {
+                    Some(dids) => keys.set_store_owners(store, &self.perspective_key_owners(dids)?),
+                    None => {
+                        let dids = self.perspective_owner_dids(&uuid.to_string())?;
+                        keys.ensure_store(store, &self.perspective_key_owners(&dids)?)
+                    }
+                },
             };
-            keys.ensure_store(store, &owners)
-                .map_err(|e| seal_failure(SealError::Keyring(e)))?;
+            keyed.map_err(|e| seal_failure(SealError::Keyring(e)))?;
         }
         Ok(sealer)
+    }
+
+    /// Destroys perspective `uuid`'s store key, once its rows and its files are gone: its
+    /// sealed values anywhere (freed pages, a copy of the file) no longer open. A store that
+    /// does not exist (never made, or destroyed already) is not an error; neither is a
+    /// database without keys.
+    pub(crate) fn destroy_perspective_store(&self, uuid: &str) -> Ad4mDbResult<()> {
+        let Some(keys) = &self.rows else {
+            return Ok(());
+        };
+        let store = StoreId::Perspective(uuid::Uuid::parse_str(uuid)?);
+        match keys.destroy_store(&store, PERSPECTIVE_REMOVED) {
+            Ok(()) | Err(crate::at_rest::KeyringError::UnknownStore) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The perspectives the keyring holds a store key for that have no handle in this
+    /// database: left by a removal that stopped between deleting the rows and destroying the
+    /// key. Read from the handles' plain `uuid` column, so a handle whose sealed values do not
+    /// open still counts as present.
+    pub(crate) fn perspective_stores_without_handle(&self) -> Ad4mDbResult<Vec<String>> {
+        let Some(keys) = &self.rows else {
+            return Ok(Vec::new());
+        };
+        let handles: std::collections::HashSet<String> = self
+            .conn
+            .prepare("SELECT uuid FROM perspective_handle")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(keys
+            .store_states()?
+            .into_iter()
+            .filter_map(|(id, _)| match id {
+                StoreId::Perspective(uuid) => Some(uuid.to_string()),
+                _ => None,
+            })
+            .filter(|uuid| !handles.contains(uuid))
+            .collect())
     }
 
     /// Seals every value of a sealed column still in the clear: after the export into a
@@ -602,6 +645,90 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(moved.current_state.as_deref(), Some(SECRET_WORDS[4]));
+    }
+
+    /// A perspective's store key: made when the perspective is added, wrapped for a person who
+    /// joins its neighbourhood, unwrapped for one dropped from its owners, and destroyed after
+    /// the perspective is removed, so its sealed values no longer open anywhere.
+    #[test]
+    fn a_perspectives_store_key_follows_its_owners_and_goes_with_the_perspective() {
+        let folder = tempfile::tempdir().unwrap();
+        let keys = keyring(folder.path(), 1);
+        let key = database_key(&keys).unwrap();
+        let path = folder.path().join("ad4m_db.sqlite");
+        let db = Ad4mDb::open(&path, Some((&key, keys.clone()))).unwrap();
+        let alice = KeyOwner::User("alice".into());
+        let bob = KeyOwner::User("bob".into());
+        db.add_user("bob", "did:key:bob", "pw").unwrap();
+
+        // Added: the store exists, wrapped for its one owner.
+        let uuid = filled(&db);
+        let store = StoreId::Perspective(uuid::Uuid::parse_str(&uuid).unwrap());
+        assert_eq!(keys.store_owners(&store).unwrap(), vec![alice.clone()]);
+
+        // Bob joins its neighbourhood: he gets a wrap too.
+        db.add_owner_to_neighbourhood(SECRET_WORDS[1], "did:key:bob")
+            .unwrap();
+        assert_eq!(
+            keys.store_owners(&store).unwrap(),
+            vec![alice.clone(), bob.clone()]
+        );
+
+        // The handle drops alice: her wrap goes, bob still reads the perspective.
+        let mut handle = db._get_perspective(&uuid).unwrap().unwrap();
+        handle.owners = Some(vec!["did:key:bob".into()]);
+        db.update_perspective(&handle).unwrap();
+        assert_eq!(keys.store_owners(&store).unwrap(), vec![bob]);
+        assert_eq!(
+            db._get_perspective(&uuid).unwrap().unwrap().name.as_deref(),
+            Some(SECRET_WORDS[0])
+        );
+
+        // Removed: first the rows, then (the files and) the key.
+        let stored_name: String = db
+            .conn
+            .query_row(
+                "SELECT name FROM perspective_handle WHERE uuid = ?1",
+                [&uuid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let row = row_key(&[&uuid]);
+        let cell = Cell {
+            table: "perspective_handle",
+            column: "name",
+            row: &row,
+        };
+        assert_eq!(
+            sqlite::open_value(&keys, &store, &cell, &stored_name).unwrap(),
+            SECRET_WORDS[0]
+        );
+        assert!(db.perspective_stores_without_handle().unwrap().is_empty());
+        db.remove_perspective(&uuid).unwrap();
+        // A removal that stopped here is found at the next start.
+        assert_eq!(
+            db.perspective_stores_without_handle().unwrap(),
+            vec![uuid.clone()]
+        );
+        db.destroy_perspective_store(&uuid).unwrap();
+        assert_eq!(
+            keys.store_owners(&store),
+            Err(crate::at_rest::KeyringError::UnknownStore)
+        );
+        // A copy of the sealed value (a freed page, a backup) no longer opens.
+        assert!(sqlite::open_value(&keys, &store, &cell, &stored_name).is_err());
+        assert!(db.perspective_stores_without_handle().unwrap().is_empty());
+        // Destroying it again is not an error.
+        db.destroy_perspective_store(&uuid).unwrap();
+
+        // Also after a restart: the key is gone from the keyring file.
+        drop(db);
+        let again = keyring(folder.path(), 1);
+        assert!(sqlite::open_value(&again, &store, &cell, &stored_name).is_err());
+        assert_eq!(
+            again.store_owners(&store),
+            Err(crate::at_rest::KeyringError::UnknownStore)
+        );
     }
 
     #[test]

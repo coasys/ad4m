@@ -438,14 +438,27 @@ impl DataKeys {
         })
     }
 
-    /// Removes `owner`'s wraps of store `id`'s key. Refused when a version would be left with
-    /// no wrap.
-    pub fn remove_owner(&self, id: &StoreId, owner: &KeyOwner) -> Result<(), KeyringError> {
+    /// Removes `owner`'s wraps of store `id`'s key and answers the owners left. When `owner` is
+    /// the last one the keyring is left as it is and the answer is empty: the caller deletes
+    /// the store's files, then calls [`DataKeys::destroy_store`], so the key goes after the
+    /// data it protects and never before.
+    pub fn remove_owner(
+        &self,
+        id: &StoreId,
+        owner: &KeyOwner,
+    ) -> Result<Vec<KeyOwner>, KeyringError> {
         let path = self.path.clone();
         self.with_open(|open| {
             let store = open.file.store(id).ok_or(KeyringError::UnknownStore)?;
             if !wrapped_by(store, owner) {
                 return Err(KeyringError::UnknownOwner);
+            }
+            let left: Vec<KeyOwner> = owners_of(store)
+                .into_iter()
+                .filter(|o| o != owner)
+                .collect();
+            if left.is_empty() {
+                return Ok(left);
             }
             let mut next = open.file.clone();
             let entry = store_mut(&mut next, id)?;
@@ -463,8 +476,34 @@ impl DataKeys {
                     return Err(KeyringError::LastOwner);
                 }
             }
-            Self::commit(&path, open, next)
+            Self::commit(&path, open, next)?;
+            Ok(left)
         })
+    }
+
+    /// The persons that hold store `id`'s key, in the order they were added.
+    pub fn store_owners(&self, id: &StoreId) -> Result<Vec<KeyOwner>, KeyringError> {
+        self.with_open(|open| {
+            let store = open.file.store(id).ok_or(KeyringError::UnknownStore)?;
+            Ok(owners_of(store))
+        })
+    }
+
+    /// Makes the owners of store `id` exactly `owners` (each made a person when it is not one
+    /// yet): the store is made when it does not exist, each new owner gets a wrap, then each
+    /// owner not listed loses its own. Wraps are added before any is removed, so the key always
+    /// has one. `owners` must not be empty: a store with no owner is destroyed, not emptied.
+    pub fn set_store_owners(&self, id: &StoreId, owners: &[KeyOwner]) -> Result<(), KeyringError> {
+        if owners.is_empty() {
+            return Err(KeyringError::LastOwner);
+        }
+        self.ensure_store(id, owners)?;
+        for owner in self.store_owners(id)? {
+            if !owners.contains(&owner) {
+                self.remove_owner(id, &owner)?;
+            }
+        }
+        Ok(())
     }
 
     /// Destroys store `id`'s key, leaving a tombstone. The executor's own store is not one
@@ -563,6 +602,21 @@ fn wrapped_by(store: &StoreEntry, owner: &KeyOwner) -> bool {
             .iter()
             .any(|w| matches!(&w.wrapper, Wrapper::Person { owner: o, .. } if o == owner))
     })
+}
+
+/// Every person with a wrap of any version of `store`'s key, each once, in wrap order.
+fn owners_of(store: &StoreEntry) -> Vec<KeyOwner> {
+    let mut owners = Vec::new();
+    for (_, version) in store.key.iter() {
+        for wrap in &version.wraps {
+            if let Wrapper::Person { owner, .. } = &wrap.wrapper {
+                if !owners.contains(owner) {
+                    owners.push(owner.clone());
+                }
+            }
+        }
+    }
+    owners
 }
 
 /// A wrap of `key` (version `version` of store `id`) under `owner`'s current data key.
@@ -824,11 +878,16 @@ mod tests {
             keys.destroy_person(&alice, "left"),
             Err(KeyringError::StillOwned)
         );
-        keys.remove_owner(&store, &alice).unwrap();
         assert_eq!(
-            keys.remove_owner(&store, &bob),
-            Err(KeyringError::LastOwner)
+            keys.remove_owner(&store, &alice).unwrap(),
+            vec![bob.clone()]
         );
+        assert_eq!(
+            keys.remove_owner(&store, &bob).unwrap(),
+            Vec::<KeyOwner>::new(),
+            "the last owner keeps its wrap until the store is destroyed"
+        );
+        assert_eq!(keys.store_owners(&store).unwrap(), vec![bob.clone()]);
         keys.destroy_person(&alice, "left").unwrap();
 
         let on_disk = KeyringFile::read(keys.path()).unwrap().unwrap();
@@ -880,6 +939,121 @@ mod tests {
         assert_eq!(std::fs::read(keys.path()).unwrap(), before);
         assert_eq!(keys.summary().unwrap().persons.len(), 1);
         keys.create_person(KeyOwner::User("carol".into())).unwrap();
+    }
+
+    /// A perspective with two owners: each removal drops only that owner's wrap, the key still
+    /// opens through the other after a restart, and the last removal leaves the store to
+    /// `destroy_store`, after which no entry and no wrap of it is left, on disk or after a
+    /// restart.
+    #[test]
+    fn a_store_lives_while_an_owner_holds_it_and_its_key_goes_with_the_last() {
+        let (folder, keys) = sealed();
+        keys.unlock(secret(11)).unwrap();
+        let alice = KeyOwner::User("alice".into());
+        let bob = KeyOwner::User("bob".into());
+        let store = StoreId::Perspective(uuid::Uuid::new_v4());
+        keys.set_store_owners(&store, &[alice.clone(), bob.clone()])
+            .unwrap();
+        assert_eq!(
+            keys.store_owners(&store).unwrap(),
+            vec![alice.clone(), bob.clone()]
+        );
+        let (_, rows) = keys.subkey(&store, None, SubkeyPurpose::Rows).unwrap();
+
+        assert_eq!(
+            keys.remove_owner(&store, &alice).unwrap(),
+            vec![bob.clone()]
+        );
+        drop(keys);
+        let keys = DataKeys::load(super::super::keyring_file::path_in(folder.path())).unwrap();
+        keys.unlock(secret(11)).unwrap();
+        let (_, again) = keys.subkey(&store, None, SubkeyPurpose::Rows).unwrap();
+        assert_eq!(again.expose_secret(), rows.expose_secret());
+        assert_eq!(keys.store_owners(&store).unwrap(), vec![bob.clone()]);
+
+        assert!(keys.remove_owner(&store, &bob).unwrap().is_empty());
+        keys.destroy_store(&store, "perspective-removed").unwrap();
+        let raw = std::fs::read_to_string(keys.path()).unwrap();
+        assert!(
+            !raw.contains(&store.to_string()),
+            "no entry names the store"
+        );
+        assert!(matches!(
+            keys.subkey(&store, None, SubkeyPurpose::Rows),
+            Err(KeyringError::UnknownStore)
+        ));
+        drop(keys);
+        let keys = DataKeys::load(super::super::keyring_file::path_in(folder.path())).unwrap();
+        keys.unlock(secret(11)).unwrap();
+        assert!(matches!(
+            keys.subkey(&store, None, SubkeyPurpose::Rows),
+            Err(KeyringError::UnknownStore)
+        ));
+        let summary = keys.summary().unwrap();
+        assert!(summary.stores.iter().all(|s| s.id != store.to_string()));
+        assert_eq!(summary.tombstones.len(), 1);
+        assert_eq!(summary.tombstones[0].kind, TombstoneKindName::Store);
+    }
+
+    /// `set_store_owners` adds before it removes, so a store handed from one person to another
+    /// never has no owner, and an empty owner list is refused.
+    #[test]
+    fn setting_a_stores_owners_hands_it_over_without_a_gap() {
+        let (_folder, keys) = sealed();
+        keys.unlock(secret(12)).unwrap();
+        let alice = KeyOwner::User("alice".into());
+        let bob = KeyOwner::User("bob".into());
+        let store = StoreId::Perspective(uuid::Uuid::new_v4());
+        keys.set_store_owners(&store, std::slice::from_ref(&alice))
+            .unwrap();
+        keys.set_store_owners(&store, std::slice::from_ref(&bob))
+            .unwrap();
+        assert_eq!(keys.store_owners(&store).unwrap(), vec![bob.clone()]);
+        assert_eq!(
+            keys.set_store_owners(&store, &[]),
+            Err(KeyringError::LastOwner)
+        );
+        assert_eq!(keys.store_owners(&store).unwrap(), vec![bob]);
+        // Alice owns nothing now: her key can go.
+        keys.destroy_person(&alice, "left").unwrap();
+    }
+
+    /// Each person's perspective has its own key, wrapped only under its owner's data key: the
+    /// other person's data key opens no wrap of it.
+    #[test]
+    fn one_persons_data_key_does_not_open_anothers_perspective() {
+        let (_folder, keys) = sealed();
+        keys.unlock(secret(13)).unwrap();
+        let alice = KeyOwner::User("alice".into());
+        let bob = KeyOwner::User("bob".into());
+        let alices = StoreId::Perspective(uuid::Uuid::new_v4());
+        let bobs = StoreId::Perspective(uuid::Uuid::new_v4());
+        keys.set_store_owners(&alices, std::slice::from_ref(&alice))
+            .unwrap();
+        keys.set_store_owners(&bobs, std::slice::from_ref(&bob))
+            .unwrap();
+        let (_, alices_rows) = keys.subkey(&alices, None, SubkeyPurpose::Rows).unwrap();
+        let (_, bobs_rows) = keys.subkey(&bobs, None, SubkeyPurpose::Rows).unwrap();
+        assert_ne!(alices_rows.expose_secret(), bobs_rows.expose_secret());
+        keys.with_open(|open| {
+            let alices_key = &open.persons[&(alice.clone(), KeyVersion::FIRST)];
+            let bobs_entry = open.file.store(&bobs).unwrap();
+            let wraps = &bobs_entry.key.current_value().wraps;
+            assert_eq!(wraps.len(), 1);
+            assert!(
+                open.file
+                    .unwrap_store_key(&bobs, KeyVersion::FIRST, &wraps[0], alices_key)
+                    .is_err(),
+                "alice's data key opens no wrap of bob's perspective"
+            );
+            let bobs_key = &open.persons[&(bob.clone(), KeyVersion::FIRST)];
+            assert!(open
+                .file
+                .unwrap_store_key(&bobs, KeyVersion::FIRST, &wraps[0], bobs_key)
+                .is_ok());
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[cfg(unix)]

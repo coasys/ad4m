@@ -49,6 +49,40 @@ pub fn restrict(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// [`restrict`] for `path` and everything under it: each folder 0700, each file 0600. For a
+/// store a library writes with the default mode (RocksDB under a SPARQL store), and for one
+/// an older executor left open. Symbolic links are not followed.
+pub fn restrict_tree(path: &Path) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    restrict(path)?;
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            restrict_tree(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// Makes every file and folder this process creates from now on private to its user: the
+/// umask gains group and other bits (`| 0o077`). Libraries that create files with the default
+/// mode (RocksDB, SQLite's journals, Holochain's databases) then make them 0600 and folders
+/// 0700. Answers the umask before. A no-op off unix.
+pub fn private_umask() -> u32 {
+    #[cfg(unix)]
+    {
+        // SAFETY: umask only swaps the process's file mode creation mask; it cannot fail.
+        let before = unsafe { libc::umask(0o077) };
+        // Keep any stricter bits the process had for its owner too.
+        unsafe { libc::umask(before | 0o077) };
+        before as u32
+    }
+    #[cfg(not(unix))]
+    0
+}
+
 /// The mode bits of `path` that let group or others in, if any (unix).
 pub fn open_bits(path: &Path) -> io::Result<u32> {
     #[cfg(unix)]
@@ -197,5 +231,43 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from("keyring.json")]);
+    }
+
+    #[test]
+    fn restrict_tree_closes_every_folder_and_file_under_a_store() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("store");
+        let nested = store.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        for folder in [&store, &store.join("a"), &nested] {
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for file in [store.join("CURRENT"), nested.join("000001.sst")] {
+            std::fs::write(&file, b"x").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        restrict_tree(&store).unwrap();
+        assert_eq!(mode(&store), 0o700);
+        assert_eq!(mode(&store.join("a")), 0o700);
+        assert_eq!(mode(&nested), 0o700);
+        assert_eq!(mode(&store.join("CURRENT")), 0o600);
+        assert_eq!(mode(&nested.join("000001.sst")), 0o600);
+    }
+
+    /// Under the private umask a library that creates files and folders with the default
+    /// mode makes them 0600 and 0700.
+    #[test]
+    fn under_the_private_umask_default_modes_are_private() {
+        let root = tempfile::tempdir().unwrap();
+        let before = unsafe { libc::umask(0o022) };
+        let was = private_umask();
+        let folder = root.path().join("made-by-a-library");
+        std::fs::create_dir(&folder).unwrap();
+        let file = folder.join("data");
+        std::fs::write(&file, b"x").unwrap();
+        unsafe { libc::umask(before) };
+        assert_eq!(was, 0o022);
+        assert_eq!(mode(&folder), 0o700);
+        assert_eq!(mode(&file), 0o600);
     }
 }

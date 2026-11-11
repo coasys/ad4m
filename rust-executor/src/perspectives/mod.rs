@@ -130,6 +130,7 @@ static OPENED: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
 /// Opens every perspective in the database at start-up and marks them opened once all the
 /// tasks have ended, whether each opened or not (see [`opened`]).
 pub fn open_at_start() {
+    finish_interrupted_removals();
     let tasks = initialize_from_db();
     tokio::spawn(async move {
         for task in tasks {
@@ -520,6 +521,10 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         log::error!("Error removing perspective from db: {}", e);
     }
 
+    // The files go, then the key: the SPARQL store is plain on disk, and the key shreds the
+    // perspective's sealed rows wherever a copy of them is left.
+    destroy_perspective_store(uuid);
+
     if let Some(ref instance) = removed_instance {
         // Drop any link-language -> perspective cache entries that
         // pointed at this uuid. Without this, the cache keeps a
@@ -537,24 +542,6 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
             }
         }
 
-        // Clean up the per-perspective SPARQL (Oxigraph/RocksDB) directory
-        if let Some(data_path) = get_app_data_path() {
-            let db_path = std::path::Path::new(&data_path)
-                .join("perspectives")
-                .join(uuid);
-            if db_path.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&db_path) {
-                    log::warn!(
-                        "Failed to remove SPARQL store directory for perspective {}: {}",
-                        uuid,
-                        e
-                    );
-                } else {
-                    log::debug!("Cleaned up SPARQL store directory for perspective {}", uuid);
-                }
-            }
-        }
-
         let recipients = event_recipients(&*instance.persisted.lock().await);
         publish_to_owners(
             Topic::PerspectiveRemoved,
@@ -567,6 +554,49 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
     }
 
     removed_instance
+}
+
+/// The folder of perspective `uuid`'s files (its SPARQL store) under the data folder, when a
+/// data folder is set.
+fn perspective_dir(uuid: &str) -> Option<std::path::PathBuf> {
+    get_app_data_path().map(|data_path| {
+        std::path::Path::new(&data_path)
+            .join("perspectives")
+            .join(uuid)
+    })
+}
+
+/// Deletes perspective `uuid`'s folder (its SPARQL store), then destroys its store key. A
+/// folder that does not delete is logged and the key still goes: with the rows deleted, the
+/// key protects nothing but their sealed copies, which must stop opening.
+fn destroy_perspective_store(uuid: &str) {
+    if let Some(dir) = perspective_dir(uuid) {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => log::debug!("Deleted the SPARQL store of perspective {uuid}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("Failed to remove the SPARQL store of perspective {uuid}: {e}"),
+        }
+    }
+    if let Err(e) = crate::db_backend::db_backend().destroy_perspective_store(uuid) {
+        log::error!("Could not destroy the store key of removed perspective {uuid}: {e}");
+    }
+}
+
+/// Finishes removals that stopped between deleting a perspective's rows and destroying its
+/// store key (a crash, a kill): each keyring store of a perspective with no handle loses its
+/// folder and its key. Runs at start, before any perspective opens.
+fn finish_interrupted_removals() {
+    match crate::db_backend::db_backend().perspective_stores_without_handle() {
+        Ok(orphans) => {
+            for uuid in orphans {
+                log::warn!(
+                    "Finishing the removal of perspective {uuid}: its store key outlived it"
+                );
+                destroy_perspective_store(&uuid);
+            }
+        }
+        Err(e) => log::warn!("Could not look for perspectives whose removal stopped: {e}"),
+    }
 }
 
 pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, language_address: String) {
@@ -902,6 +932,41 @@ mod tests {
         assert!(find_perspective_by_uuid(&perspectives, &handle2.uuid)
             .await
             .is_some());
+    }
+
+    /// A removed perspective's SPARQL store is deleted from the data folder, also when the
+    /// perspective was not loaded; another perspective's store stays.
+    #[tokio::test]
+    async fn removing_a_perspective_deletes_its_sparql_store() {
+        setup();
+        let folder = tempfile::tempdir().unwrap();
+        let before = APP_DATA_PATH.read().unwrap().clone();
+        set_app_data_path(folder.path().to_string_lossy().to_string());
+
+        let gone = PerspectiveHandle::new_from_name("removed".to_string());
+        let kept = PerspectiveHandle::new_from_name("kept".to_string());
+        add_perspective(gone.clone(), None).await.unwrap();
+        add_perspective(kept.clone(), None).await.unwrap();
+        let store_of = |uuid: &str| folder.path().join("perspectives").join(uuid);
+        assert!(store_of(&gone.uuid).join("sparql_store").is_dir());
+
+        remove_perspective(&gone.uuid).await;
+        assert!(!store_of(&gone.uuid).exists());
+        assert!(store_of(&kept.uuid).join("sparql_store").is_dir());
+
+        // Not loaded (as after a failed start): its folder goes all the same.
+        let unloaded = PERSPECTIVES
+            .write()
+            .unwrap()
+            .remove(&kept.uuid)
+            .and_then(|lock| lock.into_inner().ok())
+            .unwrap();
+        unloaded.teardown_background_tasks().await;
+        drop(unloaded);
+        assert!(remove_perspective(&kept.uuid).await.is_none());
+        assert!(!store_of(&kept.uuid).exists());
+
+        *APP_DATA_PATH.write().unwrap() = before;
     }
 
     #[tokio::test]

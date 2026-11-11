@@ -1120,6 +1120,13 @@ impl SparqlStore {
     pub fn new(data_path: Option<&str>) -> Result<Self, Error> {
         let store = match data_path {
             Some(path) => {
+                if !crate::at_rest::stores_may_open(crate::at_rest::gate().map(|g| &**g)) {
+                    return Err(anyhow!(
+                        "{}: a perspective's SPARQL store opens only once the storage is \
+                         unlocked",
+                        crate::at_rest::SEALED
+                    ));
+                }
                 let store_path = std::path::PathBuf::from(path).join("sparql_store");
                 // 0700, also for a folder an older executor made: RocksDB makes its files
                 // with the process umask, and the folder keeps others out of them.
@@ -1133,7 +1140,7 @@ impl SparqlStore {
                         )
                     })?;
                 log::info!("Opening persistent SPARQL store at {:?}", store_path);
-                Store::open_with_options(
+                let store = Store::open_with_options(
                     &store_path,
                     StoreOptions::default().with_max_open_files(SPARQL_STORE_MAX_OPEN_FILES),
                 )
@@ -1143,7 +1150,18 @@ impl SparqlStore {
                         store_path,
                         e
                     )
-                })?
+                })?;
+                // Each file 0600, each folder 0700: the ones RocksDB just made and any an
+                // older executor left with the default mode. The executor's private umask
+                // keeps the files RocksDB makes later 0600 too.
+                crate::at_rest::files::restrict_tree(&store_path).map_err(|e| {
+                    anyhow!(
+                        "Failed to make the SPARQL store at {:?} private: {}",
+                        store_path,
+                        e
+                    )
+                })?;
+                store
             }
             None => Store::new()?,
         };
@@ -4223,6 +4241,49 @@ mod tests {
         std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
         drop(SparqlStore::new(Some(dir.path().join("old").to_str().unwrap())).unwrap());
         assert_eq!(mode(&old), 0o700);
+    }
+
+    /// Every file RocksDB makes in a store is 0600 and every folder 0700, under the default
+    /// umask an embedder may run with, and in a store an older executor left open.
+    #[cfg(unix)]
+    #[test]
+    fn every_file_in_a_sparql_store_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        fn walk(path: &std::path::Path, seen: &mut Vec<(std::path::PathBuf, u32)>) {
+            let mode = std::fs::symlink_metadata(path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            seen.push((path.to_path_buf(), mode));
+            if path.is_dir() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    walk(&entry.unwrap().path(), seen);
+                }
+            }
+        }
+        let before = unsafe { libc::umask(0o022) };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let store = SparqlStore::new(Some(path)).unwrap();
+        let signer = TestSigner::generate();
+        store
+            .add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://b"))
+            .unwrap();
+        drop(store);
+        // Opened again, as at the next start, after a file was left open.
+        let current = dir.path().join("sparql_store").join("CURRENT");
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(SparqlStore::new(Some(path)).unwrap());
+        unsafe { libc::umask(before) };
+
+        let mut seen = Vec::new();
+        walk(&dir.path().join("sparql_store"), &mut seen);
+        assert!(seen.len() > 2, "RocksDB made files: {seen:?}");
+        for (path, mode) in seen {
+            let want = if path.is_dir() { 0o700 } else { 0o600 };
+            assert_eq!(mode, want, "{}", path.display());
+        }
     }
 
     // ── query_links optimization tests ──

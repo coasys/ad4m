@@ -340,6 +340,14 @@ pub fn is_gated() -> bool {
     gate().is_some_and(|g| g.state() != StorageState::Open)
 }
 
+/// Whether a store on disk may be opened now: the keyring is unlocked. A store holds the data
+/// the keyring's keys guard, so none is opened, or made, before the storage secret has
+/// opened the keyring. No gate (unit tests, tools on a copy of a data folder): yes. `gate`:
+/// the process's gate, or one a test made.
+pub fn stores_may_open(gate: Option<&StorageGate>) -> bool {
+    gate.is_none_or(|gate| gate.keys().is_open())
+}
+
 /// The refusal a gated executor answers `method` with, if any. `gate`: the process's gate, or
 /// one a test made.
 pub fn refusal(gate: Option<&StorageGate>, method: &str) -> Option<String> {
@@ -388,6 +396,16 @@ mod tests {
         assert!(refusal(Some(&gate), "agent.status").is_some());
         gate.mark_open();
         assert_eq!(refusal(Some(&gate), "agent.status"), None);
+    }
+
+    #[test]
+    fn stores_open_only_once_the_keyring_is_unlocked() {
+        let folder = tempfile::tempdir().unwrap();
+        let gate = StorageGate::new(folder.path(), false);
+        assert!(!stores_may_open(Some(&gate)), "sealed");
+        gate.unlock(&secret(1)).unwrap();
+        assert!(stores_may_open(Some(&gate)), "unlocked, the stores opening");
+        assert!(stores_may_open(None), "no gate");
     }
 
     #[test]
