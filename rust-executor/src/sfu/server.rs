@@ -2,6 +2,7 @@
 //! and the Sans I/O event loop driven by tokio.
 
 use std::collections::{HashMap, HashSet};
+use std::mem::Discriminant;
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -9,9 +10,12 @@ use std::time::{Duration, Instant};
 use log::{debug, error, info, warn};
 use str0m::change::SdpOffer;
 use str0m::channel::ChannelId;
-use str0m::media::{KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid};
+use str0m::format::Codec;
+use str0m::media::{
+    KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid, Rid,
+};
 use str0m::net::Protocol;
-use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc};
+use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -19,6 +23,15 @@ use super::reachability::{assess, stun_reflexive, Advertised, SfuReachability};
 use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
 use super::simulcast::{is_keyframe, LayerSelector};
+
+/// The call session whose media a track carries, by the id the clients of
+/// this node know it by: a local session's own id, a remote one's
+/// qualified with its node ([`super::cascade::remote_session_id`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackOrigin {
+    pub participant_id: String,
+    pub agent_did: String,
+}
 
 /// A connected WebRTC peer managed by the SFU server.
 ///
@@ -54,8 +67,11 @@ pub struct SfuPeer {
     pub tracks_out_rev: HashMap<(ParticipantId, Mid), Mid>,
     /// Tracks deferred because a pending offer blocked renegotiation
     /// when the additions arrived.  Each entry stores:
-    /// (origin_pid, origin_mid, kind, origin_agent_did).
-    pub deferred_tracks: Vec<(ParticipantId, Mid, MediaKind, String)>,
+    /// (origin_pid, origin_mid, kind, the session the track carries).
+    pub deferred_tracks: Vec<(ParticipantId, Mid, MediaKind, TrackOrigin)>,
+    /// Pipe only: the remote session each inbound mid carries, from the
+    /// track mappings of the remote node's offers. See [`SfuPeer::track_origin`].
+    pub remote_origins: HashMap<Mid, TrackOrigin>,
     /// True for cross-node pipe transports — see [`SfuPeer`] docs.
     /// Affects how renegotiation offers are routed and how forward
     /// loops treat the participant.
@@ -69,6 +85,14 @@ pub struct SfuPeer {
     /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
     /// request until its answer lands or its offer goes stale.
     pub ice_restart: Option<IceRestart>,
+    /// (outbound mid, codec) of forwarded packets dropped because the
+    /// peer negotiated no matching codec on that mid — each logged once,
+    /// not per packet, so a track the peer cannot take does not flood
+    /// the log at media rate.
+    pub drops_logged: HashSet<(Mid, Discriminant<Codec>)>,
+    /// (outbound mid, error kind) of failed media writes already logged
+    /// — once each, not per packet.
+    pub write_errors_logged: HashSet<(Mid, Discriminant<RtcError>)>,
 }
 
 /// A client's ICE restart in flight. The SFU stays the only offerer: the
@@ -128,10 +152,13 @@ impl SfuPeer {
             pending_offer: None,
             pending_offer_sent: None,
             deferred_tracks: Vec::new(),
+            remote_origins: HashMap::new(),
             is_pipe,
             channels: HashMap::new(),
             disconnected_since: None,
             ice_restart: None,
+            drops_logged: HashSet::new(),
+            write_errors_logged: HashSet::new(),
         }
     }
 
@@ -156,6 +183,40 @@ impl SfuPeer {
         match &self.ice_restart {
             Some(restart) => now >= restart.since + ICE_RESTART_GRACE,
             None => true,
+        }
+    }
+
+    /// The session whose media this peer's inbound track `mid` carries. A
+    /// client peer sends its own; a pipe carries other nodes' sessions, as
+    /// their offers named them. A mid no offer named (a node on an older
+    /// build sends no mapping) is the pipe's own: its id and the remote
+    /// node's DID, as before track mappings.
+    pub fn track_origin(&self, mid: Mid) -> TrackOrigin {
+        if self.is_pipe {
+            if let Some(origin) = self.remote_origins.get(&mid) {
+                return origin.clone();
+            }
+        }
+        TrackOrigin {
+            participant_id: self.id.to_string(),
+            agent_did: self.agent_did.clone(),
+        }
+    }
+
+    /// Pipe: remember the session each m-line of the remote node's offer
+    /// carries (`track_mapping`, by the remote node's ids).
+    pub fn note_remote_origins(&mut self, track_mapping: &[crate::sfu::TrackMapEntry]) {
+        for entry in track_mapping {
+            self.remote_origins.insert(
+                Mid::from(entry.mid.as_str()),
+                TrackOrigin {
+                    participant_id: super::cascade::remote_session_id(
+                        &entry.participant_id,
+                        &self.agent_did,
+                    ),
+                    agent_did: entry.agent_did.clone(),
+                },
+            );
         }
     }
 
@@ -302,6 +363,8 @@ impl std::fmt::Debug for SfuPeer {
             .field("is_pipe", &self.is_pipe)
             .field("channels", &self.channels.len())
             .field("ice_restart", &self.ice_restart.as_ref().map(|r| r.since))
+            .field("drops_logged", &self.drops_logged.len())
+            .field("write_errors_logged", &self.write_errors_logged.len())
             .finish()
     }
 }
@@ -341,6 +404,8 @@ pub enum SfuCommand {
         remote_did: String,
         /// String form of the [`crate::sfu::room::RoomId`].
         room_id: String,
+        /// The remote session each new m-line carries, by the remote node's ids.
+        track_mapping: Vec<crate::sfu::TrackMapEntry>,
     },
     /// Trickle ICE: add a remote ICE candidate to an existing peer.
     /// The candidate arrives as an SDP candidate-attribute string
@@ -754,6 +819,7 @@ impl SfuServer {
                         sdp_offer_json,
                         remote_did,
                         room_id,
+                        track_mapping,
                     }) => {
                         let Some(peer) = peers.get_mut(&participant_id) else {
                             debug!(
@@ -779,6 +845,8 @@ impl SfuServer {
                                 continue;
                             }
                         };
+                        // Before the tracks open: they are attributed as they do.
+                        peer.note_remote_origins(&track_mapping);
                         match peer.rtc.sdp_api().accept_offer(offer) {
                             Ok(answer) => match serde_json::to_string(&answer) {
                                 Ok(answer_json) => {
@@ -879,13 +947,14 @@ impl SfuServer {
                         // receive data channel messages too.
                         let payload = crate::sfu::types::SfuDataMessage::new(
                             origin_did.clone(),
+                            participant_id.to_string(),
                             origin_room.neighbourhood_url.clone(),
                             origin_room.room_name.clone(),
                             channel_label.clone(),
                             binary,
                             &data,
                         );
-                        let recipients = data_recipients(&peers, &origin_room, &origin_did);
+                        let recipients = data_recipients(&peers, &origin_room, &participant_id);
                         crate::pubsub::get_global_pubsub_sync()
                             .publish_event(crate::events::Event::sfu_data(&payload, recipients));
                     }
@@ -987,7 +1056,8 @@ impl SfuServer {
             let mut tracks_opened: Vec<(ParticipantId, Mid, MediaKind)> = Vec::new();
             let mut keyframe_requests: Vec<(ParticipantId, KeyframeRequest)> = Vec::new();
             // Data channel messages, published once the poll loop no longer borrows `peers`.
-            let mut data_received: Vec<crate::sfu::types::SfuDataMessage> = Vec::new();
+            let mut data_received: Vec<(ParticipantId, crate::sfu::types::SfuDataMessage)> =
+                Vec::new();
 
             for (pid, peer) in peers.iter_mut() {
                 loop {
@@ -1049,13 +1119,14 @@ impl SfuServer {
                                     // the room's agents, as `sfu-data`.
                                     let payload = crate::sfu::types::SfuDataMessage::new(
                                         origin_did,
+                                        pid.to_string(),
                                         origin_room.neighbourhood_url,
                                         origin_room.room_name,
                                         label,
                                         relay_binary,
                                         &relay_data,
                                     );
-                                    data_received.push(payload);
+                                    data_received.push((pid.clone(), payload));
                                 }
                             }
                             Event::ChannelClose(cid) => {
@@ -1076,9 +1147,9 @@ impl SfuServer {
 
             if !data_received.is_empty() {
                 let pubsub = crate::pubsub::get_global_pubsub_sync();
-                for payload in data_received {
+                for (sender, payload) in data_received {
                     let room = RoomId::new(&payload.neighbourhood_url, &payload.room_name);
-                    let recipients = data_recipients(&peers, &room, &payload.sender_did);
+                    let recipients = data_recipients(&peers, &room, &sender);
                     pubsub.publish_event(crate::events::Event::sfu_data(&payload, recipients));
                 }
             }
@@ -1145,16 +1216,7 @@ impl SfuServer {
                             data.rid.as_ref(),
                             data.time,
                         );
-                        if let Some(writer) = target_peer.rtc.writer(out_mid) {
-                            if let Err(e) =
-                                writer.write(data.pt, data.network_time, time, data.data.clone())
-                            {
-                                warn!(
-                                    "SFU: failed to write media to peer {} mid {}: {:?}",
-                                    target_pid, out_mid, e
-                                );
-                            }
-                        }
+                        write_forwarded(target_peer, out_mid, data, time);
                     }
                 }
             }
@@ -1264,123 +1326,16 @@ impl SfuServer {
                 }
             }
 
-            // Snapshot pid → agent_did so the renegotiation loop can
-            // build track attribution without re-borrowing peers.
-            let pid_to_did: HashMap<ParticipantId, String> = peers
-                .iter()
-                .map(|(pid, peer)| (pid.clone(), peer.agent_did.clone()))
-                .collect();
-
-            // Materialise per-target.  One sdp_api batch per target
-            // peer so a single offer carries every new outbound m-line
-            // (str0m permits exactly one in-flight change at a time).
-            for (target_pid, additions) in adds_per_target.into_iter() {
-                let Some(target_peer) = peers.get_mut(&target_pid) else {
-                    continue;
-                };
-                if target_peer.pending_offer.is_some() {
-                    for (kind, origin_pid, origin_mid) in &additions {
-                        if !target_peer
-                            .tracks_out_rev
-                            .contains_key(&(origin_pid.clone(), *origin_mid))
-                        {
-                            if let Some(did) = pid_to_did.get(origin_pid) {
-                                target_peer.deferred_tracks.push((
-                                    origin_pid.clone(),
-                                    *origin_mid,
-                                    *kind,
-                                    did.clone(),
-                                ));
-                            }
-                        }
-                    }
-                    continue;
-                }
-                let room_id = target_peer.room_id.clone();
-                // Skip tracks already forwarded — matches the deferred path's
-                // tracks_out_rev check to prevent duplicate outbound m-lines.
-                let to_add: Vec<(MediaKind, ParticipantId, Mid)> = additions
-                    .into_iter()
-                    .filter(|(_, origin_pid, origin_mid)| {
-                        !target_peer
-                            .tracks_out_rev
-                            .contains_key(&(origin_pid.clone(), *origin_mid))
-                    })
-                    .collect();
-                let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _)| *kind).collect();
-                let Some((offer, pending, mids)) =
-                    offer_send_only(&mut target_peer.rtc, &kinds, false)
-                else {
-                    continue;
-                };
-                let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = mids
-                    .into_iter()
-                    .zip(to_add)
-                    .map(|(new_mid, (kind, origin_pid, origin_mid))| {
-                        (new_mid, origin_pid, origin_mid, kind)
-                    })
-                    .collect();
-
-                // Build track attribution from the newly assigned mids.
-                let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
-                    .iter()
-                    .filter_map(|(new_mid, origin_pid, _, kind)| {
-                        let did = pid_to_did.get(origin_pid)?;
-                        Some(crate::sfu::TrackMapEntry {
-                            mid: new_mid.to_string(),
-                            agent_did: did.clone(),
-                            media_kind: if kind.is_audio() {
-                                "audio".to_string()
-                            } else {
-                                "video".to_string()
-                            },
-                        })
-                    })
-                    .collect();
-
-                for (new_mid, origin_pid, origin_mid, _kind) in new_outbound {
-                    target_peer
-                        .tracks_out
-                        .insert(new_mid, (origin_pid.clone(), origin_mid));
-                    target_peer
-                        .tracks_out_rev
-                        .insert((origin_pid, origin_mid), new_mid);
-                }
-                target_peer.pending_offer = Some(pending);
-                target_peer.pending_offer_sent = Some(Instant::now());
-                info!(
-                    "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
-                    target_pid,
-                    kinds.len()
-                );
-
-                let sdp_offer_json = match serde_json::to_string(&offer) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(
-                            "SFU: serialise renegotiation offer for {} failed: {}",
-                            target_pid, e
-                        );
-                        continue;
-                    }
-                };
-                if target_peer.is_pipe {
-                    let payload = crate::sfu::SfuPipeRenegotiationOffer {
-                        remote_did: target_peer.agent_did.clone(),
-                        room_id: room_id.to_string(),
-                        sdp_offer: sdp_offer_json,
-                    };
-                    super::pipe_bus::publish_offer(payload);
-                } else {
-                    let payload = crate::sfu::SfuCallRenegotiationOffer {
-                        target_did: target_peer.agent_did.clone(),
-                        neighbourhood_url: room_id.neighbourhood_url.clone(),
-                        room_name: room_id.room_name.clone(),
-                        sdp_offer: sdp_offer_json,
+            for (target_pid, sdp_offer_json, track_mapping) in
+                offer_new_tracks(&mut peers, adds_per_target)
+            {
+                if let Some(target_peer) = peers.get(&target_pid) {
+                    publish_renegotiation_offer(
+                        target_peer,
+                        &target_pid,
+                        sdp_offer_json,
                         track_mapping,
-                    };
-                    crate::pubsub::get_global_pubsub_sync()
-                        .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
+                    );
                 }
             }
 
@@ -1450,6 +1405,58 @@ impl SfuServer {
             for (_pid, peer) in peers.iter_mut() {
                 let _ = peer.rtc.handle_input(Input::Timeout(now));
             }
+        }
+    }
+}
+
+/// Write one forwarded packet to `peer`'s outbound `mid`, as the media
+/// relay does for every packet it decided this peer gets.
+///
+/// `data` carries the ORIGIN's payload type, which means nothing to this
+/// peer: every side numbers its own PTs — a browser answers on its own
+/// numbering (Chrome's opus is 111, Firefox's 109), so `data.pt` names
+/// only what the SENDER negotiated and is only logged, never written.
+/// The write goes out on the PT `peer` negotiated for the same codec on
+/// `mid`: [`str0m::media::Writer::match_params`] scores the codec spec
+/// (codec, clock rate, channels and format parameters such as H264's
+/// profile-level-id and packetization-mode), and the
+/// [`str0m::media::Writer::payload_params`] check keeps it to a PT this
+/// mid actually negotiated — `match_params` scores the whole session
+/// config, which can hold the codec locked for another mid.
+///
+/// A peer with no matching codec on `mid` gets nothing; the drop logs
+/// once per (mid, codec) and a failed write once per (mid, error kind)
+/// — never per packet.
+fn write_forwarded(peer: &mut SfuPeer, mid: Mid, data: &MediaData, time: MediaTime) {
+    let Some(writer) = peer.rtc.writer(mid) else {
+        return;
+    };
+    let pt = writer
+        .match_params(data.params)
+        .filter(|&pt| writer.payload_params().any(|p| p.pt() == pt));
+    let Some(pt) = pt else {
+        let codec = data.params.spec().codec;
+        if peer
+            .drops_logged
+            .insert((mid, std::mem::discriminant(&codec)))
+        {
+            warn!(
+                "SFU: peer {} mid {} negotiated no codec matching {:?} (PT {}); \
+                 dropping this track's media",
+                peer.id, mid, codec, data.pt
+            );
+        }
+        return;
+    };
+    if let Err(e) = writer.write(pt, data.network_time, time, data.data.clone()) {
+        if peer
+            .write_errors_logged
+            .insert((mid, std::mem::discriminant(&e)))
+        {
+            warn!(
+                "SFU: failed to write media to peer {} mid {}: {:?}",
+                peer.id, mid, e
+            );
         }
     }
 }
@@ -1546,30 +1553,9 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
 
     let kinds: Vec<MediaKind> = to_add.iter().map(|(_, _, kind, _)| *kind).collect();
     let (offer, pending, mids) = offer_send_only(&mut peer.rtc, &kinds, restart)?;
-    let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = mids
-        .into_iter()
-        .zip(to_add)
-        .map(|(new_mid, (origin_pid, origin_mid, kind, agent_did))| {
-            (new_mid, origin_pid, origin_mid, kind, agent_did)
-        })
-        .collect();
-
-    let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
-        .iter()
-        .map(
-            |(new_mid, _, _, kind, agent_did)| crate::sfu::TrackMapEntry {
-                mid: new_mid.to_string(),
-                agent_did: agent_did.clone(),
-                media_kind: if kind.is_audio() {
-                    "audio".to_string()
-                } else {
-                    "video".to_string()
-                },
-            },
-        )
-        .collect();
-
-    for (new_mid, origin_pid, origin_mid, _, _) in new_outbound {
+    let mut track_mapping = Vec::with_capacity(mids.len());
+    for (new_mid, (origin_pid, origin_mid, kind, origin)) in mids.into_iter().zip(to_add) {
+        track_mapping.push(mapping_entry(new_mid, kind, &origin));
         peer.tracks_out
             .insert(new_mid, (origin_pid.clone(), origin_mid));
         peer.tracks_out_rev
@@ -1586,17 +1572,121 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
     Some((sdp_offer_json, track_mapping))
 }
 
-/// The agents that get a data channel message `sender` sent in `room`: the agent of every
-/// client peer in that room on this executor but the sender, which has what it sent. Pipe
-/// peers stand for other SFU nodes, not agents, so none of them is in it.
+/// The track mapping entry for outbound m-line `mid` carrying `origin`'s media.
+fn mapping_entry(mid: Mid, kind: MediaKind, origin: &TrackOrigin) -> crate::sfu::TrackMapEntry {
+    crate::sfu::TrackMapEntry {
+        mid: mid.to_string(),
+        participant_id: origin.participant_id.clone(),
+        agent_did: origin.agent_did.clone(),
+        media_kind: if kind.is_audio() { "audio" } else { "video" }.to_string(),
+    }
+}
+
+/// Offer each target peer the tracks of `adds_per_target` it does not send
+/// yet, `(kind, origin peer, origin mid)`: one SDP change per target, with
+/// the track mapping naming the session each new m-line carries. A target
+/// with an offer pending gets them deferred to after its answer. Returns
+/// the offers to publish: `(target, sdp_offer_json, track_mapping)`.
+fn offer_new_tracks(
+    peers: &mut HashMap<ParticipantId, SfuPeer>,
+    adds_per_target: HashMap<ParticipantId, Vec<(MediaKind, ParticipantId, Mid)>>,
+) -> Vec<(ParticipantId, String, Vec<crate::sfu::TrackMapEntry>)> {
+    // Who each inbound track carries, read before any target is borrowed.
+    let origins: HashMap<(ParticipantId, Mid), TrackOrigin> = peers
+        .values()
+        .flat_map(|peer| {
+            peer.tracks_in
+                .keys()
+                .map(|mid| ((peer.id.clone(), *mid), peer.track_origin(*mid)))
+        })
+        .collect();
+
+    let mut offers = Vec::new();
+    // One sdp_api batch per target peer so a single offer carries every new
+    // outbound m-line (str0m permits exactly one in-flight change at a time).
+    for (target_pid, additions) in adds_per_target.into_iter() {
+        let Some(target_peer) = peers.get_mut(&target_pid) else {
+            continue;
+        };
+        if target_peer.pending_offer.is_some() {
+            for (kind, origin_pid, origin_mid) in &additions {
+                let track = (origin_pid.clone(), *origin_mid);
+                if target_peer.tracks_out_rev.contains_key(&track) {
+                    continue;
+                }
+                if let Some(origin) = origins.get(&track) {
+                    target_peer.deferred_tracks.push((
+                        origin_pid.clone(),
+                        *origin_mid,
+                        *kind,
+                        origin.clone(),
+                    ));
+                }
+            }
+            continue;
+        }
+        // Skip tracks already forwarded, and tracks no peer receives (any
+        // more): the same tests the deferred path makes above, so a track
+        // goes out with its mapping entry on both paths or on neither.
+        let to_add: Vec<(MediaKind, ParticipantId, Mid, &TrackOrigin)> = additions
+            .into_iter()
+            .filter_map(|(kind, origin_pid, origin_mid)| {
+                let track = (origin_pid.clone(), origin_mid);
+                if target_peer.tracks_out_rev.contains_key(&track) {
+                    return None;
+                }
+                let origin = origins.get(&track)?;
+                Some((kind, origin_pid, origin_mid, origin))
+            })
+            .collect();
+        let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _, _)| *kind).collect();
+        let Some((offer, pending, mids)) = offer_send_only(&mut target_peer.rtc, &kinds, false)
+        else {
+            continue;
+        };
+
+        let mut track_mapping = Vec::with_capacity(mids.len());
+        for (new_mid, (kind, origin_pid, origin_mid, origin)) in mids.into_iter().zip(to_add) {
+            track_mapping.push(mapping_entry(new_mid, kind, origin));
+            target_peer
+                .tracks_out
+                .insert(new_mid, (origin_pid.clone(), origin_mid));
+            target_peer
+                .tracks_out_rev
+                .insert((origin_pid, origin_mid), new_mid);
+        }
+        target_peer.pending_offer = Some(pending);
+        target_peer.pending_offer_sent = Some(Instant::now());
+        info!(
+            "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
+            target_pid,
+            kinds.len()
+        );
+
+        match serde_json::to_string(&offer) {
+            Ok(sdp_offer_json) => offers.push((target_pid, sdp_offer_json, track_mapping)),
+            Err(e) => warn!(
+                "SFU: serialise renegotiation offer for {} failed: {}",
+                target_pid, e
+            ),
+        }
+    }
+    offers
+}
+
+/// The agents that get a data channel message the session `sender` sent in `room`: the agent
+/// of every other client peer in that room on this executor. The sender's own agent is in it
+/// only when it is in the call on another device too; the sending session drops its own
+/// message by `senderParticipantId`. Pipe peers stand for other SFU nodes, not agents, so
+/// none of them is in it.
 fn data_recipients(
     peers: &HashMap<ParticipantId, SfuPeer>,
     room: &RoomId,
-    sender: &str,
+    sender: &ParticipantId,
 ) -> Vec<String> {
     let mut dids: Vec<String> = peers
         .values()
-        .filter(|p| !p.is_pipe && p.room_id == *room && p.agent_did != sender)
+        .filter(|p| !p.is_pipe && p.room_id == *room && p.id != *sender)
         .map(|p| p.agent_did.clone())
         .collect();
     dids.sort();
@@ -1604,9 +1694,9 @@ fn data_recipients(
     dids
 }
 
-/// Publish a renegotiation offer for a peer's deferred tracks.
-/// A client peer gets an `sfu-call-renegotiation-offer` event; a pipe
-/// transport's offer goes to the cascade router through the pipe bus.
+/// Publish a renegotiation offer. A client peer gets an
+/// `sfu-call-renegotiation-offer` event; a pipe transport's offer goes to the
+/// cascade router through the pipe bus. Both carry the track mapping.
 fn publish_renegotiation_offer(
     peer: &SfuPeer,
     pid: &ParticipantId,
@@ -1618,11 +1708,13 @@ fn publish_renegotiation_offer(
             remote_did: peer.agent_did.clone(),
             room_id: peer.room_id.to_string(),
             sdp_offer: sdp_offer_json,
+            track_mapping,
         };
         super::pipe_bus::publish_offer(payload);
     } else {
         let payload = crate::sfu::SfuCallRenegotiationOffer {
             target_did: peer.agent_did.clone(),
+            participant_id: pid.to_string(),
             neighbourhood_url: peer.room_id.neighbourhood_url.clone(),
             room_name: peer.room_id.room_name.clone(),
             sdp_offer: sdp_offer_json,
@@ -1631,10 +1723,7 @@ fn publish_renegotiation_offer(
         crate::pubsub::get_global_pubsub_sync()
             .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
     }
-    info!(
-        "SFU: deferred renegotiation offer published for peer {}",
-        pid
-    );
+    info!("SFU: renegotiation offer published for peer {}", pid);
 }
 
 #[cfg(test)]
@@ -1734,12 +1823,189 @@ mod tests {
                 origin.clone(),
                 origin_mid,
                 MediaKind::Audio,
-                "did:key:origin".to_string(),
+                TrackOrigin {
+                    participant_id: origin.to_string(),
+                    agent_did: "did:key:origin".to_string(),
+                },
             ));
         }
         let (_, mapping) = apply_deferred_tracks(&mut peer).expect("the track is offered");
         assert_eq!(mapping.len(), 1, "{mapping:?}");
         assert_eq!(peer.tracks_out.len(), 1);
+    }
+
+    fn mapped(mid: &str, participant_id: &str, agent_did: &str) -> crate::sfu::TrackMapEntry {
+        crate::sfu::TrackMapEntry {
+            mid: mid.to_string(),
+            participant_id: participant_id.to_string(),
+            agent_did: agent_did.to_string(),
+            media_kind: "audio".to_string(),
+        }
+    }
+
+    /// A track that arrives through a cascade pipe is offered to a client
+    /// as the remote session's, the one the remote node's offer named, not
+    /// as the pipe's: its id qualified by the node, its agent's DID. A mid
+    /// no offer named (a node on an older build sends no mapping) is offered
+    /// as the pipe's: its id, the remote node's DID. Deferred while an offer
+    /// is pending, either keeps its origin.
+    #[test]
+    fn a_track_from_a_pipe_is_offered_as_the_remote_session() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let room = RoomId::new("neighbourhood://test", "room");
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let client_id = ParticipantId::next();
+        let client = SfuPeer::new(
+            client_id.clone(),
+            room.clone(),
+            "did:key:bob".to_string(),
+            rtc,
+            false,
+        );
+        let pipe_id = ParticipantId::next();
+        let mut pipe = SfuPeer::new(
+            pipe_id.clone(),
+            room.clone(),
+            "did:key:nodeA".to_string(),
+            Rtc::new(Instant::now()),
+            true,
+        );
+        let (named, unnamed, later, later_unnamed) = (
+            Mid::from("7"),
+            Mid::from("9"),
+            Mid::from("8"),
+            Mid::from("6"),
+        );
+        pipe.note_remote_origins(&[
+            mapped("7", "P1", "did:key:alice"),
+            mapped("8", "P2", "did:key:carol"),
+        ]);
+        for mid in [named, unnamed, later, later_unnamed] {
+            pipe.tracks_in.insert(mid, MediaKind::Audio);
+        }
+        let mut peers = HashMap::from([(client_id.clone(), client), (pipe_id.clone(), pipe)]);
+        let as_pipe = TrackOrigin {
+            participant_id: pipe_id.to_string(),
+            agent_did: "did:key:nodeA".to_string(),
+        };
+
+        let offers = offer_new_tracks(
+            &mut peers,
+            HashMap::from([(
+                client_id.clone(),
+                vec![
+                    (MediaKind::Audio, pipe_id.clone(), named),
+                    (MediaKind::Audio, pipe_id.clone(), unnamed),
+                ],
+            )]),
+        );
+        assert_eq!(offers.len(), 1);
+        let (target, _, mapping) = &offers[0];
+        assert_eq!(target, &client_id);
+        assert_eq!(mapping.len(), 2, "{mapping:?}");
+        let by_mid = |origin_mid: Mid| {
+            let out = peers[&client_id].tracks_out_rev[&(pipe_id.clone(), origin_mid)];
+            mapping
+                .iter()
+                .find(|e| e.mid == out.to_string())
+                .map(|e| (e.participant_id.clone(), e.agent_did.clone()))
+                .expect("a mapping entry for the track")
+        };
+        assert_eq!(
+            by_mid(named),
+            ("P1@did:key:nodeA".to_string(), "did:key:alice".to_string())
+        );
+        assert_eq!(
+            by_mid(unnamed),
+            (as_pipe.participant_id.clone(), as_pipe.agent_did.clone())
+        );
+        assert_eq!(peers[&client_id].tracks_out.len(), 2);
+
+        // The client has not answered yet: the next tracks wait, and keep
+        // their origins, named or not.
+        let offers = offer_new_tracks(
+            &mut peers,
+            HashMap::from([(
+                client_id.clone(),
+                vec![
+                    (MediaKind::Audio, pipe_id.clone(), later),
+                    (MediaKind::Audio, pipe_id.clone(), later_unnamed),
+                ],
+            )]),
+        );
+        assert!(offers.is_empty());
+        let deferred: Vec<(Mid, TrackOrigin)> = peers[&client_id]
+            .deferred_tracks
+            .iter()
+            .map(|(_, mid, _, origin)| (*mid, origin.clone()))
+            .collect();
+        assert_eq!(
+            deferred,
+            vec![
+                (
+                    later,
+                    TrackOrigin {
+                        participant_id: "P2@did:key:nodeA".to_string(),
+                        agent_did: "did:key:carol".to_string(),
+                    }
+                ),
+                (later_unnamed, as_pipe.clone()),
+            ]
+        );
+
+        // Once the offer is answered, the deferred tracks go out with the
+        // same mapping the direct path gives them.
+        let client = peers.get_mut(&client_id).unwrap();
+        client.pending_offer = None;
+        let (_, mapping) = apply_deferred_tracks(client).expect("the deferred tracks are offered");
+        let mut named_in_mapping: Vec<(String, String)> = mapping
+            .iter()
+            .map(|e| (e.participant_id.clone(), e.agent_did.clone()))
+            .collect();
+        named_in_mapping.sort();
+        let mut expected = vec![
+            ("P2@did:key:nodeA".to_string(), "did:key:carol".to_string()),
+            (as_pipe.participant_id, as_pipe.agent_did),
+        ];
+        expected.sort();
+        assert_eq!(named_in_mapping, expected);
+    }
+
+    /// A client's own tracks are offered as its session's.
+    #[test]
+    fn a_track_from_a_client_is_offered_as_its_session() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let room = RoomId::new("neighbourhood://test", "room");
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let target_id = ParticipantId::next();
+        let target = SfuPeer::new(
+            target_id.clone(),
+            room.clone(),
+            "did:key:bob".to_string(),
+            rtc,
+            false,
+        );
+        let sender_id = ParticipantId::next();
+        let mut sender = SfuPeer::new(
+            sender_id.clone(),
+            room,
+            "did:key:alice".to_string(),
+            Rtc::new(Instant::now()),
+            false,
+        );
+        let mid = Mid::from("0");
+        sender.tracks_in.insert(mid, MediaKind::Audio);
+        let mut peers = HashMap::from([(target_id.clone(), target), (sender_id.clone(), sender)]);
+        let offers = offer_new_tracks(
+            &mut peers,
+            HashMap::from([(target_id, vec![(MediaKind::Audio, sender_id.clone(), mid)])]),
+        );
+        assert_eq!(offers.len(), 1);
+        let mapping = &offers[0].2;
+        assert_eq!(mapping.len(), 1, "{mapping:?}");
+        assert_eq!(mapping[0].participant_id, sender_id.to_string());
+        assert_eq!(mapping[0].agent_did, "did:key:alice");
+        assert_eq!(mapping[0].media_kind, "audio");
     }
 
     /// Behind NAT the answer offers the bound socket and the public address
@@ -1782,6 +2048,7 @@ mod tests {
         ice: Vec<(Duration, IceConnectionState)>,
         data: Vec<Duration>,
         channel: Option<ChannelId>,
+        media: Vec<MediaData>,
     }
 
     /// Feed `rtc` the clock, then drain it: events go to `seen`, packets
@@ -1803,6 +2070,7 @@ mod tests {
                 }
                 Output::Event(Event::ChannelOpen(id, _)) => seen.channel = Some(id),
                 Output::Event(Event::ChannelData(_)) => seen.data.push(now - start),
+                Output::Event(Event::MediaData(d)) => seen.media.push(d),
                 Output::Event(_) => {}
             }
         }
@@ -2633,7 +2901,10 @@ mod tests {
             pid_a.clone(),
             origin_mid,
             MediaKind::Audio,
-            "did:key:peerA".to_string(),
+            TrackOrigin {
+                participant_id: pid_a.to_string(),
+                agent_did: "did:key:peerA".to_string(),
+            },
         ));
 
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
@@ -2674,5 +2945,380 @@ mod tests {
         assert!(peers.get(&pid_b).unwrap().deferred_tracks.is_empty());
         assert!(peers.get(&pid_c).unwrap().tracks_out.is_empty());
         assert!(peers.get(&pid_c).unwrap().tracks_out_rev.is_empty());
+    }
+
+    mod payload_types {
+        use super::*;
+        use str0m::format::{Codec, FormatParams};
+        use str0m::media::{Frequency, Pt};
+
+        /// A caller whose codec config numbers PTs the way a browser does:
+        /// `firefox` gets opus 109 and VP8 120 (+RTX 121); otherwise str0m's
+        /// defaults, which are Chrome's (opus 111, VP8 96 + RTX 97).
+        /// `video_only` negotiates a VP8-only caller — one with no common
+        /// codec for audio or for other video codecs.
+        fn browser_rtc(firefox: bool, video_only: bool, addr: SocketAddr) -> Rtc {
+            let mut config = Rtc::builder();
+            if firefox {
+                let codecs = config.codec_config();
+                codecs.clear();
+                if !video_only {
+                    codecs.add_config(
+                        109.into(),
+                        None,
+                        Codec::Opus,
+                        Frequency::FORTY_EIGHT_KHZ,
+                        Some(2),
+                        FormatParams {
+                            min_p_time: Some(10),
+                            use_inband_fec: Some(true),
+                            ..FormatParams::default()
+                        },
+                    );
+                }
+                codecs.add_config(
+                    120.into(),
+                    Some(121.into()),
+                    Codec::Vp8,
+                    Frequency::NINETY_KHZ,
+                    None,
+                    FormatParams::default(),
+                );
+            }
+            let mut rtc = config.build(Instant::now());
+            rtc.add_local_candidate(Candidate::host(addr, "udp").unwrap());
+            rtc
+        }
+
+        /// One end of a call: the caller-side `Rtc` (the "browser"), the
+        /// [`SfuPeer`] the event loop holds for it, and what each saw.
+        struct CallEnd {
+            caller: Rtc,
+            peer: SfuPeer,
+            pid: ParticipantId,
+            addr: SocketAddr,
+            bind: SocketAddr,
+            /// The caller's own mids — the mids MediaData arrives under
+            /// on `peer` (a mid keeps the offerer's name on both ends).
+            mid_audio: Option<Mid>,
+            mid_video: Mid,
+            caller_seen: Seen,
+            peer_seen: Seen,
+        }
+
+        /// A caller that offered `audio`/`video` sendrecv and got an ICE
+        /// connection to its SFU peer up — the state the event loop holds
+        /// once the join's signalling settled.
+        fn call_end(
+            firefox: bool,
+            video_only: bool,
+            addr: &str,
+            bind: &str,
+            did: &str,
+            room: &RoomId,
+        ) -> CallEnd {
+            let caller_addr: SocketAddr = addr.parse().unwrap();
+            let bind_addr: SocketAddr = bind.parse().unwrap();
+            let mut caller = browser_rtc(firefox, video_only, caller_addr);
+            let mut change = caller.sdp_api();
+            let mid_audio = (!video_only).then(|| {
+                change.add_media(
+                    MediaKind::Audio,
+                    str0m::media::Direction::SendRecv,
+                    None,
+                    None,
+                    None,
+                )
+            });
+            let mid_video = change.add_media(
+                MediaKind::Video,
+                str0m::media::Direction::SendRecv,
+                None,
+                None,
+                None,
+            );
+            let (offer, pending) = change.apply().unwrap();
+            let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind_addr, None).unwrap();
+            caller
+                .sdp_api()
+                .accept_answer(pending, serde_json::from_str(&answer).unwrap())
+                .unwrap();
+            let peer = SfuPeer::new(
+                ParticipantId::next(),
+                room.clone(),
+                did.to_string(),
+                rtc,
+                false,
+            );
+            let pid = peer.id.clone();
+
+            let mut end = CallEnd {
+                caller,
+                peer,
+                pid,
+                addr: caller_addr,
+                bind: bind_addr,
+                mid_audio,
+                mid_video,
+                caller_seen: Seen::default(),
+                peer_seen: Seen::default(),
+            };
+
+            let start = Instant::now();
+            let mut now = start;
+            let deadline = start + Duration::from_secs(10);
+            loop {
+                let (caller_next, peer_next) = exchange(&mut end, now, start);
+                let up = |seen: &Seen| {
+                    seen.ice.iter().any(|(_, s)| {
+                        matches!(
+                            s,
+                            IceConnectionState::Connected | IceConnectionState::Completed
+                        )
+                    })
+                };
+                if up(&end.caller_seen) && up(&end.peer_seen) {
+                    return end;
+                }
+                assert!(now < deadline, "the call never connected");
+                now = caller_next.min(peer_next).clamp(
+                    now + Duration::from_millis(1),
+                    now + Duration::from_millis(50),
+                );
+            }
+        }
+
+        /// One round on one end's network link: the caller's packets go to
+        /// the SFU's peer, the peer's packets come back. Returns each
+        /// side's next str0m deadline.
+        fn exchange(end: &mut CallEnd, now: Instant, start: Instant) -> (Instant, Instant) {
+            let mut sent = Vec::new();
+            let caller_next = drive(&mut end.caller, now, start, &mut end.caller_seen, &mut sent);
+            for (_, destination, data) in sent.drain(..) {
+                assert_eq!(destination, end.bind, "the caller sends to the SFU only");
+                receive(&mut end.peer.rtc, now, end.addr, end.bind, &data);
+            }
+            let peer_next = drive(&mut end.peer.rtc, now, start, &mut end.peer_seen, &mut sent);
+            for (_, destination, data) in sent.drain(..) {
+                assert_eq!(destination, end.addr, "the SFU sends to the caller only");
+                receive(&mut end.caller, now, end.bind, end.addr, &data);
+            }
+            (caller_next, peer_next)
+        }
+
+        /// The SFU offers `origin`'s tracks outbound on `end`'s peer, the
+        /// caller answers, and the track mappings land as the event loop's
+        /// renegotiation leaves them.
+        fn plumb(end: &mut CallEnd, origin_pid: &ParticipantId, tracks: &[(Mid, MediaKind)]) {
+            let kinds: Vec<MediaKind> = tracks.iter().map(|(_, kind)| *kind).collect();
+            let (offer, pending, mids) = offer_send_only(&mut end.peer.rtc, &kinds, false).unwrap();
+            end.peer.pending_offer = Some(pending);
+            end.peer.pending_offer_sent = Some(Instant::now());
+            let answer = end.caller.sdp_api().accept_offer(offer).unwrap();
+            end.peer
+                .accept_server_answer(&serde_json::to_string(&answer).unwrap())
+                .unwrap();
+            for ((origin_mid, _), out_mid) in tracks.iter().zip(&mids) {
+                end.peer
+                    .tracks_out
+                    .insert(*out_mid, (origin_pid.clone(), *origin_mid));
+                end.peer
+                    .tracks_out_rev
+                    .insert((origin_pid.clone(), *origin_mid), *out_mid);
+            }
+        }
+
+        /// The caller sends `frame` on `mid` encoded as `codec`.
+        fn write_media(caller: &mut Rtc, mid: Mid, codec: Codec, ticks: u64, frame: &[u8]) {
+            let pt = caller
+                .codec_config()
+                .find(|p| p.spec().codec == codec)
+                .unwrap_or_else(|| panic!("the caller negotiated no {codec:?}"))
+                .pt();
+            let time = if codec.is_audio() {
+                MediaTime::new(ticks * 480, Frequency::FORTY_EIGHT_KHZ)
+            } else {
+                MediaTime::from_90khz(ticks * 3_000)
+            };
+            caller
+                .writer(mid)
+                .expect("a mid the caller sends on")
+                .write(pt, Instant::now(), time, frame.to_vec())
+                .expect("the caller writes with its own PT");
+        }
+
+        /// Forward every MediaData that landed on `origin`'s peer to
+        /// `target`'s peer, as the event loop's relay does.
+        fn relay(origin: &mut CallEnd, target: &mut CallEnd) {
+            for data in origin.peer_seen.media.drain(..) {
+                let track = (origin.pid.clone(), data.mid);
+                let Some(&mid) = target.peer.tracks_out_rev.get(&track) else {
+                    continue;
+                };
+                write_forwarded(&mut target.peer, mid, &data, data.time);
+            }
+        }
+
+        /// Two callers whose SDPs number the same codecs differently —
+        /// Chrome's opus/VP8 are 111/96, Firefox's 109/120 — hear each
+        /// other because the SFU rewrites every packet's PT to the one
+        /// the receiver negotiated. Before the fix the writes went out
+        /// on the sender's PT and str0m refused them (UnknownPt), so
+        /// each side heard and saw nothing.
+        #[test]
+        fn media_crossing_peers_arrives_on_the_receivers_payload_type() {
+            let room = RoomId::new("neighbourhood://test", "room");
+            let mut a = call_end(
+                false,
+                false,
+                "203.0.113.20:50000",
+                "192.168.0.10:40000",
+                "did:key:alice",
+                &room,
+            );
+            let mut b = call_end(
+                true,
+                false,
+                "203.0.113.30:50000",
+                "192.168.0.10:40001",
+                "did:key:bob",
+                &room,
+            );
+
+            // Each caller's tracks, outbound on the other's peer.
+            plumb(
+                &mut b,
+                &a.pid,
+                &[
+                    (a.mid_audio.unwrap(), MediaKind::Audio),
+                    (a.mid_video, MediaKind::Video),
+                ],
+            );
+            plumb(
+                &mut a,
+                &b.pid,
+                &[
+                    (b.mid_audio.unwrap(), MediaKind::Audio),
+                    (b.mid_video, MediaKind::Video),
+                ],
+            );
+
+            const OPUS_A: &[u8] = b"alice's opus frame";
+            const VP8_A: &[u8] = b"alice's vp8 frame, a longer one";
+            const OPUS_B: &[u8] = b"bob's opus frame";
+            const VP8_B: &[u8] = b"bob's vp8 frame, a longer one";
+            let start = Instant::now();
+            let mut now = start;
+            write_media(&mut a.caller, a.mid_audio.unwrap(), Codec::Opus, 1, OPUS_A);
+            write_media(&mut a.caller, a.mid_video, Codec::Vp8, 1, VP8_A);
+            write_media(&mut b.caller, b.mid_audio.unwrap(), Codec::Opus, 1, OPUS_B);
+            write_media(&mut b.caller, b.mid_video, Codec::Vp8, 1, VP8_B);
+
+            // Run the room: media lands on each origin's peer, is
+            // forwarded on the other's outbound mid as the relay does,
+            // and reaches the other caller.
+            let (mut at_a, mut at_b) = (Vec::new(), Vec::new());
+            for _ in 0..100 {
+                exchange(&mut a, now, start);
+                exchange(&mut b, now, start);
+                relay(&mut a, &mut b);
+                relay(&mut b, &mut a);
+                at_a.append(&mut a.caller_seen.media);
+                at_b.append(&mut b.caller_seen.media);
+                if at_a.len() >= 2 && at_b.len() >= 2 {
+                    break;
+                }
+                now += Duration::from_millis(1);
+            }
+
+            // Bob hears Alice on his own numbering: opus 109, VP8 120.
+            let opus = at_b
+                .iter()
+                .find(|d| &*d.data == OPUS_A)
+                .expect("Alice's opus reached Bob");
+            assert_eq!(opus.pt, Pt::new_with_value(109));
+            let vp8 = at_b
+                .iter()
+                .find(|d| &*d.data == VP8_A)
+                .expect("Alice's VP8 reached Bob");
+            assert_eq!(vp8.pt, Pt::new_with_value(120));
+
+            // And Alice hears Bob on hers: opus 111, VP8 96.
+            let opus = at_a
+                .iter()
+                .find(|d| &*d.data == OPUS_B)
+                .expect("Bob's opus reached Alice");
+            assert_eq!(opus.pt, Pt::new_with_value(111));
+            let vp8 = at_a
+                .iter()
+                .find(|d| &*d.data == VP8_B)
+                .expect("Bob's VP8 reached Alice");
+            assert_eq!(vp8.pt, Pt::new_with_value(96));
+        }
+
+        /// A track whose codec the receiver never negotiated is dropped
+        /// — and logged once per (mid, codec), not once per packet.
+        #[test]
+        fn a_receiver_with_no_matching_codec_drops_the_track_once() {
+            let room = RoomId::new("neighbourhood://test", "room");
+            let mut a = call_end(
+                false,
+                false,
+                "203.0.113.20:50000",
+                "192.168.0.10:40000",
+                "did:key:alice",
+                &room,
+            );
+            // Bob negotiates VP8 only: no audio, no other video codec.
+            let mut b = call_end(
+                true,
+                true,
+                "203.0.113.30:50000",
+                "192.168.0.10:40001",
+                "did:key:bob",
+                &room,
+            );
+            plumb(&mut b, &a.pid, &[(a.mid_video, MediaKind::Video)]);
+
+            const VP8_A: &[u8] = b"alice's vp8 frame, a longer one";
+            let start = Instant::now();
+            let mut now = start;
+            // Alice sends two VP9 frames and one VP8 frame; Bob's video
+            // mid negotiated no VP9.
+            write_media(
+                &mut a.caller,
+                a.mid_video,
+                Codec::Vp9,
+                1,
+                b"alice's first vp9 frame",
+            );
+            write_media(
+                &mut a.caller,
+                a.mid_video,
+                Codec::Vp9,
+                2,
+                b"alice's second vp9 frame",
+            );
+            write_media(&mut a.caller, a.mid_video, Codec::Vp8, 3, VP8_A);
+
+            let mut at_b = Vec::new();
+            for _ in 0..100 {
+                exchange(&mut a, now, start);
+                exchange(&mut b, now, start);
+                relay(&mut a, &mut b);
+                at_b.append(&mut b.caller_seen.media);
+                now += Duration::from_millis(1);
+            }
+
+            // The VP8 frame arrived on Bob's numbering; both VP9 frames
+            // were dropped, logged once for the (mid, codec) pair.
+            let vp8 = at_b
+                .iter()
+                .find(|d| &*d.data == VP8_A)
+                .expect("VP8 reached Bob");
+            assert_eq!(vp8.pt, Pt::new_with_value(120));
+            assert_eq!(at_b.len(), 1, "only VP8 may arrive: {at_b:?}");
+            assert_eq!(b.peer.drops_logged.len(), 1, "two dropped packets log once");
+        }
     }
 }

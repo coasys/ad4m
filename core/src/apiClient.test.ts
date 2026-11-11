@@ -162,6 +162,52 @@ describe('ApiClient calls', () => {
     })
 })
 
+describe('ApiClient calls that open something on the executor (OPENS_METHODS)', () => {
+    it('sends request.cancel when such a call times out', async () => {
+        const promise = call('perspective.modelSubscribe', { uuid: 'u' }, { timeoutMs: 50 })
+        await flush()
+        const req = socket(0).sent[0]
+        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 408 })
+        expect(socket(0).sent[1]).toMatchObject({ type: 'request.cancel', params: { targetId: req.id } })
+    })
+
+    it('sends no request.cancel when a call without it times out', async () => {
+        // A write that timed out still runs to its end on the executor.
+        const promise = call('perspective.addLink', { uuid: 'u' }, { timeoutMs: 50 })
+        await flush()
+        await expect(promise).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).sent.map((m) => m.type)).toEqual(['perspective.addLink'])
+    })
+
+    it('sends request.cancel for a timed-out subscribeQuery too', async () => {
+        const promise = call('perspective.subscribeQuery', { uuid: 'u' }, { timeoutMs: 50 })
+        await flush()
+        const req = socket(0).sent[0]
+        await expect(promise).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).sent[1]).toMatchObject({ type: 'request.cancel', params: { targetId: req.id } })
+    })
+
+    it('drops a reply that crossed the cancel: the caller owns the id it sent', async () => {
+        const events: unknown[] = []
+        client.on('agent-updated', (e) => { events.push(e) })
+        const promise = call('perspective.modelSubscribe', { uuid: 'u', subscriptionId: 's1' }, { timeoutMs: 50 })
+        await flush()
+        const req = socket(0).sent.find((m) => m.type === 'perspective.modelSubscribe')!
+        await expect(promise).rejects.toMatchObject({ status: 408 })
+
+        const cancel = socket(0).sent.find((m) => m.type === 'request.cancel')!
+        socket(0).reply({ id: cancel.id, result: { cancelled: false, targetId: req.id } })
+        socket(0).reply({ id: req.id, result: { subscriptionId: 's1' } })
+        expect(events).toEqual([])
+        // The client stays usable: the next call is answered as usual.
+        const next = call('agent.get')
+        await flush()
+        const nextReq = socket(0).sent[socket(0).sent.length - 1]
+        socket(0).reply({ id: nextReq.id, result: { did: 'd' } })
+        await expect(next).resolves.toEqual({ did: 'd' })
+    })
+})
+
 describe('ApiClient connect-phase failures', () => {
     beforeEach(() => { TestSocket.autoOpen = false })
 

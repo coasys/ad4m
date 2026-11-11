@@ -1,5 +1,5 @@
 import { callSafely } from './notifyListeners'
-import { LONG_METHODS, READ_METHODS } from './generated/api/RpcMethods'
+import { LONG_METHODS, OPENS_METHODS, READ_METHODS } from './generated/api/RpcMethods'
 import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
 import type { EventMap, EventName } from './generated/api/Events'
 
@@ -32,7 +32,10 @@ export interface CallOptions {
      */
     signal?: AbortSignal
     /** Timeout in ms, from the call to the reply. Defaults to 30 s, or
-     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. */
+     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. A call
+     *  that opens something on the executor (`OPENS_METHODS`, a live query) is
+     *  cancelled there when it times out, as when `signal` aborts it; any other
+     *  call that times out still runs to its end. */
     timeoutMs?: number
 }
 
@@ -545,7 +548,17 @@ export class ApiClient {
                 signal?.removeEventListener('abort', onAbort)
                 fn()
             }
+            // Tell the executor the call is no longer wanted, so it stops the work. A late
+            // reply finds no pending call and is dropped.
+            const cancel = () => {
+                if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
+                    this._send(this._ws, JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
+                }
+            }
             const timer = setTimeout(() => {
+                // Only a call that opens something is cancelled on timeout: a write that
+                // timed out still runs to its end on the executor, as it always has.
+                if ((OPENS_METHODS as ReadonlySet<string>).has(type)) cancel()
                 settle(() => reject(new RpcError(408, `RPC call '${type}' timed out after ${timeoutMs}ms`)))
                 // A connect that never completes (a black-holed port) would hold every later
                 // call. Drop it once no call waits on it, so the next call dials again.
@@ -555,9 +568,7 @@ export class ApiClient {
                 }
             }, timeoutMs)
             const onAbort = () => {
-                if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
-                    this._send(this._ws, JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
-                }
+                cancel()
                 settle(() => reject(new DOMException('Aborted', 'AbortError')))
             }
             const pending: PendingCall = {
