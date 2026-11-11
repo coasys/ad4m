@@ -239,9 +239,7 @@ pub(crate) async fn auto_accept_pass(
     let pass_did = match crate::agent::did_for_context(context) {
         Ok(d) => d,
         Err(e) => {
-            log::warn!(
-                "interpretation: auto-accept could not resolve the pass's DID: {e:#}"
-            );
+            log::warn!("interpretation: auto-accept could not resolve the pass's DID: {e:#}");
             return Vec::new();
         }
     };
@@ -1111,7 +1109,10 @@ mod tests {
             1,
             "the suggestion stays staged for the person to decide"
         );
-        assert_eq!(title_of(&p, "Memo", child).await.as_deref(), Some("the memo"));
+        assert_eq!(
+            title_of(&p, "Memo", child).await.as_deref(),
+            Some("the memo")
+        );
     }
 
     /// The same deletion, then a pass that *re-emits* the removed field as an
