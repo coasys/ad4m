@@ -22,9 +22,12 @@ use super::guards::{Guard, IdParam, Owner};
 use super::perspectives_ws::check_credits;
 use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 
-/// Where the session-id-carrying methods read their id: `sessionId` (`send`, `cancel`,
-/// `messages`) or `id` (`session`, `sessionUpdate`, `sessionDelete`).
-const SESSION_ID_PARAM: IdParam = IdParam::FirstOf(&["sessionId", "id"]);
+/// Where a method reads the session it acts on: `id` for the calls on the session itself
+/// (`session`, `sessionUpdate`, `sessionDelete`), `sessionId` for the calls on its turns
+/// and transcript (`send`, `cancel`, `messages`). The guard and the handler of a method
+/// read the same one, so the session the guard checked is the session the handler touches.
+const ID_PARAM: IdParam = IdParam::Field(&["id"]);
+const SESSION_ID_PARAM: IdParam = IdParam::Field(&["sessionId"]);
 
 /// What an [`SessionError`] is on the wire: missing and another agent's sessions are one
 /// answer (404, the `owns` rule).
@@ -55,7 +58,7 @@ async fn session_list(_params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 }
 
 async fn session_get(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let id = SESSION_ID_PARAM.require(&params)?;
+    let id = ID_PARAM.require(&params)?;
     service::get(&ctx, &id)
         .map_err(session_error)
         .and_then(|s| serde_json::to_value(s).map_err(WsRpcError::from))
@@ -70,7 +73,7 @@ async fn session_update(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn session_delete(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let id = SESSION_ID_PARAM.require(&params)?;
+    let id = ID_PARAM.require(&params)?;
     service::delete(&ctx, &id)
         .map_err(session_error)
         .map(Value::Bool)
@@ -111,19 +114,19 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read()
         .guard(Guard::Owns {
             cap: |_| AGENT_READ_CAPABILITY.clone(),
-            id: SESSION_ID_PARAM,
+            id: ID_PARAM,
             owner: Owner::AgentSession,
         });
     map.method::<AgentSessionUpdateRequest, AgentSession>("agent.sessionUpdate", session_update)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
-            id: SESSION_ID_PARAM,
+            id: ID_PARAM,
             owner: Owner::AgentSession,
         });
     map.method::<AgentSessionIdParams, bool>("agent.sessionDelete", session_delete)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
-            id: SESSION_ID_PARAM,
+            id: ID_PARAM,
             owner: Owner::AgentSession,
         });
     map.method::<AgentSendParams, service::AgentSendStarted>("agent.send", send)

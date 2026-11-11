@@ -345,6 +345,10 @@ fn the_guard_table_names_the_param_an_owner_guard_reads() {
         ("ai.removeTask", "Task id"),
         ("agent.removeApp", "Grant id"),
         ("agent.revokeToken", "Grant token"),
+        ("agent.sessionUpdate", "AgentSession id"),
+        ("agent.sessionDelete", "AgentSession id"),
+        ("agent.send", "AgentSession sessionId"),
+        ("agent.cancel", "AgentSession sessionId"),
         ("agent.permitCapability", "Request auth(JSON).requestId"),
         (
             "neighbourhood.publish",

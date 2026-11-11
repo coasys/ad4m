@@ -156,7 +156,7 @@ the guard checked:
 | `agent.addTrustedAgents` | `Executor(runtime.trusted_agents:CREATE)` |
 | `agent.byDIDs` | `Cap(agent:READ)` |
 | `agent.byDid` | `Cap(agent:READ)` |
-| `agent.cancel` | `Owns(AgentSession sessionId or id, agent:UPDATE)` |
+| `agent.cancel` | `Owns(AgentSession sessionId, agent:UPDATE)` |
 | `agent.deleteEntanglementProofs` | `Executor(agent:UPDATE)` |
 | `agent.deleteTrustedAgents` | `Executor(runtime.trusted_agents:DELETE)` |
 | `agent.entanglementProofPreflight` | `Executor(agent:READ)` |
@@ -169,17 +169,17 @@ the guard checked:
 | `agent.import` | `Cap(agent:CREATE)` |
 | `agent.isLocked` | `Open` |
 | `agent.lock` | `Executor(agent:UPDATE)` |
-| `agent.messages` | `Owns(AgentSession sessionId or id, agent:READ)` |
+| `agent.messages` | `Owns(AgentSession sessionId, agent:READ)` |
 | `agent.permitCapability` | `Owns(Request auth(JSON).requestId, agent:PERMIT)` |
 | `agent.removeApp` | `Owns(Grant id, agent:UPDATE)` |
 | `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
 | `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
-| `agent.send` | `Owns(AgentSession sessionId or id, agent:UPDATE)` |
-| `agent.session` | `Owns(AgentSession sessionId or id, agent:READ)` |
+| `agent.send` | `Owns(AgentSession sessionId, agent:UPDATE)` |
+| `agent.session` | `Owns(AgentSession id, agent:READ)` |
 | `agent.sessionCreate` | `Cap(agent:CREATE)` |
-| `agent.sessionDelete` | `Owns(AgentSession sessionId or id, agent:UPDATE)` |
+| `agent.sessionDelete` | `Owns(AgentSession id, agent:UPDATE)` |
 | `agent.sessionList` | `Cap(agent:READ)` |
-| `agent.sessionUpdate` | `Owns(AgentSession sessionId or id, agent:UPDATE)` |
+| `agent.sessionUpdate` | `Owns(AgentSession id, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
 | `agent.status` | `Cap(agent:READ)` |
 | `agent.unlock` | `Executor(agent:SIGN)` |
