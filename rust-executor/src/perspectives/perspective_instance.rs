@@ -4373,30 +4373,14 @@ impl PerspectiveInstance {
             .cloned()
             .collect();
 
-        // One store transaction for the whole diff, so a batch lands as one
-        // write. On failure nothing was written; fall back to one link at a
-        // time.
-        match self.sparql_store.apply_diff(&removals, &additions) {
-            Ok(()) => return Ok(effects),
-            Err(e) => log::warn!(
-                "Failed to apply link diff to SPARQL store in one transaction, \
-                 writing links one by one: {:?}",
-                e
-            ),
-        }
-
-        // Removals first
-        for removal in &removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
-            }
-        }
-        // Additions after
-        for addition in &additions {
-            if let Err(e) = self.sparql_store.add_link(addition) {
-                log::warn!("Failed to add link to SPARQL store: {:?}", e);
-            }
-        }
+        // One store transaction for the whole diff: readers see all of it or
+        // none of it, and a write the store refuses (a link in its metadata
+        // vocabulary, a storage error) fails the call with nothing written.
+        // Every caller is a local write that publishes and commits the diff
+        // only after this returns `Ok`, so it must not report or send links
+        // the store does not hold. A peer's diff takes `persist_remote_diff`,
+        // which keeps the links it can write.
+        self.sparql_store.apply_diff(&removals, &additions)?;
 
         // EXPERIMENT: removed per-write flush. The fix-branch added a flush
         // call here to reclaim memtable memory, but flushing on EVERY single
@@ -7227,6 +7211,52 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// A write the store refuses fails the call, and the call writes nothing:
+    /// here one of two links is in the store's metadata vocabulary (#1564).
+    /// Before, `persist_link_diff` fell back to writing the links one by one,
+    /// logged the refusal and returned `Ok`, so the caller reported both
+    /// links added and committed the refused one to the link language.
+    #[tokio::test]
+    async fn a_link_the_store_refuses_fails_add_links_and_writes_nothing() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        let uuid = perspective.uuid.clone();
+
+        let refused = Link {
+            source: "ad4m://n".to_string(),
+            predicate: Some("ad4m://ontology/author".to_string()),
+            target: "did:key:someone".to_string(),
+        };
+        let result = perspective
+            .add_links(
+                vec![create_link(), refused],
+                LinkStatus::Shared,
+                None,
+                &context,
+            )
+            .await;
+
+        assert!(result.is_err(), "the refused link must fail the call");
+        assert!(
+            perspective
+                .get_links(&LinkQuery::default())
+                .await
+                .unwrap()
+                .is_empty(),
+            "the diff is one write: the other link is not stored either"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (pending, _) = crate::db_backend::db_backend()
+            .get_pending_diffs(&uuid, None)
+            .unwrap();
+        assert!(
+            pending.additions.is_empty(),
+            "nothing is committed to the link language"
+        );
     }
 
     /// A removal that matches no stored link is not committed, even when the

@@ -1888,21 +1888,44 @@ impl SparqlStore {
             .map_err(|e| anyhow!("SPARQL store backup to {:?} failed: {}", target, e))
     }
 
-    /// Clear the store and bulk-insert all provided links, except those in
-    /// the store's own metadata vocabulary, which no store keeps.
+    /// Replace every link in the store with `links`, except those in the
+    /// store's own metadata vocabulary, which no store keeps. The clear and
+    /// the rewrite are one transaction under the writer lock: readers see the
+    /// old links or the new ones, never an empty or partly written store, and
+    /// a reload that fails (a link without a status) leaves the store as it
+    /// was, so the next boot's `has_data` check still sees an empty store and
+    /// rebuilds it.
     pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
-        self.clear()?;
-        for link in &links {
-            if refuse_link_metadata(link).is_err() {
-                log::warn!(
-                    "SPARQL reload: skipping a link in the metadata vocabulary: {} -[{}]-> {}",
-                    link.data.source,
-                    link.data.predicate.as_deref().unwrap_or(""),
-                    link.data.target
-                );
-                continue;
+        {
+            let _writer = self
+                .writer
+                .lock()
+                .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+            let mut tx = self.store.start_transaction()?;
+            tx.clear()?;
+            for link in &links {
+                if refuse_link_metadata(link).is_err() {
+                    log::warn!(
+                        "SPARQL reload: skipping a link in the metadata vocabulary: {} -[{}]-> {}",
+                        link.data.source,
+                        link.data.predicate.as_deref().unwrap_or(""),
+                        link.data.target
+                    );
+                    continue;
+                }
+                // As in `write_link`: a link without a status is a bug at the
+                // caller, refused rather than defaulted.
+                let status = link.status.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "Refusing to store link without an explicit local/shared status: {} -[{}]-> {}",
+                        link.data.source,
+                        link.data.predicate.as_deref().unwrap_or(""),
+                        link.data.target
+                    )
+                })?;
+                write_link_quads(&mut tx, link, status)?;
             }
-            self.insert_link_triples(link)?;
+            tx.commit()?;
         }
         self.flush()?;
         Ok(())
@@ -2897,6 +2920,83 @@ mod tests {
 
         let all = svc.get_all_links().unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    /// A reload is one transaction: one that fails part way (here on an
+    /// addition without a status, which the store refuses) leaves the store
+    /// as it was. Before, the store was cleared first and the links written
+    /// one by one, so a failure left it half filled, and the next boot's
+    /// `has_data` check would then skip the rebuild for good.
+    #[test]
+    fn a_reload_that_fails_leaves_the_old_contents() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let old = make_link(&signer, "ad4m://old", "ad4m://p", "ad4m://t");
+        svc.add_link(&old).unwrap();
+
+        let new = make_link(&signer, "ad4m://new", "ad4m://p", "ad4m://t");
+        let mut no_status = make_link(&signer, "ad4m://bad", "ad4m://p", "ad4m://t");
+        no_status.status = None;
+        assert!(svc.reload(vec![new, no_status]).is_err());
+
+        let sources: Vec<String> = svc
+            .get_all_links()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data.source)
+            .collect();
+        assert_eq!(sources, vec!["ad4m://old".to_string()]);
+    }
+
+    /// A reader running beside a reload sees the links from before it or the
+    /// links after it, never an empty or partly written store.
+    #[test]
+    fn a_reader_never_sees_a_reload_half_done() {
+        const OLD: usize = 50;
+        const NEW: usize = 1000;
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        for i in 0..OLD {
+            svc.add_link(&make_link(
+                &signer,
+                &format!("ad4m://old/{i}"),
+                "ad4m://p",
+                "ad4m://t",
+            ))
+            .unwrap();
+        }
+        let new: Vec<LinkExpression> = (0..NEW)
+            .map(|i| make_link(&signer, &format!("ad4m://new/{i}"), "ad4m://p", "ad4m://t"))
+            .collect();
+
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let svc = svc.clone();
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                    seen.push(svc.get_all_links().unwrap().len());
+                }
+                seen
+            })
+        };
+        // Let the reader take its first look before the reload starts.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        svc.reload(new).unwrap();
+        done.store(true, std::sync::atomic::Ordering::Release);
+        let seen = reader.join().unwrap();
+
+        assert!(!seen.is_empty());
+        let torn: Vec<usize> = seen
+            .into_iter()
+            .filter(|n| *n != OLD && *n != NEW)
+            .collect();
+        assert!(
+            torn.is_empty(),
+            "a reader saw a reload half done: link counts {torn:?}"
+        );
+        assert_eq!(svc.get_all_links().unwrap().len(), NEW);
     }
 
     #[test]
