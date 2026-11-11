@@ -14,6 +14,14 @@
 # A new `extension!` in the snapshot list, or a new file that one of them
 # reads, must go into `inputs` below. A listed file that is gone stops the
 # script.
+#
+# The stamp holds the inputs' hash and the checksums of the outputs made from
+# them. It vouches only for those exact outputs: outputs that something else
+# put here (CI's restore of another commit's compile inputs, a snapshot copied
+# by hand) do not match it, and the script makes or restores them again.
+# Without the checksums a CI workdir kept a foreign commit's snapshot under its
+# own stamp, and the executor built against it called ops that did not match
+# its JS ("A language signs only as the user it runs for" from a plain sign).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -60,6 +68,18 @@ have_outputs() {
   done
 }
 
+# The stamp: the inputs' hash, then the outputs' checksums (sha256sum format).
+write_stamp() {
+  { echo "$hash"; sha256 "${outputs[@]}"; } >"$stamp"
+}
+
+# Whether the stamp names these inputs and the outputs here are the ones it
+# was written for. A stamp without checksums (older script) vouches for none.
+stamp_vouches() {
+  [[ "$(head -n 1 "$stamp" 2>/dev/null)" == "$hash" ]] && have_outputs . \
+    && tail -n +2 "$stamp" | sha256 -c --status 2>/dev/null
+}
+
 cache=${CI_ARTIFACT_DIR:+$CI_ARTIFACT_DIR/deno-snapshot}
 
 # Puts the outputs in the host-wide cache (CI only) and drops the entries that
@@ -90,14 +110,14 @@ store() {
 }
 
 if [[ "${FORCE_DENO_SNAPSHOT:-}" != 1 ]]; then
-  if [[ "$(cat "$stamp" 2>/dev/null)" == "$hash" ]] && have_outputs .; then
+  if stamp_vouches; then
     store
     echo "Deno snapshot up to date ($hash)"
     exit 0
   fi
   # A copy that fails (another runner pruned the entry meanwhile) builds.
   if [[ -n "$cache" ]] && have_outputs "$cache/$hash" && cp "${outputs[@]/#/$cache/$hash/}" .; then
-    echo "$hash" >"$stamp"
+    write_stamp
     store
     echo "Deno snapshot restored from $cache/$hash"
     exit 0
@@ -107,6 +127,6 @@ fi
 # A stamp left from a run that failed half-way would vouch for mixed outputs.
 rm -f "$stamp"
 cargo run --release --features generate_snapshot --bin generate_snapshot
-echo "$hash" >"$stamp"
+write_stamp
 store
 echo "Deno snapshot built ($hash)"

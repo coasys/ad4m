@@ -22,8 +22,10 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
   not just `cargo build`. `scripts/build-deno-snapshot.sh` hashes this directory's
   `.rs` and `.js` files, the holochain and runtime service extensions,
   `bin/generate_snapshot.rs`, `Cargo.lock` and the two `Cargo.toml`; when the hash
-  matches the stamp (`CUSTOM_DENO_SNAPSHOT.inputs`) it skips the build.
-  `FORCE_DENO_SNAPSHOT=1` builds anyway.
+  matches the stamp (`CUSTOM_DENO_SNAPSHOT.inputs`) and the outputs still match the
+  checksums the stamp recorded, it skips the build. Outputs copied in from elsewhere
+  (another commit's CI compile inputs) do not match, and it makes them again.
+  `FORCE_DENO_SNAPSHOT=1` builds anyway. Test: `bash scripts/build-deno-snapshot.test.sh`.
 - A new extension in `ad4m_language_extensions()`, or a file one of them reads
   (`esm`, ops), outside this directory goes into that script's `inputs` list.
   Otherwise a change to it keeps the old snapshot.

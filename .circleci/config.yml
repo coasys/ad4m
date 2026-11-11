@@ -189,7 +189,9 @@ commands:
           # Makes the Deno snapshot too: build-libs runs @coasys/rust-ad4m-executor#build
           # (`build-deno-snapshot`) before the cli builds the executor. The script
           # skips the snapshot when its inputs did not change since this workdir's
-          # last build, or copies it from the host-wide cache in
+          # last build and the outputs are still the ones that build made (a
+          # rust-tests or clippy job restores another commit's into this workdir),
+          # or copies it from the host-wide cache in
           # $CI_ARTIFACT_DIR/deno-snapshot/ when another runner built those inputs.
           name: Build ADAM (without bootstrap languages)
           command: |
@@ -380,6 +382,11 @@ jobs:
           # block above against healthy and deliberately broken workdirs (#1325).
           name: Test the fix_workdir step
           command: bash scripts/ci-fix-workdir.test.sh
+      - run:
+          # Fake cargo, no Rust build; about a second. The stamp must not vouch for a snapshot
+          # that restore_rust_compile_inputs of another commit left in this workdir.
+          name: Test build-deno-snapshot.sh
+          command: bash rust-executor/scripts/build-deno-snapshot.test.sh
       - build_adam
       - build_integration_inputs
       - run:
