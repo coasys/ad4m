@@ -31,6 +31,7 @@
 #   COASYS_SPACES_TIER          real (host model, Whisper) or stub; default real
 #   COASYS_SPACES_LLM_BASE_URL  OpenAI-compatible base URL (http://localhost:11434/v1)
 #   COASYS_SPACES_LLM_MODEL     model id (gemma3:12b)
+#   COASYS_SPACES_LLM_NUM_CTX   context window an Ollama server runs it with (16384; empty: as is)
 #   SOCIAL_DNA_PACKAGE          passed to the suite when set
 set -euo pipefail
 
@@ -45,6 +46,7 @@ PUBLISH_DIR="${EXECUTOR_PUBLISH_DIR:-/mnt/hdd/executor-artifacts}"
 TIER="${COASYS_SPACES_TIER:-real}"
 LLM_BASE_URL="${COASYS_SPACES_LLM_BASE_URL:-http://localhost:11434/v1}"
 LLM_MODEL="${COASYS_SPACES_LLM_MODEL:-gemma3:12b}"
+LLM_NUM_CTX="${COASYS_SPACES_LLM_NUM_CTX-16384}"
 
 WE_DIR="$WORK/we"
 SDK_DIR="$WORK/sdk"
@@ -283,6 +285,37 @@ cmd_llm_check() {
         die "the model server at $LLM_BASE_URL has no model '$LLM_MODEL' (it has: $(jq -r '[.data[]?.id] | join(", ")' <<<"$models")). On the runner: ollama pull $LLM_MODEL"
     fi
     log "$LLM_BASE_URL serves $LLM_MODEL"
+    rm -f "$WORK/llm-model"
+    with_context_window
+}
+
+# Ollama's OpenAI endpoint runs a model with the server's default context window (often 4096 tokens)
+# and cuts a longer prompt without an error; extraction's prompt is about 6,000 tokens. A request
+# cannot raise it there, so on an Ollama server this makes a variant of the model with
+# LLM_NUM_CTX tokens (`/api/create`, no download) and names it in $WORK/llm-model for `test`.
+# Another server keeps the model as it is.
+with_context_window() {
+    local root="${LLM_BASE_URL%/}" variant answer
+    root="${root%/v1}"
+    [ -n "$LLM_NUM_CTX" ] || return 0
+    if ! curl -sf --max-time 15 "$root/api/version" >/dev/null; then
+        log "$root is not an Ollama server; the model keeps its own context window"
+        return 0
+    fi
+    variant="coasys-spaces-$(printf '%s' "$LLM_MODEL" | tr ':/' '--'):ctx$LLM_NUM_CTX"
+    answer="$(curl -sf --max-time 300 "$root/api/create" -H 'content-type: application/json' \
+        -d "$(jq -nc --arg m "$variant" --arg f "$LLM_MODEL" --argjson n "$LLM_NUM_CTX" \
+            '{model: $m, from: $f, parameters: {num_ctx: $n}, stream: false}')")" ||
+        die "Ollama at $root could not make $variant from $LLM_MODEL (POST /api/create)"
+    jq -e '.status == "success"' >/dev/null <<<"$answer" || die "Ollama answered /api/create with: $answer"
+    mkdir -p "$WORK"
+    echo "$variant" >"$WORK/llm-model"
+    log "extraction runs on $variant ($LLM_MODEL with a $LLM_NUM_CTX-token context)"
+}
+
+# The model `test` names: the context-window variant `llm-check` made, else LLM_MODEL.
+served_model() {
+    cat "$WORK/llm-model" 2>/dev/null || echo "$LLM_MODEL"
 }
 
 cmd_build_web() {
@@ -300,14 +333,14 @@ cmd_test() {
         echo "we $(cat "$WORK/we.sha" 2>/dev/null || echo "?") ($WE_REF)"
         echo "executor $(cat "$WORK/executor.source" 2>/dev/null || echo "?")"
         echo "tier $TIER"
-        [ "$TIER" = real ] && echo "model $LLM_MODEL at $LLM_BASE_URL"
+        [ "$TIER" = real ] && echo "model $(served_model) at $LLM_BASE_URL"
         echo "social dna ${SOCIAL_DNA_PACKAGE:-fixture}"
     } | tee "$ARTIFACTS/run.txt"
     cd "$WE_DIR"
     AD4M_EXECUTOR="$EXECUTOR" \
         COASYS_SPACES_TIER="$TIER" \
         COASYS_SPACES_LLM_BASE_URL="$LLM_BASE_URL" \
-        COASYS_SPACES_LLM_MODEL="$LLM_MODEL" \
+        COASYS_SPACES_LLM_MODEL="$(served_model)" \
         COASYS_SPACES_ARTIFACTS="$ARTIFACTS" \
         pnpm --filter "$WE_PACKAGE" test:spaces 2>&1 | tee "$ARTIFACTS/test-spaces.log"
 }

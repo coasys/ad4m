@@ -119,8 +119,12 @@ A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marv
 
 `coasys-spaces` runs WE's product suite (`pnpm --filter @we/app-web test:spaces`,
 WE `apps/we-web/tests/live/coasys-spaces/`): a Coasys space, a call, its
-transcript (executor Whisper), extraction on Ollama `gemma3:12b`, and flows. It
-uses this commit's executor and SDK:
+transcript (executor Whisper), extraction on Ollama `gemma3:12b`, and flows.
+Ollama's OpenAI endpoint runs a model with the server's default context window
+and cuts a longer prompt silently, so `llm-check` makes the variant
+`coasys-spaces-gemma3-12b:ctx16384` (`/api/create`, `num_ctx`;
+`COASYS_SPACES_LLM_NUM_CTX`) and the suite runs on it. It uses this commit's
+executor and SDK:
 
 - The executor is the one the `build` job published for the commit
   (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,

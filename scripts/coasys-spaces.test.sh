@@ -150,14 +150,28 @@ test_record_needs_we_sha() {
     [ ! -e "$COASYS_SPACES_STATE/last-success" ] || fail "record wrote a pair without a WE commit"
 }
 
-# A model server on a free port that lists the given model ids at /v1/models.
+# A model server on a free port that lists the given model ids at /v1/models. With OLLAMA=1 it
+# also answers Ollama's /api/version and /api/create, and writes each create request to
+# $TMP/created.
 serve_models() {
-    node -e '
+    OLLAMA="${OLLAMA:-}" CREATED="$TMP/created" node -e '
       const ids = process.argv.slice(1);
       const s = require("http").createServer((req, res) => {
-        if (req.url !== "/v1/models") { res.writeHead(404); return res.end(); }
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ object: "list", data: ids.map((id) => ({ id, object: "model" })) }));
+        if (req.url === "/v1/models") {
+          return res.end(JSON.stringify({ object: "list", data: ids.map((id) => ({ id, object: "model" })) }));
+        }
+        if (process.env.OLLAMA && req.url === "/api/version") return res.end(JSON.stringify({ version: "0.12.0" }));
+        if (process.env.OLLAMA && req.url === "/api/create" && req.method === "POST") {
+          let body = "";
+          req.on("data", (c) => (body += c));
+          return req.on("end", () => {
+            require("fs").appendFileSync(process.env.CREATED, body + "\n");
+            res.end(JSON.stringify({ status: "success" }));
+          });
+        }
+        res.writeHead(404);
+        res.end();
       });
       s.listen(0, "127.0.0.1", () => console.log(s.address().port));
     ' "$@" >"$TMP/port" &
@@ -180,9 +194,30 @@ test_llm_check() {
     unset COASYS_SPACES_LLM_BASE_URL
 }
 
+# On Ollama, llm-check makes a variant of the model with a larger context window, and names it for
+# `test`; on another server the model stays as it is.
+test_llm_context_window() {
+    OLLAMA=1 serve_models "gemma3:12b"
+    COASYS_SPACES_LLM_MODEL=gemma3:12b bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "llm-check failed on Ollama"
+    jq -e '.model == "coasys-spaces-gemma3-12b:ctx16384" and .from == "gemma3:12b" and .parameters.num_ctx == 16384' \
+        "$TMP/created" >/dev/null || fail "the variant was not asked for as expected: $(cat "$TMP/created" 2>/dev/null)"
+    [ "$(cat "$COASYS_SPACES_WORK/llm-model" 2>/dev/null)" = "coasys-spaces-gemma3-12b:ctx16384" ] ||
+        fail "test is not told to use the variant"
+    kill "$SERVER"
+    wait "$SERVER" 2>/dev/null
+
+    serve_models "gemma3:12b"
+    COASYS_SPACES_LLM_MODEL=gemma3:12b bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "llm-check failed on a plain server"
+    [ ! -e "$COASYS_SPACES_WORK/llm-model" ] || fail "a plain server's model was replaced (stale variant name kept)"
+    kill "$SERVER"
+    wait "$SERVER" 2>/dev/null
+    unset COASYS_SPACES_LLM_BASE_URL
+}
+
 for t in test_executor_from_zst test_executor_from_gz test_executor_missing \
     test_executor_checksum_mismatch test_executor_other_commit test_executor_size_mismatch \
-    test_executor_unknown_file test_preflight test_record_needs_we_sha test_llm_check; do
+    test_executor_unknown_file test_preflight test_record_needs_we_sha test_llm_check \
+    test_llm_context_window; do
     echo "$t"
     setup
     "$t"
