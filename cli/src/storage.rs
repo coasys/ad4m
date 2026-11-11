@@ -110,12 +110,16 @@ pub fn describe_status(status: &StorageStatus) -> String {
         text.push_str(": waiting for `ad4m-executor storage unlock`");
     }
     if let Some(error) = status.last_error {
-        let name = match error {
-            StorageErrorKind::WrongSecret => "wrong-secret",
-            StorageErrorKind::CorruptKeyring => "corrupt-keyring",
-            StorageErrorKind::SecretOnDataDisk => "secret-on-data-disk",
+        let line = match error {
+            StorageErrorKind::WrongSecret => "The last unlock failed: wrong-secret",
+            StorageErrorKind::CorruptKeyring => "The last unlock failed: corrupt-keyring",
+            StorageErrorKind::SecretOnDataDisk => "The last unlock failed: secret-on-data-disk",
+            StorageErrorKind::MigrationFailed => {
+                "The database did not move under its key (migration-failed): it stays in the \
+                 clear, see the executor log"
+            }
         };
-        text.push_str(&format!("\nThe last unlock failed: {name}"));
+        text.push_str(&format!("\n{line}"));
     }
     text
 }
@@ -212,6 +216,30 @@ mod tests {
         assert!(line.contains("unlocking"), "{line}");
         assert!(line.contains("new keyring"), "{line}");
         assert!(!line.contains("0101"), "{line}");
+    }
+
+    /// A database that did not move under its key is told apart from a failed unlock.
+    #[test]
+    fn status_names_a_failed_database_migration() {
+        let status = |last_error| StorageStatus {
+            state: StorageState::Open,
+            encrypted_at_rest: false,
+            stores: None,
+            keyring_id: "ab".repeat(16),
+            secret_source: None,
+            secret_on_data_disk: None,
+            root_generation: Some(1),
+            last_error,
+        };
+        let text = describe_status(&status(Some(StorageErrorKind::MigrationFailed)));
+        assert!(text.contains("migration-failed"), "{text}");
+        assert!(text.contains("stays in the clear"), "{text}");
+        assert!(!text.contains("unlock failed"), "{text}");
+        let text = describe_status(&status(Some(StorageErrorKind::WrongSecret)));
+        assert!(
+            text.contains("The last unlock failed: wrong-secret"),
+            "{text}"
+        );
     }
 
     /// The unlock goes only to a loopback address, and a malformed secret is not sent.

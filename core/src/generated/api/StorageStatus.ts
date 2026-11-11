@@ -35,6 +35,6 @@ secretOnDataDisk: boolean | null,
  */
 rootGeneration: number | null, 
 /**
- * Operator only: why the last unlock failed.
+ * Operator only: why the last unlock failed, or which store did not move under its key.
  */
 lastError: StorageErrorKind | null, };

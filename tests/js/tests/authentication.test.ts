@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil, waitForExit, stopChildProcess } from "../utils/utils";
+import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil, waitForExit, stopChildProcess, testStorageSecretEnv } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess, execFileSync, spawn } from 'node:child_process';
 import type { EventMap } from "@coasys/ad4m";
@@ -96,7 +96,7 @@ describe("Authentication integration tests", () => {
         it("without a credential the testing flag opens MCP to a tokenless caller on loopback", async () => {
             const [apiPort, mcpPort] = await getFreePorts(2);
             registerPorts([apiPort, mcpPort]);
-            const childEnv = { ...process.env };
+            const childEnv = { ...process.env, ...testStorageSecretEnv() };
             delete childEnv.AD4M_ADMIN_CREDENTIAL;
             delete childEnv.AD4M_ADMIN_CREDENTIAL_FILE;
             delete childEnv.AD4M_INSECURE_NO_ADMIN_CREDENTIAL;

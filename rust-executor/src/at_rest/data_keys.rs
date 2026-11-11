@@ -506,6 +506,45 @@ impl DataKeys {
             Ok((version, hkdf_subkey(key, &[], purpose.info())))
         })
     }
+
+    /// Sets store `id`'s state, written to the keyring file before this returns.
+    pub fn set_store_state(&self, id: &StoreId, state: StoreState) -> Result<(), KeyringError> {
+        let path = self.path.clone();
+        self.with_open(|open| {
+            open.file.store(id).ok_or(KeyringError::UnknownStore)?;
+            let mut next = open.file.clone();
+            store_mut(&mut next, id)?.state = state;
+            Self::commit(&path, open, next)
+        })
+    }
+
+    /// Makes sure store `id` exists and each of `owners` (each made a person when it is not
+    /// one yet) holds its key. A store made here starts [`StoreState::Plain`].
+    pub fn ensure_store(&self, id: &StoreId, owners: &[KeyOwner]) -> Result<(), KeyringError> {
+        for owner in owners {
+            match self.create_person(owner.clone()) {
+                Ok(()) | Err(KeyringError::OwnerExists) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        match self.create_store(id.clone(), owners) {
+            Ok(()) => return Ok(()),
+            Err(KeyringError::StoreExists) => {}
+            Err(e) => return Err(e),
+        }
+        for owner in owners {
+            match self.add_owner(id, owner) {
+                Ok(()) | Err(KeyringError::OwnerExists) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Store `id`'s state, when it exists.
+    pub fn store_state(&self, id: &StoreId) -> Result<Option<StoreState>, KeyringError> {
+        self.with_open(|open| Ok(open.file.store(id).map(|s| s.state.clone())))
+    }
 }
 
 fn store_mut<'a>(

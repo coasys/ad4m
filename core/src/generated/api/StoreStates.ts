@@ -6,15 +6,16 @@ import type { StoreStateName } from "./StoreStateName";
  */
 export type StoreStates = { 
 /**
- * The executor's database.
+ * The executor's database: the executor store's state, `encrypted` once the database file
+ * is under the database key.
  */
 database: StoreStateName, 
 /**
- * The languages' storage.
+ * The languages' storage: `plain` until it is written under a key.
  */
 languageStorage: StoreStateName, 
 /**
- * The perspectives' links: the least advanced of them (the database's state while there
- * is none).
+ * The perspectives' links: the least advanced of the perspectives' stores, `plain` while
+ * there is none.
  */
 links: StoreStateName, };

@@ -30,6 +30,7 @@ mod bots;
 pub(crate) mod grants;
 mod identity;
 mod rekey;
+pub(crate) mod sealed;
 mod tasks;
 pub use bots::{BotActivityRow, BotGrantRow, BotRow};
 pub use grants::{GrantKeyRow, GrantRow};
@@ -143,14 +144,6 @@ fn flow_replica_rows_sql(instances: Option<usize>) -> String {
     )
 }
 
-fn flow_replica_row(row: &rusqlite::Row) -> rusqlite::Result<FlowReplicaStateRow> {
-    Ok(FlowReplicaStateRow {
-        instance: row.get(0)?,
-        current_state: row.get(1)?,
-        derived_at: row.get(2)?,
-    })
-}
-
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -169,21 +162,55 @@ lazy_static! {
 
 pub struct Ad4mDb {
     conn: Connection,
+    /// The keyring whose store keys seal the sealed columns (`sealed`); `None` keeps them in
+    /// the clear (a database opened without keys).
+    rows: Option<Arc<crate::at_rest::DataKeys>>,
 }
 
 impl Ad4mDb {
+    /// Opens the executor database at `db_path` as the process's: under the installed
+    /// database keys (`at_rest::sqlite::install`), in the clear when none are installed.
     pub fn init_global_instance(db_path: &str) -> Ad4mDbResult<()> {
+        let db = match crate::at_rest::sqlite::installed() {
+            Some(keys) => Ad4mDb::open(
+                std::path::Path::new(db_path),
+                Some((&keys.sqlite, keys.rows.clone())),
+            )?,
+            None => Ad4mDb::new(db_path)?,
+        };
         let mut db_instance = AD4M_DB_INSTANCE.lock().unwrap();
-        *db_instance = Some(Ad4mDb::new(db_path)?);
+        *db_instance = Some(db);
         Ok(())
+    }
+
+    /// Opens the database at `path` under `keys`: the SQLCipher key of the file, and the
+    /// keyring that seals the sealed columns.
+    pub(crate) fn open(
+        path: &std::path::Path,
+        keys: Option<(&ad4m_keyring::SecretKey, Arc<crate::at_rest::DataKeys>)>,
+    ) -> Ad4mDbResult<Self> {
+        match keys {
+            Some((sqlite, rows)) => {
+                let conn = crate::at_rest::sqlite::open_keyed(path, sqlite)?;
+                Self::with_connection(conn, Some(rows))
+            }
+            None => Self::with_connection(Connection::open(path)?, None),
+        }
     }
 
     pub fn global_instance() -> Arc<Mutex<Option<Ad4mDb>>> {
         AD4M_DB_INSTANCE.clone()
     }
 
+    /// The database at `db_path` in the clear, without keys.
     pub(crate) fn new(db_path: &str) -> Ad4mDbResult<Self> {
-        let conn = Connection::open(db_path)?;
+        Self::with_connection(Connection::open(db_path)?, None)
+    }
+
+    fn with_connection(
+        conn: Connection,
+        rows: Option<Arc<crate::at_rest::DataKeys>>,
+    ) -> Ad4mDbResult<Self> {
         Self::refuse_data_from_before_did_keys(&conn)?;
 
         // Create tables if they don't exist
@@ -229,11 +256,16 @@ impl Ad4mDb {
             [],
         )?;
 
+        // `owner`: the DID of the person the expression was fetched for, `''` for the
+        // executor's own fetches. `data` is sealed under that person's (or the executor's)
+        // store, so one URL has a row per owner.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS expression (
                 id INTEGER PRIMARY KEY,
-                url TEXT NOT NULL UNIQUE,
-                data TEXT NOT NULL
+                url TEXT NOT NULL,
+                data TEXT NOT NULL,
+                owner TEXT NOT NULL DEFAULT '',
+                UNIQUE (url, owner)
              )",
             [],
         )?;
@@ -473,6 +505,35 @@ impl Ad4mDb {
         // fresh table.
         alter_add_column("ALTER TABLE tasks ADD COLUMN agent_did TEXT")?;
 
+        // Owner of each outbox message, by DID: its `message` and `recipient` are sealed under
+        // that person's store. NULL marks the main agent's, which includes every row from
+        // before this column.
+        alter_add_column("ALTER TABLE outbox ADD COLUMN owner_did TEXT")?;
+
+        // `expression` from before `owner`: unique by `url` alone. Rebuilt with `owner`
+        // (`''`: the executor's) and unique by `(url, owner)`.
+        let expression_has_owner: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('expression') WHERE name = 'owner'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !expression_has_owner {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE expression_with_owner (
+                    id INTEGER PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    owner TEXT NOT NULL DEFAULT '',
+                    UNIQUE (url, owner)
+                 );
+                 INSERT INTO expression_with_owner (id, url, data) SELECT id, url, data FROM expression;
+                 DROP TABLE expression;
+                 ALTER TABLE expression_with_owner RENAME TO expression;
+                 COMMIT;",
+            )?;
+        }
+
         // Add hosting columns to users table
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
         alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
@@ -596,7 +657,7 @@ impl Ad4mDb {
              ON flow_fired_mark(perspective, agent_did, instance)",
         )?;
 
-        Ok(Self { conn })
+        Ok(Self { conn, rows })
     }
 
     /// Refuses a database that a `dev` build wrote before agents were keyed by DID (D16):
@@ -681,11 +742,52 @@ impl Ad4mDb {
         let created_at = chrono::Utc::now().to_string();
         let updated_at = created_at.clone();
         let id = uuid::Uuid::new_v4().to_string();
+        let seal = self.writer(&sealed::TASKS, agent_did, &[&id], None)?;
         self.conn.execute(
             "INSERT INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, created_at, updated_at, agent_did],
+            params![
+                id,
+                seal.seal("name", &name)?,
+                model_id,
+                seal.seal("system_prompt", &system_prompt)?,
+                seal.seal("prompt_examples", &serde_json::to_string(&prompt_examples).unwrap())?,
+                seal.seal_opt("metadata", metadata.as_deref())?,
+                created_at,
+                updated_at,
+                agent_did
+            ],
         )?;
         Ok(id)
+    }
+
+    /// The columns `task_from_row` reads, in its order.
+    pub(crate) const TASK_COLUMNS: &'static str =
+        "id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did";
+
+    /// A task from a row of [`Self::TASK_COLUMNS`], its sealed values opened.
+    pub(crate) fn task_from_row(&self, row: &rusqlite::Row) -> Result<AITask, rusqlite::Error> {
+        let id: String = row.get(0)?;
+        let owner: Option<String> = row.get(8)?;
+        let seal = self.reader(&sealed::TASKS, owner.as_deref(), &[&id])?;
+        let prompt_examples = seal.open("prompt_examples", row.get(4)?)?;
+        let prompt_examples: Vec<AIPromptExamples> = serde_json::from_str(&prompt_examples)
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+        Ok(AITask {
+            name: seal.open("name", row.get(1)?)?,
+            model_id: row.get(2)?,
+            system_prompt: seal.open("system_prompt", row.get(3)?)?,
+            prompt_examples,
+            meta_data: seal.open_opt("metadata", row.get(5)?)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            task_id: id,
+        })
     }
 
     pub fn remove_task(&self, id: String) -> Result<(), rusqlite::Error> {
@@ -694,48 +796,22 @@ impl Ad4mDb {
     }
 
     pub fn get_task(&self, id: String) -> Result<Option<AITask>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT * FROM tasks WHERE id = ?")?;
-        let mut rows = stmt.query(params![id])?;
-
-        if let Some(row) = rows.next()? {
-            let prompt_examples: Vec<AIPromptExamples> =
-                serde_json::from_str(&row.get::<_, String>(4)?).unwrap();
-            Ok(Some(AITask {
-                task_id: row.get(0)?,
-                name: row.get(1)?,
-                model_id: row.get(2)?,
-                system_prompt: row.get(3)?,
-                prompt_examples,
-                meta_data: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        self.conn
+            .query_row(
+                &format!("SELECT {} FROM tasks WHERE id = ?1", Self::TASK_COLUMNS),
+                params![id],
+                |row| self.task_from_row(row),
+            )
+            .optional()
     }
 
     pub fn get_tasks(&self) -> Result<Vec<AITask>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT * FROM tasks")?;
-        let task_iter = stmt.query_map([], |row| {
-            let prompt_examples: Vec<AIPromptExamples> =
-                serde_json::from_str(&row.get::<_, String>(4)?).unwrap();
-            let task = AITask {
-                task_id: row.get(0)?,
-                name: row.get(1)?,
-                model_id: row.get(2)?,
-                system_prompt: row.get(3)?,
-                prompt_examples,
-                meta_data: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            };
-            Ok(task)
-        })?;
-
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {} FROM tasks", Self::TASK_COLUMNS))?;
         let mut tasks = Vec::new();
-        for task in task_iter {
-            tasks.push(task?);
+        for task in stmt.query_map([], |row| self.task_from_row(row))? {
+            tasks.extend(sealed::readable("tasks", task)?);
         }
         Ok(tasks)
     }
@@ -750,10 +826,22 @@ impl Ad4mDb {
         metadata: Option<String>,
     ) -> Result<bool, rusqlite::Error> {
         let updated_at = chrono::Utc::now().to_string();
-
+        // The owner stays: the values are sealed under its store.
+        let Some(owner) = self.get_task_owner(&id)? else {
+            return Ok(false);
+        };
+        let seal = self.writer(&sealed::TASKS, owner.as_deref(), &[&id], None)?;
         let result = self.conn.execute(
             "UPDATE tasks SET name = ?2, model_id = ?3, system_prompt = ?4, prompt_examples = ?5, metadata = ?6, updated_at = ?7 WHERE id = ?1",
-            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, updated_at],
+            params![
+                id,
+                seal.seal("name", &name)?,
+                model_id,
+                seal.seal("system_prompt", &system_prompt)?,
+                seal.seal("prompt_examples", &serde_json::to_string(&prompt_examples).unwrap())?,
+                seal.seal_opt("metadata", metadata.as_deref())?,
+                updated_at
+            ],
         )?;
         Ok(result > 0)
     }
@@ -936,40 +1024,54 @@ impl Ad4mDb {
         }
 
         let id = uuid::Uuid::new_v4().to_string();
+        let seal = self.writer(&sealed::NOTIFICATIONS, Some(owner_did), &[&id], None)?;
         self.conn.execute(
             "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, owner_did) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 granted,
-                notification.description,
-                notification.app_name,
-                notification.app_url,
-                notification.app_icon_path,
-                notification.trigger,
-                serde_json::to_string(&notification.perspective_ids).unwrap(),
-                notification.webhook_url,
+                seal.seal("description", &notification.description)?,
+                seal.seal("appName", &notification.app_name)?,
+                seal.seal("appUrl", &notification.app_url)?,
+                seal.seal("appIconPath", &notification.app_icon_path)?,
+                seal.seal("trigger", &notification.trigger)?,
+                seal.seal(
+                    "perspective_ids",
+                    &serde_json::to_string(&notification.perspective_ids).unwrap()
+                )?,
+                seal.seal("webhookUrl", &notification.webhook_url)?,
                 // The database is where the executor keeps the credential.
-                notification.webhook_auth.expose(),
+                seal.seal("webhookAuth", notification.webhook_auth.expose())?,
                 owner_did,
             ],
         )?;
         Ok(id)
     }
 
-    /// Reads a row of `NOTIFICATION_COLUMNS`, in that order.
-    fn notification_from_row(row: &rusqlite::Row) -> Result<Notification, rusqlite::Error> {
+    /// Reads a row of `NOTIFICATION_COLUMNS`, in that order, its sealed values opened.
+    fn notification_from_row(&self, row: &rusqlite::Row) -> Result<Notification, rusqlite::Error> {
+        let id: String = row.get(0)?;
+        let owner_did: String = row.get(10)?;
+        let seal = self.reader(&sealed::NOTIFICATIONS, Some(&owner_did), &[&id])?;
+        let perspective_ids = seal.open("perspective_ids", row.get(7)?)?;
         Ok(Notification {
-            id: row.get(0)?,
             granted: row.get(1)?,
-            description: row.get(2)?,
-            app_name: row.get(3)?,
-            app_url: row.get(4)?,
-            app_icon_path: row.get(5)?,
-            trigger: row.get(6)?,
-            perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-            webhook_url: row.get(8)?,
-            webhook_auth: Secret::new(row.get::<_, String>(9)?),
-            owner_did: row.get(10)?,
+            description: seal.open("description", row.get(2)?)?,
+            app_name: seal.open("appName", row.get(3)?)?,
+            app_url: seal.open("appUrl", row.get(4)?)?,
+            app_icon_path: seal.open("appIconPath", row.get(5)?)?,
+            trigger: seal.open("trigger", row.get(6)?)?,
+            perspective_ids: serde_json::from_str(&perspective_ids).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+            webhook_url: seal.open("webhookUrl", row.get(8)?)?,
+            webhook_auth: Secret::new(seal.open("webhookAuth", row.get(9)?)?),
+            owner_did,
+            id,
         })
     }
 
@@ -980,13 +1082,15 @@ impl Ad4mDb {
         filter: &str,
         params: impl rusqlite::Params,
     ) -> Result<Vec<Notification>, rusqlite::Error> {
-        self.conn
-            .prepare(&format!(
-                "SELECT {} FROM notifications WHERE owner_did IS NOT NULL {filter}",
-                Self::NOTIFICATION_COLUMNS
-            ))?
-            .query_map(params, Self::notification_from_row)?
-            .collect()
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM notifications WHERE owner_did IS NOT NULL {filter}",
+            Self::NOTIFICATION_COLUMNS
+        ))?;
+        let mut notifications = Vec::new();
+        for notification in stmt.query_map(params, |row| self.notification_from_row(row))? {
+            notifications.extend(sealed::readable("notifications", notification)?);
+        }
+        Ok(notifications)
     }
 
     pub fn get_notifications(&self) -> Result<Vec<Notification>, rusqlite::Error> {
@@ -1076,19 +1180,34 @@ impl Ad4mDb {
 
         // The owner stays as stored: only a re-key moves it (`move_notification_owner`), and an
         // update that read the owner before a re-key would otherwise write the retired DID back.
+        let owner: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT owner_did FROM notifications WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        let seal = self.writer(&sealed::NOTIFICATIONS, owner.as_deref(), &[&id], None)?;
         let result = self.conn.execute(
             "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10 WHERE id = ?1",
             params![
                 id,
-                updated_notification.description,
-                updated_notification.app_name,
-                updated_notification.app_url,
-                updated_notification.app_icon_path,
-                updated_notification.trigger,
-                serde_json::to_string(&updated_notification.perspective_ids).unwrap(),
-                updated_notification.webhook_url,
+                seal.seal("description", &updated_notification.description)?,
+                seal.seal("appName", &updated_notification.app_name)?,
+                seal.seal("appUrl", &updated_notification.app_url)?,
+                seal.seal("appIconPath", &updated_notification.app_icon_path)?,
+                seal.seal("trigger", &updated_notification.trigger)?,
+                seal.seal(
+                    "perspective_ids",
+                    &serde_json::to_string(&updated_notification.perspective_ids).unwrap()
+                )?,
+                seal.seal("webhookUrl", &updated_notification.webhook_url)?,
                 // The database is where the executor keeps the credential.
-                updated_notification.webhook_auth.expose(),
+                seal.seal("webhookAuth", updated_notification.webhook_auth.expose())?,
                 updated_notification.granted,
             ],
         )?;
@@ -1136,31 +1255,49 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// Keeps a sent message. The outbox is the executor's, not a user's: its rows have no
+    /// `owner_did` and are sealed for the main agent.
     pub fn add_to_outbox(
         &self,
         message: &PerspectiveExpression,
         recipient: String,
     ) -> Result<(), rusqlite::Error> {
         let message_json = serde_json::to_string(message).unwrap();
-        self.conn.execute(
-            "INSERT INTO outbox (message, recipient) VALUES (?, ?)",
-            [message_json, recipient],
+        let tx = self.conn.unchecked_transaction()?;
+        // The id is part of what a sealed value is bound to, so it is chosen before the values
+        // are sealed.
+        let id: i64 = tx.query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM outbox", [], |row| {
+            row.get(0)
+        })?;
+        let seal = self.writer(&sealed::OUTBOX, None, &[&id.to_string()], None)?;
+        tx.execute(
+            "INSERT INTO outbox (id, message, recipient) VALUES (?1, ?2, ?3)",
+            params![
+                id,
+                seal.seal("message", &message_json)?,
+                seal.seal("recipient", &recipient)?
+            ],
         )?;
-        Ok(())
+        tx.commit()
     }
 
     pub fn get_all_from_outbox(&self) -> Result<Vec<SentMessage>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT message, recipient FROM outbox")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT CAST(id AS TEXT), owner_did, message, recipient FROM outbox")?;
         let outbox_iter = stmt.query_map([], |row| {
-            let message_json: String = row.get(0)?;
+            let id: String = row.get(0)?;
+            let owner: Option<String> = row.get(1)?;
+            let seal = self.reader(&sealed::OUTBOX, owner.as_deref(), &[&id])?;
+            let message_json = seal.open("message", row.get(2)?)?;
             let message: PerspectiveExpression = serde_json::from_str(&message_json).unwrap();
-            let recipient: String = row.get(1)?;
+            let recipient = seal.open("recipient", row.get(3)?)?;
             Ok(SentMessage { message, recipient })
         })?;
 
         let mut outbox = Vec::new();
         for message in outbox_iter {
-            outbox.push(message?);
+            outbox.extend(sealed::readable("outbox", message)?);
         }
         Ok(outbox)
     }
@@ -1266,19 +1403,27 @@ impl Ad4mDb {
     }
 
     pub fn add_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
-        let owners_json = serde_json::to_string(&perspective.owners.clone().unwrap_or_default())?;
+        let owners = perspective.owners.clone().unwrap_or_default();
+        let owners_json = serde_json::to_string(&owners)?;
+        let seal = self.writer(
+            &sealed::PERSPECTIVE_HANDLE,
+            Some(&perspective.uuid),
+            &[&perspective.uuid],
+            Some(&owners),
+        )?;
+        let neighbourhood = perspective
+            .neighbourhood
+            .as_ref()
+            .and_then(|n| serde_json::to_string(n).ok());
 
         self.conn.execute(
             "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state, owners)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
-                perspective.name,
+                seal.seal_opt("name", perspective.name.as_deref())?,
                 perspective.uuid,
-                perspective
-                    .neighbourhood
-                    .as_ref()
-                    .and_then(|n| serde_json::to_string(n).ok()),
-                perspective.shared_url,
+                seal.seal_opt("neighbourhood", neighbourhood.as_deref())?,
+                seal.seal_opt("shared_url", perspective.shared_url.as_deref())?,
                 serde_json::to_string(&perspective.state)?,
                 owners_json,
             ],
@@ -1286,28 +1431,35 @@ impl Ad4mDb {
         Ok(())
     }
 
+    const PERSPECTIVE_COLUMNS: &str = "name, uuid, neighbourhood, shared_url, state, owners";
+
+    /// Reads a row of `PERSPECTIVE_COLUMNS`, its sealed values opened.
+    fn perspective_from_row(&self, row: &rusqlite::Row) -> rusqlite::Result<PerspectiveHandle> {
+        let uuid: String = row.get(1)?;
+        let seal = self.reader(&sealed::PERSPECTIVE_HANDLE, Some(&uuid), &[&uuid])?;
+        let owners_json: Option<String> = row.get(5)?;
+        let owners = owners_json.and_then(|json| serde_json::from_str(&json).ok());
+        Ok(PerspectiveHandle {
+            name: seal.open_opt("name", row.get(0)?)?,
+            neighbourhood: seal
+                .open_opt("neighbourhood", row.get(2)?)?
+                .and_then(|n| serde_json::from_str(&n).ok()),
+            shared_url: seal.open_opt("shared_url", row.get(3)?)?,
+            state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
+                .expect("Could not deserialize perspective state from DB"),
+            owners,
+            uuid,
+        })
+    }
+
     pub fn _get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state, owners FROM perspective_handle WHERE uuid = ?1",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM perspective_handle WHERE uuid = ?1",
+            Self::PERSPECTIVE_COLUMNS
+        ))?;
 
         let found_perspective = stmt
-            .query_map([uuid], |row| {
-                let owners_json: Option<String> = row.get(5)?;
-                let owners = owners_json.and_then(|json| serde_json::from_str(&json).ok());
-
-                Ok(PerspectiveHandle {
-                    name: row.get(0)?,
-                    uuid: row.get(1)?,
-                    neighbourhood: row
-                        .get::<usize, Option<String>>(2)?
-                        .and_then(|n| serde_json::from_str(&n).ok()),
-                    shared_url: row.get(3)?,
-                    state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
-                        .expect("Could not deserialize perspective state from DB"),
-                    owners,
-                })
-            })?
+            .query_map([uuid], |row| self.perspective_from_row(row))?
             .map(|p| p.ok())
             .next()
             .ok_or(anyhow!("No perspective found with given uuid"))?
@@ -1317,43 +1469,74 @@ impl Ad4mDb {
     }
 
     pub fn get_all_perspectives(&self) -> Ad4mDbResult<Vec<PerspectiveHandle>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state, owners FROM perspective_handle",
-        )?;
-        let perspective_iter = stmt.query_map([], |row| {
-            let owners_json: Option<String> = row.get(5)?;
-            let owners = owners_json.and_then(|json| serde_json::from_str(&json).ok());
-
-            Ok(PerspectiveHandle {
-                name: row.get(0)?,
-                uuid: row.get(1)?,
-                neighbourhood: row
-                    .get::<usize, Option<String>>(2)?
-                    .and_then(|n| serde_json::from_str(&n).ok()),
-                shared_url: row.get(3)?,
-                state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
-                    .expect("Could not deserialize perspective state from DB"),
-                owners,
-            })
-        })?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM perspective_handle",
+            Self::PERSPECTIVE_COLUMNS
+        ))?;
+        let perspective_iter = stmt.query_map([], |row| self.perspective_from_row(row))?;
 
         let mut perspectives = Vec::new();
         for perspective in perspective_iter {
-            perspectives.push(perspective?);
+            perspectives.extend(sealed::readable("perspective_handle", perspective)?);
         }
 
         Ok(perspectives)
     }
 
+    /// The uuids and owners of the perspectives shared at `neighbourhood_url`. `shared_url` is
+    /// sealed, so this opens every handle's and compares, instead of a `WHERE` on it.
+    fn perspectives_shared_at(
+        &self,
+        neighbourhood_url: &str,
+    ) -> Ad4mDbResult<Vec<(String, Vec<String>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uuid, shared_url, owners FROM perspective_handle")?;
+        let rows = stmt.query_map([], |row| {
+            let uuid: String = row.get(0)?;
+            let seal = self.reader(&sealed::PERSPECTIVE_HANDLE, Some(&uuid), &[&uuid])?;
+            let shared_url = seal.open_opt("shared_url", row.get(1)?)?;
+            let owners: Option<String> = row.get(2)?;
+            Ok((uuid, shared_url, owners))
+        })?;
+        let mut found = Vec::new();
+        for row in rows {
+            let Some((uuid, shared_url, owners)) = sealed::readable("perspective_handle", row)?
+            else {
+                continue;
+            };
+            if shared_url.as_deref() == Some(neighbourhood_url) {
+                let owners = match owners {
+                    Some(json) => serde_json::from_str(&json)
+                        .map_err(|e| anyhow!("Failed to fetch owners: {}", e))?,
+                    None => Vec::new(),
+                };
+                found.push((uuid, owners));
+            }
+        }
+        Ok(found)
+    }
+
     pub fn update_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
-        let owners_json = serde_json::to_string(&perspective.owners.clone().unwrap_or_default())?;
+        let owners = perspective.owners.clone().unwrap_or_default();
+        let owners_json = serde_json::to_string(&owners)?;
+        let seal = self.writer(
+            &sealed::PERSPECTIVE_HANDLE,
+            Some(&perspective.uuid),
+            &[&perspective.uuid],
+            Some(&owners),
+        )?;
+        let neighbourhood = perspective
+            .neighbourhood
+            .as_ref()
+            .and_then(|n| serde_json::to_string(n).ok());
 
         self.conn.execute(
             "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4, owners = ?5 WHERE uuid = ?6",
             params![
-                perspective.name,
-                perspective.neighbourhood.as_ref().and_then(|n| serde_json::to_string(n).ok()),
-                perspective.shared_url,
+                seal.seal_opt("name", perspective.name.as_deref())?,
+                seal.seal_opt("neighbourhood", neighbourhood.as_deref())?,
+                seal.seal_opt("shared_url", perspective.shared_url.as_deref())?,
                 serde_json::to_string(&perspective.state)?,
                 owners_json,
                 perspective.uuid,
@@ -1367,62 +1550,39 @@ impl Ad4mDb {
         neighbourhood_url: &str,
         user_did: &str,
     ) -> Ad4mDbResult<()> {
-        // First verify the perspective exists
-        let perspective_exists: bool = self
-            .conn
-            .prepare("SELECT EXISTS(SELECT 1 FROM perspective_handle WHERE shared_url = ?1)")?
-            .query_row([neighbourhood_url], |row| row.get(0))
-            .map_err(|e| anyhow!("Failed to check if perspective exists: {}", e))?;
-
-        if !perspective_exists {
+        let shared = self.perspectives_shared_at(neighbourhood_url)?;
+        if shared.is_empty() {
             return Err(anyhow!(
                 "Perspective with shared_url '{}' not found",
                 neighbourhood_url
             ));
         }
 
-        // Get current owners - propagate query errors instead of using unwrap_or_default
-        let current_owners: Vec<String> = self
-            .conn
-            .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
-            .query_row([neighbourhood_url], |row| {
-                let owners_json: String = row.get(0)?;
-                serde_json::from_str(&owners_json).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })
-            })
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    anyhow!(
-                        "Perspective with shared_url '{}' not found",
-                        neighbourhood_url
-                    )
-                }
-                e => anyhow!("Failed to fetch owners: {}", e),
-            })?;
+        for (uuid, current_owners) in shared {
+            // Add new owner if not already present
+            let mut updated_owners = current_owners;
+            if !updated_owners.contains(&user_did.to_string()) {
+                updated_owners.push(user_did.to_string());
+            }
+            // The new owner gets the perspective's store key too.
+            self.writer(
+                &sealed::PERSPECTIVE_HANDLE,
+                Some(&uuid),
+                &[&uuid],
+                Some(&updated_owners),
+            )?;
 
-        // Add new owner if not already present
-        let mut updated_owners = current_owners;
-        if !updated_owners.contains(&user_did.to_string()) {
-            updated_owners.push(user_did.to_string());
-        }
-
-        // Update database and check affected row count
-        let owners_json = serde_json::to_string(&updated_owners)?;
-        let affected_rows = self.conn.execute(
-            "UPDATE perspective_handle SET owners = ?1 WHERE shared_url = ?2",
-            params![owners_json, neighbourhood_url],
-        )?;
-
-        if affected_rows == 0 {
-            return Err(anyhow!(
-                "Failed to add owner: perspective with shared_url '{}' not found or could not be updated",
-                neighbourhood_url
-            ));
+            let owners_json = serde_json::to_string(&updated_owners)?;
+            let affected_rows = self.conn.execute(
+                "UPDATE perspective_handle SET owners = ?1 WHERE uuid = ?2",
+                params![owners_json, uuid],
+            )?;
+            if affected_rows == 0 {
+                return Err(anyhow!(
+                    "Failed to add owner: perspective with shared_url '{}' not found or could not be updated",
+                    neighbourhood_url
+                ));
+            }
         }
 
         Ok(())
@@ -1443,22 +1603,23 @@ impl Ad4mDb {
         neighbourhood_url: &str,
         user_did: &str,
     ) -> Ad4mDbResult<()> {
-        let perspective_exists: bool = self
-            .conn
-            .prepare("SELECT EXISTS(SELECT 1 FROM perspective_handle WHERE shared_url = ?1)")?
-            .query_row([neighbourhood_url], |row| row.get(0))
-            .map_err(|e| anyhow!("Failed to check if perspective exists: {}", e))?;
-
-        if !perspective_exists {
+        if self.perspectives_shared_at(neighbourhood_url)?.is_empty() {
             let uuid = uuid::Uuid::new_v4().to_string();
-            let owners_json = serde_json::to_string(&vec![user_did])?;
+            let owners = vec![user_did.to_string()];
+            let owners_json = serde_json::to_string(&owners)?;
+            let seal = self.writer(
+                &sealed::PERSPECTIVE_HANDLE,
+                Some(&uuid),
+                &[&uuid],
+                Some(&owners),
+            )?;
             self.conn.execute(
                 "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state, owners)
                  VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
                 params![
-                    format!("sfu-membership-{}", neighbourhood_url),
+                    seal.seal("name", &format!("sfu-membership-{}", neighbourhood_url))?,
                     uuid,
-                    neighbourhood_url,
+                    seal.seal("shared_url", neighbourhood_url)?,
                     "\"Synced\"",
                     owners_json,
                 ],
@@ -1470,16 +1631,14 @@ impl Ad4mDb {
     }
 
     pub fn get_neighbourhood_owners(&self, neighbourhood_url: &str) -> Ad4mDbResult<Vec<String>> {
-        let owners: Vec<String> = self
-            .conn
-            .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
-            .query_row([neighbourhood_url], |row| {
-                let owners_json: String = row.get(0)?;
-                Ok(serde_json::from_str(&owners_json).unwrap_or_default())
-            })
-            .unwrap_or_default();
-
-        Ok(owners)
+        // The first perspective shared there, as the `query_row` this replaces read.
+        Ok(self
+            .perspectives_shared_at(neighbourhood_url)
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            .map(|(_, owners)| owners)
+            .unwrap_or_default())
     }
 
     pub fn remove_perspective(&self, uuid: &str) -> Ad4mDbResult<()> {
@@ -1517,6 +1676,27 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// Reads a row of `FLOW_REPLICA_ROW_SQL` / `flow_replica_rows_sql` of `agent_did` on
+    /// `perspective`, its state opened.
+    fn flow_replica_row(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        row: &rusqlite::Row,
+    ) -> rusqlite::Result<FlowReplicaStateRow> {
+        let instance: String = row.get(0)?;
+        let seal = self.reader(
+            &sealed::FLOW_REPLICA_STATE,
+            Some(perspective),
+            &[perspective, agent_did, &instance],
+        )?;
+        Ok(FlowReplicaStateRow {
+            current_state: seal.open_opt("current_state", row.get(1)?)?,
+            derived_at: row.get(2)?,
+            instance,
+        })
+    }
+
     /// `agent_did`'s rows on `perspective`, optionally narrowed to
     /// `instances`. A seeded row (minted here, not derived yet) comes back
     /// with `current_state: None`.
@@ -1539,9 +1719,12 @@ impl Ad4mDb {
         let keys = [perspective, agent_did]
             .into_iter()
             .chain(instances.unwrap_or_default().iter().map(String::as_str));
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(keys), flow_replica_row)?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut rows = Vec::new();
+        for row in stmt.query_map(rusqlite::params_from_iter(keys), |row| {
+            self.flow_replica_row(perspective, agent_did, row)
+        })? {
+            rows.extend(sealed::readable("flow_replica_state", row)?);
+        }
         Ok(rows)
     }
 
@@ -1558,7 +1741,7 @@ impl Ad4mDb {
             .query_row(
                 FLOW_REPLICA_ROW_SQL,
                 params![perspective, agent_did, instance],
-                flow_replica_row,
+                |row| self.flow_replica_row(perspective, agent_did, row),
             )
             .optional()?)
     }
@@ -1602,10 +1785,18 @@ impl Ad4mDb {
             .query_row(
                 FLOW_REPLICA_ROW_SQL,
                 params![perspective, agent_did, instance],
-                flow_replica_row,
+                |row| self.flow_replica_row(perspective, agent_did, row),
             )
             .optional()?;
         if let Some(state) = state {
+            let state = self
+                .writer(
+                    &sealed::FLOW_REPLICA_STATE,
+                    Some(perspective),
+                    &[perspective, agent_did, instance],
+                    None,
+                )?
+                .seal("current_state", state)?;
             tx.execute(
                 "INSERT INTO flow_replica_state (perspective, agent_did, instance, current_state, derived_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
@@ -2029,16 +2220,32 @@ impl Ad4mDb {
         perspective_uuid: &str,
         diff: &PerspectiveDiff,
     ) -> Ad4mDbResult<()> {
-        self.conn.execute(
-            "INSERT INTO perspective_diff (perspective, additions, removals, is_pending)
-             VALUES (?1, ?2, ?3, ?4)",
+        let tx = self.conn.unchecked_transaction()?;
+        // The id is part of what a sealed value is bound to, so it is chosen before the values
+        // are sealed.
+        let id: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM perspective_diff",
+            [],
+            |row| row.get(0),
+        )?;
+        let seal = self.writer(
+            &sealed::PERSPECTIVE_DIFF,
+            Some(perspective_uuid),
+            &[&id.to_string()],
+            None,
+        )?;
+        tx.execute(
+            "INSERT INTO perspective_diff (id, perspective, additions, removals, is_pending)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
+                id,
                 perspective_uuid,
-                serde_json::to_string(&diff.additions)?,
-                serde_json::to_string(&diff.removals)?,
+                seal.seal("additions", &serde_json::to_string(&diff.additions)?)?,
+                seal.seal("removals", &serde_json::to_string(&diff.removals)?)?,
                 true,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -2051,11 +2258,16 @@ impl Ad4mDb {
             "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2 ORDER BY id",
         )?;
         let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
+            let id = row.get::<_, u64>(2)?;
+            let seal = self.reader(
+                &sealed::PERSPECTIVE_DIFF,
+                Some(perspective_uuid),
+                &[&id.to_string()],
+            )?;
             let additions: Vec<LinkExpression> =
-                serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
+                serde_json::from_str(&seal.open("additions", row.get(0)?)?).unwrap();
             let removals: Vec<LinkExpression> =
-                serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
-            let id = row.get::<_, u64>(2).unwrap();
+                serde_json::from_str(&seal.open("removals", row.get(1)?)?).unwrap();
             Ok((
                 PerspectiveDiff {
                     additions,
@@ -2066,11 +2278,14 @@ impl Ad4mDb {
         })?;
         let mut diffs = Vec::new();
         let mut ids = Vec::new();
-        for (count, diff_result) in diffs_iter.enumerate() {
-            let (diff, id) = diff_result?;
+        for diff_result in diffs_iter {
+            // A diff that does not open stays queued, unsent: nothing can read it.
+            let Some((diff, id)) = sealed::readable("perspective_diff", diff_result)? else {
+                continue;
+            };
             diffs.push(diff);
             ids.push(id);
-            if max_count.map(|max| count >= max - 1).unwrap_or(false) {
+            if max_count.map(|max| ids.len() >= max).unwrap_or(false) {
                 break;
             }
         }
@@ -2164,7 +2379,16 @@ impl Ad4mDb {
             "SELECT id, additions FROM perspective_diff WHERE perspective = ?1 ORDER BY id",
         )?;
         let rows = stmt.query_map(params![perspective_uuid], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)))
+            let id = row.get::<_, i64>(0)?;
+            let seal = self.reader(
+                &sealed::PERSPECTIVE_DIFF,
+                Some(perspective_uuid),
+                &[&id.to_string()],
+            )?;
+            let raw = row
+                .get::<_, String>(1)
+                .and_then(|raw| seal.open("additions", raw));
+            Ok((id, raw))
         })?;
         let mut additions = Vec::new();
         for row in rows {
@@ -2203,15 +2427,18 @@ impl Ad4mDb {
 
     // Expression Methods
 
+    /// Caches an immutable expression. The cache is the executor's (`owner` `''`): the
+    /// expressions it holds were fetched from public languages, for whoever asked.
     pub fn _add_expression<T: Serialize>(
         &self,
         url: &str,
         expression: &Expression<T>,
     ) -> Ad4mDbResult<()> {
+        let seal = self.writer(&sealed::EXPRESSION, Some(""), &[url, ""], None)?;
         self.conn.execute(
-            "INSERT INTO expression (url, data)
-             VALUES (?1, ?2)",
-            params![url, serde_json::to_string(expression)?,],
+            "INSERT OR REPLACE INTO expression (url, data, owner)
+             VALUES (?1, ?2, '')",
+            params![url, seal.seal("data", &serde_json::to_string(expression)?)?],
         )?;
         Ok(())
     }
@@ -2222,10 +2449,16 @@ impl Ad4mDb {
     ) -> Ad4mDbResult<Option<Expression<serde_json::Value>>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT data FROM expression WHERE url = ?1")?;
+            .prepare("SELECT data FROM expression WHERE url = ?1 AND owner = ''")?;
         let expression: Option<String> =
             stmt.query_row(params![url], |row| row.get(0)).optional()?;
-        Ok(expression.map(|e| serde_json::from_str(&e).unwrap()))
+        let Some(expression) = expression else {
+            return Ok(None);
+        };
+        let expression = self
+            .reader(&sealed::EXPRESSION, Some(""), &[url, ""])?
+            .open("data", expression)?;
+        Ok(Some(serde_json::from_str(&expression)?))
     }
 
     pub fn add_model(&self, model: &ModelInput) -> Ad4mDbResult<String> {
@@ -2529,25 +2762,40 @@ impl Ad4mDb {
     pub fn export_all_to_json(&self) -> Ad4mDbResult<serde_json::Value> {
         let mut export_data = serde_json::Map::new();
 
+        // Rows whose sealed values do not open are left out (`sealed::readable`).
+        fn readable_rows<T>(
+            table: &str,
+            rows: impl Iterator<Item = rusqlite::Result<T>>,
+        ) -> rusqlite::Result<Vec<T>> {
+            let mut out = Vec::new();
+            for row in rows {
+                out.extend(sealed::readable(table, row)?);
+            }
+            Ok(out)
+        }
+
         // Export perspectives
-        let perspectives: Vec<serde_json::Value> = self
-            .conn
-            .prepare("SELECT uuid, name, neighbourhood, shared_url, state, owners FROM perspective_handle")?
-            .query_map([], |row| {
-                let owners_json: Option<String> = row.get(5)?;
-                let owners: Vec<String> = owners_json
-                    .and_then(|json| serde_json::from_str(&json).ok())
-                    .unwrap_or_default();
-                Ok(serde_json::json!({
-                    "uuid": row.get::<_, String>(0)?,
-                    "name": row.get::<_, Option<String>>(1)?,
-                    "neighbourhood": row.get::<_, Option<String>>(2)?,
-                    "shared_url": row.get::<_, Option<String>>(3)?,
-                    "state": row.get::<_, String>(4)?,
-                    "owners": owners
-                }))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT uuid, name, neighbourhood, shared_url, state, owners FROM perspective_handle",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let uuid: String = row.get(0)?;
+            let seal = self.reader(&sealed::PERSPECTIVE_HANDLE, Some(&uuid), &[&uuid])?;
+            let owners_json: Option<String> = row.get(5)?;
+            let owners: Vec<String> = owners_json
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "name": seal.open_opt("name", row.get(1)?)?,
+                "neighbourhood": seal.open_opt("neighbourhood", row.get(2)?)?,
+                "shared_url": seal.open_opt("shared_url", row.get(3)?)?,
+                "state": row.get::<_, String>(4)?,
+                "owners": owners,
+                "uuid": uuid,
+            }))
+        })?;
+        let perspectives = readable_rows("perspective_handle", rows)?;
+        drop(stmt);
         export_data.insert(
             "perspectives".to_string(),
             serde_json::to_value(perspectives)?,
@@ -2576,77 +2824,100 @@ impl Ad4mDb {
         export_data.insert("links".to_string(), serde_json::to_value(links)?);
 
         // Export expressions
-        let expressions: Vec<ExpressionSchema> = self
+        let mut stmt = self
             .conn
-            .prepare("SELECT url, data FROM expression")?
-            .query_map([], |row| {
-                Ok(ExpressionSchema {
-                    url: row.get(0)?,
-                    data: serde_json::from_str(&row.get::<_, String>(1)?)
-                        .unwrap_or(serde_json::Value::Null),
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+            .prepare("SELECT url, data, owner FROM expression")?;
+        let rows = stmt.query_map([], |row| {
+            let url: String = row.get(0)?;
+            let owner: String = row.get(2)?;
+            let data = self
+                .reader(&sealed::EXPRESSION, Some(&owner), &[&url, &owner])?
+                .open("data", row.get(1)?)?;
+            Ok(ExpressionSchema {
+                url,
+                data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null),
+            })
+        })?;
+        let expressions: Vec<ExpressionSchema> = readable_rows("expression", rows)?;
+        drop(stmt);
         export_data.insert(
             "expressions".to_string(),
             serde_json::to_value(expressions)?,
         );
 
         // Export perspective_diffs
-        let diffs: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT perspective, additions, removals, is_pending FROM perspective_diff"
-        )?.query_map([], |row| {
+        let mut stmt = self.conn.prepare(
+            "SELECT perspective, additions, removals, is_pending, CAST(id AS TEXT) FROM perspective_diff"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let perspective: String = row.get(0)?;
+            let id: String = row.get(4)?;
+            let seal = self.reader(&sealed::PERSPECTIVE_DIFF, Some(&perspective), &[&id])?;
             Ok(serde_json::json!({
-                "perspective": row.get::<_, String>(0)?,
-                "additions": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(1)?).unwrap_or(serde_json::Value::Null),
-                "removals": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?).unwrap_or(serde_json::Value::Null),
-                "is_pending": row.get::<_, bool>(3)?
+                "additions": serde_json::from_str::<serde_json::Value>(&seal.open("additions", row.get(1)?)?).unwrap_or(serde_json::Value::Null),
+                "removals": serde_json::from_str::<serde_json::Value>(&seal.open("removals", row.get(2)?)?).unwrap_or(serde_json::Value::Null),
+                "is_pending": row.get::<_, bool>(3)?,
+                "perspective": perspective,
             }))
-        })?.collect::<Result<Vec<_>, _>>()?;
+        })?;
+        let diffs: Vec<serde_json::Value> = readable_rows("perspective_diff", rows)?;
+        drop(stmt);
         export_data.insert(
             "perspective_diffs".to_string(),
             serde_json::to_value(diffs)?,
         );
 
         // Export notifications
-        let notifications: Vec<serde_json::Value> = self.conn.prepare(
+        let mut stmt = self.conn.prepare(
             "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, owner_did FROM notifications"
-        )?.query_map([], |row| {
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let owner_did: String = row.get(10)?;
+            let seal = self.reader(&sealed::NOTIFICATIONS, Some(&owner_did), &[&id])?;
             Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "description": row.get::<_, String>(1)?,
-                "app_name": row.get::<_, String>(2)?,
-                "app_url": row.get::<_, String>(3)?,
-                "app_icon_path": row.get::<_, String>(4)?,
-                "trigger": row.get::<_, String>(5)?,
-                "perspective_ids": row.get::<_, String>(6)?,
-                "webhook_url": row.get::<_, String>(7)?,
-                "webhook_auth": row.get::<_, String>(8)?,
+                "description": seal.open("description", row.get(1)?)?,
+                "app_name": seal.open("appName", row.get(2)?)?,
+                "app_url": seal.open("appUrl", row.get(3)?)?,
+                "app_icon_path": seal.open("appIconPath", row.get(4)?)?,
+                "trigger": seal.open("trigger", row.get(5)?)?,
+                "perspective_ids": seal.open("perspective_ids", row.get(6)?)?,
+                "webhook_url": seal.open("webhookUrl", row.get(7)?)?,
+                "webhook_auth": seal.open("webhookAuth", row.get(8)?)?,
                 "granted": row.get::<_, bool>(9)?,
-                "owner_did": row.get::<_, String>(10)?
+                "owner_did": owner_did,
+                "id": id,
             }))
-        })?.collect::<Result<Vec<_>, _>>()?;
+        })?;
+        let notifications: Vec<serde_json::Value> = readable_rows("notifications", rows)?;
+        drop(stmt);
         export_data.insert(
             "notifications".to_string(),
             serde_json::to_value(notifications)?,
         );
 
         // Export tasks
-        let tasks: Vec<serde_json::Value> = self.conn.prepare(
+        let mut stmt = self.conn.prepare(
             "SELECT id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did FROM tasks"
-        )?.query_map([], |row| {
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let agent_did: Option<String> = row.get(8)?;
+            let seal = self.reader(&sealed::TASKS, agent_did.as_deref(), &[&id])?;
             Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
+                "name": seal.open("name", row.get(1)?)?,
                 "model_id": row.get::<_, String>(2)?,
-                "system_prompt": row.get::<_, String>(3)?,
-                "prompt_examples": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(4)?).unwrap_or(serde_json::Value::Null),
-                "metadata": row.get::<_, Option<String>>(5)?,
+                "system_prompt": seal.open("system_prompt", row.get(3)?)?,
+                "prompt_examples": serde_json::from_str::<serde_json::Value>(&seal.open("prompt_examples", row.get(4)?)?).unwrap_or(serde_json::Value::Null),
+                "metadata": seal.open_opt("metadata", row.get(5)?)?,
                 "created_at": row.get::<_, String>(6)?,
                 "updated_at": row.get::<_, String>(7)?,
-                "agent_did": row.get::<_, Option<String>>(8)?
+                "agent_did": agent_did,
+                "id": id,
             }))
-        })?.collect::<Result<Vec<_>, _>>()?;
+        })?;
+        let tasks: Vec<serde_json::Value> = readable_rows("tasks", rows)?;
+        drop(stmt);
         export_data.insert("tasks".to_string(), serde_json::to_value(tasks)?);
 
         // Export models
@@ -3508,6 +3779,12 @@ impl Ad4mDb {
                     }
                 }
             }
+        }
+
+        // The rows above went in as the export had them, in the clear.
+        let sealed = self.seal_plain_values()?;
+        if sealed > 0 {
+            log::info!("Sealed {} imported values", sealed);
         }
 
         Ok(result)

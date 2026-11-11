@@ -213,7 +213,9 @@ hyper_014 = { package = "hyper", version = "0.14.21", default-features = false, 
 # (Connection::open, conn.execute, OptionalExtension) so the bump is free.
 # Also lets us drop the whole [patch.crates-io] for lair (which only existed
 # to force rusqlite 0.34 alignment with the OLD deno).
-rusqlite = "0.40.0"
+# SQLCipher: `ad4m_db.sqlite` is keyed with the executor store's SQLite subkey. Holochain links
+# the same `libsqlite3-sys` with this feature already, so this names what the build has.
+rusqlite = { version = "0.40.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 fake = { version = "2.9.2", features = ["derive"] }
 sha2 = "0.10.8"
 regex = "1.5.4"

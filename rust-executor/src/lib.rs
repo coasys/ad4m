@@ -663,6 +663,16 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         .install_default()
         .expect("Failed to install rustls' aws_lc_rs crypto provider");
 
+    // The database file goes under its key before anything opens it: a plaintext one from an
+    // older executor moves now, and on failure the executor runs on it in the clear.
+    match at_rest::database::prepare(gate.keys(), &data_root.join("ad4m_db.sqlite"), Some(&gate)) {
+        Ok(at_rest::database::DatabaseStep::Keyed(_)) => {}
+        Ok(at_rest::database::DatabaseStep::KeptPlain(e)) => {
+            warn!("The database stays in the clear this start: {e}");
+        }
+        Err(e) => return failed_start(e),
+    }
+
     info!("Initializing Ad4mDb...");
 
     Ad4mDb::init_global_instance(
@@ -680,7 +690,12 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     )
     .expect("Failed to initialize Ad4mDb");
     // SQLite makes its files with the process umask: only the owner reads them.
-    for name in ["ad4m_db.sqlite", "ad4m_db.sqlite-wal", "ad4m_db.sqlite-shm"] {
+    for name in [
+        "ad4m_db.sqlite",
+        "ad4m_db.sqlite-wal",
+        "ad4m_db.sqlite-shm",
+        "ad4m_db.sqlite-journal",
+    ] {
         let file = data_root.join(name);
         if file.exists() {
             if let Err(e) = at_rest::files::restrict(&file) {

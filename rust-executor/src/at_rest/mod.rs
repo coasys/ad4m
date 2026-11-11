@@ -13,9 +13,11 @@
 //! gated.
 
 pub mod data_keys;
+pub mod database;
 pub mod files;
 pub mod keyring_file;
 pub mod secret_source;
+pub mod sqlite;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -47,7 +49,7 @@ pub enum StorageState {
     Open,
 }
 
-/// Why the last unlock failed.
+/// Why the last unlock failed, or which store did not move under its key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
 #[ts(export)]
@@ -55,6 +57,8 @@ pub enum StorageErrorKind {
     WrongSecret,
     CorruptKeyring,
     SecretOnDataDisk,
+    /// The plaintext database did not move under its key: it stays as it was, in the clear.
+    MigrationFailed,
 }
 
 /// Whether each kind of store is written under its key.
@@ -62,12 +66,13 @@ pub enum StorageErrorKind {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct StoreStates {
-    /// The executor's database.
+    /// The executor's database: the executor store's state, `encrypted` once the database file
+    /// is under the database key.
     pub database: StoreStateName,
-    /// The languages' storage.
+    /// The languages' storage: `plain` until it is written under a key.
     pub language_storage: StoreStateName,
-    /// The perspectives' links: the least advanced of them (the database's state while there
-    /// is none).
+    /// The perspectives' links: the least advanced of the perspectives' stores, `plain` while
+    /// there is none.
     pub links: StoreStateName,
 }
 
@@ -91,7 +96,7 @@ pub struct StorageStatus {
     pub secret_on_data_disk: Option<bool>,
     /// Operator only: the root key's generation, once open.
     pub root_generation: Option<u32>,
-    /// Operator only: why the last unlock failed.
+    /// Operator only: why the last unlock failed, or which store did not move under its key.
     pub last_error: Option<StorageErrorKind>,
 }
 
@@ -242,6 +247,13 @@ impl StorageGate {
         self.publish();
     }
 
+    /// A store did not move under its key (`MigrationFailed`): it becomes the status's
+    /// `lastError`, and the new status is published.
+    pub fn report_error(&self, kind: StorageErrorKind) {
+        self.info().last_error = Some(kind);
+        self.publish();
+    }
+
     /// Waits until the gate is no longer sealed.
     pub async fn unsealed(&self) {
         let mut rx = self.state.subscribe();
@@ -287,7 +299,7 @@ impl StorageGate {
 
 /// The three kinds of store from the keyring's stores.
 fn store_states(states: &[(StoreId, keyring_file::StoreState)]) -> StoreStates {
-    let executor = states
+    let database = states
         .iter()
         .find(|(id, _)| *id == StoreId::Executor)
         .map_or(StoreStateName::Plain, |(_, s)| s.into());
@@ -301,10 +313,11 @@ fn store_states(states: &[(StoreId, keyring_file::StoreState)]) -> StoreStates {
         .filter(|(id, _)| matches!(id, StoreId::Perspective(_)))
         .map(|(_, s)| StoreStateName::from(s))
         .min_by_key(|s| rank(*s))
-        .unwrap_or(executor);
+        .unwrap_or(StoreStateName::Plain);
     StoreStates {
-        database: executor,
-        language_storage: executor,
+        database,
+        // No step writes the languages' storage under a key yet.
+        language_storage: StoreStateName::Plain,
         links,
     }
 }
