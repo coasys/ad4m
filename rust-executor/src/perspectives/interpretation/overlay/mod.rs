@@ -71,9 +71,25 @@ use std::collections::BTreeMap;
 /// overlay-carrying (used by `write::overlay_exists` and `model_query`
 /// conformance matching alike).
 pub(super) const OVERLAY_KIND_PRED: &str = "ad4m://interp/kind";
+/// The overlay's pointer at the `InterpretationRun` that last wrote it.
+pub(super) const OVERLAY_RUN_PRED: &str = "ad4m://interp/run";
 /// Parallel-predicate prefix for the LLM's per-property value snapshot: the full
 /// predicate is `ad4m://interp/inferred/<realPredicate>`.
 pub(super) const INFERRED_PREFIX: &str = "ad4m://interp/inferred/";
+
+/// True for a link that is part of the overlay itself (its `kind`/`run`
+/// discriminators or an `inferred/<p>` snapshot) rather than real instance
+/// data. Other `ad4m://interp/*` predicates — e.g. the `auto_accepted`
+/// marker — are deliberately not overlay links: they are records left on the
+/// base after the overlay is gone.
+pub(super) fn is_overlay_link(l: &crate::types::DecoratedLinkExpression) -> bool {
+    match l.data.predicate.as_deref() {
+        Some(p) => {
+            p == OVERLAY_KIND_PRED || p == OVERLAY_RUN_PRED || p.starts_with(INFERRED_PREFIX)
+        }
+        None => false,
+    }
+}
 
 // ---- overlay write plan ----------------------------------------------------
 

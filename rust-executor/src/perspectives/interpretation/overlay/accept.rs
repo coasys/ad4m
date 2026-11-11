@@ -17,7 +17,7 @@
 //! Property-scoped accept/reject act on a single `inferred/<p>`; when the last
 //! `inferred/<p>` is gone the overlay's `kind`/`run` links are cleaned up too.
 
-use super::{INFERRED_PREFIX, OVERLAY_KIND_PRED};
+use super::{is_overlay_link, INFERRED_PREFIX, OVERLAY_KIND_PRED, OVERLAY_RUN_PRED};
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation::replace_link;
 use crate::perspectives::model_query::utils::{emittable_iri, parse_literal_value};
@@ -25,8 +25,6 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::sparql_store::decorated_links_query;
 use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
 use std::collections::BTreeMap;
-
-const OVERLAY_RUN_PRED: &str = "ad4m://interp/run";
 
 /// One pending overlay, flattened for the query surface / UIs.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
@@ -317,17 +315,6 @@ fn inferred_links<'a>(
             property.is_none_or(|p| p == real)
         })
         .collect()
-}
-
-/// True for a link that is part of the overlay itself (its `kind`/`run`
-/// discriminators or an `inferred/<p>` snapshot) rather than real instance data.
-fn is_overlay_link(l: &DecoratedLinkExpression) -> bool {
-    match l.data.predicate.as_deref() {
-        Some(p) => {
-            p == OVERLAY_KIND_PRED || p == OVERLAY_RUN_PRED || p.starts_with(INFERRED_PREFIX)
-        }
-        None => false,
-    }
 }
 
 async fn remove(

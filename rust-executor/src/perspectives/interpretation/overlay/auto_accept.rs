@@ -22,6 +22,13 @@
 //!
 //! # What auto-accept never does
 //!
+//! **It never resolves another agent's overlay.** In a shared perspective a
+//! base carries each pending suggestion under the DID that staged it. Every
+//! overlay link on the base — `kind`, `run`, every `inferred/<p>` — must be
+//! authored by the DID this pass signs with; a single foreign-authored one
+//! leaves the item pending for that agent (or a person) to resolve, instead
+//! of this pass re-signing its values as its own.
+//!
 //! **It never changes a real value.** The §4 gate (see [`super`]) stages a
 //! proposal instead of writing it when the real value is not the LLM's to
 //! overwrite: the item was written or accepted by a person, or a person
@@ -43,7 +50,7 @@
 //! so the whole pass is deterministic.
 
 use super::classes::INTERP_OVERLAY_CLASS;
-use super::{accept_interpretation, INFERRED_PREFIX, OVERLAY_KIND_PRED};
+use super::{accept_interpretation, is_overlay_link, INFERRED_PREFIX, OVERLAY_KIND_PRED};
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation::{replace_link, InterpretationOp};
 use crate::perspectives::model_query::types::{AutoAccept, ModelShape};
@@ -186,8 +193,11 @@ async fn mark_auto_accepted(
 /// the base's current links, so an earlier-pass item that gains a parent in
 /// this pass (it shows up here as an `AddLinks` source) is accepted now.
 ///
-/// A candidate whose accept would change a real value is left pending (see
-/// the module docs).
+/// Two guards keep an otherwise eligible candidate pending: the overlay must
+/// be *this agent's own* — in a shared perspective an earlier pass of
+/// another agent may have staged it, and accepting would re-sign that
+/// agent's values as this pass's — and accepting must not change real state
+/// (see the module docs).
 ///
 /// Per-item failures are logged at warn and never abort the pass. Returns
 /// the bases that were actually accepted, in accept order.
@@ -201,6 +211,18 @@ pub(crate) async fn auto_accept_pass(
     if bases.is_empty() {
         return Vec::new();
     }
+
+    // The DID this pass signs with — the only author whose overlays this pass
+    // may resolve.
+    let pass_did = match crate::agent::did_for_context(context) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(
+                "interpretation: auto-accept could not resolve the pass's DID: {e:#}"
+            );
+            return Vec::new();
+        }
+    };
 
     // Bases the ops do not name a class for (AddLinks sources only) are
     // classified by their links — the same definition of "what is this node"
@@ -284,6 +306,19 @@ pub(crate) async fn auto_accept_pass(
             .iter()
             .any(|l| l.data.predicate.as_deref() == Some(OVERLAY_KIND_PRED));
         if !has_overlay {
+            continue;
+        }
+        // The overlay must be this pass's agent's own: every overlay link on
+        // the base — `kind`, `run`, and every `inferred/<p>` — signed by it.
+        // A base carrying another agent's overlay stays pending for that
+        // agent (or a person) to resolve.
+        if links
+            .iter()
+            .any(|l| is_overlay_link(l) && l.author != pass_did)
+        {
+            log::debug!(
+                "interpretation: {base} stays pending: its overlay was staged by another agent"
+            );
             continue;
         }
         if !shapes.iter().all(|s| rule_allows(s, &links)) {
@@ -847,6 +882,125 @@ mod tests {
             Some("second wording")
         );
         assert!(pending(&p).await.is_empty());
+    }
+
+    /// Every link on `base` matching `predicate`, in `get_links` order.
+    async fn links_of(
+        p: &PerspectiveInstance,
+        base: &str,
+        predicate: &str,
+    ) -> Vec<DecoratedLinkExpression> {
+        p.get_links(&LinkQuery {
+            source: Some(base.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+    }
+
+    /// In a shared perspective a *pending* item's overlay records who staged
+    /// it: another agent's pass left this item pending, and a later pass of
+    /// ours placing it must not accept it — accepting would re-sign that
+    /// agent's values as ours. The item stays pending, every overlay link
+    /// still authored by its own agent.
+    #[tokio::test]
+    async fn a_foreign_agents_overlay_is_left_pending() {
+        let (mut p, shapes, ctx_ours) = setup_perspective_no_llm(AA_CLASSES).await;
+        let did_other = crate::test_utils::create_test_user("bob-foreign-overlay@test");
+        let ctx_other = AgentContext::managed(did_other.clone());
+        let child = "soa://ext/note/foreign";
+        let parent = "soa://ext/chapter/foreign-parent";
+
+        // The other agent's pass stages the item; unplaced, it stays pending.
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![create_op(child, "Note", "their note")],
+            "run-theirs",
+            &ctx_other,
+        )
+        .await;
+        assert!(accepted.is_empty());
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+
+        // Our pass adds the parent link: the item is placed now, but its
+        // overlay is not ours to resolve.
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![addlinks_op(child, "ns://partOf", parent)],
+            "run-ours",
+            &ctx_ours,
+        )
+        .await;
+
+        assert!(
+            accepted.is_empty(),
+            "another agent's overlay is not ours to accept"
+        );
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+        assert!(marker_on(&p, child).await.is_none(), "no accept marker");
+
+        let did_ours = crate::agent::did_for_context(&ctx_ours).unwrap();
+        let links = p
+            .get_links(&LinkQuery {
+                source: Some(child.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        for l in links.iter().filter(|l| is_overlay_link(l)) {
+            assert_eq!(
+                l.author, did_other,
+                "overlay link {:?} was re-signed",
+                l.data.predicate
+            );
+        }
+        // The only link of ours on the base is the parent edge this pass's
+        // own op wrote — nothing the accept would have produced.
+        assert!(
+            links
+                .iter()
+                .filter(|l| l.author == did_ours)
+                .all(|l| l.data.predicate.as_deref() == Some("ns://partOf")),
+            "our pass signed only its own AddLinks edge"
+        );
+    }
+
+    /// The same placed-later sequence on an overlay *this* agent staged is
+    /// accepted, and the marker lands signed by the pass's own context.
+    /// Companion to `a_foreign_agents_overlay_is_left_pending`.
+    #[tokio::test]
+    async fn an_overlay_our_agent_staged_is_accepted() {
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(AA_CLASSES).await;
+        let child = "soa://ext/note/ours";
+        let parent = "soa://ext/chapter/ours-parent";
+
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![create_op(child, "Note", "our note")],
+            "run-1",
+            &ctx,
+        )
+        .await;
+        assert!(accepted.is_empty());
+        assert_eq!(pending(&p).await, vec![child.to_string()]);
+
+        let accepted = pass(
+            &mut p,
+            &shapes,
+            vec![addlinks_op(child, "ns://partOf", parent)],
+            "run-2",
+            &ctx,
+        )
+        .await;
+        assert_eq!(accepted, vec![child.to_string()]);
+        assert!(pending(&p).await.is_empty());
+        let (author, run) = marker_on(&p, child).await.expect("marker");
+        assert_eq!(run, "run-2");
+        assert_eq!(author, crate::agent::did_for_context(&ctx).unwrap());
     }
 
     /// A parent link from an item to itself places it under nothing, so a
