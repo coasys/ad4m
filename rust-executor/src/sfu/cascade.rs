@@ -42,6 +42,28 @@ pub fn remote_session_id(participant_id: &str, node_did: &str) -> String {
     }
 }
 
+/// Most sessions one node's announce lists for a room: the most any room
+/// holds on one node (four times the largest `maxMeshParticipants`). A
+/// longer list is cut to this length.
+pub const MAX_ANNOUNCED_SESSIONS: usize = super::service::MAX_MESH_PARTICIPANTS as usize * 4;
+
+/// `"<type> from <sender>"` for a gossip frame that did not decode, read
+/// from whatever of it parses as JSON, for the log line that drops it.
+pub fn describe_frame(frame: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(frame).unwrap_or_default();
+    let field = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|name| value.get(*name).and_then(|v| v.as_str()))
+            .map(str::to_string)
+    };
+    format!(
+        "{} from {}",
+        field(&["type"]).unwrap_or_else(|| "unknown type".into()),
+        field(&["did", "from_did"]).unwrap_or_else(|| "unknown sender".into())
+    )
+}
+
 /// Represents a remote SFU node in the cascade cluster.
 #[derive(Debug, Clone)]
 pub struct SfuNodeInfo {
@@ -84,7 +106,9 @@ pub enum CascadeSignal {
         participant_count: u32,
         capacity_hint: u32,
         /// The announcing node's sessions in the room, by its own ids:
-        /// the other nodes list them in their room rosters.
+        /// the other nodes list them in their room rosters. Absent from a
+        /// node on an older build: it announces none.
+        #[serde(default)]
         sessions: Vec<SfuRosterParticipant>,
     },
     /// SDP offer to establish a pipe transport between two SFU nodes, or to
@@ -97,7 +121,9 @@ pub enum CascadeSignal {
         sdp_offer: String,
         /// The session each new m-line carries, as the sending node names
         /// it: the receiving node attributes the track to that session, not
-        /// to the pipe.
+        /// to the pipe. Absent from a node on an older build: its tracks
+        /// are attributed to the pipe.
+        #[serde(default)]
         track_mapping: Vec<TrackMapEntry>,
     },
     /// SDP answer for pipe transport
@@ -203,14 +229,36 @@ impl CascadeManager {
             return false; // Ignore our own announces
         }
 
+        // A node announces its own sessions only: an entry that is no
+        // session, or names another node, is dropped.
+        let own_suffix = format!("@{}", did);
+        let listed = sessions.len();
         let mut sessions: Vec<SfuRosterParticipant> = sessions
             .into_iter()
-            .map(|s| SfuRosterParticipant {
-                participant_id: remote_session_id(&s.participant_id, &did),
-                agent_did: s.agent_did,
+            .filter_map(|s| {
+                let participant_id = remote_session_id(&s.participant_id, &did);
+                let own = participant_id
+                    .strip_suffix(&own_suffix)
+                    .is_some_and(|pid| ParticipantId::parse(pid).is_some());
+                own.then_some(SfuRosterParticipant {
+                    participant_id,
+                    agent_did: s.agent_did,
+                })
             })
             .collect();
         sessions.sort();
+        sessions.dedup();
+        sessions.truncate(MAX_ANNOUNCED_SESSIONS);
+        if sessions.len() != listed {
+            warn!(
+                "SFU cascade: {} announced {} sessions in {}; kept {} of its own (at most {})",
+                did,
+                listed,
+                room_id,
+                sessions.len(),
+                MAX_ANNOUNCED_SESSIONS
+            );
+        }
         let nodes = self.known_nodes.entry(room_id).or_default();
         let changed = nodes
             .get(&did)
@@ -714,6 +762,83 @@ mod tests {
         assert_eq!(
             remote_session_id("P3@did:key:m", "did:key:n"),
             "P3@did:key:m"
+        );
+    }
+
+    /// A node on the build before sessions and track mappings sends
+    /// announces without `sessions` and pipe offers without
+    /// `track_mapping`. They decode as before: no sessions, no mapping.
+    #[test]
+    fn frames_from_a_node_without_sessions_or_track_mappings_decode() {
+        let announce: CascadeSignal = serde_json::from_str(
+            r#"{"type":"sfu-announce","did":"did:key:old","room_id":"n:r","participant_count":2,"capacity_hint":8}"#,
+        )
+        .expect("an announce without sessions decodes");
+        assert!(
+            matches!(&announce, CascadeSignal::Announce { did, sessions, .. } if did == "did:key:old" && sessions.is_empty()),
+            "{announce:?}"
+        );
+        let offer: CascadeSignal = serde_json::from_str(
+            r#"{"type":"sfu-pipe-offer","from_did":"did:key:old","to_did":"did:key:new","room_id":"n:r","sdp_offer":"{}"}"#,
+        )
+        .expect("a pipe offer without a track mapping decodes");
+        assert!(
+            matches!(&offer, CascadeSignal::PipeOffer { track_mapping, .. } if track_mapping.is_empty()),
+            "{offer:?}"
+        );
+    }
+
+    /// A node announces only its own sessions: an entry that names another
+    /// node, or no session at all, is dropped, and a list longer than a room
+    /// holds is cut to that length.
+    #[test]
+    fn an_announce_lists_only_the_senders_sessions_up_to_a_room() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10031), 8);
+        let room = "test-nh:room1".to_string();
+        mgr.handle_sfu_announce(
+            "did:key:nodeA".into(),
+            room.clone(),
+            4,
+            8,
+            vec![
+                session("did:key:alice", "P1"),
+                session("did:key:bob", "P2@did:key:nodeA"),
+                session("did:key:mallory", "P3@did:key:nodeB"),
+                session("did:key:mallory", "P4@did:key:local"),
+                session("did:key:mallory", "not-a-session"),
+                session("did:key:mallory", "x@did:key:nodeA"),
+            ],
+        );
+        assert_eq!(
+            mgr.remote_sessions(&room),
+            vec![
+                session("did:key:alice", "P1@did:key:nodeA"),
+                session("did:key:bob", "P2@did:key:nodeA"),
+            ]
+        );
+
+        let many = (1..=MAX_ANNOUNCED_SESSIONS + 10)
+            .map(|i| session("did:key:alice", &format!("P{}", i)))
+            .collect();
+        mgr.handle_sfu_announce("did:key:nodeA".into(), room.clone(), 1, 8, many);
+        assert_eq!(mgr.remote_sessions(&room).len(), MAX_ANNOUNCED_SESSIONS);
+    }
+
+    /// A frame that does not decode is logged by its type and sender, read
+    /// from whatever of it parses.
+    #[test]
+    fn an_undecodable_frame_is_described_by_type_and_sender() {
+        assert_eq!(
+            describe_frame(r#"{"type":"sfu-announce","did":"did:key:a","room_id":5}"#),
+            "sfu-announce from did:key:a"
+        );
+        assert_eq!(
+            describe_frame(r#"{"type":"sfu-pipe-offer","from_did":"did:key:b"}"#),
+            "sfu-pipe-offer from did:key:b"
+        );
+        assert_eq!(
+            describe_frame("not json"),
+            "unknown type from unknown sender"
         );
     }
 

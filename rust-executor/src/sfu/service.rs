@@ -130,6 +130,9 @@ pub enum CallJoinError {
     /// The join's session key was replaced on its device by a later join
     /// (another tab): the session must stop, not rebuild.
     Replaced(String),
+    /// The caller's token stopped holding (revoked, removed or expired)
+    /// before the join reached the room: nothing changed.
+    Unauthorized(String),
     /// Any other refusal or failure.
     Failed(String),
 }
@@ -137,7 +140,9 @@ pub enum CallJoinError {
 impl std::fmt::Display for CallJoinError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CallJoinError::Replaced(m) | CallJoinError::Failed(m) => f.write_str(m),
+            CallJoinError::Replaced(m)
+            | CallJoinError::Unauthorized(m)
+            | CallJoinError::Failed(m) => f.write_str(m),
         }
     }
 }
@@ -1051,9 +1056,15 @@ impl SfuService {
     /// [`CallJoinError::Replaced`]: it must stop, not take the call back.
     ///
     /// Cancel safe: the join runs to its end in a task of its own, so a
-    /// caller that stops waiting (`request.cancel`, an ended session) never
+    /// caller that stops waiting (`request.cancel`, a closed socket) never
     /// leaves the room holding a session whose peer the media loop never
     /// got, or a replaced session that was never removed or told.
+    ///
+    /// `authorised` tells whether the caller's session still holds. The
+    /// task asks once more when it holds the room, before changing it: a
+    /// join whose token was revoked (or expired) meanwhile ends with
+    /// [`CallJoinError::Unauthorized`] and changes nothing. A caller that
+    /// only stopped waiting still holds, so its join completes.
     #[allow(clippy::too_many_arguments)]
     pub async fn call_join(
         self: &Arc<Self>,
@@ -1064,6 +1075,7 @@ impl SfuService {
         session_key: &str,
         sdp_offer_json: &str,
         accept_redirect: bool,
+        authorised: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Result<CallSessionInfo, CallJoinError> {
         let this = self.clone();
         let (url, room, did, device, key, offer) = (
@@ -1075,8 +1087,17 @@ impl SfuService {
             sdp_offer_json.to_string(),
         );
         tokio::spawn(async move {
-            this.join_call(&url, &room, &did, &device, &key, &offer, accept_redirect)
-                .await
+            this.join_call(
+                &url,
+                &room,
+                &did,
+                &device,
+                &key,
+                &offer,
+                accept_redirect,
+                &authorised,
+            )
+            .await
         })
         .await
         .map_err(|e| CallJoinError::Failed(format!("SFU join failed: {}", e)))?
@@ -1092,6 +1113,7 @@ impl SfuService {
         session_key: &str,
         sdp_offer_json: &str,
         accept_redirect: bool,
+        authorised: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<CallSessionInfo, CallJoinError> {
         for (name, value) in [("deviceId", device_id), ("sessionKey", session_key)] {
             if value.is_empty() || value.chars().count() > MAX_DEVICE_ID_LEN {
@@ -1165,6 +1187,15 @@ impl SfuService {
         // sessions the room holds.
         let replaced = {
             let mut rooms = self.rooms.write().await;
+            // The caller may have lost its token while the join waited (the
+            // join outlives its request). Asked under the lock, so a
+            // revocation that came before the room changes stops the join.
+            if !authorised() {
+                return Err(CallJoinError::Unauthorized(
+                    "The caller's token was revoked or expired before the join completed"
+                        .to_string(),
+                ));
+            }
             let created = rooms.get_room(&room_id).is_none();
             if created {
                 Self::check_new_room(&rooms, &room_id)?;
@@ -1867,7 +1898,7 @@ mod tests {
     async fn join(svc: &Arc<SfuService>, url: &str, did: &str, device: &str) -> String {
         // A new tab: a session key of its own.
         let key = format!("key-{}", ParticipantId::next());
-        svc.call_join(url, "r", did, device, &key, &offer(), false)
+        svc.call_join(url, "r", did, device, &key, &offer(), false, || true)
             .await
             .unwrap()
             .participant_id
@@ -2263,6 +2294,59 @@ mod tests {
         assert_eq!(replaced[0]["participantId"], p1.as_str());
     }
 
+    /// The caller's token is revoked while its join waits for the room: the
+    /// join ends without touching the room. No session is added, the tab it
+    /// would have replaced stays in the call and is not told, and the media
+    /// loop gets no peer. A join the client merely stopped waiting for still
+    /// completes (the tests above).
+    #[tokio::test]
+    async fn a_join_whose_token_is_revoked_while_it_waits_changes_nothing() {
+        let mut svc = test_service().await;
+        let url = "neighbourhood://revoked-join";
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        let p1 = join(&svc, url, "did:a", "laptop").await;
+        drain(&mut events);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        Arc::get_mut(&mut svc).unwrap().server.command_tx = tx;
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let barrier = svc.rooms.write().await;
+        let second = tokio::spawn({
+            let (svc, held) = (svc.clone(), held.clone());
+            async move {
+                svc.call_join(
+                    url,
+                    "r",
+                    "did:a",
+                    "laptop",
+                    "key-revoked",
+                    &offer(),
+                    false,
+                    move || held.load(std::sync::atomic::Ordering::SeqCst),
+                )
+                .await
+            }
+        });
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!second.is_finished(), "the join waits for the room");
+        held.store(false, std::sync::atomic::Ordering::SeqCst);
+        drop(barrier);
+
+        let refused = second.await.unwrap().unwrap_err();
+        assert!(
+            matches!(refused, CallJoinError::Unauthorized(_)),
+            "{refused:?}"
+        );
+        assert_eq!(sessions(&svc, url).await, vec![(p1, "did:a".to_string())]);
+        let commands = commands_within(&mut rx, std::time::Duration::from_millis(200)).await;
+        assert!(commands.is_empty(), "the media loop got {commands:?}");
+        let seen = drain(&mut events);
+        assert!(published(&seen, Topic::SfuSessionReplaced, url).is_empty());
+        assert!(published(&seen, Topic::SfuRoomRoster, url).is_empty());
+    }
+
     /// A phone and a laptop: two participants, listed apart in the roster,
     /// and leaving on one leaves the other in the call.
     #[tokio::test]
@@ -2441,7 +2525,7 @@ mod tests {
             ];
             for (device, key, field) in cases {
                 let refused = svc
-                    .call_join(url, "r", "did:a", device, key, &offer(), false)
+                    .call_join(url, "r", "did:a", device, key, &offer(), false, || true)
                     .await
                     .unwrap_err();
                 assert!(
@@ -2453,7 +2537,7 @@ mod tests {
         assert!(sessions(&svc, url).await.is_empty());
         // The limit counts characters: 128 four-byte characters are 512 bytes and allowed.
         let long = "🎧".repeat(MAX_DEVICE_ID_LEN);
-        svc.call_join(url, "r", "did:a", &long, &long, &offer(), false)
+        svc.call_join(url, "r", "did:a", &long, &long, &offer(), false, || true)
             .await
             .unwrap();
     }
@@ -2468,7 +2552,7 @@ mod tests {
         let join_keyed = |key: &'static str| {
             let svc = svc.clone();
             async move {
-                svc.call_join(url, "r", "did:a", "phone", key, &offer(), false)
+                svc.call_join(url, "r", "did:a", "phone", key, &offer(), false, || true)
                     .await
                     .map(|s| s.participant_id)
             }

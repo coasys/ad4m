@@ -42,7 +42,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use super::super::cascade::CascadeSignal;
+use super::super::cascade::{describe_frame, CascadeSignal};
 use super::{CascadeGossip, GossipTarget};
 
 /// One peer reachable over TCP gossip.
@@ -277,7 +277,15 @@ async fn reader_loop(
                         }
                     }
                     Err(e) => {
-                        debug!("TcpGossip drop malformed frame: {} -- {:?}", e, line.trim());
+                        // Loud: a peer on another build whose frames this
+                        // build cannot read leaves the cascade half working.
+                        warn!(
+                            "TcpGossip dropped a {} frame (connection of {}) that does not decode: {}",
+                            describe_frame(line.trim()),
+                            bound.as_deref().unwrap_or("an unbound peer"),
+                            e
+                        );
+                        debug!("TcpGossip undecodable frame: {:?}", line.trim());
                     }
                 }
             }

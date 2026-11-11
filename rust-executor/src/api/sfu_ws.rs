@@ -168,6 +168,10 @@ async fn list_rooms(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: SfuCallJoinParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
+    // The join outlives this future (cancel safe), so it asks the session
+    // itself, before it changes the room, whether the token still holds: a
+    // revocation stops it, a client that stops waiting does not.
+    let caller = ctx.session.clone();
     let session = service()?
         .call_join(
             &p.neighbourhood_url,
@@ -177,10 +181,12 @@ async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
             &p.session_key,
             &p.sdp_offer,
             p.accept_redirect.unwrap_or(false),
+            move || caller.check().is_ok(),
         )
         .await
         .map_err(|e| match e {
             CallJoinError::Replaced(m) => WsRpcError::conflict(m),
+            CallJoinError::Unauthorized(m) => WsRpcError::unauthorized(m),
             CallJoinError::Failed(m) => WsRpcError::internal(m),
         })?;
     Ok(serde_json::to_value(session)?)

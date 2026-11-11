@@ -188,15 +188,18 @@ impl SfuPeer {
 
     /// The session whose media this peer's inbound track `mid` carries. A
     /// client peer sends its own; a pipe carries other nodes' sessions, as
-    /// their offers named them, and `None` for a mid none named.
-    pub fn track_origin(&self, mid: Mid) -> Option<TrackOrigin> {
+    /// their offers named them. A mid no offer named (a node on an older
+    /// build sends no mapping) is the pipe's own: its id and the remote
+    /// node's DID, as before track mappings.
+    pub fn track_origin(&self, mid: Mid) -> TrackOrigin {
         if self.is_pipe {
-            self.remote_origins.get(&mid).cloned()
-        } else {
-            Some(TrackOrigin {
-                participant_id: self.id.to_string(),
-                agent_did: self.agent_did.clone(),
-            })
+            if let Some(origin) = self.remote_origins.get(&mid) {
+                return origin.clone();
+            }
+        }
+        TrackOrigin {
+            participant_id: self.id.to_string(),
+            agent_did: self.agent_did.clone(),
         }
     }
 
@@ -1594,7 +1597,7 @@ fn offer_new_tracks(
         .flat_map(|peer| {
             peer.tracks_in
                 .keys()
-                .filter_map(|mid| Some(((peer.id.clone(), *mid), peer.track_origin(*mid)?)))
+                .map(|mid| ((peer.id.clone(), *mid), peer.track_origin(*mid)))
         })
         .collect();
 
@@ -1622,27 +1625,29 @@ fn offer_new_tracks(
             }
             continue;
         }
-        // Skip tracks already forwarded — matches the deferred path's
-        // tracks_out_rev check to prevent duplicate outbound m-lines.
-        let to_add: Vec<(MediaKind, ParticipantId, Mid)> = additions
+        // Skip tracks already forwarded, and tracks no peer receives (any
+        // more): the same tests the deferred path makes above, so a track
+        // goes out with its mapping entry on both paths or on neither.
+        let to_add: Vec<(MediaKind, ParticipantId, Mid, &TrackOrigin)> = additions
             .into_iter()
-            .filter(|(_, origin_pid, origin_mid)| {
-                !target_peer
-                    .tracks_out_rev
-                    .contains_key(&(origin_pid.clone(), *origin_mid))
+            .filter_map(|(kind, origin_pid, origin_mid)| {
+                let track = (origin_pid.clone(), origin_mid);
+                if target_peer.tracks_out_rev.contains_key(&track) {
+                    return None;
+                }
+                let origin = origins.get(&track)?;
+                Some((kind, origin_pid, origin_mid, origin))
             })
             .collect();
-        let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _)| *kind).collect();
+        let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _, _)| *kind).collect();
         let Some((offer, pending, mids)) = offer_send_only(&mut target_peer.rtc, &kinds, false)
         else {
             continue;
         };
 
         let mut track_mapping = Vec::with_capacity(mids.len());
-        for (new_mid, (kind, origin_pid, origin_mid)) in mids.into_iter().zip(to_add) {
-            if let Some(origin) = origins.get(&(origin_pid.clone(), origin_mid)) {
-                track_mapping.push(mapping_entry(new_mid, kind, origin));
-            }
+        for (new_mid, (kind, origin_pid, origin_mid, origin)) in mids.into_iter().zip(to_add) {
+            track_mapping.push(mapping_entry(new_mid, kind, origin));
             target_peer
                 .tracks_out
                 .insert(new_mid, (origin_pid.clone(), origin_mid));
@@ -1841,8 +1846,9 @@ mod tests {
     /// A track that arrives through a cascade pipe is offered to a client
     /// as the remote session's, the one the remote node's offer named, not
     /// as the pipe's: its id qualified by the node, its agent's DID. A mid
-    /// no offer named is offered without a mapping entry. Deferred while
-    /// an offer is pending, it keeps that origin.
+    /// no offer named (a node on an older build sends no mapping) is offered
+    /// as the pipe's: its id, the remote node's DID. Deferred while an offer
+    /// is pending, either keeps its origin.
     #[test]
     fn a_track_from_a_pipe_is_offered_as_the_remote_session() {
         let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
@@ -1864,15 +1870,24 @@ mod tests {
             Rtc::new(Instant::now()),
             true,
         );
-        let (named, unnamed, later) = (Mid::from("7"), Mid::from("9"), Mid::from("8"));
+        let (named, unnamed, later, later_unnamed) = (
+            Mid::from("7"),
+            Mid::from("9"),
+            Mid::from("8"),
+            Mid::from("6"),
+        );
         pipe.note_remote_origins(&[
             mapped("7", "P1", "did:key:alice"),
             mapped("8", "P2", "did:key:carol"),
         ]);
-        for mid in [named, unnamed, later] {
+        for mid in [named, unnamed, later, later_unnamed] {
             pipe.tracks_in.insert(mid, MediaKind::Audio);
         }
         let mut peers = HashMap::from([(client_id.clone(), client), (pipe_id.clone(), pipe)]);
+        let as_pipe = TrackOrigin {
+            participant_id: pipe_id.to_string(),
+            agent_did: "did:key:nodeA".to_string(),
+        };
 
         let offers = offer_new_tracks(
             &mut peers,
@@ -1887,30 +1902,73 @@ mod tests {
         assert_eq!(offers.len(), 1);
         let (target, _, mapping) = &offers[0];
         assert_eq!(target, &client_id);
-        assert_eq!(mapping.len(), 1, "{mapping:?}");
-        assert_eq!(mapping[0].participant_id, "P1@did:key:nodeA");
-        assert_eq!(mapping[0].agent_did, "did:key:alice");
+        assert_eq!(mapping.len(), 2, "{mapping:?}");
+        let by_mid = |origin_mid: Mid| {
+            let out = peers[&client_id].tracks_out_rev[&(pipe_id.clone(), origin_mid)];
+            mapping
+                .iter()
+                .find(|e| e.mid == out.to_string())
+                .map(|e| (e.participant_id.clone(), e.agent_did.clone()))
+                .expect("a mapping entry for the track")
+        };
+        assert_eq!(
+            by_mid(named),
+            ("P1@did:key:nodeA".to_string(), "did:key:alice".to_string())
+        );
+        assert_eq!(
+            by_mid(unnamed),
+            (as_pipe.participant_id.clone(), as_pipe.agent_did.clone())
+        );
         assert_eq!(peers[&client_id].tracks_out.len(), 2);
 
-        // The client has not answered yet: the next track waits, and keeps
-        // its remote origin.
+        // The client has not answered yet: the next tracks wait, and keep
+        // their origins, named or not.
         let offers = offer_new_tracks(
             &mut peers,
             HashMap::from([(
                 client_id.clone(),
-                vec![(MediaKind::Audio, pipe_id.clone(), later)],
+                vec![
+                    (MediaKind::Audio, pipe_id.clone(), later),
+                    (MediaKind::Audio, pipe_id.clone(), later_unnamed),
+                ],
             )]),
         );
         assert!(offers.is_empty());
-        let deferred = &peers[&client_id].deferred_tracks;
-        assert_eq!(deferred.len(), 1);
+        let deferred: Vec<(Mid, TrackOrigin)> = peers[&client_id]
+            .deferred_tracks
+            .iter()
+            .map(|(_, mid, _, origin)| (*mid, origin.clone()))
+            .collect();
         assert_eq!(
-            deferred[0].3,
-            TrackOrigin {
-                participant_id: "P2@did:key:nodeA".to_string(),
-                agent_did: "did:key:carol".to_string(),
-            }
+            deferred,
+            vec![
+                (
+                    later,
+                    TrackOrigin {
+                        participant_id: "P2@did:key:nodeA".to_string(),
+                        agent_did: "did:key:carol".to_string(),
+                    }
+                ),
+                (later_unnamed, as_pipe.clone()),
+            ]
         );
+
+        // Once the offer is answered, the deferred tracks go out with the
+        // same mapping the direct path gives them.
+        let client = peers.get_mut(&client_id).unwrap();
+        client.pending_offer = None;
+        let (_, mapping) = apply_deferred_tracks(client).expect("the deferred tracks are offered");
+        let mut named_in_mapping: Vec<(String, String)> = mapping
+            .iter()
+            .map(|e| (e.participant_id.clone(), e.agent_did.clone()))
+            .collect();
+        named_in_mapping.sort();
+        let mut expected = vec![
+            ("P2@did:key:nodeA".to_string(), "did:key:carol".to_string()),
+            (as_pipe.participant_id, as_pipe.agent_did),
+        ];
+        expected.sort();
+        assert_eq!(named_in_mapping, expected);
     }
 
     /// A client's own tracks are offered as its session's.
