@@ -7,9 +7,18 @@ import type { AddAgentInfosRequest } from "./AddAgentInfosRequest";
 import type { Agent } from "./Agent";
 import type { AgentAddEntanglementProofsParams } from "./AgentAddEntanglementProofsParams";
 import type { AgentByDidParams } from "./AgentByDidParams";
+import type { AgentCancelParams } from "./AgentCancelParams";
 import type { AgentRemoveAppParams } from "./AgentRemoveAppParams";
 import type { AgentReply } from "./AgentReply";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
+import type { AgentSendParams } from "./AgentSendParams";
+import type { AgentSendStarted } from "./AgentSendStarted";
+import type { AgentSession } from "./AgentSession";
+import type { AgentSessionCreate } from "./AgentSessionCreate";
+import type { AgentSessionIdParams } from "./AgentSessionIdParams";
+import type { AgentSessionMessage } from "./AgentSessionMessage";
+import type { AgentSessionMessagesParams } from "./AgentSessionMessagesParams";
+import type { AgentSessionUpdateRequest } from "./AgentSessionUpdateRequest";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
 import type { AgentWithIdentity } from "./AgentWithIdentity";
@@ -213,6 +222,7 @@ export interface RpcMethods {
   "agent.addTrustedAgents": { params: TrustedAgentsWrapper; result: Array<string> };
   "agent.byDIDs": { params: AgentsByDidsRequest; result: Array<Agent | null> };
   "agent.byDid": { params: AgentByDidParams; result: Agent | null };
+  "agent.cancel": { params: AgentCancelParams; result: boolean };
   "agent.deleteEntanglementProofs": { params: EntanglementProofsWrapper; result: Array<EntanglementProof> };
   "agent.deleteTrustedAgents": { params: TrustedAgentsWrapper; result: Array<string> };
   "agent.entanglementProofPreflight": { params: EntanglementProofPreflightRequest; result: EntanglementProof };
@@ -225,10 +235,17 @@ export interface RpcMethods {
   "agent.import": { params: ImportAgentRequest; result: AgentStatus };
   "agent.isLocked": { params: Record<string, never>; result: boolean };
   "agent.lock": { params: LockAgentRequest; result: AgentStatus };
+  "agent.messages": { params: AgentSessionMessagesParams; result: Array<AgentSessionMessage> };
   "agent.permitCapability": { params: PermitCapabilityRequest; result: string };
   "agent.removeApp": { params: AgentRemoveAppParams; result: Array<Apps> };
   "agent.requestCapability": { params: RequestCapabilityRequest; result: string };
   "agent.revokeToken": { params: AgentRevokeTokenParams; result: Array<Apps> };
+  "agent.send": { params: AgentSendParams; result: AgentSendStarted };
+  "agent.session": { params: AgentSessionIdParams; result: AgentSession };
+  "agent.sessionCreate": { params: AgentSessionCreate; result: AgentSession };
+  "agent.sessionDelete": { params: AgentSessionIdParams; result: boolean };
+  "agent.sessionList": { params: Record<string, never>; result: Array<AgentSession> };
+  "agent.sessionUpdate": { params: AgentSessionUpdateRequest; result: AgentSession };
   "agent.sign": { params: SignMessageRequest; result: AgentSignature };
   "agent.status": { params: Record<string, never>; result: AgentStatus };
   "agent.unlock": { params: UnlockAgentRequest; result: AgentStatus };
@@ -431,6 +448,9 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "agent.getEntanglementProofs",
   "agent.getTrustedAgents",
   "agent.isLocked",
+  "agent.messages",
+  "agent.session",
+  "agent.sessionList",
   "agent.status",
   "ai.discoverModels",
   "ai.getDefaultModel",

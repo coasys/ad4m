@@ -17,12 +17,28 @@ import { PersistentCache, createPersistentCache } from "../cache/PersistentCache
 import type { Agent as AgentData } from "../generated/api/Agent";
 import type { AgentSignature } from "../generated/api/AgentSignature";
 import type { AgentWithIdentity } from "../generated/api/AgentWithIdentity";
+import type { AgentSendStarted } from "../generated/api/AgentSendStarted";
+import type { AgentSession } from "../generated/api/AgentSession";
+import type { AgentSessionChanged } from "../generated/api/AgentSessionChanged";
+import type { AgentSessionMessage } from "../generated/api/AgentSessionMessage";
+import type { AgentSessionUpdateRequest } from "../generated/api/AgentSessionUpdateRequest";
+import type { Capability } from "../generated/api/Capability";
 
 export interface InitializeArgs {
   did: string;
   didDocument: string;
   keystore: string;
   passphrase: string;
+}
+
+/** The fields a session's create and update take. A field left out keeps its value on an
+ *  update (and takes the default on a create); a nullable one is cleared with `null`. */
+export interface AgentSessionInput {
+  title?: string;
+  model?: string | null;
+  defaultPerspective?: string | null;
+  libraryPerspective?: string | null;
+  capabilities?: Capability[];
 }
 
 function toAgent(data: AgentData | AgentWithIdentity | null): Agent | null {
@@ -350,5 +366,68 @@ export class AgentClient {
 
   async requestPayment(amountHOT: string): Promise<PaymentRequestResult> {
     return this.#apiClient.call('hosting.requestPayment', { amountHOT });
+  }
+
+  // ── Agent sessions ──────────────────────────────────────────────────────
+  // A conversation with the executor's agent, stored in the executor's database.
+  // The agent works through the MCP tools, inside the session's capabilities.
+
+  /** Creates a session. `capabilities` absent: everything the caller holds. */
+  async sessionCreate(input: AgentSessionInput = {}): Promise<AgentSession> {
+    return this.#apiClient.call('agent.sessionCreate', {
+      title: input.title ?? null,
+      model: input.model ?? null,
+      defaultPerspective: input.defaultPerspective ?? null,
+      libraryPerspective: input.libraryPerspective ?? null,
+      capabilities: input.capabilities ?? null,
+    });
+  }
+
+  async sessionList(): Promise<AgentSession[]> {
+    return this.#apiClient.call('agent.sessionList', {});
+  }
+
+  async session(id: string): Promise<AgentSession> {
+    return this.#apiClient.call('agent.session', { id });
+  }
+
+  /** A field left out keeps its value; a nullable one (`model`, `defaultPerspective`,
+   *  `libraryPerspective`) is cleared with `null`. Capabilities can only be narrowed
+   *  to what the caller holds. */
+  async sessionUpdate(id: string, update: AgentSessionInput): Promise<AgentSession> {
+    // Keys left `undefined` are not sent, so a field stays; `null` clears a nullable one.
+    return this.#apiClient.call('agent.sessionUpdate', { id, ...update } as AgentSessionUpdateRequest);
+  }
+
+  async sessionDelete(id: string): Promise<boolean> {
+    return this.#apiClient.call('agent.sessionDelete', { id });
+  }
+
+  /** Stores the user's message and starts the turn as a detached task; returns the ids
+   *  of the message and of the `running` reply. Follow it with {@link onSessionChanged}. */
+  async sendMessage(sessionId: string, text: string): Promise<AgentSendStarted> {
+    return this.#apiClient.call('agent.send', { sessionId, text });
+  }
+
+  async cancelTurn(sessionId: string): Promise<boolean> {
+    return this.#apiClient.call('agent.cancel', { sessionId });
+  }
+
+  /** The transcript, newest entries last. `before` pages older than a `seq`. */
+  async sessionMessages(
+    sessionId: string,
+    options: { limit?: number; before?: number } = {},
+  ): Promise<AgentSessionMessage[]> {
+    return this.#apiClient.call('agent.messages', {
+      sessionId,
+      limit: options.limit ?? null,
+      before: options.before ?? null,
+    });
+  }
+
+  /** `handler` gets every change to a session the caller owns: a new message, a status
+   *  change, each tool step. Returns the unsubscribe function. */
+  onSessionChanged(handler: (event: AgentSessionChanged) => void): () => void {
+    return this.#apiClient.on('agent-session-changed', handler);
   }
 }
