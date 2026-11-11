@@ -1346,7 +1346,16 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
             }
         }
     }
-    selection.save(paths)?;
+    // `ai.localInstall` saves its selection without the lifecycle lock, so it may have
+    // done so while the runtimes above loaded: that selection stays, with the ports of
+    // this start. The install's own start, or the next one, runs its models.
+    match Selection::load(paths) {
+        Some(mut saved) => {
+            saved.ports = selection.ports;
+            saved.save(paths)?;
+        }
+        None => selection.save(paths)?,
+    }
     Ok(())
 }
 
@@ -3650,6 +3659,109 @@ mod tests {
         assert!(old_left.is_empty(), "the old runtime still runs");
         assert!(new_left.is_empty(), "still running: {new_left:?}");
         assert_eq!(names, vec!["new-chat"], "the endpoint lists the new models");
+    }
+
+    /// `ai.localInstall` saved a new selection while a start loaded the models of the old
+    /// one (autostart after a boot, or `ai.localStart`). The start wrote the selection it
+    /// had loaded back when it ended, so the install's own start ran the old models again.
+    /// A start keeps the selection it finds at its end, with the ports it chose.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_keeps_the_selection_an_install_saved_while_it_loaded() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = TEST_LOCK.lock().await;
+        crate::test_utils::ensure_test_db();
+        let saved = super::super::AI_SERVICE
+            .lock()
+            .await
+            .replace(AIService::empty());
+        let db = crate::db_backend::db_backend();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LocalPaths {
+            store: dir.path().join("store"),
+            state: dir.path().join("state"),
+        };
+        // A runtime that loads for a second, then answers `/health`: a file server on the
+        // port it is given (`--host 127.0.0.1 --port N ...`).
+        let www = dir.path().join("www");
+        std::fs::create_dir_all(&www).unwrap();
+        std::fs::write(www.join("health"), "ok").unwrap();
+        let spawned = dir.path().join("spawned");
+        let binary = dir.path().join("llama-server");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\necho $$ >> '{}'\nsleep 1\ncd '{}' && exec python3 -m http.server \"$4\" --bind 127.0.0.1\n",
+                spawned.display(),
+                www.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let selection_of = |id: &str| {
+            let mut model = selected(Service::Llm, id, Provider::LlamaServer);
+            model.path = dir.path().join(format!("{id}.gguf"));
+            std::fs::write(&model.path, "gguf").unwrap();
+            Selection {
+                runtimes: vec![SelectedRuntime {
+                    provider: Provider::LlamaServer,
+                    runtime_id: "fake".into(),
+                    version: "0".into(),
+                    build: "cpu".into(),
+                    binary: binary.clone(),
+                    lib_dirs: vec![],
+                    services: vec![Service::Llm],
+                    backend: None,
+                }],
+                models: vec![model],
+                ports: BTreeMap::new(),
+            }
+        };
+        selection_of("old-chat").save(&paths).unwrap();
+
+        // The install saves its selection while the start waits for the runtime.
+        let (outcome, _) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(30), start_at(&paths, false)),
+            async {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while spawned_pids(&spawned).is_empty() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                selection_of("new-chat").save(&paths).unwrap();
+            }
+        );
+        let kept = Selection::load(&paths);
+        let port = RUNNING
+            .lock()
+            .await
+            .get(&Provider::LlamaServer)
+            .map(|r| r.supervised.spec.port);
+        if let Some(left) = RUNNING.lock().await.remove(&Provider::LlamaServer) {
+            let left_port = left.supervised.spec.port;
+            left.supervised.stop().await;
+            MANAGED_PORTS.write().unwrap().remove(&left_port);
+        }
+        if let Some(endpoint) = db.get_endpoint_by_name(LLAMA_ENDPOINT).unwrap() {
+            let service = AIService::global_instance().await.unwrap();
+            for id in db.endpoint_model_ids(&endpoint.id).unwrap() {
+                service.remove_model(id).await.unwrap();
+            }
+            db.remove_endpoint(&endpoint.id).unwrap();
+        }
+        *super::super::AI_SERVICE.lock().await = saved;
+        let left = wait_gone(&spawned_pids(&spawned)).await;
+
+        outcome.expect("the start ends").unwrap();
+        assert!(left.is_empty(), "still running: {left:?}");
+        let kept = kept.expect("a selection is saved");
+        let models: Vec<&str> = kept.models.iter().map(|m| m.model_id.as_str()).collect();
+        assert_eq!(models, vec!["new-chat"], "the install's selection stays");
+        assert!(port.is_some(), "the start left its runtime running");
+        assert_eq!(
+            kept.ports.get(Provider::LlamaServer.as_str()).copied(),
+            port,
+            "with the port this start chose"
+        );
     }
 
     /// `pids.json` names a runtime from its spawn, not from the end of its model load: an
