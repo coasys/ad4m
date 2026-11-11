@@ -26,6 +26,9 @@ use std::sync::Arc;
 /// again a few times before giving up on the whole call.
 pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 
+/// How much of an unparseable model response the debug log shows.
+const RAW_LOG_CHARS: usize = 500;
+
 /// Run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
 /// response as an [`InterpretationOutput`] (instances plus flow proposals). Returns the first successful parse;
 /// the last parse error propagates if every attempt fails. `prompt_fn` is an
@@ -57,6 +60,12 @@ where
             Err(e) => {
                 log::warn!(
                     "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
+                );
+                // The raw output is derived from the transcript: log only its head.
+                log::debug!(
+                    "interpretation: raw response that failed to parse ({} bytes), first {RAW_LOG_CHARS} chars: {}",
+                    raw.len(),
+                    raw.chars().take(RAW_LOG_CHARS).collect::<String>()
                 );
                 last_err = Some(e);
             }
@@ -1222,7 +1231,7 @@ pub async fn run_interpretation_with_harness_and_model(
         provider,
         bridge,
         HarnessConfig { max_tool_calls },
-        emit_ctx,
+        emit_ctx.map(|ctx| ctx as &dyn crate::ai_service::harness::ToolObserver),
         credit_gate,
     )
     .await?;

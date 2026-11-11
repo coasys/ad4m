@@ -24,6 +24,15 @@ use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
 use super::simulcast::{is_keyframe, LayerSelector};
 
+/// The call session whose media a track carries, by the id the clients of
+/// this node know it by: a local session's own id, a remote one's
+/// qualified with its node ([`super::cascade::remote_session_id`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackOrigin {
+    pub participant_id: String,
+    pub agent_did: String,
+}
+
 /// A connected WebRTC peer managed by the SFU server.
 ///
 /// Two flavours share this struct so the event loop can drive them
@@ -58,8 +67,11 @@ pub struct SfuPeer {
     pub tracks_out_rev: HashMap<(ParticipantId, Mid), Mid>,
     /// Tracks deferred because a pending offer blocked renegotiation
     /// when the additions arrived.  Each entry stores:
-    /// (origin_pid, origin_mid, kind, origin_agent_did).
-    pub deferred_tracks: Vec<(ParticipantId, Mid, MediaKind, String)>,
+    /// (origin_pid, origin_mid, kind, the session the track carries).
+    pub deferred_tracks: Vec<(ParticipantId, Mid, MediaKind, TrackOrigin)>,
+    /// Pipe only: the remote session each inbound mid carries, from the
+    /// track mappings of the remote node's offers. See [`SfuPeer::track_origin`].
+    pub remote_origins: HashMap<Mid, TrackOrigin>,
     /// True for cross-node pipe transports — see [`SfuPeer`] docs.
     /// Affects how renegotiation offers are routed and how forward
     /// loops treat the participant.
@@ -140,6 +152,7 @@ impl SfuPeer {
             pending_offer: None,
             pending_offer_sent: None,
             deferred_tracks: Vec::new(),
+            remote_origins: HashMap::new(),
             is_pipe,
             channels: HashMap::new(),
             disconnected_since: None,
@@ -170,6 +183,40 @@ impl SfuPeer {
         match &self.ice_restart {
             Some(restart) => now >= restart.since + ICE_RESTART_GRACE,
             None => true,
+        }
+    }
+
+    /// The session whose media this peer's inbound track `mid` carries. A
+    /// client peer sends its own; a pipe carries other nodes' sessions, as
+    /// their offers named them. A mid no offer named (a node on an older
+    /// build sends no mapping) is the pipe's own: its id and the remote
+    /// node's DID, as before track mappings.
+    pub fn track_origin(&self, mid: Mid) -> TrackOrigin {
+        if self.is_pipe {
+            if let Some(origin) = self.remote_origins.get(&mid) {
+                return origin.clone();
+            }
+        }
+        TrackOrigin {
+            participant_id: self.id.to_string(),
+            agent_did: self.agent_did.clone(),
+        }
+    }
+
+    /// Pipe: remember the session each m-line of the remote node's offer
+    /// carries (`track_mapping`, by the remote node's ids).
+    pub fn note_remote_origins(&mut self, track_mapping: &[crate::sfu::TrackMapEntry]) {
+        for entry in track_mapping {
+            self.remote_origins.insert(
+                Mid::from(entry.mid.as_str()),
+                TrackOrigin {
+                    participant_id: super::cascade::remote_session_id(
+                        &entry.participant_id,
+                        &self.agent_did,
+                    ),
+                    agent_did: entry.agent_did.clone(),
+                },
+            );
         }
     }
 
@@ -357,6 +404,8 @@ pub enum SfuCommand {
         remote_did: String,
         /// String form of the [`crate::sfu::room::RoomId`].
         room_id: String,
+        /// The remote session each new m-line carries, by the remote node's ids.
+        track_mapping: Vec<crate::sfu::TrackMapEntry>,
     },
     /// Trickle ICE: add a remote ICE candidate to an existing peer.
     /// The candidate arrives as an SDP candidate-attribute string
@@ -770,6 +819,7 @@ impl SfuServer {
                         sdp_offer_json,
                         remote_did,
                         room_id,
+                        track_mapping,
                     }) => {
                         let Some(peer) = peers.get_mut(&participant_id) else {
                             debug!(
@@ -795,6 +845,8 @@ impl SfuServer {
                                 continue;
                             }
                         };
+                        // Before the tracks open: they are attributed as they do.
+                        peer.note_remote_origins(&track_mapping);
                         match peer.rtc.sdp_api().accept_offer(offer) {
                             Ok(answer) => match serde_json::to_string(&answer) {
                                 Ok(answer_json) => {
@@ -895,13 +947,14 @@ impl SfuServer {
                         // receive data channel messages too.
                         let payload = crate::sfu::types::SfuDataMessage::new(
                             origin_did.clone(),
+                            participant_id.to_string(),
                             origin_room.neighbourhood_url.clone(),
                             origin_room.room_name.clone(),
                             channel_label.clone(),
                             binary,
                             &data,
                         );
-                        let recipients = data_recipients(&peers, &origin_room, &origin_did);
+                        let recipients = data_recipients(&peers, &origin_room, &participant_id);
                         crate::pubsub::get_global_pubsub_sync()
                             .publish_event(crate::events::Event::sfu_data(&payload, recipients));
                     }
@@ -1003,7 +1056,8 @@ impl SfuServer {
             let mut tracks_opened: Vec<(ParticipantId, Mid, MediaKind)> = Vec::new();
             let mut keyframe_requests: Vec<(ParticipantId, KeyframeRequest)> = Vec::new();
             // Data channel messages, published once the poll loop no longer borrows `peers`.
-            let mut data_received: Vec<crate::sfu::types::SfuDataMessage> = Vec::new();
+            let mut data_received: Vec<(ParticipantId, crate::sfu::types::SfuDataMessage)> =
+                Vec::new();
 
             for (pid, peer) in peers.iter_mut() {
                 loop {
@@ -1065,13 +1119,14 @@ impl SfuServer {
                                     // the room's agents, as `sfu-data`.
                                     let payload = crate::sfu::types::SfuDataMessage::new(
                                         origin_did,
+                                        pid.to_string(),
                                         origin_room.neighbourhood_url,
                                         origin_room.room_name,
                                         label,
                                         relay_binary,
                                         &relay_data,
                                     );
-                                    data_received.push(payload);
+                                    data_received.push((pid.clone(), payload));
                                 }
                             }
                             Event::ChannelClose(cid) => {
@@ -1092,9 +1147,9 @@ impl SfuServer {
 
             if !data_received.is_empty() {
                 let pubsub = crate::pubsub::get_global_pubsub_sync();
-                for payload in data_received {
+                for (sender, payload) in data_received {
                     let room = RoomId::new(&payload.neighbourhood_url, &payload.room_name);
-                    let recipients = data_recipients(&peers, &room, &payload.sender_did);
+                    let recipients = data_recipients(&peers, &room, &sender);
                     pubsub.publish_event(crate::events::Event::sfu_data(&payload, recipients));
                 }
             }
@@ -1271,123 +1326,16 @@ impl SfuServer {
                 }
             }
 
-            // Snapshot pid → agent_did so the renegotiation loop can
-            // build track attribution without re-borrowing peers.
-            let pid_to_did: HashMap<ParticipantId, String> = peers
-                .iter()
-                .map(|(pid, peer)| (pid.clone(), peer.agent_did.clone()))
-                .collect();
-
-            // Materialise per-target.  One sdp_api batch per target
-            // peer so a single offer carries every new outbound m-line
-            // (str0m permits exactly one in-flight change at a time).
-            for (target_pid, additions) in adds_per_target.into_iter() {
-                let Some(target_peer) = peers.get_mut(&target_pid) else {
-                    continue;
-                };
-                if target_peer.pending_offer.is_some() {
-                    for (kind, origin_pid, origin_mid) in &additions {
-                        if !target_peer
-                            .tracks_out_rev
-                            .contains_key(&(origin_pid.clone(), *origin_mid))
-                        {
-                            if let Some(did) = pid_to_did.get(origin_pid) {
-                                target_peer.deferred_tracks.push((
-                                    origin_pid.clone(),
-                                    *origin_mid,
-                                    *kind,
-                                    did.clone(),
-                                ));
-                            }
-                        }
-                    }
-                    continue;
-                }
-                let room_id = target_peer.room_id.clone();
-                // Skip tracks already forwarded — matches the deferred path's
-                // tracks_out_rev check to prevent duplicate outbound m-lines.
-                let to_add: Vec<(MediaKind, ParticipantId, Mid)> = additions
-                    .into_iter()
-                    .filter(|(_, origin_pid, origin_mid)| {
-                        !target_peer
-                            .tracks_out_rev
-                            .contains_key(&(origin_pid.clone(), *origin_mid))
-                    })
-                    .collect();
-                let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _)| *kind).collect();
-                let Some((offer, pending, mids)) =
-                    offer_send_only(&mut target_peer.rtc, &kinds, false)
-                else {
-                    continue;
-                };
-                let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = mids
-                    .into_iter()
-                    .zip(to_add)
-                    .map(|(new_mid, (kind, origin_pid, origin_mid))| {
-                        (new_mid, origin_pid, origin_mid, kind)
-                    })
-                    .collect();
-
-                // Build track attribution from the newly assigned mids.
-                let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
-                    .iter()
-                    .filter_map(|(new_mid, origin_pid, _, kind)| {
-                        let did = pid_to_did.get(origin_pid)?;
-                        Some(crate::sfu::TrackMapEntry {
-                            mid: new_mid.to_string(),
-                            agent_did: did.clone(),
-                            media_kind: if kind.is_audio() {
-                                "audio".to_string()
-                            } else {
-                                "video".to_string()
-                            },
-                        })
-                    })
-                    .collect();
-
-                for (new_mid, origin_pid, origin_mid, _kind) in new_outbound {
-                    target_peer
-                        .tracks_out
-                        .insert(new_mid, (origin_pid.clone(), origin_mid));
-                    target_peer
-                        .tracks_out_rev
-                        .insert((origin_pid, origin_mid), new_mid);
-                }
-                target_peer.pending_offer = Some(pending);
-                target_peer.pending_offer_sent = Some(Instant::now());
-                info!(
-                    "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
-                    target_pid,
-                    kinds.len()
-                );
-
-                let sdp_offer_json = match serde_json::to_string(&offer) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(
-                            "SFU: serialise renegotiation offer for {} failed: {}",
-                            target_pid, e
-                        );
-                        continue;
-                    }
-                };
-                if target_peer.is_pipe {
-                    let payload = crate::sfu::SfuPipeRenegotiationOffer {
-                        remote_did: target_peer.agent_did.clone(),
-                        room_id: room_id.to_string(),
-                        sdp_offer: sdp_offer_json,
-                    };
-                    super::pipe_bus::publish_offer(payload);
-                } else {
-                    let payload = crate::sfu::SfuCallRenegotiationOffer {
-                        target_did: target_peer.agent_did.clone(),
-                        neighbourhood_url: room_id.neighbourhood_url.clone(),
-                        room_name: room_id.room_name.clone(),
-                        sdp_offer: sdp_offer_json,
+            for (target_pid, sdp_offer_json, track_mapping) in
+                offer_new_tracks(&mut peers, adds_per_target)
+            {
+                if let Some(target_peer) = peers.get(&target_pid) {
+                    publish_renegotiation_offer(
+                        target_peer,
+                        &target_pid,
+                        sdp_offer_json,
                         track_mapping,
-                    };
-                    crate::pubsub::get_global_pubsub_sync()
-                        .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
+                    );
                 }
             }
 
@@ -1605,30 +1553,9 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
 
     let kinds: Vec<MediaKind> = to_add.iter().map(|(_, _, kind, _)| *kind).collect();
     let (offer, pending, mids) = offer_send_only(&mut peer.rtc, &kinds, restart)?;
-    let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = mids
-        .into_iter()
-        .zip(to_add)
-        .map(|(new_mid, (origin_pid, origin_mid, kind, agent_did))| {
-            (new_mid, origin_pid, origin_mid, kind, agent_did)
-        })
-        .collect();
-
-    let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
-        .iter()
-        .map(
-            |(new_mid, _, _, kind, agent_did)| crate::sfu::TrackMapEntry {
-                mid: new_mid.to_string(),
-                agent_did: agent_did.clone(),
-                media_kind: if kind.is_audio() {
-                    "audio".to_string()
-                } else {
-                    "video".to_string()
-                },
-            },
-        )
-        .collect();
-
-    for (new_mid, origin_pid, origin_mid, _, _) in new_outbound {
+    let mut track_mapping = Vec::with_capacity(mids.len());
+    for (new_mid, (origin_pid, origin_mid, kind, origin)) in mids.into_iter().zip(to_add) {
+        track_mapping.push(mapping_entry(new_mid, kind, &origin));
         peer.tracks_out
             .insert(new_mid, (origin_pid.clone(), origin_mid));
         peer.tracks_out_rev
@@ -1645,17 +1572,121 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
     Some((sdp_offer_json, track_mapping))
 }
 
-/// The agents that get a data channel message `sender` sent in `room`: the agent of every
-/// client peer in that room on this executor but the sender, which has what it sent. Pipe
-/// peers stand for other SFU nodes, not agents, so none of them is in it.
+/// The track mapping entry for outbound m-line `mid` carrying `origin`'s media.
+fn mapping_entry(mid: Mid, kind: MediaKind, origin: &TrackOrigin) -> crate::sfu::TrackMapEntry {
+    crate::sfu::TrackMapEntry {
+        mid: mid.to_string(),
+        participant_id: origin.participant_id.clone(),
+        agent_did: origin.agent_did.clone(),
+        media_kind: if kind.is_audio() { "audio" } else { "video" }.to_string(),
+    }
+}
+
+/// Offer each target peer the tracks of `adds_per_target` it does not send
+/// yet, `(kind, origin peer, origin mid)`: one SDP change per target, with
+/// the track mapping naming the session each new m-line carries. A target
+/// with an offer pending gets them deferred to after its answer. Returns
+/// the offers to publish: `(target, sdp_offer_json, track_mapping)`.
+fn offer_new_tracks(
+    peers: &mut HashMap<ParticipantId, SfuPeer>,
+    adds_per_target: HashMap<ParticipantId, Vec<(MediaKind, ParticipantId, Mid)>>,
+) -> Vec<(ParticipantId, String, Vec<crate::sfu::TrackMapEntry>)> {
+    // Who each inbound track carries, read before any target is borrowed.
+    let origins: HashMap<(ParticipantId, Mid), TrackOrigin> = peers
+        .values()
+        .flat_map(|peer| {
+            peer.tracks_in
+                .keys()
+                .map(|mid| ((peer.id.clone(), *mid), peer.track_origin(*mid)))
+        })
+        .collect();
+
+    let mut offers = Vec::new();
+    // One sdp_api batch per target peer so a single offer carries every new
+    // outbound m-line (str0m permits exactly one in-flight change at a time).
+    for (target_pid, additions) in adds_per_target.into_iter() {
+        let Some(target_peer) = peers.get_mut(&target_pid) else {
+            continue;
+        };
+        if target_peer.pending_offer.is_some() {
+            for (kind, origin_pid, origin_mid) in &additions {
+                let track = (origin_pid.clone(), *origin_mid);
+                if target_peer.tracks_out_rev.contains_key(&track) {
+                    continue;
+                }
+                if let Some(origin) = origins.get(&track) {
+                    target_peer.deferred_tracks.push((
+                        origin_pid.clone(),
+                        *origin_mid,
+                        *kind,
+                        origin.clone(),
+                    ));
+                }
+            }
+            continue;
+        }
+        // Skip tracks already forwarded, and tracks no peer receives (any
+        // more): the same tests the deferred path makes above, so a track
+        // goes out with its mapping entry on both paths or on neither.
+        let to_add: Vec<(MediaKind, ParticipantId, Mid, &TrackOrigin)> = additions
+            .into_iter()
+            .filter_map(|(kind, origin_pid, origin_mid)| {
+                let track = (origin_pid.clone(), origin_mid);
+                if target_peer.tracks_out_rev.contains_key(&track) {
+                    return None;
+                }
+                let origin = origins.get(&track)?;
+                Some((kind, origin_pid, origin_mid, origin))
+            })
+            .collect();
+        let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _, _)| *kind).collect();
+        let Some((offer, pending, mids)) = offer_send_only(&mut target_peer.rtc, &kinds, false)
+        else {
+            continue;
+        };
+
+        let mut track_mapping = Vec::with_capacity(mids.len());
+        for (new_mid, (kind, origin_pid, origin_mid, origin)) in mids.into_iter().zip(to_add) {
+            track_mapping.push(mapping_entry(new_mid, kind, origin));
+            target_peer
+                .tracks_out
+                .insert(new_mid, (origin_pid.clone(), origin_mid));
+            target_peer
+                .tracks_out_rev
+                .insert((origin_pid, origin_mid), new_mid);
+        }
+        target_peer.pending_offer = Some(pending);
+        target_peer.pending_offer_sent = Some(Instant::now());
+        info!(
+            "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
+            target_pid,
+            kinds.len()
+        );
+
+        match serde_json::to_string(&offer) {
+            Ok(sdp_offer_json) => offers.push((target_pid, sdp_offer_json, track_mapping)),
+            Err(e) => warn!(
+                "SFU: serialise renegotiation offer for {} failed: {}",
+                target_pid, e
+            ),
+        }
+    }
+    offers
+}
+
+/// The agents that get a data channel message the session `sender` sent in `room`: the agent
+/// of every other client peer in that room on this executor. The sender's own agent is in it
+/// only when it is in the call on another device too; the sending session drops its own
+/// message by `senderParticipantId`. Pipe peers stand for other SFU nodes, not agents, so
+/// none of them is in it.
 fn data_recipients(
     peers: &HashMap<ParticipantId, SfuPeer>,
     room: &RoomId,
-    sender: &str,
+    sender: &ParticipantId,
 ) -> Vec<String> {
     let mut dids: Vec<String> = peers
         .values()
-        .filter(|p| !p.is_pipe && p.room_id == *room && p.agent_did != sender)
+        .filter(|p| !p.is_pipe && p.room_id == *room && p.id != *sender)
         .map(|p| p.agent_did.clone())
         .collect();
     dids.sort();
@@ -1663,9 +1694,9 @@ fn data_recipients(
     dids
 }
 
-/// Publish a renegotiation offer for a peer's deferred tracks.
-/// A client peer gets an `sfu-call-renegotiation-offer` event; a pipe
-/// transport's offer goes to the cascade router through the pipe bus.
+/// Publish a renegotiation offer. A client peer gets an
+/// `sfu-call-renegotiation-offer` event; a pipe transport's offer goes to the
+/// cascade router through the pipe bus. Both carry the track mapping.
 fn publish_renegotiation_offer(
     peer: &SfuPeer,
     pid: &ParticipantId,
@@ -1677,11 +1708,13 @@ fn publish_renegotiation_offer(
             remote_did: peer.agent_did.clone(),
             room_id: peer.room_id.to_string(),
             sdp_offer: sdp_offer_json,
+            track_mapping,
         };
         super::pipe_bus::publish_offer(payload);
     } else {
         let payload = crate::sfu::SfuCallRenegotiationOffer {
             target_did: peer.agent_did.clone(),
+            participant_id: pid.to_string(),
             neighbourhood_url: peer.room_id.neighbourhood_url.clone(),
             room_name: peer.room_id.room_name.clone(),
             sdp_offer: sdp_offer_json,
@@ -1690,10 +1723,7 @@ fn publish_renegotiation_offer(
         crate::pubsub::get_global_pubsub_sync()
             .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
     }
-    info!(
-        "SFU: deferred renegotiation offer published for peer {}",
-        pid
-    );
+    info!("SFU: renegotiation offer published for peer {}", pid);
 }
 
 #[cfg(test)]
@@ -1793,12 +1823,189 @@ mod tests {
                 origin.clone(),
                 origin_mid,
                 MediaKind::Audio,
-                "did:key:origin".to_string(),
+                TrackOrigin {
+                    participant_id: origin.to_string(),
+                    agent_did: "did:key:origin".to_string(),
+                },
             ));
         }
         let (_, mapping) = apply_deferred_tracks(&mut peer).expect("the track is offered");
         assert_eq!(mapping.len(), 1, "{mapping:?}");
         assert_eq!(peer.tracks_out.len(), 1);
+    }
+
+    fn mapped(mid: &str, participant_id: &str, agent_did: &str) -> crate::sfu::TrackMapEntry {
+        crate::sfu::TrackMapEntry {
+            mid: mid.to_string(),
+            participant_id: participant_id.to_string(),
+            agent_did: agent_did.to_string(),
+            media_kind: "audio".to_string(),
+        }
+    }
+
+    /// A track that arrives through a cascade pipe is offered to a client
+    /// as the remote session's, the one the remote node's offer named, not
+    /// as the pipe's: its id qualified by the node, its agent's DID. A mid
+    /// no offer named (a node on an older build sends no mapping) is offered
+    /// as the pipe's: its id, the remote node's DID. Deferred while an offer
+    /// is pending, either keeps its origin.
+    #[test]
+    fn a_track_from_a_pipe_is_offered_as_the_remote_session() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let room = RoomId::new("neighbourhood://test", "room");
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let client_id = ParticipantId::next();
+        let client = SfuPeer::new(
+            client_id.clone(),
+            room.clone(),
+            "did:key:bob".to_string(),
+            rtc,
+            false,
+        );
+        let pipe_id = ParticipantId::next();
+        let mut pipe = SfuPeer::new(
+            pipe_id.clone(),
+            room.clone(),
+            "did:key:nodeA".to_string(),
+            Rtc::new(Instant::now()),
+            true,
+        );
+        let (named, unnamed, later, later_unnamed) = (
+            Mid::from("7"),
+            Mid::from("9"),
+            Mid::from("8"),
+            Mid::from("6"),
+        );
+        pipe.note_remote_origins(&[
+            mapped("7", "P1", "did:key:alice"),
+            mapped("8", "P2", "did:key:carol"),
+        ]);
+        for mid in [named, unnamed, later, later_unnamed] {
+            pipe.tracks_in.insert(mid, MediaKind::Audio);
+        }
+        let mut peers = HashMap::from([(client_id.clone(), client), (pipe_id.clone(), pipe)]);
+        let as_pipe = TrackOrigin {
+            participant_id: pipe_id.to_string(),
+            agent_did: "did:key:nodeA".to_string(),
+        };
+
+        let offers = offer_new_tracks(
+            &mut peers,
+            HashMap::from([(
+                client_id.clone(),
+                vec![
+                    (MediaKind::Audio, pipe_id.clone(), named),
+                    (MediaKind::Audio, pipe_id.clone(), unnamed),
+                ],
+            )]),
+        );
+        assert_eq!(offers.len(), 1);
+        let (target, _, mapping) = &offers[0];
+        assert_eq!(target, &client_id);
+        assert_eq!(mapping.len(), 2, "{mapping:?}");
+        let by_mid = |origin_mid: Mid| {
+            let out = peers[&client_id].tracks_out_rev[&(pipe_id.clone(), origin_mid)];
+            mapping
+                .iter()
+                .find(|e| e.mid == out.to_string())
+                .map(|e| (e.participant_id.clone(), e.agent_did.clone()))
+                .expect("a mapping entry for the track")
+        };
+        assert_eq!(
+            by_mid(named),
+            ("P1@did:key:nodeA".to_string(), "did:key:alice".to_string())
+        );
+        assert_eq!(
+            by_mid(unnamed),
+            (as_pipe.participant_id.clone(), as_pipe.agent_did.clone())
+        );
+        assert_eq!(peers[&client_id].tracks_out.len(), 2);
+
+        // The client has not answered yet: the next tracks wait, and keep
+        // their origins, named or not.
+        let offers = offer_new_tracks(
+            &mut peers,
+            HashMap::from([(
+                client_id.clone(),
+                vec![
+                    (MediaKind::Audio, pipe_id.clone(), later),
+                    (MediaKind::Audio, pipe_id.clone(), later_unnamed),
+                ],
+            )]),
+        );
+        assert!(offers.is_empty());
+        let deferred: Vec<(Mid, TrackOrigin)> = peers[&client_id]
+            .deferred_tracks
+            .iter()
+            .map(|(_, mid, _, origin)| (*mid, origin.clone()))
+            .collect();
+        assert_eq!(
+            deferred,
+            vec![
+                (
+                    later,
+                    TrackOrigin {
+                        participant_id: "P2@did:key:nodeA".to_string(),
+                        agent_did: "did:key:carol".to_string(),
+                    }
+                ),
+                (later_unnamed, as_pipe.clone()),
+            ]
+        );
+
+        // Once the offer is answered, the deferred tracks go out with the
+        // same mapping the direct path gives them.
+        let client = peers.get_mut(&client_id).unwrap();
+        client.pending_offer = None;
+        let (_, mapping) = apply_deferred_tracks(client).expect("the deferred tracks are offered");
+        let mut named_in_mapping: Vec<(String, String)> = mapping
+            .iter()
+            .map(|e| (e.participant_id.clone(), e.agent_did.clone()))
+            .collect();
+        named_in_mapping.sort();
+        let mut expected = vec![
+            ("P2@did:key:nodeA".to_string(), "did:key:carol".to_string()),
+            (as_pipe.participant_id, as_pipe.agent_did),
+        ];
+        expected.sort();
+        assert_eq!(named_in_mapping, expected);
+    }
+
+    /// A client's own tracks are offered as its session's.
+    #[test]
+    fn a_track_from_a_client_is_offered_as_its_session() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let room = RoomId::new("neighbourhood://test", "room");
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let target_id = ParticipantId::next();
+        let target = SfuPeer::new(
+            target_id.clone(),
+            room.clone(),
+            "did:key:bob".to_string(),
+            rtc,
+            false,
+        );
+        let sender_id = ParticipantId::next();
+        let mut sender = SfuPeer::new(
+            sender_id.clone(),
+            room,
+            "did:key:alice".to_string(),
+            Rtc::new(Instant::now()),
+            false,
+        );
+        let mid = Mid::from("0");
+        sender.tracks_in.insert(mid, MediaKind::Audio);
+        let mut peers = HashMap::from([(target_id.clone(), target), (sender_id.clone(), sender)]);
+        let offers = offer_new_tracks(
+            &mut peers,
+            HashMap::from([(target_id, vec![(MediaKind::Audio, sender_id.clone(), mid)])]),
+        );
+        assert_eq!(offers.len(), 1);
+        let mapping = &offers[0].2;
+        assert_eq!(mapping.len(), 1, "{mapping:?}");
+        assert_eq!(mapping[0].participant_id, sender_id.to_string());
+        assert_eq!(mapping[0].agent_did, "did:key:alice");
+        assert_eq!(mapping[0].media_kind, "audio");
     }
 
     /// Behind NAT the answer offers the bound socket and the public address
@@ -2694,7 +2901,10 @@ mod tests {
             pid_a.clone(),
             origin_mid,
             MediaKind::Audio,
-            "did:key:peerA".to_string(),
+            TrackOrigin {
+                participant_id: pid_a.to_string(),
+                agent_did: "did:key:peerA".to_string(),
+            },
         ));
 
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();

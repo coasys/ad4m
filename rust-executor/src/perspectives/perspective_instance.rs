@@ -69,7 +69,7 @@ mod containment;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
 mod subscriptions;
-pub(crate) use subscriptions::result_json;
+pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 // Which writes re-run a model subscription (#1237).
 mod subscription_triggers;
 // Registering this executor's owners with the link language.
@@ -6100,16 +6100,18 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
-    /// Subscribe to a SPARQL query for the RPC connection `connection_id`, as
-    /// `subscriber` (a managed agent's DID, `None` for the main agent). Returns
-    /// the subscription id and the revision and result the reply carries (see
-    /// `open_subscription`); every change after that is published as a delta
-    /// update (`send_delta_update`). Each call makes a new subscription, so
-    /// every subscriber counts revisions from 0. A query that is not SPARQL
-    /// fails with [`PROLOG_LIVE_QUERY_UNSUPPORTED`].
+    /// Subscribe to a SPARQL query under `subscription_id` (the client's) for
+    /// the RPC connection `connection_id`, as `subscriber` (a managed agent's
+    /// DID, `None` for the main agent). Returns the subscription id and the
+    /// revision and result the reply carries (see `open_subscription`, which
+    /// refuses an id already in use); every change after that is published as
+    /// a delta update (`send_delta_update`). Each call makes a new
+    /// subscription, so every subscriber counts revisions from 0. A query that
+    /// is not SPARQL fails with [`PROLOG_LIVE_QUERY_UNSUPPORTED`].
     pub async fn subscribe_and_query(
         &self,
         query: String,
+        subscription_id: String,
         connection_id: String,
         subscriber: Option<String>,
     ) -> Result<(String, u64, String), AnyError> {
@@ -6118,14 +6120,16 @@ impl PerspectiveInstance {
         }
         let subscribed_query = SubscribedQuery::new(query.clone(), connection_id, subscriber);
         let first_result = async { self.sparql_query(query) };
-        self.open_subscription(subscribed_query, first_result).await
+        self.open_subscription(subscription_id, subscribed_query, first_result)
+            .await
     }
 
     /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
     /// registers a subscription, and runs the initial model query — all in one call.
     /// When link changes match the trigger predicates, `execute_model_query` is
     /// re-run in Rust and the change is pushed to the client as a delta
-    /// update. Each call makes a new subscription (see `open_subscription`).
+    /// update. Each call makes a new subscription under `subscription_id`, the
+    /// client's (see `open_subscription`).
     ///
     /// `classes` is one class or a union (#1238). A union is one subscription:
     /// it re-runs when a diff touches the trigger set of any class it names.
@@ -6133,6 +6137,7 @@ impl PerspectiveInstance {
         &self,
         classes: super::model_query::QueryClasses,
         query_json: String,
+        subscription_id: String,
         connection_id: String,
         subscriber: Option<String>,
     ) -> Result<(String, u64, String), AnyError> {
@@ -6164,7 +6169,8 @@ impl PerspectiveInstance {
         };
         let first_result =
             self.model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
-        self.open_subscription(subscribed_query, first_result).await
+        self.open_subscription(subscription_id, subscribed_query, first_result)
+            .await
     }
 
     /// Extract predicates from a model shape for subscription trigger matching.
@@ -9386,6 +9392,7 @@ mod tests {
             .model_subscribe_and_query(
                 "Board".into(),
                 NESTED_INCLUDE_QUERY.into(),
+                uuid::Uuid::new_v4().to_string(),
                 "c".into(),
                 None,
             )
@@ -9394,6 +9401,7 @@ mod tests {
         let (other_sub, _, _) = perspective
             .subscribe_and_query(
                 "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(),
+                uuid::Uuid::new_v4().to_string(),
                 "c".into(),
                 None,
             )

@@ -135,8 +135,9 @@ async fn e2e_intention_and_belief() {
     );
 }
 
-/// Task-tracking conversation -> only Tasks, with owners. Three assignments in
-/// the transcript should yield 2–4 tasks (LLM may merge/split slightly).
+/// Task-tracking conversation -> only Tasks, with owners. Two explicit
+/// assignments plus James's acceptance-and-extension should yield 2–4 tasks
+/// (LLM may merge/split slightly).
 #[tokio::test]
 #[ignore = "llm-e2e"]
 async fn e2e_task_tracking_counts() {
@@ -152,8 +153,8 @@ async fn e2e_task_tracking_counts() {
                 "Yes, I'll wrap up the call module and port the transcription over.",
             ),
             (
-                "Josh",
-                "I'll set up the wind-tunnel Docker scenario for the agent test.",
+                "Nico",
+                "Josh, can you set up the wind-tunnel Docker scenario for the agent test?",
             ),
         ],
         3,
@@ -458,8 +459,13 @@ async fn e2e_does_not_recreate_existing_task() {
         ),
         // …and introduces a brand-new unrelated task. Deliberately in a
         // different topic area so the LLM cannot plausibly merge them into
-        // a single upsert on the seeded base.
-        ("Josh", "I'll update the CI documentation this evening."),
+        // a single upsert on the seeded base, and phrased as an assignment
+        // to Josh (first-person "I'll …" utterances are Intentions per the
+        // Task class hint, not Tasks).
+        (
+            "Nico",
+            "Josh, can you update the CI documentation this evening?",
+        ),
     ];
 
     let mut last: Option<(
@@ -1390,7 +1396,10 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
                     "Nico",
                     "Reminder: James still needs to wrap up the WebRTC calling module for the app.",
                 ),
-                ("Josh", "I'll update the CI documentation this evening."),
+                (
+                    "Nico",
+                    "Josh, can you update the CI documentation this evening?",
+                ),
             ],
             &ctx,
             &DedupStrategy::semantic_from_env(0.75),

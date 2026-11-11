@@ -21,8 +21,9 @@ export interface E2eContext {
   /**
    * A call in `neighbourhood`'s `room`, ended for you when the scenario ends.
    * `video` is the camera's size (default `CAMERA`), or false for no camera.
+   * `clients` names further clients of users (`u1:phone`), each with its own tone.
    */
-  call(neighbourhood: string, room: string, options?: { video?: Size | false }): Call;
+  call(neighbourhood: string, room: string, options?: { video?: Size | false; clients?: string[] }): Call;
   /** Run `fn` as a named step; its duration is a sample. */
   step<T>(name: string, fn: () => Promise<T>): Promise<T>;
   metric(name: string, value: unknown): void;
@@ -74,7 +75,7 @@ async function runOnce(def: E2eDefinition, branch: string, attempt: number): Pro
     await def.run({
       world: w,
       call: (neighbourhood, room, options) => {
-        const call = new Call(w, neighbourhood, room, (p) => participants.push(p), options?.video === false ? null : options?.video ?? CAMERA);
+        const call = new Call(w, neighbourhood, room, (p) => participants.push(p), options?.video === false ? null : options?.video ?? CAMERA, options?.clients);
         calls.push(call);
         return call;
       },

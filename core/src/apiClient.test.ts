@@ -162,10 +162,9 @@ describe('ApiClient calls', () => {
     })
 })
 
-describe('ApiClient calls that hold something on the executor (onLateResult)', () => {
+describe('ApiClient calls that open something on the executor (OPENS_METHODS)', () => {
     it('sends request.cancel when such a call times out', async () => {
-        const late: unknown[] = []
-        const promise = call('perspective.modelSubscribe', { uuid: 'u' }, { timeoutMs: 50, onLateResult: (r: unknown) => late.push(r) })
+        const promise = call('perspective.modelSubscribe', { uuid: 'u' }, { timeoutMs: 50 })
         await flush()
         const req = socket(0).sent[0]
         await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 408 })
@@ -180,40 +179,32 @@ describe('ApiClient calls that hold something on the executor (onLateResult)', (
         expect(socket(0).sent.map((m) => m.type)).toEqual(['perspective.addLink'])
     })
 
-    it('hands a result that crossed the cancel to onLateResult, once', async () => {
-        const late: unknown[] = []
-        const controller = new AbortController()
-        const promise = call('perspective.modelSubscribe', { uuid: 'u' }, { signal: controller.signal, onLateResult: (r: unknown) => late.push(r) })
+    it('sends request.cancel for a timed-out subscribeQuery too', async () => {
+        const promise = call('perspective.subscribeQuery', { uuid: 'u' }, { timeoutMs: 50 })
         await flush()
         const req = socket(0).sent[0]
-        controller.abort()
-        await expect(promise).rejects.toMatchObject({ name: 'AbortError' })
-
-        socket(0).reply({ id: socket(0).sent[1].id, result: { cancelled: false, targetId: req.id } })
-        socket(0).reply({ id: req.id, result: { subscriptionId: 's1' } })
-        socket(0).reply({ id: req.id, result: { subscriptionId: 's1' } })
-        expect(late).toEqual([{ subscriptionId: 's1' }])
+        await expect(promise).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).sent[1]).toMatchObject({ type: 'request.cancel', params: { targetId: req.id } })
     })
 
-    it('does not call onLateResult for the cancelled reply, or after the socket closed', async () => {
-        const late: unknown[] = []
-        const first = new AbortController()
-        const second = new AbortController()
-        const a = call('perspective.modelSubscribe', { uuid: 'u' }, { signal: first.signal, onLateResult: (r: unknown) => late.push(r) })
-        const b = call('perspective.subscribeQuery', { uuid: 'u' }, { signal: second.signal, onLateResult: (r: unknown) => late.push(r) })
+    it('drops a reply that crossed the cancel: the caller owns the id it sent', async () => {
+        const events: unknown[] = []
+        client.on('agent-updated', (e) => { events.push(e) })
+        const promise = call('perspective.modelSubscribe', { uuid: 'u', subscriptionId: 's1' }, { timeoutMs: 50 })
         await flush()
-        const [reqA, reqB] = socket(0).sent
-        first.abort()
-        second.abort()
-        await expect(a).rejects.toMatchObject({ name: 'AbortError' })
-        await expect(b).rejects.toMatchObject({ name: 'AbortError' })
+        const req = socket(0).sent.find((m) => m.type === 'perspective.modelSubscribe')!
+        await expect(promise).rejects.toMatchObject({ status: 408 })
 
-        // The executor stopped the first call in time: it answers 499.
-        socket(0).reply({ id: reqA.id, error: { code: 499, message: 'Request cancelled by client' } })
-        // The socket closes before the second's reply: the executor ended what it opened.
-        socket(0).drop()
-        socket(0).reply({ id: reqB.id, result: { subscriptionId: 's2' } })
-        expect(late).toEqual([])
+        const cancel = socket(0).sent.find((m) => m.type === 'request.cancel')!
+        socket(0).reply({ id: cancel.id, result: { cancelled: false, targetId: req.id } })
+        socket(0).reply({ id: req.id, result: { subscriptionId: 's1' } })
+        expect(events).toEqual([])
+        // The client stays usable: the next call is answered as usual.
+        const next = call('agent.get')
+        await flush()
+        const nextReq = socket(0).sent[socket(0).sent.length - 1]
+        socket(0).reply({ id: nextReq.id, result: { did: 'd' } })
+        await expect(next).resolves.toEqual({ did: 'd' })
     })
 })
 

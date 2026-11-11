@@ -18,7 +18,7 @@ import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } fro
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { pollUntil, sleep } from "../utils/utils";
-import { addOpenAiShapedLlm, waitUntil } from "../helpers/index";
+import { addOllamaLlm, waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
@@ -28,7 +28,10 @@ import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). Without it the
+// Ollama provider requests num_ctx 131072 and Ollama reloads the model out of staging's residency.
+const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 
 // Speaker and timestamp come off the body link's reifier, not an app-level
 // `ns://author` predicate: `?timestamp` is required (it is what makes a turn
@@ -45,7 +48,7 @@ const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
 ORDER BY ?timestamp`;
 
 async function registerLlm(ad4m: any): Promise<void> {
-  const modelId = await addOpenAiShapedLlm(ad4m, "interpretation-llm", BASE_URL, MODEL);
+  const modelId = await addOllamaLlm(ad4m, "interpretation-llm", BASE_URL, MODEL, MAX_NUM_CTX);
   await ad4m.ai.setDefaultModel("LLM", modelId);
 }
 
