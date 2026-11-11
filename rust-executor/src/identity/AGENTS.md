@@ -202,7 +202,11 @@ the offer's state).
   the main agent only the operator (the admin credential; the custody credential reaches them
   through `CUSTODY_METHODS`, acting as the main agent), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
-  managed agent.
+  managed agent. `postRequest` and `deleteRequest` take the same guard: a post, and a
+  deletion without a given request, are signed by the agent's device key alone, so they speak
+  for this device to the identity's other devices. `recordPut` keeps `Cap(agent:UPDATE)`: the
+  record's envelope is signed by a key of the identity, which the device's request only
+  carries.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through
   `write_agent_language_settings` (atomic: temp file + rename), as its `storeUrl` and
   `storeKeys` settings, on every start: no store or no keys removes the setting, so an earlier
