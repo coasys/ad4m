@@ -165,6 +165,8 @@ pub enum Owner {
     Grant,
     /// A pending capability request (`PendingRequests`): the agent it asks to act as (D12).
     Request,
+    /// An agent session: its `owner_did`; none is the main agent's.
+    AgentSession,
 }
 
 impl Owner {
@@ -174,6 +176,7 @@ impl Owner {
             Owner::Task => "AI task",
             Owner::Grant => "app",
             Owner::Request => "capability request",
+            Owner::AgentSession => "agent session",
         }
     }
 
@@ -189,6 +192,7 @@ impl Owner {
             Owner::Request => "Capability request not found: it may have expired. The app must \
                                request access again"
                 .to_string(),
+            Owner::AgentSession => format!("Agent session {id} not found"),
         })
     }
 }
@@ -308,6 +312,17 @@ pub async fn owns(ctx: &RequestContext, owner: Owner, id: &str) -> Result<(), Ws
             // operator's alone.
             Some(target) => target.agent() == Some(&agent),
         },
+        Owner::AgentSession => {
+            let session_owner = crate::agent_sessions::agent_session_store()
+                .session_any(id)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            // The outer `None`: no such session. The inner one: a session of the main
+            // agent — `managed_did` is `None` for the operator and the main agent's grants.
+            let Some(session) = session_owner else {
+                return Err(not_found());
+            };
+            session.owner_did.as_deref() == agent.managed_did()
+        }
     };
     if ctx.is_operator() || (ctx.session.is_authenticated() && owned) {
         Ok(())

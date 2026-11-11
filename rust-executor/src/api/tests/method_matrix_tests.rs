@@ -213,7 +213,7 @@ fn agent_resource_rows() -> &'static [(Caller, Target, Expect)] {
 pub(super) fn owns_rows(owner: Owner) -> &'static [(Caller, Target, Expect)] {
     match owner {
         Owner::Perspective => perspective_rows(),
-        Owner::Task | Owner::Grant | Owner::Request => agent_resource_rows(),
+        Owner::Task | Owner::Grant | Owner::Request | Owner::AgentSession => agent_resource_rows(),
     }
 }
 
@@ -294,6 +294,13 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     }),
     ("ai.removeTask", || json!({ "id": TARGET })),
     ("ai.prompt", || json!({ "taskId": TARGET, "prompt": "p" })),
+    // The agent sessions: `id` on the session methods, `sessionId` on the turn calls.
+    ("agent.session", || json!({ "id": TARGET })),
+    ("agent.sessionUpdate", || json!({ "id": TARGET })),
+    ("agent.sessionDelete", || json!({ "id": TARGET })),
+    ("agent.send", || json!({ "sessionId": TARGET, "text": "t" })),
+    ("agent.cancel", || json!({ "sessionId": TARGET })),
+    ("agent.messages", || json!({ "sessionId": TARGET })),
     ("ai.embed", || json!({ "modelId": "m1", "text": "t" })),
     ("ai.transcriptionOpen", || json!({ "modelId": "m1" })),
     ("ai.transcriptionClose", || json!({ "streamId": "s1" })),
@@ -781,6 +788,8 @@ pub(super) struct World {
     main_agents_grant: String,
     users_request: String,
     main_agents_request: String,
+    users_agent_session: String,
+    main_agents_agent_session: String,
 }
 
 impl World {
@@ -834,6 +843,24 @@ impl World {
             id
         };
         let user = || AgentContext::managed(USER_DID.to_string());
+        let agent_session = |name: &str, owner: Option<&str>| {
+            let id = format!("{run}-{name}-session");
+            crate::db::Ad4mDb::with_global_instance(|db| {
+                db.create_agent_session(&crate::agent_sessions::types::AgentSession {
+                    id: id.clone(),
+                    owner_did: owner.map(str::to_string),
+                    title: "matrix".into(),
+                    model: None,
+                    default_perspective: None,
+                    library_perspective: None,
+                    capabilities: vec![],
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                })
+            })
+            .expect("an agent session");
+            id
+        };
         let world = World {
             users_own: format!("{run}-users-own"),
             main_agents: format!("{run}-main-agents"),
@@ -844,6 +871,8 @@ impl World {
             main_agents_grant: grant("main", AgentContext::main_agent()),
             users_request: request("users", user()),
             main_agents_request: request("main", AgentContext::main_agent()),
+            users_agent_session: agent_session("users", Some(USER_DID)),
+            main_agents_agent_session: agent_session("main", None),
         };
         for (uuid, owners) in [
             (&world.users_own, Some(vec![USER_DID.to_string()])),
@@ -870,6 +899,7 @@ impl World {
             Owner::Task => (&self.users_task, &self.operators_task),
             Owner::Grant => (&self.users_grant, &self.main_agents_grant),
             Owner::Request => (&self.users_request, &self.main_agents_request),
+            Owner::AgentSession => (&self.users_agent_session, &self.main_agents_agent_session),
         };
         match target {
             Target::UsersOwn => users.clone(),
@@ -885,6 +915,13 @@ impl World {
         }
         for task in [self.users_task, self.operators_task] {
             crate::db::Ad4mDb::with_global_instance(|db| db.remove_task(task)).unwrap();
+        }
+        for (owner, id) in [
+            (Some(USER_DID), self.users_agent_session),
+            (None, self.main_agents_agent_session),
+        ] {
+            crate::db::Ad4mDb::with_global_instance(|db| db.delete_agent_session(owner, &id))
+                .unwrap();
         }
         // A test may have removed one already.
         for grant in [&self.users_grant, &self.main_agents_grant] {
