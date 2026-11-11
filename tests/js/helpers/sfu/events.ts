@@ -1,8 +1,8 @@
 /**
- * Subscriber to the executor's `/api/v1/ws/events` event stream.
+ * Subscriber to the events on the executor's RPC socket (`/api/v1/ws`).
  *
- * The events WS is a single multiplexed connection per token; events
- * arrive as `{ type, ...payload }` JSON frames.  This subscriber opens
+ * Events arrive as `{ type, ...payload }` JSON frames; RPC replies carry
+ * an `id` and no `type`.  This subscriber opens
  * one connection per token, dispatches each frame to any registered
  * listener that matches the `type`, and gracefully closes on disconnect.
  *
@@ -37,7 +37,7 @@ export class EventsClient {
 
   get wsUrl(): string {
     const host = this.config.host ?? "127.0.0.1";
-    return `ws://${host}:${this.config.port}/api/v1/ws/events?token=${encodeURIComponent(
+    return `ws://${host}:${this.config.port}/api/v1/ws?token=${encodeURIComponent(
       this.config.token,
     )}`;
   }
