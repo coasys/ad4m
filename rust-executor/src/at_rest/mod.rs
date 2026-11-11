@@ -16,6 +16,7 @@ pub mod data_keys;
 pub mod database;
 pub mod files;
 pub mod keyring_file;
+pub mod lang_storage;
 pub mod secret_source;
 pub mod sqlite;
 
@@ -57,7 +58,8 @@ pub enum StorageErrorKind {
     WrongSecret,
     CorruptKeyring,
     SecretOnDataDisk,
-    /// The plaintext database did not move under its key: it stays as it was, in the clear.
+    /// A plaintext store (the database, or a language's storage file) did not move under its
+    /// key: it stays as it was, in the clear.
     MigrationFailed,
 }
 
@@ -69,7 +71,8 @@ pub struct StoreStates {
     /// The executor's database: the executor store's state, `encrypted` once the database file
     /// is under the database key.
     pub database: StoreStateName,
-    /// The languages' storage: `plain` until it is written under a key.
+    /// The languages' storage folders: `encrypted` once every file a language keeps there is
+    /// sealed under the key of the store the language serves.
     pub language_storage: StoreStateName,
     /// The perspectives' links: the least advanced of the perspectives' stores, `plain` while
     /// there is none.
@@ -263,11 +266,13 @@ impl StorageGate {
     /// The status; `operator` adds the operator's fields.
     pub fn status(&self, operator: bool) -> StorageStatus {
         let state = self.state();
-        let stores = self
-            .keys
-            .store_states()
-            .ok()
-            .map(|states| store_states(&states));
+        let stores = self.keys.store_states().ok().map(|states| {
+            let languages = self
+                .keys
+                .language_storage_state()
+                .map_or(StoreStateName::Plain, |s| (&s).into());
+            store_states(&states, languages)
+        });
         let info = self.info();
         let encrypted_at_rest = !info.on_data_disk
             && stores.is_some_and(|s| {
@@ -297,8 +302,11 @@ impl StorageGate {
     }
 }
 
-/// The three kinds of store from the keyring's stores.
-fn store_states(states: &[(StoreId, keyring_file::StoreState)]) -> StoreStates {
+/// The three kinds of store from the keyring's stores and the languages' storage state.
+fn store_states(
+    states: &[(StoreId, keyring_file::StoreState)],
+    language_storage: StoreStateName,
+) -> StoreStates {
     let database = states
         .iter()
         .find(|(id, _)| *id == StoreId::Executor)
@@ -316,8 +324,7 @@ fn store_states(states: &[(StoreId, keyring_file::StoreState)]) -> StoreStates {
         .unwrap_or(StoreStateName::Plain);
     StoreStates {
         database,
-        // No step writes the languages' storage under a key yet.
-        language_storage: StoreStateName::Plain,
+        language_storage,
         links,
     }
 }
@@ -462,6 +469,39 @@ mod tests {
         );
         let json = serde_json::to_value(&app).unwrap();
         assert!(json.get("keyringId").is_some() && json.get("encryptedAtRest").is_some());
+    }
+
+    #[test]
+    fn the_status_reports_the_languages_storage_from_the_keyring() {
+        let folder = tempfile::tempdir().unwrap();
+        let gate = StorageGate::new(folder.path(), false);
+        gate.unlock(&secret(4)).unwrap();
+        gate.mark_open();
+        let languages = folder.path().join("ad4m").join("languages");
+        let language = languages.join("QmStatusLanguage");
+        std::fs::create_dir_all(&language).unwrap();
+        std::fs::write(language.join("ad4m-language-kv.json"), "{}").unwrap();
+        let language_storage =
+            |gate: &StorageGate| gate.status(true).stores.unwrap().language_storage;
+        assert_eq!(language_storage(&gate), StoreStateName::Plain);
+
+        let step = lang_storage::migrate(gate.keys(), &languages, None).unwrap();
+        assert_eq!(
+            step,
+            lang_storage::LanguageStorageStep::Sealed { sealed: 1 }
+        );
+        assert_eq!(language_storage(&gate), StoreStateName::Encrypted);
+        assert!(
+            !gate.status(true).encrypted_at_rest,
+            "the database and the links are still plain"
+        );
+
+        gate.keys()
+            .set_language_storage_state(keyring_file::StoreState::Migrating {
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        assert_eq!(language_storage(&gate), StoreStateName::Migrating);
     }
 
     #[test]

@@ -11,7 +11,8 @@ export type StoreStates = {
  */
 database: StoreStateName, 
 /**
- * The languages' storage: `plain` until it is written under a key.
+ * The languages' storage folders: `encrypted` once every file a language keeps there is
+ * sealed under the key of the store the language serves.
  */
 languageStorage: StoreStateName, 
 /**

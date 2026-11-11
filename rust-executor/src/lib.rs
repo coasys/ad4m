@@ -895,6 +895,38 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Set languages directory based on app data path (must be before LanguageController)
     crate::utils::set_languages_directory(config.app_data_path.as_ref().unwrap());
 
+    // The languages' storage files go under their keys before any language loads. Each link
+    // language's files are sealed under its neighbourhood's perspective store, so the routing
+    // cache learns every neighbourhood's link language first.
+    match db_backend::db_backend().get_all_perspectives() {
+        Ok(handles) => {
+            for handle in handles {
+                if let Some(nh) = handle.neighbourhood.as_ref() {
+                    let language = nh.data.link_language.clone();
+                    perspectives::register_link_language_perspective(language, handle.clone());
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Could not list the perspectives before sealing the languages' storage: {e}")
+        }
+    }
+    match at_rest::lang_storage::prepare(
+        gate.keys(),
+        &crate::utils::languages_directory(),
+        Some(&gate),
+    ) {
+        Ok(at_rest::lang_storage::LanguageStorageStep::Sealed { sealed }) => {
+            info!("The languages' storage is under its keys ({sealed} files sealed now)");
+        }
+        Ok(at_rest::lang_storage::LanguageStorageStep::KeptPlain { sealed, error }) => {
+            warn!(
+                "The languages' storage stays partly in the clear this start ({sealed} files sealed): {error}"
+            );
+        }
+        Err(e) => return failed_start(e),
+    }
+
     LanguageController::init_global_instance();
 
     // NOTE: system languages are loaded from the agent.generate/agent.unlock handlers:

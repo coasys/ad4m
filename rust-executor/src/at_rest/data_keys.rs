@@ -584,6 +584,26 @@ impl DataKeys {
     pub fn store_state(&self, id: &StoreId) -> Result<Option<StoreState>, KeyringError> {
         self.with_open(|open| Ok(open.file.store(id).map(|s| s.state.clone())))
     }
+
+    /// Whether the languages' storage folders hold only sealed files.
+    pub fn language_storage_state(&self) -> Result<StoreState, KeyringError> {
+        self.with_open(|open| Ok(open.file.language_storage.clone()))
+    }
+
+    /// Sets the languages' storage state, written to the keyring file before this returns.
+    pub fn set_language_storage_state(&self, state: StoreState) -> Result<(), KeyringError> {
+        let path = self.path.clone();
+        self.with_open(|open| {
+            let mut next = open.file.clone();
+            next.language_storage = state;
+            Self::commit(&path, open, next)
+        })
+    }
+
+    /// Whether store `id` exists.
+    pub fn has_store(&self, id: &StoreId) -> Result<bool, KeyringError> {
+        self.with_open(|open| Ok(open.file.store(id).is_some()))
+    }
 }
 
 fn store_mut<'a>(

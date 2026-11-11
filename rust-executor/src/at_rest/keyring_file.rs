@@ -186,10 +186,11 @@ pub struct PersonEntry {
 }
 
 /// Whether a store's data is under its key yet.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoreState {
     /// Written in the clear: the key exists, the data does not use it yet.
+    #[default]
     Plain,
     /// Being moved under its key.
     Migrating { started_at: DateTime<Utc> },
@@ -300,6 +301,11 @@ pub struct KeyringFile {
     pub persons: BTreeMap<KeyOwner, PersonEntry>,
     pub stores: BTreeMap<StoreId, StoreEntry>,
     pub tombstones: Vec<Tombstone>,
+    /// Whether the languages' storage folders hold only sealed files. Each file is sealed
+    /// under the key of the store its language serves; this records the folders' move under
+    /// those keys. Absent in a keyring from before sealed language storage: `plain`.
+    #[serde(default)]
+    pub language_storage: StoreState,
     /// Reserved for the agent passphrase held for the unlock; never set by this executor.
     pub held_agent_passphrase: Option<SymWrap>,
 }
@@ -362,6 +368,7 @@ impl KeyringFile {
             persons: BTreeMap::new(),
             stores: BTreeMap::new(),
             tombstones: vec![],
+            language_storage: StoreState::Plain,
             held_agent_passphrase: None,
         };
         let executor_wrap = file.wrap_store_key(
