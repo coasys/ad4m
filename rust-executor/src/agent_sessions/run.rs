@@ -212,6 +212,33 @@ impl CreditGate for SessionGate {
     }
 }
 
+/// The turn's tool surface behind the caller's grant, checked at dispatch. `SessionGate`
+/// rechecks the caller before each completion, but a completion already in flight when
+/// the grant ends lands calls nobody authorized: the caller is checked again before
+/// every dispatch, so no call of that completion runs. A refused call reads to the model
+/// as a tool error; the gate's next check ends the turn refused — the same terminal
+/// handling as a completion refused outright.
+struct CallerGatedProvider {
+    inner: Arc<dyn ToolProvider>,
+    caller: Arc<Session>,
+    refused: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl ToolProvider for CallerGatedProvider {
+    async fn tools(&self) -> Vec<ToolSchema> {
+        self.inner.tools().await
+    }
+
+    async fn call(&self, name: &str, args: Value) -> Result<String> {
+        if let Err(e) = self.caller.check() {
+            self.refused.store(true, Ordering::SeqCst);
+            anyhow::bail!("the caller's session ended: {e}");
+        }
+        self.inner.call(name, args).await
+    }
+}
+
 /// The tools a turn of `session` may call: the whole MCP surface (static + the dynamic
 /// class tools of the perspectives the session may read) as `tool_session` — the
 /// in-process session acting as the session's agent within the capabilities the caller
@@ -298,6 +325,11 @@ pub(crate) async fn run_turn(
         inner: Arc::new(crate::api::perspectives_ws::WsHarnessCreditGate::new(
             agent.managed_did().map(str::to_string),
         )),
+        caller: caller.clone(),
+        refused: refused.clone(),
+    });
+    let provider: Arc<dyn ToolProvider> = Arc::new(CallerGatedProvider {
+        inner: provider,
         caller,
         refused: refused.clone(),
     });
