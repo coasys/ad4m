@@ -432,6 +432,42 @@ afterEach(async () => {
 
 const CALL_ID = "call:rec-abc"
 
+// ── Lifecycle ───────────────────────────────────────────────────────
+
+describe("a mesh destroyed while it joins", () => {
+    it("publishes nothing and starts no sweep or network watch once the channel listens", async () => {
+        jest.useFakeTimers()
+        try {
+            let listen!: () => void
+            const publish = jest.fn()
+            const onNetworkChange = jest.fn(() => () => {})
+            const mesh = new MeshManager({
+                channel: {
+                    publish,
+                    onMessage: () => () => {},
+                    listening: () => new Promise<void>((resolve) => { listen = resolve }),
+                },
+                callId: CALL_ID,
+                selfId: "did:alice",
+                onNetworkChange,
+                sweepMs: 1_000,
+                createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
+            })
+
+            const joining = mesh.join(stream())
+            await mesh.destroy()
+            listen()
+            await joining
+
+            expect(publish).not.toHaveBeenCalled()
+            expect(onNetworkChange).not.toHaveBeenCalled()
+            expect(jest.getTimerCount()).toBe(0)
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+})
+
 // ── Protocol ────────────────────────────────────────────────────────
 
 describe("parseCallMessage", () => {

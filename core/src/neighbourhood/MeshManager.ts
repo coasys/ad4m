@@ -673,6 +673,8 @@ export class MeshManager {
         })
         // A session announces itself once `join` returns; peers offer at once.
         await this.channel.listening?.()
+        // Left or destroyed while the channel came up: start nothing.
+        if (this.closed) return
 
         /*
          * Spend the transport's first-send cost on something that does not

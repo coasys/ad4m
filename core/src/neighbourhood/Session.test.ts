@@ -488,6 +488,29 @@ describe("mesh path", () => {
             await Promise.all([a.session.destroy(), b.session.destroy()])
         })
 
+        it("keeps the presence link for the later tab when the earlier is replaced and then destroyed while it announces", async () => {
+            let finishAnnounce: (ok: boolean) => void = () => {}
+            // The announce waits until the test lets it finish; any later write settles at once.
+            const aSetStatus = jest.fn(() => Promise.resolve(true))
+                .mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishAnnounce = resolve }))
+            const a = tab({ setOnlineStatus: aSetStatus })
+            const aJoin = a.session.join(fakeMediaStream()).catch((err: unknown) => err)
+            await delivered()
+            const b = tab()
+            await b.session.join(fakeMediaStream())
+            await delivered()
+            expect(a.replaced).toHaveLength(1)
+
+            await a.session.destroy()
+            finishAnnounce(true)
+            await aJoin
+
+            // Only the announce: no withdraw of the link the later tab holds the call on.
+            expect(aSetStatus).toHaveBeenCalledTimes(1)
+            expect(b.session.getState()).toBe("active")
+            await b.session.destroy()
+        })
+
         it("leaves a call on another device alone", async () => {
             const a = tab()
             await a.session.join(fakeMediaStream())
@@ -605,6 +628,66 @@ describe("mesh path", () => {
         await session.destroy()
         expect(mockMeshManagerInstance.leave).toHaveBeenCalled()
         expect(mockMeshManagerInstance.destroy).toHaveBeenCalled()
+    })
+
+    it("stays closed when destroyed while the mesh joins", async () => {
+        jest.useFakeTimers()
+        try {
+            let listened!: () => void
+            mockMeshManagerInstance.join.mockImplementationOnce(
+                () => new Promise<void>((resolve) => { listened = resolve }),
+            )
+            const setOnlineStatus = jest.fn().mockResolvedValue(true)
+            const onlineAgents = jest.fn().mockResolvedValue([])
+            const session = createSession(baseConfig({
+                topology: "mesh",
+                channel: fakeChannel(),
+                setOnlineStatus,
+                onlineAgents,
+            }))
+            const states = collectStates(session)
+
+            const joining = session.join(fakeMediaStream())
+            const outcome = joining.then(() => null, (err: Error) => err)
+            await Promise.resolve()
+            await session.destroy()
+            listened()
+
+            expect((await outcome)?.message).toBe("Session destroyed")
+            expect(session.getState()).toBe("closed")
+            expect(states).not.toContain("active")
+            expect(setOnlineStatus).not.toHaveBeenCalled()
+            expect(onlineAgents).not.toHaveBeenCalled()
+            expect(jest.getTimerCount()).toBe(0)
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it("withdraws its presence when destroyed while announcing it", async () => {
+        let announced!: () => void
+        const setOnlineStatus = jest.fn()
+            .mockImplementationOnce(() => new Promise<boolean>((resolve) => { announced = () => resolve(true) }))
+            .mockResolvedValue(true)
+        const onlineAgents = jest.fn().mockResolvedValue([])
+        const session = createSession(baseConfig({
+            topology: "mesh",
+            channel: fakeChannel(),
+            setOnlineStatus,
+            onlineAgents,
+            roomId: "my-room",
+            agentDid: "did:me",
+        }))
+
+        const outcome = session.join(fakeMediaStream()).then(() => null, (err: Error) => err)
+        while (setOnlineStatus.mock.calls.length === 0) await Promise.resolve()
+        await session.destroy()
+        announced()
+
+        expect((await outcome)?.message).toBe("Session destroyed")
+        expect(session.getState()).toBe("closed")
+        expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [] })
+        expect(onlineAgents).not.toHaveBeenCalled()
     })
 })
 
@@ -753,6 +836,25 @@ describe("SFU path", () => {
 
         await expect(joining).rejects.toThrow(/destroyed/)
         expect(SfuManager).not.toHaveBeenCalled()
+        expect(session.getState()).toBe("closed")
+    })
+
+    it("a session destroyed while the SFU joins never turns active", async () => {
+        let joined!: () => void
+        mockSfuManagerInstance.join.mockImplementationOnce(
+            () => new Promise<void>((resolve) => { joined = resolve }),
+        )
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        const states = collectStates(session)
+        const outcome = session.join(fakeMediaStream()).then(() => null, (err: Error) => err)
+        while (mockSfuManagerInstance.join.mock.calls.length === 0) await Promise.resolve()
+
+        const destroying = session.destroy()
+        joined()
+        await destroying
+
+        expect((await outcome)?.message).toBe("Session destroyed")
+        expect(states).not.toContain("active")
         expect(session.getState()).toBe("closed")
     })
 
