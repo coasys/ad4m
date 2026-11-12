@@ -286,6 +286,16 @@
       "params": "4B",
       "memoryBytes": 4000000000
     },
+    "qwen3.8-27b-ud-q4_k_m": {
+      "service": "llm",
+      "provider": "llama-server",
+      "url": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4af51b3542f775b0a8e4b310bfb3f17e01c306c9/Qwen3.8-27B-UD-Q4_K_M.gguf",
+      "sha256": "1bce504dfecd84153666928a41d8a66706f0158d3a317bc5196b72819d7dc529",
+      "sizeBytes": 16564259744,
+      "license": "Apache-2.0",
+      "params": "27B",
+      "memoryBytes": 20000000000
+    },
     "nomic-embed-text-v1.5-q8_0": {
       "service": "embeddings",
       "provider": "llama-server",
