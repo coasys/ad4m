@@ -546,4 +546,67 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
     const text = stepContent(reply).text ?? "";
     expect(text, "the reply mentions the flooded perspective").to.include(p.name);
   });
+
+  // ── a tool result bigger than the context window ──────────────────────────
+
+  it("answers after a describe_perspective result far bigger than num_ctx", async () => {
+    // Follow-up to #1713: the tool list was tamed, but a single tool RESULT
+    // can still overflow the window on its own. describe_perspective on
+    // this perspective returns ~420 KB (40 classes × ~10 KB of
+    // interpretation hint each). Unhandled, the continuation request after
+    // the tool call ran 465 KB ≈ >2× num_ctx 49152 — Ollama dropped the
+    // user's message to fit and Qwen's renderer answered
+    // 500 {"error":"no user query found in messages"}; the reply row
+    // settled `failed`. With the cap the same request is ~64 KB → 200.
+    const CLASS_COUNT = 40;
+    // ~15 KB of non-trivially-compressible prose per class.
+    const HINT = Array.from(
+      { length: 60 },
+      (_, i) =>
+        `clause${i}: when extracting instances keep the ${i}th field verbatim, ` +
+        `never fold neighbour${i} predicates into summaries, and report ` +
+        `counts for section${i} before describing them`,
+    ).join("; ");
+    const p = await newPerspective(`bigresult-${Date.now().toString(36)}`);
+    for (let i = 0; i < CLASS_COUNT; i++) {
+      const ns = `big://c${i}/`;
+      const shape = new SHACLShape(`${ns}BigClass${i}`);
+      shape.interpretationHint = `class ${i}: ${HINT}`;
+      shape.setConstructorActions([
+        { action: "addLink", source: "this", predicate: "rdf://type", target: `${ns}BigClass${i}` },
+      ]);
+      await p.addShacl(`BigClass${i}`, shape);
+    }
+    expect(await p.subjectClasses()).to.have.length(CLASS_COUNT);
+
+    const s = await newSession({
+      title: "a very large tool result",
+      defaultPerspective: p.uuid,
+    });
+    const started = await ad4m.ai.sendMessage(
+      s.id,
+      "Use the describe_perspective tool on my current perspective, " +
+        "then tell me in one sentence roughly what kinds of things it holds.",
+    );
+    const { msgs, reply } = await waitForReply(s.id, started.replyId);
+
+    const calls = toolSteps(msgs, "describe_perspective");
+    expect(calls.length, "the turn called describe_perspective").to.be.greaterThan(0);
+    expect(calls[0].status).to.equal("done");
+
+    // The transcript row keeps the FULL result — what the model saw is
+    // capped, what the session records is not. At ≥4 bytes of JSON per
+    // token, a result over `MAX_NUM_CTX * 4` bytes cannot fit the window
+    // even alone.
+    const resultLen = (stepContent(calls[0]).result ?? "").length;
+    expect(
+      resultLen,
+      "describe_perspective returned a result well over the context window",
+    ).to.be.greaterThan(MAX_NUM_CTX * 4);
+
+    // The turn completes: the continuation after the big result still has
+    // the user's message in it and the model answers.
+    const text = stepContent(reply).text ?? "";
+    expect(text.trim().length, "the reply is not empty").to.be.greaterThan(0);
+  });
 });

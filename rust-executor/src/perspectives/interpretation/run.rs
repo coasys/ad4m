@@ -1230,7 +1230,12 @@ pub async fn run_interpretation_with_harness_and_model(
         initial_messages,
         provider,
         bridge,
-        HarnessConfig { max_tool_calls },
+        HarnessConfig {
+            max_tool_calls,
+            tool_result_max_bytes: crate::ai_service::AIService::tool_result_max_bytes(
+                &task.model_id,
+            ),
+        },
         emit_ctx.map(|ctx| ctx as &dyn crate::ai_service::harness::ToolObserver),
         credit_gate,
     )

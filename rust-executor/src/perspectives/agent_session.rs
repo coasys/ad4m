@@ -373,6 +373,10 @@ pub(crate) async fn converse(
         model,
         HarnessConfig {
             max_tool_calls: request.max_tool_calls,
+            // Sized from the model's context window: a runAgent answer can
+            // carry a tool result home; one bigger than the window must not
+            // push the request over it.
+            tool_result_max_bytes: crate::ai_service::AIService::tool_result_max_bytes(model_id),
         },
         None,
         gate,

@@ -61,6 +61,17 @@ pub(crate) fn estimate_token_count(text: &str) -> usize {
     (chars + 3) / 4
 }
 
+/// Estimated bytes one context token occupies once a chat request is
+/// rendered: serialized message JSON is denser than the prose
+/// [`estimate_token_count`] bills at (~4 chars/token) — tools, argument
+/// objects and the message envelope run closer to three.
+const CONTEXT_BYTES_PER_TOKEN: usize = 3;
+
+/// [`AIService::context_budget_bytes`] when the model's context window is
+/// not configured: ~64 KB of message list, inside every window the
+/// executor's endpoints are run at.
+const DEFAULT_CONTEXT_BUDGET_BYTES: usize = 64 * 1024;
+
 /// Truncate LLM prompt/response text for debug logging. LOGGING.md: debug
 /// level carries "prompt/response bodies (truncated)" — long enough to
 /// actually debug what the model was asked / returned, bounded so a huge
@@ -792,6 +803,49 @@ impl AIService {
             .ok()
             .flatten()
             .is_some_and(|endpoint| model.uses_native_tools(&endpoint))
+    }
+
+    /// The context window the model's endpoint is run at (`max_num_ctx` on
+    /// the endpoint), in tokens, when the model and endpoint are known.
+    fn model_context_tokens(model_id: &str) -> Option<usize> {
+        let resolved = Self::replace_model_variables(&model_id.to_string()).ok()?;
+        let db = crate::db_backend::db_backend();
+        let model = db.get_model(resolved).ok()??;
+        db.get_endpoint(&model.endpoint_id)
+            .ok()??
+            .max_num_ctx
+            .map(|n| n as usize)
+    }
+
+    /// How many bytes of one outgoing request's message list the model's
+    /// context window leaves room for: the window estimated at ~3 bytes of
+    /// rendered chat JSON per token, halved — the other half is for the
+    /// tool definitions, the rendered template and the model's own answer
+    /// (a thinking model can spend a third of its window before any reply
+    /// text exists).
+    ///
+    /// The cap protects the one guarantee every chat template relies on:
+    /// the person's message reaches the model. A request whose rendered
+    /// prompt overruns `num_ctx` does not fail at the client — the model
+    /// server truncates oldest-first to fit, and the user turn is the
+    /// oldest message in it. Ollama answers the result with
+    /// `500 no user query found in messages`; an OpenAI-shaped server just
+    /// answers a question it never saw. When the model's window is unknown
+    /// the budget falls back to [`DEFAULT_CONTEXT_BUDGET_BYTES`].
+    pub fn context_budget_bytes(model_id: &str) -> usize {
+        match Self::model_context_tokens(model_id) {
+            Some(tokens) => tokens * CONTEXT_BYTES_PER_TOKEN / 2,
+            None => DEFAULT_CONTEXT_BUDGET_BYTES,
+        }
+    }
+
+    /// The largest tool result a `run_with_tools` loop should feed back to
+    /// this model, in bytes: a quarter of [`Self::context_budget_bytes`],
+    /// clamped so a small window cannot starve a result to uselessness and
+    /// a large one cannot unbound it. The full result still lands on the
+    /// session's transcript row — this bounds only what the model sees.
+    pub fn tool_result_max_bytes(model_id: &str) -> usize {
+        (Self::context_budget_bytes(model_id) / 4).clamp(4 * 1024, 64 * 1024)
     }
 
     /// Prompt a model with a complete turn list and tool definitions, getting
