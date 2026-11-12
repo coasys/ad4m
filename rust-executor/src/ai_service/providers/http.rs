@@ -12,6 +12,12 @@ use std::time::Duration;
 /// model listing is one small JSON document, so half a minute is generous.
 pub(crate) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a chat client waits for one answer. A completion can run for minutes on a long
+/// prompt or a slow local model; without a bound a hung upstream would park a model's
+/// worker thread forever, since the thread handles one request at a time. The model
+/// worker's own bound on a chat call (`within_endpoint_limits`) defaults to the same.
+pub(crate) const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// An HTTP client for a request that carries a credential. It follows no
 /// redirects, and it gives up after `timeout`.
 ///
@@ -25,9 +31,6 @@ pub(crate) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// The timeout is a parameter rather than something a caller may add, because
 /// reqwest's default is none at all.
-///
-/// The OpenAI chat path is not built here: `chat_gpt_lib_rs` owns its client.
-/// It sends the key as a bearer token, which is the header reqwest does strip.
 pub(crate) fn credentialed_http(timeout: Duration) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -64,6 +67,150 @@ pub(crate) fn model_ids_from_data(json: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// An upstream answered with an error status. `body` is its reason, with the key scrubbed
+/// out: an upstream may echo the credential it refused.
+#[derive(Debug)]
+pub struct UpstreamStatus {
+    pub url: String,
+    pub status: reqwest::StatusCode,
+    pub body: String,
+    /// The upstream's `Retry-After`, passed on to a client it throttled.
+    pub retry_after: Option<String>,
+}
+
+impl UpstreamStatus {
+    /// The error answer `response` of `url`, its body with `api_key` scrubbed out.
+    pub(crate) async fn read(response: reqwest::Response, url: &str, api_key: &str) -> Self {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = read_error_text(response).await;
+        UpstreamStatus {
+            url: url.to_string(),
+            status,
+            body: scrub(&body, api_key),
+            retry_after,
+        }
+    }
+}
+
+impl std::fmt::Display for UpstreamStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} answered {}: {}", self.url, self.status, self.body)
+    }
+}
+
+impl std::error::Error for UpstreamStatus {}
+
+/// An upstream that could not be asked: no connection, or no answer in time. `detail` has
+/// the key scrubbed out.
+#[derive(Debug)]
+pub struct UpstreamUnreachable {
+    pub url: String,
+    pub timed_out: bool,
+    pub detail: String,
+}
+
+impl UpstreamUnreachable {
+    pub(crate) fn new(url: &str, error: &reqwest::Error, api_key: &str) -> Self {
+        UpstreamUnreachable {
+            url: url.to_string(),
+            timed_out: error.is_timeout(),
+            detail: scrub(&error.to_string(), api_key),
+        }
+    }
+}
+
+impl std::fmt::Display for UpstreamUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Could not reach {}: {}", self.url, self.detail)
+    }
+}
+
+impl std::error::Error for UpstreamUnreachable {}
+
+/// `text` with every occurrence of `api_key` replaced by `<redacted>`.
+pub(crate) fn scrub(text: &str, api_key: &str) -> String {
+    if api_key.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(api_key, crate::config_file::REDACTED)
+    }
+}
+
+/// The most of an answer a provider call reads: far more than a model list or a
+/// non-streamed completion, so a server that sends without end cannot fill the memory.
+pub(crate) const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// The most of an error answer kept as its reason.
+pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Up to `limit` bytes of `response`'s body, and whether there was more. Stops reading at
+/// the limit.
+pub(crate) async fn read_capped(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> reqwest::Result<(Vec<u8>, bool)> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let room = limit - body.len();
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
+}
+
+/// `response`'s body as JSON. Refused past [`MAX_BODY_BYTES`].
+pub(crate) async fn read_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> anyhow::Result<T> {
+    let (body, more) = read_capped(response, MAX_BODY_BYTES).await?;
+    if more {
+        anyhow::bail!("the answer is longer than {MAX_BODY_BYTES} bytes");
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+/// An error answer's body as text: its first [`MAX_ERROR_BODY_BYTES`], empty when it cannot
+/// be read.
+pub(crate) async fn read_error_text(response: reqwest::Response) -> String {
+    read_capped(response, MAX_ERROR_BODY_BYTES)
+        .await
+        .map(|(body, _)| String::from_utf8_lossy(&body).into_owned())
+        .unwrap_or_default()
+}
+
+/// Send `request` to `url` and read the JSON answer. A failure names the URL and carries
+/// the upstream's reason ([`UpstreamStatus`] for an error status), never `api_key`.
+pub(crate) async fn fetch_json(
+    request: reqwest::RequestBuilder,
+    url: &str,
+    api_key: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let response = request
+        .send()
+        .await
+        .map_err(|e| UpstreamUnreachable::new(url, &e, api_key))?;
+    if !response.status().is_success() {
+        return Err(UpstreamStatus::read(response, url, api_key).await.into());
+    }
+    read_json(response)
+        .await
+        .map_err(|e| match e.downcast_ref::<reqwest::Error>() {
+            Some(e) if e.is_timeout() => UpstreamUnreachable::new(url, e, api_key).into(),
+            _ => anyhow::anyhow!(
+                "Could not read the answer of {url}: {}",
+                scrub(&e.to_string(), api_key)
+            ),
+        })
 }
 
 /// What an operator is told when [`is_transport_safe`] refuses their key.
@@ -194,6 +341,69 @@ mod tests {
 
     fn safe(url: &str) -> bool {
         is_transport_safe(&url::Url::parse(url).expect("parses"))
+    }
+
+    #[tokio::test]
+    async fn an_upstream_that_echoes_the_key_has_it_scrubbed_from_the_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(401)
+            .with_body(r#"{"error":"bad key sk-echoed-123"}"#)
+            .create_async()
+            .await;
+        let url = format!("{}/v1/models", server.url());
+        let request = credentialed_http(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(&url);
+
+        let error = fetch_json(request, &url, "sk-echoed-123")
+            .await
+            .unwrap_err();
+
+        let status = error
+            .downcast_ref::<UpstreamStatus>()
+            .expect("a status error");
+        assert_eq!(status.status.as_u16(), 401);
+        assert!(!error.to_string().contains("sk-echoed-123"), "{error}");
+        assert!(error.to_string().contains("bad key <redacted>"), "{error}");
+    }
+
+    // A server that answers without end: the answer is refused at the limit, and an
+    // error's reason keeps only its start.
+    #[tokio::test]
+    async fn an_answer_past_the_limit_is_refused_and_an_error_body_is_cut() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/big")
+            .with_status(200)
+            .with_body(format!("[{}0]", "0,".repeat(MAX_BODY_BYTES / 2)))
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/big-error")
+            .with_status(500)
+            .with_body("e".repeat(MAX_ERROR_BODY_BYTES * 2))
+            .create_async()
+            .await;
+        let http = credentialed_http(Duration::from_secs(30)).build().unwrap();
+
+        let url = format!("{}/big", server.url());
+        // `err()`, not `unwrap_err`: a failure must not print 16 MiB.
+        let error = fetch_json(http.get(&url), &url, "")
+            .await
+            .err()
+            .expect("refused");
+        assert!(error.to_string().contains("longer than"), "{error}");
+
+        let url = format!("{}/big-error", server.url());
+        let error = fetch_json(http.get(&url), &url, "")
+            .await
+            .err()
+            .expect("refused");
+        let status = error.downcast_ref::<UpstreamStatus>().unwrap();
+        assert_eq!(status.body.len(), MAX_ERROR_BODY_BYTES);
     }
 
     #[test]
