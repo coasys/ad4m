@@ -367,7 +367,9 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
     );
     const { msgs: msgs2 } = await waitForReply(s.id, read.replyId);
 
-    const queries = toolSteps(msgs2, "query_links");
+    // Only the second turn's steps: the first turn may have queried too.
+    const readSeq = msgs2.find((m) => m.id === read.messageId)!.seq;
+    const queries = toolSteps(msgs2, "query_links").filter((m) => m.seq > readSeq);
     expect(queries.length, "the turn called query_links").to.be.greaterThan(0);
     expect(
       queries.some(
