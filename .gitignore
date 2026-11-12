@@ -3,6 +3,8 @@
 # Per-workspace Holochain CLI toolchain built by scripts/install-hc-toolchain.sh
 # Isolated per repo so it doesn't clobber ~/.cargo/bin/hc on shared CI runners.
 .hc-toolchain/
+# Per-job CI test artifacts (.circleci/config.yml test_artifacts_dir)
+/test-artifacts/
 *.js
 !executor/scripts/*.js
 !skills/ad4m/waker/*.js
