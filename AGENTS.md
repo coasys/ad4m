@@ -211,6 +211,10 @@ This runs all four nightly jobs.
   adapter does. Test code must not use raw call RPCs, `ensureMembership` or
   `WebRtcPeer`; the first test in `sfu-e2e.test.ts` fails if it does (E11's
   outsider is the one exemption). The admin client only builds the world.
+  One exception: a `WorldSpec` user with `main: true` is the executor's main
+  agent, called with the operator credential, still only through the SDK.
+  E23 uses it, since only the main agent's own devices show how the executor
+  routes the main agent's broadcasts.
 - Each user sends its own tone (`toneFor(i)`) and a video of known size, so
   receivers check *who* they hear and at which simulcast layer.
 - E6 shapes the loopback with `tc netem`, only for its world's ports
