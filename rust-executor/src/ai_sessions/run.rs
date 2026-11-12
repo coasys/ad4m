@@ -5,12 +5,13 @@
 //! intersection of the caller's and the session's capabilities, watches the turn's credit
 //! gate, and returns the model's final answer. `service` writes it on the turn's row.
 //!
-//! The tools are the executor's whole static surface plus the dynamic class tools of the
-//! perspectives the session may read — the way a user would reach them — minus the ones
-//! that mint or steer sessions (`SESSION_HIDDEN_TOOLS`): a turn holds the in-process
-//! session it was given and must not trade it for another. Everything else is gated by
-//! capability at dispatch: a tool the narrowed session may not use answers an error the
-//! model can read, on the same guards the RPC methods check.
+//! The tools are the executor's whole static surface — plus the dynamic class tools of the
+//! perspectives the session may read when the operator exposed them (`dynamicClassTools`,
+//! the same rule the MCP transport applies) — minus the ones that mint or steer sessions
+//! (`SESSION_HIDDEN_TOOLS`): a turn holds the in-process session it was given and must not
+//! trade it for another. Everything else is gated by capability at dispatch: a tool the
+//! narrowed session may not use answers an error the model can read, on the same guards the
+//! RPC methods check.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -238,10 +239,12 @@ impl ToolProvider for CallerGatedProvider {
     }
 }
 
-/// The tools a turn of `session` may call: the whole MCP surface (static + the dynamic
-/// class tools of the perspectives the session may read) as `tool_session` — the
+/// The tools a turn of `session` may call: the MCP surface as `tool_session` — the
 /// in-process session acting as the session's agent within the capabilities the caller
-/// and the session's own both allow — minus the session-minting tools.
+/// and the session's own both allow — minus the session-minting tools. The dynamic
+/// class tools of the perspectives the session may read join the surface under the
+/// same rule as on the MCP transport: only while the operator's `dynamicClassTools`
+/// is on, so a turn does not pay the per-class tool list on every request.
 fn session_provider(tool_session: Arc<Session>) -> Arc<dyn ToolProvider> {
     let handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(
         crate::mcp::server::McpContext::new(
@@ -250,9 +253,11 @@ fn session_provider(tool_session: Arc<Session>) -> Arc<dyn ToolProvider> {
             // A turn has no request headers: nothing in it reads as local, so a tokenless
             // fallback inside it is anonymous, never the operator.
             ListenerReach::Network,
-            // The in-process bridge lists the dynamic per-class tools whatever this says;
-            // set explicitly so the intent is visible here.
-            true,
+            // The flag the executor runs with, as `lib.rs` hands it to the MCP
+            // transport: the in-process bridge's tool list follows it too.
+            crate::config::get_global_config()
+                .dynamic_class_tools
+                .unwrap_or(false),
         )
         .with_session(tool_session),
     ));

@@ -237,8 +237,8 @@ pub async fn run_agent_session(
             None,
             // No request headers reach the tools, so nothing shows them local.
             crate::agent::capabilities::ListenerReach::Network,
-            // Only the static surface is offered (`session_tools`); the flag gates the MCP
-            // transport, and the harness bridge lists the per-class tools whatever it says.
+            // Only the static surface is offered (`session_tools`); the flag also
+            // gates what the harness bridge lists, which is the same set here.
             false,
         )
         .scoped_to(request.perspective_uuid)

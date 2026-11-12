@@ -22,8 +22,9 @@
 //! - `profiles` — agent profile management
 //! - `subscriptions` — waker query generation
 //! - `neighbourhoods` / `languages` — P2P sharing and language metadata
-//! - `dynamic` — auto-generated per-class SHACL tools (exposed over MCP only
-//!   with `dynamicClassTools`; always fed to the in-process harness)
+//! - `dynamic` — auto-generated per-class SHACL tools (listed over MCP and in
+//!   the in-process harness only while the context's `dynamic_class_tools` is
+//!   on; `call_tool_by_name` dispatches a per-class name either way)
 
 pub mod auth;
 pub mod docs;
@@ -545,16 +546,18 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// The tool list this MCP transport advertises: every static `#[tool]`
-    /// on the router, plus the dynamic per-class SHACL tools **only when**
-    /// `dynamicClassTools` is enabled. With the flag off (the default) the
+    /// The tool list this handler advertises: every static `#[tool]` on the
+    /// router, plus the dynamic per-class SHACL tools **only when**
+    /// `dynamic_class_tools` is enabled. With the flag off (the default) the
     /// list is constant regardless of which social DNA is loaded — that is
     /// what lets plugin manifests and agent configs declare the AD4M tools
     /// statically. The generic `instance_*` tools cover per-class operations
     /// in that mode.
     ///
-    /// Note this is deliberately NOT what the in-process harness sees:
-    /// `harness_bridge::list_tool_schemas` always merges the dynamic tools.
+    /// This is also exactly what the in-process harness sees:
+    /// `harness_bridge::list_tool_schemas` returns this list. An AI session
+    /// passes the operator's `dynamicClassTools`; an interpretation pass sets
+    /// the flag on because its `propose_*` flow reads through per-class tools.
     pub(crate) async fn exposed_tools(&self) -> Vec<rmcp::model::Tool> {
         let mut tools = self.tool_router.list_all();
         if self.context.dynamic_class_tools {

@@ -3,10 +3,15 @@
 //! Two `pub(crate)` methods on `Ad4mMcpHandler` that let the LLM harness use
 //! the MCP tool surface without going through the `rmcp` transport:
 //!
-//! * `list_tool_schemas()` — returns every currently-exposed tool (both the
-//!   static `#[tool]` methods registered on `tool_router` AND the dynamic
-//!   per-class SHACL tools generated from the perspective's shape) as
-//!   `Vec<ToolSchema>`, the harness-facing type.
+//! * `list_tool_schemas()` — returns every currently-exposed tool as
+//!   `Vec<ToolSchema>`, the harness-facing type. What is exposed is the
+//!   same list `tools/list` answers ([`Ad4mMcpHandler::exposed_tools`]):
+//!   the static `#[tool]` methods registered on `tool_router`, plus the
+//!   dynamic per-class SHACL tools only when the context's
+//!   `dynamic_class_tools` is on. An interpretation pass runs with it on
+//!   (its `propose_*` flow needs the per-class read tools); an AI session
+//!   follows the operator's `dynamicClassTools` flag, so a chat turn is
+//!   not charged the whole per-class surface every request.
 //! * `call_tool_by_name(name, args)` — dispatches a tool call by name,
 //!   returning the tool's textual result. Bypasses `rmcp`'s `ToolRouter::call`
 //!   because that requires a `RequestContext<RoleServer>` whose `Peer` has a
@@ -24,7 +29,7 @@
 //! use: every tool but the ones that open or widen a session (login, signup, the
 //! capability request, the token mint). What a caller is offered is narrowed further
 //! by its own provider (the interpretation pass and `perspective.runAgent` take a
-//! named subset; an AI session takes all of it).
+//! named subset; an AI session takes all of the static surface).
 //! Any tool not in the match delegates to `handle_dynamic_tool`, which
 //! covers ALL per-class SHACL tools (`Task_query`, `Channel_create`, etc.)
 //! — that path already exists and works without any context.
@@ -37,28 +42,18 @@ use serde_json::Value;
 
 impl Ad4mMcpHandler {
     /// Enumerate every tool this handler exposes, in the shape the harness
-    /// consumes. Merges the router-registered static tools with the dynamic
-    /// per-class SHACL tools. Ordering is stable within a router but not
+    /// consumes. The list is [`Self::exposed_tools`]'s — the same rule
+    /// `tools/list` applies: the router-registered static tools, plus the
+    /// dynamic per-class SHACL tools only while `dynamic_class_tools` is on.
+    /// Ordering is stable within a router but not
     /// across (map iteration order); tests that need determinism should
     /// sort.
     pub(crate) async fn list_tool_schemas(&self) -> Vec<ToolSchema> {
-        let mut out = Vec::new();
-
-        // Static tools — every #[tool]-annotated method registered on the
-        // router. `attr` is the rmcp `Tool` with name / description /
-        // input_schema — convert directly.
-        for tool in self.tool_router.list_all() {
-            out.push(rmcp_tool_to_schema(&tool));
-        }
-
-        // Dynamic tools — per-class SHACL-generated (create/query/list/get/
-        // delete + property setters + collection ops). Already returns
-        // `Vec<Tool>`; convert the same way.
-        for tool in self.generate_dynamic_tools().await {
-            out.push(rmcp_tool_to_schema(&tool));
-        }
-
-        out
+        self.exposed_tools()
+            .await
+            .iter()
+            .map(rmcp_tool_to_schema)
+            .collect()
     }
 
     /// Dispatch a tool call by name. Returns the tool's raw text result

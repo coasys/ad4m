@@ -482,13 +482,11 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
     }
 
     // The table is the whole surface: every tool on offer that names a perspective has a
-    // row (A's class tools aside: B's are the ones aimed at B), none names one where the
-    // table would not aim it, and no class tool of B's is on offer.
+    // row, none names one where the table would not aim it, and no class tool — A's or
+    // B's — is on offer while `dynamicClassTools` is off.
     for tool in &offered {
         assert!(
-            !names_a_perspective(tool)
-                || tool.name.starts_with("note_")
-                || table.iter().any(|(row, _)| *row == tool.name),
+            !names_a_perspective(tool) || table.iter().any(|(row, _)| *row == tool.name),
             "`{}` names a perspective and `perspective_calls` has no row for it",
             tool.name
         );
@@ -499,15 +497,11 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
             tool.parameters
         );
         assert!(
-            !tool.name.starts_with("vault_"),
+            !tool.name.starts_with("vault_") && !tool.name.starts_with("note_"),
             "`{}` is on offer",
             tool.name
         );
     }
-    assert!(
-        offered.iter().any(|tool| tool.name == "note_query"),
-        "A's class tools are on offer"
-    );
 
     // Every tool that names none: the session holds no capability of the agent's own.
     let table = agent_wide_calls();
@@ -566,9 +560,16 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
         ],
     )
     .await;
-    for step in &inside {
+    for step in [&inside[0], &inside[1], &inside[3]] {
         assert_eq!(step.status, Some(Done), "on A: {step:?}");
     }
+    // A per-class tool name is refused outright: not on the surface while
+    // `dynamicClassTools` is off, so the filter never dispatches it.
+    expect_failed(
+        &inside[2],
+        "note_query",
+        "is not in the current provider's filtered surface",
+    );
     for step in &inside[..2] {
         assert!(
             step.content["result"]
@@ -695,4 +696,154 @@ async fn a_session_scoped_to_one_perspective_lists_only_it() {
     );
     assert!(refusal(&steps[3]).contains(NOT_HELD), "{steps:?}");
     clean_up(cleanup).await;
+}
+
+// ── the tool list follows `dynamicClassTools` ────────────────────────────────
+
+/// A Note with two writable properties and a collection, so a test sees the class's
+/// setters and collection tools on offer, not only the CRUD five.
+fn note_shape() -> String {
+    json!({
+        "target_class": "attack://Note",
+        "constructor_actions": [{
+            "action": "addLink", "source": "this",
+            "predicate": "rdf://type", "target": "attack://Note",
+        }],
+        "properties": [
+            {
+                "path": "attack://title", "name": "title", "datatype": "xsd:string",
+                "min_count": 0, "max_count": 1, "writable": true,
+                "setter": [{
+                    "action": "setSingleTarget", "source": "this",
+                    "predicate": "attack://title", "target": "value",
+                }],
+            },
+            {
+                "path": "attack://body", "name": "body", "datatype": "xsd:string",
+                "min_count": 1, "max_count": 1, "writable": true,
+                "setter": [{
+                    "action": "setSingleTarget", "source": "this",
+                    "predicate": "attack://body", "target": "value",
+                }],
+            },
+            {
+                "path": "ad4m://has_child", "name": "items", "collection": true,
+                "writable": true,
+                "adder": [{
+                    "action": "addLink", "source": "this",
+                    "predicate": "ad4m://has_child", "target": "value",
+                }],
+                "remover": [{
+                    "action": "removeLink", "source": "this",
+                    "predicate": "ad4m://has_child", "target": "value",
+                }],
+            },
+        ],
+    })
+    .to_string()
+}
+
+/// Restores the executor's `dynamicClassTools` on drop, so a failed assert does not
+/// leave the flag on for the tests that follow.
+struct DynamicToolsFlag(Option<bool>);
+
+impl DynamicToolsFlag {
+    fn held() -> Self {
+        Self(crate::config::get_global_config().dynamic_class_tools)
+    }
+    fn set(&self, value: Option<bool>) {
+        let mut config = crate::config::get_global_config();
+        config.dynamic_class_tools = value;
+        crate::config::set_global_config(config);
+    }
+}
+
+impl Drop for DynamicToolsFlag {
+    fn drop(&mut self) {
+        self.set(self.0);
+    }
+}
+
+/// A session's tool list follows the MCP rule: the static tools, plus the per-class
+/// tools of the perspectives it may read only while `dynamicClassTools` is on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_lists_the_per_class_tools_only_with_dynamic_class_tools() {
+    setup();
+    let _runtime = test_support::RuntimeService::start();
+    let did = "did:key:alice-d7";
+    let a = test_support::perspective(Some(vec![did.to_string()])).await;
+    test_support::handler_as(test_support::operator())
+        .call_tool_by_name(
+            "add_model",
+            json!({"perspective_id": a, "class_name": "Note", "shacl_json": note_shape()}),
+        )
+        .await
+        .expect("the class registers");
+    let caller = user(did, everything());
+    let session = service::create(
+        &caller,
+        AiSessionCreate {
+            model: Some("scripted".into()),
+            capabilities: Some(vec![
+                perspective_query_capability(vec![a.clone()]),
+                perspective_update_capability(vec![a.clone()]),
+            ]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let flag = DynamicToolsFlag::held();
+    let offered_of = |model: &Scripted| -> Vec<String> {
+        model
+            .offered()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect()
+    };
+
+    // Flag unset, as the executor runs by default: the static surface alone — every
+    // name on offer is a static tool's, and none is the class's.
+    flag.set(None);
+    let model = Scripted::answering(vec![]);
+    steps_of(&session, &caller, model.clone(), None).await;
+    let statics = crate::mcp::tools::Ad4mMcpHandler::static_tool_names();
+    let names = offered_of(&model);
+    for name in &names {
+        assert!(
+            statics.contains(name),
+            "a tool outside the static surface is on offer: {name}"
+        );
+        assert!(
+            !name.starts_with("note_"),
+            "a per-class tool is on offer with the flag off: {name}"
+        );
+    }
+    for name in ["describe_perspective", "instance_create"] {
+        assert!(names.iter().any(|n| n == name), "{name} is not on offer");
+    }
+
+    // The operator opted in: the class's tools join what the model is offered — its
+    // CRUD five, a setter per property and the collection's three.
+    flag.set(Some(true));
+    let model = Scripted::answering(vec![]);
+    steps_of(&session, &caller, model.clone(), None).await;
+    let names = offered_of(&model);
+    for name in [
+        "note_create",
+        "note_query",
+        "note_list",
+        "note_get",
+        "note_delete",
+        "note_set_title",
+        "note_set_body",
+        "note_get_items",
+        "note_add_items",
+        "note_remove_items",
+    ] {
+        assert!(
+            names.iter().any(|n| n == name),
+            "{name} is not on offer: {names:?}"
+        );
+    }
+    clean_up(vec![a]).await;
 }
