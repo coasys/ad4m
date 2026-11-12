@@ -65,7 +65,9 @@ export interface PerspectiveCommitCapability {
 
 export interface PerspectiveSyncCapability {
     sync(): Promise<PerspectiveDiff>;
-    render(): Promise<Perspective | { links: any[] }>;
+    /** The links the remote holds; null when the language does not know them
+     *  (the executor's fallback sync then skips, rather than push what is missing). */
+    render(): Promise<Perspective | { links: any[] } | null>;
     currentRevision(): Promise<string | null> | string | null;
 }
 
@@ -154,7 +156,7 @@ export interface FlatLanguageExports {
 
     // Perspective-sync
     perspectiveSyncSync?(): Promise<PerspectiveDiff>;
-    perspectiveSyncRender?(): Promise<Perspective | { links: any[] }>;
+    perspectiveSyncRender?(): Promise<Perspective | { links: any[] } | null>;
     perspectiveSyncCurrentRevision?(): Promise<string | null> | string | null;
 
     // Perspective-query

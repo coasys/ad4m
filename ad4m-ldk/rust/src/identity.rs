@@ -532,7 +532,9 @@ pub struct RequestPosted {
 }
 
 /// One request of the box. `signed` is the store request the device posted it with, whose
-/// `bodyHash` covers `JCS({body, expires})`, so a reader checks the poster itself.
+/// `bodyHash` covers `JCS({body, expires})` (the only bytes a store takes), so a reader checks
+/// the poster itself with `ad4m_identity_core::requests::verify_posted` against its own copy
+/// of the log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRequest {

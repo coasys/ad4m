@@ -171,9 +171,12 @@ pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
     })?;
     // As at every receipt read: refresh the carried signers' logs before the
     // fold re-judges them under the live window (see `produced::valid_outputs`).
-    for receipt in &receipts {
-        receipt.read_set.prepare_carried_signers().await;
-    }
+    super::produced::prepare_receipt_signers(
+        &catalogue,
+        &receipts,
+        perspective.receipt_verdict_memo(),
+    )
+    .await;
     Ok(first_produced_at(
         &catalogue,
         &spec.flow,

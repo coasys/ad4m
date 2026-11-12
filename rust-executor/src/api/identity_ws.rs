@@ -330,7 +330,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Signs with the agent's own device key, and publishes what the custody service signed.
     // Both can bind the agent to an identity for good, so for the main agent only the
     // operator (the custody service holds the admin credential): every app holds these
-    // capabilities by default. A user acts for their own agent.
+    // capabilities by default. A user acts for their own agent. `identity.postRequest` and
+    // `identity.deleteRequest` below take the same guard: they speak for this device to the
+    // identity's other devices.
     map.method::<CosignInceptParams, Value>("identity.cosignIncept", cosign_incept)
         .guard(Guard::UserOrOperator(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<PublishParams, SignedHead>("identity.publish", publish)
@@ -373,7 +375,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<InboxPutParams, InboxStored>("identity.inboxPut", inbox_put)
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     // The private record and the request box of the agent's identity: reads and writes
-    // signed by a key of the identity, or by the agent's own device key.
+    // signed by a key of the identity, or by the agent's own device key. A record write
+    // carries an envelope a key of the identity signed, so the device's request only carries
+    // it.
     map.method::<RecordParams, Option<StoredRecord>>("identity.record", record)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
@@ -387,10 +391,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<RequestsParams, Vec<DeviceRequest>>("identity.requests", requests)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // A post is signed by the agent's own device key alone, and so is a deletion that carries
+    // no request: both speak for this device to the identity's other devices. Every app holds
+    // agent:UPDATE by default, so as for publish: for the main agent only the operator, and a
+    // user acts for their own agent.
     map.method::<PostRequestParams, RequestPosted>("identity.postRequest", post_request)
-        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<DeleteRequestParams, bool>("identity.deleteRequest", delete_request)
-        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
     // A new main key for this executor: only on this machine, never from a network session.
     map.method::<NoParams, DeviceKeys>("identity.rekey", rekey)
         .local_only()
@@ -473,14 +481,16 @@ mod tests {
         .is_none());
     }
 
-    /// Each call carries its guard: reads the agent read capability; co-signing and publishing
-    /// the agent sign and update capabilities, and for the main agent the operator; other writes
-    /// the agent update capability; a claim for the main agent and a log reset the operator.
+    /// Each call carries its guard: reads the agent read capability; co-signing, publishing and
+    /// posting to or deleting from the request box the agent sign and update capabilities, and
+    /// for the main agent the operator; other writes the agent update capability; a claim for
+    /// the main agent and a log reset the operator.
     #[test]
     fn every_identity_call_has_its_guard() {
         let mut map = HandlerMap::new();
         register_ws_handlers(&mut map);
         let cap = |c: &Capability| format!("{:?}", Guard::Cap(c.clone()));
+        let user_or_operator = |c: &Capability| format!("{:?}", Guard::UserOrOperator(c.clone()));
         let expected = [
             ("identity.claimOffer", format!("{:?}", Guard::Operator)),
             (
@@ -488,7 +498,10 @@ mod tests {
                 format!("{:?}", Guard::UserOrOperator(AGENT_SIGN_CAPABILITY.clone())),
             ),
             ("identity.custodyStatus", format!("{:?}", Guard::Operator)),
-            ("identity.deleteRequest", cap(&AGENT_UPDATE_CAPABILITY)),
+            (
+                "identity.deleteRequest",
+                user_or_operator(&AGENT_UPDATE_CAPABILITY),
+            ),
             ("identity.devices", cap(&AGENT_READ_CAPABILITY)),
             ("identity.inbox", format!("{:?}", Guard::Operator)),
             ("identity.inboxAck", format!("{:?}", Guard::Operator)),
@@ -498,7 +511,10 @@ mod tests {
             ("identity.log", cap(&AGENT_READ_CAPABILITY)),
             ("identity.offers", cap(&AGENT_READ_CAPABILITY)),
             ("identity.openOffer", cap(&AGENT_UPDATE_CAPABILITY)),
-            ("identity.postRequest", cap(&AGENT_UPDATE_CAPABILITY)),
+            (
+                "identity.postRequest",
+                user_or_operator(&AGENT_UPDATE_CAPABILITY),
+            ),
             ("identity.prepareDevice", format!("{:?}", Guard::Operator)),
             (
                 "identity.publish",
@@ -527,6 +543,40 @@ mod tests {
             .map(|(name, guard)| (name.to_string(), guard.clone()))
             .collect();
         assert_eq!(got, want);
+    }
+
+    /// Review coasys/ad4m#1635: an app on the main agent with only the default capabilities
+    /// (agent:UPDATE among them) posted to the identity's request box signed by this device's
+    /// key, and deleted this device's pending requests. It gets 403 now, before any handler
+    /// runs; a user's session on its own agent still passes the guard.
+    #[tokio::test]
+    async fn an_app_with_the_default_capabilities_does_not_speak_for_this_device() {
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let defaults = crate::agent::capabilities::get_user_default_capabilities();
+        assert!(defaults.contains(&AGENT_UPDATE_CAPABILITY));
+        let app = Arc::new(RequestContext::app_for_test(defaults.clone()));
+        let user = RequestContext::user_for_test("did:key:alice", defaults);
+        for (method, params) in [
+            (
+                "identity.postRequest",
+                serde_json::json!({ "body": { "kind": "send-master" } }),
+            ),
+            ("identity.deleteRequest", serde_json::json!({ "id": "r" })),
+        ] {
+            let refused = map
+                .dispatch(method, params.clone(), app.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (refused.code, refused.message),
+                (
+                    403,
+                    format!("{method} for the main agent needs the admin credential")
+                )
+            );
+            assert!(map.admit(method, &params, &user).await.is_ok(), "{method}");
+        }
     }
 
     /// The idempotent reads a client resends after a reconnect. `identity.joinStatus` is none:

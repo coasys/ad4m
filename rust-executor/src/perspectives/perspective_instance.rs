@@ -1,3 +1,4 @@
+use super::fallback_sync::{fallback_push_refused, ShareScope};
 use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
@@ -69,7 +70,7 @@ mod containment;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
 mod subscriptions;
-pub(crate) use subscriptions::result_json;
+pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 // Which writes re-run a model subscription (#1237).
 mod subscription_triggers;
 // Registering this executor's owners with the link language.
@@ -742,9 +743,9 @@ fn rewrite_diff(
 
 /// The local Shared links the remote render lacks, without the links of the diffs the
 /// queue still holds (queued or parked). Links compare by author, timestamp, source,
-/// predicate and target; one set of those identities for remote and unsent keeps the
-/// pass linear.
-fn links_missing_remotely(
+/// predicate (an empty predicate counts as none) and target; one set of those
+/// identities for remote and unsent keeps the pass linear.
+pub(super) fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
     unsent: &[LinkExpression],
@@ -754,7 +755,7 @@ fn links_missing_remotely(
             &l.author,
             &l.timestamp,
             &l.data.source,
-            l.data.predicate.as_deref(),
+            l.data.predicate.as_deref().filter(|p| !p.is_empty()),
             &l.data.target,
         )
     }
@@ -1312,7 +1313,7 @@ impl PerspectiveInstance {
             );
         }
         if self.persisted.lock().await.state == PerspectiveState::NeighbourhoodCreationInitiated {
-            self.ensure_public_links_are_shared().await;
+            self.share_links_after_publish().await;
         }
         self.update_perspective_state_log_error(
             PerspectiveState::LinkLanguageInstalledButNotSynced,
@@ -1582,7 +1583,10 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn ensure_public_links_are_shared(&self) -> bool {
+    /// Commits the Shared links the link language's `render()` lacks. Callers:
+    /// `ensure_public_links_are_shared` and `share_links_after_publish`
+    /// (`fallback_sync.rs`); `scope` says how many it may send.
+    pub(crate) async fn share_links_missing_remotely(&self, scope: ShareScope) -> bool {
         let _sharing = self.share_links_mutex.lock().await;
         let uuid = self.uuid.clone();
 
@@ -1692,17 +1696,16 @@ impl PerspectiveInstance {
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
 
-                // Defensive check: a fallback sync should normally only ever need to commit
-                // a handful of links that failed to make it into a prior commit. If it's
-                // about to resubmit most or all of the perspective's shared links, that's a
-                // signal something upstream (e.g. a misread of the remote state) is wrong —
-                // log it loudly so a future regression like this one is caught immediately
-                // rather than only discoverable by manually auditing link counts later.
-                if links_count > 20 && links_count as f64 > local_links.len() as f64 * 0.5 {
-                    log::warn!(
-                        "ensure_public_links_are_shared: about to commit {} of {} local shared links for perspective {} — this looks like a full resync rather than a small catch-up, which usually indicates the remote state couldn't be read correctly",
+                // A fallback sync catches up the few links a commit missed. Most of
+                // the shared set missing means the language's view of the remote is
+                // wrong (an empty or partial mirror): sending would push the room's
+                // whole set again. Send nothing; the caller's backoff retries.
+                if fallback_push_refused(links_count, local_links.len(), scope) {
+                    log::error!(
+                        "ensure_public_links_are_shared: refusing to commit {} of {} local shared links for perspective {}: the link language's render() lacks most of them, so its view of the remote is incomplete, not the remote",
                         links_count, local_links.len(), uuid
                     );
+                    return false;
                 }
 
                 let result = link_language
@@ -4668,6 +4671,11 @@ impl PerspectiveInstance {
             if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
                 continue;
             }
+            // A link that counts stays counted while its signer's log is not known: no
+            // `cantCheck` over a stored `valid`, and so no event for it. The store keeps it too.
+            if !crate::identity::verdict::replaces(before.verdict.as_ref(), &now.verdict) {
+                continue;
+            }
             let held = self
                 .sparql_store
                 .query_links(
@@ -6407,16 +6415,18 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
-    /// Subscribe to a SPARQL query for the RPC connection `connection_id`, as
-    /// `subscriber` (a managed agent's DID, `None` for the main agent). Returns
-    /// the subscription id and the revision and result the reply carries (see
-    /// `open_subscription`); every change after that is published as a delta
-    /// update (`send_delta_update`). Each call makes a new subscription, so
-    /// every subscriber counts revisions from 0. A query that is not SPARQL
-    /// fails with [`PROLOG_LIVE_QUERY_UNSUPPORTED`].
+    /// Subscribe to a SPARQL query under `subscription_id` (the client's) for
+    /// the RPC connection `connection_id`, as `subscriber` (a managed agent's
+    /// DID, `None` for the main agent). Returns the subscription id and the
+    /// revision and result the reply carries (see `open_subscription`, which
+    /// refuses an id already in use); every change after that is published as
+    /// a delta update (`send_delta_update`). Each call makes a new
+    /// subscription, so every subscriber counts revisions from 0. A query that
+    /// is not SPARQL fails with [`PROLOG_LIVE_QUERY_UNSUPPORTED`].
     pub async fn subscribe_and_query(
         &self,
         query: String,
+        subscription_id: String,
         connection_id: String,
         subscriber: Option<String>,
     ) -> Result<(String, u64, String), AnyError> {
@@ -6425,14 +6435,16 @@ impl PerspectiveInstance {
         }
         let subscribed_query = SubscribedQuery::new(query.clone(), connection_id, subscriber);
         let first_result = async { self.sparql_query(query) };
-        self.open_subscription(subscribed_query, first_result).await
+        self.open_subscription(subscription_id, subscribed_query, first_result)
+            .await
     }
 
     /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
     /// registers a subscription, and runs the initial model query — all in one call.
     /// When link changes match the trigger predicates, `execute_model_query` is
     /// re-run in Rust and the change is pushed to the client as a delta
-    /// update. Each call makes a new subscription (see `open_subscription`).
+    /// update. Each call makes a new subscription under `subscription_id`, the
+    /// client's (see `open_subscription`).
     ///
     /// `classes` is one class or a union (#1238). A union is one subscription:
     /// it re-runs when a diff touches the trigger set of any class it names.
@@ -6440,6 +6452,7 @@ impl PerspectiveInstance {
         &self,
         classes: super::model_query::QueryClasses,
         query_json: String,
+        subscription_id: String,
         connection_id: String,
         subscriber: Option<String>,
     ) -> Result<(String, u64, String), AnyError> {
@@ -6471,7 +6484,8 @@ impl PerspectiveInstance {
         };
         let first_result =
             self.model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
-        self.open_subscription(subscribed_query, first_result).await
+        self.open_subscription(subscription_id, subscribed_query, first_result)
+            .await
     }
 
     /// Extract predicates from a model shape for subscription trigger matching.
@@ -6517,7 +6531,7 @@ impl PerspectiveInstance {
         // First, so the queries collected below carry the new class lists.
         let reresolved = self.refresh_abstract_subscriptions().await;
 
-        let mut query_futures: Vec<future::BoxFuture<'static, Option<(String, String)>>> =
+        let mut query_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
             Vec::new();
 
         // Collect only the minimal data needed: ID, query string, predicates,
@@ -6540,6 +6554,9 @@ impl PerspectiveInstance {
 
         // Store reads the model triggers make, shared by every subscription.
         let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+        // The subscriptions to re-run, grouped by what they evaluate.
+        let mut groups: Vec<(Vec<String>, String, Option<ModelSubscriptionParams>)> = Vec::new();
+        let mut evaluations: HashMap<String, usize> = HashMap::new();
 
         // Create futures for each query check
         for (id, query_string, sub_predicates, model_params) in queries {
@@ -6584,10 +6601,27 @@ impl PerspectiveInstance {
             #[cfg(test)]
             subscription_triggers::reruns::note(&id);
 
-            // Each future returns Option<(id, new_result)> instead of locking individually.
+            // Identical queries give identical results, whoever subscribed, so
+            // each one runs once and its result goes to every subscription
+            // holding it. A client that retried a slow subscribe and left the
+            // earlier ones behind then costs one evaluation, not one per retry.
+            let key = subscriptions::evaluation_key(&query_string, model_params.as_ref());
+            match evaluations.get(&key) {
+                Some(&i) => groups[i].0.push(id),
+                None => {
+                    evaluations.insert(key, groups.len());
+                    groups.push((vec![id], query_string, model_params));
+                }
+            }
+        }
+
+        for (ids, query_string, model_params) in groups {
+            // Each future returns Option<(ids, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
             let query_future = Box::pin(async move {
+                #[cfg(test)]
+                subscriptions::evaluations::note(&self_clone.uuid);
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
                 // With no shape wait: every subscription on the perspective is
                 // re-checked in the one pass below, so a wait here for one
@@ -6618,7 +6652,7 @@ impl PerspectiveInstance {
                         }
                     }
                 };
-                Some((id, result_string))
+                Some((ids, result_string))
             });
             query_futures.push(query_future);
         }
@@ -6635,8 +6669,11 @@ impl PerspectiveInstance {
         let mut delta_updates = Vec::new();
         {
             let mut queries = self.subscribed_queries.lock().await;
-            for result in results.into_iter().flatten() {
-                let (id, result_string) = result;
+            let results = results
+                .into_iter()
+                .flatten()
+                .flat_map(|(ids, result)| ids.into_iter().map(move |id| (id, result.clone())));
+            for (id, result_string) in results {
                 if let Some(stored_query) = queries.get_mut(&id) {
                     if result_string != stored_query.last_result {
                         log::debug!(
@@ -8450,6 +8487,161 @@ mod tests {
         map.forget(&log.scid());
     }
 
+    /// A link the store counts, written again while its signer's log is not in the key map,
+    /// keeps its place: after a later revocation the re-check still counts it. The control
+    /// (no second write) shows the same end state.
+    #[tokio::test]
+    async fn a_counted_link_written_again_while_its_log_is_unknown_keeps_its_place() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+
+        let mut seen = Vec::new();
+        for (seed, replay) in [(110u8, false), (111u8, true)] {
+            let perspective = setup().await;
+            let mut log = TestLog::new(seed);
+            let map = global_key_map();
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted: 0,
+                },
+            );
+            map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+            let device = log.device.clone();
+            let key = device.key();
+            let data = create_link().normalize();
+            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes =
+                crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+            let link = LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(device.sign(&bytes)),
+                    anchor: Some(0),
+                },
+                status: Some(LinkStatus::Shared),
+            };
+            assert!(perspective.sparql_store.add_remote_link(&link).unwrap());
+            let stored = perspective.sparql_store.get_all_links().unwrap();
+            assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+
+            let mut after_replay = None;
+            if replay {
+                // The log leaves the key map (a restart before the held logs load, an
+                // eviction), and the same link arrives again.
+                map.forget(&log.scid());
+                let _ = perspective.sparql_store.add_remote_link(&link).unwrap();
+                let stored = perspective.sparql_store.get_all_links().unwrap();
+                assert_eq!(stored.len(), 1);
+                after_replay = stored[0].verdict.clone();
+            }
+
+            // The log comes back with the device revoked at seq 1; both re-checks run.
+            log.revoke_d1();
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted: 1,
+                },
+            );
+            map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+            let signers = std::collections::BTreeSet::from([link.author.clone()]);
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap();
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::CantCheck)
+                .await
+                .unwrap();
+            let stored = perspective.sparql_store.get_all_links().unwrap();
+            seen.push((replay, after_replay, stored[0].verdict.clone()));
+            map.forget(&log.scid());
+        }
+        assert_eq!(seen[0].2, Some(LinkVerdict::Valid), "control");
+        assert_eq!(seen[1].1, Some(LinkVerdict::Valid), "after the replay");
+        assert_eq!(seen[1].2, Some(LinkVerdict::Valid), "after the revocation");
+    }
+
+    /// A re-check while the signer's log is not in the key map leaves a counted link as it is:
+    /// no `cantCheck` is stored over its `valid`, and no rewrite goes out for it. Once the log
+    /// is back with the key revoked, the link still counts: it was here first.
+    #[tokio::test]
+    async fn a_recheck_while_the_log_is_unknown_keeps_a_counted_link_counted() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+
+        let perspective = setup().await;
+        let mut log = TestLog::new(112);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+        let person = ad4m_identity_core::did_of(&log.scid());
+        let device = log.device.clone();
+        let key = device.key();
+        let data = create_link().normalize();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 0).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(device.sign(&bytes)),
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        assert!(perspective.sparql_store.add_remote_link(&link).unwrap());
+
+        // The log leaves the key map (an eviction, a reset) and the re-check for the key runs.
+        map.forget(&log.scid());
+        let signers = std::collections::BTreeSet::from([link.author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers.clone()))
+                .await
+                .unwrap(),
+            0,
+            "no rewrite of a counted link to cantCheck"
+        );
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
+
+        // The log comes back with the device revoked at seq 1.
+        log.revoke_d1();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 1,
+            },
+        );
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+        perspective
+            .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+            .await
+            .unwrap();
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        map.forget(&log.scid());
+    }
+
     /// A link that arrives while the signer's cached head is older than `ADMIT_FRESHNESS` is
     /// not counted, whatever its anchor: the store may hold a revocation the cache missed. Once
     /// a refresh brings that revocation, the re-check for the key flags the stored links.
@@ -9712,7 +9904,7 @@ mod tests {
             predicate = watched.data.predicate.clone().unwrap()
         );
         let (id, _, first) = perspective
-            .subscribe_and_query(query, "c".into(), None)
+            .subscribe_and_query(query, uuid::Uuid::new_v4().to_string(), "c".into(), None)
             .await
             .unwrap();
         let target = watched.data.target.clone();
@@ -11305,6 +11497,7 @@ mod tests {
             .model_subscribe_and_query(
                 "Board".into(),
                 NESTED_INCLUDE_QUERY.into(),
+                uuid::Uuid::new_v4().to_string(),
                 "c".into(),
                 None,
             )
@@ -11313,6 +11506,7 @@ mod tests {
         let (other_sub, _, _) = perspective
             .subscribe_and_query(
                 "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(),
+                uuid::Uuid::new_v4().to_string(),
                 "c".into(),
                 None,
             )
