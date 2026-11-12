@@ -58,7 +58,11 @@ fn truncate_for_event(text: &str) -> String {
 /// model's context window makes the model server drop the oldest
 /// messages — including the person's question — to fit (Ollama answers
 /// `500 no user query found in messages`).
-pub const DEFAULT_TOOL_RESULT_MAX_BYTES: usize = 24 * 1024;
+///
+/// The value is `AIService::tool_result_max_bytes`'s own unknown-window
+/// fallback, so a caller with no model context at hand and a caller whose
+/// model's window is simply unknown cap a result to the same size.
+pub use crate::ai_service::DEFAULT_TOOL_RESULT_MAX_BYTES;
 
 /// The reply an empty completion gets: the model ended its turn without
 /// answering, and the person is still waiting.
@@ -1907,6 +1911,19 @@ mod tests {
     }
 
     // ── tool-result capping ──────────────────────────────────────────────
+
+    #[test]
+    fn the_default_result_cap_is_the_unknown_window_fallback() {
+        // One source of truth: a caller that never learned the model's
+        // context window (HarnessConfig's default cap) and a caller whose
+        // model's window is simply unknown must cap a result to the same
+        // size — the defaults used to disagree (24 KiB vs the formula's
+        // 16 KiB).
+        assert_eq!(
+            DEFAULT_TOOL_RESULT_MAX_BYTES,
+            crate::ai_service::AIService::tool_result_max_bytes("a-model-nobody-registered"),
+        );
+    }
 
     #[test]
     fn cap_tool_result_cuts_on_a_char_boundary_and_says_what_it_missed() {

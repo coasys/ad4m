@@ -72,6 +72,29 @@ const CONTEXT_BYTES_PER_TOKEN: usize = 3;
 /// executor's endpoints are run at.
 const DEFAULT_CONTEXT_BUDGET_BYTES: usize = 64 * 1024;
 
+/// The bounds [`AIService::tool_result_max_bytes`] clamps one result to: a
+/// small window cannot starve a result to uselessness and a large one
+/// cannot unbound it.
+const TOOL_RESULT_CLAMP_MIN: usize = 4 * 1024;
+const TOOL_RESULT_CLAMP_MAX: usize = 64 * 1024;
+
+const fn clamp_tool_result_bytes(bytes: usize) -> usize {
+    if bytes < TOOL_RESULT_CLAMP_MIN {
+        TOOL_RESULT_CLAMP_MIN
+    } else if bytes > TOOL_RESULT_CLAMP_MAX {
+        TOOL_RESULT_CLAMP_MAX
+    } else {
+        bytes
+    }
+}
+
+/// [`AIService::tool_result_max_bytes`] when the model's context window is
+/// not configured — also [`crate::ai_service::harness::HarnessConfig`]'s
+/// default cap, so a caller with no model context at hand sizes a result
+/// exactly as the formula's unknown-window branch does.
+pub const DEFAULT_TOOL_RESULT_MAX_BYTES: usize =
+    clamp_tool_result_bytes(DEFAULT_CONTEXT_BUDGET_BYTES / 4);
+
 /// Truncate LLM prompt/response text for debug logging. LOGGING.md: debug
 /// level carries "prompt/response bodies (truncated)" — long enough to
 /// actually debug what the model was asked / returned, bounded so a huge
@@ -845,7 +868,7 @@ impl AIService {
     /// a large one cannot unbound it. The full result still lands on the
     /// session's transcript row — this bounds only what the model sees.
     pub fn tool_result_max_bytes(model_id: &str) -> usize {
-        (Self::context_budget_bytes(model_id) / 4).clamp(4 * 1024, 64 * 1024)
+        clamp_tool_result_bytes(Self::context_budget_bytes(model_id) / 4)
     }
 
     /// Prompt a model with a complete turn list and tool definitions, getting
