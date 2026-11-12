@@ -73,6 +73,10 @@ struct Claimed {
     match_code: String,
     kind: String,
     expires: u64,
+    /// The claim would make its identity the operator: it binds only after
+    /// `identity.acceptJoin`.
+    #[serde(default)]
+    needs_accept: bool,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +123,23 @@ pub async fn claim(
     println!("Claimed a {} offer of {}.", claimed.kind, claimed.did);
     println!("Match code: {}", claimed.match_code);
     println!("Confirm on the device that opened the offer that it shows the same code.");
+    if claimed.needs_accept {
+        // The person running this command pasted the offer: that is the accept the executor
+        // waits for before the identity becomes its operator.
+        tokio::time::timeout_at(
+            window,
+            client.call::<serde_json::Value>(
+                "identity.acceptJoin",
+                json!({ "offerId": claimed.offer_id }),
+            ),
+        )
+        .await
+        .map_err(|_| closed())??;
+        println!(
+            "Accepted: once confirmed, {} is this executor's operator.",
+            claimed.did
+        );
+    }
     if no_wait {
         println!(
             "Offer {}: confirm on the app's device; identity.joinStatus reports when this executor has joined.",
@@ -202,7 +223,9 @@ where
             .await
             .map_err(|_| closed())??;
         match join.state.as_str() {
-            "claimed" => {}
+            // `awaiting-accept`: the executor holds a first-run claim until the person at its
+            // computer accepts it (`identity.acceptJoin`); the caller accepts or cancels.
+            "claimed" | "awaiting-accept" => {}
             "spent" => {
                 let did = join.did.unwrap_or_else(|| did.to_string());
                 let Some(key_id) = join.key_id else {
@@ -236,6 +259,25 @@ struct LinkTicket {
     did: String,
     offer_id: String,
     match_code: String,
+    #[serde(default)]
+    needs_accept: bool,
+}
+
+/// Whether the person's answer to the accept question is yes.
+fn accepts(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Asks the person at this terminal whether this computer joins `did`; a closed stdin is no.
+async fn ask_accept(did: &str) -> Result<bool> {
+    println!("Join {did} and make it this executor's operator? Only if the app shows the same code. [y/N]");
+    let answer = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map(|_| line)
+    })
+    .await
+    .map_err(|e| anyhow!("the question was not answered: {e}"))??;
+    Ok(accepts(&answer))
 }
 
 /// `text` as a QR code of Unicode half blocks, with its quiet zone.
@@ -293,6 +335,20 @@ pub async fn link_code(executor_url: &str, token: &str) -> Result<()> {
     println!("Claimed the offer of {}.", ticket.did);
     println!("Match code: {}", ticket.match_code);
     println!("Confirm on the app that it shows the same code.");
+    if ticket.needs_accept {
+        // Whoever saw the device string may have sent this ticket: the executor joins only
+        // once the person here accepts it.
+        let offer = json!({ "offerId": ticket.offer_id });
+        if !ask_accept(&ticket.did).await? {
+            client
+                .call::<serde_json::Value>("identity.cancelJoin", offer)
+                .await?;
+            bail!("cancelled: this executor does not join {}", ticket.did);
+        }
+        client
+            .call::<serde_json::Value>("identity.acceptJoin", offer)
+            .await?;
+    }
     // The event names no expiry: the offer lives at most `OFFER_TTL_S` from its claim.
     let joined = follow_claim(
         &client,
@@ -322,7 +378,7 @@ pub fn admin_credential(
 }
 
 /// Whether `url` names a loopback host: `identity.rekey` answers only there.
-fn is_loopback_url(url: &str) -> bool {
+pub(crate) fn is_loopback_url(url: &str) -> bool {
     let Ok(url) = url::Url::parse(url) else {
         return false;
     };
@@ -482,6 +538,45 @@ mod tests {
         )
         .await;
         assert!(ended.unwrap_err().to_string().contains("expired"));
+    }
+
+    /// A held first-run claim (`awaiting-accept`) is followed like a claimed one until it is
+    /// spent; a cancelled one ends the follow.
+    #[tokio::test]
+    async fn an_awaiting_accept_claim_is_followed_until_it_is_spent() {
+        let now = || 100;
+        let answers = std::cell::RefCell::new(vec![
+            join("spent", Some("d3")),
+            join("awaiting-accept", None),
+            join("claimed", None),
+        ]);
+        let next = || {
+            let answer = answers.borrow_mut().pop().unwrap();
+            async move { Ok(answer) }
+        };
+        let joined = follow_join(A, confirm_deadline(200), next, now, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(joined, format!("Joined {A} as d3 (event 1)."));
+        let ended = follow_join(
+            A,
+            confirm_deadline(200),
+            || async { Ok(join("cancelled", None)) },
+            now,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(ended.unwrap_err().to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn only_yes_accepts() {
+        for yes in ["y\n", "Y", " yes ", "YES\r\n"] {
+            assert!(accepts(yes), "{yes:?}");
+        }
+        for no in ["", "\n", "n", "no", "yep", "ok"] {
+            assert!(!accepts(no), "{no:?}");
+        }
     }
 
     /// An executor that never answers `identity.joinStatus` cannot hold `claim` past the

@@ -3,6 +3,7 @@
 
 import type { AIModelLoadingStatus } from "./AIModelLoadingStatus";
 import type { AITask } from "./AITask";
+import type { AcceptJoinParams } from "./AcceptJoinParams";
 import type { AddAgentInfosRequest } from "./AddAgentInfosRequest";
 import type { Agent } from "./Agent";
 import type { AgentAddEntanglementProofsParams } from "./AgentAddEntanglementProofsParams";
@@ -32,6 +33,7 @@ import type { BotAgent } from "./BotAgent";
 import type { BotLogParams } from "./BotLogParams";
 import type { BotParams } from "./BotParams";
 import type { CallSessionInfo } from "./CallSessionInfo";
+import type { CancelJoinParams } from "./CancelJoinParams";
 import type { ClaimOfferParams } from "./ClaimOfferParams";
 import type { ClaimOfferResult } from "./ClaimOfferResult";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
@@ -78,6 +80,8 @@ import type { InboxEntry } from "./InboxEntry";
 import type { InboxPutParams } from "./InboxPutParams";
 import type { InboxStored } from "./InboxStored";
 import type { InteractionMeta } from "./InteractionMeta";
+import type { JoinAccepted } from "./JoinAccepted";
+import type { JoinCancelled } from "./JoinCancelled";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 import type { JoinStatus } from "./JoinStatus";
 import type { JoinStatusParams } from "./JoinStatusParams";
@@ -85,6 +89,7 @@ import type { JsonValue } from "./serde_json/JsonValue";
 import type { KeyOwner } from "./KeyOwner";
 import type { KeyOwnerParams } from "./KeyOwnerParams";
 import type { KeySessionResult } from "./KeySessionResult";
+import type { KeyringSummary } from "./KeyringSummary";
 import type { LanguageAddressParams } from "./LanguageAddressParams";
 import type { LanguageHandle } from "./LanguageHandle";
 import type { LanguageListParams } from "./LanguageListParams";
@@ -137,6 +142,7 @@ import type { PerspectiveLinkMutationsParams } from "./PerspectiveLinkMutationsP
 import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowReceiptParams";
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
+import type { PerspectiveModelSubscribeParams } from "./PerspectiveModelSubscribeParams";
 import type { PerspectiveNamedShacl } from "./PerspectiveNamedShacl";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
@@ -152,6 +158,7 @@ import type { PerspectiveShacl } from "./PerspectiveShacl";
 import type { PerspectiveShaclNameParams } from "./PerspectiveShaclNameParams";
 import type { PerspectiveSparqlParams } from "./PerspectiveSparqlParams";
 import type { PerspectiveSubjectClassesOfParams } from "./PerspectiveSubjectClassesOfParams";
+import type { PerspectiveSubscribeQueryParams } from "./PerspectiveSubscribeQueryParams";
 import type { PerspectiveSubscribed } from "./PerspectiveSubscribed";
 import type { PerspectiveSubscriptionParams } from "./PerspectiveSubscriptionParams";
 import type { PerspectiveUpdateLinkParams } from "./PerspectiveUpdateLinkParams";
@@ -208,6 +215,7 @@ import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
 import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
 import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
 import type { SfuCallJoinParams } from "./SfuCallJoinParams";
+import type { SfuCallLeaveParams } from "./SfuCallLeaveParams";
 import type { SfuCascadeStatus } from "./SfuCascadeStatus";
 import type { SfuConfig } from "./SfuConfig";
 import type { SfuEnsureMembershipParams } from "./SfuEnsureMembershipParams";
@@ -215,6 +223,7 @@ import type { SfuNeighbourhoodParams } from "./SfuNeighbourhoodParams";
 import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPreference";
 import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
+import type { SfuRestartIceParams } from "./SfuRestartIceParams";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
 import type { SfuSendDataParams } from "./SfuSendDataParams";
@@ -224,6 +233,15 @@ import type { SignMessageRequest } from "./SignMessageRequest";
 import type { SignSessionStatementParams } from "./SignSessionStatementParams";
 import type { SignedHead } from "./SignedHead";
 import type { SignedKeyStatement } from "./SignedKeyStatement";
+import type { StorageReencryptParams } from "./StorageReencryptParams";
+import type { StorageReencryptResult } from "./StorageReencryptResult";
+import type { StorageRotatePersonKeyParams } from "./StorageRotatePersonKeyParams";
+import type { StorageRotatePersonKeyResult } from "./StorageRotatePersonKeyResult";
+import type { StorageRotateSecretParams } from "./StorageRotateSecretParams";
+import type { StorageRotateSecretResult } from "./StorageRotateSecretResult";
+import type { StorageStatus } from "./StorageStatus";
+import type { StorageUnlockParams } from "./StorageUnlockParams";
+import type { StorageUnlockResult } from "./StorageUnlockResult";
 import type { StoredRecord } from "./StoredRecord";
 import type { TakenMaster } from "./TakenMaster";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
@@ -306,6 +324,8 @@ export interface RpcMethods {
   "hosting.setHotWallet": { params: SetHotWalletAddressRequest; result: boolean };
   "hosting.wallet": { params: Record<string, never>; result: HostingWalletResult };
   "hosting.walletHistory": { params: Record<string, never>; result: JsonValue };
+  "identity.acceptJoin": { params: AcceptJoinParams; result: JoinAccepted };
+  "identity.cancelJoin": { params: CancelJoinParams; result: JoinCancelled };
   "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
   "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
   "identity.custodyStatus": { params: Record<string, never>; result: DeviceKeys };
@@ -378,7 +398,7 @@ export interface RpcMethods {
   "perspective.linkMutations": { params: PerspectiveLinkMutationsParams; result: PerspectiveLinkDiff };
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
-  "perspective.modelSubscribe": { params: PerspectiveModelQueryParams; result: PerspectiveSubscribed };
+  "perspective.modelSubscribe": { params: PerspectiveModelSubscribeParams; result: PerspectiveSubscribed };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
@@ -397,7 +417,7 @@ export interface RpcMethods {
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
   "perspective.subjectClassesOf": { params: PerspectiveSubjectClassesOfParams; result: { [key in string]: Array<string> } };
-  "perspective.subscribeQuery": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
+  "perspective.subscribeQuery": { params: PerspectiveSubscribeQueryParams; result: PerspectiveSubscribed };
   "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
@@ -437,6 +457,7 @@ export interface RpcMethods {
   "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
   "runtime.setStatus": { params: SetStatusRequest; result: boolean };
   "runtime.setUnytMembraneProof": { params: SetUnytMembraneProofRequest; result: boolean };
+  "runtime.storageStatus": { params: Record<string, never>; result: StorageStatus };
   "runtime.tlsDomain": { params: Record<string, never>; result: string | null };
   "runtime.unytAgentKey": { params: Record<string, never>; result: null };
   "runtime.unytHotAgentPubkey": { params: Record<string, never>; result: null };
@@ -450,7 +471,8 @@ export interface RpcMethods {
   "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
   "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
-  "sfu.callLeave": { params: SfuRoomParams; result: boolean };
+  "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
+  "sfu.callRestartIce": { params: SfuRestartIceParams; result: boolean };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };
@@ -465,6 +487,11 @@ export interface RpcMethods {
   "sfu.startRoom": { params: SfuRoomParams; result: SfuRoomInfo };
   "sfu.status": { params: Record<string, never>; result: SfuStatus };
   "sfu.stopRoom": { params: SfuRoomParams; result: boolean };
+  "storage.keys": { params: Record<string, never>; result: KeyringSummary };
+  "storage.reencrypt": { params: StorageReencryptParams; result: StorageReencryptResult };
+  "storage.rotatePersonKey": { params: StorageRotatePersonKeyParams; result: StorageRotatePersonKeyResult };
+  "storage.rotateSecret": { params: StorageRotateSecretParams; result: StorageRotateSecretResult };
+  "storage.unlock": { params: StorageUnlockParams; result: StorageUnlockResult };
   "user.create": { params: CreateUserRequest; result: UserCreationResult };
   "user.credits": { params: UsersSetCreditsParams; result: boolean };
   "user.currentSession": { params: Record<string, never>; result: SessionInfo };
@@ -564,6 +591,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.networkMetrics",
   "runtime.notifications",
   "runtime.outbox",
+  "runtime.storageStatus",
   "runtime.tlsDomain",
   "runtime.unytAgentKey",
   "runtime.unytHotAgentPubkey",
@@ -579,6 +607,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "sfu.sfuPeerForNeighbourhood",
   "sfu.sfuPeersForNeighbourhood",
   "sfu.status",
+  "storage.keys",
   "user.currentSession",
   "user.list",
   "user.multiUserEnabled",
@@ -601,4 +630,10 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
   "runtime.restartHolochain",
+]);
+
+/** Calls that open something on the executor that outlives them (a live query): the client cancels one that timed out, as one it aborted. */
+export const OPENS_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
+  "perspective.modelSubscribe",
+  "perspective.subscribeQuery",
 ]);

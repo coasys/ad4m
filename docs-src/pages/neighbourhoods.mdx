@@ -293,6 +293,29 @@ The power of LinkLanguages lies in their ability to bridge AD4M with existing in
 
 The beauty of this approach is that AD4M apps don't need to know about the underlying infrastructure. Whether links are stored in a corporate database, a blockchain, or a p2p network, the apps just work with the semantic layer provided by the LinkLanguage.
 
+## Calls: one session per device
+
+A call through the executor's SFU (`proxy.createSession(room, …)`, then
+`session.join(stream)`) is one session per device. The SDK names the device
+when it joins: by default an id kept in the browser's `localStorage`, which
+every tab of one browser profile shares, or one per process outside a
+browser. An app that is neither (Electron, a test harness) passes its own as
+`createSession(room, { deviceId })`.
+
+- **Another device joins beside it.** The same agent on a phone and a laptop
+  is two participants: everyone, the agent's other device included, hears
+  both. `session.participants` lists sessions, each with its `participantId`
+  and `agentDid`, so one agent can appear twice.
+- **Another tab on the same device takes the call over.** The newest join
+  wins: the earlier tab's session ends, emits `replaced` and goes back to
+  `idle` without rejoining, so the app can say "you joined from another tab".
+  Joining again from that tab takes the call back.
+- **A tab that is not in the call never touches it.** Every call about a
+  session (leave, answers, ICE candidates, quality, data) names the
+  participant id its join returned, and the executor acts only on that
+  session of the caller's agent. A tab that only shows the space, or whose
+  join failed, sends none of them.
+
 ## Best Practices
 
 1. **Choose the Right LinkLanguage**:
@@ -315,11 +338,16 @@ The beauty of this approach is that AD4M apps don't need to know about the under
 
 An SFU room publishes its current roster after each join or departure. Sessions
 must watch `sfu-room-roster` and hold the neighbourhood-read capability to receive
-it. The audience is the listed DIDs and, on departure, the DID just removed;
-the payload still lists only the participants currently in the room. It is not
+it. The roster lists sessions: each entry has an `agentDid` and the
+`participantId` of one session (one per device). The audience is the DIDs of
+the listed sessions and, on departure, the DID of the session just removed;
+the payload still lists only the sessions currently in the room. It is not
 broadcast to every member of the neighbourhood.
 
-The SDK rebuilds its call if a received roster leaves its own DID out for three
-seconds. A roster listing it again cancels that grace, and leaving the call
-cancels it too. This recovery needs a working executor event connection: it does
+The SDK rebuilds its call if received rosters stop listing its own session
+(its `participantId`) for three seconds. The check is per session: another
+device of the same agent in the room does not stop it. A roster listing the
+session again cancels that grace, and leaving the call cancels it too. A
+session that a later tab on the same device replaced stops and does not
+rebuild. This recovery needs a working executor event connection: it does
 not detect a roster event lost during an executor API outage.

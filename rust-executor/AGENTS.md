@@ -33,11 +33,12 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 
 | Module | Role | Doc |
 |---|---|---|
-| `lib.rs` | Boot sequence (`run()`): config → wallet/db backends → `Ad4mDb` → `AIService` → `AgentService` → runtime → V8 → `LanguageController` → perspectives → axum. Order is hand-maintained. | — |
+| `lib.rs` | Boot sequence (`run()`): config → data-folder lock → admin credential → storage secret out of the config → private dirs (0700) → `StorageGate` (sealed: the API starts early and `run` waits for `storage.unlock`) → wallet/db backends → `Ad4mDb` → `AIService` → `AgentService` → runtime → V8 → `LanguageController` → perspectives → axum. Order is hand-maintained. | — |
 | `config.rs` | `Ad4mConfig` + global config accessor | — |
 | `config_file.rs` | The `run --config` JSON file shared with the launcher (`launcher-state.json` key names), secret resolution (`AD4M_*_FILE`), and the one mapping to `Ad4mConfig` | `docs-src/pages/developer-guides/executor-config.mdx` |
 | `config_rpc.rs` | The config file as RPC (`runtime.config`, `runtime.setConfig`, handlers in `api/config_ws.rs`): key classes (`restart`, `machine`), atomic 0600 writes, pinned keys, validators (`register_config_key`), `config-changed`. A value is written only when the file still maps to `Ad4mConfig` as the next start maps it (`to_ad4m_config`), else `invalid` | — |
 | `exit.rs` | The run contract a supervisor reads: `ExitReason` (0, 75, 78, 79, 80), `StartRefused`, the graceful stop (`request_shutdown`), `--watch-stdin` (`stop_when_closed`, on the process's buffered `Stdin`, after the custody line when `--custody-channel` took one), the data-folder lock (`executor.lock`, taken before the log folder rotates, so a refused start leaves the running executor's log alone and reports to stdout), no core dumps on Linux | — |
+| `at_rest/` | Data at rest: the operator secret (`secret_source.rs`: `AD4M_STORAGE_SECRET_FILE`, 64 hex, refused on the data folder's disk unless `allow_secret_on_data_disk`), the keyring file (`keyring_file.rs`: `keyring.json`, atomic 0600 writes), the data keys under a root derived from the secret (`data_keys.rs`), the languages' storage files sealed under their store's key (`lang_storage.rs`: `AD4MSEAL` files behind `LANGUAGE_CONTROLLER.readStorageFile`/`writeStorageFile`, the start step that seals plaintext ones; non-system language isolates get no Deno file permission), the agent passphrase (`agent_passphrase.rs`: derived from the root for an agent generated with a keyring; for an older agent, held sealed in the keyring after the first unlock that opens `agent.json` with it; `run` unlocks the agent from it, `AgentService::unlock_with_keys`), the executor's own secret files (`executor_secrets.rs`: `DataKeys::seal_executor_secret`/`open_executor_secret`, `AD4MSEAL` files beside `keyring.json`, and `seal_plaintext_executor_secret` to move a plaintext key file in and remove it), the rotations (`data_keys.rs`: `rotate_root` moves the keyring to a new secret in one keyring write, every root wrap re-wrapped and a derived agent passphrase held from then on; `rotate_person` gives a person's data key a new version; `rotation.rs`: a store's re-encryption, which makes a new store key version current, seals again every value and language file still under an older one, then retires the older ones; never the executor's own store, whose SQLCipher key is set once per process), and the `StorageGate` (sealed, unlocking, open) behind `storage.unlock`, `storage.keys`, `runtime.storageStatus`, `storage.rotateSecret`, `storage.rotatePersonKey`, `storage.reencrypt` and `storage-state-changed` | — |
 | `log_files.rs` | `--log-dir`: one file per run (`executor-0.log`), five runs kept, 50 MiB cap per file, `tail` for `runtime.logTail` | — |
 | `api/` | axum WS RPC (`/api/v1/ws`), event stream, OpenAI-compatible `/v1` | `src/api/AGENTS.md` |
 | `mcp/` | MCP server + tools (static + SHACL-generated dynamic tools) | `src/mcp/AGENTS.md` |
@@ -80,7 +81,36 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   listener is bound, the last step of `run`. The admin credential comes from the environment
   (`AD4M_ADMIN_CREDENTIAL`, or `AD4M_ADMIN_CREDENTIAL_FILE`), never from a file the executor
   writes; a supervisor gives a new one at each start. On Linux `run` sets `RLIMIT_CORE = 0`
-  and `PR_SET_DUMPABLE = 0`.
+  and `PR_SET_DUMPABLE = 0`; the `ad4m-executor` binary does so again first thing in `main`.
+- **Sealed start.** No store opens before the operator secret. With `storage_secret` in the
+  config (the CLI reads `AD4M_STORAGE_SECRET_FILE`; the launcher passes one from the OS
+  keyring), `run` unlocks the keyring and goes on. Without it, or when that unlock fails, the
+  executor comes up **sealed**: the API listens (`/health` answers), every RPC but
+  `runtime.storageStatus` and `storage.unlock` gets 503 `storage-sealed`, a JWT session is
+  refused, and `run` waits for `storage.unlock` (Operator, local only) or a stop. A secret
+  file on the data folder's disk is refused (`secret-on-data-disk`) unless
+  `allow_secret_on_data_disk` (`AD4M_ALLOW_SECRET_ON_DATA_DISK`), and the config file may
+  never carry the secret. The data folder is 0700, its files 0600. The gate is a global
+  (`at_rest::gate`); dispatch and admission check it (`HandlerMap::check_gate`).
+- **Plaintext migration.** Right after the unlock, `at_rest::migration::run` moves an
+  executor that ran before at-rest encryption under its keys, in a fixed order: the
+  executor database (SQLCipher copy, verified, then renamed over the plaintext), the
+  persons of its legacy users, then each language's storage files (sealed, read back,
+  renamed over). The keyring file's `migration` record (started, steps done, finished)
+  is the resume marker; it is written after each verified step, so a crash reruns at most
+  one step, and each step skips what is already sealed. The gate stays `Migrating` (only
+  `runtime.storageStatus` and `storage.unlock` answer) and publishes
+  `storage-migration-progress` (`step`, `storesDone`, `storesTotal`, `store`; operator
+  audience, at most one a second plus the first and last). A failed step keeps the
+  plaintext, seals the gate with `migration-failed`, and the next `storage.unlock` resumes.
+  A second run finds nothing to do. Holochain and lair files are never re-keyed.
+- **Storage reset.** `ad4m-executor storage reset --data-path <dir> [--confirm <keyring id>]`
+  (`at_rest::reset`) is offline only (it takes the data-folder lock) and never reaches
+  outside the data dir. Without `--confirm` it only lists the moves. With the keyring id
+  (`unreadable-keyring` for a keyring that does not parse) it moves the keyring, agent
+  file, users, persons and their stores, perspectives, the executor database and every
+  sealed language file into `<data>/lost-<time>/`. Language bundles, settings, the seed,
+  logs and app data stay.
 - **Local only.** A method registered `.local_only()` answers only the operator on this
   machine (`Session::is_operator_on_this_machine`: the admin credential, or no token on an
   executor without one, on a loopback listener). The method's guard answers first (403 "Admin
@@ -88,7 +118,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   network listener gets 403 `local-only`. It is on `agent.unlock`,
   `agent.signSessionStatement`, `identity.rekey`, `identity.custodyStatus`,
   `identity.takeMaster`, `identity.prepareDevice`, `identity.inbox`, `identity.inboxAck`,
-  `identity.unwrapRecordKey`, `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
+  `identity.unwrapRecordKey`, `identity.acceptJoin`, `identity.cancelJoin`, `storage.unlock`,
+  `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
   refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
   An operator from a key login is never on this machine, so these refuse it too; it calls
   every other method as the operator, `agent.generate`, `agent.import`, `agent.lock`,

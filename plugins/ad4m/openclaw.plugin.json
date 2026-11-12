@@ -112,6 +112,11 @@
         "default": true,
         "description": "Managed mode: run Holochain (default true). Set false to start the executor with --run-holochain false — no P2P/bootstrap egress, for isolated or offline executors that do not need neighbourhood sync."
       },
+      "declareBot": {
+        "type": "boolean",
+        "default": true,
+        "description": "Mark the agent as a bot in its public profile (ad4m://agent_kind) on every start, so apps can tell its messages from a person's. Managed mode marks the agent it runs; external mode marks only an account of the plugin's own (a multi-user login), never the executor's main agent. Set false to leave the profile as it is, e.g. when the plugin logs in as a person's own account. False does not remove an earlier mark."
+      },
       "multiUser": {
         "type": "boolean",
         "default": false,

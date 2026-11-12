@@ -387,6 +387,7 @@ impl Sub {
             .model_subscribe_and_query(
                 QueryClasses::One(class.into()),
                 q.to_string(),
+                uuid::Uuid::new_v4().to_string(),
                 "c".into(),
                 None,
             )

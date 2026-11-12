@@ -648,6 +648,7 @@ impl IdentityService {
                         did,
                         offer_id: claim.offer_id,
                         match_code: claim.match_code,
+                        needs_accept: claim.needs_accept,
                     },
                 );
                 true
@@ -1128,6 +1129,8 @@ mod tests {
             event.match_code,
             link::match_code(&log.scid(), &offer_id, &main_key)
         );
+        // With an operator record the claim sets none: it needs no accept.
+        assert!(!event.needs_accept);
 
         let store_did = format!("did:key:{}", store.key.multikey());
         for auth in store.inbox_auths.lock().unwrap().iter() {
@@ -1197,7 +1200,8 @@ mod tests {
     /// operator record, the main agent of no identity): the ticket is claimed, not refused
     /// `no-operator`, and the claim records no operator: until the main agent joins, "Show my
     /// code" again takes a ticket of another identity (the record is written at the join,
-    /// `joinStatus`, as on the RPC path).
+    /// `joinStatus`, as on the RPC path). The claim waits for the person here to accept it:
+    /// `link-ticket` says `needsAccept` and the claim is held.
     #[tokio::test]
     async fn a_desktop_with_no_operator_record_claims_its_first_ticket() {
         let log = TestLog::new(88);
@@ -1207,6 +1211,7 @@ mod tests {
         Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
         let _record = OperatorRecord;
         let _channel = crate::config::CustodyChannelForTest::on();
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
         let prepared = prepare_device(&service, true).await.unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         let offer_id = push_ticket(&log, &store, &device);
@@ -1215,6 +1220,22 @@ mod tests {
         assert_eq!(store.claims.lock().unwrap()[0].0, offer_id);
         let record = || Ad4mDb::with_global_instance(|db| db.operator_record()).unwrap();
         assert_eq!(record(), None, "a claim alone records no operator");
+        until("the acknowledgement", || {
+            !store.acks.lock().unwrap().is_empty()
+        })
+        .await;
+        let announced = inbox_events(&mut events);
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].topic, Topic::LinkTicket);
+        let event: LinkTicketEvent = serde_json::from_value(announced[0].payload.clone()).unwrap();
+        assert_eq!(event.offer_id, offer_id);
+        assert!(event.needs_accept, "a first-run claim waits for accept");
+        assert_eq!(
+            Ad4mDb::with_global_instance(|db| db.join(&offer_id))
+                .unwrap()
+                .map(|j| j.accept),
+            Some(crate::db::JoinAccept::Awaiting)
+        );
 
         // The wrong code was scanned: "Show my code" again, and a ticket of another identity
         // is claimed, not refused `first-link`.

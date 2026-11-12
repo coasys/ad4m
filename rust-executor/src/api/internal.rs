@@ -65,7 +65,7 @@ pub async fn internal_shutdown(headers: HeaderMap) -> Result<Json<serde_json::Va
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         log::info!("Exiting process after graceful shutdown");
-        std::process::exit(0);
+        crate::exit::exit_now(0);
     });
 
     Ok(Json(json!({"status": "shutting_down"})))
