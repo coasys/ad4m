@@ -1666,6 +1666,64 @@ mod tests {
         );
     }
 
+    /// `joinStatus` follows the claims of the main agent only. A managed agent that names the
+    /// offer of a claim the main agent made gets `not-found` and is bound to nothing, even
+    /// when the offer is spent; the main agent still finds its claim.
+    #[tokio::test]
+    async fn join_status_answers_only_the_main_agent_for_its_claim() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
+        use ad4m_identity_core::link::OfferString;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = AgentContext::main_agent();
+        let (main_did, _) = device_key(&main).unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+        let email = crate::test_utils::managed_user("join-status");
+        let managed = AgentContext::managed(crate::test_utils::create_test_user(&email));
+        let (managed_did, _) = device_key(&managed).unwrap();
+        let incept = test_service()
+            .cosign_incept(&main, &incept_listing(&main, 58))
+            .await
+            .unwrap();
+        let incept = Event::from_json(&incept).unwrap();
+        let _record = OperatorRecord::set(&did_of(&incept.scid));
+        let backend = Arc::new(RecordingStore::new(vec![incept.clone()], false));
+        let service = service_on(backend.clone());
+        let offer = OfferString {
+            store: "https://store.example".into(),
+            scid: incept.scid.clone(),
+            offer_id: bs58::encode([14u8; 16]).into_string(),
+            s: bs58::encode([1u8; 32]).into_string(),
+        };
+        service
+            .claims()
+            .claim_for_main(&offer, false, None)
+            .await
+            .expect("the main agent claims");
+        *backend.offer.lock().unwrap() = "spent".into();
+
+        let refused = service
+            .claims()
+            .join_status(&managed, &offer.offer_id)
+            .await
+            .expect_err("a managed agent has no claims");
+        assert_eq!(refused.code, 404, "{}", refused.message);
+        assert_eq!(db(|db| db.agent_identity(&managed_did)).unwrap(), None);
+        assert_eq!(db(|db| db.agent_identity(&main_did)).unwrap(), None);
+
+        let status = service
+            .claims()
+            .join_status(&main, &offer.offer_id)
+            .await
+            .expect("the main agent's claim is there");
+        assert_eq!(status.state, "spent");
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
+            Some(incept.scid.clone())
+        );
+    }
+
     /// A desktop app's executor at its first run (`--custody-channel`, no operator record, the
     /// main agent of no identity) claims. A claim the store took records nothing, so before the
     /// join the desktop may claim again, for another identity. Once the add spends the offer and

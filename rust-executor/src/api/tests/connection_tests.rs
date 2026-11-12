@@ -133,7 +133,7 @@ impl Socket {
     async fn subscribe(&mut self, perspective: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         self.send(json!({ "id": id, "type": "perspective.subscribeQuery",
-            "params": { "uuid": perspective, "query": QUERY } }));
+            "params": { "uuid": perspective, "query": QUERY, "subscriptionId": id } }));
         let reply = self.reply(&id).await;
         reply["result"]["subscriptionId"]
             .as_str()
@@ -244,7 +244,8 @@ async fn a_prolog_live_query_gets_400() {
     let mut socket = Socket::open().await;
     socket.send(
         json!({ "id": "prolog", "type": "perspective.subscribeQuery",
-        "params": { "uuid": p.0, "query": "triple(X, _, \"todo-ontology://is-todo\")." } }),
+        "params": { "uuid": p.0, "query": "triple(X, _, \"todo-ontology://is-todo\").",
+            "subscriptionId": "prolog" } }),
     );
     let reply = socket.reply("prolog").await;
     assert_eq!(reply["error"]["code"], 400, "{reply}");
@@ -252,6 +253,41 @@ async fn a_prolog_live_query_gets_400() {
         reply["error"]["message"],
         crate::perspectives::perspective_instance::PROLOG_LIVE_QUERY_UNSUPPORTED
     );
+}
+
+/// A client that gave up on a subscribe call (a timeout or an abort) sends `request.cancel`
+/// and then disposes the id it minted. Whether the cancel catches the call or the call had
+/// already registered (and answered), nothing stays registered.
+#[tokio::test]
+async fn a_subscribe_cancelled_then_disposed_leaves_nothing() {
+    let p = registered_perspective(&[]).await;
+    let mut socket = Socket::open().await;
+    for round in 0..20 {
+        let (call, sub) = (format!("s{round}"), format!("minted-{round}"));
+        socket.send(json!({ "id": call, "type": "perspective.subscribeQuery",
+            "params": { "uuid": p.0, "query": QUERY, "subscriptionId": sub } }));
+        socket.send(
+            json!({ "id": format!("c{round}"), "type": "request.cancel", "params": { "targetId": call } }),
+        );
+        socket.send(
+            json!({ "id": format!("d{round}"), "type": "perspective.disposeQuery",
+            "params": { "uuid": p.0, "subscriptionId": sub } }),
+        );
+        // The call's reply (a result, or 499) and the dispose's, in either order.
+        let mut waiting = vec![call.clone(), format!("d{round}")];
+        while !waiting.is_empty() {
+            let msg = socket.next().await;
+            waiting.retain(|id| msg["id"].as_str() != Some(id.as_str()));
+        }
+        let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
+        assert!(
+            perspective
+                .subscription_state(&sub, &socket.connection_id)
+                .await
+                .is_none(),
+            "round {round}: the subscription stayed"
+        );
+    }
 }
 
 /// Poll until `subscription` of `connection` is gone, for up to 2 s.
@@ -300,7 +336,12 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
                     l.notified().await;
                     let (id, _, _) = crate::perspectives::get_perspective(&uuid)
                         .unwrap()
-                        .subscribe_and_query(QUERY.into(), ctx.connection_id.clone().unwrap(), None)
+                        .subscribe_and_query(
+                            QUERY.into(),
+                            uuid::Uuid::new_v4().to_string(),
+                            ctx.connection_id.clone().unwrap(),
+                            None,
+                        )
                         .await
                         .unwrap();
                     *slot.lock().unwrap() = Some(id);
@@ -615,6 +656,7 @@ fn hanging_subscribe(
             std::future::pending::<Result<Value, WsRpcError>>().await
         }
     })
+    .opens()
     .guard(Guard::Open);
     map
 }
@@ -664,4 +706,34 @@ async fn a_connection_runs_a_bounded_number_of_live_query_opens_at_once() {
     tokio::time::timeout(Duration::from_secs(5), starts.recv())
         .await
         .expect("a waiting call starts once a running one is cancelled");
+}
+
+/// A subscribe cancelled while it waits for a turn never starts: the cancel covers the
+/// wait, so a client that gave up on it and disposed its id leaves nothing behind.
+#[tokio::test]
+async fn a_live_query_open_cancelled_while_it_waits_never_starts() {
+    use crate::api::ws_rpc::MAX_OPENING_LIVE_QUERIES;
+    let (started, mut starts) = mpsc::unbounded_channel();
+    let (dropped, _drops) = mpsc::unbounded_channel();
+    let mut socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
+    for i in 0..=MAX_OPENING_LIVE_QUERIES {
+        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribeQuery" }));
+    }
+    for _ in 0..MAX_OPENING_LIVE_QUERIES {
+        tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .expect("calls up to the cap start");
+    }
+    let waiting = format!("s{MAX_OPENING_LIVE_QUERIES}");
+    socket.send(json!({ "id": "c", "type": "request.cancel", "params": { "targetId": waiting } }));
+    assert_eq!(socket.reply(&waiting).await["error"]["code"], 499);
+
+    // A turn comes free; the cancelled call does not take it.
+    socket.send(json!({ "id": "c0", "type": "request.cancel", "params": { "targetId": "s0" } }));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), starts.recv())
+            .await
+            .is_err(),
+        "the call cancelled while it waited started"
+    );
 }

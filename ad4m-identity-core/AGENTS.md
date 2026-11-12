@@ -22,7 +22,7 @@ request box), is informative.
 | `src/seal.rs` | the one HPKE construction (RFC 9180 base mode, X25519/HKDF-SHA256/ChaCha20-Poly1305, `base64url(enc ‖ ct)`), crate-private; used by `inbox` and `record` |
 | `src/inbox.rs` | the device inbox (spec section 17): `InboxAddress`, `pre_address`, `InboxPayload`, `InboxBody` (`OfferTicket`, `Master`), `sign_payload`, `seal`/`open`, `check_payload` → `Accept` (`ClaimOffer`, `KeepMaster`, `Stale`), `PreInboxAuth` (`sign_pre_auth`, `verify_pre_auth`), `check_sealed` (the store's shape check), the limits |
 | `src/record.rs` | the private details record: `SealedRecord`, `PrivateRecord`, `DeviceEntry`, `DeviceKind`, `Place`, `HoldsMaster`, `PendingRevocation`, `RevocationReason`; `readers` (who a record is wrapped to), `seal_record` (signs the envelope), `open_record` (verifies the receipt and the envelope first), `verify_envelope` → `Writer` (at the head), `envelope_signing_bytes`, `check_sealed` (the store's check), the store's `RecordReceipt` (`sign_receipt`, `verify_receipt` → `Writer` at the receipt's seq, `envelope_hash`, `RECEIPT_DOMAIN`), `record_aad`, `wrap_info`; the recovery key's `RecoveryAttestation`, `Recovery`, `attest_recovery_key`, `verify_attestation`, `recovery_of`, `attestation_signing_bytes` |
-| `src/requests.rs` | the request box: `DeviceRequestBody` (`SendMaster`, `ConfirmRevoke`), `PostedRequest`, `check_post`, `REQUEST_TTL_S`, `MAX_OPEN_REQUESTS` |
+| `src/requests.rs` | the request box: `DeviceRequestBody` (`SendMaster`, `ConfirmRevoke`), `PostedRequest`, `check_post`, `posted_bytes`, `verify_posted` (a reader's check of the poster, on `BoxedRequest`/`SignedStoreRequest`), `REQUEST_TTL_S`, `MAX_OPEN_REQUESTS`, `MAX_OPEN_REQUESTS_PER_KEY` |
 | `src/document.rs` | `did_document(chain, version, also_known_as)`: `DidDocument`, `VerificationMethod`, `DocumentMetadata`, `DocumentError` (spec section 9); the contexts `DID_CONTEXT`, `MULTIKEY_CONTEXT`, `COASYS_CONTEXT` |
 | `src/domain.rs` | the signing-domain registry and labels (spec sections 7 and 16); `signing_bytes`, `verify_signed`, `check_domain`; `LINK_DOMAIN`, `AGENT_RECORD_DOMAIN`, `HEAD_DOMAIN`, `REQUEST_DOMAIN`, `SESSION_DOMAIN` (key statements: a device key's login on an executor); `HeadStatement` (what the store signs for a head; the store signs it, executors verify it) |
 | `src/pow.rs` | `Pow`, `solve`, `solve_range`, `check` (the brake's proof of work, bound to the SCID; host policy, spec section 14) |
@@ -133,7 +133,7 @@ spend a claim.
 `tests/inbox.rs` covers seals (round trip, wrong key, wrong address, tampering), every refusal
 of `check_payload`, offer tickets and pre-join reads; `tests/record.rs` the wrapping (device
 keys and the recovery key, never a bot key), a revoked device and the next version, the AAD,
-the store's check and the record JSON; `tests/requests.rs` expiry and `confirm-revoke` keys.
+the store's check and the record JSON; `tests/requests.rs` expiry, `confirm-revoke` keys and `verify_posted`.
 `vectors/devices.json` pins them with fixed X25519 secrets and the RNG stream of
 `tests/common::TestRng`.
 `tests/document.rs` covers the DID document mapping (live, revoked, bot, rotated,

@@ -129,6 +129,7 @@ import type { PerspectiveLinkMutationsParams } from "./PerspectiveLinkMutationsP
 import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowReceiptParams";
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
+import type { PerspectiveModelSubscribeParams } from "./PerspectiveModelSubscribeParams";
 import type { PerspectiveNamedShacl } from "./PerspectiveNamedShacl";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
@@ -144,6 +145,7 @@ import type { PerspectiveShacl } from "./PerspectiveShacl";
 import type { PerspectiveShaclNameParams } from "./PerspectiveShaclNameParams";
 import type { PerspectiveSparqlParams } from "./PerspectiveSparqlParams";
 import type { PerspectiveSubjectClassesOfParams } from "./PerspectiveSubjectClassesOfParams";
+import type { PerspectiveSubscribeQueryParams } from "./PerspectiveSubscribeQueryParams";
 import type { PerspectiveSubscribed } from "./PerspectiveSubscribed";
 import type { PerspectiveSubscriptionParams } from "./PerspectiveSubscriptionParams";
 import type { PerspectiveUpdateLinkParams } from "./PerspectiveUpdateLinkParams";
@@ -199,6 +201,7 @@ import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
 import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
 import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
 import type { SfuCallJoinParams } from "./SfuCallJoinParams";
+import type { SfuCallLeaveParams } from "./SfuCallLeaveParams";
 import type { SfuCascadeStatus } from "./SfuCascadeStatus";
 import type { SfuConfig } from "./SfuConfig";
 import type { SfuEnsureMembershipParams } from "./SfuEnsureMembershipParams";
@@ -206,6 +209,7 @@ import type { SfuNeighbourhoodParams } from "./SfuNeighbourhoodParams";
 import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPreference";
 import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
+import type { SfuRestartIceParams } from "./SfuRestartIceParams";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
 import type { SfuSendDataParams } from "./SfuSendDataParams";
@@ -363,7 +367,7 @@ export interface RpcMethods {
   "perspective.linkMutations": { params: PerspectiveLinkMutationsParams; result: PerspectiveLinkDiff };
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
-  "perspective.modelSubscribe": { params: PerspectiveModelQueryParams; result: PerspectiveSubscribed };
+  "perspective.modelSubscribe": { params: PerspectiveModelSubscribeParams; result: PerspectiveSubscribed };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
@@ -382,7 +386,7 @@ export interface RpcMethods {
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
   "perspective.subjectClassesOf": { params: PerspectiveSubjectClassesOfParams; result: { [key in string]: Array<string> } };
-  "perspective.subscribeQuery": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
+  "perspective.subscribeQuery": { params: PerspectiveSubscribeQueryParams; result: PerspectiveSubscribed };
   "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
@@ -435,7 +439,8 @@ export interface RpcMethods {
   "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
   "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
-  "sfu.callLeave": { params: SfuRoomParams; result: boolean };
+  "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
+  "sfu.callRestartIce": { params: SfuRestartIceParams; result: boolean };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };
@@ -581,4 +586,10 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
   "runtime.restartHolochain",
+]);
+
+/** Calls that open something on the executor that outlives them (a live query): the client cancels one that timed out, as one it aborted. */
+export const OPENS_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
+  "perspective.modelSubscribe",
+  "perspective.subscribeQuery",
 ]);

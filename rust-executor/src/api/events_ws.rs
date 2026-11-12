@@ -137,6 +137,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::sfu::SfuMigrateEvent>(SfuMigrate, false),
         EventSpec::of::<crate::sfu::SfuDataMessage>(SfuData, false),
         EventSpec::of::<crate::sfu::SfuRoomRoster>(SfuRoomRoster, false),
+        EventSpec::of::<crate::sfu::SfuSessionReplaced>(SfuSessionReplaced, false),
         EventSpec::of::<FlowStateChangedEvent>(FlowStateChanged, true),
         EventSpec::of::<crate::identity::types::IdentityForkEvent>(IdentityFork, false),
         EventSpec::of::<crate::config_rpc::ConfigChanged>(ConfigChanged, false),
@@ -270,6 +271,7 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::SfuMigrate
         | Topic::SfuData
         | Topic::SfuRoomRoster
+        | Topic::SfuSessionReplaced
         | Topic::FlowStateChanged
         | Topic::IdentityFork
         | Topic::ConfigChanged
@@ -2227,6 +2229,7 @@ mod event_spec_tests {
                 Topic::SfuCallRenegotiationOffer,
                 serde_json::to_value(crate::sfu::SfuCallRenegotiationOffer {
                     target_did: "did:a".into(),
+                    participant_id: "P1".into(),
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
                     sdp_offer: "{}".into(),
@@ -2246,6 +2249,7 @@ mod event_spec_tests {
                 Topic::SfuData,
                 serde_json::to_value(crate::sfu::SfuDataMessage {
                     sender_did: "did:a".into(),
+                    sender_participant_id: "P1".into(),
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
                     channel_label: "c".into(),
@@ -2258,7 +2262,19 @@ mod event_spec_tests {
                 serde_json::to_value(crate::sfu::SfuRoomRoster {
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
-                    participants: vec!["did:a".into()],
+                    participants: vec![crate::sfu::SfuRosterParticipant {
+                        agent_did: "did:a".into(),
+                        participant_id: "P1".into(),
+                    }],
+                }),
+            ),
+            (
+                Topic::SfuSessionReplaced,
+                serde_json::to_value(crate::sfu::SfuSessionReplaced {
+                    target_did: "did:a".into(),
+                    neighbourhood_url: "n".into(),
+                    room_name: "r".into(),
+                    participant_id: "P1".into(),
                 }),
             ),
             (

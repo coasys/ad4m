@@ -7,7 +7,8 @@
 //! ```text
 //! { "type": "sfu-announce", "did": "did:key:...",
 //!   "room_id": "windtunnel://t3:t3-sfu-cascade-2node",
-//!   "participant_count": 4, "capacity_hint": 4 }\n
+//!   "participant_count": 1, "capacity_hint": 4,
+//!   "sessions": [{ "agentDid": "did:key:...", "participantId": "P7" }] }\n
 //! ```
 //!
 //! On the receive side the transport spawns one tokio task per
@@ -41,7 +42,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use super::super::cascade::CascadeSignal;
+use super::super::cascade::{describe_frame, CascadeSignal};
 use super::{CascadeGossip, GossipTarget};
 
 /// One peer reachable over TCP gossip.
@@ -276,7 +277,15 @@ async fn reader_loop(
                         }
                     }
                     Err(e) => {
-                        debug!("TcpGossip drop malformed frame: {} -- {:?}", e, line.trim());
+                        // Loud: a peer on another build whose frames this
+                        // build cannot read leaves the cascade half working.
+                        warn!(
+                            "TcpGossip dropped a {} frame (connection of {}) that does not decode: {}",
+                            describe_frame(line.trim()),
+                            bound.as_deref().unwrap_or("an unbound peer"),
+                            e
+                        );
+                        debug!("TcpGossip undecodable frame: {:?}", line.trim());
                     }
                 }
             }
@@ -349,6 +358,7 @@ mod tests {
             room_id: "n:r".into(),
             participant_count: 1,
             capacity_hint: 4,
+            sessions: Vec::new(),
         })
         .unwrap();
         frame.push(b'\n');

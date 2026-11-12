@@ -109,7 +109,8 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   on the last page; `bootstrap` itself ignores the backoff. This is not the
   deleted key-ring re-bootstrap: it runs only while a render is stored, and
   stops at the last page. Without it a fresh member whose first render
-  failed would never load the room (BUG-115). The host's
+  failed would never load the room (BUG-115). One exception: a store that
+  does not hash to the room's revision renders again (below). The host's
   `httpFetch` deadline is a fixed 10 s for every call, and the language
   cannot raise it for `/render`.
 - **A link the key it names does not open costs that link only.** Its
@@ -129,15 +130,32 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   between and the cursor stays.
 - **The first-load snapshot is paged and resumable.** `bootstrap()` stores
   `render/progress` before the first `/render` page and after each one.
-  While a render is stored, `catchUp()` does not tail `/sync`: a render is
-  stored only at cursor 0, and the log from 0 is the full replay the render
-  replaces. `applyInboundWireDiff` applies nothing then either: a WebSocket
+  While a render is stored, `catchUp()` does not tail `/sync`: the snapshot
+  replaces the log up to its `upto`. `applyInboundWireDiff` applies nothing then either: a WebSocket
   push before the first page is inside the snapshot, one after it is in the
   tail. The render's last page is followed by the tail from `upto`, inside
   the same single flight. Nothing is removed after the last page: a fresh
   store holds only the pages and its own commits, which the server has, in
   the snapshot or the tail. A resumed render keeps its `upto`, so the tail
   needs the log after it, which the server keeps.
+- **`render()` answers only a store that is the room.** The link server's
+  revision is the XOR of the active links' `link_hash`, and a member computes
+  each `link_hash` (`wireLinkHash`). So a store with its held ops applied
+  (`storeRevision`, src/sync.ts) must hash to the revision stored with the
+  cursor. `render()` returns null (unknown) while a render is stored or when
+  the store does not hash to it: the executor's fallback sync pushes every
+  shared link `render()` lacks, so a short store made it push most of the
+  room again (12,303 of 12,803 links on staging, 2026-11-10). `currentRevision()` stays the stored revision, never null:
+  the executor reads a null revision as "nothing committed yet".
+  `healIfShort`: once per start, after a catch-up that reached the room's
+  head, a store that does not hash to the room's revision stores a render
+  (the same paged, resumable one) and loads the room again. Builds before
+  #1641 left such stores: every WebSocket push moved the cursor to its own
+  sequence, so a member whose `/render` had failed held only the pushes and
+  its own commits at a cursor near the head, and since #1644 a cursor above
+  0 never rendered again. The render only adds, so a link the store holds
+  and the room does not (or one no key opens) keeps it unknown until the
+  next start's heal.
 - **Encrypted links are base64.** `encryptLinkForWire` writes ciphertext and
   nonce in base64, `decryptLinkFromWire` reads base64. (Sealed key boxes are
   hex: that is the host contract's format, not the link wire format.)

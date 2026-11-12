@@ -562,13 +562,20 @@ impl<'a> LinkGuard<'a> {
     /// `FILTER EXISTS` rather than a join, so two passing links over one triple
     /// do not return the subject twice: the reads that hydrate a relation use
     /// it. `predicate` is a term: `<iri>` or a variable. Empty when open.
+    ///
+    /// The checks on the reifier sit in an inner `FILTER EXISTS`, where
+    /// `?_pv` is bound. Side by side in one group, Oxigraph joins them to the
+    /// `rdf:reifies` pattern without a key (it does not reorder joins inside
+    /// an expression): a Cartesian product that scanned every reifier passing
+    /// the checks, for every row. On 76k links that was a full scan per
+    /// hydrated relation (`test_perf_exists_guard_binds_the_reifier`).
     pub(super) fn exists(&self, subject: &str, predicate: &str, object: &str) -> String {
         if self.is_open() {
             return String::new();
         }
         format!(
             " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
-             <<( {subject} {predicate} {object} )>> .{} }}",
+             <<( {subject} {predicate} {object} )>> . FILTER EXISTS {{{} }} }}",
             self.on_reifier("?_pv")
         )
     }

@@ -33,7 +33,7 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::{NEIGHBOURHOOD_READ_CAPABILITY, NEIGHBOURHOOD_UPDATE_CAPABILITY};
-use crate::sfu::{get_sfu_service, CallSessionInfo, SfuConfig, SfuRoomInfo};
+use crate::sfu::{get_sfu_service, CallJoinError, CallSessionInfo, SfuConfig, SfuRoomInfo};
 use crate::types::RequestContext;
 
 use super::guards::Guard;
@@ -167,24 +167,40 @@ async fn list_rooms(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: SfuCallJoinParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
+    // The join outlives this future (cancel safe), so it asks the session
+    // itself, before it changes the room, whether the token still holds: a
+    // revocation stops it, a client that stops waiting does not.
+    let caller = ctx.session.clone();
     let session = service()?
         .call_join(
             &p.neighbourhood_url,
             &p.room_name,
             &agent_did,
+            &p.device_id,
+            &p.session_key,
             &p.sdp_offer,
             p.accept_redirect.unwrap_or(false),
+            move || caller.check().is_ok(),
         )
         .await
-        .map_err(map_room_err)?;
+        .map_err(|e| match e {
+            CallJoinError::Replaced(m) => WsRpcError::conflict(m),
+            CallJoinError::Unauthorized(m) => WsRpcError::unauthorized(m),
+            CallJoinError::Failed(m) => WsRpcError::internal(m),
+        })?;
     Ok(serde_json::to_value(session)?)
 }
 
 async fn call_leave(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let p: SfuRoomParams = parse(params)?;
+    let p: SfuCallLeaveParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
     let ok = service()?
-        .call_leave(&p.neighbourhood_url, &p.room_name, &agent_did)
+        .call_leave(
+            &p.neighbourhood_url,
+            &p.room_name,
+            &agent_did,
+            &p.participant_id,
+        )
         .await
         .map_err(map_room_err)?;
     Ok(Value::Bool(ok))
@@ -201,6 +217,7 @@ async fn call_set_quality_preference(
             &p.neighbourhood_url,
             &p.room_name,
             &agent_did,
+            &p.participant_id,
             &p.preference,
         )
         .await
@@ -277,7 +294,30 @@ async fn call_answer_server_offer(
             &p.neighbourhood_url,
             &p.room_name,
             &agent_did,
+            &p.participant_id,
             &p.sdp_answer,
+        )
+        .await
+        .map_err(map_room_err)?;
+    Ok(Value::Bool(ok))
+}
+
+// ── ICE restart ───────────────────────────────────────────────────────────────
+//
+// After a network change the client asks the SFU to restart ICE on the
+// caller's own connection. The offer comes back as an
+// `sfu-call-renegotiation-offer` event and is answered with
+// `sfu.callAnswerServerOffer`: the SFU stays the only offerer.
+
+async fn call_restart_ice(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: SfuRestartIceParams = parse(params)?;
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
+    let ok = service()?
+        .call_restart_ice(
+            &p.neighbourhood_url,
+            &p.room_name,
+            &agent_did,
+            &p.participant_id,
         )
         .await
         .map_err(map_room_err)?;
@@ -295,7 +335,13 @@ async fn add_ice_candidate(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     let p: SfuAddIceCandidateParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
     let ok = service()?
-        .add_ice_candidate(&p.neighbourhood_url, &p.room_name, &agent_did, &p.candidate)
+        .add_ice_candidate(
+            &p.neighbourhood_url,
+            &p.room_name,
+            &agent_did,
+            &p.participant_id,
+            &p.candidate,
+        )
         .await
         .map_err(map_room_err)?;
     Ok(Value::Bool(ok))
@@ -325,6 +371,7 @@ async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
             &p.neighbourhood_url,
             &p.room_name,
             &agent_did,
+            &p.participant_id,
             &p.channel_label,
             data,
             binary,
@@ -473,7 +520,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(read());
     map.method::<SfuCallJoinParams, CallSessionInfo>("sfu.callJoin", call_join)
         .guard(update());
-    map.method::<SfuRoomParams, bool>("sfu.callLeave", call_leave)
+    map.method::<SfuCallLeaveParams, bool>("sfu.callLeave", call_leave)
         .guard(update());
     map.method::<SfuQualityPreferenceParams, bool>(
         "sfu.callSetQualityPreference",
@@ -485,6 +532,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         call_answer_server_offer,
     )
     .guard(update());
+    map.method::<SfuRestartIceParams, bool>("sfu.callRestartIce", call_restart_ice)
+        .guard(update());
     map.method::<SfuNeighbourhoodParams, SfuConfig>("sfu.getConfig", get_config)
         .read()
         .guard(read());
@@ -554,11 +603,32 @@ pub struct SfuCallJoinParams {
     pub room_name: String,
     /// JSON-encoded `RTCSessionDescriptionInit`.
     pub sdp_offer: String,
+    /// The device the caller joins from (an opaque id, 1 to 128 characters).
+    /// The caller's session from the same device is replaced; one from
+    /// another device stays beside it.
+    pub device_id: String,
+    /// The client's random key for this call session (1 to 128 characters,
+    /// never published). A rebuild of the session sends it again and
+    /// replaces its own dead session; a join whose key a later join from the
+    /// same device replaced is refused with 409: that session must stop.
+    pub session_key: String,
     /// The caller can reach other cascade nodes, so a busy room may answer
     /// with `redirectTo` instead of a session. Off by default: an SDK client
     /// reaches only this executor.
     #[ts(optional)]
     pub accept_redirect: Option<bool>,
+}
+
+/// `sfu.callLeave`: the session to leave, as its join returned it.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuCallLeaveParams {
+    pub neighbourhood_url: String,
+    pub room_name: String,
+    /// The `participantId` the join returned. Only the caller's own session
+    /// is left; any other id leaves nothing (`false`).
+    pub participant_id: String,
 }
 
 #[derive(Deserialize, TS)]
@@ -567,6 +637,8 @@ pub struct SfuCallJoinParams {
 pub struct SfuQualityPreferenceParams {
     pub neighbourhood_url: String,
     pub room_name: String,
+    /// The caller's session, as its join returned it.
+    pub participant_id: String,
     /// The service rejects any other value.
     #[ts(type = r#""high" | "medium" | "low" | "auto""#)]
     pub preference: String,
@@ -578,8 +650,22 @@ pub struct SfuQualityPreferenceParams {
 pub struct SfuAnswerServerOfferParams {
     pub neighbourhood_url: String,
     pub room_name: String,
+    /// The caller's session, as its join returned it.
+    pub participant_id: String,
     /// JSON-encoded `RTCSessionDescriptionInit`.
     pub sdp_answer: String,
+}
+
+/// `sfu.callRestartIce`: the session whose ICE to restart.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuRestartIceParams {
+    pub neighbourhood_url: String,
+    pub room_name: String,
+    /// The caller's session, as its join returned it. Any other id, even
+    /// another device of the same agent, is refused.
+    pub participant_id: String,
 }
 
 #[derive(Deserialize, TS)]
@@ -596,6 +682,8 @@ pub struct SfuSetConfigParams {
 pub struct SfuAddIceCandidateParams {
     pub neighbourhood_url: String,
     pub room_name: String,
+    /// The caller's session, as its join returned it.
+    pub participant_id: String,
     /// The candidate's SDP attribute line.
     pub candidate: String,
 }
@@ -606,6 +694,8 @@ pub struct SfuAddIceCandidateParams {
 pub struct SfuSendDataParams {
     pub neighbourhood_url: String,
     pub room_name: String,
+    /// The caller's session, as its join returned it.
+    pub participant_id: String,
     pub channel_label: String,
     /// UTF-8 text, or base64 when `binary` is true.
     pub data: String,
@@ -706,11 +796,39 @@ mod tests {
             ),
             (
                 "sfu.sendData",
-                json!({ "neighbourhoodUrl": "n", "roomName": "r", "channelLabel": "c", "data": 1 }),
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "participantId": "P1", "channelLabel": "c", "data": 1 }),
             ),
             (
                 "sfu.sendData",
-                json!({ "neighbourhoodUrl": "n", "roomName": "r", "channelLabel": "c", "data": "x", "binary": "yes" }),
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "participantId": "P1", "channelLabel": "c", "data": "x", "binary": "yes" }),
+            ),
+            // A call about a session names it: one that does not is refused, never
+            // applied to whichever session of the caller's DID comes first.
+            ("sfu.callLeave", room.clone()),
+            (
+                "sfu.callAnswerServerOffer",
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "sdpAnswer": "{}" }),
+            ),
+            (
+                "sfu.addIceCandidate",
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "candidate": "c" }),
+            ),
+            (
+                "sfu.callSetQualityPreference",
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "preference": "low" }),
+            ),
+            (
+                "sfu.sendData",
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "channelLabel": "c", "data": "x" }),
+            ),
+            // A join names its device and its session key.
+            (
+                "sfu.callJoin",
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "sdpOffer": "{}", "sessionKey": "k" }),
+            ),
+            (
+                "sfu.callJoin",
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "sdpOffer": "{}", "deviceId": "d" }),
             ),
             ("sfu.setConfig", json!({ "neighbourhoodUrl": "n" })),
             (
