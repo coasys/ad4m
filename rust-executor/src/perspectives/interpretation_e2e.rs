@@ -1371,8 +1371,8 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
     let mut last_err: Option<String> = None;
     for i in 1..=attempts {
         let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
-        // Semantic dedup embeds identity strings through AIService's own (local,
-        // CPU) embedding model — register it before the run.
+        // Semantic dedup embeds identity strings through AIService's embedding model
+        // (on INTERPRETATION_EMBED_BASE_URL when set) — register it before the run.
         super::interpretation_test_support::register_interpretation_embedding_model().await;
         let task_shape = &shapes[0];
 
@@ -2354,7 +2354,7 @@ async fn auto_processor_election_only_online_participants_process() {
 }
 
 /// Deterministic proof that the `DedupStrategy::Semantic` path — AIService's
-/// local Bert embeddings + cosine threshold — actually drops a paraphrased
+/// endpoint embeddings + cosine threshold — actually drops a paraphrased
 /// duplicate while keeping an unrelated item. The LLM-driven e2e above only
 /// exercises this when the model happens to re-propose the seeded item; this
 /// test removes that non-determinism by feeding hand-crafted proposals straight
@@ -2429,7 +2429,7 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
 /// Full `run_interpretation` e2e that actually exercises the parent-scope
 /// plumbing end-to-end (prompt build → LLM → dedup → write), not just the
 /// isolated `existing_instance_context` helper. One existing Task lives under
-/// parent B. A transcript restates it. Semantic dedup (Bert) removes wording
+/// parent B. A transcript restates it. Semantic dedup (embeddings) removes wording
 /// sensitivity so the assertions turn purely on *scope*:
 ///   - scoped to parent B (contains the seed): the restatement is deduped — no
 ///     fresh `ext/` task is minted (robust: holds whether or not the LLM
