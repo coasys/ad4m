@@ -134,9 +134,20 @@ export interface BrowserUser {
   consoleErrors: string[];
 }
 
-/** Open a tab for a user in its own browser context, with the call harness installed. */
-export async function openTab(browser: Browser, kind: BrowserKind, name: string, did: string, pageUrl: string): Promise<BrowserUser> {
-  const context = await browser.newContext(kind === "firefox" ? {} : { permissions: ["camera", "microphone"] });
+/** A browser profile's storage, as `BrowserContext.storageState()` returns it. */
+export type Profile = Awaited<ReturnType<BrowserContext["storageState"]>>;
+
+/**
+ * Open a tab for a user in its own browser context, with the call harness
+ * installed. A new context is a new browser profile, so the SDK gives the tab
+ * a new device id; `profile` (an earlier context's storage) opens it in that
+ * profile again, with the device id it kept in `localStorage`.
+ */
+export async function openTab(browser: Browser, kind: BrowserKind, name: string, did: string, pageUrl: string, profile?: Profile): Promise<BrowserUser> {
+  const context = await browser.newContext({
+    ...(kind === "firefox" ? {} : { permissions: ["camera", "microphone"] }),
+    ...(profile ? { storageState: profile } : {}),
+  });
   await context.addInitScript(installCallHarness);
   const page = await context.newPage();
   const consoleErrors: string[] = [];
@@ -145,6 +156,8 @@ export async function openTab(browser: Browser, kind: BrowserKind, name: string,
     if (message.type() === "error") consoleErrors.push(message.text().replace(/token=[^'"\s]+/g, "token=…"));
   });
   page.on("pageerror", (error) => consoleErrors.push(`pageerror: ${error.message}`));
+  page.on("crash", () => consoleErrors.push(`the page crashed at ${new Date().toISOString()}`));
+  page.on("close", () => consoleErrors.push(`the page closed at ${new Date().toISOString()}`));
   await page.goto(pageUrl);
   await page.waitForFunction(() => (window as any).ad4mReady === true);
   return { name, kind, did, context, page, consoleErrors };
@@ -152,6 +165,11 @@ export async function openTab(browser: Browser, kind: BrowserKind, name: string,
 
 export async function joinCall(user: BrowserUser, args: JoinArgs): Promise<void> {
   await user.page.evaluate((a) => (window as any).__call.join(a), args);
+}
+
+/** The device id the SDK keeps in the tab's profile (`defaultDeviceId`), or null before a join made one. */
+export async function deviceIdOf(user: BrowserUser): Promise<string | null> {
+  return user.page.evaluate(() => localStorage.getItem("v1/ad4m-sfu-device-id"));
 }
 
 export async function report(user: BrowserUser): Promise<PageReport> {

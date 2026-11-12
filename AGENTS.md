@@ -301,6 +301,25 @@ until the pair connects; `join` waits for the channel to listen before the
 session announces presence; the buffer for not-yet-listed peers never drops a
 description.
 
+Mesh presence (`core/src/neighbourhood/Session.ts`): each device in a mesh
+call puts two links into its agent's one online status, a presence link
+(source `did#device`, `ad4m://session/in-call`, target the room) and a beat
+(same source, `ad4m://session/in-call-beat`, target `<room>#<beat>`). The
+roster poll (3 s) also renews the beat, once every 30 s: one `setOnlineStatus`
+per device per interval, read-modify-write of the status it just read. A
+reader keeps, per device, the beat it last saw and when it first saw it (its
+own clock; writers' clocks are never compared), and leaves a device out once
+the beat has not changed for 90 s. So a device that died without leaving (a
+crash, a closed browser, a lost network) leaves every roster within about
+90 s + a poll, even while another device of its agent keeps the status alive;
+that device's next renewal also drops the dead one's links from the status.
+A presence link without a beat (an older SDK) never goes stale. Renewal stops
+with polling: on leave, destroy, `replaced` and idle. A tab reopened in the
+same browser profile keeps its device id (`localStorage`) and simply takes
+its links over. `sfu-browsers.test.ts` pins both: the same-profile rejoin
+lists the user once, and a dead second device leaves everyone's list within
+`GHOST_GONE_MS`.
+
 ### Port Conflicts
 
 Sometimes an old `ad4m-executor` binary is still running from a previous test run, causing port conflicts. Before running tests, kill any lingering processes:

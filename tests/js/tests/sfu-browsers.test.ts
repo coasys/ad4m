@@ -1,8 +1,8 @@
 import { expect } from "chai";
 import type { Server } from "node:http";
 import {
-  BROWSER_KINDS, joinCall, launch, openTab, outboundIp, receiveProblems, report, servePage, short,
-  type BrowserKind, type BrowserUser, type Launched,
+  BROWSER_KINDS, deviceIdOf, joinCall, launch, openTab, outboundIp, receiveProblems, report, servePage, short,
+  type BrowserKind, type BrowserUser, type Launched, type Profile,
 } from "../helpers/sfu/browser/browsers.js";
 import type { PageReport } from "../helpers/sfu/browser/page.js";
 import { startWorld, type World } from "../helpers/sfu/e2e/world.js";
@@ -36,12 +36,24 @@ const USERS: Record<string, BrowserKind> = {
   firefox: "firefox",
   webkit: "webkit",
 };
-const SCENARIOS = ["chromium", "firefox", "webkit", "mixed", "rejoin"] as const;
+const SCENARIOS = ["chromium", "firefox", "webkit", "mixed", "rejoin", "lost-device"] as const;
 type ScenarioName = (typeof SCENARIOS)[number];
 
 const CONNECT_TIMEOUT_MS = 90_000;
 /** A lost tab's rejoin: the SFU drops the old peer after 10 s of ICE `Disconnected`; the SDK rebuilds within seconds. */
 const REJOIN_TIMEOUT_MS = 150_000;
+/**
+ * How soon a device that died without leaving must leave everyone's list,
+ * while another device of its agent stays in the call. Mesh: each device
+ * renews a beat in its agent's status every 30 s and a reader drops a device
+ * whose beat it has seen unchanged for 90 s (`PRESENCE_STALE_MS` in
+ * core/src/neighbourhood/Session.ts), at its next roster poll (3 s); the
+ * margin covers the status reads and this test's own reads. The SFU drops
+ * the peer after 10 s of ICE `Disconnected`, well inside the bound.
+ */
+const PRESENCE_STALE_MS = 90_000;
+const ROSTER_POLL_MS = 3_000;
+const GHOST_GONE_MS = PRESENCE_STALE_MS + ROSTER_POLL_MS + 30_000;
 
 const neighbourhoodName = (topology: Topology, scenario: ScenarioName) => `${topology}-${scenario}`;
 
@@ -116,11 +128,12 @@ describe("SFU: calls in real browsers, mixed, through the SDK", function () {
     context.skip();
   }
 
-  async function enter(name: string, topology: Topology, scenario: ScenarioName): Promise<BrowserUser> {
+  /** Open a tab for `name` and join the scenario's call; in `profile` (an earlier tab's storage), when given. */
+  async function enter(name: string, topology: Topology, scenario: ScenarioName, profile?: Profile): Promise<BrowserUser> {
     const kind = USERS[name];
     const { browser } = browsers.get(kind)!;
     const worldUser = world!.users[name];
-    const user = await openTab(browser!, kind, name, worldUser.did, pageUrl);
+    const user = await openTab(browser!, kind, name, worldUser.did, pageUrl, profile);
     open.push(user);
     await joinCall(user, {
       executorUrl: `http://127.0.0.1:${worldUser.port}`,
@@ -220,7 +233,7 @@ describe("SFU: calls in real browsers, mixed, through the SDK", function () {
         expectCleanSessions(reports, topology);
       });
 
-      it("firefox's tab is lost mid-call and it rejoins: everyone gets its media again", async function () {
+      it("firefox's tab is lost mid-call and reopened in the same browser profile: it rejoins as the same device and everyone gets its media again", async function () {
         const third = browsers.get("webkit")!.browser ? "webkit" : "chromium-2";
         requireBrowsers(this, ["chromium", "firefox"]);
         this.timeout(REJOIN_TIMEOUT_MS * 2 + 60_000);
@@ -228,12 +241,17 @@ describe("SFU: calls in real browsers, mixed, through the SDK", function () {
         for (const name of ["chromium", "firefox", third]) users.push(await enter(name, topology, "rejoin"));
         await everyoneReceivesEveryone(users, CONNECT_TIMEOUT_MS, "before the loss");
 
-        // The tab goes without a word: no leave, its sockets and connections cut.
+        // The tab goes without a word: no leave, its sockets and connections cut. The
+        // browser profile stays, as a crashed tab's does, and so does the device id in it.
         const lost = users[1];
+        const device = await deviceIdOf(lost);
+        const profile = await lost.context.storageState();
         await lost.context.close();
         open = open.filter((u) => u !== lost);
 
-        const back = await enter("firefox", topology, "rejoin");
+        const back = await enter("firefox", topology, "rejoin", profile);
+        expect(device, "the lost tab's device id").to.be.a("string");
+        expect(await deviceIdOf(back), "the reopened tab's device id").to.equal(device);
         const now = [users[0], back, users[2]];
         const reports = await everyoneReceivesEveryone(now, REJOIN_TIMEOUT_MS, "after firefox rejoined");
         for (const user of now) {
@@ -241,6 +259,63 @@ describe("SFU: calls in real browsers, mixed, through the SDK", function () {
           const listed = reports[user.name].participants;
           expect(listed.filter((did) => did === back.did).length, `${user.name} lists firefox once`).to.be.at.most(1);
         }
+      });
+
+      it("a second device of firefox's user dies mid-call: it leaves everyone's list while the first stays", async function () {
+        // Not WebKit: in a mesh call, headless WebKit's tab crashed (Playwright's `crash` event)
+        // about 50 s after the death, while it still listed the dead device and repaired its
+        // connection to it. That ends this test before it sees the presence it is about.
+        const third = "chromium-2";
+        requireBrowsers(this, ["chromium", "firefox"]);
+        this.timeout(CONNECT_TIMEOUT_MS * 3 + GHOST_GONE_MS + 60_000);
+        const users = [];
+        for (const name of ["chromium", "firefox", third]) users.push(await enter(name, topology, "lost-device"));
+        await everyoneReceivesEveryone(users, CONNECT_TIMEOUT_MS, "before the second device");
+
+        // The same user from another browser profile: a device of its own.
+        const second = await enter("firefox", topology, "lost-device");
+        expect(await deviceIdOf(second), "the second device's id").to.not.equal(await deviceIdOf(users[1]));
+        const firefoxDid = second.did;
+        const tabs: [string, BrowserUser][] = [["chromium", users[0]], ["firefox", users[1]], [third, users[2]], ["firefox-2", second]];
+        /** How often each open tab lists the firefox user: its two devices, less the tab's own. */
+        const counts = async () => {
+          const counted: Record<string, number> = {};
+          for (const [label, tab] of tabs) {
+            if (!open.includes(tab)) continue;
+            const r = await report(tab).catch((error) => {
+              throw new Error(`${label}'s tab: ${error instanceof Error ? error.message : error}; its events: ${JSON.stringify(tab.consoleErrors.slice(-10))}`);
+            });
+            counted[label] = r.participants.filter((did) => did === firefoxDid).length;
+          }
+          return counted;
+        };
+        const until = async (want: (counted: Record<string, number>) => boolean, timeoutMs: number, what: string) => {
+          const deadline = Date.now() + timeoutMs;
+          for (;;) {
+            const counted = await counts().catch((error) => {
+              throw new Error(`${what}: ${error instanceof Error ? error.message : error}`);
+            });
+            if (want(counted)) return;
+            if (Date.now() > deadline) throw new Error(`${what} within ${timeoutMs / 1000} s; firefox listed: ${JSON.stringify(counted)}`);
+            await new Promise((resolve) => setTimeout(resolve, 1_500));
+          }
+        };
+        // Every other user lists both firefox devices; each firefox device lists the other.
+        await until((c) => c.chromium === 2 && c[third] === 2 && c.firefox === 1 && c["firefox-2"] === 1,
+          CONNECT_TIMEOUT_MS, "not everyone listed both firefox devices");
+
+        // The second device goes without a word: no leave, its sockets and connections cut,
+        // and its profile with it, so nothing comes back as that device.
+        await second.context.close();
+        open = open.filter((u) => u !== second);
+        const lostAt = Date.now();
+
+        await until((c) => c.chromium === 1 && c[third] === 1 && c.firefox === 0,
+          GHOST_GONE_MS, "the dead device did not leave every list");
+        console.log(`    the dead device left every list ${Math.round((Date.now() - lostAt) / 1000)} s after it died`);
+        // The first device is still in the call, heard and seen by everyone.
+        const reports = await everyoneReceivesEveryone(users, CONNECT_TIMEOUT_MS, "after the second device died");
+        expectCleanSessions(reports, topology);
       });
     });
   }
