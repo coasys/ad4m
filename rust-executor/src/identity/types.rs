@@ -326,6 +326,10 @@ pub struct ClaimOfferResult {
     pub kind: OfferKind,
     #[ts(type = "number")]
     pub expires: u64,
+    /// The claim would make its identity this executor's operator (a desktop app's first run:
+    /// `--custody-channel`, no operator record): it binds only after `identity.acceptJoin`.
+    /// Until then `identity.joinStatus` answers `awaiting-accept`, even once the offer is spent.
+    pub needs_accept: bool,
 }
 
 /// `identity.joinStatus` params.
@@ -335,8 +339,43 @@ pub struct JoinStatusParams {
     pub offer_id: String,
 }
 
-/// `identity.joinStatus`: the offer's state for this executor's key. On `spent` the log lists
-/// the key and the agent speaks for `did`.
+/// `identity.acceptJoin` params: the offer of the claim to accept.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptJoinParams {
+    pub offer_id: String,
+}
+
+/// `identity.acceptJoin`: the claim is accepted; the next `identity.joinStatus` that reads
+/// `spent` binds the main agent and records the operator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinAccepted {
+    #[ts(type = "true")]
+    pub accepted: bool,
+}
+
+/// `identity.cancelJoin` params: the offer of the claim to cancel.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelJoinParams {
+    pub offer_id: String,
+}
+
+/// `identity.cancelJoin`: the claim never binds, even if the holder confirms it later.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinCancelled {
+    #[ts(type = "true")]
+    pub cancelled: bool,
+}
+
+/// `identity.joinStatus`: the claim's state for this executor's key. The store's offer
+/// states (`open`, `claimed`, `spent`, `expired`, `cancelled`, `contested`, `superseded`),
+/// and two of this executor's: `awaiting-accept` while a claim that needs accept
+/// (`ClaimOfferResult.needsAccept`) is claimed or spent and not yet accepted (nothing is
+/// bound), and `cancelled` once `identity.cancelJoin` cancelled the claim (it never binds).
+/// On `spent` the log lists the key and the agent speaks for `did`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct JoinStatus {
@@ -691,6 +730,8 @@ pub struct LinkTicketEvent {
     pub did: String,
     pub offer_id: String,
     pub match_code: String,
+    /// The claim binds only after `identity.acceptJoin` (as `ClaimOfferResult.needsAccept`).
+    pub needs_accept: bool,
 }
 
 /// `inbox-message`: a message waits in this executor's inbox; for a `master` the custody

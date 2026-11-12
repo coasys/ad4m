@@ -659,6 +659,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "offer": "coasys:offer:1:x" }),
     ),
     ("identity.joinStatus", || json!({ "offerId": "o" })),
+    ("identity.acceptJoin", || json!({ "offerId": "o" })),
+    ("identity.cancelJoin", || json!({ "offerId": "o" })),
     ("identity.inboxAck", || json!({ "id": "m" })),
     (
         "identity.inboxPut",
@@ -1140,6 +1142,8 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
         vec![
             "agent.signSessionStatement",
             "agent.unlock",
+            "identity.acceptJoin",
+            "identity.cancelJoin",
             "identity.custodyStatus",
             "identity.inbox",
             "identity.inboxAck",
@@ -1399,6 +1403,8 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
         operator_methods,
         vec![
             "agent.signSessionStatement",
+            "identity.acceptJoin",
+            "identity.cancelJoin",
             "identity.claimOffer",
             "identity.custodyStatus",
             "identity.inbox",

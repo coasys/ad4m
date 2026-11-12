@@ -54,6 +54,56 @@ pub struct JoinRow {
     /// The identity's SCID.
     pub scid: String,
     pub claimed_at: u64,
+    /// Whether the person at this computer must accept the claim before the main agent joins.
+    pub accept: JoinAccept,
+}
+
+/// A claim's local accept (`identity_joins.accept`). A claim that would set the operator
+/// record (a desktop's first run, `FirstLink::FirstRun`) waits for the person at this computer
+/// (`identity.acceptJoin`); any claim may be cancelled here (`identity.cancelJoin`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinAccept {
+    /// A claim that sets no operator record: the main agent joins once the offer is spent. A
+    /// row written before the column existed reads as this.
+    NotNeeded,
+    /// A first-run claim: the main agent does not join until the person accepts it.
+    Awaiting,
+    /// The person at this computer accepted the claim.
+    Accepted,
+    /// The person at this computer cancelled the claim: it never binds.
+    Cancelled,
+}
+
+/// What [`Ad4mDb::cancel_join`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinCancel {
+    /// The claim is cancelled (now or before).
+    Cancelled,
+    /// No claim on that offer.
+    NoClaim,
+    /// The agent already speaks for the claim's identity: too late to cancel.
+    AlreadyJoined,
+}
+
+impl JoinAccept {
+    fn as_str(self) -> &'static str {
+        match self {
+            JoinAccept::NotNeeded => "not-needed",
+            JoinAccept::Awaiting => "awaiting",
+            JoinAccept::Accepted => "accepted",
+            JoinAccept::Cancelled => "cancelled",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "not-needed" => Some(JoinAccept::NotNeeded),
+            "awaiting" => Some(JoinAccept::Awaiting),
+            "accepted" => Some(JoinAccept::Accepted),
+            "cancelled" => Some(JoinAccept::Cancelled),
+            _ => None,
+        }
+    }
 }
 
 fn to_sql(n: u64) -> i64 {
@@ -64,7 +114,8 @@ fn from_sql(n: i64) -> u64 {
     u64::try_from(n).unwrap_or(0)
 }
 
-/// Creates the identity tables (idempotent).
+/// Creates the identity tables (idempotent), and adds `identity_joins.accept` to a table made
+/// before it existed (its rows read `not-needed`).
 pub(crate) fn create_identity_tables(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS operator_record (
@@ -81,9 +132,21 @@ pub(crate) fn create_identity_tables(conn: &Connection) -> rusqlite::Result<()> 
          CREATE TABLE IF NOT EXISTS identity_joins (
             offer_id TEXT PRIMARY KEY,
             scid TEXT NOT NULL,
-            claimed_at INTEGER NOT NULL
+            claimed_at INTEGER NOT NULL,
+            accept TEXT NOT NULL DEFAULT 'not-needed'
          );",
-    )
+    )?;
+    let has_accept: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('identity_joins') WHERE name = 'accept'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_accept {
+        conn.execute_batch(
+            "ALTER TABLE identity_joins ADD COLUMN accept TEXT NOT NULL DEFAULT 'not-needed'",
+        )?;
+    }
+    Ok(())
 }
 
 /// The operator record in `conn`, if set.
@@ -164,6 +227,22 @@ fn set_agent_identity_in(
     }
 }
 
+/// The local accept of the claim on `offer_id` in `conn`, if there is one.
+fn join_accept_in(conn: &Connection, offer_id: &str) -> Ad4mDbResult<Option<JoinAccept>> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT accept FROM identity_joins WHERE offer_id = ?1",
+            params![offer_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    text.map(|t| {
+        JoinAccept::parse(&t)
+            .ok_or_else(|| anyhow::anyhow!("identity_joins.accept {t:?} is unknown"))
+    })
+    .transpose()
+}
+
 impl Ad4mDb {
     pub(super) fn create_identity_tables(conn: &Connection) -> rusqlite::Result<()> {
         create_identity_tables(conn)
@@ -206,19 +285,57 @@ impl Ad4mDb {
         set_agent_identity_in(&self.conn, agent_did, scid, set_at)
     }
 
+    /// The end of a claim this executor made (`offer_id`), in one transaction: records that the
+    /// local agent `agent_did` speaks for `scid` (as [`Ad4mDb::set_agent_identity`]) unless the
+    /// claim is cancelled, so a cancel that lands first binds nothing.
+    pub fn set_agent_identity_of_join(
+        &self,
+        agent_did: &str,
+        scid: &str,
+        set_at: u64,
+        offer_id: &str,
+    ) -> Ad4mDbResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        match join_accept_in(&tx, offer_id)? {
+            Some(JoinAccept::Cancelled) => {
+                return Err(anyhow::anyhow!(
+                    "the claim of offer {offer_id} is cancelled"
+                ))
+            }
+            Some(_) => {}
+            None => return Err(anyhow::anyhow!("no claim of offer {offer_id}")),
+        }
+        set_agent_identity_in(&tx, agent_did, scid, set_at)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// The end of a desktop app's first link, in one transaction: records that the local agent
     /// `agent_did` speaks for `scid` (as [`Ad4mDb::set_agent_identity`]) and, while the operator
     /// record is empty, that `operator_did` (the identity's DID) is the operator
     /// (`OperatorSetBy::FirstRun`). Both or neither: a process that stops between them leaves
-    /// no binding without its operator. Answers the operator record as it stands afterwards.
+    /// no binding without its operator. `offer_id` is the claim that joins: it must read
+    /// `accepted` inside the same transaction, so a cancel that lands first binds nothing.
+    /// Answers the operator record as it stands afterwards.
     pub fn set_agent_identity_and_first_run_operator(
         &self,
         agent_did: &str,
         scid: &str,
         operator_did: &str,
         set_at: u64,
+        offer_id: &str,
     ) -> Ad4mDbResult<OperatorRecordRow> {
         let tx = self.conn.unchecked_transaction()?;
+        match join_accept_in(&tx, offer_id)? {
+            Some(JoinAccept::Accepted) => {}
+            Some(other) => {
+                return Err(anyhow::anyhow!(
+                    "the claim of offer {offer_id} is {}, not accepted",
+                    other.as_str()
+                ))
+            }
+            None => return Err(anyhow::anyhow!("no claim of offer {offer_id}")),
+        }
         set_agent_identity_in(&tx, agent_did, scid, set_at)?;
         let record =
             set_operator_record_if_empty_in(&tx, operator_did, set_at, OperatorSetBy::FirstRun)?;
@@ -271,28 +388,75 @@ impl Ad4mDb {
     /// Remembers a claim this executor made, so `identity.joinStatus` can follow it.
     pub fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO identity_joins (offer_id, scid, claimed_at) VALUES (?1, ?2, ?3)",
-            params![join.offer_id, join.scid, to_sql(join.claimed_at)],
+            "INSERT OR REPLACE INTO identity_joins (offer_id, scid, claimed_at, accept) VALUES (?1, ?2, ?3, ?4)",
+            params![join.offer_id, join.scid, to_sql(join.claimed_at), join.accept.as_str()],
         )?;
         Ok(())
     }
 
+    /// Sets the local accept of the claim on `offer_id`; false when there is no such claim or
+    /// it is cancelled (a cancel is final: an accept racing it never undoes it).
+    pub fn set_join_accept(&self, offer_id: &str, accept: JoinAccept) -> Ad4mDbResult<bool> {
+        Ok(self.conn.execute(
+            "UPDATE identity_joins SET accept = ?2 WHERE offer_id = ?1 AND accept != 'cancelled'",
+            params![offer_id, accept.as_str()],
+        )? > 0)
+    }
+
+    /// Cancels the claim on `offer_id` unless `agent_did` already speaks for its identity, in
+    /// one transaction with that check: a binding written first wins, and one written after
+    /// is refused ([`Ad4mDb::set_agent_identity_of_join`]). Cancelling twice is `Cancelled`.
+    pub fn cancel_join(&self, offer_id: &str, agent_did: &str) -> Ad4mDbResult<JoinCancel> {
+        let tx = self.conn.unchecked_transaction()?;
+        let scid: Option<String> = tx
+            .query_row(
+                "SELECT scid FROM identity_joins WHERE offer_id = ?1",
+                params![offer_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(scid) = scid else {
+            return Ok(JoinCancel::NoClaim);
+        };
+        if agent_identity_in(&tx, agent_did)?.as_deref() == Some(scid.as_str()) {
+            return Ok(JoinCancel::AlreadyJoined);
+        }
+        tx.execute(
+            "UPDATE identity_joins SET accept = ?2 WHERE offer_id = ?1",
+            params![offer_id, JoinAccept::Cancelled.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(JoinCancel::Cancelled)
+    }
+
     /// The claim this executor made on `offer_id`, if any.
     pub fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>> {
-        Ok(self
+        let row = self
             .conn
             .query_row(
-                "SELECT offer_id, scid, claimed_at FROM identity_joins WHERE offer_id = ?1",
+                "SELECT offer_id, scid, claimed_at, accept FROM identity_joins WHERE offer_id = ?1",
                 params![offer_id],
                 |row| {
-                    Ok(JoinRow {
-                        offer_id: row.get(0)?,
-                        scid: row.get(1)?,
-                        claimed_at: from_sql(row.get(2)?),
-                    })
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
                 },
             )
-            .optional()?)
+            .optional()?;
+        row.map(|(offer_id, scid, claimed_at, accept)| {
+            Ok(JoinRow {
+                offer_id,
+                scid,
+                claimed_at: from_sql(claimed_at),
+                accept: JoinAccept::parse(&accept).ok_or_else(|| {
+                    anyhow::anyhow!("identity_joins.accept {accept:?} is unknown")
+                })?,
+            })
+        })
+        .transpose()
     }
 }
 
@@ -367,21 +531,24 @@ mod tests {
     #[test]
     fn the_first_run_binding_and_operator_are_one_write() {
         let (_dir, db) = db();
+        for offer in ["a", "b", "c"] {
+            db.add_join(&accepted_join(offer)).unwrap();
+        }
         db.fail_operator_record_writes_for_test(true).unwrap();
         assert!(db
-            .set_agent_identity_and_first_run_operator("did:key:z6MkA", "QmA", "did:scid:A", 1)
+            .set_agent_identity_and_first_run_operator("did:key:z6MkA", "QmA", "did:scid:A", 1, "a")
             .is_err());
         assert_eq!(db.agent_identity("did:key:z6MkA").unwrap(), None);
         db.fail_operator_record_writes_for_test(false).unwrap();
 
         db.set_agent_identity("did:key:z6MkB", "QmB", 1).unwrap();
         assert!(db
-            .set_agent_identity_and_first_run_operator("did:key:z6MkB", "QmA", "did:scid:A", 2)
+            .set_agent_identity_and_first_run_operator("did:key:z6MkB", "QmA", "did:scid:A", 2, "b")
             .is_err());
         assert_eq!(db.operator_record().unwrap(), None);
 
         let set = db
-            .set_agent_identity_and_first_run_operator("did:key:z6MkA", "QmA", "did:scid:A", 3)
+            .set_agent_identity_and_first_run_operator("did:key:z6MkA", "QmA", "did:scid:A", 3, "a")
             .unwrap();
         assert_eq!(
             (set.scid.as_str(), set.set_by),
@@ -393,12 +560,108 @@ mod tests {
         );
         // A record that stands is kept: the binding lands, the record does not change.
         let again = db
-            .set_agent_identity_and_first_run_operator("did:key:z6MkC", "QmC", "did:scid:C", 4)
+            .set_agent_identity_and_first_run_operator("did:key:z6MkC", "QmC", "did:scid:C", 4, "c")
             .unwrap();
         assert_eq!(again, set);
         assert_eq!(
             db.agent_identity("did:key:z6MkC").unwrap().as_deref(),
             Some("QmC")
+        );
+    }
+
+    fn accepted_join(offer_id: &str) -> JoinRow {
+        JoinRow {
+            offer_id: offer_id.into(),
+            scid: "QmA".into(),
+            claimed_at: 1,
+            accept: JoinAccept::Accepted,
+        }
+    }
+
+    /// The first-run write reads the claim's accept in its own transaction: a claim awaiting
+    /// accept, a cancelled one and an unknown offer bind nothing and record no operator.
+    #[test]
+    fn the_first_run_write_binds_only_an_accepted_claim() {
+        let (_dir, db) = db();
+        for (offer, accept) in [
+            ("waiting", JoinAccept::Awaiting),
+            ("cancelled", JoinAccept::Cancelled),
+            ("plain", JoinAccept::NotNeeded),
+        ] {
+            db.add_join(&JoinRow {
+                accept,
+                ..accepted_join(offer)
+            })
+            .unwrap();
+        }
+        for offer in ["waiting", "cancelled", "plain", "unknown"] {
+            assert!(
+                db.set_agent_identity_and_first_run_operator(
+                    "did:key:z6MkA",
+                    "QmA",
+                    "did:scid:A",
+                    1,
+                    offer
+                )
+                .is_err(),
+                "{offer}"
+            );
+        }
+        assert_eq!(db.agent_identity("did:key:z6MkA").unwrap(), None);
+        assert_eq!(db.operator_record().unwrap(), None);
+    }
+
+    /// A claim's binding is refused once the claim is cancelled, or with no claim; a claim
+    /// that needs no accept binds without one. A cancel after the binding is refused
+    /// `AlreadyJoined` and leaves the claim as it was.
+    #[test]
+    fn a_cancelled_claim_binds_nothing_and_a_bound_one_is_not_cancelled() {
+        let (_dir, db) = db();
+        for (offer, accept) in [
+            ("plain", JoinAccept::NotNeeded),
+            ("cancelled", JoinAccept::Cancelled),
+        ] {
+            db.add_join(&JoinRow {
+                accept,
+                ..accepted_join(offer)
+            })
+            .unwrap();
+        }
+        for offer in ["cancelled", "unknown"] {
+            assert!(
+                db.set_agent_identity_of_join("did:key:z6MkA", "QmA", 1, offer)
+                    .is_err(),
+                "{offer}"
+            );
+        }
+        assert_eq!(db.agent_identity("did:key:z6MkA").unwrap(), None);
+        assert_eq!(
+            db.cancel_join("unknown", "did:key:z6MkA").unwrap(),
+            JoinCancel::NoClaim
+        );
+        assert_eq!(
+            db.cancel_join("cancelled", "did:key:z6MkA").unwrap(),
+            JoinCancel::Cancelled
+        );
+
+        db.set_agent_identity_of_join("did:key:z6MkA", "QmA", 1, "plain")
+            .unwrap();
+        assert_eq!(
+            db.agent_identity("did:key:z6MkA").unwrap().as_deref(),
+            Some("QmA")
+        );
+        assert_eq!(
+            db.cancel_join("plain", "did:key:z6MkA").unwrap(),
+            JoinCancel::AlreadyJoined
+        );
+        assert_eq!(
+            db.join("plain").unwrap().map(|j| j.accept),
+            Some(JoinAccept::NotNeeded)
+        );
+        // Another agent's claim on the same identity is still cancelled.
+        assert_eq!(
+            db.cancel_join("plain", "did:key:z6MkB").unwrap(),
+            JoinCancel::Cancelled
         );
     }
 
@@ -409,9 +672,50 @@ mod tests {
             offer_id: "offer".into(),
             scid: "QmA".into(),
             claimed_at: 5,
+            accept: JoinAccept::Awaiting,
         };
         db.add_join(&join).unwrap();
-        assert_eq!(db.join("offer").unwrap(), Some(join));
+        assert_eq!(db.join("offer").unwrap(), Some(join.clone()));
         assert_eq!(db.join("other").unwrap(), None);
+        assert!(db.set_join_accept("offer", JoinAccept::Accepted).unwrap());
+        assert!(!db.set_join_accept("other", JoinAccept::Accepted).unwrap());
+        assert_eq!(
+            db.join("offer").unwrap().map(|j| j.accept),
+            Some(JoinAccept::Accepted)
+        );
+        // A cancel is final: a later accept changes nothing.
+        assert!(db.set_join_accept("offer", JoinAccept::Cancelled).unwrap());
+        assert!(!db.set_join_accept("offer", JoinAccept::Accepted).unwrap());
+        assert_eq!(
+            db.join("offer").unwrap().map(|j| j.accept),
+            Some(JoinAccept::Cancelled)
+        );
+    }
+
+    /// A database made before `identity_joins.accept` gets the column at open; its rows read
+    /// `not-needed` (`joinStatus` still holds them while there is no operator record).
+    #[test]
+    fn a_joins_table_without_accept_gets_the_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE identity_joins (
+                    offer_id TEXT PRIMARY KEY, scid TEXT NOT NULL, claimed_at INTEGER NOT NULL);
+                 INSERT INTO identity_joins VALUES ('old', 'QmA', 7);",
+            )
+            .unwrap();
+        }
+        let db = Ad4mDb::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            db.join("old").unwrap(),
+            Some(JoinRow {
+                offer_id: "old".into(),
+                scid: "QmA".into(),
+                claimed_at: 7,
+                accept: JoinAccept::NotNeeded,
+            })
+        );
     }
 }

@@ -584,6 +584,8 @@ impl ExecutorRpc for TestExecutor {
                     "matchCode": link::match_code(&offer.scid, &offer.offer_id, &self.device_key()),
                     "kind": body["kind"],
                     "expires": body["expires"],
+                    // An executor with an operator record: its claims need no accept.
+                    "needsAccept": false,
                 }))
             }
             "identity.joinStatus" => {

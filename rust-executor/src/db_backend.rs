@@ -32,8 +32,8 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 
 use crate::db::{
-    Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinRow,
-    OperatorRecordRow, OperatorSetBy, PaymentRequest,
+    Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinAccept, JoinCancel,
+    JoinRow, OperatorRecordRow, OperatorSetBy, PaymentRequest,
 };
 use crate::types::{
     AIModelLoadingStatus, AIPromptExamples, AITask, EntanglementProof, Expression, ImportResult,
@@ -390,11 +390,14 @@ macro_rules! ad4m_db_methods {
             fn set_operator_record_if_empty(&self, scid: &str, set_at: u64, set_by: OperatorSetBy) -> Ad4mDbResult<OperatorRecordRow>;
             fn agent_identity(&self, agent_did: &str) -> Ad4mDbResult<Option<String>>;
             fn set_agent_identity(&self, agent_did: &str, scid: &str, set_at: u64) -> Ad4mDbResult<()>;
-            fn set_agent_identity_and_first_run_operator(&self, agent_did: &str, scid: &str, operator_did: &str, set_at: u64) -> Ad4mDbResult<OperatorRecordRow>;
+            fn set_agent_identity_of_join(&self, agent_did: &str, scid: &str, set_at: u64, offer_id: &str) -> Ad4mDbResult<()>;
+            fn set_agent_identity_and_first_run_operator(&self, agent_did: &str, scid: &str, operator_did: &str, set_at: u64, offer_id: &str) -> Ad4mDbResult<OperatorRecordRow>;
             fn agents_of_identity(&self, scid: &str) -> Ad4mDbResult<Vec<String>>;
             fn local_identities(&self) -> Ad4mDbResult<Vec<String>>;
             fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
+            fn set_join_accept(&self, offer_id: &str, accept: JoinAccept) -> Ad4mDbResult<bool>;
+            fn cancel_join(&self, offer_id: &str, agent_did: &str) -> Ad4mDbResult<JoinCancel>;
 
             // Re-key of the main agent: the rows that move to its new DID (`db/rekey.rs`)
             fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
