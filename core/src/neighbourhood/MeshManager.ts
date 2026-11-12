@@ -105,6 +105,12 @@ export type CallBody =
     | { kind: "reset" }
     /** Application data, relayed over signalling because the mesh has no server. SDK-only. */
     | { kind: "data"; label: string; data: string; binary: boolean }
+    /**
+     * The sender is still in the call: sent to all on a timer by the session
+     * (`MeshManager.beat`), reported as the `beat` event. Not persisted. An SDK
+     * from before it parses it to nothing and drops it without a word.
+     */
+    | { kind: "beat" }
 
 export interface CallEnvelope extends CallGenerations {
     v: number
@@ -155,6 +161,8 @@ export function parseCallMessage(payload: unknown): CallMessage | null {
     }
 
     if (msg.kind === "reset") return { ...envelope, kind: "reset" }
+
+    if (msg.kind === "beat") return { ...envelope, kind: "beat" }
 
     if (msg.kind === "data") {
         const { label, data, binary } = msg as { label?: unknown; data?: unknown; binary?: unknown }
@@ -361,6 +369,8 @@ export type MeshEvent =
     | "peer-state"
     /** `(did, { rung, attempts })` — a repair was attempted on this pair. */
     | "peer-recovery"
+    /** `(did)` — a peer of this call beat ({@link MeshManager.beat}), listed in the roster or not. */
+    | "beat"
     | "error"
 
 export type MeshEventCallback = (...args: any[]) => void
@@ -655,6 +665,12 @@ export class MeshManager {
             const to = (payload as { to?: unknown }).to
             if (typeof to === "string" && to !== TARGET_ALL && to !== this.selfId) return
 
+            // Liveness, not signalling: reported for any sender, never held.
+            if (message.kind === "beat") {
+                this.emit("beat", from)
+                return
+            }
+
             // Only peers the roster placed in the call. Without this, anyone on
             // the channel could open a connection by sending an offer.
             const slot = this.slots.get(from)
@@ -829,6 +845,16 @@ export class MeshManager {
      */
     sendData(label: string, data: string, binary: boolean = false): void {
         this.publish({ v: CALL_PROTOCOL_VERSION, call: this.callId, to: TARGET_ALL, kind: "data", label, data, binary })
+    }
+
+    /**
+     * Tell every peer of the call that this one is still in it. Through
+     * {@link publish}, so a beat's publish result is counted like any other
+     * send. Nothing once the mesh has left.
+     */
+    beat(): void {
+        if (this.closed) return
+        this.publish({ v: CALL_PROTOCOL_VERSION, call: this.callId, to: TARGET_ALL, kind: "beat" })
     }
 
     subscribeDataChannel(callback: (msg: SfuDataMessage) => void): () => void {

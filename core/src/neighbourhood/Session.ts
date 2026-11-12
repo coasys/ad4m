@@ -114,10 +114,11 @@ interface SessionImplConfig {
      *  membership so other agents' roster polls can discover it. */
     setOnlineStatus?: (status: { links: StatusLink[] }) => Promise<boolean>
     /** This agent's current online status. The session adds its presence
-     *  link and beat to it and takes them out again, leaving the app's own
-     *  links and the presence of this agent's other live devices — which the
-     *  mesh roster reads from here too. A device whose beat went stale is
-     *  taken out at this device's next renewal. */
+     *  link and marker to it at join and takes them out again at leave,
+     *  leaving the app's own links and the presence of this agent's other
+     *  live devices — which the mesh roster reads from here too. A device of
+     *  this agent that stopped beating is taken out once, by the poll that
+     *  finds it stale. */
     ownOnlineStatus?: () => Promise<{ data?: { links?: { data?: Partial<StatusLink> }[] } } | null>
     /** Poll for agents currently online in the neighbourhood.  The
      *  session reconciles the result against its mesh connections. */
@@ -136,29 +137,33 @@ interface SessionImplConfig {
  * online-status link with this predicate, its mesh peer id as source and
  * the room id as target.  Other agents polling `onlineAgents()` use this
  * to discover the roster without a join message; one agent's devices each
- * add a link of their own to the agent's one status, with a beat beside it
- * ({@link CALL_BEAT_PREDICATE}) that shows the device is still there.
+ * add a link of their own to the agent's one status, with the marker
+ * ({@link CALL_BEATS_PREDICATE}) beside it.
  */
 const CALL_PRESENCE_PREDICATE = "ad4m://session/in-call"
 
 type StatusLink = { source: string; predicate?: string; target: string }
 
 /**
- * Call-presence beat predicate. Beside its presence link, each device in a
- * mesh call carries one link with this predicate, its peer id as source and
- * `<roomId>#<beat>` as target. The device writes a new beat every
- * {@link PRESENCE_RENEW_INTERVAL_MS}; a reader takes the device as gone once
- * it has seen the same beat for {@link PRESENCE_STALE_MS} by its own clock.
- * The beat is only compared for change, never with the reader's time, so
- * clocks need not agree. A presence link without a beat (an SDK from before
- * the beat) never goes stale.
+ * Marker predicate: the device beats. Beside its presence link, each device
+ * in a mesh call writes one link with this predicate, its peer id as source
+ * and the room id as target, once, at join. The marker never changes; the
+ * beat itself travels as a `beat` message over the call's signalling
+ * ({@link MeshManager.beat}), every {@link BEAT_INTERVAL_MS}, and is never
+ * persisted. A reader leaves out a device with the marker that it has not
+ * heard beat for {@link PRESENCE_STALE_MS} by its own clock, counted from
+ * when it first saw the device if it never heard it. A presence link without
+ * the marker (an SDK from before the beat) never goes stale.
  */
-const CALL_BEAT_PREDICATE = "ad4m://session/in-call-beat"
+const CALL_BEATS_PREDICATE = "ad4m://session/in-call-beat"
 
-/** How often (ms) a mesh device writes a new beat into its agent's status. */
-const PRESENCE_RENEW_INTERVAL_MS = 30_000
+/**
+ * How often (ms) a mesh device beats. Beats are best effort: a reader keeps a
+ * device through three lost beats in a row, with 10 s to spare for the fourth.
+ */
+const BEAT_INTERVAL_MS = 20_000
 
-/** How long (ms) a reader keeps a device whose beat has not changed. */
+/** How long (ms) a reader keeps a device with the marker that it has not heard beat. */
 const PRESENCE_STALE_MS = 90_000
 
 /** How often (ms) the mesh session polls `onlineAgents` for roster changes. */
@@ -171,34 +176,25 @@ function peerOf(did: string, source: unknown): string | null {
 }
 
 /**
- * The mesh peer a call-presence link of `did` announces, or `null`. A link
- * counts only for a peer of the agent whose status carries it, so no agent
- * can place another in a call.
+ * The mesh peer a call-presence link or marker of `did` names for `roomId`,
+ * or `null`. A link counts only for a peer of the agent whose status carries
+ * it, so no agent can place another in a call.
  */
-function presencePeer(did: string, link: Partial<StatusLink> | undefined, roomId: string): string | null {
-    if (link?.predicate !== CALL_PRESENCE_PREDICATE || link.target !== roomId) return null
+function callPeer(did: string, link: Partial<StatusLink> | undefined, roomId: string, predicate: string): string | null {
+    if (link?.predicate !== predicate || link.target !== roomId) return null
     return peerOf(did, link.source)
 }
 
-/** The device and beat a beat link of `did` carries for `roomId`, or `null`; see {@link CALL_BEAT_PREDICATE}. */
-function presenceBeat(did: string, link: Partial<StatusLink> | undefined, roomId: string): { peer: string; beat: string } | null {
-    if (link?.predicate !== CALL_BEAT_PREDICATE || typeof link.target !== "string") return null
-    const at = link.target.lastIndexOf("#")
-    if (at === -1 || link.target.slice(0, at) !== roomId) return null
-    const peer = peerOf(did, link.source)
-    return peer ? { peer, beat: link.target.slice(at + 1) } : null
-}
-
-/** The devices of `did` its status links put in `roomId`, each with its beat (`undefined` without one). */
-function roomPeers(did: string, links: (Partial<StatusLink> | undefined)[], roomId: string): Map<string, string | undefined> {
-    const peers = new Map<string, string | undefined>()
+/** The devices of `did` its status links put in `roomId`, each with whether it carries the marker. */
+function roomPeers(did: string, links: (Partial<StatusLink> | undefined)[], roomId: string): Map<string, boolean> {
+    const peers = new Map<string, boolean>()
     for (const link of links) {
-        const peer = presencePeer(did, link, roomId)
-        if (peer && !peers.has(peer)) peers.set(peer, undefined)
+        const peer = callPeer(did, link, roomId, CALL_PRESENCE_PREDICATE)
+        if (peer) peers.set(peer, false)
     }
     for (const link of links) {
-        const beat = presenceBeat(did, link, roomId)
-        if (beat && peers.has(beat.peer)) peers.set(beat.peer, beat.beat)
+        const peer = callPeer(did, link, roomId, CALL_BEATS_PREDICATE)
+        if (peer && peers.has(peer)) peers.set(peer, true)
     }
     return peers
 }
@@ -295,67 +291,58 @@ export function createSession(config: SessionImplConfig): Session {
      *  leaving restores if the status cannot be read then. */
     let statusBeforeCall: StatusLink[] = []
     let announced = false
-    /** The last beat this device wrote, and when (this device's clock). */
-    let beat = 0
-    let beatWrittenAt = 0
-    /** A renewal's status write in flight: a withdraw waits for it, so the renewal cannot land after it. */
-    let renewing: Promise<unknown> | null = null
-    /** Per device seen in this call: its last beat and when this session first saw it (its own clock). */
-    const beatsSeen = new Map<string, { beat: string; at: number }>()
+    let beatInterval: ReturnType<typeof setInterval> | null = null
+    /**
+     * Per device the roster poll found with the marker: when this session last
+     * heard it beat, or, until it does, when the poll first saw it (its own
+     * clock). Pruned to the devices the last poll saw.
+     */
+    const heardAt = new Map<string, number>()
+    /** A repair of this agent's status in flight: a withdraw waits for it, so it cannot land after the withdraw. */
+    let repairing: Promise<unknown> | null = null
+    /** When the last repair started: a failed one is tried again only after {@link PRESENCE_STALE_MS}. */
+    let repairedAt = -Infinity
 
-    /** Whether `peer`, at `peerBeat`, is still renewing; records a changed beat. */
-    function isFresh(peer: string, peerBeat: string | undefined, now: number): boolean {
-        if (peerBeat === undefined) return true
-        const seen = beatsSeen.get(peer)
-        if (!seen || seen.beat !== peerBeat) {
-            beatsSeen.set(peer, { beat: peerBeat, at: now })
-            return true
-        }
-        return now - seen.at < PRESENCE_STALE_MS
+    /** Whether `peer`, carrying the marker, has not beaten for {@link PRESENCE_STALE_MS}. */
+    function isStale(peer: string, now: number): boolean {
+        if (!heardAt.has(peer)) heardAt.set(peer, now)
+        return now - heardAt.get(peer)! >= PRESENCE_STALE_MS
     }
 
-    /** Whether the roster poll already found `peer`, at `peerBeat`, stale. Records nothing. */
-    function seenStale(peer: string, peerBeat: string | undefined, now: number): boolean {
-        if (peerBeat === undefined) return false
-        const seen = beatsSeen.get(peer)
-        return !!seen && seen.beat === peerBeat && now - seen.at >= PRESENCE_STALE_MS
-    }
+    type OwnStatus = { data?: { links?: { data?: Partial<StatusLink> }[] } } | null
 
     /**
-     * `status`'s links without this device's links for this call, without
-     * those of this agent's other devices the roster poll found stale, and
-     * without a beat whose device has no presence link.
+     * `status`'s links without the presence links and markers of the devices
+     * in `drop`, and without a marker whose device has no presence link.
      */
-    function linksWithoutCall(status: { data?: { links?: { data?: Partial<StatusLink> }[] } } | null): StatusLink[] {
+    function linksWithout(status: OwnStatus, drop: Set<string>): StatusLink[] {
         const all = (status?.data?.links ?? []).map((link) => link.data)
         const peers = roomPeers(agentDid, all, roomId)
-        const now = Date.now()
         const links: StatusLink[] = []
         for (const l of all) {
             if (!l?.source || l.target === undefined) continue
-            const peer = presencePeer(agentDid, l, roomId) ?? presenceBeat(agentDid, l, roomId)?.peer
-            if (peer && (peer === selfPeer || !peers.has(peer) || seenStale(peer, peers.get(peer), now))) continue
+            const peer = callPeer(agentDid, l, roomId, CALL_PRESENCE_PREDICATE) ?? callPeer(agentDid, l, roomId, CALL_BEATS_PREDICATE)
+            if (peer && (drop.has(peer) || !peers.has(peer))) continue
             links.push({ source: l.source, target: l.target, ...(l.predicate ? { predicate: l.predicate } : {}) })
         }
         return links
     }
 
-    /** This agent's status links, as {@link linksWithoutCall} leaves them. */
+    /** This agent's status links without this device's call links. */
     async function ownLinksWithoutCall(): Promise<StatusLink[]> {
-        return linksWithoutCall(ownOnlineStatus ? await ownOnlineStatus() : null)
+        return linksWithout(ownOnlineStatus ? await ownOnlineStatus() : null, new Set([selfPeer]))
     }
 
-    /** This device's presence link and a new beat for this call. */
+    /** This device's presence link and marker for this call. */
     function callLinks(): StatusLink[] {
-        beat = Math.max(beat + 1, Date.now())
         return [
             { source: selfPeer, predicate: CALL_PRESENCE_PREDICATE, target: roomId },
-            { source: selfPeer, predicate: CALL_BEAT_PREDICATE, target: `${roomId}#${beat}` },
+            { source: selfPeer, predicate: CALL_BEATS_PREDICATE, target: roomId },
         ]
     }
 
     /**
-     * Add this call's presence link and beat to the agent's online status.
+     * Add this call's presence link and marker to the agent's online status.
      * Other agents' roster polls pick it up.
      */
     async function announceCallPresence(): Promise<void> {
@@ -367,37 +354,38 @@ export function createSession(config: SessionImplConfig): Session {
             })
             await setOnlineStatus({ links: [...statusBeforeCall, ...callLinks()] })
             announced = true
-            beatWrittenAt = Date.now()
         } catch (err) {
             console.warn("session: call-presence announcement failed:", err)
         }
     }
 
     /**
-     * Write a new beat once {@link PRESENCE_RENEW_INTERVAL_MS} has passed
-     * since the last, onto `own` (this agent's status, as the roster poll
-     * just read it). Stale links of this agent's other devices go with it.
+     * The one status write a poll may make: take out the links of this agent's
+     * devices in `stale`, and put this device's back if they are missing (a
+     * device of this agent that stopped hearing this one took them out). `own`
+     * is the status the poll read; an unread or unset one is never written over.
+     * At most one write per {@link PRESENCE_STALE_MS}, so a write that fails, or
+     * a sibling that keeps taking this device out, cannot write on every poll.
      */
-    async function renewCallPresence(own: Parameters<typeof linksWithoutCall>[0]): Promise<void> {
-        if (!setOnlineStatus || !announced || renewing || Date.now() - beatWrittenAt < PRESENCE_RENEW_INTERVAL_MS) return
-        const base = own?.data?.links ? linksWithoutCall(own) : statusBeforeCall
-        const write = setOnlineStatus({ links: [...base, ...callLinks()] })
-        renewing = write
-        try {
-            await write
-            beatWrittenAt = Date.now()
-        } catch (err) {
-            console.warn("session: renewing call presence failed:", err)
-        } finally {
-            if (renewing === write) renewing = null
-        }
+    function repairOwnStatus(own: OwnStatus, stale: Set<string>): void {
+        const links = own?.data?.links
+        if (!setOnlineStatus || !announced || repairing || !links) return
+        const listed = links.some((l) => callPeer(agentDid, l.data, roomId, CALL_PRESENCE_PREDICATE) === selfPeer)
+        if (stale.size === 0 && listed) return
+        const now = Date.now()
+        if (now - repairedAt < PRESENCE_STALE_MS) return
+        repairedAt = now
+        const write = setOnlineStatus({ links: [...linksWithout(own, new Set([...stale, selfPeer])), ...callLinks()] })
+            .catch((err) => console.warn("session: repairing call presence failed:", err))
+            .finally(() => { if (repairing === write) repairing = null })
+        repairing = write
     }
 
-    /** Take this call's presence link and beat out of the agent's status again. */
+    /** Take this call's presence link and marker out of the agent's status again. */
     async function withdrawCallPresence(): Promise<void> {
         if (!setOnlineStatus || !announced) return
         announced = false
-        if (renewing) await renewing.catch(() => {})
+        if (repairing) await repairing
         try {
             const links = await ownLinksWithoutCall().catch((err) => {
                 console.warn("session: reading own status failed:", err)
@@ -421,11 +409,10 @@ export function createSession(config: SessionImplConfig): Session {
      * connections to departed peers.
      *
      * A device that died without leaving keeps its link while its agent's
-     * other devices keep the status, so the poll leaves out a device whose
-     * beat ({@link CALL_BEAT_PREDICATE}) it has seen unchanged for
-     * {@link PRESENCE_STALE_MS}. The poll also renews this device's own
-     * beat ({@link renewCallPresence}), which drops such devices' links
-     * from the agent's status.
+     * other devices keep the status, so the poll leaves out a device with the
+     * marker ({@link CALL_BEATS_PREDICATE}) that has not beaten for
+     * {@link PRESENCE_STALE_MS}, and takes such devices of this agent out of
+     * its status ({@link repairOwnStatus}).
      */
     async function pollRoster(): Promise<void> {
         const mesh = meshManager
@@ -439,11 +426,14 @@ export function createSession(config: SessionImplConfig): Session {
             const now = Date.now()
             const inCall = new Set<string>()
             const seen = new Set<string>()
+            const staleOwn = new Set<string>()
             const collect = (did: string, links: { data?: Partial<StatusLink> }[] | undefined) => {
-                for (const [peer, peerBeat] of roomPeers(did, (links ?? []).map((l) => l.data), roomId)) {
+                for (const [peer, beats] of roomPeers(did, (links ?? []).map((l) => l.data), roomId)) {
                     if (peer === selfPeer) continue
+                    if (!beats) { inCall.add(peer); continue }
                     seen.add(peer)
-                    if (isFresh(peer, peerBeat, now)) inCall.add(peer)
+                    if (!isStale(peer, now)) inCall.add(peer)
+                    else if (did === agentDid) staleOwn.add(peer)
                 }
             }
             // Each agent's status is a signed perspective: its links sit
@@ -454,9 +444,9 @@ export function createSession(config: SessionImplConfig): Session {
                 if (agent.did !== agentDid) collect(agent.did, agent.status?.data?.links)
             }
             collect(agentDid, own?.data?.links)
-            for (const peer of [...beatsSeen.keys()]) if (!seen.has(peer)) beatsSeen.delete(peer)
+            for (const peer of [...heardAt.keys()]) if (!seen.has(peer)) heardAt.delete(peer)
             mesh.setRoster([...inCall])
-            void renewCallPresence(own)
+            repairOwnStatus(own, staleOwn)
         } catch (err) {
             console.warn("session: roster poll failed:", err)
         } finally {
@@ -464,17 +454,36 @@ export function createSession(config: SessionImplConfig): Session {
         }
     }
 
-    function startRosterPolling(): void {
+    /**
+     * Start the roster poll and this device's beat. Each runs on its own
+     * timer: a poll that hangs on a slow `onlineAgents` must not stop the beat
+     * while media still flows.
+     */
+    function startRosterPolling(mesh: MeshManager): void {
+        heardAt.clear()
+        repairedAt = -Infinity
+        // `peer` is the verified author's DID with the device its payload names:
+        // a beat can only vouch for its own agent's devices. Only devices the
+        // poll tracks are recorded, so a stranger's beats cannot grow the map.
+        mesh.on("beat", (peer: string) => {
+            if (meshManager === mesh && heardAt.has(peer)) heardAt.set(peer, Date.now())
+        })
+        mesh.beat()
+        beatInterval = setInterval(() => mesh.beat(), BEAT_INTERVAL_MS)
         // Immediate first poll, then periodic
-        beatsSeen.clear()
         void pollRoster()
         rosterInterval = setInterval(() => void pollRoster(), ROSTER_POLL_INTERVAL_MS)
     }
 
+    /** Stop the roster poll and the beat. Beats are never persisted: nothing else to undo. */
     function stopRosterPolling(): void {
         if (rosterInterval !== null) {
             clearInterval(rosterInterval)
             rosterInterval = null
+        }
+        if (beatInterval !== null) {
+            clearInterval(beatInterval)
+            beatInterval = null
         }
     }
 
@@ -644,7 +653,7 @@ export function createSession(config: SessionImplConfig): Session {
                     await withdrawCallPresence()
                     throw new Error("Session destroyed")
                 }
-                startRosterPolling()
+                startRosterPolling(mesh)
 
                 emit("topology-changed", "mesh")
                 setState("active")

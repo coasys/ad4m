@@ -45,10 +45,11 @@ const REJOIN_TIMEOUT_MS = 150_000;
 /**
  * How soon a device that died without leaving must leave everyone's list,
  * while another device of its agent stays in the call. Mesh: each device
- * renews a beat in its agent's status every 30 s and a reader drops a device
- * whose beat it has seen unchanged for 90 s (`PRESENCE_STALE_MS` in
- * core/src/neighbourhood/Session.ts), at its next roster poll (3 s); the
- * margin covers the status reads and this test's own reads. The SFU drops
+ * beats over the call's signalling every 20 s and a reader drops a device it
+ * has not heard beat for 90 s (`PRESENCE_STALE_MS` in
+ * core/src/neighbourhood/Session.ts), at its next roster poll (3 s). The
+ * last beat comes before the death, so the bound runs from the death too;
+ * the margin covers the status reads and this test's own reads. The SFU drops
  * the peer after 10 s of ICE `Disconnected`, well inside the bound.
  */
 const PRESENCE_STALE_MS = 90_000;

@@ -302,23 +302,36 @@ session announces presence; the buffer for not-yet-listed peers never drops a
 description.
 
 Mesh presence (`core/src/neighbourhood/Session.ts`): each device in a mesh
-call puts two links into its agent's one online status, a presence link
-(source `did#device`, `ad4m://session/in-call`, target the room) and a beat
-(same source, `ad4m://session/in-call-beat`, target `<room>#<beat>`). The
-roster poll (3 s) also renews the beat, once every 30 s: one `setOnlineStatus`
-per device per interval, read-modify-write of the status it just read. A
-reader keeps, per device, the beat it last saw and when it first saw it (its
-own clock; writers' clocks are never compared), and leaves a device out once
-the beat has not changed for 90 s. So a device that died without leaving (a
-crash, a closed browser, a lost network) leaves every roster within about
-90 s + a poll, even while another device of its agent keeps the status alive;
-that device's next renewal also drops the dead one's links from the status.
-A presence link without a beat (an older SDK) never goes stale. Renewal stops
-with polling: on leave, destroy, `replaced` and idle. A tab reopened in the
-same browser profile keeps its device id (`localStorage`) and simply takes
-its links over. `sfu-browsers.test.ts` pins both: the same-profile rejoin
-lists the user once, and a dead second device leaves everyone's list within
-`GHOST_GONE_MS`.
+call puts two links into its agent's one online status, once, at join: a
+presence link (source `did#device`, `ad4m://session/in-call`, target the
+room) and a marker (same source, `ad4m://session/in-call-beat`, target the
+room) that says the device beats. The beat itself is never persisted: every
+20 s, and at once on join, the device sends a `beat` message on the call's
+telepresence channel (`{v, call, to: "*", kind: "beat"}` through
+`MeshManager.beat`, so it is counted like any send), on its own timer, so a
+roster poll that hangs cannot stop it. Never write liveness into the online
+status: p-diff-sync keeps every `set_online_status` as a permanent chain
+entry and `get_online_status` scans them all. A receiver ties a beat to the
+link author the executor verified plus the device in the payload, so an
+agent can vouch only for its own devices, and a beat never makes a device: a
+device is in the call only through its own agent's presence link. A reader
+records, on its own clock, when it last heard each device with the marker
+(or first saw it, if it never heard it) and leaves it out after 90 s with no
+beat; a new beat brings it back at the next poll (3 s). So a device that
+died without leaving (a crash, a closed browser, a lost network) leaves every
+roster within about 90 s + a poll, even while another device of its agent
+keeps the status alive, a live device survives three lost beats in a row,
+and a reader that joins late keeps a device it has never heard for up to
+90 s. A device with no marker (an older SDK, which drops the unknown `beat`
+kind without a word) never goes stale. Status writes are join, leave, and
+one repair when a poll finds a stale device of this agent (its links go) or
+this device's own links missing (a sibling took them out while it missed
+beats; they go back), at most once per 90 s; nothing is written over a
+status that reads as none. The beat stops on leave, destroy and `replaced`.
+A tab reopened in the same browser profile keeps its device id
+(`localStorage`) and simply takes its links over. `sfu-browsers.test.ts` pins
+both: the same-profile rejoin lists the user once, and a dead second device
+leaves everyone's list within `GHOST_GONE_MS`.
 
 ### Port Conflicts
 

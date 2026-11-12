@@ -36,6 +36,7 @@ const mockMeshManagerInstance = {
     destroy: jest.fn().mockResolvedValue(undefined),
     getParticipants: jest.fn().mockReturnValue([]),
     setRoster: jest.fn(),
+    beat: jest.fn(),
     replaceTrack: jest.fn().mockResolvedValue(undefined),
     sendData: jest.fn(),
     subscribeDataChannel: jest.fn().mockReturnValue(() => {}),
@@ -97,9 +98,9 @@ function baseConfig(overrides: Record<string, unknown> = {}) {
     }
 }
 
-/** The beat link a mesh device writes beside its presence link: its peer id, and `<room>#<beat>`. */
-function beatOf(peer: string, room: string) {
-    return { source: peer, predicate: "ad4m://session/in-call-beat", target: expect.stringMatching(new RegExp(`^${room}#\\d+$`)) }
+/** The marker a mesh device writes once beside its presence link: it beats, so it can go stale. */
+function markerOf(peer: string, room: string) {
+    return { source: peer, predicate: "ad4m://session/in-call-beat", target: room }
 }
 
 function collectStates(session: Session): SessionState[] {
@@ -300,7 +301,7 @@ describe("mesh path", () => {
         expect(setOnlineStatus).toHaveBeenCalledWith({
             links: [
                 { source: "did:me#this-device", predicate: "ad4m://session/in-call", target: "my-room" },
-                beatOf("did:me#this-device", "my-room"),
+                markerOf("did:me#this-device", "my-room"),
             ],
         })
     })
@@ -311,7 +312,7 @@ describe("mesh path", () => {
         const appLink = { source: "did:me", predicate: "app://mood", target: "literal:string:busy" }
         const inCall = { source: "did:me#this-device", predicate: "ad4m://session/in-call", target: "my-room" }
         const phoneInCall = { source: "did:me#phone", predicate: "ad4m://session/in-call", target: "my-room" }
-        const beat = beatOf("did:me#this-device", "my-room")
+        const beat = markerOf("did:me#this-device", "my-room")
         const statusWith = (...links: object[]) => ({ data: { links: links.map((data) => ({ data })) } })
 
         function presenceSession(ownOnlineStatus: jest.Mock) {
@@ -1167,36 +1168,47 @@ describe("mesh roster polling edge cases", () => {
 
 // A device can die without leaving (a crash, a closed browser, a lost network).
 // Its links stay in its agent's one status for as long as another device of
-// the agent keeps that status, so each device renews a beat and readers drop a
-// device whose beat has not changed for the stale bound (#1581's regression).
+// the agent keeps that status. So each device beats over the call's signalling
+// (never into the status), and a reader leaves out a device that carries the
+// marker but has not beaten for the stale bound.
 describe("a mesh device that dies without leaving", () => {
     const ROOM = "beat-room"
-    /** The bounds the session works to (Session.ts): renewal, staleness, roster poll. */
-    const RENEW_MS = 30_000
+    /** The bounds the session works to (Session.ts): beat, staleness, roster poll. */
+    const BEAT_MS = 20_000
     const STALE_MS = 90_000
     const POLL_MS = 3_000
     const realSetTimeout = setTimeout
 
     type Link = { source: string; predicate: string; target: string }
     const presence = (peer: string): Link => ({ source: peer, predicate: "ad4m://session/in-call", target: ROOM })
-    const beatLink = (peer: string, beat: number): Link => ({ source: peer, predicate: "ad4m://session/in-call-beat", target: `${ROOM}#${beat}` })
+    const marker = (peer: string): Link => ({ source: peer, predicate: "ad4m://session/in-call-beat", target: ROOM })
     const statusOf = (links: Link[]) => ({ data: { links: links.map((data) => ({ data })) } })
+    const ME = "did:me#this-device"
 
     /** Agents' statuses as an executor holds them; this session is `did:me`'s device `this-device`. */
     function world(overrides: Record<string, unknown> = {}) {
         const statuses = new Map<string, Link[]>()
-        const setOnlineStatus = jest.fn(async ({ links }: { links: Link[] }) => { statuses.set("did:me", links); return true })
+        /** While set, this agent's status writes wait for it. */
+        let gate: Promise<void> | null = null
+        const setOnlineStatus = jest.fn(async ({ links }: { links: Link[] }) => {
+            if (gate) await gate
+            statuses.set("did:me", links)
+            return true
+        })
         const ownOnlineStatus = jest.fn(async () => (statuses.has("did:me") ? statusOf(statuses.get("did:me")!) : null))
         const onlineAgents = jest.fn(async () =>
             [...statuses].filter(([did]) => did !== "did:me").map(([did, links]) => ({ did, status: statusOf(links) })))
         /** A device of `did` writes its links into the agent's status, keeping everyone else's. */
         const write = (did: string, peer: string, ...links: Link[]) =>
             statuses.set(did, [...(statuses.get(did) ?? []).filter((l) => l.source !== peer), ...links])
-        /** A live device: announces now, then a new beat every renewal interval. */
+        /** A beat reaching this session from `peer`: the sender the channel verified (author DID, payload device). */
+        const beatFrom = (peer: string) => {
+            for (const [event, handler] of mockMeshManagerInstance.on.mock.calls) if (event === "beat") handler(peer)
+        }
+        /** A live device of `did` on this SDK: announces with the marker once, then beats. */
         const live = (did: string, peer: string) => {
-            let beat = 1
-            write(did, peer, presence(peer), beatLink(peer, beat))
-            setInterval(() => write(did, peer, presence(peer), beatLink(peer, ++beat)), RENEW_MS)
+            write(did, peer, presence(peer), marker(peer))
+            setInterval(() => beatFrom(peer), BEAT_MS)
         }
         const session = createSession(baseConfig({
             topology: "mesh",
@@ -1208,10 +1220,17 @@ describe("a mesh device that dies without leaving", () => {
             agentDid: "did:me",
             ...overrides,
         }))
-        /** The last roster the mesh got, sorted: a device's rewrite moves its links in the status. */
+        /** The last roster the mesh got, sorted. */
         const roster = (): string[] => [...(mockMeshManagerInstance.setRoster.mock.calls.at(-1)?.[0] ?? [])].sort()
         const own = (): Link[] => statuses.get("did:me") ?? []
-        return { session, statuses, setOnlineStatus, write, live, roster, own }
+        const beats = () => mockMeshManagerInstance.beat.mock.calls.length
+        const writes = () => setOnlineStatus.mock.calls.length
+        const hold = () => {
+            let open!: () => void
+            gate = new Promise((resolve) => { open = resolve })
+            return () => { gate = null; open() }
+        }
+        return { session, statuses, setOnlineStatus, write, beatFrom, live, roster, own, beats, writes, hold }
     }
 
     beforeEach(() => { jest.useFakeTimers() })
@@ -1220,120 +1239,230 @@ describe("a mesh device that dies without leaving", () => {
         jest.useRealTimers()
     })
 
-    it("drops another agent's device whose beat stops once the stale bound passes, and keeps a renewing one", async () => {
+    it("announces the presence link and the marker once, then beats at once and every beat interval without writing the status", async () => {
         const w = world()
         w.live("did:bob", "did:bob#desk")
-        w.write("did:bob", "did:bob#laptop", presence("did:bob#laptop"), beatLink("did:bob#laptop", 7))
-        // A device on an SDK from before the beat writes none: it never goes stale.
+        await w.session.join(fakeMediaStream())
+        expect(w.own()).toEqual([presence(ME), marker(ME)])
+        expect(w.beats()).toBe(1)
+
+        await jest.advanceTimersByTimeAsync(10 * BEAT_MS)
+        expect(w.beats()).toBe(11)
+        expect(w.writes()).toBe(1)
+        expect(w.roster()).toEqual(["did:bob#desk"])
+
+        await w.session.leave()
+        expect(w.writes()).toBe(2)
+        expect(w.own()).toEqual([])
+    })
+
+    it("keeps beating while the roster poll hangs on onlineAgents", async () => {
+        const w = world({ onlineAgents: jest.fn(() => new Promise(() => {})) })
+        await w.session.join(fakeMediaStream())
+        await jest.advanceTimersByTimeAsync(5 * BEAT_MS)
+        expect(w.beats()).toBe(6)
+        expect(w.writes()).toBe(1)
+        await w.session.leave()
+    })
+
+    it("leaves out another agent's device whose beats stopped, never an older SDK's, and a new beat brings it back", async () => {
+        const w = world()
+        w.live("did:bob", "did:bob#desk")
+        w.write("did:bob", "did:bob#laptop", presence("did:bob#laptop"), marker("did:bob#laptop"))
+        // A device on an SDK from before the beat writes no marker and sends no beat.
         w.write("did:carol", "did:carol#old", presence("did:carol#old"))
         await w.session.join(fakeMediaStream())
+        // The laptop's last beat.
+        w.beatFrom("did:bob#laptop")
 
         await jest.advanceTimersByTimeAsync(STALE_MS - POLL_MS)
         expect(w.roster()).toEqual(["did:bob#desk", "did:bob#laptop", "did:carol#old"])
-
         await jest.advanceTimersByTimeAsync(POLL_MS)
         expect(w.roster()).toEqual(["did:bob#desk", "did:carol#old"])
 
-        // It comes back: a new beat puts it in again.
-        w.write("did:bob", "did:bob#laptop", presence("did:bob#laptop"), beatLink("did:bob#laptop", 8))
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+        expect(w.roster()).toEqual(["did:bob#desk", "did:carol#old"])
+
+        w.beatFrom("did:bob#laptop")
         await jest.advanceTimersByTimeAsync(POLL_MS)
         expect(w.roster()).toEqual(["did:bob#desk", "did:bob#laptop", "did:carol#old"])
+        // No status of another agent is ever written.
+        expect(w.writes()).toBe(1)
         await w.session.leave()
     })
 
-    it("renews its beat every renewal interval, one status write each", async () => {
+    it("keeps a device with the marker that it has never heard for the stale bound from when it first saw it", async () => {
         const w = world()
+        w.write("did:bob", "did:bob#quiet", presence("did:bob#quiet"), marker("did:bob#quiet"))
         await w.session.join(fakeMediaStream())
-        expect(w.setOnlineStatus).toHaveBeenCalledTimes(1)
-
-        await jest.advanceTimersByTimeAsync(3 * RENEW_MS + POLL_MS)
-        expect(w.setOnlineStatus).toHaveBeenCalledTimes(4)
-        const beats = w.setOnlineStatus.mock.calls.map(([{ links }]) =>
-            links.filter((l) => l.predicate === "ad4m://session/in-call-beat").map((l) => l.target))
-        // Each write carries one beat of this device, and each a new one.
-        expect(beats.every((b) => b.length === 1)).toBe(true)
-        expect(new Set(beats.flat()).size).toBe(4)
-        expect(w.own()).toEqual(expect.arrayContaining([presence("did:me#this-device"), beatOf("did:me#this-device", ROOM)]))
-        await w.session.leave()
-    })
-
-    it("drops its agent's dead device from the roster and from the status, and keeps the live one's links", async () => {
-        const appLink = { source: "did:me", predicate: "app://mood", target: "literal:string:busy" }
-        const w = world()
-        w.statuses.set("did:me", [appLink])
-        w.live("did:me", "did:me#tablet")
-        w.write("did:me", "did:me#phone", presence("did:me#phone"), beatLink("did:me#phone", 3))
-        await w.session.join(fakeMediaStream())
-
-        // Its own renewals keep both other devices while the phone's beat is not yet stale.
-        await jest.advanceTimersByTimeAsync(2 * RENEW_MS + POLL_MS)
-        expect(w.roster()).toEqual(["did:me#phone", "did:me#tablet"])
-        expect(w.own()).toEqual(expect.arrayContaining([presence("did:me#phone"), presence("did:me#tablet")]))
-
-        await jest.advanceTimersByTimeAsync(STALE_MS + POLL_MS - (2 * RENEW_MS + POLL_MS))
-        expect(w.roster()).toEqual(["did:me#tablet"])
-        // The renewal after the stale bound took the phone's links out, and kept everyone else's.
-        const sources = w.own().map((l) => l.source)
-        expect(sources).not.toContain("did:me#phone")
-        expect(w.own()).toEqual(expect.arrayContaining([
-            appLink, presence("did:me#tablet"), presence("did:me#this-device"), beatOf("did:me#this-device", ROOM),
-        ]))
-        expect(w.own().filter((l) => l.source === "did:me#tablet")).toHaveLength(2)
-        await w.session.leave()
-    })
-
-    it("takes no agent's beat for another agent's device", async () => {
-        const w = world()
-        w.write("did:carol", "did:carol#desk", presence("did:carol#desk"), beatLink("did:carol#desk", 1))
-        // Bob renews a beat in Carol's device's name, and announces a device of Carol's.
-        let forged = 1
-        const forge = () => w.write("did:bob", "did:carol#desk",
-            presence("did:carol#desk"), beatLink("did:carol#desk", ++forged), presence("did:carol#phone"))
-        forge()
-        setInterval(forge, RENEW_MS)
-        await w.session.join(fakeMediaStream())
+        await jest.advanceTimersByTimeAsync(STALE_MS - POLL_MS)
+        expect(w.roster()).toEqual(["did:bob#quiet"])
         await jest.advanceTimersByTimeAsync(POLL_MS)
-        expect(w.roster()).toEqual(["did:carol#desk"])
+        expect(w.roster()).toEqual([])
+        await w.session.leave()
+    })
+
+    it("keeps a device that lost three beats in a row", async () => {
+        const w = world()
+        w.write("did:bob", "did:bob#lossy", presence("did:bob#lossy"), marker("did:bob#lossy"))
+        await w.session.join(fakeMediaStream())
+        w.beatFrom("did:bob#lossy")
+        // Its beats at 20, 40 and 60 s are lost; the one at 80 s arrives.
+        await jest.advanceTimersByTimeAsync(4 * BEAT_MS)
+        w.beatFrom("did:bob#lossy")
+        await jest.advanceTimersByTimeAsync(STALE_MS - 4 * BEAT_MS + POLL_MS)
+        expect(w.roster()).toEqual(["did:bob#lossy"])
+        await w.session.leave()
+    })
+
+    it("takes no agent's beat for another agent's device, and makes no device of a beat", async () => {
+        const w = world()
+        w.write("did:me", "did:me#phone", presence("did:me#phone"), marker("did:me#phone"))
+        w.write("did:carol", "did:carol#desk", presence("did:carol#desk"), marker("did:carol#desk"))
+        // Bob's status names devices of Carol's and of this agent's: neither counts.
+        w.write("did:bob", "did:bob", presence("did:carol#tablet"), marker("did:carol#tablet"), presence("did:me#tablet"))
+        await w.session.join(fakeMediaStream())
+        // Bob beats under their device ids: the channel names him as the sender,
+        // so each beat is one of his own devices, and one without presence.
+        const forge = () => ["did:bob#phone", "did:bob#desk", "did:bob#tablet", "did:bob#ghost"].forEach(w.beatFrom)
+        forge()
+        setInterval(forge, BEAT_MS / 2)
+        await jest.advanceTimersByTimeAsync(POLL_MS)
+        expect(w.roster()).toEqual(["did:carol#desk", "did:me#phone"])
 
         await jest.advanceTimersByTimeAsync(STALE_MS)
         expect(w.roster()).toEqual([])
         await w.session.leave()
     })
 
-    /** Join, see the first renewal, end the call with `end`, and count status writes for long after. */
-    async function renewalsAfter(end: (w: ReturnType<typeof world>) => Promise<void>, overrides: Record<string, unknown> = {}) {
-        const w = world(overrides)
+    it("takes its agent's dead device out of the roster and of the status in one write, keeping every other link", async () => {
+        const appLink = { source: "did:me", predicate: "app://mood", target: "literal:string:busy" }
+        const w = world()
+        w.statuses.set("did:me", [appLink])
+        w.live("did:me", "did:me#tablet")
+        w.write("did:me", "did:me#phone", presence("did:me#phone"), marker("did:me#phone"))
         await w.session.join(fakeMediaStream())
-        await jest.advanceTimersByTimeAsync(RENEW_MS + POLL_MS)
-        expect(w.setOnlineStatus).toHaveBeenCalledTimes(2)
+        expect(w.writes()).toBe(1)
+
+        await jest.advanceTimersByTimeAsync(STALE_MS - POLL_MS)
+        expect(w.roster()).toEqual(["did:me#phone", "did:me#tablet"])
+        expect(w.writes()).toBe(1)
+
+        await jest.advanceTimersByTimeAsync(POLL_MS)
+        expect(w.roster()).toEqual(["did:me#tablet"])
+        expect(w.writes()).toBe(2)
+        expect(w.own()).toHaveLength(5)
+        expect(w.own()).toEqual(expect.arrayContaining([
+            appLink, presence("did:me#tablet"), marker("did:me#tablet"), presence(ME), marker(ME),
+        ]))
+
+        // Nothing changes after: no more writes.
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+        expect(w.writes()).toBe(2)
+        expect(w.roster()).toEqual(["did:me#tablet"])
+
+        await w.session.leave()
+        expect(w.writes()).toBe(3)
+        expect(w.own()).toEqual(expect.arrayContaining([appLink, presence("did:me#tablet"), marker("did:me#tablet")]))
+        expect(w.own()).toHaveLength(3)
+    })
+
+    it("tries a failed cleanup again only after the stale bound", async () => {
+        const consoleWarn = jest.spyOn(console, "warn").mockImplementation()
+        const w = world()
+        w.write("did:me", "did:me#phone", presence("did:me#phone"), marker("did:me#phone"))
+        await w.session.join(fakeMediaStream())
+        w.setOnlineStatus.mockRejectedValue(new Error("store down"))
+        await jest.advanceTimersByTimeAsync(STALE_MS)
+        expect(w.writes()).toBe(2)
+        await jest.advanceTimersByTimeAsync(STALE_MS - POLL_MS)
+        expect(w.writes()).toBe(2)
+        await jest.advanceTimersByTimeAsync(POLL_MS)
+        expect(w.writes()).toBe(3)
+        await w.session.leave()
+        consoleWarn.mockRestore()
+    })
+
+    it("puts its own links back, once, when another device took them out of the status", async () => {
+        const appLink = { source: "did:me", predicate: "app://mood", target: "literal:string:busy" }
+        const w = world()
+        await w.session.join(fakeMediaStream())
+        // A device of this agent that missed this one's beats took its links out.
+        w.statuses.set("did:me", [appLink])
+        await jest.advanceTimersByTimeAsync(POLL_MS)
+        expect(w.writes()).toBe(2)
+        expect(w.own()).toEqual([appLink, presence(ME), marker(ME)])
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+        expect(w.writes()).toBe(2)
+        await w.session.leave()
+    })
+
+    it("writes nothing while its agent's status reads as none", async () => {
+        const w = world()
+        w.live("did:bob", "did:bob#desk")
+        await w.session.join(fakeMediaStream())
+        w.statuses.delete("did:me")
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+        expect(w.writes()).toBe(1)
+        expect(w.roster()).toEqual(["did:bob#desk"])
+        await w.session.leave()
+    })
+
+    it("withdraws after a cleanup write still in flight, so the withdraw is the last write", async () => {
+        const appLink = { source: "did:me", predicate: "app://mood", target: "literal:string:busy" }
+        const w = world()
+        w.statuses.set("did:me", [appLink])
+        w.write("did:me", "did:me#phone", presence("did:me#phone"), marker("did:me#phone"))
+        await w.session.join(fakeMediaStream())
+        const open = w.hold()
+        await jest.advanceTimersByTimeAsync(STALE_MS)
+        expect(w.writes()).toBe(2)
+        const leaving = w.session.leave()
+        await jest.advanceTimersByTimeAsync(0)
+        open()
+        await leaving
+        expect(w.own()).toEqual([appLink])
+    })
+
+    /** Join, see a beat, end the call with `end`, and count beats and status writes for long after. */
+    async function after(end: (w: ReturnType<typeof world>) => Promise<void>) {
+        const w = world()
+        await w.session.join(fakeMediaStream())
+        await jest.advanceTimersByTimeAsync(BEAT_MS)
+        expect(w.beats()).toBe(2)
         await end(w)
-        const writes = w.setOnlineStatus.mock.calls.length
-        await jest.advanceTimersByTimeAsync(4 * RENEW_MS)
-        return { w, after: w.setOnlineStatus.mock.calls.length - writes }
+        const beats = w.beats()
+        const writes = w.writes()
+        await jest.advanceTimersByTimeAsync(10 * BEAT_MS)
+        return { w, beats: w.beats() - beats, writes: w.writes() - writes }
     }
 
-    it("stops renewing on leave, and takes its beat out with its presence", async () => {
-        const { w, after } = await renewalsAfter((w) => w.session.leave())
-        expect(after).toBe(0)
+    it("stops beating on leave", async () => {
+        const { w, beats, writes } = await after((w) => w.session.leave())
+        expect([beats, writes]).toEqual([0, 0])
         expect(w.own()).toEqual([])
     })
 
-    it("stops renewing on destroy", async () => {
-        const { w, after } = await renewalsAfter((w) => w.session.destroy())
-        expect(after).toBe(0)
+    it("stops beating on destroy", async () => {
+        const { w, beats, writes } = await after((w) => w.session.destroy())
+        expect([beats, writes]).toEqual([0, 0])
         expect(w.own()).toEqual([])
     })
 
-    it("stops renewing when another tab of this device takes the call over", async () => {
+    it("stops beating when another tab of this device takes the call over", async () => {
         let later: Session | null = null
-        const { w, after } = await renewalsAfter(async () => {
+        const laterMesh = { ...mockMeshManagerInstance, beat: jest.fn() }
+        const { w, beats, writes } = await after(async () => {
+            ;(MeshManager as unknown as jest.Mock).mockImplementationOnce(() => laterMesh)
             later = createSession(baseConfig({ topology: "mesh", channel: fakeChannel(), roomId: ROOM, agentDid: "did:me" }))
             await later.join(fakeMediaStream())
             // BroadcastChannel delivers on the real event loop.
             await new Promise((r) => realSetTimeout(r, 20))
         })
         expect(w.session.getState()).toBe("idle")
-        expect(after).toBe(0)
+        expect([beats, writes]).toEqual([0, 0])
+        // The tab that took over beats for the device.
+        expect(laterMesh.beat.mock.calls.length).toBeGreaterThan(1)
         await later!.destroy()
         await w.session.destroy()
     })
