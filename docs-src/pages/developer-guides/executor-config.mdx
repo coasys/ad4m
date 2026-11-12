@@ -53,6 +53,12 @@ ignored, and the error names the key by its path, e.g.
 | `sfu_udp_port` | number | a free port, new at each start | `--sfu-udp-port` / `AD4M_SFU_UDP_PORT` |
 | `sfu_public_addr` | string (IP) | the STUN probe's address | `--sfu-public-addr` / `AD4M_SFU_PUBLIC_ADDR` |
 | `sfu_stun_server` | string (`host:port`) | no probe | `--sfu-stun-server` / `AD4M_SFU_STUN_SERVER` |
+| `ai_endpoints` | list of endpoints | none | file only, see below |
+| `ai_models` | list of models | none | file only, see below |
+| `ai_defaults` | object: `llm`, `embedding`, `transcription` → model name | none | file only, see below |
+| `local_ai_dir` | string (path) | `~/.local/share/ad4m/local-ai`, `~/Library/Application Support/ad4m/local-ai`, `%LOCALAPPDATA%\ad4m\local-ai` | `--local-ai-dir` / `AD4M_LOCAL_AI_DIR` |
+| `local_ai_autostart` | bool | `true` | `--local-ai-autostart` / `AD4M_LOCAL_AI_AUTOSTART` |
+| `local_ai_device` | `cpu`, `cuda`, `metal`, `vulkan` or `rocm` | the best backend detected | `--local-ai-device` / `AD4M_LOCAL_AI_DEVICE` |
 | `log_config` | object: crate → level | see below | `RUST_LOG` overrides it |
 | `multi_user_config.enabled` | bool | `false` | `--enable-multi-user` / `AD4M_ENABLE_MULTI_USER` |
 | `multi_user_config.tls_config` | object or `null` | no TLS | see below |
@@ -71,6 +77,13 @@ out to get its default.
 `multi_user_config.enabled: false` (or `--enable-multi-user false`) does not
 turn multi-user off on a data directory where it was enabled before: the
 executor records multi-user as on in its database and only ever sets it.
+
+`local_ai_autostart` starts the local AI runtimes an install put in place when
+the executor starts. It never downloads or installs anything: local AI is
+installed only by `ai.localInstall` (an app's call, such as the launcher's setup screen),
+`ad4m-executor local-ai install`, or the Docker image's `INCLUDE_MODELS`. A
+request that needs a model of a type the executor has none of fails with an
+error that says how to get one.
 
 Multi-user mode needs an admin credential. Without one, a caller with no
 token on a loopback listener is the operator, who could act as every user:
@@ -117,6 +130,36 @@ startup only: after the public IP changes, restart the executor.
 ```json
 { "sfu_bind_addr": "192.168.0.10", "sfu_udp_port": 40000,
   "sfu_stun_server": "stun.l.google.com:19302" }
+```
+
+**The `ai_*` keys** register AI model servers and models at startup, before
+the AI service loads. The executor runs no model itself: without these keys (or
+models added through the launcher or `ai.addModel`) AI features stay off. They apply by name: an entry that exists is brought to
+the file's settings, a missing one is added, and nothing the file does not
+name changes. An endpoint's key comes from the environment variable its
+`api_key_env` names; an `api_key` in the file stops `run`. An entry that
+cannot apply (its variable is unset, a key over plain HTTP to another host,
+an unknown endpoint or model name) is skipped with a warning. `kind` is one
+of `OLLAMA`, `LLAMA_SERVER`, `VLLM`, `OPEN_AI`, `ANTHROPIC`,
+`OPEN_AI_AUDIO`, `OPEN_AI_COMPATIBLE`; `capabilities` (`chat`,
+`embeddings`, `transcription`, `speech`) defaults to the kind's.
+`request_timeout_secs` bounds one request to the endpoint, queueing
+included (default 300 for chat, 60 for embeddings, 120 for speech); a
+stream `/v1` forwards may be silent that long between two chunks, not
+longer. `max_concurrent` lets at most that many requests through at once,
+the rest wait (default: no limit). A `model_type` is `LLM`, `EMBEDDING`,
+`TRANSCRIPTION` or `SPEECH`.
+
+```json
+{ "ai_endpoints": [
+    { "name": "ollama", "kind": "OLLAMA", "base_url": "http://127.0.0.1:11434", "max_num_ctx": 32768, "max_concurrent": 2 },
+    { "name": "openai", "kind": "OPEN_AI", "base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY" }
+  ],
+  "ai_models": [
+    { "name": "qwen", "model_type": "LLM", "endpoint": "ollama", "remote_model": "qwen3:8b" },
+    { "name": "gpt", "model_type": "LLM", "endpoint": "openai", "remote_model": "gpt-5", "native_tools": true }
+  ],
+  "ai_defaults": { "llm": "qwen" } }
 ```
 
 **`identity`** (`storeUrl`, `storeKeys`, `allowPrivateSrc`; flags
