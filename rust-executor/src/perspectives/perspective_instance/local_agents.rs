@@ -10,6 +10,15 @@ use super::PerspectiveInstance;
 use crate::languages::language::Language;
 
 impl PerspectiveInstance {
+    /// This executor's agents that own the perspective: its owners (main or
+    /// managed), or the main agent's DID for a perspective without any.
+    pub(super) async fn local_agents(&self) -> Vec<String> {
+        match self.persisted.lock().await.owners.clone() {
+            Some(owners) if !owners.is_empty() => owners,
+            _ => vec![crate::agent::did()],
+        }
+    }
+
     /// Tell `language` this executor's owners (the main agent's DID for a
     /// perspective without any), unless it was last told exactly `told`.
     /// Returns the owners the language now has, or `None` if telling it
@@ -24,10 +33,7 @@ impl PerspectiveInstance {
         told: Option<&[String]>,
     ) -> Option<Vec<String>> {
         let _registering = self.local_agents_mutex.lock().await;
-        let agents = match self.persisted.lock().await.owners.clone() {
-            Some(owners) if !owners.is_empty() => owners,
-            _ => vec![crate::agent::did()],
-        };
+        let agents = self.local_agents().await;
         if told == Some(agents.as_slice()) {
             return Some(agents);
         }
