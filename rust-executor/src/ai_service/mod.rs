@@ -1092,7 +1092,7 @@ impl AIService {
             return Ok(id);
         }
         let what = if caller.is_some_and(RequestContext::is_operator) {
-            "set up local AI (ai.localInstall) or register a model on an endpoint"
+            "set up local AI (launcher Settings → AI, or ai.localInstall) or register a model on an endpoint"
         } else {
             "ask the operator to set up local AI"
         };
@@ -1601,8 +1601,8 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "No default EMBEDDING model on this executor: set up local AI (ai.localInstall) \
-             or register a model on an endpoint"
+            "No default EMBEDDING model on this executor: set up local AI (launcher Settings → \
+             AI, or ai.localInstall) or register a model on an endpoint"
         );
         assert!(service.embedders.lock().await.is_empty(), "nothing set up");
         embeds.assert_async().await;
@@ -1696,9 +1696,9 @@ mod tests {
             "{error}"
         );
         assert!(
-            error
-                .to_string()
-                .contains("set up local AI (ai.localInstall) or register a model"),
+            error.to_string().contains(
+                "set up local AI (launcher Settings → AI, or ai.localInstall) or register a model"
+            ),
             "{error}"
         );
         assert!(service.transcription_streams.lock().await.is_empty());

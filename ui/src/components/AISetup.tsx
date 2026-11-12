@@ -5,28 +5,21 @@ import {
   type DetectedEndpoint,
   type DiscoveredModel,
   type EndpointKind,
-  type LocalAiHardware,
-  type LocalAiPlan,
-  type LocalAiProgress,
-  type LocalAiStatus,
 } from "@coasys/ad4m";
 import { open } from "@tauri-apps/plugin-shell";
 import { useCallback, useEffect, useState } from "react";
 import "../index.css";
 import {
-  basisNote,
   chatModels,
   endpointFor,
   kindLabel,
-  localAction,
   localChatReady,
-  localDefaults,
   preselectedChat,
+  readyLocalDefaults,
   registerModel,
-  serverInstead,
   serves,
-  toDownload,
 } from "./aiSetup";
+import { LocalAiPanel, useLocalAi } from "./LocalAiPanel";
 
 type Mode = "Local" | "Server" | "Skip";
 type ServerMode = "Detected" | "Remote";
@@ -39,41 +32,6 @@ const REMOTE_KINDS: { kind: EndpointKind; label: string; baseUrl: string }[] = [
   { kind: "ANTHROPIC", label: "Anthropic", baseUrl: "https://api.anthropic.com" },
   { kind: "OPEN_AI_COMPATIBLE", label: "Other", baseUrl: "https://" },
 ];
-
-/** How often the page reads local AI's status and plan again while it shows them. */
-const REFRESH_MS = 5000;
-
-/** The start of the error a failed read of the device, plan or status shows. */
-const LOAD_ERROR = "Could not check this device: ";
-
-const SERVICE_LABELS: Record<string, string> = {
-  llm: "Chat",
-  embeddings: "Embeddings",
-  stt: "Transcription",
-  tts: "Speech",
-};
-
-function gb(bytes: number): string {
-  return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
-}
-
-/** One line for the detected device: CPU, RAM, the GPU a runtime would use. */
-function describeDevice(hardware: LocalAiHardware): string {
-  const gpu =
-    hardware.gpus.find((g) => g.type === "discrete") ?? hardware.gpus[0];
-  // A discrete GPU whose VRAM is not known gets no suffix.
-  const gpuSuffix =
-    gpu?.type === "discrete"
-      ? gpu.vramBytes
-        ? ` (${gb(gpu.vramBytes)})`
-        : ""
-      : gpu?.type === "unified"
-        ? " (unified memory)"
-        : " (integrated)";
-  const gpuText = gpu ? `${gpu.name}${gpuSuffix}` : "no GPU";
-  const backends = hardware.backends.filter((b) => b !== "cpu");
-  return `${hardware.cpu.brand || hardware.arch}, ${gb(hardware.ramBytes)} RAM, ${gpuText}${backends.length ? `, ${backends.join(" + ")}` : ""}`;
-}
 
 /**
  * Onboarding's AI page. First choice: local AI on this device: the executor detects the
@@ -100,45 +58,27 @@ export default function AISetup(props: {
   const [servedChat, setServedChat] = useState<Record<string, string[]>>({});
   const [chatChoice, setChatChoice] = useState<ChatChoice | null>(null);
 
-  // Local AI
-  const [hardware, setHardware] = useState<LocalAiHardware | null>(null);
-  const [plan, setPlan] = useState<LocalAiPlan | null>(null);
-  const [localStatus, setLocalStatus] = useState<LocalAiStatus | null>(null);
-  const [progress, setProgress] = useState<LocalAiProgress | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [loadFailed, setLoadFailed] = useState(false);
+  // Local AI: read at once, refreshed while its panel shows.
+  const local = useLocalAi(client, mode === "Local", setError);
 
   // A model server
   const [detected, setDetected] = useState<DetectedEndpoint[] | null>(null);
   const [detecting, setDetecting] = useState(false);
+  /**
+   * Detection's own error: the local panel looks for servers too (only to offer one), and a
+   * server's listing error must not replace the device read's error there. Shown with the
+   * servers.
+   */
+  const [detectError, setDetectError] = useState("");
   const [remoteKind, setRemoteKind] = useState(REMOTE_KINDS[0]);
   const [remoteUrl, setRemoteUrl] = useState(REMOTE_KINDS[0].baseUrl);
   const [remoteKey, setRemoteKey] = useState("");
   const [remoteModels, setRemoteModels] = useState<DiscoveredModel[]>([]);
   const [remoteEndpointId, setRemoteEndpointId] = useState<string | null>(null);
 
-  const loadLocal = useCallback(async () => {
-    try {
-      const [h, p, s] = await Promise.all([
-        client.ai.localHardware(),
-        client.ai.localPlan(),
-        client.ai.localStatus(),
-      ]);
-      setHardware(h);
-      setPlan(p);
-      setLocalStatus(s);
-      setLoadFailed(false);
-      // A read that failed before is answered now: its error goes.
-      setError((shown) => (shown.startsWith(LOAD_ERROR) ? "" : shown));
-    } catch (e) {
-      setLoadFailed(true);
-      setError(`${LOAD_ERROR}${e}`);
-    }
-  }, [client]);
-
   const detect = useCallback(async () => {
     setDetecting(true);
-    setError("");
+    setDetectError("");
     try {
       const servers = await client.ai.detectEndpoints();
       const chat: Record<string, string[]> = {};
@@ -153,7 +93,7 @@ export default function AISetup(props: {
             } catch (e) {
               // The server still offers the recommended download.
               chat[s.baseUrl] = [];
-              setError(`Could not list the models of ${s.baseUrl}: ${e}`);
+              setDetectError(`Could not list the models of ${s.baseUrl}: ${e}`);
             }
           })
       );
@@ -162,43 +102,11 @@ export default function AISetup(props: {
       // A choice the person made, or one made before, stays.
       setChatChoice((chosen) => chosen ?? preselectedChat(servers, chat));
     } catch (e) {
-      setError(`${e}`);
+      setDetectError(`${e}`);
       setDetected([]);
     }
     setDetecting(false);
   }, [client]);
-
-  useEffect(() => {
-    loadLocal();
-  }, [loadLocal]);
-
-  // While the page shows local AI: its status and plan again now and then, so a runtime
-  // that stops, or a setup that ends elsewhere, shows here.
-  useEffect(() => {
-    if (mode !== "Local" || installing) return;
-    // One refresh at a time, and none lands after the effect ends: an older answer must
-    // not overwrite a newer one, or the state an install or a mode change set.
-    let cancelled = false;
-    let inFlight = false;
-    const timer = setInterval(() => {
-      if (inFlight) return;
-      inFlight = true;
-      Promise.all([client.ai.localStatus(), client.ai.localPlan()])
-        .then(([s, p]) => {
-          if (cancelled) return;
-          setLocalStatus(s);
-          setPlan(p);
-        })
-        .catch(() => {})
-        .finally(() => {
-          inFlight = false;
-        });
-    }, REFRESH_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [mode, installing, client]);
 
   const hasLlm = registered.some((r) => r.startsWith("LLM:"));
   // The local panel looks too: a model server already running is offered instead of a download.
@@ -206,7 +114,8 @@ export default function AISetup(props: {
     if ((mode === "Server" || mode === "Local") && detected === null) detect();
   }, [mode, detected, detect]);
 
-  const localReady = localChatReady(localStatus);
+  const localReady = localChatReady(local.status);
+  const setLocalStatus = local.setStatus;
 
   useEffect(() => {
     if (mode === "Server" && serverMode === "Detected" && chatChoice) {
@@ -217,8 +126,9 @@ export default function AISetup(props: {
         try {
           const status = await client.ai.localStatus();
           setLocalStatus(status);
-          if (localChatReady(status)) {
-            for (const [modelType, id] of localDefaults(status)) await client.ai.setDefaultModel(modelType, id);
+          const defaults = readyLocalDefaults(status);
+          if (defaults) {
+            for (const [modelType, id] of defaults) await client.ai.setDefaultModel(modelType, id);
             return true;
           }
           setError("Local AI's chat model does not run: start local AI first.");
@@ -233,7 +143,7 @@ export default function AISetup(props: {
     }
     // commitChatChoice reads only its argument, `client` and stable setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, serverMode, chatChoice, hasLlm, localReady, onReady, client]);
+  }, [mode, serverMode, chatChoice, hasLlm, localReady, onReady, client, setLocalStatus]);
 
   /** Register the chosen chat model on its server and make it the default chat model. */
   async function commitChatChoice({ server, remoteModel }: ChatChoice): Promise<boolean> {
@@ -250,31 +160,6 @@ export default function AISetup(props: {
     } finally {
       setBusy(null);
     }
-  }
-
-  async function installLocal() {
-    setInstalling(true);
-    setError("");
-    setProgress(null);
-    try {
-      const status = await client.ai.localInstall({}, (p) => setProgress(p));
-      setLocalStatus(status);
-      setPlan(await client.ai.localPlan());
-    } catch (e) {
-      setError(`${e}`);
-    }
-    setInstalling(false);
-  }
-
-  async function startLocal() {
-    setBusy("local-start");
-    setError("");
-    try {
-      setLocalStatus(await client.ai.localStart());
-    } catch (e) {
-      setError(`${e}`);
-    }
-    setBusy(null);
   }
 
   /** Save the detected server as an endpoint and register `remoteModel` on it. */
@@ -343,15 +228,6 @@ export default function AISetup(props: {
   const isChosen = (server: DetectedEndpoint, remoteModel: string) =>
     chatChoice?.server.baseUrl === server.baseUrl && chatChoice.remoteModel === remoteModel;
 
-  const action = plan ? localAction(localStatus, plan, installing) : "install";
-  const instead =
-    action === "install" && !installing
-      ? serverInstead(
-          detected,
-          (localStatus?.runtimes ?? []).flatMap((r) => (r.port ? [r.port] : []))
-        )
-      : null;
-
   return (
     <j-flex direction="column" a="center" gap="500" style={{ width: "100%", maxWidth: 640 }}>
       <j-flex gap="400" style={{ padding: "0 10px" }}>
@@ -376,135 +252,16 @@ export default function AISetup(props: {
 
       {mode === "Local" && (
         <j-flex direction="column" gap="400" style={{ width: "100%" }}>
-          {(!hardware || !plan) && loadFailed ? (
-            <j-button variant="primary" onClick={loadLocal}>
-              Check this device again
-            </j-button>
-          ) : !hardware || !plan ? (
-            <j-text>Checking this device...</j-text>
-          ) : (
-            <j-box className="box">
-              <j-flex direction="column" gap="300">
-                <j-text nomargin color="ui-0">
-                  Found on this computer: {describeDevice(hardware)}
-                </j-text>
-                <j-text nomargin size="400" color="ui-700">
-                  Class {plan.hardwareClass}; the models may use {gb(plan.memoryBudgetBytes)} of memory.
-                </j-text>
-                {plan.models.map((m) => (
-                  <j-flex key={m.modelId} a="center" j="between" gap="300">
-                    <j-text nomargin size="400">
-                      {SERVICE_LABELS[m.service] ?? m.service}: {m.modelId}
-                      {basisNote(m) && ` (${basisNote(m)})`}
-                    </j-text>
-                    <j-text nomargin size="400" color="ui-700">
-                      {m.installed ? "downloaded" : gb(m.sizeBytes)}
-                    </j-text>
-                  </j-flex>
-                ))}
-                {plan.runtimes.map((r) => (
-                  <j-flex key={r.runtimeId} a="center" j="between" gap="300">
-                    <j-text nomargin size="400">
-                      Runtime: {r.runtimeId} {r.version} ({r.backend})
-                    </j-text>
-                    <j-text nomargin size="400" color="ui-700">
-                      {r.installed ? "downloaded" : gb(r.sizeBytes)}
-                    </j-text>
-                  </j-flex>
-                ))}
-                {plan.unavailable.map((u) => (
-                  <j-text key={u.service} nomargin size="400" color="warning-500">
-                    {SERVICE_LABELS[u.service] ?? u.service}: {u.reason}
-                  </j-text>
-                ))}
-                {plan.reasons.map((r) => (
-                  <j-text key={r} nomargin size="400" color={plan.fits ? "ui-700" : "danger-500"}>
-                    {r}
-                  </j-text>
-                ))}
-                <j-text nomargin color="ui-0">
-                  {plan.downloadBytes > 0 ? `Download: ${gb(plan.downloadBytes)}` : "Everything is downloaded"}
-                  {plan.fits ? ", fits this device" : ", does not fit this device"}
-                </j-text>
-
-                {installing && progress && (
-                  <j-flex direction="column" gap="200">
-                    <progress
-                      max={Math.max(progress.totalBytes, 1)}
-                      value={progress.doneBytes}
-                      style={{ width: "100%" }}
-                    />
-                    <j-text nomargin size="400" color="ui-700">
-                      {progress.phase === "download" && progress.item
-                        ? `${progress.item}: ${gb(progress.itemDoneBytes)} of ${gb(progress.itemTotalBytes)}`
-                        : progress.phase}
-                    </j-text>
-                  </j-flex>
-                )}
-                {installing && !progress && <j-text nomargin>Preparing...</j-text>}
-
-                {localStatus?.installed && !installing && (
-                  <j-flex direction="column" gap="200">
-                    {localStatus.runtimes.map((r) => (
-                      <j-text key={r.provider} nomargin size="400">
-                        {r.provider}: {r.phase ?? "not started"}
-                        {r.port ? ` on port ${r.port}` : ""}
-                        {r.onGpu === true ? `, on the GPU (${gb(r.gpuBytes ?? 0)})` : ""}
-                        {r.onGpu === false ? ", on the CPU: the GPU build found no device" : ""}
-                        {r.detail ? ` (${r.detail})` : ""}
-                      </j-text>
-                    ))}
-                  </j-flex>
-                )}
-
-                {action === "running" ? (
-                  <j-text nomargin color="success-500">
-                    Local AI runs: its models are the defaults.
-                  </j-text>
-                ) : action === "start" ? (
-                  <j-button variant="primary" onClick={startLocal} loading={busy === "local-start"}>
-                    Start local AI
-                  </j-button>
-                ) : (
-                  <j-flex direction="column" gap="300">
-                    {!installing && plan.fits && (
-                      <j-text nomargin color="ui-0">
-                        {plan.downloadBytes > 0
-                          ? `Local AI would download ${toDownload(plan).join(", ") || "its files"} to this computer: ${gb(plan.downloadBytes)} in total. Nothing is downloaded until you say yes. Download and set it up?`
-                          : "Everything local AI needs is on this computer. Set it up?"}
-                      </j-text>
-                    )}
-                    <j-flex gap="300" wrap>
-                      <j-button
-                        variant="primary"
-                        disabled={!plan.fits || installing}
-                        loading={installing}
-                        onClick={installLocal}
-                      >
-                        {plan.downloadBytes > 0 ? `Yes, download ${gb(plan.downloadBytes)}` : "Yes, set it up"}
-                      </j-button>
-                      {!installing && (
-                        <j-button variant="subtle" onClick={() => setMode("Skip")}>
-                          No, no AI for now
-                        </j-button>
-                      )}
-                    </j-flex>
-                    {instead && (
-                      <j-button
-                        variant="link"
-                        onClick={() => {
-                          setServerMode("Detected");
-                          setMode("Server");
-                        }}
-                      >
-                        Use the {kindLabel(instead.kind)} already running at {instead.baseUrl} instead
-                      </j-button>
-                    )}
-                  </j-flex>
-                )}
-              </j-flex>
-            </j-box>
-          )}
+          <LocalAiPanel
+            local={local}
+            runningText="Local AI runs: its models are the defaults."
+            onDecline={{ label: "No, no AI for now", run: () => setMode("Skip") }}
+            detected={detected}
+            onUseServer={() => {
+              setServerMode("Detected");
+              setMode("Server");
+            }}
+          />
         </j-flex>
       )}
 
@@ -659,6 +416,12 @@ export default function AISetup(props: {
         <j-text style={{ maxWidth: 420 }}>
           Without a chat model, AI features (interpretation, summaries, agents) stay off until
           you add one in Settings, AI.
+        </j-text>
+      )}
+
+      {mode === "Server" && detectError && (
+        <j-text color="danger-500" style={{ maxWidth: 520 }}>
+          {detectError}
         </j-text>
       )}
 

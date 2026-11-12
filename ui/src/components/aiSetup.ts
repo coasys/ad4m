@@ -202,6 +202,17 @@ export function localChatReady(status: Pick<LocalAiStatus, "models" | "runtimes"
 }
 
 /**
+ * The defaults to set once local AI is set up: [`localDefaults`] when its chat model runs
+ * ([`localChatReady`]), as onboarding's Next does; `null` while it does not run, so a screen
+ * keeps the defaults it has until a start makes it run.
+ */
+export function readyLocalDefaults(
+  status: Pick<LocalAiStatus, "models" | "runtimes"> | null
+): [ModelType, string][] | null {
+  return status && localChatReady(status) ? localDefaults(status) : null;
+}
+
+/**
  * What the local AI panel offers: `running` when every runtime of the selection runs, `start`
  * when it is installed with its files in, else `install`. A selection without the chat model
  * the plan has (an earlier install for embeddings or transcription only), or whose chat

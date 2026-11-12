@@ -403,7 +403,13 @@ mod tests {
                 .unwrap()
                 .block_on(async {
                     let client = super::super::local::install::http_client()?;
-                    super::super::local::onnx_runtime::fetch_pinned(&store, &client, &|_| {}).await
+                    super::super::local::onnx_runtime::fetch_pinned(
+                        &store,
+                        &client,
+                        super::super::local::onnx_runtime::pinned(),
+                        &|_| {},
+                    )
+                    .await
                 })
                 .unwrap();
             gate = SpeechGate::new();

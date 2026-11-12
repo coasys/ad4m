@@ -385,15 +385,25 @@ async fn plan_for(
         &|sha| installed.contains(sha),
         services.unwrap_or(&plan::PLANNED_SERVICES),
     );
-    if plan.models.iter().any(|m| m.service == Service::Stt) {
-        if let Some((size, have)) = onnx_runtime::planned(&Store::new(&paths.store)) {
-            plan.total_bytes += size;
-            if !have {
-                plan.download_bytes += size;
-            }
+    count_speech_gate(&mut plan, || {
+        onnx_runtime::planned(&Store::new(&paths.store))
+    });
+    Ok(plan)
+}
+
+/// Adds ONNX Runtime to `plan`'s sizes when the plan has transcription: `gate` answers its
+/// size and whether the store holds it ([`onnx_runtime::planned`]; `None` where it is linked
+/// in). Read only for a plan with transcription.
+fn count_speech_gate(plan: &mut LocalPlan, gate: impl FnOnce() -> Option<(u64, bool)>) {
+    if !plan.models.iter().any(|m| m.service == Service::Stt) {
+        return;
+    }
+    if let Some((size, have)) = gate() {
+        plan.total_bytes += size;
+        if !have {
+            plan.download_bytes += size;
         }
     }
-    Ok(plan)
 }
 
 /// What the tests of the modules here share: the lock that runs them one at a time and
@@ -455,5 +465,51 @@ mod tests {
             store_root_from(None, Some("/env".into()), Some(user)).unwrap(),
             PathBuf::from("/env")
         );
+    }
+
+    fn plan_of(services: &[&str]) -> LocalPlan {
+        let models: Vec<serde_json::Value> = services
+            .iter()
+            .map(|service| {
+                serde_json::json!({
+                    "service": service, "modelId": format!("{service}-model"),
+                    "provider": "llama-server", "sizeBytes": 100, "memoryBytes": 1,
+                    "license": "MIT", "installed": false, "basis": "measured",
+                    "fromClass": "c", "evidence": [], "metrics": {}, "serverFlags": []
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "hardwareClass": "c", "runtimes": [], "models": models, "unavailable": [],
+            "downloadBytes": 100 * services.len(), "totalBytes": 100 * services.len(),
+            "memoryBytes": 1, "memoryBudgetBytes": 1, "diskFreeBytes": null, "fits": true,
+            "reasons": [], "recommendationsGeneratedAt": "", "device": null
+        }))
+        .unwrap()
+    }
+
+    /// ONNX Runtime (macOS) is part of what a plan with transcription downloads, and of its
+    /// total only once the store holds it; a plan without transcription, or a platform that
+    /// links it in, counts nothing. Runs on every platform: the build is passed in.
+    #[test]
+    fn a_plan_with_transcription_counts_the_speech_gate() {
+        let mut missing = plan_of(&["llm", "stt"]);
+        count_speech_gate(&mut missing, || Some((30, false)));
+        assert_eq!((missing.download_bytes, missing.total_bytes), (230, 230));
+
+        let mut held = plan_of(&["llm", "stt"]);
+        count_speech_gate(&mut held, || Some((30, true)));
+        assert_eq!((held.download_bytes, held.total_bytes), (200, 230));
+
+        let mut linked_in = plan_of(&["llm", "stt"]);
+        count_speech_gate(&mut linked_in, || None);
+        assert_eq!(
+            (linked_in.download_bytes, linked_in.total_bytes),
+            (200, 200)
+        );
+
+        let mut no_stt = plan_of(&["llm", "embeddings"]);
+        count_speech_gate(&mut no_stt, || panic!("not read without transcription"));
+        assert_eq!((no_stt.download_bytes, no_stt.total_bytes), (200, 200));
     }
 }

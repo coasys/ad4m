@@ -12,6 +12,7 @@ import {
   localDefaults,
   parseMaxNumCtx,
   preselectedChat,
+  readyLocalDefaults,
   serverInstead,
   toDownload,
   withMaxNumCtx,
@@ -197,6 +198,20 @@ test("picking local AI makes each registered local model the default of its type
     ["EMBEDDING", "m2"],
     ["TRANSCRIPTION", "m3"],
   ]);
+});
+
+test("an install sets local AI's defaults only once its chat model runs", () => {
+  const embeddings = { service: "embeddings", modelId: "nomic", model: "m2" };
+  assert.equal(readyLocalDefaults(null), null);
+  assert.deepEqual(readyLocalDefaults({ models: [chatModel, embeddings], runtimes: [llamaUp] }), [
+    ["LLM", "m1"],
+    ["EMBEDDING", "m2"],
+  ]);
+  // Installed, but the runtime failed to start: the defaults stay as they are.
+  const failed = [runtime("llama-server", ["llm", "embeddings"], "failed")];
+  assert.equal(readyLocalDefaults({ models: [chatModel, embeddings], runtimes: failed }), null);
+  // No chat model registered (an install for embeddings only): none.
+  assert.equal(readyLocalDefaults({ models: [embeddings], runtimes: [llamaUp] }), null);
 });
 
 test("the local panel names what an install would download: only what is not here yet", () => {

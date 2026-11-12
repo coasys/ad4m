@@ -85,21 +85,27 @@ pub(crate) fn pinned() -> Option<(&'static Library, &'static str)> {
 
 /// The download size of the pinned build where it is needed, and whether `store` holds it.
 pub(crate) fn planned(store: &Store) -> Option<(u64, bool)> {
-    let (library, key) = pinned()?;
-    Some((
-        library.builds[key].size_bytes,
-        installed(store, library, key).is_some(),
-    ))
+    planned_with(store, pinned())
 }
 
-/// For an explicit install: fetch the pinned build into `store` where it is needed (macOS),
-/// unless it is there. `None` where ONNX Runtime is linked in.
+/// [`planned`] for `pinned` (the library and build key; `None` where ONNX Runtime is linked
+/// in): a test passes a pinned build on any platform.
+pub(super) fn planned_with(store: &Store, pinned: Option<(&Library, &str)>) -> Option<(u64, bool)> {
+    let (library, key) = pinned?;
+    let build = library.builds.get(key)?;
+    Some((build.size_bytes, installed(store, library, key).is_some()))
+}
+
+/// For an explicit install: fetch `pinned` (the library and build key, [`pinned`]) into
+/// `store`, unless it is there. `None` where ONNX Runtime is linked in (`pinned` is `None`).
+/// A test passes a pinned build on any platform.
 pub(crate) async fn fetch_pinned(
     store: &Store,
     client: &reqwest::Client,
+    pinned: Option<(&Library, &str)>,
     progress: &(dyn Fn(u64) + Send + Sync),
 ) -> Result<Option<PathBuf>> {
-    let Some((library, key)) = pinned() else {
+    let Some((library, key)) = pinned else {
         return Ok(None);
     };
     fetch(store, client, library, key, progress).await.map(Some)
@@ -364,5 +370,49 @@ mod tests {
             "{error}"
         );
         assert_eq!(installed(&store, &library, "macos-arm64"), None);
+    }
+
+    /// The plan's size of a pinned build, and whether the store holds it: on every platform
+    /// when a build is pinned, none where it is linked in.
+    #[tokio::test]
+    async fn a_pinned_build_is_planned_by_its_size_until_the_store_holds_it() {
+        let archive = tar_gz("ort/lib/libonnxruntime.1.18.1.dylib", b"a dylib");
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/ort.tgz")
+            .with_body(&archive)
+            .create_async()
+            .await;
+        let library = library(
+            format!("{}/ort.tgz", server.url()),
+            &archive,
+            &sha(&archive),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let pinned = Some((&library, "macos-arm64"));
+
+        assert_eq!(planned_with(&store, None), None);
+        assert_eq!(planned_with(&store, Some((&library, "linux-x64"))), None);
+        assert_eq!(
+            planned_with(&store, pinned),
+            Some((archive.len() as u64, false))
+        );
+
+        let client = http_client().unwrap();
+        assert_eq!(
+            fetch_pinned(&store, &client, None, &|_| {}).await.unwrap(),
+            None,
+            "linked in: nothing to fetch"
+        );
+        let path = fetch_pinned(&store, &client, pinned, &|_| {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"a dylib");
+        assert_eq!(
+            planned_with(&store, pinned),
+            Some((archive.len() as u64, true))
+        );
     }
 }

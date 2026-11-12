@@ -296,7 +296,8 @@ impl LegacyRow {
 
 /// What to do instead of an in-process model of any type: nothing installs on its own, so
 /// the operator installs local AI or registers a model.
-const IN_PROCESS_ADVICE: &str = "Install local AI (ai.localInstall), or register a model on an \
+const IN_PROCESS_ADVICE: &str =
+    "Install local AI (launcher Settings → AI, or ai.localInstall), or register a model on an \
      endpoint (Ollama, llama-server, speaches, ...) and make it the default.";
 
 #[cfg(test)]
@@ -591,6 +592,7 @@ mod tests {
     #[test]
     fn the_advice_for_a_deleted_model_names_the_explicit_ways_to_get_one() {
         assert!(super::IN_PROCESS_ADVICE.contains("ai.localInstall"));
+        assert!(super::IN_PROCESS_ADVICE.contains("launcher Settings → AI"));
         assert!(super::IN_PROCESS_ADVICE.contains("register a model on an endpoint"));
         assert!(!super::IN_PROCESS_ADVICE.contains("'default'"));
     }

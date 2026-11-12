@@ -99,14 +99,13 @@ The executor still runs no model in-process: `local/` installs and supervises mo
 | `plan.rs` | pure `plan()`: per service the recommendation of the class or the nearest smaller measured one (no evidence = unmeasured), else the manifest's smallest model of the service whose runtime runs here (`basis: default`, also when the measured provider has no build here), memory sum vs budget with step-down, build per provider (recommended, else CUDA > Metal > Vulkan > ROCm > CPU; a recommended ROCm build becomes Vulkan where Vulkan runs: the ROCm build silently runs on the CPU without the system ROCm libraries), each model's `serverFlags` (measured, else `default_flags`: `--reasoning off` for chat), disk check |
 | `install.rs` | the store (`downloads/`, `runtime/<id>/<version>-<build>/`, `models/`), `download` (`.part` + `Range` resume, sha256 and size before rename; a redirect only to https), `unpack` (tar.gz, zip; no path escapes) into `<version>-<build>.partial` (the whole name: `with_extension` would cut at the version's last dot), macOS quarantine strip |
 | `supervisor.rs` | `Supervised` child (owns it: dropping it stops the child, so a start cancelled before `RUNNING` has it leaves nothing running): loopback port (`choose_port`, never the `detect.rs` ports), readiness (llama `/health`, nemo-speech `/ready`), `RestartBudget` (3, reset after 5 healthy min), SIGTERM then SIGKILL, Linux `PR_SET_PDEATHSIG` from one long-lived spawner thread, `reap_stale` by pid + exe path |
-| `mod.rs` | `LocalPaths` / `store_root`, the API types, `Selection` (and the lock on its file), the shared statics (`RUNNING`, `MANAGED_PORTS`, `GPU_CHECKS`, `INSTALLING`), `hardware` / `current_plan`; re-exports the rest so callers use `local::…` |
-| `setup.rs` | `install` (one at a time, progress events; on macOS with transcription also ONNX Runtime), `install_into` (`local-ai install`, `INCLUDE_MODELS`), `remove`. The only paths that download |
+| `mod.rs` | `LocalPaths` / `store_root`, the API types, `Selection` (and the lock on its file), the shared statics (`RUNNING`, `MANAGED_PORTS`, `GPU_CHECKS`, `INSTALLING`), `hardware` / `current_plan` (`plan_for`: the plan, with ONNX Runtime's size counted by `count_speech_gate` when it has transcription); re-exports the rest so callers use `local::…` |
+| `setup.rs` | `install` (`ai.localInstall`: one at a time under the install flag, `ai-local-progress` events, then the selection saved, the old runtimes stopped and the new ones started and registered), `install_into` (`local-ai install`, `INCLUDE_MODELS`: no start), `remove` (`ai.localRemove`: stop, unregister, forget the selection; files only with `deleteFiles`). The only paths that download. On macOS with transcription the last download is ONNX Runtime (`fetch_speech_gate`); its failure is a warning and a progress `detail`, not a failed install: transcription then runs ungated |
+| `onnx_runtime.rs` | ONNX Runtime for the speech gate where `ort` loads it at run time (macOS): `pinned` (the manifest's build per platform, `libraries.onnxruntime`; `None` where it is linked in), `planned` (its size for the plan), `fetch_pinned` (used by the install only; verified like a runtime build), `ready` (loads the store's build into `ort` once, never downloads; linked in: always yes). `planned_with` and `fetch_pinned` take the pinned build, so tests run on every platform |
 | `autostart.rs` | `autostart` (`local_ai_autostart`: starts what is installed, never installs) |
-| `runtimes.rs` | `start` / `stop` / `status`, child specs and flags, pid files, `stop_on_exit`, `stop_children_blocking` |
-| `health.rs` | `managed_health`, the health and pid followers, the GPU check |
-| `registration.rs` | `register` / `unregister`, managed endpoint names |
-
-| (the six above, in detail) | `install` / `start` / `stop` / `remove` / `status`, `register` (endpoints `This device (llama.cpp)` / `This device (NeMo Speech)`, models named by manifest id; a nemo-speech model's `remote_model` is the id its `/v1/models` lists, `parakeet-tdt-0.6b-v3.oss-align.q8_0`, since it refuses any other; the chat model `native_tools: true`; defaults), `managed_health` (what `check_health` uses for a managed endpoint: the supervisor's phase, then llama-server's liveness or nemo-speech's listing), `autostart` (`local_ai_autostart`), `stop_on_exit` (run by the executor's shutdown, `clean_up_before_exit` in `lib.rs`, and by `runtime.quit`: SIGTERM to all at once, SIGKILL after 2 s, inside the 4 s a signal leaves the shutdown), `stop_children_blocking` (the same from a thread that cannot await: the launcher's Quit, which exits without the executor's shutdown) |
+| `runtimes.rs` | `start` / `stop` / `status`, child specs and flags, pid files; `stop_on_exit` (run by the executor's shutdown, `clean_up_before_exit` in `lib.rs`, and by `runtime.quit`: SIGTERM to all at once, SIGKILL after 2 s, inside the 4 s a signal leaves the shutdown), `stop_children_blocking` (the same from a thread that cannot await: the launcher's Quit, which exits without the executor's shutdown) |
+| `health.rs` | `managed_health` (what `check_health` uses for a managed endpoint: the supervisor's phase, then llama-server's liveness or nemo-speech's listing), the health and pid followers, the GPU check |
+| `registration.rs` | `register` (endpoints `This device (llama.cpp)` / `This device (NeMo Speech)`, models named by manifest id; a nemo-speech model's `remote_model` is the id its `/v1/models` lists, `parakeet-tdt-0.6b-v3.oss-align.q8_0`, since it refuses any other; the chat model `native_tools: true`; defaults) / `unregister`, managed endpoint names |
 
 - Storage: the store is per user, shared by agents (`local_ai_dir` / `AD4M_LOCAL_AI_DIR`,
   else `dirs::data_local_dir()/ad4m/local-ai`; never the temporary directory: without a
@@ -175,11 +174,12 @@ The executor still runs no model in-process: `local/` installs and supervises mo
   to a request path or to executor start. `AIService::default_model` (`ai.embed` or
   `ai.transcriptionOpen` on `"default"` with no model of the type) answers `LocalAiRefused`:
   the operator gets "No default <TYPE> model on this executor: set up local AI
-  (ai.localInstall) or register a model on an endpoint"; any other caller, and the
-  executor's own embeds (`None`), "… ask the operator to set up local AI". `/v1` has no
-  default (404). On macOS the install that sets up transcription fetches ONNX Runtime for
-  the speech gate (`onnx_runtime::fetch_pinned`; `plan_for` counts its size); a stream
-  never fetches it and runs ungated without it.
+  (launcher Settings → AI, or ai.localInstall) or register a model on an endpoint"; any
+  other caller, and the executor's own embeds (`None`), "… ask the operator to set up local
+  AI". `/v1` has no default (404). On macOS the install that sets up transcription fetches
+  ONNX Runtime for the speech gate (`onnx_runtime::fetch_pinned`; `plan_for` counts its
+  size); a failed fetch does not fail the install, and a stream never fetches it and runs
+  ungated without it.
 - Model names live in `manifest.json` and the recommendations, as data (the rule below).
   Updating a pin: new URL, `sizeBytes` and `sha256` (GitHub `digest`, HF `lfs.oid`), and an
   HF URL with a commit, never `main` (a unit test checks).

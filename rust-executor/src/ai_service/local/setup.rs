@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use super::data::{self, Service};
+use super::data::{self, Library, Service};
 use super::hardware::Backend;
 use super::install::{self, Store};
 use super::onnx_runtime;
@@ -175,11 +175,12 @@ async fn install_for(
     let client = install::http_client()?;
     // Transcription streams gate speech with Silero VAD; where ONNX Runtime is loaded at run
     // time (macOS), the install that sets up transcription fetches it. Nothing else does.
+    let gate = onnx_runtime::pinned();
     let onnx_bytes = plan
         .models
         .iter()
         .any(|m| m.service == Service::Stt)
-        .then(|| onnx_runtime::planned(&store).map(|(size, _)| size))
+        .then(|| onnx_runtime::planned_with(&store, gate).map(|(size, _)| size))
         .flatten();
     let total: u64 = plan.runtimes.iter().map(|r| r.size_bytes).sum::<u64>()
         + plan.models.iter().map(|m| m.size_bytes).sum::<u64>()
@@ -241,9 +242,8 @@ async fn install_for(
         });
     }
     if let Some(size) = onnx_bytes {
-        let reporter = Reporter::new("onnxruntime".into(), size, done, total);
-        onnx_runtime::fetch_pinned(&store, &client, &|bytes| reporter.report(bytes)).await?;
-        reporter.flush().await;
+        // Optional: a failed download leaves transcription ungated, not the install undone.
+        fetch_speech_gate(&store, &client, gate, size, done, total).await;
     }
     {
         let _file = SELECTION_FILE.lock().unwrap();
@@ -256,6 +256,44 @@ async fn install_for(
         start_at(paths, true).await?;
     }
     Ok(())
+}
+
+/// Fetch ONNX Runtime for the speech gate (`pinned`: macOS's build; `None` where it is linked
+/// in) as the install's last download. A failure does not fail the install: the chat,
+/// embedding and transcription models work without it, and a transcription stream then sends
+/// all audio, with its warning. The failure is logged and published as the item's progress
+/// detail.
+async fn fetch_speech_gate(
+    store: &Store,
+    client: &reqwest::Client,
+    pinned: Option<(&Library, &str)>,
+    size: u64,
+    done: u64,
+    total: u64,
+) {
+    let reporter = Reporter::new("onnxruntime".into(), size, done, total);
+    match onnx_runtime::fetch_pinned(store, client, pinned, &|bytes| reporter.report(bytes)).await {
+        Ok(_) => {
+            reporter.flush().await;
+        }
+        Err(e) => {
+            let detail = format!(
+                "ONNX Runtime did not download ({e:#}): transcription runs without its speech \
+                 gate; install local AI again to retry"
+            );
+            log::warn!("{detail}");
+            publish_progress(ProgressEvent {
+                phase: "download".into(),
+                item: Some("onnxruntime".into()),
+                item_done_bytes: 0,
+                item_total_bytes: size,
+                done_bytes: done + size,
+                total_bytes: total,
+                detail: Some(detail),
+            })
+            .await;
+        }
+    }
 }
 
 /// Publishes one item's download progress at most every [`PROGRESS_INTERVAL`].
@@ -407,5 +445,70 @@ mod tests {
         assert!(!finished.installing, "{finished:?}");
         assert!(failed.unwrap_err().to_string().contains("broke off"));
         assert!(!flag_after_failure);
+    }
+
+    /// A failed ONNX Runtime download (macOS's speech gate) does not fail the install: it is
+    /// published as the item's detail and the install goes on. Where ONNX Runtime is linked
+    /// in there is nothing to fetch. Runs on every platform: the pinned build is passed in.
+    #[tokio::test]
+    async fn a_failed_speech_gate_download_does_not_fail_the_install() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/ort.tgz")
+            .with_status(503)
+            .create_async()
+            .await;
+        let library: Library = serde_json::from_value(serde_json::json!({
+            "version": "1.18.1",
+            "builds": { "macos-arm64": {
+                "url": format!("{}/ort.tgz", server.url()), "sha256": "0".repeat(64),
+                "sizeBytes": 40, "binary": "ort/lib/libonnxruntime.1.18.1.dylib"
+            } }
+        }))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let client = install::http_client().unwrap();
+        let mut events = get_global_pubsub().await.subscribe_events();
+
+        // The ONNX Runtime step that carries a failure, among the progress events published.
+        let failure_of = |events: &mut tokio::sync::broadcast::Receiver<_>| {
+            let mut failure = None;
+            while let Ok(event) = events.try_recv() {
+                let event: std::sync::Arc<crate::events::Event> = event;
+                if event.topic != Topic::AiLocalProgress {
+                    continue;
+                }
+                let step: ProgressEvent = serde_json::from_value(event.payload.clone()).unwrap();
+                if step.item.as_deref() == Some("onnxruntime") && step.detail.is_some() {
+                    failure = Some(step);
+                }
+            }
+            failure
+        };
+
+        fetch_speech_gate(
+            &store,
+            &client,
+            Some((&library, "macos-arm64")),
+            40,
+            60,
+            100,
+        )
+        .await;
+        mock.assert_async().await;
+        let failure = failure_of(&mut events).expect("the failure is published");
+        assert_eq!(failure.phase, "download");
+        assert_eq!((failure.done_bytes, failure.total_bytes), (100, 100));
+        assert!(failure
+            .detail
+            .unwrap()
+            .contains("transcription runs without its speech gate"),);
+
+        fetch_speech_gate(&store, &client, None, 0, 0, 0).await;
+        assert!(
+            failure_of(&mut events).is_none(),
+            "nothing to fetch, nothing failed"
+        );
     }
 }
