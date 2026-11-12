@@ -107,8 +107,9 @@ With `enabled: true`, `run` stops unless a password is set (see
 127.0.0.1 and the machine's LAN address (the default route's interface) on
 one port and offers both: browsers on this machine that skip loopback
 (Firefox) and other machines on the LAN reach it. This holds with `localhost`
-too: the API stays on loopback, and only the media UDP port is reachable on
-the LAN, guarded by ICE credentials and DTLS. The LAN address is detected
+too: the plain RPC port stays on loopback, and the SFU adds only its media
+UDP port on the LAN, guarded by ICE credentials and DTLS (a `tls_config`
+listener binds `0.0.0.0` on its own, as above). The LAN address is detected
 again for each call, so after a move to another network the next call offers
 the new one; offline, calls offer loopback only. With `sfu_bind_addr` set,
 the SFU binds that address on `sfu_udp_port` and offers it alone

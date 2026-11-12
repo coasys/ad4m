@@ -286,8 +286,9 @@ binds two sockets on one port: 127.0.0.1 and the LAN address
 (`detect_outbound_ip`, the default route's interface), and every answer
 offers both as host candidates. Firefox needs the LAN one (it gathers no
 loopback candidate); other machines on the LAN reach it too. In localhost
-mode the API stays on loopback: only the media UDP port is reachable on the
-LAN, guarded by ICE credentials and DTLS. The LAN address is detected again
+mode the plain RPC port stays on loopback: the SFU adds only its media UDP
+port on the LAN, guarded by ICE credentials and DTLS (a `tls_config`
+listener binds `0.0.0.0` on its own). The LAN address is detected again
 for every answer and pipe: after a move to another network the next call
 binds the new address on the same port (old sockets stay, at most 8, in case
 the address comes back). A call in progress keeps the addresses it was
