@@ -69,6 +69,14 @@ impl WsRpcError {
             message: msg.into(),
         }
     }
+    /// 503: the executor cannot answer this now (`storage-sealed` while it waits for its
+    /// storage secret).
+    pub fn unavailable(msg: impl Into<String>) -> Self {
+        Self {
+            code: 503,
+            message: msg.into(),
+        }
+    }
     pub fn not_implemented(msg: impl Into<String>) -> Self {
         Self {
             code: 501,
@@ -251,6 +259,10 @@ pub struct MethodSpec {
     /// Can run for minutes (LLM work, Holochain, publishing): the client's
     /// default timeout is its long one.
     pub long: bool,
+    /// Opens something on the executor that lives past the call (a live query): the
+    /// connection caps how many run at once and cancels them when it closes, and the
+    /// client cancels one that timed out (`request.cancel`), as it does one it aborted.
+    pub opens: bool,
 }
 
 type Check = fn(&Value) -> Result<(), String>;
@@ -269,9 +281,11 @@ struct Entry {
     or_null: bool,
     /// [`MethodFlags::local_only`]: only the operator on this machine may call it.
     local_only: bool,
+    /// [`MethodFlags::opens`].
+    opens: bool,
 }
 
-/// Returned by [`HandlerMap::method`] to mark a method `read` or `long` and to set its
+/// Returned by [`HandlerMap::method`] to mark a method `read`, `long` or `opens` and to set its
 /// guard.
 pub struct MethodFlags<'a> {
     spec: &'a mut MethodSpec,
@@ -287,6 +301,20 @@ impl MethodFlags<'_> {
     pub fn long(self) -> Self {
         self.spec.long = true;
         self
+    }
+    /// The method opens something that outlives the call: a live query, which belongs to
+    /// the connection that opened it ([`MethodSpec::opens`]).
+    pub fn opens(self) -> Self {
+        let name = &self.spec.name;
+        let entry = self
+            .entry
+            .unwrap_or_else(|| panic!("'{name}' is not dispatched through the map: no opens"));
+        entry.opens = true;
+        self.spec.opens = true;
+        MethodFlags {
+            spec: self.spec,
+            entry: Some(entry),
+        }
     }
     /// The method answers `null` where it would answer 404: a resource that is missing or not
     /// the caller's (the guard's answer, D6), or one that went away before the handler read
@@ -354,6 +382,7 @@ where
         result: TsType::of::<R>(),
         read: false,
         long: false,
+        opens: false,
     });
     specs.last_mut().expect("just pushed")
 }
@@ -367,6 +396,8 @@ where
 pub struct HandlerMap {
     handlers: HashMap<String, Entry>,
     specs: Vec<MethodSpec>,
+    /// The storage gate this map checks; `None`: the process's (`at_rest::gate`).
+    gate: Option<Arc<crate::at_rest::StorageGate>>,
 }
 
 impl HandlerMap {
@@ -374,6 +405,27 @@ impl HandlerMap {
         Self {
             handlers: HashMap::new(),
             specs: Vec::new(),
+            gate: None,
+        }
+    }
+
+    /// This map checks `gate` instead of the process's.
+    #[cfg(test)]
+    pub fn with_gate(mut self, gate: Arc<crate::at_rest::StorageGate>) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
+    /// While the storage is not open, only the storage methods answer (`at_rest`): 503
+    /// `storage-sealed` for every other one.
+    fn check_gate(&self, msg_type: &str) -> Result<(), WsRpcError> {
+        let gate = self
+            .gate
+            .as_deref()
+            .or(crate::at_rest::gate().map(|g| &**g));
+        match crate::at_rest::refusal(gate, msg_type) {
+            Some(refused) => Err(WsRpcError::unavailable(refused)),
+            None => Ok(()),
         }
     }
 
@@ -396,6 +448,7 @@ impl HandlerMap {
             guard: None,
             or_null: false,
             local_only: false,
+            opens: false,
         });
         MethodFlags {
             spec: push_spec::<P, R>(&mut self.specs, name),
@@ -453,6 +506,11 @@ impl HandlerMap {
         names
     }
 
+    /// Whether `name` is a dispatched method flagged [`MethodFlags::opens`].
+    pub fn opens(&self, name: &str) -> bool {
+        self.handlers.get(name).is_some_and(|entry| entry.opens)
+    }
+
     /// Every method contract, sorted by name.
     pub fn specs(&self) -> Vec<&MethodSpec> {
         let mut specs: Vec<&MethodSpec> = self.specs.iter().collect();
@@ -460,7 +518,8 @@ impl HandlerMap {
         specs
     }
 
-    /// Dispatch an RPC message: find the method (404), check the params against its
+    /// Dispatch an RPC message: find the method (404), refuse it while the storage is not
+    /// open unless it is a storage method (503 `storage-sealed`), check the params against its
     /// contract (400), run its guard (403, or 404 for a resource that is missing or not the
     /// caller's), then run the handler. A method flagged `.or_null()` answers `null` for 404.
     pub async fn dispatch(
@@ -470,6 +529,7 @@ impl HandlerMap {
         ctx: Arc<RequestContext>,
     ) -> Result<Value, WsRpcError> {
         let entry = self.entry(msg_type)?;
+        self.check_gate(msg_type)?;
         let answer = match Self::admit_entry(entry, msg_type, &params, &ctx, true).await {
             Ok(pending) => {
                 let answer = (entry.handler)(params, ctx).await;
@@ -501,7 +561,9 @@ impl HandlerMap {
         params: &Value,
         ctx: &RequestContext,
     ) -> Result<(), WsRpcError> {
-        Self::admit_entry(self.entry(msg_type)?, msg_type, params, ctx, false)
+        let entry = self.entry(msg_type)?;
+        self.check_gate(msg_type)?;
+        Self::admit_entry(entry, msg_type, params, ctx, false)
             .await
             .map(|_| ())
     }
@@ -618,6 +680,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::identity_ws::register_ws_handlers(&mut map);
     super::key_login_ws::register_ws_handlers(&mut map);
     super::bots_ws::register_ws_handlers(&mut map);
+    super::storage_ws::register_ws_handlers(&mut map);
     // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.
     map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
     map.inline::<NoParams, bool>(super::event_interest::UNWATCH);

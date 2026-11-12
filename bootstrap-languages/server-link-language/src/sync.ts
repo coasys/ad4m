@@ -30,7 +30,9 @@ import type {
 } from "./types.js";
 import { isEncryptedLinkData } from "./types.js";
 import {
+    bytesToHex,
     decryptLinkFromWire,
+    hexToBytes,
     encryptLinkForWire,
     latestKeyVersion,
     wireLinkHash,
@@ -328,20 +330,24 @@ let _renderRetryDelay = RENDER_RETRY_BASE_MS;
 /** The render in flight (its pages, then the tail from `upto`), from `init`
  *  or a retry: there is never a second one. */
 let _rendering: Promise<void> | null = null;
+/** Whether this instance already compared its store with the room (`healIfShort`). */
+let _mirrorChecked = false;
 
 /** Test-only: clear the render state, so one test's failed render does not leak into the next. */
 export function _resetRenderStateForTests(): void {
     _renderDueAt = 0;
     _renderRetryDelay = RENDER_RETRY_BASE_MS;
     _rendering = null;
+    _mirrorChecked = false;
 }
 
 /**
  * Stores a render for a fresh member: one whose cursor is 0 and that has no
  * render stored. A stored render (a first render cut off by a failure or a
- * restart) is kept and resumed. A member whose cursor is above 0 never
- * renders: the server keeps the whole diff log, so `/sync` from its cursor
- * brings every change. The stored progress is the "render needed" state:
+ * restart) is kept and resumed. A member whose cursor is above 0 does not
+ * render here: the server keeps the whole diff log, so `/sync` from its cursor
+ * brings every change (only a store that does not hash to the room's
+ * revision renders again, `healIfShort`). The stored progress is the "render needed" state:
  * until the last page clears it, catch-up does not tail `/sync` and retries
  * the render with backoff (`retryRenderIfDue`). `init` calls it before its
  * startup sequence, so a render that never ran (authentication failed
@@ -492,9 +498,9 @@ async function renderPages(): Promise<void> {
  * for a key, it re-reads the key ring; it then retries the held links
  * against whatever ring it has. Returns what it emitted.
  *
- * While a paged render is stored (`bootstrap`), it does not tail: a render
- * is stored only at cursor 0, and reading the log from 0 is the full replay
- * the render replaces. It resumes the render instead, once its
+ * While a paged render is stored (`bootstrap`, or `healIfShort`), it does
+ * not tail: the render's snapshot replaces the log up to its `upto`. It
+ * resumes the render instead, once its
  * backoff has elapsed, without waiting for it (`retryRenderIfDue`); the
  * render's last page is followed by the tail from its `upto`.
  */
@@ -507,6 +513,8 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         emitted.removals.push(...diff.removals);
     };
     let since = store.getSequence();
+    /** The room's head from the last `/sync` page; -1 when catch-up did not tail. */
+    let head = -1;
     while (!store.getRenderProgress()) {
         const res = await withToken((token) => api.fetchSync(config, token, since, _syncPageLimit));
         console.log(
@@ -522,7 +530,10 @@ export async function catchUp(): Promise<PerspectiveDiff> {
             store.setRevision(res.revision);
             store.setSequence(res.sequence);
         }
-        if (res.next === null) break;
+        if (res.next === null) {
+            head = res.sequence;
+            break;
+        }
         since = res.next;
     }
 
@@ -535,6 +546,8 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         }
     }
     collect(retryHeld());
+    // At the room's head the stored revision is the room's at the cursor.
+    if (head === store.getSequence()) healIfShort(head);
     if (store.getRenderProgress()) {
         // Like the key ring above: until the render's last page, every
         // catch-up resumes it, gated by its backoff.
@@ -577,10 +590,87 @@ export async function performSync(): Promise<PerspectiveDiff> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Is the store the room? (render, and the heal of a short store)
+// ---------------------------------------------------------------------------
+
+/** The link server's revision format: 32 bytes, hex. */
+const SERVER_REVISION = /^[0-9a-f]{64}$/;
+
+/**
+ * The revision the room has if it holds what this store holds: the XOR of the
+ * link hashes of the stored links, with each held op applied (a held add is
+ * the room's, a held removal is not). The link server keeps its revision the
+ * same way, over the `link_hash` each member computes with `wireLinkHash`.
+ * Null when a held link carries no `link_hash`.
+ */
+function storeRevision(links: LinkExpression[]): string | null {
+    const hashes = new Set(links.map(wireLinkHash));
+    for (const held of store.heldLinks()) {
+        if (!held.link.link_hash) return null;
+        if (held.op === "add") hashes.add(held.link.link_hash);
+        else hashes.delete(held.link.link_hash);
+    }
+    const acc = new Uint8Array(32);
+    for (const h of hashes) {
+        const bytes = hexToBytes(h);
+        for (let i = 0; i < 32; i++) acc[i] ^= bytes[i];
+    }
+    return bytesToHex(acc);
+}
+
+/** Whether `links` (the store's) are the room at the cursor: no render is
+ *  stored and they hash to the server's revision stored with the cursor. */
+function storeIsRoom(links: LinkExpression[]): boolean {
+    const revision = store.getRevision();
+    return !store.getRenderProgress() && !!revision && SERVER_REVISION.test(revision) &&
+        storeRevision(links) === revision;
+}
+
+/**
+ * Once per start, after a catch-up that reached the room's head: a store
+ * that does not hash to the room's revision is short, and gets a paged render
+ * (the same render a fresh member runs, resumed the same way). A member whose
+ * cursor is above 0 never renders otherwise, so without this a store that
+ * lost links stays short for good. Builds before #1641 moved the cursor to
+ * every WebSocket push's sequence, so a member whose `/render` had failed
+ * held only the pushes and its own commits at a cursor near the room's head.
+ *
+ * The render only adds: a stored link the room no longer has stays, and so
+ * does the mismatch. Once per start, so a mismatch no render fixes (a link no
+ * key opens) costs one render per start, not one per catch-up; `render()`
+ * stays unknown meanwhile.
+ */
+function healIfShort(head: number): void {
+    if (_mirrorChecked || _rendering || store.getRenderProgress() || head === 0) return;
+    const revision = store.getRevision();
+    if (!revision || !SERVER_REVISION.test(revision)) return;
+    _mirrorChecked = true;
+    const links = store.allLinks().links;
+    if (storeRevision(links) === revision) return;
+    console.warn(
+        `[server-link-language] the store (${links.length} link(s) at sequence ${head}) does not ` +
+        "hash to the room's revision; rendering the room again",
+    );
+    store.setRenderProgress({ upto: null, next: null, page: 0 });
+}
+
+/** perspective-sync.currentRevision(): the room's revision at the cursor.
+ *  Not null when the store is short: the executor reads null as "nothing is
+ *  committed yet" and pushes every shared link. `render()` says unknown. */
 export function currentRevision(): string {
     return store.getRevision() || "";
 }
 
-export function render() {
-    return store.allLinks();
+/**
+ * perspective-sync.render(): the room's links, as far as this store knows
+ * them. Null (unknown) unless the store is the room at its cursor
+ * (`storeIsRoom`): while a render is stored, or when the store does not hash
+ * to the room's revision. The executor's fallback sync pushes every shared
+ * link `render()` lacks, so a short store must never answer.
+ */
+export function render(): { links: LinkExpression[] } | null {
+    if (store.getRenderProgress()) return null;
+    const rendered = store.allLinks();
+    return storeIsRoom(rendered.links) ? rendered : null;
 }

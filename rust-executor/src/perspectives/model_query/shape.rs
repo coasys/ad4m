@@ -445,7 +445,8 @@ fn local_sparql(shape_uri: &str, guard: &LinkGuard) -> String {
 /// The property rows [`load_shape`] parses, one per property and per
 /// combination of its `sh://path`, `rdf://type` and shown `ad4m://local`
 /// values (the rows the per-field `OPTIONAL` query used to return), every
-/// other field carried as its first value and absent when unset. A property
+/// other field carried as its smallest value (two signers can disagree on
+/// one; the pick must not depend on store order) and absent when unset. A property
 /// without a counting `sh://path` and `rdf://type` yields no row.
 pub(super) fn property_rows(
     store: &SparqlStore,
@@ -512,7 +513,12 @@ pub(super) fn property_rows(
                         if matches!(*field, "path" | "propType" | "local") {
                             continue;
                         }
-                        row.insert((*field).into(), Value::String(values[0].clone()));
+                        // Two signers may give one field different counting
+                        // values: the smallest, so the pick does not depend on
+                        // the order the links arrived or the query returned them.
+                        if let Some(value) = values.iter().min() {
+                            row.insert((*field).into(), Value::String(value.clone()));
+                        }
                     }
                     rows.push(Value::Object(row));
                 }

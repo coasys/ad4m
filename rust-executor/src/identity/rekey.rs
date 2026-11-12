@@ -39,7 +39,7 @@ use crate::api::ws_handler::WsRpcError;
 use crate::db_backend::db_backend;
 use crate::events::Event;
 use crate::pubsub::get_global_pubsub_sync;
-use crate::wallet::{wallet_backend, KEY_NAME_MAIN};
+use crate::wallet::{wallet_backend, WalletBackend, KEY_NAME_MAIN};
 
 use super::types::DeviceKeys;
 
@@ -60,8 +60,18 @@ pub async fn rekey_main() -> Result<DeviceKeys, WsRpcError> {
 
 /// The main agent's DIDs of earlier keys, from their retired names in the wallet.
 fn retired_main_dids() -> Vec<String> {
+    retired_main_dids_in(wallet_backend().as_ref())
+}
+
+/// The retired main DIDs in `backend`. A wallet that cannot rename keys has never retired a
+/// main key (a re-key needs to rename it), so it has none: the moves never take owners from a
+/// key this executor did not retire, and its keys are not listed.
+fn retired_main_dids_in(backend: &dyn WalletBackend) -> Vec<String> {
+    if !backend.can_rename_keys() {
+        return Vec::new();
+    }
     let prefix = retired_key_name("");
-    wallet_backend()
+    backend
         .list_key_names()
         .into_iter()
         .filter_map(|name| name.strip_prefix(&prefix).map(str::to_string))
@@ -204,6 +214,29 @@ mod tests {
     use crate::db::{Ad4mDb, JoinRow};
     use crate::types::{NotificationInput, PerspectiveHandle};
 
+    /// A wallet that cannot rename keys lists no retired main DID, even with a key under a
+    /// retired name, so neither the re-key nor the start-up pass moves owners from it. The
+    /// same wallet that can rename keys lists it.
+    #[test]
+    fn a_wallet_that_cannot_rename_keys_has_no_retired_main_dids() {
+        use crate::agent::rekey::tests::TestWallet;
+        let mut wallet = TestWallet {
+            inner: crate::wallet::LocalWallet::new(),
+            renames: false,
+            generate_fails: false,
+        };
+        wallet
+            .generate_keypair(&retired_key_name("did:key:not-retired-here"))
+            .unwrap();
+
+        let without_renames = retired_main_dids_in(&wallet);
+        wallet.renames = true;
+        let with_renames = retired_main_dids_in(&wallet);
+
+        assert!(without_renames.is_empty(), "{without_renames:?}");
+        assert_eq!(with_renames, vec!["did:key:not-retired-here".to_string()]);
+    }
+
     /// After a re-key, every place of the table above holds the new DID (or let go of the
     /// old key's state), and the old key still signs nothing.
     #[tokio::test]
@@ -270,6 +303,7 @@ mod tests {
                 offer_id: "rekey-offer".into(),
                 scid: "rekey-scid".into(),
                 claimed_at: 1,
+                accept: crate::db::JoinAccept::NotNeeded,
             })?;
             // Its flow bookkeeping on the perspective.
             db.record_flow_replica_pass(&owned.uuid, &old, "flow", Some("open"), &[], "t")

@@ -1,0 +1,155 @@
+name: At-rest tests (macOS)
+
+# The data-at-rest tests on macOS, Apple silicon. The same tests run on Linux in CircleCI: the
+# keyring crate (native and wasm32) in `clippy`, the executor's at_rest module in `rust-tests`,
+# the run-contract CLI tests in `clippy` (`cargo test -p ad4m`). CircleCI's runners are all
+# Linux, so macOS runs here, on the runner image the release's macOS build uses
+# (`publish_staging.yml`).
+#
+# What only this job shows: SQLCipher builds and keys databases on macOS with the vendored
+# OpenSSL (rusqlite's `bundled-sqlcipher-vendored-openssl`, so not CommonCrypto), the shipped
+# binary links no system OpenSSL, and the executor starts sealed and unlocks on macOS.
+#
+# A full executor build takes about as long here as the release's macOS build, so pull requests
+# run it only when they touch the at-rest code or what builds it; every push to `dev` and
+# `staging` runs it.
+
+on:
+  pull_request:
+    paths:
+      - 'ad4m-keyring/**'
+      - 'rust-executor/src/at_rest/**'
+      - 'rust-executor/src/db.rs'
+      - 'rust-executor/Cargo.toml'
+      - 'cli/src/storage.rs'
+      - 'cli/src/run_config.rs'
+      - 'cli/tests/run_contract.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/at-rest-macos.yml'
+  push:
+    branches:
+      - dev
+      - staging
+  workflow_dispatch:
+
+# A newer commit on a pull request or on `dev` supersedes a run still in progress.
+concurrency:
+  group: at-rest-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  at-rest-macos:
+    runs-on: macos-14
+    timeout-minutes: 300
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # System git, so cargo does not fetch coasys/deno's chromium submodules.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
+
+    steps:
+    - name: Fetch source code
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+
+    - name: Refuse anything but Apple silicon
+      run: |
+        [ "$(uname -m)" = arm64 ] || { echo "runner is $(uname -m), not arm64"; exit 1; }
+        sw_vers
+
+    # .cargo/config.toml links aarch64-apple-darwin with ld-classic (the executor is past the
+    # B/BL range of ld-prime's output); Xcode 15.4 has it, as in the release's macOS build.
+    - name: Select Xcode 15.4 (has ld-classic for branch islands)
+      run: |
+        sudo xcode-select -s /Applications/Xcode_15.4.app
+        xcodebuild -version
+
+    # The toolchain itself comes from rust-toolchain.toml (with the wasm32 target).
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-all-crates: true
+        shared-key: "at-rest-macos-v1"
+
+    - name: Install GO
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24.6'
+        cache: false
+
+    - name: Use Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - uses: pnpm/action-setup@v4
+
+    - name: Use Node.js 24.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: 24.x
+        cache: 'pnpm'
+
+    - name: Install dependencies (macOS)
+      run: brew install protobuf cmake
+
+    - name: pnpm Install
+      run: pnpm install --no-frozen-lockfile
+
+    # The executor embeds the Deno snapshot (made for this machine's architecture) and the dapp
+    # directory; the tests need neither a real dapp nor the launcher.
+    - name: Generate the Deno snapshot
+      run: |
+        mkdir -p dapp/dist
+        cd rust-executor && pnpm run build-deno-snapshot
+
+    - name: ad4m-keyring tests
+      run: cargo test --release -p ad4m-keyring
+
+    # The same tests on wasm32 under Node: the keyring's randomness there is
+    # `crypto.getRandomValues`. The runner must be the locked wasm-bindgen version.
+    - name: ad4m-keyring wasm32 tests
+      if: success() || failure()
+      run: |
+        WASM_BINDGEN=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+        RUNNER=$PWD/target/wasm-tools/bin/wasm-bindgen-test-runner
+        if ! "$RUNNER" --version 2>/dev/null | grep -q " $WASM_BINDGEN\$"; then
+          cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked --root target/wasm-tools
+        fi
+        CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER \
+          cargo test --release -p ad4m-keyring --target wasm32-unknown-unknown
+
+    # SQLCipher keys, sealed columns, store and person keys, sealed language storage, the sealed
+    # snapshot, rotation and the migration of a plaintext executor.
+    - name: executor at_rest tests
+      if: success() || failure()
+      run: |
+        cargo test --release -p ad4m-executor --lib at_rest:: -- --test-threads=1
+
+    # The built `ad4m-executor` started as a supervisor starts it: sealed start, unlock, lock,
+    # exit codes.
+    - name: run-contract CLI tests
+      if: success() || failure()
+      run: cargo test --release -p ad4m --test run_contract
+
+    - name: The executor links no system OpenSSL
+      if: success() || failure()
+      run: |
+        bin=target/release/ad4m-executor
+        [ "$(lipo -archs "$bin")" = arm64 ] || { echo "$bin is $(lipo -archs "$bin"), not arm64"; exit 1; }
+        otool -L "$bin"
+        if otool -L "$bin" | grep -Ei 'libssl|libcrypto'; then
+          echo "$bin links a system OpenSSL; SQLCipher must use the vendored one"
+          exit 1
+        fi

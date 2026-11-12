@@ -697,6 +697,15 @@ request: a host refuses a read signed for another store (`403 store`), so a read
 replayed to a second host. A host checks the store, the method, the path (without the query),
 `expires` (at most 5 minutes ahead) and that the nonce is new.
 
+**Inbox room.** A host keeps sealed texts of at most 8 KiB. A joined inbox holds at most 16
+messages, each for 30 days. A pre-join address holds at most 2 messages per writing identity,
+each until its offer leaves `open` (at most 5 minutes). The room is counted per identity
+because any identity with an open offer bound to the device key may write there: the holder
+that scanned the device string delivers its ticket while its offer is open, whatever another
+identity that learned the string writes, and the device string need not be kept secret. An
+identity holds at most 5 open offers, so it holds at most 10 pre-join messages (80 KiB) at a
+time over every address; one address holds 2 per identity with an open offer bound to its key.
+
 **The private details record.** `SealedRecord { version, wrapped, recoveryKey?,
 recoveryAttestation?, nonce, ciphertext, signer, sig }`. The record (`PrivateRecord { devices, wordsCheckedAt, pendingRevocations,
 safeguards }`, no other field: person settings stay per device) is encrypted with
@@ -819,9 +828,19 @@ writes it. A pending revocation's `reason` is `left-host` or `account-deleted`.
 
 **The request box.** A device key without the bot mark posts `{body, expires}` with `body`
 `{kind: "send-master"}` or `{kind: "confirm-revoke", keyIds, rotate}`; `expires` lies at most 7
-days ahead. The host keeps the post with the signed store request it came with, whose
-`bodyHash` is the hash of `JCS({body, expires})`, so a reader checks the poster itself. A
-request changes no key and no log event by itself.
+days ahead. A poster sends the post as `JCS({body, expires})`, the bytes its signed store
+request's `bodyHash` covers; a host refuses any other bytes (`400 canonical`), even when they
+hash to the `bodyHash`, so the hash a reader computes is the poster's. The host keeps the post
+with the signed store request it came with, so a reader checks the poster itself
+(`verify_posted` in the core): the request names the identity, `POST /v1/requests/<scid>`,
+the poster's key id as `keyId` and the hash of `JCS({body, expires})` as `bodyHash`; its
+`kelSeq` and `kelHash` name a position of the reader's log (a reader whose log has not
+reached `kelSeq` reads the log first); the poster is a device key without the bot mark valid
+at `kelSeq` and at the reader's head, so a request of a key revoked since does not count, as
+the host drops it with the revocation; and its `coasys:store-request` signature verifies. The
+store request's own `expires` and `store` are not read. A host keeps at most 16 open requests
+per identity and 4 per posting key, so one device key cannot fill the box and keep the
+identity's other device keys out. A request changes no key and no log event by itself.
 
 **An executor as a device.** An AD4M executor is a device whose key is its wallet key. It
 reads its joined inbox when it starts, when its wallet unlocks, when its key joins an
@@ -855,11 +874,28 @@ a new string ends the read of the last one.
   naming another identity refuses it; so does no record, except on a desktop's first run: an
   executor with the custody channel, no record and no identity may claim any offer, and records
   an identity as operator, `FirstRun`, only when its main agent joins it: the holder confirmed
-  the match code and the add listing the device key is in the log; until then it may claim
-  again, for the same or another identity), with `canKeepMaster` exactly when the
-  executor has the custody channel; only a claim made shows the identity and the match code
-  (`link-ticket`). The ticket is deleted either way; one whose log cannot be read now waits
-  for the next read.
+  the match code, the add listing the device key is in the log and the operator on this
+  machine accepted the claim; until then it may claim again, for the same or another
+  identity), with `canKeepMaster` exactly when the executor has the custody channel; only a
+  claim made shows the identity and the match code (`link-ticket`). The ticket is deleted
+  either way; one whose log cannot be read now waits for the next read.
+- Anyone who sees the device string can deliver a ticket, so a first-run claim is held:
+  `link-ticket` and `identity.claimOffer` answer `needsAccept: true`, and
+  `identity.joinStatus` answers `awaiting-accept` (the main agent is not bound, no record is
+  written) while the claim is claimed or spent and not accepted. The person at the computer
+  compares the identity and the match code and calls `identity.acceptJoin {offerId}` →
+  `{accepted: true}`, before or after the holder confirms; the next `joinStatus` that reads
+  `spent` binds the main agent and records `FirstRun`. A claim that sets no operator record
+  (the record already names the identity) has `needsAccept: false` and binds on `spent`
+  without accept. `identity.cancelJoin {offerId}` → `{cancelled: true}` cancels any claim:
+  it never binds, even if the holder confirms later, `joinStatus` answers `cancelled`, and a
+  later accept is refused (409 `cancelled`). Both calls are the operator's on this machine
+  (Operator, local only: an app, a network listener and a device-key login get 403), the
+  custody credential included; both repeat as no-ops. 404 when the executor holds no claim
+  on the offer (for `acceptJoin`: none awaiting accept); `cancelJoin` after the claim bound
+  answers 409 `already-joined`. The executor does not tell the store of a cancel: the
+  holder's add may still land in the log, listing a device key that never speaks for the
+  identity until the holder revokes it.
 - The executor never decrypts the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key
   (always for a post). For the app on its machine whose device it is (the desktop's custody

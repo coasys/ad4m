@@ -36,6 +36,7 @@ use super::backend::{IdentityBackend, IdentityError};
 use super::head::verify_head;
 use super::types::StoreBehind;
 use super::verdict::{key_verdict, KeyVerdict, VerdictChange};
+use crate::at_rest::sqlite::open_database;
 
 /// The chain type of key logs in the hash-chain tables.
 pub const KEL_TYPE: ChainType = "coasys:kel";
@@ -676,14 +677,24 @@ impl KelCache {
     }
 
     /// The cache in the database file at `path` (the executor's `ad4m_db.sqlite`), trusting
-    /// heads signed by `store_keys` (multikeys).
+    /// heads signed by `store_keys` (multikeys). Both connections open under the installed
+    /// database key, when there is one.
     pub fn open(path: impl AsRef<Path>, store_keys: Vec<String>) -> Result<Self, CacheError> {
-        let store = SqliteChainStore::open(path.as_ref()).map_err(storage)?;
-        let meta = Connection::open(path.as_ref()).map_err(storage)?;
+        let (store, meta) = Self::connections(path.as_ref())?;
+        Self::with(store, meta, store_keys, global_key_map())
+    }
+
+    fn connections(path: &Path) -> Result<(SqliteChainStore, Connection), CacheError> {
+        let store_conn = open_database(path).map_err(storage)?;
+        store_conn
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(storage)?;
+        let store = SqliteChainStore::from_connection(store_conn).map_err(storage)?;
+        let meta = open_database(path).map_err(storage)?;
         // The store's connection writes the same file; `reset` deletes through this one.
         meta.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(storage)?;
-        Self::with(store, meta, store_keys, global_key_map())
+        Ok((store, meta))
     }
 
     /// [`KelCache::open`] feeding `key_map` (tests: a restart with a fresh key map).
@@ -693,8 +704,7 @@ impl KelCache {
         store_keys: Vec<String>,
         key_map: Arc<KeyMap>,
     ) -> Result<Self, CacheError> {
-        let store = SqliteChainStore::open(path.as_ref()).map_err(storage)?;
-        let meta = Connection::open(path.as_ref()).map_err(storage)?;
+        let (store, meta) = Self::connections(path.as_ref())?;
         Self::with(store, meta, store_keys, key_map)
     }
 

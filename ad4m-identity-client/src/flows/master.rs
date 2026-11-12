@@ -809,10 +809,12 @@ fn note_busy() -> ClientError {
 ///
 /// Two fences:
 ///
-/// - the note and the vault's note ([`VAULT_NOTE`]) are read again inside the record write,
-///   after the version it builds on was read (a precondition of [`record::write_as_if`]): a
-///   release written since is seen there, and the mark is decided again from it — so a `true` decided before a removal's release never
-///   lands after that removal's `false`, which is written only after the release;
+/// - the note, the vault's note ([`VAULT_NOTE`]) and the custody epoch are read again inside
+///   the record write, after the version it builds on was read (a precondition of
+///   [`record::write_as_if`]): a release written since, or a custody change (a whole removal of
+///   the vault included), is seen there, and the mark is decided again — so a `true` decided
+///   before a removal's release never lands after that removal's `false`, which is written
+///   only after the release;
 /// - the custody epoch is read before and after: while it moved under a write, a custody
 ///   operation won in between — a forget, or another app's store — and the entry is written
 ///   again from what the vault keeps then.
@@ -977,9 +979,12 @@ async fn hold_mark_gated<R: ExecutorRpc>(
                 None => Vec::new(),
             },
         };
-        // Checked on the version the write builds on, after it was read.
+        // Checked on the version the write builds on, after it was read. The epoch too: while it
+        // is `fenced`, what the mark was decided on (`emptying`, `kept`) still holds; a removal
+        // that came and went, or one that read a later epoch, moved it.
         let still = |record: Option<&PrivateRecord>, _: &KelChain| {
             if vault.custody_note(scid, key_id)? != note
+                || vault.custody_epoch(scid)? != fenced
                 || vault_emptying(vault, scid, fenced)? != emptying
             {
                 return Err(ClientError::CustodyNoteMoved);
@@ -1532,7 +1537,8 @@ async fn mark_gated<R: ExecutorRpc>(
 /// top of this device's custody note; the epoch is read again, and when it moved (a store
 /// came between) the release is removed and the steps start again ([`release`]); the same
 /// release goes on the vault's own note ([`VAULT_NOTE`]), so no mark through another device
-/// key on this vault writes `true` while this removal is pending; the record
+/// key on this vault writes `true` while this removal is pending (the releases there that read
+/// an older epoch go); the record
 /// marks this device `holdsMaster: false`, only while the release is still the top layer; the
 /// vault forgets the key ([`Vault::forget_master_at`] that epoch, so a key another app sharing
 /// the vault installed in between, the same one included, is never removed); and, when it
@@ -1571,8 +1577,18 @@ pub async fn remove_master<R: ExecutorRpc>(
     let token = released.token();
     // The same release on the vault's own note, before the write that marks every entry on
     // this vault `false`: a mark through another device key on this vault reads it, so it
-    // writes no `true` while this removal is pending. Taken out after the forget.
-    if let Err(e) = push_note(vault, &scid, VAULT_NOTE, &released) {
+    // writes no `true` while this removal is pending. Taken out after the forget. Releases there
+    // that read an older epoch are past ([`vault_emptying`]) and go: one that a removal cut off
+    // after its push left, under a device note that an acquisition cleared since, is in no
+    // other note that a removal retires from.
+    let pushed = swap_layers(vault, &scid, VAULT_NOTE, |layers| {
+        layers.retain(
+            |layer| !matches!(layer, CustodyNote::Released { epoch: read, .. } if *read < epoch),
+        );
+        layers.insert(0, released.clone());
+        Some(())
+    });
+    if let Err(e) = pushed {
         pop_own(vault, &scid, &own, token)?;
         return Err(e);
     }
@@ -1830,8 +1846,8 @@ fn vault_emptying(vault: &dyn Vault, scid: &str, epoch: u64) -> Result<bool, Cli
 /// mark, or the carry of another mark on this vault, came first). Nothing is written while a
 /// removal of this vault is pending ([`vault_emptying`]) or the vault keeps no key.
 ///
-/// Fenced like [`hold_mark`]: the notes are read again on the version the write builds on, and
-/// the custody epoch before and after the write. When the epoch moved under the write, the
+/// Fenced like [`hold_mark`]: the notes and the custody epoch are read again on the version the
+/// write builds on, and the epoch after the write. When the epoch moved under the write, the
 /// marks follow the vault again: a vault that keeps no key then is swept
 /// ([`sweep_emptied`]). Answers the version written, `None` when nothing was written.
 #[allow(clippy::too_many_arguments)]
@@ -1879,7 +1895,9 @@ async fn mark_cleared_again<R: ExecutorRpc>(
             })
             .collect();
         let still = |record: Option<&PrivateRecord>, _: &KelChain| {
-            if vault_emptying(vault, scid, fenced)? {
+            // A moved epoch: `kept` and the vault's note may no longer hold (a whole removal of
+            // this vault came between). Decided again.
+            if vault.custody_epoch(scid)? != fenced || vault_emptying(vault, scid, fenced)? {
                 return Err(ClientError::CustodyNoteMoved);
             }
             for (key_id, note) in &planned {

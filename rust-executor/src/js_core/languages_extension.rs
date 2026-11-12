@@ -245,6 +245,65 @@ fn language_settings() -> Result<String, AnyhowWrapperError> {
         .ok_or_else(|| anyhow::anyhow!("languageSettings not set yet").into())
 }
 
+/// The language this isolate runs, for its storage calls.
+struct StorageCaller {
+    folder: std::path::PathBuf,
+    address: String,
+    system: bool,
+    /// The keys its files are sealed under; none: plain files.
+    keys: Option<Arc<crate::at_rest::DataKeys>>,
+}
+
+impl StorageCaller {
+    fn of_isolate() -> Result<Self, AnyhowWrapperError> {
+        try_with_isolate_state(|state| {
+            Some(StorageCaller {
+                folder: std::path::PathBuf::from(state.language_storage_directory.clone()?),
+                address: state.language_address.clone()?,
+                system: state.system_language,
+                keys: state
+                    .storage_keys
+                    .clone()
+                    .or_else(crate::at_rest::lang_storage::installed),
+            })
+        })
+        .flatten()
+        .ok_or_else(|| anyhow::anyhow!("No language is loaded in this runtime").into())
+    }
+
+    fn caller(&self) -> crate::at_rest::lang_storage::Caller<'_> {
+        crate::at_rest::lang_storage::Caller {
+            folder: &self.folder,
+            address: &self.address,
+            system: self.system,
+        }
+    }
+}
+
+/// Reads a file of the calling language's storage: `path` relative to its storage folder, or
+/// absolute inside it. A sealed file is opened under the key of the store the language
+/// serves. A system language may also read plain files under the executor's working
+/// directory. A missing file is an error starting `NotFound: No such file`.
+#[op2]
+#[string]
+fn op_language_storage_read(#[string] path: String) -> Result<String, AnyhowWrapperError> {
+    let me = StorageCaller::of_isolate()?;
+    crate::at_rest::lang_storage::read_file(me.keys.as_deref(), me.caller(), &path)
+        .map_err(|e| anyhow::anyhow!("{e}").into())
+}
+
+/// Writes a file of the calling language's storage, atomically, sealed under the key of the
+/// store the language serves. Paths as for [`op_language_storage_read`].
+#[op2(fast)]
+fn op_language_storage_write(
+    #[string] path: String,
+    #[string] content: String,
+) -> Result<(), AnyhowWrapperError> {
+    let me = StorageCaller::of_isolate()?;
+    crate::at_rest::lang_storage::write_file(me.keys.as_deref(), me.caller(), &path, &content)
+        .map_err(|e| anyhow::anyhow!("{e}").into())
+}
+
 deno_core::extension!(
     language_service,
     ops = [
@@ -256,6 +315,8 @@ deno_core::extension!(
         language_storage_directory,
         language_address,
         language_settings,
+        op_language_storage_read,
+        op_language_storage_write,
     ],
     esm_entry_point = "ext:language_service/languages_extension.js",
     esm = [dir "src/js_core", "languages_extension.js"]

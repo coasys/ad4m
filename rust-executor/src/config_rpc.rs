@@ -161,6 +161,7 @@ const BUILT_IN_KEYS: &[(&str, KeyClass)] = &[
     ("log_config", KeyClass::Restart),
     ("mcp_enabled", KeyClass::Restart),
     ("mcp_port", KeyClass::Restart),
+    ("allow_secret_on_data_disk", KeyClass::Machine),
     ("app_data_path", KeyClass::Machine),
     ("hc_admin_port", KeyClass::Machine),
     ("hc_app_port", KeyClass::Machine),
@@ -545,6 +546,7 @@ mod tests {
             "log_dir",
             "multi_user_config",
             "public_origins",
+            "allow_secret_on_data_disk",
         ] {
             assert_eq!(class(key), Some(KeyClass::Machine), "{key}");
         }
@@ -570,6 +572,7 @@ mod tests {
             identity: Some(Default::default()),
             log_dir: Some("a".into()),
             public_origins: Some(vec!["https://a.example".into()]),
+            allow_secret_on_data_disk: Some(false),
         })
         .unwrap();
         for key in file.as_object().unwrap().keys() {
