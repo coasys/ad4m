@@ -664,17 +664,12 @@ mod tests {
 
     // The size cap drops oldest-first, but the question the new turn answers
     // never falls: a chat template that finds no user message fails the
-    // whole request — which is the bug this guards.
+    // whole request — which is the bug this guards. The oversized tail sits
+    // AFTER the question here — the running turn's row is skipped but a step
+    // its task already wrote is not — so an oldest-first drop has to cross
+    // the question to reach it.
     #[test]
     fn the_size_cap_never_drops_the_last_user_message() {
-        let mut big_answer = row(
-            "a1",
-            2,
-            AiSessionMessageRole::Assistant,
-            assistant_content(&"x".repeat(HISTORY_MAX_BYTES)),
-            Some(AiTurnStatus::Done),
-        );
-        big_answer.id = "a1".into();
         let messages = vec![
             row(
                 "u1",
@@ -683,7 +678,13 @@ mod tests {
                 user_content("first"),
                 None,
             ),
-            big_answer,
+            row(
+                "a1",
+                2,
+                AiSessionMessageRole::Assistant,
+                assistant_content("done"),
+                Some(AiTurnStatus::Done),
+            ),
             row(
                 "u2",
                 3,
@@ -691,10 +692,28 @@ mod tests {
                 user_content("the question being answered"),
                 None,
             ),
+            row(
+                "a2",
+                4,
+                AiSessionMessageRole::Assistant,
+                assistant_content(""),
+                Some(AiTurnStatus::Running),
+            ),
+            row(
+                "t1",
+                5,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {},
+                        "result": "x".repeat(HISTORY_MAX_BYTES) }),
+                Some(AiTurnStatus::Done),
+            ),
         ];
         let history = history(messages, usize::MAX);
-        let last = history.last().unwrap();
-        assert_eq!(last["role"], "user");
-        assert_eq!(last["content"], "the question being answered");
+        assert!(
+            history
+                .iter()
+                .any(|m| m["role"] == "user" && m["content"] == "the question being answered"),
+            "the question the new turn answers fell off: {history:?}"
+        );
     }
 }
