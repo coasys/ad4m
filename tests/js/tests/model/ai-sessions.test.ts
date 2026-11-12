@@ -19,7 +19,9 @@
  * Requires a reachable LLM endpoint. Endpoint + model are env-overridable to
  * match the Rust e2e suite:
  *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default gemma3:12b)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-48k)
+ *   INTERPRETATION_E2E_MAX_NUM_CTX (default 49152, the context the model
+ *     was created with; matching it keeps Ollama from reloading the model)
  *   INTERPRETATION_E2E_API_TYPE (default OLLAMA — the native /api/chat wire
  *     carries tools as data. OPEN_AI takes the prompt-injection path, which
  *     Ollama 0.40 + qwen3.8 crashes on mid-generation: HTTP 500 "EOF")
@@ -41,7 +43,8 @@ const expect = chai.expect;
 chai.use(chaiAsPromised);
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
+const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
 const API_TYPE = process.env.INTERPRETATION_E2E_API_TYPE || "OLLAMA";
 const API_KEY = process.env.INTERPRETATION_E2E_API_KEY;
 
@@ -94,7 +97,13 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
 
     const modelId = await ad4m.ai.addModel({
       name: "ai-sessions-llm",
-      api: { baseUrl: BASE_URL, apiKey: API_KEY, model: MODEL, apiType: API_TYPE },
+      api: {
+        baseUrl: BASE_URL,
+        apiKey: API_KEY,
+        model: MODEL,
+        apiType: API_TYPE,
+        maxNumCtx: MAX_NUM_CTX,
+      },
       modelType: "LLM",
     } as any);
     await ad4m.ai.setDefaultModel("LLM", modelId);
