@@ -60,6 +60,7 @@ type StepContent = {
   name?: string;
   arguments?: Record<string, unknown>;
   target?: string;
+  writes?: boolean;
   result?: string;
   error?: string;
   text?: string;
@@ -357,10 +358,15 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
     );
     const { msgs } = await waitForReply(s.id, started.replyId);
 
+    const adds = toolSteps(msgs, "add_link");
+    expect(adds.length, "the turn called add_link").to.be.greaterThan(0);
+    // `writes` on the step row is the executor's own answer to "did this
+    // change something" (agent_session::tool_writes), the flag a client
+    // colours write steps from instead of guessing at the name.
     expect(
-      toolSteps(msgs, "add_link").length,
-      "the turn called add_link",
-    ).to.be.greaterThan(0);
+      stepContent(adds[0]).writes,
+      "the add_link step is marked a write",
+    ).to.equal(true);
 
     // The write, checked on the graph — not on what the model said it did.
     const links = await p.get(new LinkQuery({ source: "songbird://first-note" }));
@@ -386,6 +392,10 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
       ),
       "query_links targeted the session's perspective",
     ).to.equal(true);
+    expect(
+      stepContent(queries[0]).writes,
+      "the query_links step is not a write",
+    ).to.equal(false);
   });
 
   it("reaches a perspective named in the message (list_perspectives → query_links)", async () => {

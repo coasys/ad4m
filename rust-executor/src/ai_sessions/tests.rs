@@ -612,6 +612,54 @@ async fn the_transcript_a_turn_leaves_and_the_next_one_reads() {
     assert_eq!(messages[6]["content"], "and now?");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_step_row_says_whether_its_call_writes() {
+    setup();
+    let did = "did:key:alice-writes";
+    let alice = user(did, everything());
+    let session = create(&alice);
+
+    // One read call and one write call: each step's row carries `writes`
+    // answered by `agent_session::tool_writes` — the flag a client colors
+    // "changed something" from instead of guessing at the name.
+    let first = service::send(
+        &alice,
+        &session.id,
+        "look, then change",
+        tooling(
+            Scripted::answering(vec![
+                calls("query_links", json!({"perspective_id": "px"})),
+                calls("add_link", json!({"perspective_id": "px"})),
+            ]),
+            StubProvider::named(&["query_links", "add_link"]),
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    let reply = settled(Some(did), &first.reply_id).await;
+    assert_eq!(reply.status, Some(Done));
+
+    let rows = service::messages(&alice, &session.id, None, None).unwrap();
+    let steps: Vec<_> = rows
+        .iter()
+        .filter(|m| m.role == AiSessionMessageRole::Tool)
+        .collect();
+    assert_eq!(steps.len(), 2, "{rows:?}");
+    assert_eq!(steps[0].content["name"], "query_links");
+    assert_eq!(
+        steps[0].content["writes"],
+        json!(false),
+        "a read call's row is not a write"
+    );
+    assert_eq!(steps[1].content["name"], "add_link");
+    assert_eq!(
+        steps[1].content["writes"],
+        json!(true),
+        "a write call's row says it writes"
+    );
+}
+
 // ── the caller's grant behind the turn ──────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
