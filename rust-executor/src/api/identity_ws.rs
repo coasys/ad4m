@@ -19,11 +19,10 @@ use crate::identity::types::{
     AcceptJoinParams, CancelJoinParams, ClaimOfferParams, ClaimOfferResult, CosignInceptParams,
     DeleteRequestParams, DeviceKeys, DeviceRequest, DeviceView, DidResolutionResult, IdentityLog,
     IdentityStatus, InboxAckParams, InboxEntry, InboxPutParams, InboxStored, JoinAccepted,
-    JoinCancelled, JoinStatus, JoinStatusParams, KeyOwner, KeyOwnerParams, LogParams,
-    OfferListing, OfferOpened, OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice,
-    PublishParams, RecordKey, RecordParams, RecordPutParams, RecordStored, RequestPosted,
-    RequestsParams, ResetLogParams, ResolveParams, SignedHead, StoredRecord, TakenMaster,
-    UnwrapRecordKeyParams,
+    JoinCancelled, JoinStatus, JoinStatusParams, KeyOwner, KeyOwnerParams, LogParams, OfferListing,
+    OfferOpened, OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice, PublishParams,
+    RecordKey, RecordParams, RecordPutParams, RecordStored, RequestPosted, RequestsParams,
+    ResetLogParams, ResolveParams, SignedHead, StoredRecord, TakenMaster, UnwrapRecordKeyParams,
 };
 use crate::types::RequestContext;
 
