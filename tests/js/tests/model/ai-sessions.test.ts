@@ -11,6 +11,9 @@
  *   - "add this link / read it back"   → `add_link`, then `query_links`
  *   - "this perspective only"          → a session scoped to one perspective
  *     lists only it and is refused on another
+ *   - #1713                            → a perspective holding 100 classes no
+ *     longer floods the session's tool list (was ~1,500 tools / ~750 KB per
+ *     request; Ollama truncated the user message out and the turn failed)
  *
  * Tool steps land as `role: "tool"` transcript entries (`content.name`,
  * `content.arguments`, `content.target`, `content.result`), so the scenarios
@@ -36,7 +39,7 @@
 
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { Ad4mClient, LinkQuery } from "@coasys/ad4m";
+import { Ad4mClient, LinkQuery, SHACLShape } from "@coasys/ad4m";
 import type { AISession, AISessionChanged, AISessionMessage } from "@coasys/ad4m";
 import { addOllamaLlm, startAgent, waitUntil } from "../../helpers/index.js";
 
@@ -461,5 +464,76 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
       expect(stepContent(q).error ?? "").to.include("Capability is not matched");
       expect(stepContent(q).result, "a refused step carries no result").to.be.undefined;
     }
+  });
+
+  // ── #1713: a perspective full of classes must not drown the session ───────
+
+  it("runs a turn over a perspective whose per-class tools would overflow the context (#1713)", async () => {
+    // coasys/ad4m#1713: a session offered one tool set per class of every
+    // perspective it could read. A real install had ~1,500 such tools — ~750
+    // KB of tools[] JSON on every request — so at num_ctx 49152 Ollama
+    // truncated the user message out of the prompt when the turn continued
+    // after a tool call, answered `500 {"error":"no user query found in
+    // messages"}`, and the assistant row ended `failed`. Sessions now offer
+    // the static surface only (per-class tools need `dynamicClassTools`).
+    //
+    // One class with 8 scalar properties and a collection generates 16 tools
+    // ≈ 8.3 KB of tools[] JSON (measured in
+    // mcp::tools::dynamic::tests::generated_class_tools_json_size). 100
+    // classes ≈ 1,600 tools ≈ ~837 KB ≈ ~210,000 tokens at ~4 chars/token —
+    // over 4× the model's num_ctx, so had they been offered the turn could
+    // not run at all.
+    const CLASS_COUNT = 100;
+    const p = await newPerspective(`flood-${Date.now().toString(36)}`);
+
+    for (let i = 0; i < CLASS_COUNT; i++) {
+      const ns = `flood://c${i}/`;
+      const shape = new SHACLShape(`${ns}FloodClass${i}`);
+      shape.setConstructorActions([
+        { action: "addLink", source: "this", predicate: "rdf://type", target: `${ns}FloodClass${i}` },
+      ]);
+      for (let j = 0; j < 8; j++) {
+        shape.addProperty({
+          name: `property${j}`,
+          path: `${ns}property${j}`,
+          datatype: "xsd://string",
+          maxCount: 1,
+          writable: true,
+          setter: [
+            { action: "setSingleTarget", source: "this", predicate: `${ns}property${j}`, target: "value" },
+          ],
+        });
+      }
+      shape.addProperty({
+        name: "members",
+        path: `${ns}member`,
+        collection: true,
+        writable: true,
+        adder: [{ action: "addLink", source: "this", predicate: `${ns}member`, target: "value" }],
+        remover: [{ action: "removeLink", source: "this", predicate: `${ns}member`, target: "value" }],
+      });
+      await p.addShacl(`FloodClass${i}`, shape);
+    }
+    // The classes really landed — the list the per-class tool generation reads.
+    expect(await p.subjectClasses()).to.have.length(CLASS_COUNT);
+
+    // A turn that needs a tool call and a continuation after it — the exact
+    // request shape the oversized tool list broke.
+    const s = await newSession({
+      title: "a flooded perspective",
+      defaultPerspective: p.uuid,
+    });
+    const started = await ad4m.ai.sendMessage(
+      s.id,
+      "Use the list_perspectives tool to list my perspectives, then tell me the names you see.",
+    );
+    const { msgs, reply } = await waitForReply(s.id, started.replyId);
+
+    const calls = toolSteps(msgs, "list_perspectives");
+    expect(calls.length, "the turn called list_perspectives").to.be.greaterThan(0);
+    expect(calls[0].status).to.equal("done");
+
+    const text = stepContent(reply).text ?? "";
+    expect(text, "the reply mentions the flooded perspective").to.include(p.name);
   });
 });
