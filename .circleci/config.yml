@@ -659,6 +659,11 @@ jobs:
           name: JS unit tests
           command: pnpm exec turbo run test --concurrency=1 --filter='!@coasys/rust-ad4m-executor' --filter='!@coasys/ad4m-cli'
           no_output_timeout: 30m
+      - run:
+          # The wind tunnel's pure parts (no model server), including the check that
+          # ai-wind-tunnel/recommendations.json is what the checked-in evidence derives.
+          name: AI wind tunnel unit tests
+          command: cd ./tests/js && pnpm run test-ai-wind-tunnel-unit
 
   # The regular JS integration suite: local bootstrap languages only, no
   # Holochain conductor. Two-executor suites share languages, neighbourhoods

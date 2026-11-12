@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "runId": "a48b1a99",
+  "startedAt": "2026-11-05T03:32:18.454Z",
+  "finishedAt": "2026-11-05T03:32:42.011Z",
+  "hardwareClass": "apple-silicon-32",
+  "fingerprint": {
+    "os": "macos",
+    "osVersion": "macOS 15.7.2",
+    "kernel": "24.6.0",
+    "arch": "arm64",
+    "cpu": {
+      "model": "Apple M4 Pro",
+      "cores": 14,
+      "threads": 14
+    },
+    "memoryBytes": 51539607552,
+    "gpus": [
+      {
+        "vendor": "apple",
+        "name": "Apple M4 Pro",
+        "vramBytes": 0,
+        "unified": true
+      }
+    ],
+    "backends": [
+      "cpu",
+      "metal"
+    ],
+    "gpuBudgetBytes": 38654705664,
+    "drivers": {},
+    "id": "e6916d40"
+  },
+  "executor": {
+    "commit": "unknown",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "b498751fbed495c305aa1e53024f63e1283f2cfe"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "ollama"
+    ],
+    "services": [
+      "llm",
+      "completion",
+      "embeddings",
+      "stt",
+      "tts"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "ollama": {
+      "status": "available",
+      "builds": [],
+      "mode": "spawned",
+      "version": "0.33.3"
+    }
+  },
+  "cells": [
+    {
+      "provider": "ollama",
+      "service": "stt",
+      "status": "unsupported",
+      "reason": "Ollama serves no transcription API (/v1/audio/transcriptions)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "ollama",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "Ollama serves no speech API (/v1/audio/speech)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "ollama",
+      "service": "embeddings",
+      "status": "pass",
+      "model": {
+        "remoteModel": "nomic-embed-text",
+        "sizeBytes": 274302030,
+        "license": "Apache-2.0",
+        "params": "137M",
+        "source": "https://ollama.com/library/nomic-embed-text",
+        "memoryBytes": 274302030
+      },
+      "backend": "metal",
+      "endpointKind": "OLLAMA",
+      "checks": [
+        {
+          "name": "embeds a batch (/v1/embeddings)",
+          "pass": true,
+          "detail": "6 vectors for 6 inputs"
+        },
+        {
+          "name": "embeds queries one at a time",
+          "pass": true,
+          "detail": "6 query vectors"
+        },
+        {
+          "name": "dimension is consistent",
+          "pass": true,
+          "detail": "768 dimensions",
+          "value": 768
+        },
+        {
+          "name": "retrieval ranks the expected passage first",
+          "pass": true,
+          "detail": "6/6 top-1, MRR 1.000",
+          "value": 6,
+          "threshold": 6
+        },
+        {
+          "name": "SDK ai.embed matches /v1",
+          "pass": true,
+          "detail": "768 dims, cosine 1.0000 to the /v1 vector",
+          "value": 1,
+          "threshold": "> 0.99"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 344,
+        "dimension": 768,
+        "mrr": 1,
+        "batchLatencyMs": {
+          "n": 3,
+          "median": 163.2,
+          "p95": 182.8,
+          "min": 161.5,
+          "max": 185,
+          "mean": 169.9
+        },
+        "textsPerSec": {
+          "n": 3,
+          "median": 196,
+          "p95": 198,
+          "min": 173,
+          "max": 198.2,
+          "mean": 189.1
+        },
+        "singleLatencyMs": {
+          "n": 3,
+          "median": 9.229,
+          "p95": 9.39,
+          "min": 9.127,
+          "max": 9.408,
+          "mean": 9.255
+        },
+        "directBatchLatencyMs": {
+          "n": 3,
+          "median": 163.6,
+          "p95": 164.6,
+          "min": 162,
+          "max": 164.7,
+          "mean": 163.4
+        },
+        "executorOverheadMs": -0.4,
+        "peakRssBytes": 44580864,
+        "peakGpuBytes": null,
+        "pullMs": 13666,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 274302030,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 15134
+    }
+  ]
+}
