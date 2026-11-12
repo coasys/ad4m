@@ -40,7 +40,9 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' },
     // ── Identity ──
     'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true } },
-    'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, echo: p }),
+    'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, needsAccept: false, echo: p }),
+    'identity.acceptJoin': { accepted: true },
+    'identity.cancelJoin': { cancelled: true },
     'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
     'identity.devices': [],
     'identity.rekey': { sign: 'did:key:z6MkNew', enc: 'z6LSNew' },
@@ -1368,6 +1370,18 @@ describe('IdentityClient', () => {
         expect(lastRpcCall!.params.offer).toBe('coasys:offer:1:abc');
         expect(lastRpcCall!.params.hint).toBe('server');
         expect(claimed.matchCode).toBe('R7K Q2M');
+        expect(claimed.needsAccept).toBe(false);
+    });
+
+    test('acceptJoin() and cancelJoin() send the offer id', async () => {
+        const accepted = await ad4m.identity.acceptJoin('offer');
+        expect(lastRpcCall!.type).toBe('identity.acceptJoin');
+        expect(lastRpcCall!.params).toEqual({ offerId: 'offer' });
+        expect(accepted).toEqual({ accepted: true });
+        const cancelled = await ad4m.identity.cancelJoin('offer');
+        expect(lastRpcCall!.type).toBe('identity.cancelJoin');
+        expect(lastRpcCall!.params).toEqual({ offerId: 'offer' });
+        expect(cancelled).toEqual({ cancelled: true });
     });
 
     test('log() sends the did, from and fresh', async () => {

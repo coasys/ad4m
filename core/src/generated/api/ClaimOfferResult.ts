@@ -8,4 +8,10 @@ export type ClaimOfferResult = { did: string, offerId: string,
 /**
  * "R7K Q2M": the holder shows the same code.
  */
-matchCode: string, kind: OfferKind, expires: number, };
+matchCode: string, kind: OfferKind, expires: number, 
+/**
+ * The claim would make its identity this executor's operator (a desktop app's first run:
+ * `--custody-channel`, no operator record): it binds only after `identity.acceptJoin`.
+ * Until then `identity.joinStatus` answers `awaiting-accept`, even once the offer is spent.
+ */
+needsAccept: boolean, };

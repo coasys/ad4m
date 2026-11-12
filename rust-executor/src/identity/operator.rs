@@ -8,9 +8,10 @@
 //! identity passes. The one exception is a desktop app's executor at its first run
 //! (`--custody-channel`, no record, the main agent of no identity yet): the desktop never runs
 //! `init --operator` and does not know its person before the first offer arrives, so it may claim
-//! any offer, and the identity its main agent joins (the holder confirmed, the add landed:
+//! any offer, and the identity its main agent joins (the holder confirmed, the add landed, the
+//! operator on this machine accepted the claim with `identity.acceptJoin`:
 //! `ClaimService::join_status`) is recorded as the operator (`OperatorSetBy::FirstRun`). A claim
-//! that never completes records nothing. From then on the rule holds as for every executor.
+//! that never completes, or is never accepted, records nothing. From then on the rule holds as for every executor.
 //! While the key is valid in a log, `claim_for_main` refuses every offer
 //! (`already-linked`).
 //!

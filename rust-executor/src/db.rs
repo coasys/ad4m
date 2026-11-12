@@ -37,7 +37,7 @@ pub use grants::{GrantKeyRow, GrantRow};
 #[cfg(test)]
 pub(crate) use identity::operator_record_in;
 pub(crate) use identity::set_operator_record_if_empty_in;
-pub use identity::{JoinRow, OperatorRecordRow, OperatorSetBy};
+pub use identity::{JoinAccept, JoinCancel, JoinRow, OperatorRecordRow, OperatorSetBy};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {

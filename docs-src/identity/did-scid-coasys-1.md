@@ -874,11 +874,28 @@ a new string ends the read of the last one.
   naming another identity refuses it; so does no record, except on a desktop's first run: an
   executor with the custody channel, no record and no identity may claim any offer, and records
   an identity as operator, `FirstRun`, only when its main agent joins it: the holder confirmed
-  the match code and the add listing the device key is in the log; until then it may claim
-  again, for the same or another identity), with `canKeepMaster` exactly when the
-  executor has the custody channel; only a claim made shows the identity and the match code
-  (`link-ticket`). The ticket is deleted either way; one whose log cannot be read now waits
-  for the next read.
+  the match code, the add listing the device key is in the log and the operator on this
+  machine accepted the claim; until then it may claim again, for the same or another
+  identity), with `canKeepMaster` exactly when the executor has the custody channel; only a
+  claim made shows the identity and the match code (`link-ticket`). The ticket is deleted
+  either way; one whose log cannot be read now waits for the next read.
+- Anyone who sees the device string can deliver a ticket, so a first-run claim is held:
+  `link-ticket` and `identity.claimOffer` answer `needsAccept: true`, and
+  `identity.joinStatus` answers `awaiting-accept` (the main agent is not bound, no record is
+  written) while the claim is claimed or spent and not accepted. The person at the computer
+  compares the identity and the match code and calls `identity.acceptJoin {offerId}` →
+  `{accepted: true}`, before or after the holder confirms; the next `joinStatus` that reads
+  `spent` binds the main agent and records `FirstRun`. A claim that sets no operator record
+  (the record already names the identity) has `needsAccept: false` and binds on `spent`
+  without accept. `identity.cancelJoin {offerId}` → `{cancelled: true}` cancels any claim:
+  it never binds, even if the holder confirms later, `joinStatus` answers `cancelled`, and a
+  later accept is refused (409 `cancelled`). Both calls are the operator's on this machine
+  (Operator, local only: an app, a network listener and a device-key login get 403), the
+  custody credential included; both repeat as no-ops. 404 when the executor holds no claim
+  on the offer (for `acceptJoin`: none awaiting accept); `cancelJoin` after the claim bound
+  answers 409 `already-joined`. The executor does not tell the store of a cancel: the
+  holder's add may still land in the log, listing a device key that never speaks for the
+  identity until the holder revokes it.
 - The executor never decrypts the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key
   (always for a post). For the app on its machine whose device it is (the desktop's custody

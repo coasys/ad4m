@@ -123,6 +123,7 @@ mod tests {
             offer_id: "offer".into(),
             scid: "scid".into(),
             claimed_at: 1,
+            accept: crate::db::JoinAccept::NotNeeded,
         })
         .unwrap();
 
