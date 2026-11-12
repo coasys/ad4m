@@ -202,7 +202,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-240 methods: Cap 87, Executor 38, Open 10, Operator 35, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 14.
+241 methods: Cap 86, Executor 38, Open 10, Operator 35, Owns 68, UserOrOperator 4. Local only (the operator on this machine): 14.
 
 | Method | Guard |
 |---|---|
@@ -266,7 +266,7 @@ the guard checked:
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
 | `identity.custodyStatus` | `Operator`, local only |
-| `identity.deleteRequest` | `Cap(agent:UPDATE)` |
+| `identity.deleteRequest` | `UserOrOperator(agent:UPDATE)` |
 | `identity.devices` | `Cap(agent:READ)` |
 | `identity.inbox` | `Operator`, local only |
 | `identity.inboxAck` | `Operator`, local only |
@@ -276,7 +276,7 @@ the guard checked:
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
-| `identity.postRequest` | `Cap(agent:UPDATE)` |
+| `identity.postRequest` | `UserOrOperator(agent:UPDATE)` |
 | `identity.prepareDevice` | `Operator`, local only |
 | `identity.publish` | `UserOrOperator(agent:UPDATE)` |
 | `identity.record` | `Cap(agent:READ)` |
@@ -409,6 +409,7 @@ the guard checked:
 | `sfu.callAnswerServerOffer` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callJoin` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callLeave` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callRestartIce` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callSetQualityPreference` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.cascadeStatus` | `Cap(neighbourhood:READ)` |
 | `sfu.ensureMembership` | `Operator` |
