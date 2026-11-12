@@ -16,12 +16,12 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner`, `store_request` (a store request signed by a device key at a store-signed head) and `body_bytes` (the JCS bytes its `bodyHash` covers) |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
-| `custody.rs` | The custody channel's guard `admit` (the custody credential = `Principal::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`) and `CUSTODY_METHODS` with `admit_call`: the custody credential is no operator and holds no capability; dispatch lets it reach only the calls on that list (403 `not-a-custody-call` for any other), and `Session::open` refuses it off a loopback listener. The credential is the first line of stdin at start (`config::read_custody_credential`), held in memory only and wiped on drop: never the environment or a flag, which `/proc/<pid>/environ` and `/proc/<pid>/cmdline` show to other processes and to the admin credential's host file reads. `run` exits 78 without the line, with an empty line, with the admin credential's value, or with `AD4M_CUSTODY_CREDENTIAL`/`_FILE` set, and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
+| `custody.rs` | The custody channel's guard `admit` (the custody credential = `Principal::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`) and `CUSTODY_METHODS` with `admit_call`: the custody credential is no operator and holds no capability; dispatch lets it reach only the calls on that list (403 `not-a-custody-call` for any other), and `Session::open` refuses it off a loopback listener. The credential is the first line of stdin at start (`config::read_custody_credential`), held in memory only and wiped on drop: never the environment or a flag, which `/proc/<pid>/environ` and `/proc/<pid>/cmdline` show to other processes and to the admin credential's host file reads. `run` exits 78 without the line, with an empty line, with the admin credential's value, or with `AD4M_CUSTODY_CREDENTIAL`/`_FILE` set, and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster`, a `identity.claimOffer` with `canKeepMaster`, and `identity.acceptJoin` / `identity.cancelJoin` (the desktop's first-run claim) |
 | `inbox.rs` | The device inbox: `Inbox` (the joined messages opened here, by id and type, never a body; one read of the joined inbox at a time; the open pre-join read; the pull's wake-up), `pull_inbox` (`identity.inbox`), `take_master` (`identity.takeMaster`), `inbox_ack`, `inbox_put`, `prepare_device` (`identity.prepareDevice`: the device string and the pre-join read; `take_ticket` claims and, once claimed, sends `link-ticket`), `run_pull` / `run_schedule` / `wake` (at start, at unlock and binding, every 15 minutes) |
 | `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
 | `person.rs` | the person's profile: `person_record` (the agent record under the `did:scid` and its signed request, by the device key at the trusted head), `IdentityService::publish_person_profile` |
-| `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key; `canKeepMaster` as the caller says, which only the custody channel may: `custody::admit` on the RPC path, the channel itself on the ticket path), `join_status` (the main agent's claims only) |
+| `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key; `canKeepMaster` as the caller says, which only the custody channel may: `custody::admit` on the RPC path, the channel itself on the ticket path), `join_status` (the main agent's claims only; `awaiting-accept`, `cancelled`), `accept_join` (`identity.acceptJoin`), `cancel_join` (`identity.cancelJoin`) |
 | `service.rs` | `IdentityService`: status, log, resetLog, cosignIncept, publish, openOffer, offers, devices; error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity`; the key session contracts (`KeyStatement`, `SignedKeyStatement`, `SessionChallenge`, `KeySessionResult`, `SessionInfo`, ...) |
 
@@ -182,16 +182,29 @@ the offer's state).
   the trusted seq, `no-operator` without a record, `first-link` for another identity. One
   exception (`FirstLink::FirstRun`): a `--custody-channel` executor (a desktop app, which never
   runs `init --operator`) with no record and no identity for its main agent may claim any
-  offer. The claim records nothing: only when the main agent joins (`join_status` on `spent`,
-  `bind_agent_if_listed` with `first_run_operator`) is that identity recorded as operator
-  (`OperatorSetBy::FirstRun`). The binding and the record are one transaction
-  (`set_agent_identity_and_first_run_operator`): a process that stops between them leaves
-  neither, and the next `joinStatus` writes both. That is why `identity.joinStatus` is a
-  write, not a `.read()`. So a claim that never completes
-  (the wrong code scanned, the holder said No) leaves the desktop free to claim again, for the
-  same or another identity. From then on the rule applies as above: a claim for any other
-  identity is `first-link`. Both the ticket path and `identity.claimOffer` (a pasted link) go
-  through `claim_for_main` and end in `joinStatus`, so both get it.
+  offer. The claim records nothing and is held: anyone who sees the device string can deliver
+  a ticket, so its join row is `accept = awaiting` (`JoinAccept`), `link-ticket` and
+  `ClaimOfferResult` say `needsAccept: true`, and `join_status` answers `awaiting-accept`
+  (nothing bound, nothing recorded) while it is claimed or spent and not accepted.
+  `identity.acceptJoin` (`ClaimService::accept_join`; Operator, `.local_only()`, the custody
+  credential too) sets `accepted`, before or after `spent`; only then does the main agent join
+  (`join_status` on `spent`, `bind_agent_if_listed` with `Binding::FirstRun`) and that
+  identity get recorded as operator (`OperatorSetBy::FirstRun`). The binding and the record
+  are one transaction (`set_agent_identity_and_first_run_operator`, which also requires
+  `accepted`): a process that stops between them leaves neither, and the next `joinStatus`
+  writes both. That is why `identity.joinStatus` is a write, not a `.read()`. So a claim that
+  never completes (the wrong code scanned, the holder said No, nobody accepted) leaves the
+  desktop free to claim again, for the same or another identity. From then on the rule
+  applies as above: a claim for any other identity is `first-link`. Both the ticket path and
+  `identity.claimOffer` (a pasted link) go through `claim_for_main` and end in `joinStatus`,
+  so both get it. A claim that sets no operator record (`not-needed`) binds on `spent`
+  without accept (`Binding::Claim`); a legacy row (`not-needed`) with no operator record is
+  held as `awaiting`. `identity.cancelJoin` (`ClaimService::cancel_join`, same guard) cancels
+  any claim of the main agent: `accept = cancelled` is final (`set_join_accept` never
+  overwrites it), `join_status` answers `cancelled` without asking the store, and the
+  binding transaction of `Binding::Claim`/`FirstRun` refuses a cancelled claim, while
+  `db.cancel_join` refuses (409 `already-joined`) a claim whose agent is already bound, both
+  in one transaction, so a cancel and a bind never both win. The store is not told.
 - With an operator record the main key may speak only for the operator's identity:
   `cosignIncept` for the main agent runs `main_incept_check` and refuses (`first-link`) an
   incept of any other identity, and `publish` of an incept by the main agent runs it again
@@ -479,7 +492,7 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   at most one read a second; a new call ends the last read. `claim_for_main` (the first-link
   rule) claims a ticket that passes `check_payload` (its signed offer checked against the
   identity's log, refreshed from the store) with `canKeepMaster` exactly when the custody
-  channel is on; a claim sends `link-ticket {did, offerId, matchCode}` to the operator on this
+  channel is on; a claim sends `link-ticket {did, offerId, matchCode, needsAccept}` to the operator on this
   machine, a refused one sends nothing; the message is deleted either way. A ticket whose log
   cannot be read now waits for the next round; a store that is behind (`Behind`, `Conflict`)
   is no such case: the cached log at its trusted seq checks the ticket. A master key in a pre-join inbox is dropped

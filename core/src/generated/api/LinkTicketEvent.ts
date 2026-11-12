@@ -5,4 +5,8 @@
  * and the executor claimed it; the device shows the identity and the claim's match code,
  * which the holder shows too.
  */
-export type LinkTicketEvent = { did: string, offerId: string, matchCode: string, };
+export type LinkTicketEvent = { did: string, offerId: string, matchCode: string, 
+/**
+ * The claim binds only after `identity.acceptJoin` (as `ClaimOfferResult.needsAccept`).
+ */
+needsAccept: boolean, };
