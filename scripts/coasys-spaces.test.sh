@@ -217,6 +217,7 @@ test_test_needs_the_suite() {
 # also answers Ollama's /api/version, /api/show (num_ctx $OWN_CTX when set) and /api/create, and
 # writes each create request to $TMP/created.
 serve_models() {
+    rm -f "$TMP/port"
     OLLAMA="${OLLAMA:-}" OWN_CTX="${OWN_CTX:-}" CREATED="$TMP/created" node -e '
       const ids = process.argv.slice(1);
       const s = require("http").createServer((req, res) => {
