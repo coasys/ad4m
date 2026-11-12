@@ -552,7 +552,13 @@ struct Sub {
 impl Sub {
     async fn open(p: &PerspectiveInstance) -> (Sub, String) {
         let (id, _, initial) = p
-            .model_subscribe_and_query(one("TextContent"), ALL.into(), "c".into(), None)
+            .model_subscribe_and_query(
+                one("TextContent"),
+                ALL.into(),
+                uuid::Uuid::new_v4().to_string(),
+                "c".into(),
+                None,
+            )
             .await
             .expect("subscribe");
         let rx = get_global_pubsub().await.subscribe_events();

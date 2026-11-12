@@ -4,7 +4,9 @@
 //! Who may write and read:
 //! - **Pre-join** `pre:<a>`: written by the current master key that opened an `open` offer
 //!   bound to the device string's `sign`, with `pre_address(sign, r) == a` (`403 writer`
-//!   otherwise); at most 2 messages; each lives until the offer's `expires`. Read and
+//!   otherwise); at most 2 messages per writing identity, so another identity that learned
+//!   the device string cannot fill the room of the holder that scanned it; each lives until
+//!   the offer's `expires`. Read and
 //!   acknowledged with a pre-join read (`X-Coasys-Inbox`) by `sign` for this store.
 //! - **Joined** `<scid>/<keyId>`: written by the current master key of `scid` (`403 writer`
 //!   otherwise) to a device key valid at the head without the bot mark (`404` otherwise); at
@@ -47,12 +49,21 @@ fn check_write(write: &InboxWrite) -> Result<(), ApiError> {
     check_sealed(&write.sealed).map_err(|e| ApiError::invalid(e.name(), e.to_string()))
 }
 
-/// `429 {scope:"identity"}` when `address` already holds `max` live messages; the retry is
-/// when the oldest of them expires.
-fn check_room(conn: &Connection, address: &str, max: usize, now: u64) -> Result<(), ApiError> {
+/// `429 {scope:"identity"}` when `scid` already holds `max` live messages at `address`; the
+/// retry is when the oldest of them expires. Room is counted per writing identity: at a
+/// pre-join address several identities may write (each needs its own open offer bound to the
+/// device key), and one of them filling its room must not keep the others out. A joined
+/// address belongs to one identity, so there the count is the address's.
+fn check_room(
+    conn: &Connection,
+    address: &str,
+    scid: &str,
+    max: usize,
+    now: u64,
+) -> Result<(), ApiError> {
     let (count, first): (i64, Option<i64>) = conn.query_row(
-        "SELECT COUNT(*), MIN(expires) FROM inbox WHERE address = ?1 AND expires > ?2",
-        params![address, to_sql(now)?],
+        "SELECT COUNT(*), MIN(expires) FROM inbox WHERE address = ?1 AND scid = ?2 AND expires > ?3",
+        params![address, scid, to_sql(now)?],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     if count as usize >= max {
@@ -184,7 +195,7 @@ impl Store {
             ));
         }
         let text = pre_text(address);
-        check_room(&tx, &text, MAX_PRE_MESSAGES, now)?;
+        check_room(&tx, &text, &bind.scid, MAX_PRE_MESSAGES, now)?;
         limits::take_identity_write(&tx, &self.settings, &bind.scid, now)?;
         let stored = insert(
             &tx,
@@ -239,7 +250,7 @@ impl Store {
             ));
         }
         let address = joined_address(scid, key_id);
-        check_room(&tx, &address, MAX_JOINED_MESSAGES, now)?;
+        check_room(&tx, &address, scid, MAX_JOINED_MESSAGES, now)?;
         limits::take_identity_write(&tx, &self.settings, scid, now)?;
         let stored = insert(
             &tx,

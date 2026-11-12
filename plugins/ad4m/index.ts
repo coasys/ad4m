@@ -39,7 +39,7 @@ import {
   stopExecutor,
   downloadExecutor,
 } from "./executor";
-import { ensureAgentReady } from "./agent";
+import { closeMarkingClients, declareBotIfOwnAccount, ensureAgentReady } from "./agent";
 import {
   extractMcpResultData,
   mcpCallTool,
@@ -447,6 +447,27 @@ export function _parkedSubscriptionsForTests(): Map<string, WakerSubscription> {
   return _parkedSubscriptions;
 }
 
+type ConnectAgentClient = (executorUrl: string, token: string) => any;
+
+const connectRealAgentClient: ConnectAgentClient = (executorUrl, token) =>
+  new (loadWakerClientModule().Ad4mClient)(executorUrl, token);
+
+/** The client external mode marks the agent with; tests replace it (`_setAgentClientForTests`). */
+let _connectAgentClient: ConnectAgentClient = connectRealAgentClient;
+
+/** External mode's bot mark, running in the background after a start. */
+let _botMark: Promise<void> = Promise.resolve();
+
+/** @internal The last start's external-mode bot mark, for tests to wait on. */
+export function _botMarkForTests(): Promise<void> {
+  return _botMark;
+}
+
+/** @internal Inject the client external mode marks the agent with; `null` restores the real one. */
+export function _setAgentClientForTests(connect: ConnectAgentClient | null): void {
+  _connectAgentClient = connect ?? connectRealAgentClient;
+}
+
 /** @internal Inject a subscription manager, for tests that cannot connect a real waker. */
 export function _setSubscriptionManagerForTests(
   manager: WakerSubscriptionManager | null,
@@ -462,6 +483,7 @@ export function _resetModuleState(): void {
   _wakerClient = null;
   _subscriptionManager = null;
   _sessionId = "";
+  _botMark = Promise.resolve();
   _registeredTools = new Set<string>();
   _wakerStopped = false;
   if (_wakerRetryTimer) clearTimeout(_wakerRetryTimer);
@@ -806,6 +828,27 @@ export default function ad4mPlugin(api: any) {
     if (!error) return false;
     const lower = error.toLowerCase();
     return lower.includes("invalid credentials") || lower.includes("user not found");
+  }
+
+  /**
+   * External mode marks the agent as a bot only when `token` is an account of the plugin's own
+   * ({@link declareBotIfOwnAccount}), asked of `auth_status` on every start, so a token from the
+   * config counts as one from a fresh login. The question goes over a session of its own opened
+   * with `token`, and the client that marks uses `token` too: the plugin's session may be an
+   * older one (it survives a reload) and act as someone else. Never rejects.
+   */
+  async function declareBotInExternalMode(token: string): Promise<void> {
+    let principal: string | undefined;
+    try {
+      const init = await mcpInitialize(endpoint, token);
+      principal = extractMcpResultData(
+        await mcpCallTool(endpoint, "auth_status", {}, init.sessionId, token),
+      )?.principal;
+    } catch (e: any) {
+      logger.warn(`[ad4m] Could not ask who the token acts as, so the agent is not marked as a bot: ${e?.message ?? e}`);
+      return;
+    }
+    await declareBotIfOwnAccount(principal, () => _connectAgentClient(executorUrl, token), logger);
   }
 
   /**
@@ -1381,6 +1424,8 @@ Notes:
 
       // ── Mode-specific initialization ──
 
+      const markAsBot = providedConfig.declareBot !== false;
+
       if (mode === "external") {
         // External mode: use token from config, or obtain JWT
         if (!_authToken) {
@@ -1391,6 +1436,8 @@ Notes:
             logger.info("[ad4m] JWT obtained");
           }
         }
+        // In the background: an executor slow to answer delays no start.
+        if (_authToken && markAsBot) _botMark = declareBotInExternalMode(_authToken);
       } else {
         // Managed mode: generate ephemeral admin credential (not persisted)
         const adminCredential = generateRandomPassphrase(24);
@@ -1453,6 +1500,8 @@ Notes:
               _authToken,
               logger,
               agentPassphrase,
+              undefined,
+              markAsBot,
             );
             if (agentResult) {
               _pluginAgentDid = agentResult.did;
@@ -1469,6 +1518,8 @@ Notes:
             adminCredential,
             logger,
             agentPassphrase,
+            undefined,
+            markAsBot,
           );
           if (agentResult) {
             _pluginAgentDid = agentResult.did;
@@ -1509,6 +1560,7 @@ Notes:
       }
     },
     stop() {
+      closeMarkingClients();
       stopExecutor(logger);
       logger.info("[ad4m] AD4M MCP service stopped");
     },

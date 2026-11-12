@@ -6,7 +6,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 
 use super::{did_document, signing_key_id, AgentService};
-use crate::wallet::{wallet_backend, KEY_NAME_MAIN};
+use crate::wallet::{wallet_backend, WalletBackend, KEY_NAME_MAIN};
 
 /// The old and the new device `did:key` of the main agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +27,27 @@ pub fn main_key_generation() -> u64 {
 /// The wallet name of the main agent's key `did` once a re-key retired it.
 pub fn retired_key_name(did: &str) -> String {
     format!("retired-main:{did}")
+}
+
+/// Retires the main key `old_did` and makes a new `main` key. When the new key cannot be made,
+/// the old key is `main` again.
+fn replace_main_key(backend: &dyn WalletBackend, old_did: &str) -> Result<(), AnyError> {
+    backend.retire_key(KEY_NAME_MAIN, &retired_key_name(old_did))?;
+    if let Err(e) = backend.generate_keypair(KEY_NAME_MAIN) {
+        put_old_main_key_back(backend, old_did)
+            .map_err(|undo| anyhow!("{e}; and the old key is not back: {undo}"))?;
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Undoes [`replace_main_key`]: a new `main` key, if there is one, goes under its own retired
+/// name, and the retired key `old_did` is `main` again.
+fn put_old_main_key_back(backend: &dyn WalletBackend, old_did: &str) -> Result<(), AnyError> {
+    if let Some(new) = backend.get_did_document(KEY_NAME_MAIN) {
+        backend.retire_key(KEY_NAME_MAIN, &retired_key_name(&new.id))?;
+    }
+    backend.retire_key(&retired_key_name(old_did), KEY_NAME_MAIN)
 }
 
 impl AgentService {
@@ -58,8 +79,7 @@ impl AgentService {
             self.signing_key_id.clone(),
             self.agent.clone(),
         );
-        backend.retire_key(KEY_NAME_MAIN, &retired_key_name(&old_did))?;
-        backend.generate_keypair(KEY_NAME_MAIN)?;
+        replace_main_key(backend.as_ref(), &old_did)?;
         let document = did_document();
         let new_did = document.id.clone();
         self.did_document = Some(serde_json::to_string(&document)?);
@@ -73,9 +93,7 @@ impl AgentService {
         if let Err(e) = self.try_save(&passphrase) {
             (self.did_document, self.signing_key_id, self.agent) = before;
             self.did = Some(old_did.clone());
-            backend
-                .retire_key(KEY_NAME_MAIN, &retired_key_name(&new_did))
-                .and_then(|()| backend.retire_key(&retired_key_name(&old_did), KEY_NAME_MAIN))
+            put_old_main_key_back(backend.as_ref(), &old_did)
                 .map_err(|undo| anyhow!("{e}; and the old key is not back: {undo}"))?;
             return Err(e);
         }
@@ -92,9 +110,82 @@ impl AgentService {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::agent::{did_for_context, AgentContext};
+    use crate::wallet::LocalWallet;
+
+    /// A local wallet with faults: it may refuse to rename keys (as a shared wallet does), and
+    /// its key generation may fail.
+    pub(crate) struct TestWallet {
+        pub(crate) inner: LocalWallet,
+        pub(crate) renames: bool,
+        pub(crate) generate_fails: bool,
+    }
+
+    impl WalletBackend for TestWallet {
+        fn generate_keypair(&self, name: &str) -> Result<(), AnyError> {
+            if self.generate_fails {
+                return Err(anyhow!("the wallet cannot make a key"));
+            }
+            self.inner.generate_keypair(name)
+        }
+        fn get_secret_key(&self, name: &str) -> Option<Vec<u8>> {
+            self.inner.get_secret_key(name)
+        }
+        fn get_public_key(&self, name: &str) -> Option<Vec<u8>> {
+            self.inner.get_public_key(name)
+        }
+        fn get_did_document(&self, name: &str) -> Option<did_key::Document> {
+            WalletBackend::get_did_document(&self.inner, name)
+        }
+        fn sign(&self, name: &str, message: &[u8]) -> Option<Vec<u8>> {
+            self.inner.sign(name, message)
+        }
+        fn list_key_names(&self) -> Vec<String> {
+            self.inner.list_key_names()
+        }
+        fn key_exists(&self, name: &str) -> bool {
+            self.inner.key_exists(name)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn can_rename_keys(&self) -> bool {
+            self.renames
+        }
+        fn retire_key(&self, name: &str, retired_name: &str) -> Result<(), AnyError> {
+            self.inner.retire_key(name, retired_name)
+        }
+    }
+
+    /// A re-key whose new key cannot be made puts the old key back as `main`, and leaves no
+    /// retired key behind.
+    #[test]
+    fn a_rekey_whose_new_key_cannot_be_made_keeps_the_old_key() {
+        let inner = LocalWallet::new();
+        inner.generate_keypair(KEY_NAME_MAIN).unwrap();
+        let old_did = WalletBackend::get_did_document(&inner, KEY_NAME_MAIN)
+            .unwrap()
+            .id;
+        let wallet = TestWallet {
+            inner,
+            renames: true,
+            generate_fails: true,
+        };
+
+        let refused = replace_main_key(&wallet, &old_did);
+
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "the wallet cannot make a key"
+        );
+        assert_eq!(
+            wallet.get_did_document(KEY_NAME_MAIN).map(|d| d.id),
+            Some(old_did)
+        );
+        assert_eq!(wallet.list_key_names(), vec![KEY_NAME_MAIN.to_string()]);
+    }
 
     /// A re-key makes a new main key, keeps the old one under its retired name, moves the
     /// service's DID and profile, and leaves old signatures verifiable.

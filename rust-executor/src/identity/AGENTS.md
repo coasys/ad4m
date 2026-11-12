@@ -203,7 +203,11 @@ the offer's state).
   the main agent only the operator (the admin credential; the custody credential reaches them
   through `CUSTODY_METHODS`, acting as the main agent), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
-  managed agent.
+  managed agent. `postRequest` and `deleteRequest` take the same guard: a post, and a
+  deletion without a given request, are signed by the agent's device key alone, so they speak
+  for this device to the identity's other devices. `recordPut` keeps `Cap(agent:UPDATE)`: the
+  record's envelope is signed by a key of the identity, which the device's request only
+  carries.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through
   `write_agent_language_settings` (atomic: temp file + rename), as its `storeUrl` and
   `storeKeys` settings, on every start: no store or no keys removes the setting, so an earlier
@@ -349,11 +353,21 @@ the offer's state).
   exactly for `valid`. A found person stays for good; "no log" holds for 15 minutes.
   In a flow's authority checks a bot never acts as its owner: a bot-signed link counts
   under the bot's own `did:key` only (`perspectives::flow_instance::atom::flow_person`), so
-  `person` there is display, not authority.
+  `person` there is display, not authority. That rests on the bot mark reaching the flow:
+  the engine reads proposal and role links as `model_query` `__links` rows
+  (`model_query::links::decorated_link`, from `attach_links` and `containment`), so every
+  stored-link read selects `byBot` and `judgementVersion` beside `person` and decodes them as
+  `sparql_store::decode_proof` does (a stale judgement: no person, no mark). A new read of
+  stored links that keeps `person` must keep both.
 - **The re-check** (`run_recheck`, started by `init`): on each `VerdictChange` the links of
   that key; every 60 s the links of bot keys whose scope `expires` fell since the last tick
   (`KeyMap::expiring`), then the `cantCheck` links. Each is judged again and rewritten when
-  the verdict or person changed (`PerspectiveInstance::recheck_links`). Reads page by
+  the verdict or person changed (`PerspectiveInstance::recheck_links`), except that neither
+  a re-check nor a write of the same proof ever replaces a stored `valid` with `cantCheck`
+  (`verdict::replaces`): the stored `valid` is the order the executor knows, and a log that
+  is out of the key map for a while (before `load_held`, an eviction, `identity.resetLog`)
+  must not cost it. `invalid` and `flagged` need no such guard: they are judged again from
+  the log alone once it is back. Reads page by
   reifier IRI (`RECHECK_BATCH` rows): a key's links are read to the last page; the
   `cantCheck` pass reads one page per tick from `recheck_cursor` and wraps at the end, so
   links that stay unresolvable do not hide the ones after them. Rewritten links go through

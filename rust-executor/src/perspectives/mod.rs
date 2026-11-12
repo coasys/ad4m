@@ -3,6 +3,7 @@ pub(crate) mod agent_session;
 mod agent_session_tests;
 pub mod auto_processor;
 pub(crate) mod content_address;
+pub(crate) mod fallback_sync;
 pub(crate) mod flow_classes;
 pub(crate) mod flow_context;
 pub(crate) mod flow_evaluator;

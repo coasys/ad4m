@@ -162,6 +162,8 @@ export class Receiver {
 /** A participant as the SDK session reports it: who, and the stream their media arrives on. */
 export interface Heard {
   agentDid: string;
+  /** The participant's session; an agent on two devices is two participants. */
+  participantId?: string;
   stream: MediaStream;
 }
 
@@ -185,13 +187,16 @@ export class Hearing {
     }
   }
 
-  /** Per participant: the frames arriving, the tone their audio carries, their video's size. */
-  remotes(participants: readonly Heard[], tones: number[]): Record<string, Remote> {
+  /**
+   * Per participant — by DID unless `key` says otherwise — the frames
+   * arriving, the tone their audio carries, their video's size.
+   */
+  remotes(participants: readonly Heard[], tones: number[], key: (p: Heard) => string = (p) => p.agentDid): Record<string, Remote> {
     this.attach(participants);
     const held = new Set<string>();
     const remotes: Record<string, Remote> = {};
     for (const participant of participants) {
-      const remote = (remotes[participant.agentDid] ??= { audioFrames: 0, audioRecent: 0, tone: null, videoFrames: 0, videoRecent: 0, width: 0, height: 0 });
+      const remote = (remotes[key(participant)] ??= { audioFrames: 0, audioRecent: 0, tone: null, videoFrames: 0, videoRecent: 0, width: 0, height: 0 });
       for (const track of participant.stream.getTracks()) {
         held.add(track.id);
         const receiver = this.receivers.get(track.id)!;
