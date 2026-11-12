@@ -43,6 +43,8 @@ pub const CUSTODY_METHODS: &[&str] = &[
     "identity.offers",
     "identity.claimOffer",
     "identity.joinStatus",
+    "identity.acceptJoin",
+    "identity.cancelJoin",
     "identity.prepareDevice",
     "identity.inbox",
     "identity.inboxAck",

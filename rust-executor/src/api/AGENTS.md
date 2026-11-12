@@ -190,7 +190,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-235 methods: Cap 86, Executor 38, Open 9, Operator 30, Owns 68, UserOrOperator 4. Local only (the operator on this machine): 11.
+237 methods: Cap 86, Executor 38, Open 9, Operator 32, Owns 68, UserOrOperator 4. Local only (the operator on this machine): 13.
 
 | Method | Guard |
 |---|---|
@@ -251,6 +251,8 @@ the guard checked:
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
 | `hosting.wallet` | `Executor(runtime.hosting:READ)` |
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
+| `identity.acceptJoin` | `Operator`, local only |
+| `identity.cancelJoin` | `Operator`, local only |
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
 | `identity.custodyStatus` | `Operator`, local only |

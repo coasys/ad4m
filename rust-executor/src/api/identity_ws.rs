@@ -16,13 +16,13 @@ use crate::agent::capabilities::{
 };
 use crate::agent::AgentContext;
 use crate::identity::types::{
-    ClaimOfferParams, ClaimOfferResult, CosignInceptParams, DeleteRequestParams, DeviceKeys,
-    DeviceRequest, DeviceView, DidResolutionResult, IdentityLog, IdentityStatus, InboxAckParams,
-    InboxEntry, InboxPutParams, InboxStored, JoinStatus, JoinStatusParams, KeyOwner,
-    KeyOwnerParams, LogParams, OfferListing, OfferOpened, OffersParams, OpenOfferParams,
-    PostRequestParams, PreparedDevice, PublishParams, RecordKey, RecordParams, RecordPutParams,
-    RecordStored, RequestPosted, RequestsParams, ResetLogParams, ResolveParams, SignedHead,
-    StoredRecord, TakenMaster, UnwrapRecordKeyParams,
+    AcceptJoinParams, CancelJoinParams, ClaimOfferParams, ClaimOfferResult, CosignInceptParams,
+    DeleteRequestParams, DeviceKeys, DeviceRequest, DeviceView, DidResolutionResult, IdentityLog,
+    IdentityStatus, InboxAckParams, InboxEntry, InboxPutParams, InboxStored, JoinAccepted,
+    JoinCancelled, JoinStatus, JoinStatusParams, KeyOwner, KeyOwnerParams, LogParams, OfferListing,
+    OfferOpened, OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice, PublishParams,
+    RecordKey, RecordParams, RecordPutParams, RecordStored, RequestPosted, RequestsParams,
+    ResetLogParams, ResolveParams, SignedHead, StoredRecord, TakenMaster, UnwrapRecordKeyParams,
 };
 use crate::types::RequestContext;
 
@@ -175,6 +175,27 @@ async fn join_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             .claims()
             .join_status(&ctx.acts_as(), &p.offer_id)
             .await?,
+    )
+}
+
+/// `identity.acceptJoin`: the person at this computer accepts the main agent's held first-run
+/// claim (operator, this machine only).
+async fn accept_join(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: AcceptJoinParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .claims()
+            .accept_join(&AgentContext::main_agent(), &p.offer_id)?,
+    )
+}
+
+/// `identity.cancelJoin`: the main agent's claim never binds (operator, this machine only).
+async fn cancel_join(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: CancelJoinParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .claims()
+            .cancel_join(&AgentContext::main_agent(), &p.offer_id)?,
     )
 }
 
@@ -350,6 +371,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // and may record the operator, so a client does not replay it as a read.
     map.method::<JoinStatusParams, JoinStatus>("identity.joinStatus", join_status)
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // The person at this computer accepts a first-run claim (one that would record the
+    // operator) before the main agent joins, or cancels any claim not yet joined: the
+    // operator on this machine only, so whoever sees the device string and delivers a ticket
+    // first does not take the desktop.
+    map.method::<AcceptJoinParams, JoinAccepted>("identity.acceptJoin", accept_join)
+        .local_only()
+        .guard(Guard::Operator);
+    map.method::<CancelJoinParams, JoinCancelled>("identity.cancelJoin", cancel_join)
+        .local_only()
+        .guard(Guard::Operator);
     map.method::<NoParams, Vec<DeviceView>>("identity.devices", devices)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
@@ -492,6 +523,8 @@ mod tests {
         let cap = |c: &Capability| format!("{:?}", Guard::Cap(c.clone()));
         let user_or_operator = |c: &Capability| format!("{:?}", Guard::UserOrOperator(c.clone()));
         let expected = [
+            ("identity.acceptJoin", format!("{:?}", Guard::Operator)),
+            ("identity.cancelJoin", format!("{:?}", Guard::Operator)),
             ("identity.claimOffer", format!("{:?}", Guard::Operator)),
             (
                 "identity.cosignIncept",
@@ -644,6 +677,8 @@ mod tests {
                 "identity.unwrapRecordKey",
                 serde_json::json!({ "wrapped": "x" }),
             ),
+            ("identity.acceptJoin", serde_json::json!({ "offerId": "o" })),
+            ("identity.cancelJoin", serde_json::json!({ "offerId": "o" })),
         ] {
             for caller in [network(), key_login()] {
                 let refused = map
@@ -917,6 +952,8 @@ mod tests {
                 serde_json::json!({ "offer": "coasys:offer:1:x", "canKeepMaster": true }),
             ),
             ("identity.joinStatus", serde_json::json!({ "offerId": "o" })),
+            ("identity.acceptJoin", serde_json::json!({ "offerId": "o" })),
+            ("identity.cancelJoin", serde_json::json!({ "offerId": "o" })),
             ("identity.prepareDevice", serde_json::json!({})),
             ("identity.cosignIncept", serde_json::json!({ "event": {} })),
             ("identity.publish", serde_json::json!({ "events": [] })),

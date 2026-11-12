@@ -303,6 +303,7 @@ mod tests {
                 offer_id: "rekey-offer".into(),
                 scid: "rekey-scid".into(),
                 claimed_at: 1,
+                accept: crate::db::JoinAccept::NotNeeded,
             })?;
             // Its flow bookkeeping on the perspective.
             db.record_flow_replica_pass(&owned.uuid, &old, "flow", Some("open"), &[], "t")

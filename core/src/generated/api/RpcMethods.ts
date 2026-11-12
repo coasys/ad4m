@@ -3,6 +3,7 @@
 
 import type { AIModelLoadingStatus } from "./AIModelLoadingStatus";
 import type { AITask } from "./AITask";
+import type { AcceptJoinParams } from "./AcceptJoinParams";
 import type { AddAgentInfosRequest } from "./AddAgentInfosRequest";
 import type { Agent } from "./Agent";
 import type { AgentAddEntanglementProofsParams } from "./AgentAddEntanglementProofsParams";
@@ -32,6 +33,7 @@ import type { BotAgent } from "./BotAgent";
 import type { BotLogParams } from "./BotLogParams";
 import type { BotParams } from "./BotParams";
 import type { CallSessionInfo } from "./CallSessionInfo";
+import type { CancelJoinParams } from "./CancelJoinParams";
 import type { ClaimOfferParams } from "./ClaimOfferParams";
 import type { ClaimOfferResult } from "./ClaimOfferResult";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
@@ -78,6 +80,8 @@ import type { InboxEntry } from "./InboxEntry";
 import type { InboxPutParams } from "./InboxPutParams";
 import type { InboxStored } from "./InboxStored";
 import type { InteractionMeta } from "./InteractionMeta";
+import type { JoinAccepted } from "./JoinAccepted";
+import type { JoinCancelled } from "./JoinCancelled";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 import type { JoinStatus } from "./JoinStatus";
 import type { JoinStatusParams } from "./JoinStatusParams";
@@ -310,6 +314,8 @@ export interface RpcMethods {
   "hosting.setHotWallet": { params: SetHotWalletAddressRequest; result: boolean };
   "hosting.wallet": { params: Record<string, never>; result: HostingWalletResult };
   "hosting.walletHistory": { params: Record<string, never>; result: JsonValue };
+  "identity.acceptJoin": { params: AcceptJoinParams; result: JoinAccepted };
+  "identity.cancelJoin": { params: CancelJoinParams; result: JoinCancelled };
   "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
   "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
   "identity.custodyStatus": { params: Record<string, never>; result: DeviceKeys };
