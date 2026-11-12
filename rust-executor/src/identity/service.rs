@@ -22,6 +22,17 @@ use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
 use crate::db_backend::{db_backend, DbBackend};
 
+/// How [`IdentityService::bind_agent_if_listed`] writes the binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Binding<'a> {
+    /// Not from a claim (a new identity, a refresh of a known one).
+    Plain,
+    /// From this executor's claim on the offer: refused once the claim is cancelled.
+    Claim(&'a str),
+    /// From an accepted first-run claim on the offer: also records the operator.
+    FirstRun(&'a str),
+}
+
 pub(super) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -374,18 +385,20 @@ impl IdentityService {
         agent: &AgentContext,
         scid: &str,
     ) -> Result<Option<String>, WsRpcError> {
-        self.bind_agent_if_listed(agent, scid, false).await
+        self.bind_agent_if_listed(agent, scid, Binding::Plain).await
     }
 
-    /// [`IdentityService::record_agent_if_listed`], and with `first_run_operator` the end of a
-    /// desktop app's first link (`identity.joinStatus` on `spent`): a still-empty operator
-    /// record takes the identity (`OperatorSetBy::FirstRun`) in the same database write as the
-    /// binding, so no stop between the two leaves a bound desktop without its operator.
+    /// [`IdentityService::record_agent_if_listed`] as `binding` says. For a claim
+    /// (`identity.joinStatus` on `spent`) the binding is written only while the claim is not
+    /// cancelled, in the same database write, so a cancel that lands first binds nothing. At the
+    /// end of a desktop app's first link (an accepted first-run claim) a still-empty operator
+    /// record takes the identity (`OperatorSetBy::FirstRun`) in that write too, so no stop
+    /// between the two leaves a bound desktop without its operator.
     pub(super) async fn bind_agent_if_listed(
         &self,
         agent: &AgentContext,
         scid: &str,
-        first_run_operator: bool,
+        binding: Binding<'_>,
     ) -> Result<Option<String>, WsRpcError> {
         let (agent_did, key) = device_key(agent).map_err(WsRpcError::internal)?;
         // Only up to the store-signed head: a log lists any key its master adds, so events a
@@ -408,17 +421,35 @@ impl IdentityService {
         {
             let bound_before = db(|db| db.agent_identity(&agent_did))?.is_some();
             let exists = |e: WsRpcError| error(409, format!("identity-exists: {}", e.message));
-            if first_run_operator {
+            let refused = |e: WsRpcError| {
+                if e.message.contains("is cancelled") {
+                    error(409, format!("cancelled: {}", e.message))
+                } else if e.message.contains("not accepted") {
+                    error(409, format!("awaiting-accept: {}", e.message))
+                } else {
+                    exists(e)
+                }
+            };
+            if let Binding::FirstRun(offer_id) = binding {
                 let did = did_of(scid);
                 let recorded = db(|db| {
-                    db.set_agent_identity_and_first_run_operator(&agent_did, scid, &did, now())
+                    db.set_agent_identity_and_first_run_operator(
+                        &agent_did,
+                        scid,
+                        &did,
+                        now(),
+                        offer_id,
+                    )
                 })
-                .map_err(exists)?;
+                .map_err(refused)?;
                 if recorded.scid == did && recorded.set_by == crate::db::OperatorSetBy::FirstRun {
                     log::info!(
                         "identity: this desktop executor joined {did}, its operator from now on"
                     );
                 }
+            } else if let Binding::Claim(offer_id) = binding {
+                db(|db| db.set_agent_identity_of_join(&agent_did, scid, now(), offer_id))
+                    .map_err(refused)?;
             } else {
                 db(|db| db.set_agent_identity(&agent_did, scid, now())).map_err(exists)?;
             }
@@ -1744,11 +1775,13 @@ mod tests {
             offer_id: bs58::encode([14u8; 16]).into_string(),
             s: bs58::encode([1u8; 32]).into_string(),
         };
-        service
+        let claimed = service
             .claims()
             .claim_for_main(&offer, false, None)
             .await
             .expect("the main agent claims");
+        // With an operator record the claim sets none: no accept, it binds once spent.
+        assert!(!claimed.needs_accept);
         *backend.offer.lock().unwrap() = "spent".into();
 
         let refused = service
@@ -1774,7 +1807,8 @@ mod tests {
 
     /// A desktop app's executor at its first run (`--custody-channel`, no operator record, the
     /// main agent of no identity) claims. A claim the store took records nothing, so before the
-    /// join the desktop may claim again, for another identity. Once the add spends the offer and
+    /// join the desktop may claim again, for another identity. A spent claim nobody here
+    /// accepted binds nothing (`awaiting-accept`). Once accepted, and the add spent the offer,
     /// the main agent binds to the identity, that identity is the operator (`first-run`), and an
     /// offer of another identity is refused `first-link`. Without the custody channel a missing
     /// record stays `no-operator`, before the store.
@@ -1819,11 +1853,12 @@ mod tests {
 
         let channel = crate::config::CustodyChannelForTest::on();
         let first = offer(&incept.scid, 6);
-        service
+        let claimed = service
             .claims()
             .claim_for_main(&first, true, None)
             .await
             .expect("a desktop's first claim goes ahead");
+        assert!(claimed.needs_accept, "a first-run claim waits for accept");
         assert_eq!(claims(), 1);
         // The store took the claim, but the holder has not confirmed it: nothing is recorded.
         assert_eq!(record(), None, "a claim alone records no operator");
@@ -1838,14 +1873,37 @@ mod tests {
             .expect("a second claim before the join goes ahead");
         assert_eq!((claims(), record()), (2, None));
 
-        // The holder confirms the first claim: the add lands and the main agent binds to its
-        // identity, which becomes the operator.
+        // The holder confirms the first claim and the add lands, but nobody at this computer
+        // accepted it: nothing binds and nothing is recorded (whoever saw the device string and
+        // delivered a ticket first does not take the desktop).
         *backend.offer.lock().unwrap() = "spent".into();
+        for _ in 0..2 {
+            let held = service
+                .claims()
+                .join_status(&main, &first.offer_id)
+                .await
+                .unwrap();
+            assert_eq!(held.state, "awaiting-accept");
+            assert_eq!(held.key_id, None);
+            assert_eq!(db(|db| db.agent_identity(&main_did)).unwrap(), None);
+            assert_eq!(record(), None, "a held claim records no operator");
+        }
+
+        // Accepted: the next `joinStatus` binds the main agent to the identity, which becomes
+        // the operator. Accepting again changes nothing.
+        for _ in 0..2 {
+            let accepted = service
+                .claims()
+                .accept_join(&main, &first.offer_id)
+                .unwrap();
+            assert!(accepted.accepted);
+        }
         let status = service
             .claims()
             .join_status(&main, &first.offer_id)
             .await
             .unwrap();
+        assert_eq!(status.state, "spent");
         assert_eq!(status.key_id.as_deref(), Some("d1"));
         assert_eq!(
             db(|db| db.agent_identity(&main_did)).unwrap(),
@@ -1891,7 +1949,8 @@ mod tests {
     }
 
     /// A desktop at its first run (`--custody-channel`, no operator record, no identity) with
-    /// claims on `offers` of one identity the store took, each offer now spent: the service, its
+    /// claims on `offers` of one identity the store took and the person here accepted, each
+    /// offer now spent: the service, its
     /// store, the identity's SCID and the main agent's `did:key`, with the custody channel on
     /// until the first is dropped.
     async fn a_first_run_desktop_with_spent_claims(
@@ -1900,6 +1959,27 @@ mod tests {
     ) -> (
         crate::config::CustodyChannelForTest,
         IdentityService,
+        String,
+        String,
+    ) {
+        let (channel, service, backend, scid, main_did) =
+            a_first_run_desktop_with_claims(seed, offers, true).await;
+        *backend.offer.lock().unwrap() = "spent".into();
+        (channel, service, scid, main_did)
+    }
+
+    /// A desktop at its first run with claims on `offers` of one identity the store took,
+    /// accepted here when `accept`, the offers `claimed`: the service, its store, the
+    /// identity's SCID and the main agent's `did:key`, with the custody channel on until the
+    /// first is dropped.
+    async fn a_first_run_desktop_with_claims(
+        seed: u8,
+        offers: &[u8],
+        accept: bool,
+    ) -> (
+        crate::config::CustodyChannelForTest,
+        IdentityService,
+        Arc<RecordingStore>,
         String,
         String,
     ) {
@@ -1930,9 +2010,15 @@ mod tests {
                 .claim_for_main(&offer, true, None)
                 .await
                 .expect("a desktop's claim before the join goes ahead");
+            if accept {
+                service
+                    .claims()
+                    .accept_join(&main, &offer.offer_id)
+                    .expect("the person here accepts");
+            }
         }
-        *backend.offer.lock().unwrap() = "spent".into();
-        (channel, service, incept.scid, main_did)
+        *backend.offer.lock().unwrap() = "claimed".into();
+        (channel, service, backend, incept.scid, main_did)
     }
 
     fn offer_id(id: u8) -> String {
@@ -2003,6 +2089,14 @@ mod tests {
             (first.key_id.as_deref(), second.key_id.as_deref()),
             (Some("d1"), Some("d1"))
         );
+        // Bound to the identity: too late to cancel either claim.
+        let late = service.claims().cancel_join(&main, &ids[0]).unwrap_err();
+        assert_eq!(late.code, 409);
+        assert!(
+            late.message.starts_with("already-joined"),
+            "{}",
+            late.message
+        );
         assert_eq!(
             db(|db| db.agent_identity(&main_did)).unwrap(),
             Some(scid.clone())
@@ -2021,6 +2115,162 @@ mod tests {
 
         drop(channel);
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+    }
+
+    /// The person here may accept a first-run claim before the holder confirms it: while the
+    /// offer is only claimed, `joinStatus` answers `claimed` (no longer `awaiting-accept`) and
+    /// binds nothing; once the add spends the offer, it binds and records the operator.
+    #[tokio::test]
+    async fn a_first_run_claim_accepted_before_it_is_spent_binds_once_spent() {
+        use crate::db::OperatorSetBy;
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
+        let (channel, service, backend, scid, main_did) =
+            a_first_run_desktop_with_claims(63, &[21], false).await;
+        let main = AgentContext::main_agent();
+
+        let held = service
+            .claims()
+            .join_status(&main, &offer_id(21))
+            .await
+            .unwrap();
+        assert_eq!(held.state, "awaiting-accept", "claimed and not accepted");
+
+        service.claims().accept_join(&main, &offer_id(21)).unwrap();
+        let status = service
+            .claims()
+            .join_status(&main, &offer_id(21))
+            .await
+            .unwrap();
+        assert_eq!((status.state.as_str(), status.key_id), ("claimed", None));
+        assert_eq!(db(|db| db.agent_identity(&main_did)).unwrap(), None);
+        assert_eq!(db(|db| db.operator_record()).unwrap(), None);
+
+        *backend.offer.lock().unwrap() = "spent".into();
+        let status = service
+            .claims()
+            .join_status(&main, &offer_id(21))
+            .await
+            .unwrap();
+        assert_eq!(status.state, "spent");
+        assert_eq!(status.key_id.as_deref(), Some("d1"));
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
+            Some(scid.clone())
+        );
+        let recorded = db(|db| db.operator_record())
+            .unwrap()
+            .expect("the operator");
+        assert_eq!(
+            (recorded.scid, recorded.set_by),
+            (did_of(&scid), OperatorSetBy::FirstRun)
+        );
+
+        drop(channel);
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+    }
+
+    /// A cancelled first-run claim never binds, whether it was accepted or not and even once
+    /// the holder confirms it: `joinStatus` answers `cancelled` and records nothing, a second
+    /// cancel is a no-op, and an accept after the cancel is refused `cancelled`.
+    #[tokio::test]
+    async fn a_cancelled_first_run_claim_never_binds() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
+        let (channel, service, backend, _scid, main_did) =
+            a_first_run_desktop_with_claims(64, &[22, 23], false).await;
+        let main = AgentContext::main_agent();
+        let claims = service.claims();
+
+        // 22 cancelled while held; 23 accepted, then cancelled.
+        claims.accept_join(&main, &offer_id(23)).unwrap();
+        for id in [22, 23] {
+            for _ in 0..2 {
+                let cancelled = claims.cancel_join(&main, &offer_id(id)).unwrap();
+                assert!(cancelled.cancelled);
+            }
+        }
+        *backend.offer.lock().unwrap() = "spent".into();
+        for id in [22, 23] {
+            let status = claims.join_status(&main, &offer_id(id)).await.unwrap();
+            assert_eq!((status.state.as_str(), status.key_id), ("cancelled", None));
+            let refused = claims.accept_join(&main, &offer_id(id)).unwrap_err();
+            assert_eq!(refused.code, 409);
+            assert!(
+                refused.message.starts_with("cancelled"),
+                "{}",
+                refused.message
+            );
+        }
+        assert_eq!(db(|db| db.agent_identity(&main_did)).unwrap(), None);
+        assert_eq!(db(|db| db.operator_record()).unwrap(), None);
+
+        // No claim: 404 for accept and cancel.
+        for refused in [
+            claims.accept_join(&main, &offer_id(99)).unwrap_err(),
+            claims.cancel_join(&main, &offer_id(99)).unwrap_err(),
+        ] {
+            assert_eq!(refused.code, 404, "{}", refused.message);
+        }
+
+        drop(channel);
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+    }
+
+    /// With an operator record a claim sets none: it needs no accept (`identity.acceptJoin` is
+    /// `not-found` for it) and binds once spent. It can still be cancelled, and then never
+    /// binds, even when the holder confirms it.
+    #[tokio::test]
+    async fn a_claim_that_sets_no_operator_needs_no_accept_and_can_be_cancelled() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
+        use ad4m_identity_core::link::OfferString;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = AgentContext::main_agent();
+        let (main_did, _) = device_key(&main).unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+        let incept = test_service()
+            .cosign_incept(&main, &incept_listing(&main, 65))
+            .await
+            .unwrap();
+        let incept = Event::from_json(&incept).unwrap();
+        let _record = OperatorRecord::set(&did_of(&incept.scid));
+        let backend = Arc::new(RecordingStore::new(vec![incept.clone()], false));
+        let service = service_on(backend.clone());
+        let offer = |id: u8| OfferString {
+            store: "https://store.example".into(),
+            scid: incept.scid.clone(),
+            offer_id: bs58::encode([id; 16]).into_string(),
+            s: bs58::encode([1u8; 32]).into_string(),
+        };
+        let claims = service.claims();
+        for id in [24, 25] {
+            let claimed = claims
+                .claim_for_main(&offer(id), false, None)
+                .await
+                .unwrap();
+            assert!(!claimed.needs_accept);
+        }
+        let refused = claims.accept_join(&main, &offer_id(24)).unwrap_err();
+        assert_eq!(refused.code, 404, "{}", refused.message);
+
+        // 24 cancelled: the holder's confirmation binds nothing.
+        claims.cancel_join(&main, &offer_id(24)).unwrap();
+        *backend.offer.lock().unwrap() = "spent".into();
+        let status = claims.join_status(&main, &offer_id(24)).await.unwrap();
+        assert_eq!((status.state.as_str(), status.key_id), ("cancelled", None));
+        assert_eq!(db(|db| db.agent_identity(&main_did)).unwrap(), None);
+
+        // 25, never accepted, binds once spent.
+        let status = claims.join_status(&main, &offer_id(25)).await.unwrap();
+        assert_eq!(status.state, "spent");
+        assert_eq!(status.key_id.as_deref(), Some("d1"));
+        assert_eq!(
+            db(|db| db.agent_identity(&main_did)).unwrap(),
+            Some(incept.scid.clone())
+        );
         Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
     }
 }
