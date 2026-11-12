@@ -24,11 +24,10 @@
  *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-48k)
  *   INTERPRETATION_E2E_MAX_NUM_CTX (default 49152, the context the model
  *     was created with; matching it keeps Ollama from reloading the model)
- *   INTERPRETATION_E2E_API_TYPE (default OLLAMA — the native /api/chat wire
- *     carries tools as data. OPEN_AI takes the prompt-injection path, which
- *     Ollama 0.40 + qwen3.8 crashes on mid-generation: HTTP 500 "EOF")
- *   INTERPRETATION_E2E_API_KEY  (only if the endpoint requires it; omitted
- *     otherwise, so plain-HTTP endpoints are not refused the key)
+ *   INTERPRETATION_E2E_API_KEY  (default "ollama", the helper placeholder)
+ * The endpoint is native Ollama (`addOllamaLlm`), as in the other LLM suites.
+ * The helper always sends a key, and the executor refuses a key over plain
+ * HTTP except to loopback: reach a remote Ollama over https or a local port.
  *
  * Run (from tests/js, executor built + `pnpm run prepare-test` once):
  *   LLM_E2E=1 pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit \
@@ -39,7 +38,7 @@ import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { Ad4mClient, LinkQuery } from "@coasys/ad4m";
 import type { AISession, AISessionChanged, AISessionMessage } from "@coasys/ad4m";
-import { startAgent, waitUntil } from "../../helpers/index.js";
+import { addOllamaLlm, startAgent, waitUntil } from "../../helpers/index.js";
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -47,7 +46,6 @@ chai.use(chaiAsPromised);
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
-const API_TYPE = process.env.INTERPRETATION_E2E_API_TYPE || "OLLAMA";
 const API_KEY = process.env.INTERPRETATION_E2E_API_KEY;
 
 // A turn is a detached task; the reply row settles whenever the model is done.
@@ -97,17 +95,14 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
     ad4m = agent.client;
     stopAgent = agent.stop;
 
-    const modelId = await ad4m.ai.addModel({
-      name: "ai-sessions-llm",
-      api: {
-        baseUrl: BASE_URL,
-        apiKey: API_KEY,
-        model: MODEL,
-        apiType: API_TYPE,
-        maxNumCtx: MAX_NUM_CTX,
-      },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addOllamaLlm(
+      ad4m,
+      "ai-sessions-llm",
+      BASE_URL,
+      MODEL,
+      MAX_NUM_CTX,
+      API_KEY
+    );
     await ad4m.ai.setDefaultModel("LLM", modelId);
   });
 
