@@ -9,7 +9,10 @@ import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sfuScenario } from "../helpers/sfu/harness.js";
-import { Hearing, type Heard, toneSource, wrtc } from "../helpers/sfu/e2e/media.js";
+import { Call } from "../helpers/sfu/e2e/call.js";
+import { Hearing, type Heard, PauseWatch, toneFor, toneSource, wrtc } from "../helpers/sfu/e2e/media.js";
+import type { Snapshot } from "../helpers/sfu/e2e/protocol.js";
+import type { World } from "../helpers/sfu/e2e/world.js";
 import { pollUntil } from "../utils/utils.js";
 import { e1TwoUsers } from "../helpers/sfu/e2e/scenarios/e1-two-users.js";
 import { e2ManyUsers } from "../helpers/sfu/e2e/scenarios/e2-many-users.js";
@@ -181,6 +184,52 @@ describe("SFU: end to end through the SDK", function () {
     } finally {
       after.close();
       hearing.stop();
+    }
+  });
+
+  it("a hold does not count silence while the sender's or the receiver's process stood still", () => {
+    // A participant's tone is a timer on its process's event loop. On a loaded
+    // host a fresh process stood still for a second (CI's E20: "u2 hears
+    // silence from u1:tab2" mid-hold): the call carried on, but nothing sent
+    // the tone. Silence then is the harness's, not the call's; a wrong tone,
+    // or silence with nobody paused, still breaks the hold.
+    const users = { u1: { name: "u1", did: "did:test:u1" }, u2: { name: "u2", did: "did:test:u2" } };
+    const call = new Call({ users } as unknown as World, "space", "room", () => {}, null);
+    call.present.add("u1");
+    call.present.add("u2");
+    const snapshot = (from: { did: string; tone: number | null }, pausedMs = 0) => ({
+      sessions: [{ agentDid: from.did, audioFrames: 500, audioRecent: 100, tone: from.tone, videoFrames: 0, videoRecent: 0, width: 0, height: 0 }],
+      pausedMs,
+    }) as unknown as Snapshot;
+    const check = (u1: Snapshot, u2: Snapshot, holding: boolean) => call.hearsEveryone()(new Map([["u1", u1], ["u2", u2]]), holding);
+    const fine = snapshot({ did: users.u2.did, tone: toneFor(1) });
+    const hearsSilence = (pausedMs = 0) => snapshot({ did: users.u1.did, tone: null }, pausedMs);
+
+    expect(check(fine, snapshot({ did: users.u1.did, tone: toneFor(0) }), true)).to.deep.equal([]);
+    expect(check(fine, hearsSilence(), true), "silence, nobody paused").to.deep.equal([`u2 hears silence from u1, who sends ${toneFor(0)} Hz`]);
+    expect(check(snapshot({ did: users.u2.did, tone: toneFor(1) }, 900), hearsSilence(), true), "the sender stood still").to.deep.equal([]);
+    expect(check(fine, hearsSilence(900), true), "the receiver stood still").to.deep.equal([]);
+    expect(check(snapshot({ did: users.u2.did, tone: toneFor(1) }, 120), hearsSilence(), true), "a pause too short to silence anything").to.have.length(1);
+    expect(check(snapshot({ did: users.u2.did, tone: toneFor(1) }, 900), hearsSilence(), false), "waiting for audio: a pause excuses nothing").to.have.length(1);
+    expect(
+      check(snapshot({ did: users.u2.did, tone: toneFor(1) }, 900), snapshot({ did: users.u1.did, tone: toneFor(1) }), true),
+      "a wrong tone always counts",
+    ).to.deep.equal([`u2 hears ${toneFor(1)} Hz (u2's tone) from u1, who sends ${toneFor(0)} Hz`]);
+  });
+
+  it("a participant knows when its process stood still", async () => {
+    const pauses = new PauseWatch();
+    try {
+      await new Promise((r) => setTimeout(r, 100));
+      expect(pauses.longestWithin(2_000), "a process left to run").to.be.below(400);
+      const until = Date.now() + 400;
+      while (Date.now() < until);
+      expect(pauses.longestWithin(2_000), "while the pause is still on").to.be.at.least(400);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(pauses.longestWithin(2_000), "after it").to.be.at.least(400);
+      expect(pauses.longestWithin(50), "once it has passed out of the window").to.be.below(400);
+    } finally {
+      pauses.stop();
     }
   });
 
