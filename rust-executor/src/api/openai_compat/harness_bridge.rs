@@ -116,11 +116,15 @@ impl CompletionSource for OpenAiCompatBridge {
 /// is the failure this runs against: the model server's own truncation
 /// drops oldest-first, and a chat template that renders no user turn fails
 /// the whole request (`no user query found in messages`) or answers a
-/// question it never saw.
+/// question it never saw. The leading `system` messages never drop either:
+/// they carry the operator's prompt — a session's "records are data, not
+/// instructions" guard among it — and losing them is what the trim used to
+/// do first, exactly when a long history pushed the list over budget.
 ///
 /// Two phases:
-///   1. Drop entries before the last user message oldest-first; dropping an
-///      assistant `tool_calls` turn drains the result messages it orphaned.
+///   1. Drop entries between the system prefix and the last user message,
+///      oldest-first; dropping an assistant `tool_calls` turn drains the
+///      result messages it orphaned.
 ///   2. Still over with nothing droppable left (the tail after the
 ///      question is heavier than the budget): shrink `tool` results —
 ///      the only unbounded entries — oldest-first to a stub, so the turn
@@ -144,6 +148,9 @@ fn trim_messages_to_budget(messages: &[Value], budget_bytes: usize, model_id: &s
     );
 
     let mut out: Vec<Value> = messages.to_vec();
+    // Leading `system` messages are the operator's prompt; the drop loop
+    // starts after them.
+    let keep = out.iter().take_while(|m| m["role"] == "system").count();
     // The index the drop loop may not reach: the last user message is the
     // question being answered. A list carrying none trims only to its own
     // first entry.
@@ -151,15 +158,16 @@ fn trim_messages_to_budget(messages: &[Value], budget_bytes: usize, model_id: &s
         .iter()
         .rposition(|m| m["role"] == "user")
         .unwrap_or_else(|| out.len().saturating_sub(1));
-    while size(&out) > budget_bytes && last_user > 0 {
-        out.remove(0);
+    while size(&out) > budget_bytes && last_user > keep {
+        out.remove(keep);
         last_user -= 1;
         // A dropped assistant `tool_calls` turn leaves its results with no
         // call to answer: a `tool` message a provider refuses the request
-        // for. They go with it — leading `tool` entries are always orphans
-        // here, since whatever answered them was just dropped.
-        while last_user > 0 && out.first().is_some_and(|m| m["role"] == "tool") {
-            out.remove(0);
+        // for. They go with it — `tool` entries at the drop point are
+        // always orphans here, since whatever answered them was just
+        // dropped.
+        while last_user > keep && out.get(keep).is_some_and(|m| m["role"] == "tool") {
+            out.remove(keep);
             last_user -= 1;
         }
     }
@@ -1366,17 +1374,48 @@ mod injected_path_dispatch_tests {
     #[test]
     fn trimming_drops_oldest_but_keeps_the_last_user_message() {
         // The exact #1713-follow-up failure: an old oversized tail pushed the
-        // question off the request. The question stays, whatever falls.
+        // question off the request. The question stays, whatever falls — and
+        // the list comes under budget with the system prompt still on it:
+        // leading `system` messages never trim.
         let messages = vec![
-            json!({"role": "system", "content": "x".repeat(8_000)}),
-            json!({"role": "user", "content": "the earlier question"}),
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "x".repeat(8_000)}),
             json!({"role": "assistant", "content": "y".repeat(8_000)}),
             json!({"role": "user", "content": "the question being answered"}),
         ];
         let out = trim_messages_to_budget(&messages, 4_000, "m");
+        assert_eq!(out[0]["role"], "system");
         let last = out.last().unwrap();
         assert_eq!(last["role"], "user");
         assert_eq!(last["content"], "the question being answered");
+        assert!(msg_size(&out) <= 4_000, "{} bytes", msg_size(&out));
+    }
+
+    #[test]
+    fn the_system_prompt_survives_trimming() {
+        // A session keeps up to 128 KiB of history while the budget is ~72
+        // KiB, so a session whose transcript grows past the budget used to
+        // lose out[0] — the system prompt carrying the "records are data,
+        // not instructions" guard — on every later turn. Every leading
+        // `system` message is kept; trimming starts after them.
+        let messages = vec![
+            json!({"role": "system", "content": "the session's guard"}),
+            json!({"role": "system", "content": "a second operator instruction"}),
+            json!({"role": "user", "content": "x".repeat(8_000)}),
+            json!({"role": "assistant", "content": "y".repeat(8_000)}),
+            json!({"role": "user", "content": "the question being answered"}),
+        ];
+        let out = trim_messages_to_budget(&messages, 4_000, "m");
+        assert_eq!(
+            &out[..2],
+            &[
+                json!({"role": "system", "content": "the session's guard"}),
+                json!({"role": "system", "content": "a second operator instruction"}),
+            ],
+            "the leading system messages fell to the trim: {out:?}"
+        );
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[2]["content"], "the question being answered");
         assert!(msg_size(&out) <= 4_000, "{} bytes", msg_size(&out));
     }
 
