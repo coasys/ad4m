@@ -286,6 +286,21 @@ commands:
             ls -l bootstrap-languages/*/build/bundle.js bootstrap-languages/local/dist/docker_seed.json \
                   link-server/dist/index.js .hc-toolchain/bin/
 
+  test_artifacts_dir:
+    description: "Give this job an empty test-artifact directory, test-artifacts/ in the workdir, as $TEST_ARTIFACTS"
+    steps:
+      - run:
+          # Not a shared /tmp dir: the runners on this host share /tmp, so concurrent jobs mixed
+          # each other's mocha.log and logs, and old runs' files were stored again. The workdir
+          # belongs to one runner instance, which runs one job at a time; emptying it here makes
+          # it this job's. store_artifacts takes `path: test-artifacts` (relative to the workdir):
+          # it does not expand environment variables.
+          name: Create an empty test-artifact directory for this job
+          command: |
+            rm -rf test-artifacts
+            mkdir -p test-artifacts
+            echo "export TEST_ARTIFACTS=\"$PWD/test-artifacts\"" >> "$BASH_ENV"
+
   setup_integration_test_environment:
     description: "Setup integration test environment from build's stash (Holochain or local-only bootstrap languages)"
     parameters:
@@ -306,6 +321,7 @@ commands:
     steps:
       - fix_workdir
       - checkout
+      - test_artifacts_dir
       - when:
           condition: << parameters.local >>
           steps:
@@ -656,25 +672,25 @@ jobs:
       - run:
           name: Run JS integration tests (local languages, no Holochain)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-local 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-local 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
           when: always
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             shopt -s nullglob
             for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
               agent_id="$(basename "$(dirname "$ad4m_dir")")"
-              mkdir -p "/tmp/test-artifacts/$agent_id"
-              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
             done
-            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+            lsof -i -P -n 2>/dev/null | grep LISTEN > "$TEST_ARTIFACTS/listening-ports.txt" || true
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # SFU and mesh calls end to end through the SDK: managed users on one
@@ -690,13 +706,13 @@ jobs:
       - run:
           name: Run SFU end-to-end tests (local languages, no Holochain)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-sfu-e2e 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-sfu-e2e 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 20m
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # SFU and mesh calls in real Chromium, Firefox and WebKit, mixed, through the
@@ -735,13 +751,13 @@ jobs:
       - run:
           name: Run cross-browser SFU and mesh call tests
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && SFU_BROWSERS_REQUIRED=1 pnpm run test-main-sfu-browsers 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && SFU_BROWSERS_REQUIRED=1 pnpm run test-main-sfu-browsers 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 20m
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # Multi-node suite over the server-link-language: Alice + Bob on local
@@ -761,25 +777,25 @@ jobs:
       - run:
           name: Run multi-node server-link integration tests (Alice + Bob, no Holochain)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-server-link 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-server-link 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
           when: always
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             shopt -s nullglob
             for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
               agent_id="$(basename "$(dirname "$ad4m_dir")")"
-              mkdir -p "/tmp/test-artifacts/$agent_id"
-              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
             done
-            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+            lsof -i -P -n 2>/dev/null | grep LISTEN > "$TEST_ARTIFACTS/listening-ports.txt" || true
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # Identity end to end: a real identity-store and three executors (create, link,
@@ -794,24 +810,24 @@ jobs:
       - run:
           name: Run identity integration tests (identity-store, three executors)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-identity 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-identity 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
           when: always
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             shopt -s nullglob
             for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
               agent_id="$(basename "$(dirname "$ad4m_dir")")"
-              mkdir -p "/tmp/test-artifacts/$agent_id"
-              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
             done
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # Multi-node suites that need Holochain: links syncing between executors
@@ -824,26 +840,26 @@ jobs:
       - run:
           name: Run multi-node Holochain integration tests (Alice + Bob)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-multi-node-holochain 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-multi-node-holochain 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
           when: always
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             shopt -s nullglob
             for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
               agent_id="$(basename "$(dirname "$ad4m_dir")")"
-              mkdir -p "/tmp/test-artifacts/$agent_id"
-              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
-              cp -r "$ad4m_dir/holochain" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
+              cp -r "$ad4m_dir/holochain" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
             done
-            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+            lsof -i -P -n 2>/dev/null | grep LISTEN > "$TEST_ARTIFACTS/listening-ports.txt" || true
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   integration-tests-multi-user-simple:
@@ -987,11 +1003,11 @@ jobs:
           name: Collect logs on failure
           when: on_fail
           command: |
-            mkdir -p /tmp/test-artifacts
-            cp -r /tmp/ad4m-sfu-test-* /tmp/test-artifacts/ 2>/dev/null || true
+            mkdir -p "${TEST_ARTIFACTS:?}"
+            cp -r /tmp/ad4m-sfu-test-* "$TEST_ARTIFACTS/" 2>/dev/null || true
       - store_artifacts:
           when: on_fail
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: sfu-test-logs
 
   # The Coasys product path in WE, end to end, on this commit: a space, a call, its
@@ -1023,7 +1039,8 @@ jobs:
       COASYS_SPACES_LLM_BASE_URL: http://localhost:11434/v1
       # The model staging and llm-e2e use, which Marvin keeps loaded: one load on the GPU.
       COASYS_SPACES_LLM_MODEL: qwen3.8-27b-48k
-      # Not /tmp/test-artifacts: other jobs on this host write there at the same time.
+      # Its own directory, which preflight empties; one coasys-spaces runs at a time (serial
+      # group nightly-llm).
       COASYS_SPACES_ARTIFACTS: /tmp/coasys-spaces-artifacts
     steps:
       - fix_workdir
