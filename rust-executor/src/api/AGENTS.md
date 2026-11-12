@@ -80,6 +80,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | `Open` | no capability and no rule: every caller, anonymous included, reaches the handler, which decides |
 | `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
 | `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
+| `CapAnyPointer(cap)` | none: any caller holding `cap`'s domain and actions on at least one pointer. For a method that lists a kind of resource (`perspective.all`): the handler narrows its answer to the pointers the session may read (`capabilities::pointers_covered`) |
 | `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
 | `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`): every app holds their capabilities by default |
 | `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
@@ -134,6 +135,9 @@ Notes on some methods:
   users there, a behaviour change.
 - `perspective.all` lists the caller's agent's perspectives, `ai.tasks` its tasks (every one to
   the operator); `ai.addTask` and `perspective.create` record the caller's agent as owner.
+  `perspective.all` is `CapAnyPointer`: a caller holding perspective READ on some pointers
+  (an AI session scoped to one perspective) is admitted and sees only the ones they name;
+  `*` sees all of the caller's agent's, as before.
 - `neighbourhood.*` methods that name a perspective (`publish` by `perspectiveUuid`, the others
   by `uuid`) use `Owns { Perspective }` on the neighbourhood capability: the perspective that
   holds a neighbourhood decides who may use it.
@@ -149,7 +153,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-214 methods: Cap 82, Executor 33, Open 5, Operator 18, Owns 74, UserOrOperator 2.
+214 methods: Cap 81, CapAnyPointer 1, Executor 33, Open 5, Operator 18, Owns 74, UserOrOperator 2.
 
 | Method | Guard |
 |---|---|
@@ -247,7 +251,7 @@ the guard checked:
 | `perspective.addLinkExpression` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.all` | `Cap(perspective:READ)` |
+| `perspective.all` | `CapAnyPointer(perspective:READ)` |
 | `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
 | `perspective.createBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
