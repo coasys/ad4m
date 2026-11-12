@@ -463,7 +463,7 @@ mod tests {
         .unwrap();
         Ad4mDb::create_grants_table(&conn).unwrap();
         Ad4mDb::create_grants_table(&conn).unwrap();
-        let db = Ad4mDb { conn };
+        let db = Ad4mDb { conn, rows: None };
         assert_eq!(
             db.grants().unwrap(),
             vec![GrantRow {

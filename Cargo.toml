@@ -4,6 +4,7 @@ members = [
     "ad4m-hash-chain",
     "ad4m-identity-core",
     "ad4m-identity-client",
+    "ad4m-keyring",
     "identity-store",
     "cli",
     "rust-client",

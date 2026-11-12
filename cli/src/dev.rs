@@ -37,6 +37,9 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 .join(".ad4m-test");
             let ad4m_test_dir: String = ad4m_test_dir.to_string_lossy().to_string();
             let ad4m_test_dir_clone = ad4m_test_dir.clone();
+            // A folder an earlier run left (it stopped before its cleanup) has a keyring this
+            // run's secret does not open.
+            let _ = fs::remove_dir_all(std::path::Path::new(&ad4m_test_dir));
 
             rust_executor::init::init(Some(ad4m_test_dir.clone()), None)
                 .map_err(|err| anyhow::anyhow!("Error in init: {:?}", err))?;
@@ -71,6 +74,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 mcp_port: None,
                 smtp_config: None,
                 pid_file: None,
+                storage_secret: Some(throwaway_storage_secret()),
                 ..Default::default()
             }));
 
@@ -231,6 +235,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 mcp_port: None,
                 smtp_config: None,
                 pid_file: None,
+                storage_secret: Some(throwaway_storage_secret()),
                 ..Default::default()
             }));
 
@@ -511,4 +516,13 @@ fn random_admin_credential() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A fresh storage secret for an executor whose data folder lives only for one command: handed
+/// in-process, so the executor opens at once and the secret is never written down.
+fn throwaway_storage_secret() -> rust_executor::at_rest::StorageSecret {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rust_executor::at_rest::StorageSecret::in_process(bytes)
 }

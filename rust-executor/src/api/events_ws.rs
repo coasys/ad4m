@@ -45,7 +45,7 @@
 //! | `flow-state-changed`          | (inline)      | `agentDid` if it reads the perspective; else the main agent's to `Operator` | A flow instance's state moved on that agent's replica (#1424) |
 //! | `identity-fork`               | (inline)      | the local agents that speak for the identity | The key-log cache found two logs (a different valid event at a held seq) and kept its own (a store answering a shorter log raises none) |
 //! | `config-changed`              | (inline)      | the operator           | `runtime.setConfig` wrote keys to the config file; they take effect at the next start |
-//! | `link-ticket`                 | (inline)      | the operator on this machine | The executor claimed the offer a holder sent to an open `identity.prepareDevice`: the identity and the match code |
+//! | `link-ticket`                 | (inline)      | the operator on this machine | The executor claimed the offer a holder sent to an open `identity.prepareDevice`: the identity, the match code, and `needsAccept` (a first-run claim binds only after `identity.acceptJoin`) |
 //! | `inbox-message`               | (inline)      | the operator on this machine | A message waits in this executor's inbox (`{id, kind}`, never a body); for `master` the custody service calls `identity.takeMaster` |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
@@ -138,11 +138,14 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::sfu::SfuMigrateEvent>(SfuMigrate, false),
         EventSpec::of::<crate::sfu::SfuDataMessage>(SfuData, false),
         EventSpec::of::<crate::sfu::SfuRoomRoster>(SfuRoomRoster, false),
+        EventSpec::of::<crate::sfu::SfuSessionReplaced>(SfuSessionReplaced, false),
         EventSpec::of::<FlowStateChangedEvent>(FlowStateChanged, true),
         EventSpec::of::<crate::identity::types::IdentityForkEvent>(IdentityFork, false),
         EventSpec::of::<crate::config_rpc::ConfigChanged>(ConfigChanged, false),
         EventSpec::of::<crate::identity::types::LinkTicketEvent>(LinkTicket, false),
         EventSpec::of::<crate::identity::types::InboxMessageEvent>(InboxMessage, false),
+        EventSpec::of::<crate::at_rest::StorageStatus>(StorageStateChanged, false),
+        EventSpec::of::<crate::at_rest::StorageMigrationProgress>(StorageMigrationProgress, false),
     ]
 }
 
@@ -336,11 +339,14 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::SfuMigrate
         | Topic::SfuData
         | Topic::SfuRoomRoster
+        | Topic::SfuSessionReplaced
         | Topic::FlowStateChanged
         | Topic::IdentityFork
         | Topic::ConfigChanged
         | Topic::LinkTicket
-        | Topic::InboxMessage => None,
+        | Topic::InboxMessage
+        | Topic::StorageStateChanged
+        | Topic::StorageMigrationProgress => None,
     }
 }
 
@@ -881,6 +887,18 @@ mod audience_matrix_tests {
             (
                 "config-changed".into(),
                 event(Topic::ConfigChanged, Audience::Operator),
+                vec!["operator"],
+            ),
+            // The storage gate changed state: the operator's status, so the operator only.
+            (
+                "storage-state-changed".into(),
+                event(Topic::StorageStateChanged, Audience::Operator),
+                vec!["operator"],
+            ),
+            // The move of plaintext data under its keys: the operator's, like the status.
+            (
+                "storage-migration-progress".into(),
+                event(Topic::StorageMigrationProgress, Audience::Operator),
                 vec!["operator"],
             ),
         ];
@@ -2414,6 +2432,7 @@ mod event_spec_tests {
                 Topic::SfuCallRenegotiationOffer,
                 serde_json::to_value(crate::sfu::SfuCallRenegotiationOffer {
                     target_did: "did:a".into(),
+                    participant_id: "P1".into(),
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
                     sdp_offer: "{}".into(),
@@ -2433,6 +2452,7 @@ mod event_spec_tests {
                 Topic::SfuData,
                 serde_json::to_value(crate::sfu::SfuDataMessage {
                     sender_did: "did:a".into(),
+                    sender_participant_id: "P1".into(),
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
                     channel_label: "c".into(),
@@ -2445,7 +2465,19 @@ mod event_spec_tests {
                 serde_json::to_value(crate::sfu::SfuRoomRoster {
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
-                    participants: vec!["did:a".into()],
+                    participants: vec![crate::sfu::SfuRosterParticipant {
+                        agent_did: "did:a".into(),
+                        participant_id: "P1".into(),
+                    }],
+                }),
+            ),
+            (
+                Topic::SfuSessionReplaced,
+                serde_json::to_value(crate::sfu::SfuSessionReplaced {
+                    target_did: "did:a".into(),
+                    neighbourhood_url: "n".into(),
+                    room_name: "r".into(),
+                    participant_id: "P1".into(),
                 }),
             ),
             (
@@ -2470,6 +2502,7 @@ mod event_spec_tests {
                     did: "did:scid:coasys:1:Qm".into(),
                     offer_id: "o".into(),
                     match_code: "ABC DEF".into(),
+                    needs_accept: true,
                 }),
             ),
             (
@@ -2477,6 +2510,29 @@ mod event_spec_tests {
                 serde_json::to_value(crate::identity::types::InboxMessageEvent {
                     id: "m".into(),
                     kind: crate::identity::types::InboxMessageType::Master,
+                }),
+            ),
+            (
+                Topic::StorageStateChanged,
+                serde_json::to_value(crate::at_rest::StorageStatus {
+                    state: crate::at_rest::StorageState::Sealed,
+                    encrypted_at_rest: false,
+                    stores: None,
+                    keyring_id: "00".repeat(16),
+                    secret_source: None,
+                    secret_on_data_disk: None,
+                    root_generation: None,
+                    last_error: Some(crate::at_rest::StorageErrorKind::WrongSecret),
+                    migration: None,
+                }),
+            ),
+            (
+                Topic::StorageMigrationProgress,
+                serde_json::to_value(crate::at_rest::StorageMigrationProgress {
+                    step: crate::at_rest::MigrationStep::LanguageStorage,
+                    stores_done: 2,
+                    stores_total: 4,
+                    store: Some("language:QmLanguage".into()),
                 }),
             ),
         ];

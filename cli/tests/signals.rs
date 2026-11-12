@@ -73,6 +73,15 @@ fn fresh_data_path(name: &str) -> PathBuf {
     data_path
 }
 
+/// A storage secret file (mode 0600) beside `data_path`.
+fn storage_secret_file(data_path: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let file = data_path.with_extension("storage-secret");
+    std::fs::write(&file, format!("{}\n", "3c".repeat(32))).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    file
+}
+
 /// `run` without Holochain on a free port.
 fn run_args(data_path: &Path) -> Vec<String> {
     let mut args = vec!["run".to_string(), "--app-data-path".to_string()];
@@ -87,6 +96,9 @@ fn run_args(data_path: &Path) -> Vec<String> {
             "--language-language-only",
             "false",
             "--insecure-no-admin-credential",
+            // The secret file sits beside the data folder, on its disk.
+            "--allow-secret-on-data-disk",
+            "true",
         ]
         .map(String::from),
     );
@@ -141,6 +153,8 @@ fn start(name: &str, sighup_ignored: bool) -> Executor {
     };
     let mut child = command
         .args(run_args(&data_path))
+        // Opens the data at the start: without a secret the executor would wait sealed.
+        .env("AD4M_STORAGE_SECRET_FILE", storage_secret_file(&data_path))
         // Readiness is an info line: an inherited RUST_LOG=warn would hide it.
         .env("RUST_LOG", "rust_executor=info")
         .stdin(Stdio::null())

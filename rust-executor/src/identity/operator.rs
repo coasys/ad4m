@@ -8,9 +8,10 @@
 //! identity passes. The one exception is a desktop app's executor at its first run
 //! (`--custody-channel`, no record, the main agent of no identity yet): the desktop never runs
 //! `init --operator` and does not know its person before the first offer arrives, so it may claim
-//! any offer, and the identity its main agent joins (the holder confirmed, the add landed:
+//! any offer, and the identity its main agent joins (the holder confirmed, the add landed, the
+//! operator on this machine accepted the claim with `identity.acceptJoin`:
 //! `ClaimService::join_status`) is recorded as the operator (`OperatorSetBy::FirstRun`). A claim
-//! that never completes records nothing. From then on the rule holds as for every executor.
+//! that never completes, or is never accepted, records nothing. From then on the rule holds as for every executor.
 //! While the key is valid in a log, `claim_for_main` refuses every offer
 //! (`already-linked`).
 //!
@@ -112,7 +113,8 @@ pub enum OperatorInitError {
 
 /// Records `did` as the operator in the executor database at `db_path` while the record is
 /// empty. The same identity again is fine; another one stops with
-/// [`OperatorInitError::Recorded`]'s message.
+/// [`OperatorInitError::Recorded`]'s message. A database under its key opens with the key
+/// from the storage secret file named by `AD4M_STORAGE_SECRET_FILE`.
 pub fn record_operator_at_init(
     db_path: &Path,
     did: &str,
@@ -121,14 +123,38 @@ pub fn record_operator_at_init(
     if ad4m_identity_core::scid_of(did).is_none() {
         return Err(OperatorInitError::NotAnIdentity(did.to_string()));
     }
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| OperatorInitError::Database(e.to_string()))?;
+    let conn = open_for_init(db_path).map_err(OperatorInitError::Database)?;
     let record = crate::db::set_operator_record_if_empty_in(&conn, did, now, OperatorSetBy::Cli)
         .map_err(|e| OperatorInitError::Database(e.to_string()))?;
     if record.scid != did {
         return Err(OperatorInitError::Recorded(record.scid));
     }
     Ok(record)
+}
+
+/// The database at `db_path` for `init`: in the clear while it is (a new folder, an executor
+/// that never ran with a keyring), else under the database key of the data folder's keyring,
+/// opened with the secret file.
+fn open_for_init(db_path: &Path) -> Result<rusqlite::Connection, String> {
+    use crate::at_rest::{keyring_file, secret_source, sqlite, DataKeys, StorageSecret};
+    let file = sqlite::database_file(db_path).map_err(|e| e.to_string())?;
+    if file != sqlite::DatabaseFile::Encrypted {
+        return rusqlite::Connection::open(db_path).map_err(|e| e.to_string());
+    }
+    let Some(secret_file) = std::env::var_os(secret_source::SECRET_FILE_VAR) else {
+        return Err(format!(
+            "{} is under its key: set {} to the storage secret file to open it",
+            db_path.display(),
+            secret_source::SECRET_FILE_VAR
+        ));
+    };
+    let secret = StorageSecret::read_file(Path::new(&secret_file)).map_err(|e| e.to_string())?;
+    let data_dir = db_path.parent().unwrap_or(Path::new("."));
+    let keys = DataKeys::load(keyring_file::path_in(data_dir)).map_err(|e| e.to_string())?;
+    keys.unlock(secret.to_zeroizing())
+        .map_err(|e| format!("the storage secret does not open the keyring: {e}"))?;
+    let key = sqlite::database_key(&keys).map_err(|e| e.to_string())?;
+    sqlite::open_keyed(db_path, &key).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

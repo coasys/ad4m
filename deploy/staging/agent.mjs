@@ -3,13 +3,17 @@
 // secrets read from files so they never appear in argv, the environment of
 // another process, or the output.
 //
-//   node agent.mjs status     prints one word: unlocked | locked | no-agent
-//   node agent.mjs generate   creates the main agent with the unlock passphrase
+//   node agent.mjs status     prints one word: unlocked | locked | no-agent | sealed
+//   node agent.mjs generate   creates the main agent
+//
+// `sealed`: the executor waits for its storage secret and answers nothing else.
+// An executor with an open keyring derives the new agent's passphrase from it
+// and ignores the one sent; an older build uses the passphrase file.
 //
 // AD4M_URL                     executor base URL (default http://127.0.0.1:12400);
 //                              with a non-empty credential it must be loopback
 // AD4M_ADMIN_CREDENTIAL_FILE   admin credential (required)
-// AD4M_UNLOCK_PASSPHRASE_FILE  agent passphrase (generate only)
+// AD4M_UNLOCK_PASSPHRASE_FILE  agent passphrase (generate only, optional)
 //
 // Exit status: 0 on an answer, 1 on an RPC error or timeout, 2 on bad usage.
 // Needs Node 22 or later (global WebSocket).
@@ -52,8 +56,11 @@ function call(type, params, timeoutMs) {
       if (message.id !== "1") return; // an event, not our answer
       clearTimeout(timer);
       ws.close();
-      if (message.error) reject(new Error(`${type}: ${message.error.code} ${message.error.message}`));
-      else resolve(message.result);
+      if (message.error) {
+        const error = new Error(`${type}: ${message.error.code} ${message.error.message}`);
+        error.sealed = String(message.error.message).startsWith("storage-sealed");
+        reject(error);
+      } else resolve(message.result);
     };
   });
 }
@@ -61,10 +68,17 @@ function call(type, params, timeoutMs) {
 const command = process.argv[2];
 try {
   if (command === "status") {
-    const status = await call("agent.status", {}, 10_000);
+    let status;
+    try {
+      status = await call("agent.status", {}, 10_000);
+    } catch (error) {
+      if (!error.sealed) throw error;
+      console.log("sealed");
+      process.exit(0);
+    }
     console.log(!status.isInitialized ? "no-agent" : status.isUnlocked ? "unlocked" : "locked");
   } else if (command === "generate") {
-    const passphrase = secret("AD4M_UNLOCK_PASSPHRASE_FILE");
+    const passphrase = process.env.AD4M_UNLOCK_PASSPHRASE_FILE ? secret("AD4M_UNLOCK_PASSPHRASE_FILE") : "";
     // Generating starts the Holochain conductor and installs the system languages.
     const agent = await call("agent.generate", { passphrase }, 300_000);
     if (agent.error) throw new Error(`generated ${agent.did}, but: ${agent.error}`);

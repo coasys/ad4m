@@ -32,7 +32,9 @@ profiles the others published. Without the setting they use the KV and see only 
 
 The executor lets a system language access files in its own storage directory
 and in the executor's working directory, nowhere else, so the directory must lie
-inside the working directory. It must also exist already.
+inside the working directory. It must also exist already. Files there are
+written in the clear (only files inside a language's own storage directory are
+sealed), which is what lets several executors share them.
 
 The integration tests (`tests/js`) use shared mode for every executor: see
 `tests/js/utils/sharedStores.ts`.

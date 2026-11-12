@@ -2,8 +2,9 @@
  * A headless executor started from a config file (`ad4m-executor run
  * --config <file>`): the file's ports, TLS, MCP and multi-user settings take
  * effect, the admin credential comes from AD4M_ADMIN_CREDENTIAL_FILE, and
- * with AD4M_UNLOCK_PASSPHRASE_FILE a restarted executor unlocks its agent
- * without anyone calling agent.unlock. A config file holding a secret value,
+ * a restarted executor unlocks its agent from the keyring without anyone
+ * calling agent.unlock (AD4M_UNLOCK_PASSPHRASE_FILE is retired: it is not
+ * read and a warning says so). A config file holding a secret value,
  * an empty admin credential file, or an empty AD4M_<FLAG> variable stops
  * `run`. Holochain is off (AD4M_RUN_HOLOCHAIN=false): the conductor is not
  * what these settings are about.
@@ -149,35 +150,46 @@ describe("Executor config file", () => {
         anonymous.close();
     });
 
-    it("unlocks its agent at startup from AD4M_UNLOCK_PASSPHRASE_FILE", async () => {
-        await stop();
-        const passphraseFile = path.join(dir, "secrets", "unlock-passphrase");
-
-        // A wrong passphrase: the executor stays up, locked, and says why.
-        writeSecret(passphraseFile, "not-the-passphrase\n");
-        executor = await start({ AD4M_UNLOCK_PASSPHRASE_FILE: passphraseFile });
-        await pollUntil(() => output.includes("Unlocking the agent at startup"),
-            { timeoutMs: 30000, label: "the failed startup unlock is logged" });
-        expect(output).to.not.include("not-the-passphrase");
-        const locked = new Ad4mClient(baseUrl(apiPort), ADMIN_CREDENTIAL);
-        const lockedStatus = await locked.agent.status();
-        expect(lockedStatus.isInitialized).to.be.true;
-        expect(lockedStatus.isUnlocked).to.be.false;
-        locked.close();
+    it("unlocks its agent at startup from the keyring, with no passphrase file", async () => {
         await stop();
 
-        // The right passphrase: unlocked with no agent.unlock call.
-        writeSecret(passphraseFile, `${PASSPHRASE}\n`);
-        executor = await start({ AD4M_UNLOCK_PASSPHRASE_FILE: passphraseFile });
+        // The agent was generated with a keyring: its passphrase comes from the keyring,
+        // and nobody types it again.
+        executor = await start();
         const client = new Ad4mClient(baseUrl(apiPort), ADMIN_CREDENTIAL);
         // The wallet unlocks first; the log line follows once the system
         // languages are loaded.
         await pollUntil(async () => (await client.agent.status()).isUnlocked,
-            { timeoutMs: 60000, label: "agent unlocked from the passphrase file" });
-        await pollUntil(() => output.includes("Agent unlocked at startup"),
+            { timeoutMs: 60000, label: "agent unlocked from the keyring" });
+        await pollUntil(() => output.includes("Agent unlocked at startup from the keyring"),
             { timeoutMs: 60000, label: "the startup unlock is logged" });
-        expect(output).to.not.include("starting its services failed");
+        // The lines themselves, so a failure shows which service failed.
+        expect(output.split("\n").filter((line) => line.includes("starting its services failed")))
+            .to.deep.equal([]);
         expect(output).to.not.include(PASSPHRASE);
+        // agent.lock and agent.unlock still pair up on the caller's passphrase.
+        await client.agent.lock("a-lock-passphrase");
+        expect((await client.agent.status()).isUnlocked).to.be.false;
+        await expect(client.agent.unlock("not-the-lock-passphrase", false)).to.be.rejected;
+        await client.agent.unlock("a-lock-passphrase", false);
+        expect((await client.agent.status()).isUnlocked).to.be.true;
+        client.close();
+    });
+
+    it("needs AD4M_UNLOCK_PASSPHRASE_FILE no more, and says so", async () => {
+        await stop();
+        const passphraseFile = path.join(dir, "secrets", "unlock-passphrase");
+
+        // Whatever the file holds, the keyring unlocks the agent; the file is not read.
+        writeSecret(passphraseFile, "not-the-passphrase\n");
+        executor = await start({ AD4M_UNLOCK_PASSPHRASE_FILE: passphraseFile });
+        const client = new Ad4mClient(baseUrl(apiPort), ADMIN_CREDENTIAL);
+        await pollUntil(async () => (await client.agent.status()).isUnlocked,
+            { timeoutMs: 60000, label: "agent unlocked from the keyring" });
+        await pollUntil(() => output.includes("AD4M_UNLOCK_PASSPHRASE_FILE is no longer needed"),
+            { timeoutMs: 60000, label: "the retired variable is logged" });
+        expect(output).to.not.include("not-the-passphrase");
+        expect(output).to.not.include("Unlocking the agent at startup with the passphrase");
         client.close();
     });
 

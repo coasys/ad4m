@@ -217,6 +217,15 @@ impl VerdictMemo {
         settled
     }
 
+    /// Whether the memo holds a verdict for `receipt` under the definition
+    /// `catalogue` holds: a `Verified` run or a structural refusal, both final
+    /// under this key, so nothing a refresh of the receipt's carried signers
+    /// could bring changes what [`settled`](Self::settled) answers. Peeks:
+    /// the entry's recency is left to the read that uses it.
+    pub fn holds(&self, catalogue: &HashMap<String, SHACLFlow>, receipt: &FlowReceipt) -> bool {
+        memo_key(catalogue, receipt).is_some_and(|key| self.lock().peek(&key).is_some())
+    }
+
     /// How many verifications this memo has actually run.
     #[cfg(test)]
     pub fn verifications(&self) -> usize {

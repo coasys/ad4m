@@ -457,7 +457,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     // Guard::Owns on a perspective: the params beside `uuid`.
     ("perspective.queryProlog", || json!({ "query": "true." })),
     ("perspective.querySparql", || json!({ "query": "ASK {}" })),
-    ("perspective.subscribeQuery", || json!({ "query": "true." })),
+    (
+        "perspective.subscribeQuery",
+        || json!({ "query": "true.", "subscriptionId": "s" }),
+    ),
     (
         "perspective.subscribeSparql",
         || json!({ "query": "ASK {}" }),
@@ -484,7 +487,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "perspective.modelSubscribe",
-        || json!({ "class_name": "C", "query_json": "{}" }),
+        || json!({ "class_name": "C", "query_json": "{}", "subscriptionId": "s" }),
     ),
     (
         "perspective.evaluateGetters",
@@ -595,26 +598,33 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     // params take `{}`.
     ("sfu.startRoom", sfu_room),
     ("sfu.stopRoom", sfu_room),
-    ("sfu.callLeave", sfu_room),
+    (
+        "sfu.callLeave",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1" }),
+    ),
+    (
+        "sfu.callRestartIce",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1" }),
+    ),
     (
         "sfu.callJoin",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}", "deviceId": "d", "sessionKey": "k" }),
     ),
     (
         "sfu.callSetQualityPreference",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "preference": "low" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "preference": "low" }),
     ),
     (
         "sfu.callAnswerServerOffer",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpAnswer": "{}" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "sdpAnswer": "{}" }),
     ),
     (
         "sfu.addIceCandidate",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "candidate": "c" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "candidate": "c" }),
     ),
     (
         "sfu.sendData",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "channelLabel": "c", "data": "d" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "channelLabel": "c", "data": "d" }),
     ),
     ("sfu.getConfig", sfu_neighbourhood),
     ("sfu.sfuPeerForNeighbourhood", sfu_neighbourhood),
@@ -650,6 +660,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("identity.joinStatus", || json!({ "offerId": "o" })),
     ("identity.keyOwner", || json!({ "key": "z6Mk" })),
+    ("identity.acceptJoin", || json!({ "offerId": "o" })),
+    ("identity.cancelJoin", || json!({ "offerId": "o" })),
     ("identity.inboxAck", || json!({ "id": "m" })),
     (
         "identity.inboxPut",
@@ -665,6 +677,13 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("identity.deleteRequest", || json!({ "id": "r" })),
     ("identity.unwrapRecordKey", || json!({ "wrapped": "w" })),
+    // Storage.
+    ("storage.unlock", || json!({ "secret": "5a".repeat(32) })),
+    (
+        "storage.rotateSecret",
+        || json!({ "currentSecret": "5a".repeat(32), "newSecret": "5b".repeat(32) }),
+    ),
+    ("storage.reencrypt", || json!({ "store": "person:main" })),
     // Key sessions.
     (
         "user.loginWithKey",
@@ -1133,7 +1152,8 @@ async fn no_local_only_method_admits_an_operator_from_a_key_login() {
 }
 
 /// The calls that stay on this machine: opening and replacing the executor's own key, signing
-/// as this device, the custody channel and stopping or restarting its process.
+/// as this device, the custody channel, unlocking its storage and stopping or restarting its
+/// process.
 /// [`OPERATOR_ANYWHERE`] are not among them.
 #[test]
 fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
@@ -1142,6 +1162,8 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
         vec![
             "agent.signSessionStatement",
             "agent.unlock",
+            "identity.acceptJoin",
+            "identity.cancelJoin",
             "identity.custodyStatus",
             "identity.inbox",
             "identity.inboxAck",
@@ -1151,6 +1173,9 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
             "identity.unwrapRecordKey",
             "runtime.quit",
             "runtime.restart",
+            "storage.reencrypt",
+            "storage.rotateSecret",
+            "storage.unlock",
         ]
     );
 }
@@ -1401,6 +1426,8 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
         operator_methods,
         vec![
             "agent.signSessionStatement",
+            "identity.acceptJoin",
+            "identity.cancelJoin",
             "identity.claimOffer",
             "identity.custodyStatus",
             "identity.inbox",
@@ -1427,6 +1454,11 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "runtime.unytWalletBalance",
             "runtime.unytWalletHistory",
             "sfu.ensureMembership",
+            "storage.keys",
+            "storage.reencrypt",
+            "storage.rotatePersonKey",
+            "storage.rotateSecret",
+            "storage.unlock",
             "user.credits",
             "user.freeAccess",
             "user.setMultiUserEnabled",
@@ -1729,6 +1761,7 @@ fn only_methods_whose_guard_checks_no_capability_are_open() {
             "agent.isLocked",
             "runtime.freeHostingEnabled",
             "runtime.info",
+            "runtime.storageStatus",
             "runtime.tlsDomain",
             "user.currentSession",
             "user.endAllSessions",

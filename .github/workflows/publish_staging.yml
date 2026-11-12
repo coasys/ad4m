@@ -123,7 +123,17 @@ jobs:
         with:
           tag_name: ${{ steps.create_tag.outputs.version }}
           release_name: ADAM (Launcher & CLI binaries) ${{ steps.create_tag.outputs.version }} Prerelease
-          body: See the assets to download this version and install.
+          body: |
+            See the assets to download this version and install.
+
+            The headless executor for servers is `ad4m-cli-executor-linux-<version>-x64` (Linux x86_64) or `ad4m-cli-executor-macos-<version>-aarch64` (macOS, Apple silicon). Each has a `.sha256` file beside it. Download both into one folder and check the binary before you run it:
+
+            ```
+            sha256sum -c ad4m-cli-executor-linux-<version>-x64.sha256          # Linux
+            shasum -a 256 -c ad4m-cli-executor-macos-<version>-aarch64.sha256  # macOS
+            ```
+
+            Both print `OK` for an intact download. See `docs-src/headless-executor.md` for running it.
           draft: true
           prerelease: true
 
@@ -270,6 +280,19 @@ jobs:
         asset_name: ad4m-cli-client-linux-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
+    # The headless executor that servers run is this asset, not a build of their own. It starts
+    # here (`storage new-secret` prints 64 hex characters and touches no data), and its SHA-256
+    # goes beside it under the asset's name, so a download checks with `sha256sum -c`.
+    - name: Check the headless executor and write its SHA-256
+      env:
+        ASSET: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64
+      run: |
+        bin=target/release/ad4m-executor
+        first_line="$("$bin" storage new-secret | sed -n 1p)"
+        printf '%s' "$first_line" | grep -Eq '^[0-9a-f]{64}$' || { echo "$bin storage new-secret failed"; exit 1; }
+        bash scripts/release-checksum.sh "$bin" "$ASSET" > "target/release/$ASSET.sha256"
+        cat "target/release/$ASSET.sha256"
+
     - name: Upload Release AD4M CLI executor Linux Binary
       id: upload-release-linux-ad4m-cli-executor-binary
       uses: actions/upload-release-asset@v1
@@ -280,6 +303,16 @@ jobs:
         asset_path: target/release/ad4m-executor
         asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor Linux Binary SHA-256
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target/release/ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64.sha256
+        asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64.sha256
+        asset_content_type: text/plain
 
   # ============================================================================
   # Linux CUDA Binary Build - Uses CUDA Docker container
@@ -333,6 +366,14 @@ jobs:
         asset_name: ADAM.Launcher_${{ steps.extract_version.outputs.version }}_amd64_CUDA.AppImage
         asset_content_type: application/octet-stream
 
+    - name: Check the CUDA executor and write its SHA-256
+      env:
+        ASSET: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64-CUDA
+      run: |
+        bin=target/release/ad4m-executor
+        bash scripts/release-checksum.sh "$bin" "$ASSET" > "target/release/$ASSET.sha256"
+        cat "target/release/$ASSET.sha256"
+
     - name: Upload Release AD4M CLI executor Linux CUDA Binary
       id: upload-release-linux-ad4m-cli-executor-cuda-binary
       uses: actions/upload-release-asset@v1
@@ -343,6 +384,16 @@ jobs:
         asset_path: target/release/ad4m-executor
         asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64-CUDA
         asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor Linux CUDA Binary SHA-256
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: target/release/ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64-CUDA.sha256
+        asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64-CUDA.sha256
+        asset_content_type: text/plain
 
   # ============================================================================
   # macOS Binary Build - Uses aggressive caching (Docker not available on macOS)
@@ -527,6 +578,20 @@ jobs:
         asset_name: ad4m-cli-client-macos-${{ steps.extract_version.outputs.version }}-aarch64
         asset_content_type: application/octet-stream
 
+    # Apple silicon only (no macOS Intel build). The binary starts here and links no OpenSSL
+    # from the system: SQLCipher's crypto is the vendored OpenSSL, built into the binary.
+    - name: Check the headless executor and write its SHA-256
+      env:
+        ASSET: ad4m-cli-executor-macos-${{ steps.extract_version.outputs.version }}-aarch64
+      run: |
+        bin=target/release/ad4m-executor
+        [ "$(lipo -archs "$bin")" = arm64 ] || { echo "$bin is $(lipo -archs "$bin"), not arm64"; exit 1; }
+        if otool -L "$bin" | grep -Ei 'libssl|libcrypto'; then echo "$bin links a system OpenSSL"; exit 1; fi
+        first_line="$("$bin" storage new-secret | sed -n 1p)"
+        printf '%s' "$first_line" | grep -Eq '^[0-9a-f]{64}$' || { echo "$bin storage new-secret failed"; exit 1; }
+        bash scripts/release-checksum.sh "$bin" "$ASSET" > "target/release/$ASSET.sha256"
+        cat "target/release/$ASSET.sha256"
+
     - name: Upload Release AD4M CLI executor macOS Binary
       id: upload-release-macos-ad4m-cli-executor-binary
       uses: actions/upload-release-asset@v1
@@ -537,6 +602,16 @@ jobs:
         asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m-executor
         asset_name: ad4m-cli-executor-macos-${{ steps.extract_version.outputs.version }}-aarch64
         asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor macOS Binary SHA-256
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m-cli-executor-macos-${{ steps.extract_version.outputs.version }}-aarch64.sha256
+        asset_name: ad4m-cli-executor-macos-${{ steps.extract_version.outputs.version }}-aarch64.sha256
+        asset_content_type: text/plain
 
   # ============================================================================
   # Windows Binary Build - Re-enabled now that V8 uses pre-built binaries
