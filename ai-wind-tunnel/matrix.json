@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "description": "The cells the wind tunnel runs: per provider and service, the models. A model is a manifest `modelId` (rust-executor/src/ai_service/local/manifest.json: the runtimes the executor can install) or a `remoteModel` the provider pulls by its own name. `unsupported` gives the reason a provider cannot serve a service; such cells are recorded as unsupported, not failed.",
+  "services": ["llm", "completion", "embeddings", "stt", "tts"],
+  "providers": {
+    "ollama": {
+      "endpointKind": "OLLAMA",
+      "models": {
+        "llm": [
+          { "remoteModel": "qwen3.5:0.8b", "sizeBytes": 1322069043, "license": "Apache-2.0", "params": "0.8B", "source": "https://ollama.com/library/qwen3.5" },
+          { "remoteModel": "qwen3.5:2b", "sizeBytes": 2683396637, "license": "Apache-2.0", "params": "2B", "source": "https://ollama.com/library/qwen3.5" },
+          { "remoteModel": "qwen3.5:4b", "sizeBytes": 3324173757, "license": "Apache-2.0", "params": "4B", "source": "https://ollama.com/library/qwen3.5" }
+        ],
+        "completion": [
+          { "remoteModel": "qwen3.5:0.8b", "sizeBytes": 1322069043, "license": "Apache-2.0", "params": "0.8B", "source": "https://ollama.com/library/qwen3.5" }
+        ],
+        "embeddings": [
+          { "remoteModel": "nomic-embed-text", "sizeBytes": 274302030, "license": "Apache-2.0", "params": "137M", "source": "https://ollama.com/library/nomic-embed-text" }
+        ]
+      },
+      "unsupported": {
+        "stt": "Ollama serves no transcription API (/v1/audio/transcriptions)",
+        "tts": "Ollama serves no speech API (/v1/audio/speech)"
+      }
+    },
+    "llama-server": {
+      "endpointKind": "LLAMA_SERVER",
+      "models": {
+        "llm": [
+          { "modelId": "qwen3.5-0.8b-q8_0" },
+          { "modelId": "qwen3.5-2b-q4_k_m" },
+          { "modelId": "qwen3.5-4b-q4_k_m" }
+        ],
+        "completion": [
+          { "modelId": "qwen3.5-0.8b-q8_0" }
+        ],
+        "embeddings": [
+          { "modelId": "nomic-embed-text-v1.5-q8_0" }
+        ],
+        "stt": [
+          { "modelId": "qwen3-asr-0.6b-q8_0" },
+          { "modelId": "qwen3-asr-1.7b-q8_0" },
+          { "modelId": "voxtral-mini-3b-2507-q4_k_m" }
+        ]
+      },
+      "unsupported": {
+        "tts": "llama-server b11669 has no speech route: it lists no --model-vocoder option and no /tts or /v1/audio/speech path; OuteTTS runs only in the llama-tts CLI"
+      }
+    },
+    "whisper-server": {
+      "endpointKind": "OPEN_AI_AUDIO",
+      "models": {
+        "stt": [
+          { "modelId": "whisper-base.en-q5_1" },
+          { "modelId": "whisper-small-q5_1" }
+        ]
+      },
+      "unsupported": {
+        "llm": "whisper-server only transcribes",
+        "completion": "whisper-server only transcribes",
+        "embeddings": "whisper-server only transcribes",
+        "tts": "whisper-server only transcribes"
+      }
+    },
+    "speaches": {
+      "endpointKind": "OPEN_AI_AUDIO",
+      "image": "ghcr.io/speaches-ai/speaches:latest-cpu",
+      "models": {
+        "stt": [
+          { "remoteModel": "Systran/faster-whisper-base.en", "sizeBytes": 147772310, "license": "MIT", "params": "74M", "source": "https://huggingface.co/Systran/faster-whisper-base.en" },
+          { "remoteModel": "Systran/faster-whisper-small", "sizeBytes": 486215847, "license": "MIT", "params": "244M", "source": "https://huggingface.co/Systran/faster-whisper-small" }
+        ],
+        "tts": [
+          { "remoteModel": "speaches-ai/Kokoro-82M-v1.0-ONNX-int8", "voice": "af_heart", "sizeBytes": 120577468, "license": "Apache-2.0", "params": "82M", "source": "https://huggingface.co/speaches-ai/Kokoro-82M-v1.0-ONNX-int8" }
+        ]
+      },
+      "unsupported": {
+        "llm": "speaches serves only audio (transcription and speech)",
+        "completion": "speaches serves only audio (transcription and speech)",
+        "embeddings": "speaches serves only audio (transcription and speech)"
+      }
+    },
+    "nemo-speech": {
+      "endpointKind": "OPEN_AI_AUDIO",
+      "models": {
+        "stt": [
+          { "modelId": "parakeet-tdt-0.6b-v3-q8_0" },
+          { "modelId": "nemotron-3.5-asr-streaming-0.6b-q8_0" }
+        ]
+      },
+      "unsupported": {
+        "llm": "nemo-speech serves speech models only (ASR, TTS, diarization, translation)",
+        "completion": "nemo-speech serves speech models only (ASR, TTS, diarization, translation)",
+        "embeddings": "nemo-speech serves speech models only (ASR, TTS, diarization, translation)"
+      }
+    },
+    "sherpa-onnx": {
+      "endpointKind": "OPEN_AI_AUDIO",
+      "models": {
+        "stt": [
+          { "modelId": "parakeet-tdt-0.6b-v3-int8-onnx" }
+        ]
+      },
+      "unsupported": {
+        "llm": "sherpa-onnx serves speech models only",
+        "completion": "sherpa-onnx serves speech models only",
+        "embeddings": "sherpa-onnx serves speech models only",
+        "tts": "sherpa-onnx's servers speak WebSocket only; its offline TTS has no server binary"
+      }
+    },
+    "vllm": {
+      "endpointKind": "VLLM",
+      "models": {
+        "llm": [
+          { "remoteModel": "Qwen/Qwen3.5-0.8B", "sizeBytes": 1769980465, "license": "Apache-2.0", "params": "0.8B", "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B" }
+        ],
+        "completion": [
+          { "remoteModel": "Qwen/Qwen3.5-0.8B", "sizeBytes": 1769980465, "license": "Apache-2.0", "params": "0.8B", "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B" }
+        ]
+      },
+      "unsupported": {
+        "tts": "vLLM serves no speech API (/v1/audio/speech)"
+      }
+    }
+  }
+}

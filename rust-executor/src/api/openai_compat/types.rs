@@ -11,9 +11,8 @@ use serde_json::Value;
 // Common
 // ---------------------------------------------------------------------------
 
-/// Standard OpenAI usage object.  All token counts are best-effort: the
-/// local Kalosm backend reports `chars/4` estimates today; remote upstreams
-/// return exact counts which we forward when available.
+/// Standard OpenAI usage object. On the paths the executor answers itself the counts are
+/// `chars/4` estimates; a forwarded answer carries the upstream's own `usage`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: u64,
@@ -33,22 +32,27 @@ pub struct ModelListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ModelInfo {
+    /// The model's name: what a client sends as `model`.
     pub id: String,
-    pub object: &'static str,   // "model"
-    pub created: i64,           // unix epoch seconds (we report 0 for static models)
-    pub owned_by: &'static str, // "ad4m"
+    pub object: &'static str, // "model"
+    pub created: i64,         // unix epoch seconds
+    /// The name of the endpoint that serves it.
+    pub owned_by: String,
     /// AD4M-specific extension fields.  Tools that don't know about them
-    /// ignore them; the proposal's spec carries `ad4m.model_type` here.
+    /// ignore them.
     #[serde(rename = "ad4m")]
     pub extensions: ModelExtensions,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelExtensions {
-    pub model_type: String, // "llm" | "embedding" | "transcription" | "tts"
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>, // "local" | "remote" | "passthrough"
+    pub model_type: crate::types::ModelType,
+    pub endpoint_id: String,
+    /// The id the endpoint knows the model by.
+    pub remote_model: String,
+    /// From the endpoint's last health check (`UNKNOWN` before the first).
+    pub status: crate::types::ModelStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -394,15 +398,6 @@ pub struct EmbeddingItem {
 pub struct EmbeddingUsage {
     pub prompt_tokens: u64,
     pub total_tokens: u64,
-}
-
-// ---------------------------------------------------------------------------
-// /v1/audio/transcriptions
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize)]
-pub struct TranscriptionResponse {
-    pub text: String,
 }
 
 // ---------------------------------------------------------------------------
