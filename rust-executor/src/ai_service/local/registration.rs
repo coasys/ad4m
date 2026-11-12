@@ -98,13 +98,13 @@ fn runs_on(port: u16) -> bool {
 }
 
 /// Register `runtime` as a managed endpoint with its models; make each the default of its
-/// type when `make_default`, or when the type has none. Answers the endpoint id.
+/// type when the type has none. A default the operator chose (a remote model, say) stays.
+/// Answers the endpoint id.
 pub(super) async fn register(
     selection: &Selection,
     runtime: &SelectedRuntime,
     port: u16,
     key: &str,
-    make_default: bool,
 ) -> Result<String> {
     let models = selection.models_of(runtime.provider);
     let (kind, capabilities) = match runtime.provider {
@@ -178,9 +178,7 @@ pub(super) async fn register(
 
     // A model a new selection dropped (fewer services, a re-plan): its row goes, and with
     // it a default that named it. Before the models below: a type whose default goes gets
-    // the selection's model of that type as its default, also when this start does not make
-    // its models the defaults (a re-plan installed with `start: false`, then `ai.localStart`
-    // or the start at executor start).
+    // the selection's model of that type as its default.
     for row in crate::db_backend::db_backend().get_models()? {
         if row.endpoint_id == endpoint.id && !models.iter().any(|m| m.model_id == row.name) {
             service.remove_model(row.id).await?;
@@ -225,7 +223,7 @@ pub(super) async fn register(
         let has_default = crate::db_backend::db_backend()
             .get_default_model(model_type.clone())?
             .is_some_and(|default| rows.iter().any(|r| r.id == default) || default == id);
-        if make_default || !has_default {
+        if !has_default {
             service.set_default_model(model_type, id).await?;
         }
     }
@@ -411,7 +409,7 @@ mod tests {
             )],
             ports: BTreeMap::new(),
         };
-        let outcome = register(&selection, &runtime, port, "k", false).await;
+        let outcome = register(&selection, &runtime, port, "k").await;
         let remote = outcome.as_ref().ok().and_then(|endpoint| {
             db.endpoint_model_ids(endpoint)
                 .unwrap()
@@ -481,7 +479,7 @@ mod tests {
             names
         };
 
-        let endpoint = register(&both, &runtime, 40011, "k3y", true).await.unwrap();
+        let endpoint = register(&both, &runtime, 40011, "k3y").await.unwrap();
         let before = names(&endpoint);
         let default_before = db
             .get_default_model(crate::types::ModelType::Embedding)
@@ -491,9 +489,7 @@ mod tests {
             models: vec![chat],
             ports: BTreeMap::new(),
         };
-        let again = register(&chat_only, &runtime, 40011, "k3y", true)
-            .await
-            .unwrap();
+        let again = register(&chat_only, &runtime, 40011, "k3y").await.unwrap();
         let after = names(&endpoint);
         let default_after = db
             .get_default_model(crate::types::ModelType::Embedding)
@@ -549,10 +545,10 @@ mod tests {
             models: vec![selected(Service::Llm, id, Provider::LlamaServer)],
             ports: BTreeMap::new(),
         };
-        let endpoint = register(&with("old-chat"), &runtime, 40014, "k", true)
+        let endpoint = register(&with("old-chat"), &runtime, 40014, "k")
             .await
             .unwrap();
-        register(&with("new-chat"), &runtime, 40014, "k", false)
+        register(&with("new-chat"), &runtime, 40014, "k")
             .await
             .unwrap();
         let default = db.get_default_model(crate::types::ModelType::Llm).unwrap();

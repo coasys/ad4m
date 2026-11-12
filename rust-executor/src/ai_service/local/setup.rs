@@ -251,9 +251,10 @@ async fn install_for(
     }
 
     if params.start.unwrap_or(true) {
-        // A new set of models: stop what runs, start the new one, make it the default.
+        // A new set of models: stop what runs, start the new one. Its models become the
+        // defaults only of types that have none: an operator's chosen defaults stay.
         stop_all().await;
-        start_at(paths, true).await?;
+        start_at(paths).await?;
     }
     Ok(())
 }

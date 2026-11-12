@@ -131,8 +131,9 @@ The executor still runs no model in-process: `local/` installs and supervises mo
   runtime gets a pid and when a restart gives it a new one; the start writes it again
   after each `RUNNING.insert`. `register` first removes the model rows on its endpoint
   that the selection does not name (and so the defaults that named them), then registers
-  the selection's models, so a type whose default went gets the new model as its default
-  also without `make_default`; it asks a running nemo-speech for its listing up to 5
+  the selection's models, so a type whose default went gets the new model as its default.
+  A model becomes the default only of a type with none (no start or install replaces a
+  default the operator chose, such as a remote chat model); it asks a running nemo-speech for its listing up to 5
   times (1 s apart) before it falls back to the manifest id. `autostart` (`autostart.rs`)
   only starts what an install put in place and never downloads; it waits for `AIService::wait_loaded` (the start's load of the stored models) first: a
   load after the registration would put back the clients of the old endpoint settings.

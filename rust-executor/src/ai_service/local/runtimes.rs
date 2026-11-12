@@ -104,7 +104,7 @@ pub async fn status() -> LocalStatus {
 /// only for types that have none.
 pub async fn start() -> Result<LocalStatus> {
     let paths = LocalPaths::from_config()?;
-    start_at(&paths, false).await?;
+    start_at(&paths).await?;
     Ok(status().await)
 }
 
@@ -430,7 +430,7 @@ fn serves_other_models(port: u16, selection: &Selection, runtime: &SelectedRunti
         })
 }
 
-pub(super) async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
+pub(super) async fn start_at(paths: &LocalPaths) -> Result<()> {
     let _lifecycle = LIFECYCLE.lock().await;
     let mut selection = Selection::load(paths)
         .ok_or_else(|| LocalAiRefused("Local AI is not installed: call ai.localInstall".into()))?;
@@ -514,7 +514,7 @@ pub(super) async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<(
                     "Local AI: {} runs without its registration: registering it",
                     runtime.provider.as_str()
                 );
-                let id = register(&selection, &runtime, port, &key, make_default).await?;
+                let id = register(&selection, &runtime, port, &key).await?;
                 if let Some(running) = RUNNING.lock().await.get_mut(&runtime.provider) {
                     if running.endpoint_id.as_deref() != Some(id.as_str()) {
                         running.endpoint_id = Some(id.clone());
@@ -579,7 +579,7 @@ pub(super) async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<(
                 settled.detail.clone().unwrap_or_default()
             );
         }
-        let endpoint_id = register(&selection, &runtime, port, &key, make_default).await?;
+        let endpoint_id = register(&selection, &runtime, port, &key).await?;
         if let Some(running) = RUNNING.lock().await.get_mut(&runtime.provider) {
             running.endpoint_id = Some(endpoint_id.clone());
             spawn_health_follower(endpoint_id, running.supervised.watch());
@@ -1087,7 +1087,7 @@ mod tests {
         .unwrap();
 
         tokio::select! {
-            result = start_at(&paths, false) => panic!("the start ended: {result:?}"),
+            result = start_at(&paths) => panic!("the start ended: {result:?}"),
             _ = async {
                 while !started.exists() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1202,7 +1202,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (paths, spawned) = never_ready_llama(dir.path());
         tokio::select! {
-            result = async { tokio::join!(start_at(&paths, false), start_at(&paths, false)) } => {
+            result = async { tokio::join!(start_at(&paths), start_at(&paths)) } => {
                 panic!("a start ended: {result:?}")
             }
             _ = async {
@@ -1273,7 +1273,7 @@ mod tests {
         );
 
         let started = tokio::select! {
-            result = start_at(&paths, false) => Err(format!("the start ended: {result:?}")),
+            result = start_at(&paths) => Err(format!("the start ended: {result:?}")),
             _ = async {
                 while spawned_pids(&spawned).is_empty() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1318,7 +1318,7 @@ mod tests {
         .save(&paths)
         .unwrap();
 
-        let outcome = start_at(&paths, false).await;
+        let outcome = start_at(&paths).await;
         let supervised = RUNNING.lock().await.remove(&Provider::LlamaServer);
         if let Some(left) = supervised {
             MANAGED_PORTS
@@ -1457,7 +1457,7 @@ mod tests {
             },
         );
 
-        let outcome = tokio::time::timeout(Duration::from_secs(20), start_at(&paths, false)).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(20), start_at(&paths)).await;
         let endpoint = db.get_endpoint_by_name(LLAMA_ENDPOINT).unwrap();
         let recorded = RUNNING
             .lock()
@@ -1585,7 +1585,7 @@ mod tests {
             },
         );
 
-        let outcome = tokio::time::timeout(Duration::from_secs(30), start_at(&paths, false)).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), start_at(&paths)).await;
         let endpoint = db.get_endpoint_by_name(LLAMA_ENDPOINT).unwrap();
         let mut names: Vec<String> = endpoint
             .iter()
@@ -1688,7 +1688,7 @@ mod tests {
 
         // The install saves its selection while the start waits for the runtime.
         let (outcome, _) = tokio::join!(
-            tokio::time::timeout(Duration::from_secs(30), start_at(&paths, false)),
+            tokio::time::timeout(Duration::from_secs(30), start_at(&paths)),
             async {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while spawned_pids(&spawned).is_empty() && Instant::now() < deadline {
@@ -1740,7 +1740,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (paths, spawned) = never_ready_llama(dir.path());
         let named = tokio::select! {
-            result = start_at(&paths, false) => Err(format!("the start ended: {result:?}")),
+            result = start_at(&paths) => Err(format!("the start ended: {result:?}")),
             named = async {
                 while spawned_pids(&spawned).is_empty() {
                     tokio::time::sleep(Duration::from_millis(20)).await;

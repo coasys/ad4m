@@ -158,9 +158,9 @@ test("local chat is ready only with its model registered and its runtime running
   assert.equal(localChatReady({ models: [unregistered], runtimes: [llamaUp] }), false);
 });
 
-const planWith = (services, downloadBytes = 0) => ({
-  models: services.map((service) => ({ service })),
-  downloadBytes,
+const planWith = (services, missing = false) => ({
+  models: services.map((service) => ({ service, modelId: service, installed: !missing })),
+  runtimes: [{ runtimeId: "llama-server", installed: true }],
 });
 
 test("the local panel offers start, install, or says local AI runs", () => {
@@ -183,7 +183,12 @@ test("the local panel offers start, install, or says local AI runs", () => {
   assert.equal(localAction(unregistered, all, false), "install");
   // Nothing installed, or files missing: install.
   assert.equal(localAction({ installed: false, runtimes: [], models: [] }, all, false), "install");
-  assert.equal(localAction(installed([stopped], [chatModel]), planWith(["llm"], 10), false), "install");
+  assert.equal(localAction(installed([stopped], [chatModel]), planWith(["llm"], true), false), "install");
+  // Every model and runtime is in, but bytes are left (ONNX Runtime did not download): start.
+  assert.equal(
+    localAction(installed([stopped], [chatModel]), { ...all, downloadBytes: 40 }, false),
+    "start"
+  );
 });
 
 test("picking local AI makes each registered local model the default of its type", () => {

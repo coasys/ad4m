@@ -217,11 +217,15 @@ export function readyLocalDefaults(
  * when it is installed with its files in, else `install`. A selection without the chat model
  * the plan has (an earlier install for embeddings or transcription only), or whose chat
  * model is not registered, offers the install, also when the chat model's files are
- * downloaded already: a start would not add it.
+ * downloaded already: a start would not add it. Bytes left that no model or runtime names
+ * (macOS's ONNX Runtime after a failed download) do not turn a start into an install.
  */
 export function localAction(
   status: Pick<LocalAiStatus, "installed" | "models" | "runtimes"> | null,
-  plan: { models: Pick<LocalAiPlannedModel, "service">[]; downloadBytes: number },
+  plan: {
+    models: Pick<LocalAiPlannedModel, "service" | "modelId" | "installed">[];
+    runtimes: { runtimeId: string; installed: boolean }[];
+  },
   installing: boolean
 ): "running" | "start" | "install" {
   if (!status?.installed || installing) return "install";
@@ -231,7 +235,7 @@ export function localAction(
   if (lacksChat) return "install";
   const running = status.runtimes.filter((r) => r.phase === "running").length;
   if (running > 0 && running === status.runtimes.length) return "running";
-  return plan.downloadBytes === 0 ? "start" : "install";
+  return toDownload(plan).length === 0 ? "start" : "install";
 }
 
 /**

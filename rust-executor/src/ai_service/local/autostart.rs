@@ -42,7 +42,7 @@ pub fn autostart() {
             service.wait_loaded().await;
         }
         log::info!("Local AI: starting the installed runtimes");
-        if let Err(e) = start_at(&paths, false).await {
+        if let Err(e) = start_at(&paths).await {
             log::error!("Local AI did not start: {e:#}");
         }
     });
