@@ -370,7 +370,9 @@ impl Ad4mMcpHandler {
 mod guard_tests {
     use super::*;
     use crate::agent::capabilities::{perspective_query_capability, perspective_update_capability};
-    use crate::mcp::tools::test_support::{app, handler_as, operator, perspective, setup, status};
+    use crate::mcp::tools::test_support::{
+        app, handler_as, operator, perspective, setup, status, user,
+    };
 
     // Writes checked PERSPECTIVE_CREATE on every perspective; the method checks the update
     // capability on the one it names.
@@ -427,6 +429,79 @@ mod guard_tests {
             .await;
         assert_eq!(status(&refused), Some(403), "{refused}");
         crate::perspectives::remove_perspective(&users).await;
+    }
+
+    /// READ on one perspective's uuid admits the call (`perspective.all` is
+    /// `Guard::CapAnyPointer`), and the answer narrows to the pointers the caller may read;
+    /// `*` keeps the answer it had. The matrix pins the admission; this pins the narrowing.
+    /// (No substring checks: a refusal's error text echoes the caller's pointers.)
+    #[tokio::test]
+    async fn a_caller_scoped_to_one_perspective_lists_only_it() {
+        setup();
+        let a = perspective(None).await;
+        let b = perspective(None).await;
+        let uuids = |answer: &str| -> Vec<String> {
+            let listed: Vec<serde_json::Value> =
+                serde_json::from_str(answer).unwrap_or_else(|_| panic!("a list: {answer}"));
+            listed
+                .iter()
+                .map(|p| p["uuid"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let caller = |caps| handler_as(app(caps));
+
+        // READ on [a]: admitted, and only A is in the answer.
+        let scoped = caller(vec![perspective_query_capability(vec![a.clone()])])
+            .list_perspectives(Parameters(ListPerspectivesParams {}))
+            .await;
+        let scoped = uuids(&scoped);
+        assert!(scoped.contains(&a), "A is listed: {scoped:?}");
+        assert!(!scoped.contains(&b), "B is not: {scoped:?}");
+
+        // READ on `*`: both, as before.
+        let all = caller(vec![perspective_query_capability(vec!["*".into()])])
+            .list_perspectives(Parameters(ListPerspectivesParams {}))
+            .await;
+        let all = uuids(&all);
+        assert!(all.contains(&a), "{all:?}");
+        assert!(all.contains(&b), "{all:?}");
+
+        // No perspective READ: refused, as before.
+        let refused = caller(vec![])
+            .list_perspectives(Parameters(ListPerspectivesParams {}))
+            .await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+
+        // The same narrowing for a user, within the ownership filter: theirs is not theirs
+        // to see whatever the capability says, and a `*` user sees only its own.
+        let did = "did:key:mcp-scoped-lister";
+        let mine = perspective(Some(vec![did.into()])).await;
+        let theirs = perspective(Some(vec!["did:key:mcp-scoped-other".into()])).await;
+        let users = handler_as(user(
+            did,
+            vec![perspective_query_capability(vec![mine.clone()])],
+        ))
+        .list_perspectives(Parameters(ListPerspectivesParams {}))
+        .await;
+        let users = uuids(&users);
+        assert!(users.contains(&mine), "{users:?}");
+        assert!(!users.contains(&theirs), "{users:?}");
+        let wide = handler_as(user(
+            did,
+            vec![perspective_query_capability(vec!["*".into()])],
+        ))
+        .list_perspectives(Parameters(ListPerspectivesParams {}))
+        .await;
+        let wide = uuids(&wide);
+        assert!(wide.contains(&mine), "{wide:?}");
+        assert!(
+            !wide.contains(&theirs),
+            "another user's stays out, `*` or not: {wide:?}"
+        );
+
+        for uuid in [a, b, mine, theirs] {
+            crate::perspectives::remove_perspective(&uuid).await;
+        }
     }
 }
 

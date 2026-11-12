@@ -294,9 +294,10 @@ fn perspective_calls(p: &str, class: &str, name: &str) -> Vec<(String, Value)> {
 }
 
 /// One call of every tool that names no perspective: what it reaches is the agent's.
+/// `list_perspectives` is not one: the session holds perspective READ on A, so it answers,
+/// narrowed to A — [`a_narrowed_sessions_tools_stay_inside_it`] asserts that separately.
 fn agent_wide_calls() -> Vec<(String, Value)> {
     [
-        ("list_perspectives", json!({})),
         ("add_perspective", json!({"name": "planted"})),
         (
             "neighbourhood_join_from_url",
@@ -514,6 +515,18 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
     for (step, (tool, _)) in agent_wide.iter().zip(&table) {
         expect_failed(step, tool, NOT_HELD);
     }
+    // `list_perspectives` is the one agent-wide call a perspective-scoped session may make:
+    // it holds READ on A, so `perspective.all` answers — with A alone, never B.
+    let (listed, _) = steps_of_calls(
+        &session,
+        &caller,
+        &[("list_perspectives".to_string(), json!({}))],
+    )
+    .await;
+    assert_eq!(listed[0].status, Some(Done), "the list answers: {listed:?}");
+    let answer = listed[0].content["result"].as_str().unwrap_or_default();
+    assert!(answer.contains(&a), "A is listed: {answer}");
+    assert!(!answer.contains(&b), "B is not: {answer}");
     let (status, _) =
         steps_of_calls(&session, &caller, &[("auth_status".to_string(), json!({}))]).await;
     assert!(
@@ -524,7 +537,8 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
         assert!(
             names_a_perspective(tool)
                 || table.iter().any(|(row, _)| *row == tool.name)
-                || ["auth_status", "get_documentation"].contains(&tool.name.as_str()),
+                || ["auth_status", "get_documentation", "list_perspectives"]
+                    .contains(&tool.name.as_str()),
             "`{}` names no perspective and `agent_wide_calls` has no row for it",
             tool.name
         );
@@ -581,6 +595,7 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
     for step in outside
         .iter()
         .chain(&agent_wide)
+        .chain(&listed)
         .chain(&inside)
         .chain(&naming)
     {
@@ -610,4 +625,74 @@ async fn no_tool_reaches_a_perspective_outside_a_users_sessions_capabilities() {
 async fn no_tool_reaches_a_perspective_outside_the_main_agents_sessions_capabilities() {
     setup();
     a_narrowed_sessions_tools_stay_inside_it(operator(), None).await;
+}
+
+/// The scenario `capabilities` exists for: a session scoped to perspective A lists
+/// perspectives — the first thing a model does — and sees only A, reads and writes A, and
+/// is refused on B.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_scoped_to_one_perspective_lists_only_it() {
+    setup();
+    // A real managed agent: adding a link signs as it.
+    let did = crate::test_utils::create_test_user("alice-d6@example.org");
+    let (a, b, cleanup) = two_perspectives_of(&did).await;
+    let caller = user(&did, everything());
+    let session = service::create(
+        &caller,
+        AiSessionCreate {
+            model: Some("scripted".into()),
+            default_perspective: Some(a.clone()),
+            capabilities: Some(vec![
+                perspective_query_capability(vec![a.clone()]),
+                perspective_update_capability(vec![a.clone()]),
+            ]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let steps = steps_of(
+        &session,
+        &caller,
+        Scripted::answering(vec![
+            calls("list_perspectives", json!({})),
+            calls("query_links", json!({"perspective_id": a})),
+            calls(
+                "add_link",
+                json!({
+                    "perspective_id": a,
+                    "source": "s://a", "predicate": "p://x", "target": "t://1",
+                }),
+            ),
+            calls("query_links", json!({"perspective_id": b})),
+        ]),
+        None,
+    )
+    .await;
+    assert_eq!(steps.len(), 4, "{steps:?}");
+
+    // The listing answers — with A alone.
+    assert_eq!(steps[0].status, Some(Done), "the list answers: {steps:?}");
+    let listed = steps[0].content["result"].as_str().unwrap_or_default();
+    assert!(listed.contains(&a), "A is listed: {listed}");
+    assert!(!listed.contains(&b), "B is not: {listed}");
+
+    // Reading A and writing it work.
+    assert_eq!(steps[1].status, Some(Done), "A reads: {steps:?}");
+    assert_eq!(steps[2].status, Some(Done), "A takes a link: {steps:?}");
+    assert!(
+        links_of(&a)
+            .await
+            .contains(&("s://a".into(), "p://x".into(), "t://1".into())),
+        "the link landed"
+    );
+
+    // B stays refused.
+    assert_eq!(
+        steps[3].status,
+        Some(Failed),
+        "B is outside the session: {steps:?}"
+    );
+    assert!(refusal(&steps[3]).contains(NOT_HELD), "{steps:?}");
+    clean_up(cleanup).await;
 }

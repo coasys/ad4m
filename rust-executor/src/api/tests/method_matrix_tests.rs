@@ -19,9 +19,9 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::pending::PendingRequests;
 use crate::agent::capabilities::{
-    anonymous_capabilities_when, capability_matches, perspective_query_capability, AuthInfo,
-    Capability, AGENT_AUTH_CAPABILITY, AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY,
-    AI_PROMPT_CAPABILITY,
+    anonymous_capabilities_when, capability_matches, capability_matches_any_pointer,
+    perspective_query_capability, AuthInfo, Capability, AGENT_AUTH_CAPABILITY,
+    AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY, AI_PROMPT_CAPABILITY,
 };
 use crate::agent::grants::{Grants, LiveGrant};
 use crate::agent::{AgentContext, AgentService};
@@ -80,8 +80,9 @@ pub(super) enum Expect {
 }
 
 /// What [`Caller::UserAppWithout`] holds: querying one perspective that no row names. No
-/// guard checks it: a perspective guard builds its capability from the row's uuid, and every
-/// other perspective capability names `*`, which a single pointer does not cover.
+/// other guard checks it: a perspective guard builds its capability from the row's uuid, and
+/// every other perspective capability names `*`, which a single pointer does not cover.
+/// `Guard::CapAnyPointer` does admit it — the capability on one pointer is what it admits.
 pub(super) fn unrelated_capability() -> Capability {
     perspective_query_capability(vec!["matrix-unrelated-perspective".to_string()])
 }
@@ -125,6 +126,32 @@ pub(super) fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
             (
                 Anonymous,
                 if anonymous_holds(cap) {
+                    Granted
+                } else {
+                    Forbidden
+                },
+            ),
+        ],
+        // The capability on at least one pointer: `UserAppWithout` is the scoped grant
+        // (`unrelated_capability` is perspective READ on one pointer no row names) — the
+        // caller `perspective.all` now admits, whose answer the handler narrows.
+        Guard::CapAnyPointer(cap) => vec![
+            (Operator, Granted),
+            (AppWithout, Forbidden),
+            (AppWith, Granted),
+            (User, Granted),
+            (OtherUser, Granted),
+            (
+                UserAppWithout,
+                if capability_matches_any_pointer(&[unrelated_capability()], cap) {
+                    Granted
+                } else {
+                    Forbidden
+                },
+            ),
+            (
+                Anonymous,
+                if capability_matches_any_pointer(&anonymous_capabilities_when(true), cap) {
                     Granted
                 } else {
                     Forbidden
@@ -1359,6 +1386,47 @@ async fn perspective_get_answers_null_and_query_links_404_for_another_users_pers
         "not the caller's answers as a missing one does"
     );
     world.remove().await;
+}
+
+/// `perspective.all` is `Guard::CapAnyPointer`: perspective READ on one pointer admits a
+/// caller (an AI session scoped to one perspective; the handler narrows its answer to the
+/// pointers it may read), `*` admits as before, and a caller with no perspective READ at
+/// all is refused, as it was under `Cap`.
+#[tokio::test]
+async fn perspective_all_admits_read_on_any_pointer_and_refuses_none() {
+    let map = build_handler_map();
+    let one = |pointer: &str| perspective_query_capability(vec![pointer.to_string()]);
+    for (who, caller) in [
+        (
+            "app scoped to one",
+            RequestContext::app_for_test(vec![one("some-uuid")]),
+        ),
+        (
+            "app holding `*`",
+            RequestContext::app_for_test(vec![one("*")]),
+        ),
+        (
+            "user scoped to one",
+            RequestContext::user_for_test(USER_DID, vec![one("some-uuid")]),
+        ),
+    ] {
+        assert!(
+            map.admit("perspective.all", &json!({}), &caller)
+                .await
+                .is_ok(),
+            "{who}"
+        );
+    }
+    for (who, caller) in [
+        ("app without it", RequestContext::app_for_test(vec![])),
+        ("anonymous", context(Caller::Anonymous, None)),
+    ] {
+        let refused = map
+            .admit("perspective.all", &json!({}), &caller)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 403, "{who}: {}", refused.message);
+    }
 }
 
 /// D12, D14: a user approves and revokes the requests and grants of their own agent; another
