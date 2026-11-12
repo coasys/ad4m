@@ -61,7 +61,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `DELETE /offers/{scid}/{offerId}` master-signed | `204` · `403 signer`/`store` · `404` |
 | `POST /offers/{scid}/{offerId}/claim` `Claim` | `201`/`200` repeat `{state, kind, expires}` · `403 secret`/`bound`/`cosig` · `404` · `409 key-taken` · `410 {state}` |
 | `GET /offers/{scid}/{offerId}/state?key=&wait=` | `200 {state, seq?}` for the claiming key only · `404` |
-| `PUT /inbox/pre/{a}` `{sealed, bind:{scid, offerId, sign, r}}` + master-signed request | `201 {id, expires}` (expires = the offer's) · `400` · `403 writer` · `413` · `429 identity` (2 messages, or the bucket) |
+| `PUT /inbox/pre/{a}` `{sealed, bind:{scid, offerId, sign, r}}` + master-signed request | `201 {id, expires}` (expires = the offer's) · `400` · `403 writer` · `413` · `429 identity` (2 messages per writing identity, or the bucket) |
 | `GET /inbox/pre/{a}?wait=` `X-Coasys-Inbox` | `200 [InboxMessage]` oldest first · `403 signer`/`store` |
 | `DELETE /inbox/pre/{a}/{id}` `X-Coasys-Inbox` | `204` · `403 signer`/`store` · `404` |
 | `PUT /inbox/{scid}/{keyId}` `{sealed}` + master-signed request | `201 {id, expires}` (30 days) · `400` · `403 writer` · `404` no such key valid at the head without the bot mark · `413` · `429 identity` (16 messages, or the bucket) |
@@ -69,7 +69,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `DELETE /inbox/{scid}/{keyId}/{id}` signed by `keyId` | `204` · `403 signer` · `404` |
 | `GET /private/{scid}` signed (device key or master) | `200 {record: SealedRecord, receipt: RecordReceipt}` · `403` · `404` none yet |
 | `PUT /private/{scid}` `SealedRecord` + signed request | `200 {version, receipt: RecordReceipt}` · `400 malformed`/`signer`/`signature`/`attestation`/`wrapped`/`recovery-key` · `403` · `409 {version}` · `413` · `429 identity` |
-| `POST /requests/{scid}` `{body, expires}` signed by a device key | `201 {id}` · `400 malformed`/`expires` · `403 signer` · `429 identity` (16 open, or the bucket) |
+| `POST /requests/{scid}` `{body, expires}` signed by a device key | `201 {id}` · `400 malformed`/`expires`/`canonical` (the body not sent as its JCS) · `403 signer` · `429 identity` (16 open, 4 per posting key, or the bucket) |
 | `GET /requests/{scid}?since=` signed (device key or master) | `200 [DeviceRequest]` oldest first |
 | `DELETE /requests/{scid}/{id}` by the poster or the master | `204` · `403 signer` · `404` |
 | `GET /feed?after=` `Authorization: Bearer <FEED_TOKEN>` | `200 {items, next}` · `401` |
@@ -326,8 +326,9 @@ tests name them by these names.
   Any other append is measured, a `rotate` in it included, so the owner sends the recovery
   `rotate` on its own. The inbox, the private details record and the request box add nothing
   to a log: they are rows of their own tables, never events, so they neither grow a fold nor
-  count toward the budget; their own caps bound them (2 pre-join and 16 joined messages per
-  address, one record per identity, 16 open requests, the 64 kB body).
+  count toward the budget; their own caps bound them (2 pre-join messages per address and
+  writing identity, at most 5 open offers each; 16 joined messages per address; one record
+  per identity; 16 open requests per identity and 4 per posting key; the 64 kB body).
 - **A fresh database**: the store has never been deployed, and a store file from before the
   agent-record version ceiling, the `fork_signers` table and the key index's `keys.master` and
   `logs.next` columns is not upgraded: start such a store on an empty database. Records
