@@ -1119,7 +1119,7 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
     if change.verdict == KeyVerdict::Valid {
         return 0;
     }
-    let mut ended = end_revoked_bot(&change.key, change.verdict);
+    let mut ended = end_revoked_bot(&change.scid, &change.key, change.verdict);
     ended += match Grants::global().revoke_key(&did_of(&change.scid), &change.key) {
         Ok(ended) => {
             if ended > 0 {
@@ -1180,23 +1180,32 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
 
 /// Ends the sessions of the local bot whose key is `key` (a multikey) when its owner's log
 /// revoked the key (`verdict` [`KeyVerdict::Revoked`], or [`KeyVerdict::NotInLog`]: the log
-/// no longer lists it). A bot's token is not bound to its key (a bot's key never logs in), so
+/// no longer lists it). `scid` is the identity whose log gave the verdict: only the bot's
+/// owner speaks for its key. One key can sit in more than one log this executor reads, and a
+/// revocation in another identity's log says nothing about the key in the owner's, where it may
+/// still be valid. A bot's token is not bound to its key (a bot's key never logs in), so
 /// [`Grants::revoke_key`] does not reach it; the bot's agent does. An expired key ends
 /// nothing here: its owner may extend the scope, and each call and event checks the key
 /// anyway (`crate::bots::decide_key`). Returns how many active grants ended.
-fn end_revoked_bot(key: &str, verdict: KeyVerdict) -> usize {
+fn end_revoked_bot(scid: &str, key: &str, verdict: KeyVerdict) -> usize {
     if !matches!(verdict, KeyVerdict::Revoked | KeyVerdict::NotInLog) {
         return 0;
     }
     let did = format!("did:key:{key}");
-    if crate::bots::registered(&did).is_none() {
+    let Some(bot) = crate::bots::registered(&did) else {
+        return 0;
+    };
+    // Owners and verdicts both name the identity by its bare SCID; comparing the bare forms
+    // keeps a DID-form name on either side from reading as another identity.
+    if scid_from(&bot.owner) != scid_from(scid) {
         return 0;
     }
     match Grants::global().revoke_agent(&AgentContext::managed(did.clone())) {
         Ok(ended) => {
             if ended > 0 {
                 log::info!(
-                    "identity: ended {ended} session(s) of the bot {did}: its key is {verdict:?}"
+                    "identity: ended {ended} session(s) of the bot {did}: its key is {verdict:?} in {}",
+                    did_of(scid_from(scid))
                 );
             }
             ended
@@ -1315,7 +1324,7 @@ async fn recheck_bot_keys(service: &IdentityService, attempts: &RecheckAttempts)
                         .await;
                 }
             }
-            ended += end_revoked_bot(&key, found.verdict);
+            ended += end_revoked_bot(&bot.owner, &key, found.verdict);
         }
     })
     .await;
@@ -2576,6 +2585,67 @@ mod tests {
                 "the bot's session ended (re-check: {via_recheck})"
             );
         }
+        no_operator();
+    }
+
+    // One key can sit in more than one log this executor reads. A revocation in
+    // another identity's log leaves the bot's sessions alone (the key may still be valid in
+    // its owner's); only the owner's verdict ends them, whichever form names the owner.
+    #[tokio::test]
+    async fn only_the_owners_verdict_ends_a_bots_sessions() {
+        let world = world(198).await;
+        let key = world.bot.key().to_string();
+        let did = format!("did:key:{key}");
+        let owner = world.log.scid();
+        crate::bots::remember(crate::db::BotRow {
+            did: did.clone(),
+            username: "bot-198@bots.ad4m".into(),
+            name: "shared key".into(),
+            owner: owner.clone(),
+            offer_id: "offer".into(),
+            created_at: 1,
+            grant: crate::db::BotGrantRow {
+                spaces: vec![],
+                can: vec!["read".into()],
+                expires: None,
+                state: "active".into(),
+                version: 1,
+                updated_at: 1,
+            },
+        });
+        let (_, grant) = grants::mint(
+            AgentContext::managed(did.clone()),
+            crate::agent::capabilities::AuthInfo::default(),
+            None,
+            3600,
+        )
+        .unwrap();
+
+        // Another identity's log that lists the same key: its verdicts name its own SCID.
+        let foreign = format!("{owner}x");
+        for verdict in [KeyVerdict::Revoked, KeyVerdict::NotInLog] {
+            for scid in [foreign.clone(), did_of(&foreign)] {
+                let change = VerdictChange {
+                    key: key.clone(),
+                    scid,
+                    verdict,
+                };
+                assert_eq!(on_verdict_change(&change), 0, "{verdict:?}");
+                assert!(
+                    !grant.is_ended(),
+                    "another identity's {verdict:?} leaves the bot's session alive"
+                );
+            }
+        }
+
+        // The owner, named as a DID: the same identity, so its revocation ends the bot.
+        let change = VerdictChange {
+            key: key.clone(),
+            scid: did_of(&owner),
+            verdict: KeyVerdict::Revoked,
+        };
+        assert_eq!(on_verdict_change(&change), 1, "the owner's revocation");
+        assert!(grant.is_ended(), "the owner's revocation ends the bot");
         no_operator();
     }
 
