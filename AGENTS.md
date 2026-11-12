@@ -317,6 +317,36 @@ until the pair connects; `join` waits for the channel to listen before the
 session announces presence; the buffer for not-yet-listed peers never drops a
 description.
 
+### AI wind tunnel
+
+`pnpm run ai-wind-tunnel` (in `tests/js`) runs every cell of providers (Ollama,
+llama-server, vLLM, whisper-server, speaches) × services (llm, completion,
+embeddings, stt, tts) for real through a fresh executor, verifies each answer,
+measures it and writes `ai-wind-tunnel/evidence/<class>/<date>-<id>.json`;
+`pnpm run ai-wind-tunnel-recommend` derives `ai-wind-tunnel/recommendations.json`
+from all evidence. Not in any CI job (it needs real models); the unit tests
+(`pnpm run test-ai-wind-tunnel-unit`) are cheap. See `ai-wind-tunnel/README.md`.
+
+- Every measured call goes through the executor as an app's would: endpoints
+  and models registered with `ai.addEndpoint`/`ai.addModel` (Ollama models
+  pulled with `ai.pullModel`), requests over the SDK and `/v1`. Direct calls
+  to the provider only give the executor's overhead.
+- A cell is `pass`, `fail` (with the failed check), `unsupported` (the provider
+  cannot serve it: `ai-wind-tunnel/matrix.json`) or `skipped` (not available on
+  this machine). Never record timing without the checks.
+- Shared data the executor will read: the runtime/model manifest at
+  `rust-executor/src/ai_service/local/manifest.json`, the hardware-class rules
+  `ai-wind-tunnel/hardware-classes.json` with their fixtures
+  (`hardware-class-fixtures.json`, which a Rust classifier must pass too), and
+  `recommendations.json` (schema v1). Change their meaning only with a schema
+  version bump.
+- Recommendations cite evidence; a class without evidence has none. Never edit
+  `recommendations.json` by hand: add evidence and regenerate (a unit test
+  fails when it is stale).
+- The run binds free ports on 127.0.0.1 only, never the `AI_WT_RESERVED_PORTS`,
+  stops only processes it started and removes only `ai-wt-<run id>-*`
+  containers. ts-mocha needs Node 24 (it fails to load under Node 26).
+
 ### Port Conflicts
 
 Sometimes an old `ad4m-executor` binary is still running from a previous test run, causing port conflicts. Before running tests, kill any lingering processes:

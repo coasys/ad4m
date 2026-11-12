@@ -30,7 +30,7 @@
 import { expect } from "chai";
 import { Ad4mClient, LinkQuery, PerspectiveProxy } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
-import { startAgent } from "../../helpers/index.js";
+import { addOllamaLlm, startAgent } from "../../helpers/index.js";
 import { ExtBelief, ExtIntention } from "./interpretation-models.js";
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
@@ -127,11 +127,7 @@ describeIfLLM("perspective.runInterpretationWithHarness (WS + real LLM)", functi
     ad4m = agent.client;
     stop = agent.stop;
 
-    const modelId = await ad4m.ai.addModel({
-      name: "harness-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA", maxNumCtx: MAX_NUM_CTX },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addOllamaLlm(ad4m, "harness-llm", BASE_URL, MODEL, MAX_NUM_CTX);
     await ad4m.ai.setDefaultModel("LLM", modelId);
 
     p = await ad4m.perspective.add("run-interpretation-harness-test");
@@ -316,11 +312,7 @@ describeIfLLM("perspective.runInterpretationWithHarness — relation interpretat
     ad4m = agent.client;
     stop = agent.stop;
 
-    const modelId = await ad4m.ai.addModel({
-      name: "harness-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA", maxNumCtx: MAX_NUM_CTX },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addOllamaLlm(ad4m, "harness-llm", BASE_URL, MODEL, MAX_NUM_CTX);
     await ad4m.ai.setDefaultModel("LLM", modelId);
 
     p = await ad4m.perspective.add("run-interpretation-harness-relation-hints-test");
@@ -503,11 +495,7 @@ describeIfLLM("perspective.runInterpretationWithHarness — tool-call events", f
     ad4m = agent.client;
     stop = agent.stop;
 
-    const modelId = await ad4m.ai.addModel({
-      name: "harness-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA", maxNumCtx: MAX_NUM_CTX },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addOllamaLlm(ad4m, "harness-llm", BASE_URL, MODEL, MAX_NUM_CTX);
     await ad4m.ai.setDefaultModel("LLM", modelId);
 
     p = await ad4m.perspective.add("run-interpretation-harness-events-test");

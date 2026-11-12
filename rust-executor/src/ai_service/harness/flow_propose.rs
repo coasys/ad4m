@@ -175,8 +175,8 @@ where
 {
     async fn tools(&self) -> Vec<ToolSchema> {
         let mut out = self.inner.tools().await;
-        // One tool per distinct flow name (OpenAI + kalosm both reject
-        // duplicate function names), covering EVERY live instance of that
+        // One tool per distinct flow name (OpenAI rejects duplicate
+        // function names), covering EVERY live instance of that
         // flow: the schema's `instance` enum lists all of them, so a
         // schema-obedient model can attribute any instance, not just the
         // first one seen. Groups preserve first-seen flow order.
