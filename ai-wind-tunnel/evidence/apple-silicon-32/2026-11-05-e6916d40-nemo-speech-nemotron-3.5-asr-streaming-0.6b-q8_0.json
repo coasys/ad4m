@@ -1,0 +1,354 @@
+{
+  "schemaVersion": 1,
+  "runId": "7ae2d816",
+  "startedAt": "2026-11-05T03:08:47.770Z",
+  "finishedAt": "2026-11-05T03:14:03.853Z",
+  "hardwareClass": "apple-silicon-32",
+  "fingerprint": {
+    "os": "macos",
+    "osVersion": "macOS 15.7.2",
+    "kernel": "24.6.0",
+    "arch": "arm64",
+    "cpu": {
+      "model": "Apple M4 Pro",
+      "cores": 14,
+      "threads": 14
+    },
+    "memoryBytes": 51539607552,
+    "gpus": [
+      {
+        "vendor": "apple",
+        "name": "Apple M4 Pro",
+        "vramBytes": 0,
+        "unified": true
+      }
+    ],
+    "backends": [
+      "cpu",
+      "metal"
+    ],
+    "gpuBudgetBytes": 38654705664,
+    "drivers": {},
+    "id": "e6916d40"
+  },
+  "executor": {
+    "commit": "unknown",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "b498751fbed495c305aa1e53024f63e1283f2cfe"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "nemo-speech"
+    ],
+    "services": [
+      "llm",
+      "completion",
+      "embeddings",
+      "stt",
+      "tts"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "nemo-speech": {
+      "status": "available",
+      "builds": [
+        "macos-arm64-metal",
+        "macos-arm64-cpu"
+      ],
+      "mode": "spawned",
+      "version": "0.3.0"
+    }
+  },
+  "cells": [
+    {
+      "provider": "nemo-speech",
+      "service": "llm",
+      "status": "unsupported",
+      "reason": "nemo-speech serves speech models only (ASR, TTS, diarization, translation)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "nemo-speech",
+      "service": "completion",
+      "status": "unsupported",
+      "reason": "nemo-speech serves speech models only (ASR, TTS, diarization, translation)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "nemo-speech",
+      "service": "embeddings",
+      "status": "unsupported",
+      "reason": "nemo-speech serves speech models only (ASR, TTS, diarization, translation)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "nemo-speech",
+      "service": "stt",
+      "status": "fail",
+      "reason": "transcribes recording (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms; transcribes meeting (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms; transcribes weather (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms; transcribes weather-noisy (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms",
+      "model": {
+        "modelId": "nemotron-3.5-asr-streaming-0.6b-q8_0",
+        "remoteModel": "nemotron-3.5-asr-streaming-0.6b-q8_0",
+        "sizeBytes": 742090464,
+        "memoryBytes": 800000000,
+        "license": "OpenMDW-1.1",
+        "params": "0.6B",
+        "source": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b/resolve/ea30d66debe3740a08b573244286791d423d6b3e/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
+      },
+      "runtimeBuild": "macos-arm64-metal",
+      "backend": "metal",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--device",
+        "metal",
+        "--no-ui"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.357: \"The pool happens like rain in the morning, clear into sunshine by the evening.\"",
+          "value": 0.357,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 134,
+        "noisyLanguage": "en-US",
+        "noisyNoHintWer": 0.357,
+        "noisyNoHintText": "The pool happens like rain in the morning, clear into sunshine by the evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.304,
+          "min": 0,
+          "max": 0.357,
+          "mean": 0.089
+        },
+        "werMean": 0.089,
+        "streamWerMean": null,
+        "rtf": {
+          "n": 12,
+          "median": 0.017,
+          "p95": 0.026,
+          "min": 0.013,
+          "max": 0.026,
+          "mean": 0.018
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 78.064,
+          "p95": 124.9,
+          "min": 64.196,
+          "max": 144.1,
+          "mean": 85.408
+        },
+        "streamLatencyMs": null,
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 72.374,
+          "p95": 83.636,
+          "min": 64.405,
+          "max": 84.782,
+          "mean": 73.326
+        },
+        "executorOverheadMs": 5.7,
+        "peakRssBytes": 577126400,
+        "peakGpuBytes": null,
+        "serverReadyMs": 6575,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 800000000,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 181418
+    },
+    {
+      "provider": "nemo-speech",
+      "service": "stt",
+      "status": "fail",
+      "reason": "transcribes recording (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms; transcribes meeting (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms; transcribes weather (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms; transcribes weather-noisy (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms",
+      "model": {
+        "modelId": "nemotron-3.5-asr-streaming-0.6b-q8_0",
+        "remoteModel": "nemotron-3.5-asr-streaming-0.6b-q8_0",
+        "sizeBytes": 742090464,
+        "memoryBytes": 800000000,
+        "license": "OpenMDW-1.1",
+        "params": "0.6B",
+        "source": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b/resolve/ea30d66debe3740a08b573244286791d423d6b3e/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
+      },
+      "runtimeBuild": "macos-arm64-cpu",
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--device",
+        "cpu",
+        "--no-ui"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.357: \"The pool happens of light rain in the morning, clear into sunshine by the evening.\"",
+          "value": 0.357,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 197,
+        "noisyLanguage": "en-US",
+        "noisyNoHintWer": 0.357,
+        "noisyNoHintText": "The pool happens of light rain in the morning, clear into sunshine by the evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.304,
+          "min": 0,
+          "max": 0.357,
+          "mean": 0.089
+        },
+        "werMean": 0.089,
+        "streamWerMean": null,
+        "rtf": {
+          "n": 12,
+          "median": 0.04,
+          "p95": 0.046,
+          "min": 0.032,
+          "max": 0.05,
+          "mean": 0.04
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 173.4,
+          "p95": 225.1,
+          "min": 157.3,
+          "max": 242.2,
+          "mean": 186.5
+        },
+        "streamLatencyMs": null,
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 173.8,
+          "p95": 202.3,
+          "min": 149.2,
+          "max": 205.2,
+          "mean": 175.2
+        },
+        "executorOverheadMs": -0.4,
+        "peakRssBytes": 1214922752,
+        "peakGpuBytes": null,
+        "serverReadyMs": 1012,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 800000000,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 126366
+    }
+  ]
+}

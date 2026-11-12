@@ -1,5 +1,5 @@
 import { ApiClient, LONG_TIMEOUT_MS, RpcError } from "./apiClient"
-import { AIClient } from "./ai/AIClient"
+import { AIClient, LOCAL_INSTALL_TIMEOUT_MS } from "./ai/AIClient"
 import { AgentClient } from "./agent/AgentClient"
 import { LanguageClient } from "./language/LanguageClient"
 import { NeighbourhoodClient } from "./neighbourhood/NeighbourhoodClient"
@@ -1286,7 +1286,8 @@ describe('long calls', () => {
     const calls: [string, (o?: object) => Promise<unknown>][] = [
         ['ai.prompt', (o) => new AIClient(url, undefined, client).prompt('t', 'p', o)],
         ['ai.embed', (o) => new AIClient(url, undefined, client).embed('m', 'x', o)],
-        ['ai.addModel', (o) => new AIClient(url, undefined, client).addModel({ name: 'm', modelType: 'LLM' } as any, o)],
+        ['ai.pullModel', (o) => new AIClient(url, undefined, client).pullModel('e', 'm', o)],
+        ['ai.localStart', (o) => new AIClient(url, undefined, client).localStart(o)],
         ['agent.generate', (o) => new AgentClient(url, undefined, client).generate('pw', o)],
         ['agent.unlock', (o) => new AgentClient(url, undefined, client).unlock('pw', true, o)],
         ['language.publish', (o) => new LanguageClient(url, undefined, client).publish('/p', { name: 'l' } as any, o)],
@@ -1325,6 +1326,19 @@ describe('long calls', () => {
             expect(timedOut()).toMatchObject({ status: 408 })
         })
     })
+
+    it('ai.localInstall waits LOCAL_INSTALL_TIMEOUT_MS, longer than a long call', async () => {
+        const outcome = outcomeOf(new AIClient(url, undefined, client).localInstall())
+        await jest.advanceTimersByTimeAsync(1)
+        expect(lastSent().type).toBe('ai.localInstall')
+        await jest.advanceTimersByTimeAsync(LONG_TIMEOUT_MS + 1000)
+        expect(outcome()).toBe('pending')
+        // The deadline itself: pending a millisecond before it, rejected just after.
+        await jest.advanceTimersByTimeAsync(LOCAL_INSTALL_TIMEOUT_MS - LONG_TIMEOUT_MS - 1002)
+        expect(outcome()).toBe('pending')
+        await jest.advanceTimersByTimeAsync(2)
+        expect(outcome()).toMatchObject({ name: 'RpcError', status: 408 })
+    })
 })
 
 /** A `link-added` event exactly as the executor sends it. */
@@ -1344,6 +1358,29 @@ function linkAdded(perspectiveUuid: string, target = 'literal://x') {
 
 /** An `agent-updated` event exactly as the executor sends it. */
 const agentUpdated = { type: 'agent-updated', agent: { did: 'did:test:alice', directMessageLanguage: null, perspective: null } }
+
+describe('ApiClient socket errors', () => {
+    // Node's WebSocket fires `error` (then a 1006 close) when the server ends the connection
+    // without answering the client's close frame, as the executor does.
+    it('says nothing of a socket it closed itself, and logs an error of the open one', async () => {
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+            const off = client.on('agent-updated', () => {})
+            await flush()
+            const first = socket(0)
+            off() // the last handler: the client closes the socket
+            first.onerror?.({ type: 'error' })
+            expect(errorSpy).not.toHaveBeenCalled()
+
+            open()
+            await flush()
+            socket(1).onerror?.({ type: 'error' })
+            expect(errorSpy).toHaveBeenCalledWith('WebSocket error:', { type: 'error' })
+        } finally {
+            errorSpy.mockRestore()
+        }
+    })
+})
 
 describe('ApiClient.on', () => {
     it('delivers an event, as sent, to the handlers of its type only', async () => {

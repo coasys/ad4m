@@ -83,6 +83,7 @@ export class ImportResult {
     expressions: ImportStats;
     perspectiveDiffs: ImportStats;
     notifications: ImportStats;
+    aiEndpoints: ImportStats;
     models: ImportStats;
     defaultModels: ImportStats;
     tasks: ImportStats;
