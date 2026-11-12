@@ -28,8 +28,16 @@ export interface Inbound {
   /** The payload types this page's connection receives that participant's media on, from the `codec` stats. */
   audioPt: number | null;
   videoPt: number | null;
-  /** The loudest decoded sample of the participant's audio in the last three seconds (Web Audio analyser), 0..1. */
+  /**
+   * How loud the participant's decoded audio is, 0..1. With `audioMeter`
+   * "web-audio": the loudest sample a Web Audio analyser read in the last
+   * three seconds. With "rtp-stats": the receiver's `inbound-rtp` `audioLevel`
+   * (the decoder's recent peak), used where the page's AudioContext does not
+   * run: Firefox keeps it `suspended` on a host with no audio output (no
+   * PulseAudio/PipeWire), so its graph reads silence though audio decodes.
+   */
   audioPeak: number;
+  audioMeter: "web-audio" | "rtp-stats";
   /** Mean luminance (0..255) of the participant's video as drawn on a canvas, or null where it cannot be drawn. */
   luma: number | null;
 }
@@ -175,8 +183,9 @@ export function installCallHarness(): void {
       const tracks = new Set(participant.stream.getTracks().map((t: MediaStreamTrack) => t.id));
       const counts: Inbound = {
         audioPackets: 0, videoPackets: 0, framesDecoded: 0, frameWidth: 0,
-        audioPt: null, videoPt: null, audioPeak: 0, luma: luma(participant.agentDid),
+        audioPt: null, videoPt: null, audioPeak: 0, audioMeter: "web-audio", luma: luma(participant.agentDid),
       };
+      let decodedLevel = 0;
       for (const pc of live) {
         for (const receiver of pc.getReceivers()) {
           if (!tracks.has(receiver.track.id)) continue;
@@ -187,6 +196,7 @@ export function installCallHarness(): void {
             if (s.kind === "audio") {
               counts.audioPackets += s.packetsReceived ?? 0;
               counts.audioPt ??= pt;
+              decodedLevel = Math.max(decodedLevel, s.audioLevel ?? 0);
             } else if (s.kind === "video") {
               counts.videoPackets += s.packetsReceived ?? 0;
               counts.framesDecoded += s.framesDecoded ?? 0;
@@ -200,6 +210,11 @@ export function installCallHarness(): void {
         for (const { at, value } of meters.get(track.id)?.peaks ?? []) {
           if (at >= now - 3_000) counts.audioPeak = Math.max(counts.audioPeak, value);
         }
+      }
+      // No audio output, no Web Audio: measure what the decoder produced instead.
+      if (audio && audio.state !== "running") {
+        counts.audioPeak = decodedLevel;
+        counts.audioMeter = "rtp-stats";
       }
       inbound[participant.agentDid] = counts;
     }
