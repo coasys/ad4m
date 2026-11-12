@@ -377,6 +377,10 @@ pub(crate) async fn converse(
             // carry a tool result home; one bigger than the window must not
             // push the request over it.
             tool_result_max_bytes: crate::ai_service::AIService::tool_result_max_bytes(model_id),
+            // A silent completion goes back as it came — the nudge's
+            // "the person is still waiting" is a session's framing, not
+            // runAgent's, and it would cost a billed completion either way.
+            empty_completion_nudges: 0,
         },
         None,
         gate,

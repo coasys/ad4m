@@ -60,12 +60,6 @@ fn truncate_for_event(text: &str) -> String {
 /// `500 no user query found in messages`).
 pub const DEFAULT_TOOL_RESULT_MAX_BYTES: usize = 24 * 1024;
 
-/// How often `run_with_tools` re-asks the model after a completion that
-/// came back with no text and no tool calls. A silent model is nudged, not
-/// trusted: a thinking model's reply that never left its thinking channel
-/// reads exactly like a stall, and the nudge tells the two apart.
-const EMPTY_COMPLETION_NUDGES: usize = 2;
-
 /// The reply an empty completion gets: the model ended its turn without
 /// answering, and the person is still waiting.
 const EMPTY_COMPLETION_NUDGE: &str = "Your last answer was empty — the person is still \
@@ -471,6 +465,17 @@ pub struct HarnessConfig {
     /// from the model's context window (`AIService::tool_result_max_bytes`);
     /// the default covers callers with no model context at hand.
     pub tool_result_max_bytes: usize,
+    /// How often the loop re-asks the model after a completion that came
+    /// back with no text and no tool calls, the wind-down completion
+    /// included (one extra completion each). A silent model is nudged, not
+    /// trusted: a thinking model's reply that never left its thinking
+    /// channel reads exactly like a stall, and the nudge tells the two
+    /// apart. AI sessions ask for their reply back — the text is the
+    /// answer. Callers that discard the final text keep 0: interpretation's
+    /// normal finish is a model that made its `propose_*` calls and went
+    /// quiet, and `runAgent` answers as the model left it — each nudge is a
+    /// billed completion whose text nobody reads.
+    pub empty_completion_nudges: u32,
 }
 
 impl Default for HarnessConfig {
@@ -478,6 +483,7 @@ impl Default for HarnessConfig {
         Self {
             max_tool_calls: 20,
             tool_result_max_bytes: DEFAULT_TOOL_RESULT_MAX_BYTES,
+            empty_completion_nudges: 0,
         }
     }
 }
@@ -539,7 +545,7 @@ pub async fn run_with_tools(
     // Asking for the answer again costs one completion; a model still
     // silent after the nudges ran out really has nothing to say, and its
     // empty reply is returned as it came.
-    let mut empty_nudges: usize = 0;
+    let mut empty_nudges: u32 = 0;
 
     while calls_used < config.max_tool_calls as usize {
         round += 1;
@@ -592,12 +598,13 @@ pub async fn run_with_tools(
         // spoke — so nudge it rather than recording an empty reply, but
         // only so often: `empty_nudges` bounds it across the whole loop.
         if completion.tool_calls.is_empty() && completion.content.trim().is_empty() {
-            if empty_nudges < EMPTY_COMPLETION_NUDGES {
+            if empty_nudges < config.empty_completion_nudges {
                 empty_nudges += 1;
                 log::warn!(
                     "harness: round={round}: the completion came back empty \
                      (no text, no tool calls) — asking for the answer \
-                     (nudge {empty_nudges}/{EMPTY_COMPLETION_NUDGES})"
+                     (nudge {empty_nudges}/{max})",
+                    max = config.empty_completion_nudges,
                 );
                 messages.push(json!({
                     "role": "system",
@@ -606,8 +613,8 @@ pub async fn run_with_tools(
                 continue;
             }
             log::warn!(
-                "harness: the model stayed silent through \
-                 {EMPTY_COMPLETION_NUDGES} nudges; returning its empty reply"
+                "harness: the model stayed silent ({empty_nudges} nudges \
+                 spent); returning its empty reply"
             );
             return Ok(completion.content);
         }
@@ -774,11 +781,14 @@ pub async fn run_with_tools(
         .await?;
     // The wind-down answer can come back empty the same way a round's
     // completion can — give it the same nudges before returning silence.
-    while final_completion.content.trim().is_empty() && empty_nudges < EMPTY_COMPLETION_NUDGES {
+    while final_completion.content.trim().is_empty()
+        && empty_nudges < config.empty_completion_nudges
+    {
         empty_nudges += 1;
         log::warn!(
             "harness: the wind-down completion came back empty — asking for \
-             the answer (nudge {empty_nudges}/{EMPTY_COMPLETION_NUDGES})"
+             the answer (nudge {empty_nudges}/{max})",
+            max = config.empty_completion_nudges,
         );
         messages.push(json!({
             "role": "system",
@@ -1978,6 +1988,31 @@ mod tests {
     // ── an empty completion is a stall, not an answer ─────────────────────
 
     #[tokio::test]
+    async fn a_silent_completion_returns_at_once_when_nudges_are_off() {
+        // Callers that discard the final text (interpretation, runAgent)
+        // run with no nudges: the empty reply goes back as it came and
+        // exactly one completion is spent.
+        let script = vec![plain_answer("")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider { tools: vec![] });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("hi")],
+            provider,
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "");
+        assert_eq!(llm.call_count(), 1, "no nudges: one completion spent");
+    }
+
+    #[tokio::test]
     async fn an_empty_completion_is_asked_again_not_recorded() {
         // A completion with no text and no tool calls is the model ending
         // its turn without answering — nudge it rather than return "".
@@ -1990,7 +2025,10 @@ mod tests {
             vec![user_message("hi")],
             provider,
             llm.clone(),
-            HarnessConfig::default(),
+            HarnessConfig {
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
             None,
             None,
         )
@@ -2008,7 +2046,7 @@ mod tests {
     #[tokio::test]
     async fn a_model_silent_through_every_nudge_returns_its_empty_reply() {
         // Nudges ran out — the empty reply goes back as it came, the caller
-        // decides what silence means. Bound: EMPTY_COMPLETION_NUDGES (2)
+        // decides what silence means. Bound: `empty_completion_nudges` (2)
         // extra completions on top of the first, no more.
         let script = vec![plain_answer(""), plain_answer(""), plain_answer("")];
         let llm = Arc::new(ScriptedLLM::new(script));
@@ -2019,7 +2057,10 @@ mod tests {
             vec![user_message("hi")],
             provider,
             llm.clone(),
-            HarnessConfig::default(),
+            HarnessConfig {
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
             None,
             None,
         )
@@ -2052,6 +2093,7 @@ mod tests {
             llm.clone(),
             HarnessConfig {
                 max_tool_calls: 2,
+                empty_completion_nudges: 2,
                 ..HarnessConfig::default()
             },
             None,

@@ -949,7 +949,7 @@ async fn an_empty_answer_is_asked_again_and_the_next_one_lands() {
 async fn a_turn_the_model_ends_silent_is_failed_not_done_and_empty() {
     setup();
     let (alice, session) = alice("silent");
-    // Silent through the nudges too (EMPTY_COMPLETION_NUDGES = 2): what was
+    // Silent through the nudges too (empty_completion_nudges = 2): what was
     // a `done` row with blank text is now the stumble it is.
     let (_, reply) = sent_reply(
         &alice,

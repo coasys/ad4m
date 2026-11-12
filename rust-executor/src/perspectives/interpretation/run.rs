@@ -1235,6 +1235,10 @@ pub async fn run_interpretation_with_harness_and_model(
             tool_result_max_bytes: crate::ai_service::AIService::tool_result_max_bytes(
                 &task.model_id,
             ),
+            // The pass's final text is discarded — a model that made its
+            // propose_* calls and went quiet is a normal finish, and each
+            // nudge would cost a billed completion nobody reads.
+            empty_completion_nudges: 0,
         },
         emit_ctx.map(|ctx| ctx as &dyn crate::ai_service::harness::ToolObserver),
         credit_gate,

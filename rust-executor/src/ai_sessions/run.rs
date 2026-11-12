@@ -373,6 +373,10 @@ pub(crate) async fn run_turn(
         completions,
         HarnessConfig {
             tool_result_max_bytes,
+            // A session's reply is the text itself: a silent completion is
+            // a stall (a thinking model that never left its channel), so the
+            // loop nudges the model for the answer before failing the turn.
+            empty_completion_nudges: 2,
             ..HarnessConfig::default()
         },
         Some(&observer),
