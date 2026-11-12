@@ -5,6 +5,8 @@ import type { DeviceView } from "../generated/api/DeviceView";
 import type { DidResolutionResult } from "../generated/api/DidResolutionResult";
 import type { IdentityLog } from "../generated/api/IdentityLog";
 import type { IdentityStatus } from "../generated/api/IdentityStatus";
+import type { JoinAccepted } from "../generated/api/JoinAccepted";
+import type { JoinCancelled } from "../generated/api/JoinCancelled";
 import type { JoinStatus } from "../generated/api/JoinStatus";
 import type { KeyOwner } from "../generated/api/KeyOwner";
 import type { OfferListing } from "../generated/api/OfferListing";
@@ -118,8 +120,32 @@ export class IdentityClient {
         return this.#apiClient.call("identity.claimOffer", { offer, hint, canKeepMaster });
     }
 
+    /**
+     * The state of this executor's claim on `offerId`; on `spent` the main agent has joined the
+     * identity. `awaiting-accept` while a claim with `needsAccept` waits for `acceptJoin`
+     * (nothing is bound, even once the holder confirmed); `cancelled` after `cancelJoin`.
+     */
     async joinStatus(offerId: string): Promise<JoinStatus> {
         return this.#apiClient.call("identity.joinStatus", { offerId });
+    }
+
+    /**
+     * Accepts a claim with `needsAccept` (a desktop's first link, which makes the identity
+     * this executor's operator): the next `joinStatus` that reads `spent` joins. Before or
+     * after the holder confirms; again is a no-op. 404 when no claim on `offerId` awaits
+     * accept, 409 `cancelled` once cancelled. The operator on this machine only.
+     */
+    async acceptJoin(offerId: string): Promise<JoinAccepted> {
+        return this.#apiClient.call("identity.acceptJoin", { offerId });
+    }
+
+    /**
+     * Cancels this executor's claim on `offerId` (any claim): it never joins, even if the
+     * holder confirms it later. Again is a no-op. 404 for no claim, 409 `already-joined` once
+     * the main agent joined through it. The operator on this machine only.
+     */
+    async cancelJoin(offerId: string): Promise<JoinCancelled> {
+        return this.#apiClient.call("identity.cancelJoin", { offerId });
     }
 
     /**

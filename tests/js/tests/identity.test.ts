@@ -633,11 +633,12 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
     });
 
     it("links a desktop through its device string: its claim, then link-ticket with the match code", async () => {
+        // A desktop app's first run: the custody channel and no operator record, so the
+        // identity its first claim joins becomes its operator, once accepted on this computer.
         desk = await start("inbox-desktop", {
             credential: CREDENTIAL,
             env: { AD4M_CUSTODY_CHANNEL: "true" },
             custodyCredential: CUSTODY,
-            initArgs: ["--operator", did],
         });
         const tickets: any[] = [];
         desk.client.on("link-ticket", (event) => tickets.push(event));
@@ -654,6 +655,9 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         await pollUntil(() => tickets.length > 0, { timeoutMs: 30_000, intervalMs: 200, label: "link-ticket event" });
         expect(tickets[0].did).to.equal(did);
         expect(tickets[0].offerId).to.equal(pushed.offerId);
+        // No operator record yet: this claim would make the identity the operator, so it
+        // binds only once the person on this computer accepts it.
+        expect(tickets[0].needsAccept).to.equal(true);
 
         const claimed = await holder.send({ cmd: "waitClaim" });
         expect(claimed.matchCode).to.equal(tickets[0].matchCode);
@@ -663,6 +667,14 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         const confirmed = await holder.send({ cmd: "confirm", name: "Desk", kind: "desktop-app" });
         // Creating the identity wrote record version 1; the link writes version 2.
         expect(confirmed).to.deep.equal({ seq: 1, keyId: "d2", master: null, record: 2 });
+
+        // Confirmed but not accepted: nothing is bound.
+        await pollUntil(
+            async () => (await desk.client.identity.joinStatus(pushed.offerId)).state === "awaiting-accept",
+            { timeoutMs: 30_000, intervalMs: 500, label: "the confirmed claim held for accept" },
+        );
+        expect((await desk.client.identity.status()).did).to.not.equal(did);
+        expect(await desk.client.identity.acceptJoin(pushed.offerId)).to.deep.equal({ accepted: true });
 
         await pollUntil(
             async () => (await desk.client.identity.joinStatus(pushed.offerId)).state === "spent",
