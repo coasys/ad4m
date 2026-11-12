@@ -312,7 +312,8 @@ cmd_llm_check() {
     if ! models="$(curl -sf --max-time 15 "$LLM_BASE_URL/models")"; then
         die "the model server at $LLM_BASE_URL does not answer (GET /models). On the runner: systemctl status ollama"
     fi
-    if ! jq -e --arg m "$LLM_MODEL" '[.data[]?.id] | index($m)' >/dev/null <<<"$models"; then
+    # Ollama lists a model with its tag; a name without one means `:latest`.
+    if ! jq -e --arg m "$LLM_MODEL" '[.data[]?.id] | (index($m) // (if ($m | contains(":")) then null else index($m + ":latest") end))' >/dev/null <<<"$models"; then
         die "the model server at $LLM_BASE_URL has no model '$LLM_MODEL' (it has: $(jq -r '[.data[]?.id] | join(", ")' <<<"$models")). On the runner: ollama pull $LLM_MODEL"
     fi
     log "$LLM_BASE_URL serves $LLM_MODEL"

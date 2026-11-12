@@ -251,6 +251,14 @@ serve_models() {
 test_llm_check() {
     serve_models "llama3:8b" "gemma3:12b"
     COASYS_SPACES_LLM_MODEL=gemma3:12b bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "llm-check failed with the model served"
+    kill "$SERVER"
+    wait "$SERVER" 2>/dev/null
+    # Ollama lists a model with its tag: a name without one is its `:latest`, and only that.
+    serve_models "qwen3.8-27b-48k:latest" "gemma3:12b"
+    COASYS_SPACES_LLM_MODEL=qwen3.8-27b-48k bash "$SCRIPT" llm-check >/dev/null 2>&1 ||
+        fail "llm-check did not take qwen3.8-27b-48k:latest for qwen3.8-27b-48k"
+    COASYS_SPACES_LLM_MODEL=gemma3 bash "$SCRIPT" llm-check >/dev/null 2>&1 &&
+        fail "llm-check took gemma3:12b for gemma3 (gemma3:latest)"
     out="$(COASYS_SPACES_LLM_MODEL=gemma3:27b bash "$SCRIPT" llm-check 2>&1)" && fail "llm-check passed without the model"
     grep -qF "ollama pull gemma3:27b" <<<"$out" || fail "a missing model does not say what to pull: $out"
     kill "$SERVER"
