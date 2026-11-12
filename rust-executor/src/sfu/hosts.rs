@@ -227,9 +227,13 @@ impl MediaSockets {
         let socket = bind_lan(ip, lan.port, lan.fixed)?;
         let addr = socket.local_addr()?;
         sockets.push((addr, Arc::new(socket)));
-        // Never the loopback socket, the first.
+        // Never the loopback socket (the first), nor the primary: a public
+        // mapping learned at startup forwards to it.
         if sockets.len() > MAX_LAN_SOCKETS + 1 {
-            let (gone, _) = sockets.remove(1);
+            let oldest = (1..sockets.len())
+                .find(|&i| sockets[i].0 != self.inner.primary)
+                .expect("more LAN sockets than the primary");
+            let (gone, _) = sockets.remove(oldest);
             info!(
                 "SFU media: closing the socket on {}, the oldest network",
                 gone
@@ -442,6 +446,36 @@ mod tests {
         let version = sockets.version();
         assert_eq!(sockets.host_addrs(), first, "back home: the same socket");
         assert_eq!(sockets.version(), version);
+    }
+
+    /// Many networks later, the oldest LAN sockets close, but never the one
+    /// bound at startup: a public mapping learned there forwards to it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_startup_socket_outlives_the_networks_after_it() {
+        let lan = Arc::new(AtomicU8::new(2));
+        let sockets = MediaSockets::bind_with(lan_default(), lan_from(Arc::clone(&lan)))
+            .await
+            .unwrap();
+        let primary = sockets.primary();
+        assert_eq!(primary.ip(), ip("127.0.0.2"));
+        for n in 10..20 {
+            lan.store(n, Ordering::SeqCst);
+            sockets.host_addrs();
+        }
+        let bound = sockets.bound_addrs();
+        assert_eq!(bound.len(), MAX_LAN_SOCKETS + 1, "{bound:?}");
+        assert!(bound.contains(&primary), "{bound:?}");
+        assert!(sockets.socket(primary).is_some());
+        assert_eq!(
+            bound.last().unwrap().ip(),
+            ip("127.0.0.19"),
+            "the newest is kept"
+        );
+        assert!(
+            !bound.iter().any(|a| a.ip() == ip("127.0.0.10")),
+            "the oldest after the primary went: {bound:?}"
+        );
     }
 
     /// Offline at start, online later: the first call after binds the LAN.

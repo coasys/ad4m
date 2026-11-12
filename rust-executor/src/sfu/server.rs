@@ -698,29 +698,31 @@ impl SfuServer {
     ///
     /// The answer offers every address in `hosts` (a bound socket each, from
     /// [`MediaSockets::host_addrs`]) as a host candidate and, behind NAT,
-    /// `advertised` as a server-reflexive one whose base is the first
-    /// non-loopback host (the LAN socket the router forwards to). A caller's
-    /// packets to the advertised address arrive addressed to that socket, so
-    /// str0m matches them to its host candidate.
+    /// `advertised` = `(public, base)` as a server-reflexive one. `base` is
+    /// the socket the public mapping was learned on (the router forwards to
+    /// it, [`MediaSockets::primary`]); it is offered as a host too, even after
+    /// the LAN address moved on, since a caller's packets to the public
+    /// address arrive addressed to it and str0m matches them to its host
+    /// candidate.
     pub fn create_rtc_for_offer(
         offer: SdpOffer,
         hosts: &[SocketAddr],
-        advertised: Option<SocketAddr>,
+        advertised: Option<(SocketAddr, SocketAddr)>,
     ) -> Result<(Rtc, String), String> {
         let mut rtc = Rtc::builder().build(Instant::now());
 
-        for host in hosts {
+        if hosts.is_empty() {
+            return Err("The SFU has no address to offer".to_string());
+        }
+        let base = advertised.map(|(_, base)| base);
+        let extra = base.filter(|base| !hosts.contains(base));
+        for host in hosts.iter().chain(extra.iter()) {
             let candidate = Candidate::host(*host, "udp")
                 .map_err(|e| format!("Failed to create host candidate: {}", e))?;
             rtc.add_local_candidate(candidate);
         }
-        let base = hosts
-            .iter()
-            .find(|h| !h.ip().is_loopback())
-            .or(hosts.first())
-            .ok_or("The SFU has no address to offer")?;
-        if let Some(public) = advertised {
-            let candidate = Candidate::server_reflexive(public, *base, "udp")
+        if let Some((public, base)) = advertised {
+            let candidate = Candidate::server_reflexive(public, base, "udp")
                 .map_err(|e| format!("Failed to create server-reflexive candidate: {}", e))?;
             rtc.add_local_candidate(candidate);
         }
@@ -2073,7 +2075,8 @@ mod tests {
         let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
         let public: SocketAddr = "198.51.100.7:40000".parse().unwrap();
         let (_, answer) =
-            SfuServer::create_rtc_for_offer(caller_offer(), &[local], Some(public)).unwrap();
+            SfuServer::create_rtc_for_offer(caller_offer(), &[local], Some((public, local)))
+                .unwrap();
         let lines = candidates(&answer);
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(
@@ -2188,7 +2191,7 @@ mod tests {
         let cid = change.add_channel("sfu-data".into());
         let (offer, pending) = change.apply().unwrap();
         let (mut sfu, answer) =
-            SfuServer::create_rtc_for_offer(offer, &[bind], Some(public)).unwrap();
+            SfuServer::create_rtc_for_offer(offer, &[bind], Some((public, bind))).unwrap();
         let answer: str0m::change::SdpAnswer = serde_json::from_str(&answer).unwrap();
         caller.sdp_api().accept_answer(pending, answer).unwrap();
 
@@ -2274,6 +2277,82 @@ mod tests {
             caller_seen.data.last().is_some_and(|t| *t >= recent),
             "the caller stopped receiving at {:?}",
             caller_seen.data.last()
+        );
+    }
+
+    /// The LAN address moved on after startup, but the router still forwards
+    /// the public address to the startup socket (a second interface took the
+    /// default route). The answer's srflx candidate keeps the startup socket
+    /// as its base, and offers it as a host, so a caller that reaches the
+    /// SFU only through the forward connects.
+    #[test]
+    fn a_caller_through_the_forward_connects_after_the_lan_moved_on() {
+        let startup: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let moved: SocketAddr = "10.0.0.5:40000".parse().unwrap();
+        let public: SocketAddr = "198.51.100.7:40000".parse().unwrap();
+        let caller_addr: SocketAddr = "203.0.113.20:50000".parse().unwrap();
+
+        let mut caller = Rtc::builder().build(Instant::now());
+        caller.add_local_candidate(Candidate::host(caller_addr, "udp").unwrap());
+        let mut change = caller.sdp_api();
+        let cid = change.add_channel("sfu-data".into());
+        let (offer, pending) = change.apply().unwrap();
+        let (mut sfu, answer) =
+            SfuServer::create_rtc_for_offer(offer, &[loopback, moved], Some((public, startup)))
+                .unwrap();
+        assert!(
+            candidates(&answer)
+                .iter()
+                .any(|l| l.contains("192.168.0.10 40000 typ host")),
+            "the startup socket is offered: {:?}",
+            candidates(&answer)
+        );
+        let answer: str0m::change::SdpAnswer = serde_json::from_str(&answer).unwrap();
+        caller.sdp_api().accept_answer(pending, answer).unwrap();
+
+        let start = Instant::now();
+        let mut now = start;
+        let (mut caller_seen, mut sfu_seen) = (Seen::default(), Seen::default());
+        let mut next_write = Duration::ZERO;
+        while now - start < Duration::from_secs(10) {
+            let mut sent = Vec::new();
+            let caller_next = drive(&mut caller, now, start, &mut caller_seen, &mut sent);
+            for (_, destination, data) in sent.drain(..) {
+                // Only the forward reaches the SFU, at the startup socket.
+                if destination == public {
+                    receive(&mut sfu, now, caller_addr, startup, &data);
+                }
+            }
+            let sfu_next = drive(&mut sfu, now, start, &mut sfu_seen, &mut sent);
+            for (source, destination, data) in sent.drain(..) {
+                if source == startup && destination == caller_addr {
+                    receive(&mut caller, now, public, caller_addr, &data);
+                }
+            }
+            if now - start >= next_write {
+                if let Some(mut ch) = caller.channel(cid) {
+                    ch.write(true, b"caller").unwrap();
+                }
+                next_write += Duration::from_millis(500);
+            }
+            let next = caller_next.min(sfu_next).min(start + next_write);
+            now = next.clamp(
+                now + Duration::from_millis(1),
+                now + Duration::from_millis(50),
+            );
+        }
+        assert!(
+            sfu_seen.ice.iter().any(|(_, s)| matches!(
+                s,
+                IceConnectionState::Connected | IceConnectionState::Completed
+            )),
+            "the SFU never connected through the forward: {:?}",
+            sfu_seen.ice
+        );
+        assert!(
+            !sfu_seen.data.is_empty(),
+            "the SFU received no data through the forward"
         );
     }
 

@@ -1172,7 +1172,9 @@ impl SfuService {
         let (rtc, sdp_answer) = SfuServer::create_rtc_for_offer(
             offer,
             &self.server.sockets.host_addrs(),
-            self.server.advertised.map(|a| a.addr),
+            self.server
+                .advertised
+                .map(|a| (a.addr, self.server.sockets.primary())),
         )?;
 
         let peer = SfuPeer::new(
