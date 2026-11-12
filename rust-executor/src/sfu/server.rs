@@ -3197,24 +3197,35 @@ mod tests {
             let caller_addr: SocketAddr = addr.parse().unwrap();
             let bind_addr: SocketAddr = bind.parse().unwrap();
             let mut caller = browser_rtc(firefox, video_only, caller_addr);
-            let mut change = caller.sdp_api();
-            let mid_audio = (!video_only).then(|| {
-                change.add_media(
-                    MediaKind::Audio,
+            let (offer, pending, mid_audio, mid_video) = loop {
+                let mut change = caller.sdp_api();
+                let mid_audio = (!video_only).then(|| {
+                    change.add_media(
+                        MediaKind::Audio,
+                        str0m::media::Direction::SendRecv,
+                        None,
+                        None,
+                        None,
+                    )
+                });
+                let mid_video = change.add_media(
+                    MediaKind::Video,
                     str0m::media::Direction::SendRecv,
                     None,
                     None,
                     None,
-                )
-            });
-            let mid_video = change.add_media(
-                MediaKind::Video,
-                str0m::media::Direction::SendRecv,
-                None,
-                None,
-                None,
-            );
-            let (offer, pending) = change.apply().unwrap();
+                );
+                // str0m checks a new mid only against the session's m-lines,
+                // not the batch's: two equal mids make one m-line shadow the
+                // other, and the next offer fails "Changed order for m-line".
+                // A browser never repeats a mid, so draw again, as
+                // `offer_send_only` does.
+                if mid_audio == Some(mid_video) {
+                    continue;
+                }
+                let (offer, pending) = change.apply().unwrap();
+                break (offer, pending, mid_audio, mid_video);
+            };
             let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, &[bind_addr], None).unwrap();
             caller
                 .sdp_api()

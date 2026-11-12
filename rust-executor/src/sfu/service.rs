@@ -2695,8 +2695,16 @@ mod tests {
                         .await
                         .unwrap());
                 }
-                let event = events.try_recv().unwrap();
-                assert_eq!(event.topic, Topic::SfuRoomRoster);
+                // Tests in other threads publish on the same global pubsub and
+                // stream: look for this room's roster, not the first event.
+                let ours = |payload: &serde_json::Value| {
+                    payload["neighbourhoodUrl"] == room_id.neighbourhood_url.as_str()
+                        && payload["roomName"] == room_id.room_name.as_str()
+                };
+                let event = drain(&mut events)
+                    .into_iter()
+                    .find(|e| e.topic == Topic::SfuRoomRoster && ours(&e.payload))
+                    .expect("the departure publishes the room's roster");
                 assert!(
                     departed.may_receive(&event),
                     "departure must reach the removed DID"
@@ -2707,12 +2715,17 @@ mod tests {
                     session("did:remaining", true).may_receive(&event),
                     matches!(stayer, Some(("did:remaining", _)))
                 );
-                let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
-                    .await
-                    .expect("departed session receives the real stream event")
-                    .unwrap();
-                let message: serde_json::Value = serde_json::from_str(&message).unwrap();
-                assert_eq!(message["type"], "sfu-room-roster");
+                let message = tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        let message: serde_json::Value =
+                            serde_json::from_str(&stream.next().await.unwrap()).unwrap();
+                        if message["type"] == "sfu-room-roster" && ours(&message) {
+                            break message;
+                        }
+                    }
+                })
+                .await
+                .expect("departed session receives the real stream event");
                 assert_eq!(
                     message["participants"],
                     match stayer {
