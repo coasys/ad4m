@@ -331,7 +331,8 @@ mod tests {
 
         assert_eq!(neighbourhood_creator(&url).await, Some(creator));
         assert!(stored_policy(&url).await.is_none());
-        assert_eq!(read_policy(&url).await, CallPolicy::default());
+        // A space with no policy calls through this executor's SFU.
+        assert_eq!(read_policy(&url).await, policy("designated", 4));
 
         write_policy(&url, &policy("cascaded", 6), &context)
             .await

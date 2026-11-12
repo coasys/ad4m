@@ -78,8 +78,11 @@ pub struct IceServer {
     pub credential: Option<String>,
 }
 
+/// A space with no policy calls through this executor's SFU. An executor
+/// without a running SFU answers `sfu.getConfig` with an error, and apps
+/// call such a space as a mesh.
 fn default_mode() -> String {
-    "mesh".to_string()
+    "designated".to_string()
 }
 fn default_fallback() -> String {
     "mesh".to_string()
