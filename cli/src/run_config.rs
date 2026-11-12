@@ -285,10 +285,11 @@ pub struct RunArgs {
         value_parser = non_empty(StringValueParser::new())
     )]
     pub sfu_cascade_peers: Option<Vec<String>>,
-    /// IP address the SFU media server binds its UDP socket to. Default:
-    /// 127.0.0.1, so calls reach only this machine; with `--localhost false`,
-    /// the machine's outbound interface. Set it (e.g. a LAN address) to choose
-    /// which interface accepts media from other machines.
+    /// IP address the SFU media server binds its UDP socket to, and the only
+    /// one it offers. Default: 127.0.0.1 and the LAN address (the default
+    /// route's interface, detected again at each call), both offered, so
+    /// browsers that skip loopback (Firefox) and other machines on the LAN
+    /// reach the media. `127.0.0.1` keeps media on this machine.
     #[arg(long, env = "AD4M_SFU_BIND_ADDR", value_parser = non_empty(StringValueParser::new()))]
     pub sfu_bind_addr: Option<String>,
     /// STUN server (`host:port`) the SFU asks once at startup for its public

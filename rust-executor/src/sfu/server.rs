@@ -1,4 +1,4 @@
-//! SFU server — manages the shared UDP socket, str0m Rtc instances,
+//! SFU server — the media UDP sockets ([`MediaSockets`]), str0m Rtc instances,
 //! and the Sans I/O event loop driven by tokio.
 
 use std::collections::{HashMap, HashSet};
@@ -19,6 +19,7 @@ use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, R
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use super::hosts::{socket_for, MediaSockets};
 use super::reachability::{assess, stun_reflexive, Advertised, SfuReachability};
 use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
@@ -446,6 +447,10 @@ pub struct SfuServerConfig {
     /// remote clients can reach. See [`sfu_bind_ip`] for how the executor
     /// picks it.
     ///
+    /// An unspecified IP (`0.0.0.0`) is the LAN default: a socket on
+    /// loopback and one on the LAN address, both offered (see
+    /// [`MediaSockets`]). Nothing binds `0.0.0.0` itself.
+    ///
     /// Port `:0` lets the OS pick a free UDP port; any other port is bound
     /// exactly, or startup fails.
     pub bind_addr: SocketAddr,
@@ -475,18 +480,21 @@ impl Default for SfuServerConfig {
     }
 }
 
-/// The IP the SFU binds, as the API listeners decide theirs: network
-/// exposure is opt-in.
+/// The IP the SFU binds.
 ///
-/// - `--sfu-bind-addr` wins.
-/// - Otherwise the SFU follows `--localhost`: loopback while the API is
-///   loopback-only (the default), the outbound interface once the API is
-///   exposed (`--localhost false`), so other machines can reach the media.
+/// - `--sfu-bind-addr` wins: that address, and only it, is bound and offered.
+/// - Otherwise the LAN default, returned as `0.0.0.0`: loopback plus the LAN
+///   address, whatever `--localhost` says. Firefox gathers no loopback
+///   candidate and cannot reach an SFU on 127.0.0.1 alone, even on the same
+///   machine. In localhost mode the API stays on loopback; only the media UDP
+///   port is reachable on the LAN, and ICE credentials plus DTLS guard it.
+///   The LAN address is detected again for every call (a laptop that changes
+///   networks); with none, calls offer loopback only. See [`MediaSockets`].
 ///
 /// A malformed address, or an unspecified one (`0.0.0.0`, `::`: str0m cannot
 /// offer it as a candidate), falls back to loopback, never to a wider
 /// interface.
-pub fn sfu_bind_ip(explicit: Option<&str>, localhost: bool) -> std::net::IpAddr {
+pub fn sfu_bind_ip(explicit: Option<&str>) -> std::net::IpAddr {
     let loopback = std::net::Ipv4Addr::LOCALHOST.into();
     match explicit {
         Some(addr) => match addr.parse::<std::net::IpAddr>() {
@@ -506,8 +514,7 @@ pub fn sfu_bind_ip(explicit: Option<&str>, localhost: bool) -> std::net::IpAddr 
                 loopback
             }
         },
-        None if localhost => loopback,
-        None => super::detect_outbound_ip(),
+        None => std::net::Ipv4Addr::UNSPECIFIED.into(),
     }
 }
 
@@ -525,7 +532,6 @@ pub fn sfu_bind_ip(explicit: Option<&str>, localhost: bool) -> std::net::IpAddr 
 ///   a fixed `udp_port`: the router forwards only a port it knows.
 pub fn sfu_media_addrs(
     bind_addr: Option<&str>,
-    localhost: bool,
     udp_port: Option<u16>,
     public_addr: Option<&str>,
 ) -> Result<(SocketAddr, Option<std::net::IpAddr>), String> {
@@ -543,7 +549,7 @@ pub fn sfu_media_addrs(
                 ))
             }
         },
-        _ => sfu_bind_ip(bind_addr, localhost),
+        _ => sfu_bind_ip(bind_addr),
     };
     let public_ip = match public_addr {
         None => None,
@@ -604,10 +610,14 @@ pub struct DeadPeer {
     pub is_pipe: bool,
 }
 
-/// The SFU server. Owns the UDP socket and drives the str0m event loop.
+/// The SFU server. Owns the UDP sockets and drives the str0m event loop.
 pub struct SfuServer {
-    /// The bound local address of the UDP socket.
+    /// The address the SFU reports as bound: the explicit one, or in the LAN
+    /// default the LAN socket bound at startup (loopback with no LAN).
     pub local_addr: SocketAddr,
+    /// The bound sockets, and the host candidates a new connection gets
+    /// ([`MediaSockets::host_addrs`]).
+    pub sockets: MediaSockets,
     /// The public address offered next to `local_addr` behind NAT.
     pub advertised: Option<Advertised>,
     /// What the startup probe found.
@@ -620,32 +630,25 @@ pub struct SfuServer {
 }
 
 impl SfuServer {
-    /// Start the SFU server. Binds a UDP socket and spawns the event loop on tokio.
+    /// Start the SFU server. Binds its UDP sockets and spawns the event loop on tokio.
     pub async fn start(config: SfuServerConfig) -> Result<Self, std::io::Error> {
-        let fixed_port = config.bind_addr.port() != 0;
-        let socket = UdpSocket::bind(config.bind_addr).await.map_err(|e| {
-            if fixed_port {
-                std::io::Error::new(
-                    e.kind(),
-                    format!(
-                        "SFU UDP port {} on {} is not available ({}): free it, or set another \
-                         --sfu-udp-port and forward that one",
-                        config.bind_addr.port(),
-                        config.bind_addr.ip(),
-                        e
-                    ),
-                )
-            } else {
-                e
-            }
-        })?;
-        let local_addr = socket.local_addr()?;
+        let sockets = MediaSockets::bind(config.bind_addr).await?;
+        Self::start_on(config, sockets).await
+    }
 
-        // On the SFU's own socket, before the event loop owns it: the mapping
+    /// Start the SFU server on sockets already bound.
+    pub async fn start_on(
+        config: SfuServerConfig,
+        sockets: MediaSockets,
+    ) -> Result<Self, std::io::Error> {
+        let fixed_port = config.bind_addr.port() != 0;
+        let local_addr = sockets.primary();
+
+        // On the SFU's own socket, before the event loop reads it: the mapping
         // a STUN server sees is the one callers' packets come back through.
         // Loopback cannot reach a STUN server, so it is not probed.
-        let probe = match &config.stun_server {
-            Some(server) if !local_addr.ip().is_loopback() => {
+        let probe = match (&config.stun_server, sockets.socket(local_addr)) {
+            (Some(server), Some(socket)) if !local_addr.ip().is_loopback() => {
                 Some(stun_reflexive(&socket, server).await)
             }
             _ => None,
@@ -677,15 +680,11 @@ impl SfuServer {
         let (command_tx, command_rx) = mpsc::channel(256);
         let (dead_peer_tx, dead_peer_rx) = mpsc::unbounded_channel();
 
-        tokio::spawn(Self::event_loop(
-            socket,
-            command_rx,
-            local_addr,
-            dead_peer_tx,
-        ));
+        tokio::spawn(Self::event_loop(sockets.clone(), command_rx, dead_peer_tx));
 
         Ok(Self {
             local_addr,
+            sockets,
             advertised,
             reachability,
             command_tx,
@@ -696,22 +695,31 @@ impl SfuServer {
     /// Create an Rtc instance for a new peer, process the SDP offer, and return the answer.
     /// The Rtc instance is NOT yet added to the event loop — call `add_peer` after.
     ///
-    /// The answer offers the bound socket as a host candidate and, behind NAT,
-    /// `advertised` as a server-reflexive one on that socket. A caller's
-    /// packets to the advertised address arrive addressed to the bound socket,
-    /// so str0m matches them to the host candidate.
+    /// The answer offers every address in `hosts` (a bound socket each, from
+    /// [`MediaSockets::host_addrs`]) as a host candidate and, behind NAT,
+    /// `advertised` as a server-reflexive one whose base is the first
+    /// non-loopback host (the LAN socket the router forwards to). A caller's
+    /// packets to the advertised address arrive addressed to that socket, so
+    /// str0m matches them to its host candidate.
     pub fn create_rtc_for_offer(
         offer: SdpOffer,
-        local_addr: SocketAddr,
+        hosts: &[SocketAddr],
         advertised: Option<SocketAddr>,
     ) -> Result<(Rtc, String), String> {
         let mut rtc = Rtc::builder().build(Instant::now());
 
-        let candidate = Candidate::host(local_addr, "udp")
-            .map_err(|e| format!("Failed to create host candidate: {}", e))?;
-        rtc.add_local_candidate(candidate);
+        for host in hosts {
+            let candidate = Candidate::host(*host, "udp")
+                .map_err(|e| format!("Failed to create host candidate: {}", e))?;
+            rtc.add_local_candidate(candidate);
+        }
+        let base = hosts
+            .iter()
+            .find(|h| !h.ip().is_loopback())
+            .or(hosts.first())
+            .ok_or("The SFU has no address to offer")?;
         if let Some(public) = advertised {
-            let candidate = Candidate::server_reflexive(public, local_addr, "udp")
+            let candidate = Candidate::server_reflexive(public, *base, "udp")
                 .map_err(|e| format!("Failed to create server-reflexive candidate: {}", e))?;
             rtc.add_local_candidate(candidate);
         }
@@ -728,10 +736,15 @@ impl SfuServer {
     }
 
     /// The main event loop. Reads UDP packets, drives str0m, and relays media.
+    ///
+    /// Reads every bound socket ([`MediaSockets`]); a packet's destination
+    /// is the address of the socket it arrived on, which str0m needs to match
+    /// a STUN request to its host candidate. A packet str0m sends leaves on
+    /// the socket bound at its source. The socket set is reread when a call
+    /// binds a new LAN address.
     async fn event_loop(
-        socket: UdpSocket,
+        media: MediaSockets,
         mut command_rx: mpsc::Receiver<SfuCommand>,
-        local_addr: SocketAddr,
         dead_peer_tx: mpsc::UnboundedSender<DeadPeer>,
     ) {
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
@@ -739,10 +752,23 @@ impl SfuServer {
         let mut quality_preferences: HashMap<ParticipantId, String> = HashMap::new();
         let mut layers = LayerSelector::default();
         let mut buf = vec![0u8; 2000];
+        let (mut sockets_version, mut sockets) = media.snapshot();
+        // The socket read first, rotated so a busy one cannot starve the rest.
+        let mut first_read = 0usize;
 
-        info!("SFU event loop started on {}", local_addr);
+        info!(
+            "SFU event loop started on {:?}",
+            sockets.iter().map(|(addr, _)| *addr).collect::<Vec<_>>()
+        );
 
         loop {
+            if media.version() != sockets_version {
+                (sockets_version, sockets) = media.snapshot();
+                info!(
+                    "SFU event loop now reads {:?}",
+                    sockets.iter().map(|(addr, _)| *addr).collect::<Vec<_>>()
+                );
+            }
             // Process commands
             loop {
                 match command_rx.try_recv() {
@@ -1067,12 +1093,16 @@ impl SfuServer {
 
                     match peer.rtc.poll_output() {
                         Ok(Output::Transmit(transmit)) => {
-                            if let Err(e) =
-                                socket.try_send_to(&transmit.contents, transmit.destination)
-                            {
+                            let sent = match socket_for(&sockets, transmit.source) {
+                                Some(socket) => socket
+                                    .try_send_to(&transmit.contents, transmit.destination)
+                                    .map(|_| ()),
+                                None => Err(std::io::Error::other("no socket")),
+                            };
+                            if let Err(e) = sent {
                                 debug!(
-                                    "SFU: failed to send UDP to {}: {}",
-                                    transmit.destination, e
+                                    "SFU: failed to send UDP from {} to {}: {}",
+                                    transmit.source, transmit.destination, e
                                 );
                             }
                         }
@@ -1362,13 +1392,14 @@ impl SfuServer {
                 }
             }
 
-            // Read from the UDP socket with timeout
+            // Read from the UDP sockets with timeout
             let duration = (earliest_timeout - Instant::now()).max(Duration::from_millis(1));
+            first_read = first_read.wrapping_add(1);
 
             tokio::select! {
-                result = socket.recv_from(&mut buf) => {
+                result = recv_any(&sockets, first_read, &mut buf) => {
                     match result {
-                        Ok((n, source)) => {
+                        Ok((n, source, destination)) => {
                             let data = &buf[..n];
                             if let Ok(contents) = data.try_into() {
                                 let input = Input::Receive(
@@ -1376,7 +1407,7 @@ impl SfuServer {
                                     Receive {
                                         proto: Protocol::Udp,
                                         source,
-                                        destination: local_addr,
+                                        destination,
                                         contents,
                                     },
                                 );
@@ -1407,6 +1438,32 @@ impl SfuServer {
             }
         }
     }
+}
+
+/// The next packet on any of `sockets`, read from `first % len` on: its
+/// length, its source, and the address of the socket it arrived on (its
+/// destination). Pending forever with no sockets.
+async fn recv_any(
+    sockets: &[(SocketAddr, std::sync::Arc<UdpSocket>)],
+    first: usize,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, SocketAddr, SocketAddr)> {
+    std::future::poll_fn(|cx| {
+        let count = sockets.len();
+        for i in 0..count {
+            let (addr, socket) = &sockets[(first + i) % count];
+            let mut read = tokio::io::ReadBuf::new(buf);
+            match socket.poll_recv_from(cx, &mut read) {
+                std::task::Poll::Ready(Ok(source)) => {
+                    return std::task::Poll::Ready(Ok((read.filled().len(), source, *addr)))
+                }
+                std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Pending => {}
+            }
+        }
+        std::task::Poll::Pending
+    })
+    .await
 }
 
 /// Write one forwarded packet to `peer`'s outbound `mid`, as the media
@@ -1808,7 +1865,7 @@ mod tests {
     #[test]
     fn a_track_queued_twice_is_offered_once() {
         let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
-        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), &[local], None).unwrap();
         let mut peer = SfuPeer::new(
             ParticipantId::next(),
             RoomId::new("neighbourhood://test", "room"),
@@ -1853,7 +1910,7 @@ mod tests {
     fn a_track_from_a_pipe_is_offered_as_the_remote_session() {
         let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
         let room = RoomId::new("neighbourhood://test", "room");
-        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), &[local], None).unwrap();
         let client_id = ParticipantId::next();
         let client = SfuPeer::new(
             client_id.clone(),
@@ -1976,7 +2033,7 @@ mod tests {
     fn a_track_from_a_client_is_offered_as_its_session() {
         let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
         let room = RoomId::new("neighbourhood://test", "room");
-        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), &[local], None).unwrap();
         let target_id = ParticipantId::next();
         let target = SfuPeer::new(
             target_id.clone(),
@@ -2015,7 +2072,7 @@ mod tests {
         let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
         let public: SocketAddr = "198.51.100.7:40000".parse().unwrap();
         let (_, answer) =
-            SfuServer::create_rtc_for_offer(caller_offer(), local, Some(public)).unwrap();
+            SfuServer::create_rtc_for_offer(caller_offer(), &[local], Some(public)).unwrap();
         let lines = candidates(&answer);
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(
@@ -2036,7 +2093,7 @@ mod tests {
     #[test]
     fn without_an_advertised_address_the_answer_offers_the_host_only() {
         let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
-        let (_, answer) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let (_, answer) = SfuServer::create_rtc_for_offer(caller_offer(), &[local], None).unwrap();
         let lines = candidates(&answer);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("typ host"), "{lines:?}");
@@ -2129,7 +2186,8 @@ mod tests {
         );
         let cid = change.add_channel("sfu-data".into());
         let (offer, pending) = change.apply().unwrap();
-        let (mut sfu, answer) = SfuServer::create_rtc_for_offer(offer, bind, Some(public)).unwrap();
+        let (mut sfu, answer) =
+            SfuServer::create_rtc_for_offer(offer, &[bind], Some(public)).unwrap();
         let answer: str0m::change::SdpAnswer = serde_json::from_str(&answer).unwrap();
         caller.sdp_api().accept_answer(pending, answer).unwrap();
 
@@ -2263,7 +2321,7 @@ mod tests {
         );
         let cid = change.add_channel("sfu-data".into());
         let (offer, pending) = change.apply().unwrap();
-        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, &[bind], None).unwrap();
         let answer: str0m::change::SdpAnswer = serde_json::from_str(&answer).unwrap();
         caller.sdp_api().accept_answer(pending, answer).unwrap();
         let mut peer = SfuPeer::new(
@@ -2441,7 +2499,7 @@ mod tests {
     #[test]
     fn an_ice_restart_waits_for_a_pending_offer_and_is_offered_once() {
         let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
-        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), &[local], None).unwrap();
         let mut peer = SfuPeer::new(
             ParticipantId::next(),
             RoomId::new("neighbourhood://test", "room"),
@@ -2489,7 +2547,7 @@ mod tests {
             None,
         );
         let (offer, pending) = change.apply().unwrap();
-        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, &[bind], None).unwrap();
         caller
             .sdp_api()
             .accept_answer(pending, serde_json::from_str(&answer).unwrap())
@@ -2553,7 +2611,7 @@ mod tests {
             None,
         );
         let (offer, pending) = change.apply().unwrap();
-        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, &[bind], None).unwrap();
         caller
             .sdp_api()
             .accept_answer(pending, serde_json::from_str(&answer).unwrap())
@@ -2605,7 +2663,7 @@ mod tests {
             None,
         );
         let (offer, pending) = change.apply().unwrap();
-        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, &[bind], None).unwrap();
         caller
             .sdp_api()
             .accept_answer(pending, serde_json::from_str(&answer).unwrap())
@@ -2653,7 +2711,7 @@ mod tests {
     #[test]
     fn a_stale_restart_offer_ends_the_restart() {
         let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
-        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), &[local], None).unwrap();
         let mut peer = SfuPeer::new(
             ParticipantId::next(),
             RoomId::new("neighbourhood://test", "room"),
@@ -2681,7 +2739,9 @@ mod tests {
     async fn a_fixed_port_is_bound_and_advertised_with_the_probes_ip() {
         // Loopback is never probed, and a public address is not behind NAT:
         // this needs a private, non-loopback interface.
-        let ip = super::super::detect_outbound_ip();
+        let Ok(ip) = super::super::detect_outbound_ip() else {
+            return;
+        };
         if ip.is_loopback() || !crate::sfu::reachability::is_private_ip(ip) {
             return;
         }
@@ -2742,12 +2802,26 @@ mod tests {
     #[test]
     fn the_media_settings_refuse_what_no_caller_could_use() {
         let ok = |b: Option<&str>, port: Option<u16>, public: Option<&str>| {
-            sfu_media_addrs(b, true, port, public)
+            sfu_media_addrs(b, port, public)
         };
         assert_eq!(
             ok(Some("192.168.0.10"), Some(40000), Some("198.51.100.7")).unwrap(),
             (
                 "192.168.0.10:40000".parse().unwrap(),
+                Some("198.51.100.7".parse().unwrap())
+            )
+        );
+        // No bind address: the LAN default, on the fixed port when one is
+        // given, with the public address advertised beside it.
+        let lan_default: std::net::IpAddr = std::net::Ipv4Addr::UNSPECIFIED.into();
+        assert_eq!(
+            ok(None, None, None).unwrap(),
+            (SocketAddr::new(lan_default, 0), None)
+        );
+        assert_eq!(
+            ok(None, Some(40000), Some("198.51.100.7")).unwrap(),
+            (
+                SocketAddr::new(lan_default, 40000),
                 Some("198.51.100.7".parse().unwrap())
             )
         );
@@ -2814,22 +2888,124 @@ mod tests {
         }
     }
 
+    /// With no `--sfu-bind-addr`, the SFU takes loopback and the LAN address
+    /// (`--localhost` no longer narrows it; the API listeners still follow it). An
+    /// explicit address is bound exactly; a malformed or unspecified one
+    /// falls back to loopback.
     #[test]
-    fn sfu_binds_loopback_unless_exposure_is_asked_for() {
+    fn sfu_binds_loopback_and_the_lan_unless_an_address_is_given() {
         let loopback: std::net::IpAddr = std::net::Ipv4Addr::LOCALHOST.into();
+        let lan_default: std::net::IpAddr = std::net::Ipv4Addr::UNSPECIFIED.into();
         assert_eq!(SfuServerConfig::default().bind_addr.ip(), loopback);
-        assert_eq!(sfu_bind_ip(None, true), loopback);
+        assert_eq!(sfu_bind_ip(None), lan_default);
         assert_eq!(
-            sfu_bind_ip(Some("::1"), false),
+            sfu_bind_ip(Some("::1")),
             "::1".parse::<std::net::IpAddr>().unwrap()
         );
         assert_eq!(
-            sfu_bind_ip(Some("10.1.2.3"), true),
+            sfu_bind_ip(Some("10.1.2.3")),
             "10.1.2.3".parse::<std::net::IpAddr>().unwrap()
         );
-        assert_eq!(sfu_bind_ip(Some("0.0.0.0"), false), loopback);
-        assert_eq!(sfu_bind_ip(Some("not-an-ip"), false), loopback);
-        assert_eq!(sfu_bind_ip(None, false), crate::sfu::detect_outbound_ip());
+        assert_eq!(sfu_bind_ip(Some("127.0.0.1")), loopback);
+        assert_eq!(sfu_bind_ip(Some("0.0.0.0")), loopback);
+        assert_eq!(sfu_bind_ip(Some("::")), loopback);
+        assert_eq!(sfu_bind_ip(Some("not-an-ip")), loopback);
+    }
+
+    /// A caller on a real UDP socket that reaches the SFU only at `target_ip`
+    /// (every other candidate in the answer is dropped, as for a browser
+    /// that pairs no loopback candidate). Returns the address it reached once
+    /// its data channel opened through the running event loop; panics after 15 s.
+    async fn call_through(server: &SfuServer, target_ip: std::net::IpAddr) -> SocketAddr {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local = socket.local_addr().unwrap();
+        let mut caller = Rtc::builder().build(Instant::now());
+        caller.add_local_candidate(Candidate::host(local, "udp").unwrap());
+        let mut change = caller.sdp_api();
+        change.add_channel("sfu-data".into());
+        let (offer, pending) = change.apply().unwrap();
+
+        let hosts = server.sockets.host_addrs();
+        let target = *hosts
+            .iter()
+            .find(|h| h.ip() == target_ip)
+            .unwrap_or_else(|| panic!("{target_ip} is not offered: {hosts:?}"));
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, &hosts, None).unwrap();
+        let answer: str0m::change::SdpAnswer = serde_json::from_str(&answer).unwrap();
+        caller.sdp_api().accept_answer(pending, answer).unwrap();
+        server
+            .command_tx
+            .send(SfuCommand::AddPeer(SfuPeer::new(
+                ParticipantId::next(),
+                RoomId::new("neighbourhood://test", "room"),
+                "did:key:caller".to_string(),
+                rtc,
+                false,
+            )))
+            .await
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut buf = vec![0u8; 2000];
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "no data channel through {target} within 15 s"
+            );
+            let wake = match caller.poll_output().unwrap() {
+                Output::Event(Event::ChannelOpen(..)) => return target,
+                Output::Event(_) => continue,
+                Output::Transmit(t) => {
+                    if t.destination == target {
+                        socket.send_to(&t.contents, t.destination).await.unwrap();
+                    }
+                    continue;
+                }
+                Output::Timeout(t) => t.min(deadline),
+            };
+            let wait = wake.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(wait, socket.recv_from(&mut buf)).await {
+                Ok(Ok((n, source))) => {
+                    receive(&mut caller, Instant::now(), source, local, &buf[..n])
+                }
+                Ok(Err(e)) => panic!("caller socket: {e}"),
+                Err(_) => caller.handle_input(Input::Timeout(Instant::now())).unwrap(),
+            }
+        }
+    }
+
+    /// The LAN default end to end: a caller reaching only the LAN candidate
+    /// connects through the running event loop (the packet's destination is
+    /// the LAN socket's, so str0m answers its STUN). When the LAN address
+    /// changes, the next call binds the new one, the event loop reads it, and
+    /// a caller reaching only that address connects; loopback still works.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_caller_connects_through_the_lan_socket_and_the_one_after_a_change() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::Arc;
+        let lan = Arc::new(AtomicU8::new(2));
+        let detect: super::super::hosts::DetectLan = {
+            let lan = lan.clone();
+            Arc::new(move || {
+                Ok(std::net::Ipv4Addr::new(127, 0, 0, lan.load(Ordering::SeqCst)).into())
+            })
+        };
+        let sockets = MediaSockets::bind_with("0.0.0.0:0".parse().unwrap(), detect)
+            .await
+            .unwrap();
+        let server = SfuServer::start_on(SfuServerConfig::default(), sockets)
+            .await
+            .unwrap();
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+
+        call_through(&server, ip("127.0.0.2")).await;
+
+        lan.store(3, Ordering::SeqCst);
+        let target = call_through(&server, ip("127.0.0.3")).await;
+        assert!(server.sockets.bound_addrs().contains(&target));
+        call_through(&server, ip("127.0.0.1")).await;
+        let _ = server.command_tx.send(SfuCommand::Shutdown).await;
     }
 
     #[test]
@@ -3038,7 +3214,7 @@ mod tests {
                 None,
             );
             let (offer, pending) = change.apply().unwrap();
-            let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind_addr, None).unwrap();
+            let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, &[bind_addr], None).unwrap();
             caller
                 .sdp_api()
                 .accept_answer(pending, serde_json::from_str(&answer).unwrap())

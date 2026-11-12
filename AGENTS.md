@@ -180,11 +180,12 @@ This runs all four nightly jobs.
   canvas (not black; headless WebKit never plays a `<video>`, so not there).
   On the SFU, Chromium + Firefox also asserts the payload types differ per
   leg and each receiver gets its own numbers (#1684).
-- The suite binds the SFU to the host's outbound IPv4
-  (`AD4M_SFU_BIND_ADDR`), not loopback: Firefox gathers no loopback
-  candidate and never pairs its LAN candidates with an SFU on 127.0.0.1
-  (ICE stays `checking`, the SFU's DTLS times out), while Chromium and
-  WebKit connect. `SFU_BROWSERS_SFU_ADDR=127.0.0.1` shows that case.
+- The suite runs the executor's default SFU binding: loopback plus the
+  LAN address, both offered. Firefox needs the LAN one: it gathers no
+  loopback candidate and never pairs its LAN candidates with an SFU on
+  127.0.0.1 only (ICE stays `checking`, the SFU's DTLS times out), while
+  Chromium and WebKit connect. `SFU_BROWSERS_SFU_ADDR` binds the SFU there
+  instead (`AD4M_SFU_BIND_ADDR`); `127.0.0.1` shows the loopback case.
 - Install the browsers with `pnpm exec playwright-core install --with-deps
   chromium firefox webkit` in `tests/js`. On an Ubuntu release Playwright has
   no builds for (CI's runner is 25.04), it falls back to the 24.04 builds,
@@ -279,18 +280,37 @@ socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
 at once; `change` on `navigator.connection` and ICE `disconnected` run
 `checkConnection`, which drops a socket silent for 2 s after its ping.
 
-SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
-binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port
-that is taken stops startup), runs the STUN probe on that same socket before
-the event loop owns it, and `assess` decides the advertised address
-(`sfu_public_addr`, else the probe's reflexive IP on the fixed port) and the
-reachability (`public` once STUN sees the advertised IP). Answers carry the
-host candidate and, when advertised, a srflx candidate on the same socket;
-str0m matches inbound STUN to the host candidate by destination, so the
-event loop's `destination: local_addr` stays right. Cascade pipes offer the
-host candidate only. The public address is read at startup: an IP change
-needs a restart. The four `sfu_*` keys live in the config file too; a build
-without them refuses them as unknown keys.
+SFU media addresses (`rust-executor/src/sfu/{hosts,server,reachability}.rs`):
+with no `sfu_bind_addr` (the default, whatever `--localhost` says) the SFU
+binds two sockets on one port: 127.0.0.1 and the LAN address
+(`detect_outbound_ip`, the default route's interface), and every answer
+offers both as host candidates. Firefox needs the LAN one (it gathers no
+loopback candidate); other machines on the LAN reach it too. In localhost
+mode the API stays on loopback: only the media UDP port is reachable on the
+LAN, guarded by ICE credentials and DTLS. The LAN address is detected again
+for every answer and pipe: after a move to another network the next call
+binds the new address on the same port (old sockets stay, at most 8, in case
+the address comes back). A call in progress keeps the addresses it was
+offered: a LAN pair whose address went away fails its ICE restart in place
+and the SDK rebuilds the call, which gets the new address; a pair over
+loopback carries on. No LAN (offline): answers offer loopback only, logged,
+and each call looks again. One socket per address, never `0.0.0.0`: str0m
+matches inbound STUN to a host candidate by destination, which a socket
+bound to one address knows (the event loop passes the receiving socket's
+address), and replies leave from the address the caller sent to. An
+explicit `sfu_bind_addr` binds that address only, as before (malformed or
+unspecified: loopback).
+
+SFU behind NAT: the SFU binds on `sfu_udp_port` (0/unset: ephemeral; a fixed
+port that is taken, on loopback or the LAN address, stops startup), runs the
+STUN probe on the LAN (or explicit) socket before the event loop owns it,
+and `assess` decides the advertised address (`sfu_public_addr`, else the
+probe's reflexive IP on the fixed port) and the reachability (`public` once
+STUN sees the advertised IP). Answers carry the host candidates and, when
+advertised, a srflx candidate whose base is the LAN (or explicit) socket.
+Cascade pipes offer the host candidates only. The public address is read at
+startup: an IP change needs a restart. The four `sfu_*` keys live in the
+config file too; a build without them refuses them as unknown keys.
 
 Mesh signalling rules the scenarios pin (`core/src/neighbourhood/MeshManager.ts`):
 offers are numbered per connection and answers name theirs, so a late answer

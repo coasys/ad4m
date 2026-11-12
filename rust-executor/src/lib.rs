@@ -697,7 +697,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
         let (bind_addr, public_ip) = crate::sfu::server::sfu_media_addrs(
             config.sfu_bind_addr.as_deref(),
-            config.localhost.unwrap_or(true),
             config.sfu_udp_port,
             config.sfu_public_addr.as_deref(),
         )
