@@ -294,7 +294,7 @@ export function createSession(config: SessionImplConfig): Session {
     let beatInterval: ReturnType<typeof setInterval> | null = null
     /**
      * Per device the roster poll found with the marker: when this session last
-     * heard it beat, or, until it does, when the poll first saw it (its own
+     * heard it beat or found its pair connected, or, until then, when the poll first saw it (its own
      * clock). Pruned to the devices the last poll saw.
      */
     const heardAt = new Map<string, number>()
@@ -303,9 +303,13 @@ export function createSession(config: SessionImplConfig): Session {
     /** When the last repair started: a failed one is tried again only after {@link PRESENCE_STALE_MS}. */
     let repairedAt = -Infinity
 
-    /** Whether `peer`, carrying the marker, has not beaten for {@link PRESENCE_STALE_MS}. */
-    function isStale(peer: string, now: number): boolean {
-        if (!heardAt.has(peer)) heardAt.set(peer, now)
+    /**
+     * Whether `peer`, carrying the marker, has not beaten for {@link PRESENCE_STALE_MS}.
+     * A pair connected now counts as heard: media flowing proves the peer
+     * alive while its beats, signals sent without delivery, may be lost.
+     */
+    function isStale(peer: string, now: number, states: Map<string, RTCPeerConnectionState>): boolean {
+        if (!heardAt.has(peer) || states.get(peer) === "connected") heardAt.set(peer, now)
         return now - heardAt.get(peer)! >= PRESENCE_STALE_MS
     }
 
@@ -370,7 +374,9 @@ export function createSession(config: SessionImplConfig): Session {
     function repairOwnStatus(own: OwnStatus, stale: Set<string>): void {
         const links = own?.data?.links
         if (!setOnlineStatus || !announced || repairing || !links) return
-        const listed = links.some((l) => callPeer(agentDid, l.data, roomId, CALL_PRESENCE_PREDICATE) === selfPeer)
+        // Listed means the presence link and the marker: without the marker,
+        // readers would never find this device stale.
+        const listed = roomPeers(agentDid, links.map((l) => l.data), roomId).get(selfPeer) === true
         if (stale.size === 0 && listed) return
         const now = Date.now()
         if (now - repairedAt < PRESENCE_STALE_MS) return
@@ -424,6 +430,7 @@ export function createSession(config: SessionImplConfig): Session {
             // The session left while the poll was in flight.
             if (meshManager !== mesh) return
             const now = Date.now()
+            const states = mesh.peerStates()
             const inCall = new Set<string>()
             const seen = new Set<string>()
             const staleOwn = new Set<string>()
@@ -432,7 +439,7 @@ export function createSession(config: SessionImplConfig): Session {
                     if (peer === selfPeer) continue
                     if (!beats) { inCall.add(peer); continue }
                     seen.add(peer)
-                    if (!isStale(peer, now)) inCall.add(peer)
+                    if (!isStale(peer, now, states)) inCall.add(peer)
                     else if (did === agentDid) staleOwn.add(peer)
                 }
             }

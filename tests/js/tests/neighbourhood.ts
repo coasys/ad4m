@@ -647,15 +647,20 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     };
                     await bobNH!.addSignalHandler(bobHandler)
 
-                    // Test broadcast without loopback
+                    // Test broadcast without loopback. The executor routes a
+                    // broadcast to every agent it hosts in the neighbourhood,
+                    // the sender's own agent too (its other clients must hear
+                    // it), so Alice's client gets one copy of her broadcast.
                     let link = new Link({source: "alice", target: "broadcast", predicate: "test"});
                     const aliceSignal = new PerspectiveUnsignedInput([link])
                     await aliceNH!.sendBroadcastU(aliceSignal)
 
-                    await pollUntil(() => bobCalls >= 1, { label: "bob receives non-loopback broadcast" })
+                    await pollUntil(() => bobCalls >= 1 && aliceCalls >= 1, { label: "alice+bob receive non-loopback broadcast" })
 
                     expect(bobCalls).to.be.equal(1)
-                    expect(aliceCalls).to.be.equal(0) // Alice shouldn't receive her own broadcast
+                    expect(aliceCalls).to.be.equal(1) // her own agent's copy
+                    //@ts-ignore
+                    expect(aliceData.data.links[0].data).to.deep.equal(link)
                     //@ts-ignore
                     expect(bobData.data.links[0].data).to.deep.equal(link)
 
@@ -671,12 +676,13 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
                     await aliceNH!.sendBroadcastU(aliceSignal2, true)
 
-                    // Loopback: BOTH counters must reach 1 — polling on just one
-                    // would race the other's assertion.
-                    await pollUntil(() => bobCalls >= 1 && aliceCalls >= 1, { label: "alice+bob receive loopback broadcast" })
+                    // Loopback adds a second copy for the sender's executor:
+                    // Alice gets two, Bob one. Wait for both counters, polling
+                    // on just one would race the other's assertion.
+                    await pollUntil(() => bobCalls >= 1 && aliceCalls >= 2, { label: "alice+bob receive loopback broadcast" })
 
                     expect(bobCalls).to.be.equal(1)
-                    expect(aliceCalls).to.be.equal(1) // Alice should receive her own broadcast
+                    expect(aliceCalls).to.be.equal(2) // her agent's copy and the loopback copy
                     //@ts-ignore
                     expect(bobData.data.links[0].data).to.deep.equal(link2)
                     //@ts-ignore
@@ -688,15 +694,15 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
                     await bobNH!.sendBroadcastU(bobSignal, true)
 
-                    // Wait for BOTH counters. Bob's local loopback echo lands
+                    // Wait for BOTH counters. Bob's two local copies land
                     // on Bob's own pubsub within microseconds; Alice receives
                     // via the link-language broadcast which is much slower.
-                    // Polling on just `bobCalls >= 2` returns as soon as the
+                    // Polling on just `bobCalls >= 3` returns as soon as the
                     // fast half lands and races the aliceCalls assertion below.
-                    await pollUntil(() => bobCalls >= 2 && aliceCalls >= 2, { label: "bob+alice receive bob's loopback broadcast" })
+                    await pollUntil(() => bobCalls >= 3 && aliceCalls >= 3, { label: "bob+alice receive bob's loopback broadcast" })
 
-                    expect(bobCalls).to.be.equal(2) // Bob should receive his own broadcast
-                    expect(aliceCalls).to.be.equal(2) // Alice should receive Bob's broadcast
+                    expect(bobCalls).to.be.equal(3) // two copies of his own broadcast
+                    expect(aliceCalls).to.be.equal(3) // Alice should receive Bob's broadcast
                     //@ts-ignore
                     expect(bobData.data.links[0].data).to.deep.equal(link3)
                     //@ts-ignore

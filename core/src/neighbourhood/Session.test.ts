@@ -36,6 +36,7 @@ const mockMeshManagerInstance = {
     destroy: jest.fn().mockResolvedValue(undefined),
     getParticipants: jest.fn().mockReturnValue([]),
     setRoster: jest.fn(),
+    peerStates: jest.fn(() => new Map<string, string>()),
     beat: jest.fn(),
     replaceTrack: jest.fn().mockResolvedValue(undefined),
     sendData: jest.fn(),
@@ -1237,6 +1238,7 @@ describe("a mesh device that dies without leaving", () => {
     afterEach(() => {
         jest.clearAllTimers()
         jest.useRealTimers()
+        mockMeshManagerInstance.peerStates.mockImplementation(() => new Map<string, string>())
     })
 
     it("announces the presence link and the marker once, then beats at once and every beat interval without writing the status", async () => {
@@ -1365,6 +1367,44 @@ describe("a mesh device that dies without leaving", () => {
         expect(w.writes()).toBe(3)
         expect(w.own()).toEqual(expect.arrayContaining([appLink, presence("did:me#tablet"), marker("did:me#tablet")]))
         expect(w.own()).toHaveLength(3)
+    })
+
+    it("keeps a peer whose pair is connected without beats, and drops it once disconnected and still silent", async () => {
+        const states = new Map<string, string>()
+        mockMeshManagerInstance.peerStates.mockImplementation(() => new Map(states))
+        const w = world()
+        w.write("did:bob", "did:bob#desk", presence("did:bob#desk"), marker("did:bob#desk"))
+        w.write("did:me", "did:me#phone", presence("did:me#phone"), marker("did:me#phone"))
+        await w.session.join(fakeMediaStream())
+        // Signals fail: no beat ever arrives, but media flows on both pairs.
+        states.set("did:bob#desk", "connected")
+        states.set("did:me#phone", "connected")
+        await jest.advanceTimersByTimeAsync(2 * STALE_MS)
+        expect(w.roster()).toEqual(["did:bob#desk", "did:me#phone"])
+        expect(w.writes()).toBe(1)
+
+        states.set("did:bob#desk", "disconnected")
+        states.set("did:me#phone", "failed")
+        await jest.advanceTimersByTimeAsync(STALE_MS - POLL_MS)
+        expect(w.roster()).toEqual(["did:bob#desk", "did:me#phone"])
+        await jest.advanceTimersByTimeAsync(2 * POLL_MS)
+        expect(w.roster()).toEqual([])
+        expect(w.writes()).toBe(2)
+        expect(w.own()).toEqual([presence(ME), marker(ME)])
+        await w.session.leave()
+    })
+
+    it("puts its marker back when the status keeps its presence link but lost the marker", async () => {
+        const appLink = { source: "did:me", predicate: "app://mood", target: "literal:string:busy" }
+        const w = world()
+        await w.session.join(fakeMediaStream())
+        w.statuses.set("did:me", [appLink, presence(ME)])
+        await jest.advanceTimersByTimeAsync(POLL_MS)
+        expect(w.writes()).toBe(2)
+        expect(w.own()).toEqual([appLink, presence(ME), marker(ME)])
+        await jest.advanceTimersByTimeAsync(10 * 60_000)
+        expect(w.writes()).toBe(2)
+        await w.session.leave()
     })
 
     it("tries a failed cleanup again only after the stale bound", async () => {

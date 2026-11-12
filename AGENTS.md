@@ -317,7 +317,12 @@ agent can vouch only for its own devices, and a beat never makes a device: a
 device is in the call only through its own agent's presence link. A reader
 records, on its own clock, when it last heard each device with the marker
 (or first saw it, if it never heard it) and leaves it out after 90 s with no
-beat; a new beat brings it back at the next poll (3 s). So a device that
+beat; a new beat brings it back at the next poll (3 s). A poll that finds
+the reader's pair with the device connected counts as hearing it, so a call
+whose signals fail while media flows keeps its peers. The executor routes a
+broadcast to every agent it hosts in the neighbourhood, the sender's agent
+too (main or managed), so two devices of one agent on one executor hear each
+other; each device drops its own messages. So a device that
 died without leaving (a crash, a closed browser, a lost network) leaves every
 roster within about 90 s + a poll, even while another device of its agent
 keeps the status alive, a live device survives three lost beats in a row,
@@ -325,7 +330,7 @@ and a reader that joins late keeps a device it has never heard for up to
 90 s. A device with no marker (an older SDK, which drops the unknown `beat`
 kind without a word) never goes stale. Status writes are join, leave, and
 one repair when a poll finds a stale device of this agent (its links go) or
-this device's own links missing (a sibling took them out while it missed
+this device's presence link or marker missing (a sibling took them out while it missed
 beats; they go back), at most once per 90 s; nothing is written over a
 status that reads as none. The beat stops on leave, destroy and `replaced`.
 A tab reopened in the same browser profile keeps its device id
