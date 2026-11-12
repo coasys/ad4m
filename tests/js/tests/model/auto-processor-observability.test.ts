@@ -18,7 +18,7 @@
  * Requires a reachable LLM (Ollama over the OpenAI-compatible API). Endpoint
  * + model env-overridable to match the Rust e2e suite:
  *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default gemma3:12b)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-48k)
  *
  * Run (from tests/js, executor built + `pnpm run prepare-test` once):
  *   pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit \
@@ -41,7 +41,10 @@ import { startAgent, waitUntil } from "../../helpers/index.js";
 import { ConversationSubgroup } from "./auto-processor-models.js";
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). Without it the
+// Ollama provider requests num_ctx 131072 and Ollama reloads the model out of staging's residency.
+const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 
 // Same scope query the other WS auto-processor tests use — reifier carries
 // author + timestamp, `?timestamp` is what makes a turn identifiable to the
@@ -103,7 +106,7 @@ describeIfLLM("AutoProcessor observability — events + debug output (PR #903)",
 
     const modelId = await ad4m.ai.addModel({
       name: "interpretation-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
+      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OLLAMA", maxNumCtx: MAX_NUM_CTX },
       modelType: "LLM",
     } as any);
     await ad4m.ai.setDefaultModel("LLM", modelId);

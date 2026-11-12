@@ -35,6 +35,17 @@ function classParams(className: string | string[]): { class_name: string } | { c
     return Array.isArray(className) ? { class_names: className } : { class_name: className }
 }
 
+/** A new live query's id (a UUID v4). The client mints it, so it can end the
+ *  subscription without the subscribe call's reply. `getRandomValues`, not
+ *  `randomUUID`: a page served over plain HTTP has only the former. */
+function mintSubscriptionId(): string {
+    const b = globalThis.crypto.getRandomValues(new Uint8Array(16))
+    b[6] = (b[6] & 0x0f) | 0x40
+    b[8] = (b[8] & 0x3f) | 0x80
+    const hex = Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 export class PerspectiveClient {
     #apiClient: ApiClient
     #expressionClient?: ExpressionClient
@@ -111,7 +122,26 @@ export class PerspectiveClient {
     /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
     /** `options.signal` cancels the call, and the executor stops computing the first result. */
     async subscribeQuery(uuid: string, query: string, options?: CallOptions): Promise<Subscribed> {
-        return this.#apiClient.call('perspective.subscribeQuery', { uuid, query }, options)
+        const subscriptionId = mintSubscriptionId()
+        return this.#released(uuid, subscriptionId, this.#apiClient.call(
+            'perspective.subscribeQuery', { uuid, query, subscriptionId }, options,
+        ))
+    }
+
+    /** A subscribe call that failed (timed out, aborted, refused) leaves no live
+     *  query on the executor that nobody holds. The client minted its id, so it
+     *  disposes it without the reply. A timeout or an abort sends `request.cancel`
+     *  first, and the executor handles a cancel before the calls after it: the
+     *  cancel either stops the call before it registers, or the dispose finds the
+     *  subscription. The dispose goes out before the call's error is thrown, and
+     *  is not awaited; one that fails changes nothing. */
+    async #released(uuid: string, subscriptionId: string, call: Promise<Subscribed>): Promise<Subscribed> {
+        try {
+            return await call
+        } catch (e) {
+            this.disposeQuerySubscription(uuid, subscriptionId).catch(() => {})
+            throw e
+        }
     }
 
     /** Every `query-subscription-update` event on this client's socket. */
@@ -166,9 +196,11 @@ export class PerspectiveClient {
     /** Open a live model query over one class or several. Updates arrive through {@link onQueryUpdate}. */
     /** `options.signal` cancels the call, and the executor stops computing the first result. */
     async modelSubscribe(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<Subscribed> {
-        return this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }, options
-        )
+        const subscriptionId = mintSubscriptionId()
+        return this.#released(uuid, subscriptionId, this.#apiClient.call(
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson, subscriptionId },
+            options,
+        ))
     }
 
     async add(name: string): Promise<PerspectiveProxy> {

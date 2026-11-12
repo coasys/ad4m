@@ -40,12 +40,14 @@ pub enum Topic {
     SfuMigrate,
     SfuData,
     SfuRoomRoster,
+    SfuSessionReplaced,
     FlowStateChanged,
+    IdentityFork,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 24] = [
+    pub const ALL: [Topic; 26] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -69,7 +71,9 @@ impl Topic {
         Topic::SfuMigrate,
         Topic::SfuData,
         Topic::SfuRoomRoster,
+        Topic::SfuSessionReplaced,
         Topic::FlowStateChanged,
+        Topic::IdentityFork,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -99,7 +103,9 @@ impl Topic {
             Topic::SfuMigrate => "sfu-migrate",
             Topic::SfuData => "sfu-data",
             Topic::SfuRoomRoster => "sfu-room-roster",
+            Topic::SfuSessionReplaced => "sfu-session-replaced",
             Topic::FlowStateChanged => "flow-state-changed",
+            Topic::IdentityFork => "identity-fork",
         }
     }
 
@@ -116,8 +122,10 @@ impl Topic {
         let on_perspective = || vec![perspective.unwrap_or(caps::WILD_CARD).to_string()];
         // No `_` arm: a new topic does not compile until someone chooses its capability.
         match self {
-            // `agent.status`, `agent.get`.
-            Topic::AgentStatusChanged | Topic::AgentUpdated => caps::AGENT_READ_CAPABILITY.clone(),
+            // `agent.status`, `agent.get`; a fork shows in `identity.status`.
+            Topic::AgentStatusChanged | Topic::AgentUpdated | Topic::IdentityFork => {
+                caps::AGENT_READ_CAPABILITY.clone()
+            }
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead
@@ -163,7 +171,8 @@ impl Topic {
             Topic::SfuCallRenegotiationOffer
             | Topic::SfuMigrate
             | Topic::SfuData
-            | Topic::SfuRoomRoster => caps::NEIGHBOURHOOD_READ_CAPABILITY.clone(),
+            | Topic::SfuRoomRoster
+            | Topic::SfuSessionReplaced => caps::NEIGHBOURHOOD_READ_CAPABILITY.clone(),
         }
     }
 }
@@ -353,18 +362,26 @@ impl Event {
         Event::new(Topic::SfuData, Audience::Dids(recipients), message)
     }
 
-    /// `sfu-room-roster`: who is in a call room now, to the participants it lists
-    /// and, on departure, the removed DID so it can detect its missing session.
-    /// The departed DID is a recipient, not a member of the payload's roster.
-    pub fn sfu_room_roster(roster: &crate::sfu::SfuRoomRoster, departed: Option<&str>) -> Event {
-        let mut recipients = roster.participants.clone();
-        if let Some(did) = departed {
-            if !recipients.iter().any(|recipient| recipient == did) {
-                recipients.push(did.to_string());
-            }
-        }
-        let audience = Audience::Dids(recipients);
-        Event::new(Topic::SfuRoomRoster, audience, roster)
+    /// `sfu-room-roster`: who is in a call room now, to `recipients` (once
+    /// each). The caller picks them: this executor's sessions in the room and,
+    /// on departure, the departed session's DID so that session can see it is
+    /// no longer listed. Sessions of other cascade nodes are in the payload but
+    /// never recipients: their own executor tells them, and an announce must
+    /// not choose who here hears about the room.
+    pub fn sfu_room_roster(
+        roster: &crate::sfu::SfuRoomRoster,
+        mut recipients: Vec<String>,
+    ) -> Event {
+        recipients.sort();
+        recipients.dedup();
+        Event::new(Topic::SfuRoomRoster, Audience::Dids(recipients), roster)
+    }
+
+    /// `sfu-session-replaced`: a later join from the same device took one of `targetDid`'s
+    /// call sessions over; to that agent only, whose session named in it stops.
+    pub fn sfu_session_replaced(replaced: &crate::sfu::SfuSessionReplaced) -> Event {
+        let audience = Audience::Dids(vec![replaced.target_did.clone()]);
+        Event::new(Topic::SfuSessionReplaced, audience, replaced)
     }
 
     /// The event goes only to the socket of the RPC connection `connection_id`, if its
@@ -466,6 +483,7 @@ mod tests {
         use crate::agent::session::{Principal, Session};
         use crate::sfu::{
             SfuCallRenegotiationOffer, SfuDataMessage, SfuMigrateEvent, SfuRoomRoster,
+            SfuRosterParticipant, SfuSessionReplaced,
         };
         let agent = |did: &str, caps: Vec<Capability>| {
             Session::for_test(Principal::Agent(AgentContext::managed(did.to_string())))
@@ -480,6 +498,7 @@ mod tests {
         let events = [
             Event::sfu_renegotiation_offer(&SfuCallRenegotiationOffer {
                 target_did: "did:alice".into(),
+                participant_id: "P1".into(),
                 neighbourhood_url: "n".into(),
                 room_name: "r".into(),
                 sdp_offer: "{}".into(),
@@ -495,13 +514,23 @@ mod tests {
                 &SfuRoomRoster {
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
-                    participants: vec!["did:alice".into(), "did:bob".into()],
+                    participants: vec![
+                        SfuRosterParticipant {
+                            agent_did: "did:alice".into(),
+                            participant_id: "P1".into(),
+                        },
+                        SfuRosterParticipant {
+                            agent_did: "did:bob".into(),
+                            participant_id: "P2".into(),
+                        },
+                    ],
                 },
-                None,
+                vec!["did:alice".into(), "did:bob".into()],
             ),
             Event::sfu_data(
                 &SfuDataMessage::new(
                     "did:bob".into(),
+                    "P2".into(),
                     "n".into(),
                     "r".into(),
                     "chat".into(),
@@ -510,6 +539,12 @@ mod tests {
                 ),
                 vec!["did:alice".into()],
             ),
+            Event::sfu_session_replaced(&SfuSessionReplaced {
+                target_did: "did:alice".into(),
+                neighbourhood_url: "n".into(),
+                room_name: "r".into(),
+                participant_id: "P1".into(),
+            }),
         ];
         for event in &events {
             assert_eq!(event.capability, *caps::NEIGHBOURHOOD_READ_CAPABILITY);
@@ -521,6 +556,7 @@ mod tests {
         let data: Value = serde_json::from_str(&data).unwrap();
         assert_eq!(data["type"], "sfu-data");
         assert_eq!(data["senderDid"], "did:bob");
+        assert_eq!(data["senderParticipantId"], "P2");
         assert_eq!(data["channelLabel"], "chat");
         let _: SfuDataMessage = serde_json::from_value(data).unwrap();
     }

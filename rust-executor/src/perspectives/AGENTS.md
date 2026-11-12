@@ -45,7 +45,15 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   counter has its own short lock: `set_immediate_commits` never waits for a language call.
 - `pending_diffs_loop`: a failed `commit_pending_diffs` is logged at warn and retried after
   100 ms doubling to 30 s, reset on success (tests: `perspective_instance_pending_diffs_tests.rs`).
-  When a batch of several diffs fails, the oldest diff is sent alone, then the rest. A diff that
+  A batch is one diff, and a receiver applies its removals before its additions, so the rows are
+  never concatenated: `merge_pending_diffs` (db.rs) keeps only the last operation on each link
+  expression (`link_identity`: author, timestamp, source, target, and the predicate normalised
+  as the store keeps it, `Some("")` = `None`) in queue order, a row's removals before its
+  additions. A later removal drops the earlier addition and stays; a later addition drops the
+  earlier removal; a repeated `+x` or `-x` is sent once.
+  One commit per batch still.
+  When a batch of several diffs fails, the oldest diff is sent alone, then the rest, merged from
+  the rest's own rows (`get_pending_diffs_among`). A diff that
   fails while the language accepts the rest is parked: its `perspective_diff` row stays with
   `is_pending = 0` (`Ad4mDb::park_pending_diffs`; the export lists it), logged at
   error level by row id (its links stay local). The failure may have been transient, so the row
@@ -59,6 +67,16 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `ensure_public_links_are_shared` and the fallback pass. Immediate sends from `commit` are
   outside this lock, so a fallback sync can run while an immediate send is in flight and submit
   the same link again.
+- The fallback sync never pushes most of the shared set (`fallback_sync.rs`,
+  `fallback_push_refused`): more than 20 links and more than half of the Shared links missing
+  from `render()` means the language's view of the remote is short (a partial or empty
+  mirror), so it logs an error, commits nothing and returns false. A language that does not
+  know the remote returns null from `render()` (skip). Only the creator's push at publish
+  (`share_links_after_publish`: `publish` and `attach_link_language` in
+  `NeighbourhoodCreationInitiated`) sends the whole set: the links made before the
+  neighbourhood existed were never sent. When that push fails (commit error, or `render()`
+  null while the language's first render runs), it queues them as one pending diff, so the
+  queue, not the refusing fallback, delivers them.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.

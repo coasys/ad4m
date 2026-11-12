@@ -11,11 +11,23 @@
  */
 
 import { Ad4mClient, type Session } from "@coasys/ad4m";
-import { Hearing, SCREEN, Source, toneSource, videoSource, wrtc } from "./media.js";
+import { Hearing, PauseWatch, SCREEN, Source, toneSource, videoSource, wrtc } from "./media.js";
 import type { Command, JoinOptions, Snapshot } from "./protocol.js";
-import { installWebRtc, selectedRemoteAddresses } from "./webrtc.js";
+import { failNextOffer, installWebRtc, selectedRemoteAddresses } from "./webrtc.js";
 
 installWebRtc();
+
+// A browser's global object is an EventTarget that fires `online` when a
+// network comes up; Node's is not. Give it that much, so the SDK hears a
+// scenario's network change where it listens for one in a browser.
+if (typeof (globalThis as any).addEventListener !== "function") {
+  const target = new EventTarget();
+  Object.assign(globalThis, {
+    addEventListener: target.addEventListener.bind(target),
+    removeEventListener: target.removeEventListener.bind(target),
+    dispatchEvent: target.dispatchEvent.bind(target),
+  });
+}
 
 let client: Ad4mClient | null = null;
 let session: Session | null = null;
@@ -23,11 +35,18 @@ let options: JoinOptions | null = null;
 let tone: Source | null = null;
 let camera: Source | null = null;
 let screen: Source | null = null;
+/** Pauses of this process, from its start: a fresh process on a loaded host stalls most. */
+const pauses = new PauseWatch();
+/**
+ * How long after a pause a receiver can still miss the tone: the half second
+ * it analyses, the jitter buffer, and the spread of one round of snapshots.
+ */
+const PAUSE_RECENT_MS = 2_000;
 
 const state = {
   topology: null as string | null,
-  /** Who the session's events say is in the call. */
-  roster: new Set<string>(),
+  /** Who the session's events say is in the call: DID per participant (an agent on two devices is two). */
+  roster: new Map<string, string>(),
   left: new Set<string>(),
   /** `participant-left` events so far; a rebuilt connection fires one per participant. */
   departures: 0,
@@ -36,10 +55,16 @@ const state = {
   errors: [] as string[],
   peerStates: {} as Record<string, string>,
   recoveries: 0,
+  replaced: false,
 };
 
 function didOf(participant: any): string {
   return participant?.did ?? participant?.agentDid;
+}
+
+/** The participant's session: a mesh participant is its DID. */
+function keyOf(participant: any): string {
+  return participant?.participantId ?? didOf(participant);
 }
 
 /** Attach a receiver to every track of every participant that has none yet. */
@@ -50,24 +75,30 @@ function receiveAll(): void {
 async function snapshot(): Promise<Snapshot> {
   const participants = session?.participants ?? [];
   const remotes = state.hearing.remotes(participants, options?.tones ?? []);
+  const bySession = state.hearing.remotes(participants, options?.tones ?? [], keyOf);
+  const sessions = participants.map((p: any) => ({ ...bySession[keyOf(p)], agentDid: p.agentDid }));
   return {
     joined: session?.getState() === "active",
     state: session?.getState() ?? "none",
     topology: state.topology,
-    roster: [...state.roster],
+    roster: [...state.roster.values()],
     participants: participants.map((p) => p.agentDid),
     left: [...state.left],
     departures: state.departures,
     remotes,
+    sessions,
+    replaced: state.replaced,
     data: state.data,
     errors: state.errors,
     peerStates: state.peerStates,
     recoveries: state.recoveries,
     selectedRemotes: await selectedRemoteAddresses(),
+    pausedMs: pauses.longestWithin(PAUSE_RECENT_MS),
   };
 }
 
-async function join(opts: JoinOptions): Promise<void> {
+/** The user's session for the space, created as an app creates it, not joined. */
+async function open(opts: JoinOptions): Promise<Session> {
   options = opts;
   client ??= new Ad4mClient(`http://127.0.0.1:${opts.port}`, opts.token);
   const perspective = (await client.perspective.all()).find((p) => p.sharedUrl === opts.neighbourhoodUrl);
@@ -83,12 +114,14 @@ async function join(opts: JoinOptions): Promise<void> {
       neighbourhoodUrl: opts.neighbourhoodUrl,
       topology: sfuConfig.mode === "mesh" ? "mesh" : "auto",
       sfuConfig,
+      ...(opts.deviceId ? { deviceId: opts.deviceId } : {}),
     });
     session.on("topology-changed", (topology: string) => { state.topology = topology; });
-    session.on("participant-joined", (p: any) => { state.roster.add(didOf(p)); state.left.delete(didOf(p)); receiveAll(); });
+    session.on("participant-joined", (p: any) => { state.roster.set(keyOf(p), didOf(p)); state.left.delete(didOf(p)); receiveAll(); });
     session.on("participant-updated", () => receiveAll());
     session.on("stream-added", () => receiveAll());
-    session.on("participant-left", (p: any) => { state.roster.delete(didOf(p)); state.left.add(didOf(p)); state.departures += 1; });
+    session.on("participant-left", (p: any) => { state.roster.delete(keyOf(p)); state.left.add(didOf(p)); state.departures += 1; });
+    session.on("replaced", () => { state.replaced = true; });
     const debug = (line: string) => {
       if (process.env.E2E_DEBUG) console.log(`[e2e ${process.env.E2E_WHO}] ${new Date().toISOString().slice(17, 23)} ${line}`);
     };
@@ -108,6 +141,12 @@ async function join(opts: JoinOptions): Promise<void> {
       state.data.push({ from: message.senderDid, label: message.channelLabel, data: message.data, binary: message.binary });
     });
   }
+  return session;
+}
+
+async function join(opts: JoinOptions): Promise<void> {
+  const session = await open(opts);
+  if (opts.failOffer) failNextOffer();
 
   tone ??= toneSource(opts.tone);
   if (opts.video) camera ??= videoSource(opts.video.width, opts.video.height);
@@ -119,6 +158,9 @@ async function run(command: Command): Promise<unknown> {
   switch (command.kind) {
     case "join":
       return join(command.options);
+    case "open":
+      await open(command.options);
+      return;
     case "rejoin":
       return join(options!);
     case "leave":
@@ -138,12 +180,16 @@ async function run(command: Command): Promise<unknown> {
       return session!.setQualityPreference(command.preference);
     case "send":
       return session!.sendData(command.label, command.data, command.binary);
+    case "networkChanged":
+      (globalThis as unknown as EventTarget).dispatchEvent(new Event("online"));
+      return;
     case "snapshot":
       return snapshot();
     case "close":
       state.hearing.stop();
       await session?.destroy().catch(() => {});
       for (const source of [tone, camera, screen]) source?.stop();
+      pauses.stop();
       setTimeout(() => process.exit(0), 50);
       return;
   }

@@ -32,7 +32,8 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 
 use crate::db::{
-    Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, PaymentRequest,
+    Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinRow,
+    OperatorRecordRow, PaymentRequest,
 };
 use crate::types::{
     AIModelLoadingStatus, AIPromptExamples, AITask, EntanglementProof, Expression, ImportResult,
@@ -368,9 +369,19 @@ macro_rules! ad4m_db_methods {
                 max_bytes: usize,
                 initial_count: Option<usize>
             ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)>;
+            fn get_pending_diffs_among(&self, perspective_uuid: &str, ids: &[u64]) -> Ad4mDbResult<PerspectiveDiff>;
             fn clear_pending_diffs(&self, perspective_uuid: &str, ids: Vec<u64>) -> Ad4mDbResult<()>;
             fn park_pending_diffs(&self, perspective_uuid: &str, ids: Vec<u64>) -> Ad4mDbResult<()>;
             fn get_unsent_additions(&self, perspective_uuid: &str) -> Ad4mDbResult<Vec<LinkExpression>>;
+
+            // Identity: the operator record, the identity each local agent speaks for, the
+            // claims this executor made (`db/identity.rs`)
+            fn operator_record(&self) -> Ad4mDbResult<Option<OperatorRecordRow>>;
+            fn agent_identity(&self, agent_did: &str) -> Ad4mDbResult<Option<String>>;
+            fn set_agent_identity(&self, agent_did: &str, scid: &str, set_at: u64) -> Ad4mDbResult<()>;
+            fn agents_of_identity(&self, scid: &str) -> Ad4mDbResult<Vec<String>>;
+            fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
+            fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
 
             // Expression cache
             fn _add_expression(&self, url: &str, expression: &Expression<Value>) -> Ad4mDbResult<()>;

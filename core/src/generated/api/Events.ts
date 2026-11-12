@@ -10,6 +10,7 @@ import type { AutoProcessorNeighbourhoodState } from "./AutoProcessorNeighbourho
 import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { FlowStateChangedEvent } from "./FlowStateChangedEvent";
 import type { HostingUserInfo } from "./HostingUserInfo";
+import type { IdentityForkEvent } from "./IdentityForkEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
 import type { PerspectiveEvent } from "./PerspectiveEvent";
@@ -22,6 +23,7 @@ import type { SfuCallRenegotiationOffer } from "./SfuCallRenegotiationOffer";
 import type { SfuDataMessage } from "./SfuDataMessage";
 import type { SfuMigrateEvent } from "./SfuMigrateEvent";
 import type { SfuRoomRoster } from "./SfuRoomRoster";
+import type { SfuSessionReplaced } from "./SfuSessionReplaced";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -49,7 +51,9 @@ export interface EventMap {
   "sfu-migrate": SfuMigrateEvent;
   "sfu-data": SfuDataMessage;
   "sfu-room-roster": SfuRoomRoster;
+  "sfu-session-replaced": SfuSessionReplaced;
   "flow-state-changed": FlowStateChangedEvent;
+  "identity-fork": IdentityForkEvent;
 }
 
 export type EventName = keyof EventMap;

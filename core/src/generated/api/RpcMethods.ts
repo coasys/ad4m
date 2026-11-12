@@ -12,6 +12,7 @@ import type { AgentReply } from "./AgentReply";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
+import type { AgentWithIdentity } from "./AgentWithIdentity";
 import type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
 import type { AiAddModelParams } from "./AiAddModelParams";
 import type { AiAddTaskParams } from "./AiAddTaskParams";
@@ -27,12 +28,17 @@ import type { AiUpdateTaskParams } from "./AiUpdateTaskParams";
 import type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 import type { Apps } from "./Apps";
 import type { CallSessionInfo } from "./CallSessionInfo";
+import type { ClaimOfferParams } from "./ClaimOfferParams";
+import type { ClaimOfferResult } from "./ClaimOfferResult";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
+import type { CosignInceptParams } from "./CosignInceptParams";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
+import type { DeviceView } from "./DeviceView";
+import type { DidResolutionResult } from "./DidResolutionResult";
 import type { EmbedRequest } from "./EmbedRequest";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
@@ -52,10 +58,14 @@ import type { HostRate } from "./HostRate";
 import type { HostingInfoResult } from "./HostingInfoResult";
 import type { HostingRequestPaymentResult } from "./HostingRequestPaymentResult";
 import type { HostingWalletResult } from "./HostingWalletResult";
+import type { IdentityLog } from "./IdentityLog";
+import type { IdentityStatus } from "./IdentityStatus";
 import type { ImportAgentRequest } from "./ImportAgentRequest";
 import type { ImportRequest } from "./ImportRequest";
 import type { InteractionMeta } from "./InteractionMeta";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
+import type { JoinStatus } from "./JoinStatus";
+import type { JoinStatusParams } from "./JoinStatusParams";
 import type { JsonValue } from "./serde_json/JsonValue";
 import type { LanguageAddressParams } from "./LanguageAddressParams";
 import type { LanguageHandle } from "./LanguageHandle";
@@ -65,6 +75,7 @@ import type { LanguageRef } from "./LanguageRef";
 import type { LanguageWriteSettingsParams } from "./LanguageWriteSettingsParams";
 import type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
 import type { LockAgentRequest } from "./LockAgentRequest";
+import type { LogParams } from "./LogParams";
 import type { Model } from "./Model";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
 import type { NeighbourhoodOnlineStatusParams } from "./NeighbourhoodOnlineStatusParams";
@@ -72,8 +83,12 @@ import type { NeighbourhoodSignalParams } from "./NeighbourhoodSignalParams";
 import type { NeighbourhoodUuidParams } from "./NeighbourhoodUuidParams";
 import type { Notification } from "./Notification";
 import type { NotificationInput } from "./NotificationInput";
+import type { OfferListing } from "./OfferListing";
+import type { OfferOpened } from "./OfferOpened";
+import type { OffersParams } from "./OffersParams";
 import type { OnlineAgent } from "./OnlineAgent";
 import type { OpenLinkRequest } from "./OpenLinkRequest";
+import type { OpenOfferParams } from "./OpenOfferParams";
 import type { OverlayView } from "./OverlayView";
 import type { PermitCapabilityRequest } from "./PermitCapabilityRequest";
 import type { PerspectiveAddAutoProcessorParams } from "./PerspectiveAddAutoProcessorParams";
@@ -101,6 +116,7 @@ import type { PerspectiveLinkMutationsParams } from "./PerspectiveLinkMutationsP
 import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowReceiptParams";
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
+import type { PerspectiveModelSubscribeParams } from "./PerspectiveModelSubscribeParams";
 import type { PerspectiveNamedShacl } from "./PerspectiveNamedShacl";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
@@ -116,6 +132,7 @@ import type { PerspectiveShacl } from "./PerspectiveShacl";
 import type { PerspectiveShaclNameParams } from "./PerspectiveShaclNameParams";
 import type { PerspectiveSparqlParams } from "./PerspectiveSparqlParams";
 import type { PerspectiveSubjectClassesOfParams } from "./PerspectiveSubjectClassesOfParams";
+import type { PerspectiveSubscribeQueryParams } from "./PerspectiveSubscribeQueryParams";
 import type { PerspectiveSubscribed } from "./PerspectiveSubscribed";
 import type { PerspectiveSubscriptionParams } from "./PerspectiveSubscriptionParams";
 import type { PerspectiveUpdateLinkParams } from "./PerspectiveUpdateLinkParams";
@@ -127,8 +144,11 @@ import type { PromptRequest } from "./PromptRequest";
 import type { ProposeOutcome } from "./ProposeOutcome";
 import type { PublishLanguageRequest } from "./PublishLanguageRequest";
 import type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest";
+import type { PublishParams } from "./PublishParams";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
+import type { ResetLogParams } from "./ResetLogParams";
+import type { ResolveParams } from "./ResolveParams";
 import type { RunAgentRequest } from "./RunAgentRequest";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
@@ -153,6 +173,7 @@ import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
 import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
 import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
 import type { SfuCallJoinParams } from "./SfuCallJoinParams";
+import type { SfuCallLeaveParams } from "./SfuCallLeaveParams";
 import type { SfuCascadeStatus } from "./SfuCascadeStatus";
 import type { SfuConfig } from "./SfuConfig";
 import type { SfuEnsureMembershipParams } from "./SfuEnsureMembershipParams";
@@ -160,12 +181,14 @@ import type { SfuNeighbourhoodParams } from "./SfuNeighbourhoodParams";
 import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPreference";
 import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
+import type { SfuRestartIceParams } from "./SfuRestartIceParams";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
 import type { SfuSendDataParams } from "./SfuSendDataParams";
 import type { SfuSetConfigParams } from "./SfuSetConfigParams";
 import type { SfuStatus } from "./SfuStatus";
 import type { SignMessageRequest } from "./SignMessageRequest";
+import type { SignedHead } from "./SignedHead";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
 import type { UnytVersionInfo } from "./UnytVersionInfo";
@@ -195,7 +218,7 @@ export interface RpcMethods {
   "agent.entanglementProofPreflight": { params: EntanglementProofPreflightRequest; result: EntanglementProof };
   "agent.generate": { params: GenerateAgentRequest; result: AgentStatus };
   "agent.generateJwt": { params: GenerateJwtRequest; result: string };
-  "agent.get": { params: Record<string, never>; result: Agent };
+  "agent.get": { params: Record<string, never>; result: AgentWithIdentity };
   "agent.getApps": { params: Record<string, never>; result: Array<Apps> };
   "agent.getEntanglementProofs": { params: Record<string, never>; result: Array<EntanglementProof> };
   "agent.getTrustedAgents": { params: Record<string, never>; result: Array<string> };
@@ -239,6 +262,17 @@ export interface RpcMethods {
   "hosting.setHotWallet": { params: SetHotWalletAddressRequest; result: boolean };
   "hosting.wallet": { params: Record<string, never>; result: HostingWalletResult };
   "hosting.walletHistory": { params: Record<string, never>; result: JsonValue };
+  "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
+  "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
+  "identity.devices": { params: Record<string, never>; result: Array<DeviceView> };
+  "identity.joinStatus": { params: JoinStatusParams; result: JoinStatus };
+  "identity.log": { params: LogParams; result: IdentityLog };
+  "identity.offers": { params: OffersParams; result: Array<OfferListing> };
+  "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
+  "identity.publish": { params: PublishParams; result: SignedHead };
+  "identity.resetLog": { params: ResetLogParams; result: boolean };
+  "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
+  "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
@@ -286,7 +320,7 @@ export interface RpcMethods {
   "perspective.linkMutations": { params: PerspectiveLinkMutationsParams; result: PerspectiveLinkDiff };
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
-  "perspective.modelSubscribe": { params: PerspectiveModelQueryParams; result: PerspectiveSubscribed };
+  "perspective.modelSubscribe": { params: PerspectiveModelSubscribeParams; result: PerspectiveSubscribed };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
@@ -305,7 +339,7 @@ export interface RpcMethods {
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
   "perspective.subjectClassesOf": { params: PerspectiveSubjectClassesOfParams; result: { [key in string]: Array<string> } };
-  "perspective.subscribeQuery": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
+  "perspective.subscribeQuery": { params: PerspectiveSubscribeQueryParams; result: PerspectiveSubscribed };
   "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
@@ -354,7 +388,8 @@ export interface RpcMethods {
   "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
   "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
-  "sfu.callLeave": { params: SfuRoomParams; result: boolean };
+  "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
+  "sfu.callRestartIce": { params: SfuRestartIceParams; result: boolean };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };
@@ -409,6 +444,12 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "hosting.info",
   "hosting.wallet",
   "hosting.walletHistory",
+  "identity.devices",
+  "identity.joinStatus",
+  "identity.log",
+  "identity.offers",
+  "identity.resolve",
+  "identity.status",
   "language.all",
   "language.get",
   "language.meta",
@@ -483,4 +524,10 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
   "runtime.restartHolochain",
+]);
+
+/** Calls that open something on the executor that outlives them (a live query): the client cancels one that timed out, as one it aborted. */
+export const OPENS_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
+  "perspective.modelSubscribe",
+  "perspective.subscribeQuery",
 ]);

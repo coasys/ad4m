@@ -11,6 +11,10 @@ file. Edit this file; do not put unique rules in `CLAUDE.md`.
 | `rust-executor/` | The AD4M runtime: WS RPC server, perspectives/graph store, languages runtime (Deno), Holochain conductor, AI service, MCP server. **Start at `rust-executor/AGENTS.md`.** | Rust |
 | `cli/` | `ad4m` CLI binary; wraps `rust-executor` (`ad4m-executor` subcommand) and `rust-client` | Rust |
 | `rust-client/` | Rust client for the executor's WS RPC | Rust |
+| `ad4m-hash-chain/` | Generic linear hash chain of signed JSON entries (entry hash, `eddsa-jcs-2022` proofs, fold/import, fork detection, `ChainStore` with memory/SQLite adapters; native + WASM). Under the key log. See `ad4m-hash-chain/AGENTS.md` | Rust |
+| `ad4m-identity-core/` | The `did:scid:coasys:1` identity core: the key log as a chain type on `ad4m-hash-chain` (`Event`, `KelPolicy`, `fold`, `KeyState`), the DID document (`did_document`), signing domains, proof of work, event builders (`build`), the 12 words (`words`), WASM exports (`wasm`). Spec `docs-src/identity/did-scid-coasys-1.md`. See `ad4m-identity-core/AGENTS.md` | Rust |
+| `ad4m-identity-client/` | The master-key side of `did:scid:coasys:1` for apps: `Vault` (`MemoryVault` behind `test-vault`), `MasterSigner`, `ViaExecutor` (the executor's `identity.*` calls over any `ExecutorRpc`; feature `ws` for `ad4m-client`), flows `create`, `link`, `revoke`. Builds for wasm32. See `ad4m-identity-client/AGENTS.md` | Rust |
+| `identity-store/` | The shared store of key logs: `identity-store` binary (axum, SQLite on `ad4m-hash-chain`'s `SqliteChainStore`), signed heads, the key index, signed requests, agent records, offers and claims (an `add` spends a claim: the claim check). Its log and head reads are the public did:scid host profile (any origin, cached). Reached by executors only through the agent language. See `identity-store/AGENTS.md` | Rust |
 | `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC contracts (`src/generated/api/RpcMethods.ts`) | TS |
 | `connect/` | Browser/Node connection helper (`@coasys/ad4m-connect`) | TS |
 | `bootstrap-languages/` | The system Languages (agent, perspective-diff-sync, etc.) bundled into the executor | TS/Rust |
@@ -122,12 +126,95 @@ between executors, the server-link suite (and, for p-diff-sync itself, the
 Holochain suite); such suites take a `LinkLangConfig` (`utils/linkLangConfig.ts`)
 so the same file runs on both link languages.
 
+### Nightly (`nightly-llm-e2e` workflow)
+
+A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`
+(local Ollama). Each job has its own serial group. The jobs: `llm-e2e`,
+`integration-tests-sfu`, `integration-tests-sfu-browsers` (see below) and
+`coasys-spaces`.
+
+`coasys-spaces` runs WE's product suite (`pnpm --filter @we/app-web test:spaces`,
+WE `apps/we-web/tests/live/coasys-spaces/`): a Coasys space, a call, its
+transcript (executor Whisper), extraction on Ollama `qwen3.8-27b-48k` (the
+model staging and `llm-e2e` use, which Marvin keeps loaded), and flows.
+Ollama's OpenAI endpoint runs a model with the server's default context window
+and cuts a longer prompt silently. So when the model's own `num_ctx` is below
+`COASYS_SPACES_LLM_NUM_CTX` (16384), `llm-check` makes a variant such as
+`coasys-spaces-gemma3-12b:ctx16384` (`/api/create`) and the suite runs on it.
+A model with a large enough `num_ctx` (the 48k tag) runs as it is, so the GPU
+holds one load. It uses this commit's executor and SDK:
+
+- The executor is the one the `build` job published for the commit
+  (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,
+  the job builds it.
+- `core` and `connect` are built and packed. WE's ad4m pin (root `pnpm.overrides`)
+  points at the two tarballs.
+- WE comes from the pipeline parameter `we-ref` (branch, tag or full commit;
+  default `dev`). WE installs with its own pnpm (10).
+
+The job halts green when the same ad4m commit, WE commit, tier and model already
+passed on the host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
+`COASYS_SPACES_FORCE=1` to run anyway. A checkout with changes (a run by hand
+with local edits) runs, but neither skips nor records a pass. It shares the serial group
+`nightly-llm` with `llm-e2e`: both use the host's Ollama and GPU, so they run
+one after the other. Screenshots, traces and logs are under the
+job's artifacts, `coasys-spaces/`.
+
+Each step is a subcommand of `scripts/coasys-spaces.sh`. `bash
+scripts/coasys-spaces.sh all` runs the whole job on a machine with Ollama and the
+model (`COASYS_SPACES_TIER=stub` needs no model). `bash
+scripts/coasys-spaces.test.sh` tests the script.
+
+To run the workflow by hand on a branch, with another WE ref (the definition id
+is in Project Settings → Pipelines):
+
+```bash
+curl -X POST https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/pipeline/run \
+  -H "Circle-Token: $CIRCLECI_TOKEN" -H 'content-type: application/json' \
+  -d '{"definition_id": "<definition id>",
+       "config": {"branch": "<branch>"}, "checkout": {"branch": "<branch>"},
+       "parameters": {"run-nightly-llm": true, "we-ref": "<WE branch>"}}'
+```
+
+This runs all four nightly jobs.
+
 ### SFU wind tunnel
 
 | Suite | Languages | CI |
 |---|---|---|
 | `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | every push, `integration-tests-sfu-e2e` |
+| `test-sfu-browsers`: SFU and mesh calls in real Chromium, Firefox and WebKit, mixed (about 1 min past the world's start) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-browsers` does both) | nightly, `integration-tests-sfu-browsers` |
 | `test-sfu`: `sfu-cascade`, `sfu-session` (T20, T21), `sfu-mesh` (network baselines) | Holochain: `pnpm run prepare-test` | nightly, `integration-tests-sfu` |
+
+- **Browser suite (`tests/js/tests/sfu-browsers.test.ts`, helpers in
+  `tests/js/helpers/sfu/browser/`).** Each user calls from its own
+  Playwright browser context, loading `core/lib/index.js` from a loopback
+  page server, and joins through `createSession` as an app does. Per
+  topology: Chromium with each browser, a Chromium + Firefox + WebKit call,
+  and a Firefox tab lost mid-call that rejoins. Asserts come from getStats
+  (packets and decoded frames growing), a Web Audio analyser (audible) and a
+  canvas (not black; headless WebKit never plays a `<video>`, so not there).
+  On the SFU, Chromium + Firefox also asserts the payload types differ per
+  leg and each receiver gets its own numbers (#1684).
+- The suite binds the SFU to the host's outbound IPv4
+  (`AD4M_SFU_BIND_ADDR`), not loopback: Firefox gathers no loopback
+  candidate and never pairs its LAN candidates with an SFU on 127.0.0.1
+  (ICE stays `checking`, the SFU's DTLS times out), while Chromium and
+  WebKit connect. `SFU_BROWSERS_SFU_ADDR=127.0.0.1` shows that case.
+- Install the browsers with `pnpm exec playwright-core install --with-deps
+  chromium firefox webkit` in `tests/js`. On an Ubuntu release Playwright has
+  no builds for (CI's runner is 25.04), it falls back to the 24.04 builds,
+  whose WebKit needs ICU 74: set `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE` to the
+  build with the host's library versions (`debian13-x64` on 25.04), with its
+  own `PLAYWRIGHT_BROWSERS_PATH`. A browser that cannot start makes
+  its tests pending with the reason; `SFU_BROWSERS_REQUIRED=1` (CI) fails
+  instead. Without root for WebKit's system libraries, extract the missing
+  packages (`apt-get download`, `dpkg -x`) and list the `.so` files,
+  dependencies first, in `WEBKIT_LD_PRELOAD`. `SFU_BROWSERS_DEBUG=1` dumps
+  every tab's SDPs when a wait times out.
+- Each test hangs up (`session.leave()`) before closing its tabs: a tab
+  closed mid-call keeps its SFU slot until the server drops it, and a DID
+  is in at most 4 calls per node.
 
 - **E2E worlds use one executor without Holochain.** Users of one executor
   share a neighbourhood's perspective as its owners, so links, the call
@@ -157,6 +244,9 @@ so the same file runs on both link languages.
   participant process's TCP and UDP sockets from `/proc`, and the lease
   drops all their traffic (netem 100 % loss, matched by protocol and port)
   while sockets opened later work. Skips without passwordless `sudo -n tc`.
+  E18 makes the same cut, then fires `online` in the participant process
+  (`Participant.networkChanged`). Both assert the call came back in place:
+  u2 saw no departures, so no rebuild.
 - A participant process killed by a signal nobody sent (the libwebrtc binding
   crashes rarely while closing) reruns the scenario once; an assertion failure
   never does.
@@ -165,17 +255,45 @@ so the same file runs on both link languages.
   recoveries per participant, and world phase timings. `E2E_DEBUG=stack`
   adds the caller of each local description.
 
-SFU behaviour the scenarios pin: the executor publishes `sfu-room-roster`
-(to the listed DIDs, plus the removed DID on departure) after every join and departure, and the SDK keys
-participants by DID from it; tracks are attributed only by the `trackMapping`
-mids; `sfu-data` never echoes to its sender; room capacity comes from the
+SFU behaviour the scenarios pin: one session per device. `sfu.callJoin`
+names a `deviceId`; a join from the same DID and device (another tab)
+replaces the earlier session, which gets `sfu-session-replaced` and stops
+without rejoining, even mid-reconnect (E20); another device joins beside it as a participant of
+its own (E22; at most `MAX_DEVICES_PER_DID` = 4 per room). Every call about
+a session (`callLeave`, `callAnswerServerOffer`, `addIceCandidate`,
+`callSetQualityPreference`, `callRestartIce`, `sendData`) names the `participantId` its join
+returned, and acts only on that session of the caller's DID; the SDK sends
+none of them without one, so a tab that never joined cannot end another
+tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
+listed DIDs, plus the departed session's DID on departure) after every join
+and departure, listing sessions (`participantId` + `agentDid`), and the SDK
+keys participants by participant id from it; when the roster stops listing
+this session (its `participantId`) for 3 s, the SDK rebuilds the call, but a
+replaced session never does; tracks are attributed only by the `trackMapping`
+mids (which name
+the participant id); a session never receives its own media or its own
+`sfu-data` (`senderParticipantId`), but does receive its agent's other
+device; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer only after
-10 s of ICE `Disconnected`; the SDK rebuilds a failed connection and retries
-the join for 120 s. `ApiClient` drops an executor socket whose ping stays
-unanswered for a ping interval (10 s, `PING_INTERVAL_MS`; longer while a large
-write it sent may still be crossing a 16 kB/s link) and dials a new one, so a
-socket a network switch left OPEN is noticed in 10 to 20 s.
+10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
+(`sfu.callRestartIce`), 10 s after the request or after the restart's answer;
+on ICE `disconnected` or a network change the SDK restarts ICE in place (the
+SFU stays the only offerer: the restart comes as a server renegotiation
+offer), and rebuilds the call if that has not reconnected within 5 s; a
+failed connection is rebuilt at once, and a rebuild retries the join for
+120 s. The restart names the session's `participantId` (only that session
+restarts, never another device of the agent), and a manager with no session
+(join not back, left, replaced) sends none. A room roster that leaves this
+session out for 3 s also rebuilds the call (the executor sends the departure
+roster to the departed DID too); a roster that lists it, as during a restart
+in place, changes nothing.
+`ApiClient` drops an executor socket whose ping stays unanswered for a ping
+interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
+still be crossing a 16 kB/s link) and dials a new one, so a
+socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
+at once; `change` on `navigator.connection` and ICE `disconnected` run
+`checkConnection`, which drops a socket silent for 2 s after its ping.
 
 SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
 binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port

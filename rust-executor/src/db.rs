@@ -27,8 +27,13 @@ use url::Url;
 use uuid::Uuid;
 
 mod grants;
+mod identity;
 mod tasks;
 pub use grants::GrantRow;
+#[cfg(test)]
+pub(crate) use identity::operator_record_in;
+pub(crate) use identity::set_operator_record_if_empty_in;
+pub use identity::{JoinRow, OperatorRecordRow, OperatorSetBy};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -157,6 +162,56 @@ fn sent_api_key(api: &ModelApiInput) -> String {
 
 lazy_static! {
     static ref AD4M_DB_INSTANCE: Arc<Mutex<Option<Ad4mDb>>> = Arc::new(Mutex::new(None));
+}
+
+/// Queued diffs, oldest first, as the one diff a receiver can apply in their place.
+///
+/// A receiver applies a diff's removals, then its additions, and a removal matches
+/// one exact link expression ([`link_identity`]). Concatenating the rows would lose
+/// their order: `+x` then `-x` would arrive as "remove x, add x" and leave x with
+/// every peer. So only the last operation on each expression stays, in queue order
+/// and, within a row, removals before additions as the receiver reads a single row:
+/// an addition is dropped when a later operation adds or removes it, and a removal
+/// (kept otherwise: peers may hold the link from before) when a later one adds or
+/// removes it. The links that remain keep their order.
+pub fn merge_pending_diffs(diffs: Vec<PerspectiveDiff>) -> PerspectiveDiff {
+    let mut seen_later = HashSet::new();
+    let mut additions = Vec::new();
+    let mut removals = Vec::new();
+    // Newest operation first, so each one knows what follows it.
+    for diff in diffs.into_iter().rev() {
+        for addition in diff.additions.into_iter().rev() {
+            if seen_later.insert(link_identity(&addition)) {
+                additions.push(addition);
+            }
+        }
+        for removal in diff.removals.into_iter().rev() {
+            if seen_later.insert(link_identity(&removal)) {
+                removals.push(removal);
+            }
+        }
+    }
+    additions.reverse();
+    removals.reverse();
+    PerspectiveDiff {
+        additions,
+        removals,
+    }
+}
+
+/// What a removal matches a link by: author, timestamp, source, predicate, target.
+/// The predicate is normalised as the store keeps it: `Some("")` and `None` are
+/// one link (`remove_link` matches both against `""`).
+pub(crate) fn link_identity(
+    link: &LinkExpression,
+) -> (String, String, String, Option<String>, String) {
+    (
+        link.author.clone(),
+        link.timestamp.clone(),
+        link.data.source.clone(),
+        Ad4mDb::normalize_predicate(link.data.predicate.clone()),
+        link.data.target.clone(),
+    )
 }
 
 pub struct Ad4mDb {
@@ -383,6 +438,8 @@ impl Ad4mDb {
 
         // The tokens the executor issued: see agent::grants.
         Self::create_grants_table(&conn)?;
+        // The operator record and the identities local agents speak for: see identity::.
+        Self::create_identity_tables(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS email_verifications (
@@ -2024,51 +2081,75 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// The oldest `max_count` queued diffs as one diff, and their row ids. See
+    /// [`merge_pending_diffs`] for how the rows combine.
     pub fn get_pending_diffs(
         &self,
         perspective_uuid: &str,
         max_count: Option<usize>,
     ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
+        let (diffs, ids) = self
+            .pending_diff_rows(perspective_uuid, max_count)?
+            .into_iter()
+            .unzip();
+        Ok((merge_pending_diffs(diffs), ids))
+    }
+
+    /// The queued rows among `ids`, merged oldest first as in `get_pending_diffs`.
+    pub fn get_pending_diffs_among(
+        &self,
+        perspective_uuid: &str,
+        ids: &[u64],
+    ) -> Ad4mDbResult<PerspectiveDiff> {
+        if ids.is_empty() {
+            return Ok(merge_pending_diffs(Vec::new()));
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ? AND is_pending = ? AND id IN ({placeholders}) ORDER BY id"
+        ))?;
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&perspective_uuid, &true];
+        values.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+        let diffs = stmt
+            .query_map(values.as_slice(), Self::pending_diff_row)?
+            .map(|row| row.map(|(diff, _)| diff))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(merge_pending_diffs(diffs))
+    }
+
+    /// The oldest `max_count` queued rows, oldest first.
+    fn pending_diff_rows(
+        &self,
+        perspective_uuid: &str,
+        max_count: Option<usize>,
+    ) -> Ad4mDbResult<Vec<(PerspectiveDiff, u64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2 ORDER BY id",
         )?;
-        let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
-            let additions: Vec<LinkExpression> =
-                serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
-            let removals: Vec<LinkExpression> =
-                serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
-            let id = row.get::<_, u64>(2).unwrap();
-            Ok((
-                PerspectiveDiff {
-                    additions,
-                    removals,
-                },
-                id,
-            ))
-        })?;
-        let mut diffs = Vec::new();
-        let mut ids = Vec::new();
+        let diffs_iter = stmt.query_map(params![perspective_uuid, true], Self::pending_diff_row)?;
+        let mut rows = Vec::new();
         for (count, diff_result) in diffs_iter.enumerate() {
-            let (diff, id) = diff_result?;
-            diffs.push(diff);
-            ids.push(id);
+            rows.push(diff_result?);
             if max_count.map(|max| count >= max - 1).unwrap_or(false) {
                 break;
             }
         }
-        // Assuming we want to concatenate all additions and removals from different diffs
-        let mut all_additions = Vec::new();
-        let mut all_removals = Vec::new();
-        for diff in diffs {
-            all_additions.extend(diff.additions);
-            all_removals.extend(diff.removals);
-        }
+        Ok(rows)
+    }
+
+    /// One `perspective_diff` row selected as `additions, removals, id`.
+    fn pending_diff_row(row: &rusqlite::Row) -> rusqlite::Result<(PerspectiveDiff, u64)> {
+        let additions: Vec<LinkExpression> =
+            serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
+        let removals: Vec<LinkExpression> =
+            serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
+        let id = row.get::<_, u64>(2).unwrap();
         Ok((
             PerspectiveDiff {
-                additions: all_additions,
-                removals: all_removals,
+                additions,
+                removals,
             },
-            ids,
+            id,
         ))
     }
 
@@ -5081,6 +5162,152 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert_eq!(diff.additions.len(), 2);
         assert_eq!(diff.removals.len(), 0);
+    }
+
+    /// The merged diff, applied as a receiver does (removals, then additions),
+    /// leaves what the rows applied one by one leave: the last operation on an
+    /// expression wins, and the other links keep their order.
+    #[test]
+    fn pending_diffs_merge_to_their_net_effect_in_queue_order() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        let x = construct_dummy_link_expression(LinkStatus::Shared);
+        let y = construct_dummy_link_expression(LinkStatus::Shared);
+        let a = construct_dummy_link_expression(LinkStatus::Shared);
+        let b = construct_dummy_link_expression(LinkStatus::Shared);
+        let diff =
+            |additions: Vec<&LinkExpression>, removals: Vec<&LinkExpression>| PerspectiveDiff {
+                additions: additions.into_iter().cloned().collect(),
+                removals: removals.into_iter().cloned().collect(),
+            };
+        // +x, +a, -y, -x, +y, +b
+        for row in [
+            diff(vec![&x], vec![]),
+            diff(vec![&a], vec![]),
+            diff(vec![], vec![&y]),
+            diff(vec![], vec![&x]),
+            diff(vec![&y], vec![]),
+            diff(vec![&b], vec![]),
+        ] {
+            db.add_pending_diff(&p_uuid, &row).unwrap();
+        }
+
+        let (merged, ids) = db.get_pending_diffs(&p_uuid, None).unwrap();
+        assert_eq!(ids.len(), 6);
+        assert_eq!(merged, diff(vec![&a, &y, &b], vec![&x]));
+
+        // Only the rows asked for.
+        let among = db.get_pending_diffs_among(&p_uuid, &ids[3..]).unwrap();
+        assert_eq!(among, diff(vec![&y, &b], vec![&x]));
+
+        // One row that removes and adds x is read removals first: x stays.
+        assert_eq!(
+            merge_pending_diffs(vec![diff(vec![&x], vec![&x])]),
+            diff(vec![&x], vec![])
+        );
+    }
+
+    /// `get_pending_diffs_among` reads only the queued rows among the ids it is
+    /// given: a row parked since (`is_pending = 0`) is never sent again, even
+    /// when its id is asked for.
+    #[test]
+    fn get_pending_diffs_among_skips_parked_rows() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        let a = construct_dummy_link_expression(LinkStatus::Shared);
+        let parked_addition = construct_dummy_link_expression(LinkStatus::Shared);
+        let parked_removal = construct_dummy_link_expression(LinkStatus::Shared);
+        let c = construct_dummy_link_expression(LinkStatus::Shared);
+        for row in [
+            PerspectiveDiff {
+                additions: vec![a.clone()],
+                removals: vec![],
+            },
+            PerspectiveDiff {
+                additions: vec![parked_addition.clone()],
+                removals: vec![parked_removal.clone()],
+            },
+            PerspectiveDiff {
+                additions: vec![c.clone()],
+                removals: vec![],
+            },
+        ] {
+            db.add_pending_diff(&p_uuid, &row).unwrap();
+        }
+        let (_, ids) = db.get_pending_diffs(&p_uuid, None).unwrap();
+        assert_eq!(ids.len(), 3);
+
+        db.park_pending_diffs(&p_uuid, vec![ids[1]]).unwrap();
+
+        let among = db.get_pending_diffs_among(&p_uuid, &ids).unwrap();
+        assert!(!among.additions.contains(&parked_addition));
+        assert!(!among.removals.contains(&parked_removal));
+        assert_eq!(
+            among,
+            PerspectiveDiff {
+                additions: vec![a, c],
+                removals: vec![],
+            }
+        );
+    }
+
+    /// A repeated operation on one expression (a failed batch stored as one row
+    /// with `remove_link` called twice, or duplicates across rows) is sent once:
+    /// only the last operation on each expression stays.
+    #[test]
+    fn repeated_operations_on_a_link_merge_to_the_last_one() {
+        let x = construct_dummy_link_expression(LinkStatus::Shared);
+        let add = || PerspectiveDiff {
+            additions: vec![x.clone()],
+            removals: vec![],
+        };
+        let remove = || PerspectiveDiff {
+            additions: vec![],
+            removals: vec![x.clone()],
+        };
+
+        assert_eq!(merge_pending_diffs(vec![add(), add()]), add());
+        assert_eq!(merge_pending_diffs(vec![remove(), remove()]), remove());
+        assert_eq!(
+            merge_pending_diffs(vec![add(), remove(), remove()]),
+            remove()
+        );
+        // Within one row, too.
+        assert_eq!(
+            merge_pending_diffs(vec![PerspectiveDiff {
+                additions: vec![],
+                removals: vec![x.clone(), x.clone()],
+            }]),
+            remove()
+        );
+    }
+
+    /// The store keeps no predicate as `""` and reads it back as `None`, and
+    /// `remove_link` matches either: an addition with `Some("")` and a removal
+    /// with `None` are one link, so the removal cancels the addition.
+    #[test]
+    fn an_empty_predicate_and_no_predicate_are_one_link_in_the_merge() {
+        let mut added = construct_dummy_link_expression(LinkStatus::Shared);
+        added.data.predicate = Some(String::new());
+        let mut removed = added.clone();
+        removed.data.predicate = None;
+
+        assert_eq!(
+            merge_pending_diffs(vec![
+                PerspectiveDiff {
+                    additions: vec![added],
+                    removals: vec![],
+                },
+                PerspectiveDiff {
+                    additions: vec![],
+                    removals: vec![removed.clone()],
+                },
+            ]),
+            PerspectiveDiff {
+                additions: vec![],
+                removals: vec![removed],
+            }
+        );
     }
 
     /// An imported row is stored without a shape check, so one parked row may not
