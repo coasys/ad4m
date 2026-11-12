@@ -10,7 +10,7 @@ use crate::agent::capabilities::*;
 use crate::helpers::can_access_perspective_with_did;
 use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::perspective_instance::{
-    is_sparql_query, result_json, PROLOG_LIVE_QUERY_UNSUPPORTED,
+    is_sparql_query, result_json, SubscriptionIdTaken, PROLOG_LIVE_QUERY_UNSUPPORTED,
 };
 use crate::perspectives::{
     add_perspective, get_perspective,
@@ -823,11 +823,15 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let perspective = guarded_perspective(&params).await?;
 
-    let reply = perspective
-        .subscribe_and_query(body.query, connection_id, subscriber(&ctx))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    subscribed(reply)
+    let opened = perspective
+        .subscribe_and_query(
+            body.query,
+            client_subscription_id(body.subscription_id)?,
+            connection_id.clone(),
+            subscriber(&ctx),
+        )
+        .await;
+    subscribed(&perspective, &ctx, &connection_id, opened).await
 }
 
 /// The RPC connection a subscription belongs to; a call without one (REST)
@@ -838,17 +842,56 @@ fn connection_id(ctx: &RequestContext) -> Result<String, WsRpcError> {
     })
 }
 
+/// The id a client minted for the live query it opens. It is a map key, and it appears
+/// in logs, errors and updates, so it must be a short id: 1 to 64 characters of
+/// `[A-Za-z0-9-]` (the SDK sends a UUID).
+fn client_subscription_id(id: String) -> Result<String, WsRpcError> {
+    let valid =
+        (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    if valid {
+        Ok(id)
+    } else {
+        Err(WsRpcError::bad_request(
+            "subscriptionId must be 1 to 64 characters of [A-Za-z0-9-]",
+        ))
+    }
+}
+
 /// The agent a subscription runs as, whose sessions alone get its updates: the
 /// managed agent the caller acts as, `None` for the main agent.
 fn subscriber(ctx: &RequestContext) -> Option<String> {
     ctx.user_did().map(str::to_string)
 }
 
-/// Reply to a subscribe call: the result as JSON at its revision (0 unless
-/// a change was published while the first result was computed).
-fn subscribed(
-    (subscription_id, revision, result): (String, u64, String),
+/// The reply to a call that opened a live query.
+///
+/// A taken id is a 409. A call cancelled while it opened is ended here: the client that
+/// cancelled it disposes the id next, and that dispose may have found nothing yet, so the
+/// subscription would stay with nobody holding it. The cancel reached the executor before
+/// the dispose, so a dispose that ran before the subscription was registered left the call
+/// cancelled by now.
+async fn subscribed(
+    perspective: &PerspectiveInstance,
+    ctx: &RequestContext,
+    connection_id: &str,
+    opened: Result<(String, u64, String), deno_core::error::AnyError>,
 ) -> Result<Value, WsRpcError> {
+    let (subscription_id, revision, result) = opened.map_err(|e| {
+        if e.downcast_ref::<SubscriptionIdTaken>().is_some() {
+            WsRpcError::conflict(e.to_string())
+        } else {
+            WsRpcError::internal(e.to_string())
+        }
+    })?;
+    if ctx.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+        perspective
+            .dispose_query_subscription(&subscription_id, connection_id)
+            .await;
+        return Err(WsRpcError {
+            code: 499,
+            message: "Request cancelled by client".to_string(),
+        });
+    }
     Ok(serde_json::to_value(PerspectiveSubscribed {
         subscription_id,
         result: result_json(&result),
@@ -1159,15 +1202,21 @@ async fn model_subscribe_handler(
 ) -> Result<Value, WsRpcError> {
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
+    let subscription_id = client_subscription_id(params.require_str("subscriptionId")?)?;
 
     let connection_id = connection_id(&ctx)?;
     let perspective = guarded_perspective(&params).await?;
 
-    let reply = perspective
-        .model_subscribe_and_query(classes, query_json, connection_id, subscriber(&ctx))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    subscribed(reply)
+    let opened = perspective
+        .model_subscribe_and_query(
+            classes,
+            query_json,
+            subscription_id,
+            connection_id.clone(),
+            subscriber(&ctx),
+        )
+        .await;
+    subscribed(&perspective, &ctx, &connection_id, opened).await
 }
 
 async fn run_interpretation_handler(
@@ -2528,10 +2577,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     .guard(update());
     map.method::<PerspectiveDiscardBatchParams, bool>("perspective.discardBatch", discard_batch)
         .guard(update());
-    map.method::<PerspectiveQueryParams, PerspectiveSubscribed>(
+    map.method::<PerspectiveSubscribeQueryParams, PerspectiveSubscribed>(
         "perspective.subscribeQuery",
         subscribe_query,
     )
+    .opens()
     .guard(query());
     map.method::<PerspectiveSubscriptionParams, PerspectiveResynced>(
         "perspective.resyncSubscription",
@@ -2560,10 +2610,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
-    map.method::<PerspectiveModelQueryParams, PerspectiveSubscribed>(
+    map.method::<PerspectiveModelSubscribeParams, PerspectiveSubscribed>(
         "perspective.modelSubscribe",
         model_subscribe_handler,
     )
+    .opens()
     .guard(query());
     map.method::<PerspectiveEvaluateGettersParams, String>(
         "perspective.evaluateGetters",
@@ -2789,6 +2840,17 @@ pub struct PerspectiveQueryParams {
     pub query: String,
 }
 
+/// `perspective.subscribeQuery`: the subscription id is the client's, so it can end the
+/// subscription without the reply (after a timeout or an abort).
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveSubscribeQueryParams {
+    pub uuid: String,
+    pub query: String,
+    #[serde(rename = "subscriptionId")]
+    pub subscription_id: String,
+}
+
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct PerspectiveSparqlParams {
@@ -2938,6 +3000,21 @@ pub struct PerspectiveModelQueryParams {
     #[ts(optional)]
     pub class_names: Option<Vec<String>>,
     pub query_json: String,
+}
+
+/// `perspective.modelSubscribe`: [`PerspectiveModelQueryParams`] and the client's
+/// subscription id (see [`PerspectiveSubscribeQueryParams`]).
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveModelSubscribeParams {
+    pub uuid: String,
+    #[ts(optional)]
+    pub class_name: Option<String>,
+    #[ts(optional)]
+    pub class_names: Option<Vec<String>>,
+    pub query_json: String,
+    #[serde(rename = "subscriptionId")]
+    pub subscription_id: String,
 }
 
 /// The classes a `modelQuery` / `modelSubscribe` call names: `class_name` or

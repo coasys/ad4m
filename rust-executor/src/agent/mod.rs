@@ -489,6 +489,10 @@ pub struct AgentService {
     /// rewrites it in the current one.
     #[serde(skip)]
     legacy_keystore: bool,
+    /// `agent.lock` locked the wallet in memory under a caller's passphrase: only that
+    /// passphrase unlocks it, not the keyring's.
+    #[serde(skip)]
+    locked_by_caller: bool,
 }
 
 lazy_static! {
@@ -588,6 +592,7 @@ impl AgentService {
             signing_key_id: None,
             passphrase: None,
             legacy_keystore: false,
+            locked_by_caller: false,
         });
 
         (*agent_instance).as_mut().unwrap().create_new_keys();
@@ -608,6 +613,7 @@ impl AgentService {
             signing_key_id: None,
             passphrase: None,
             legacy_keystore: false,
+            locked_by_caller: false,
         }
     }
 
@@ -1129,7 +1135,59 @@ impl AgentService {
         Ok(())
     }
 
+    /// Unlocks the wallet. When the keyring gives the agent passphrase, the wallet opens with
+    /// it and `password` only undoes an `agent.lock` (it must be the passphrase that lock
+    /// used); a wallet already unlocked stays so. Otherwise `password` must open the wallet
+    /// file, and the keyring then holds it, so later starts unlock without it.
     pub fn unlock(&mut self, password: String) -> Result<(), AnyError> {
+        let keys = crate::at_rest::agent_passphrase::keys();
+        self.unlock_with_keys(password, keys.as_deref())
+    }
+
+    /// [`Self::unlock`] with the keyring `keys` (tests give their own).
+    pub fn unlock_with_keys(
+        &mut self,
+        password: String,
+        keys: Option<&crate::at_rest::DataKeys>,
+    ) -> Result<(), AnyError> {
+        use crate::at_rest::agent_passphrase;
+        if let Some(held) = agent_passphrase::from_keyring(keys) {
+            let backend = wallet_backend();
+            if backend.is_unlocked() {
+                return self.finish_unlock(held.to_string());
+            }
+            if self.locked_by_caller {
+                backend.unlock(&password)?;
+                return self.finish_unlock(held.to_string());
+            }
+            return self.open_wallet(held.to_string());
+        }
+        let was_unlocked = wallet_backend().is_unlocked();
+        self.open_wallet(password.clone())?;
+        // Held only once it opens the wallet file itself: a passphrase that only undoes an
+        // `agent.lock` in memory is not the agent's.
+        if !was_unlocked && !self.locked_by_caller && self.file_opens_with(&password) {
+            agent_passphrase::capture(keys, &password);
+        }
+        Ok(())
+    }
+
+    /// Whether `password` opens the keystore in the agent file.
+    fn file_opens_with(&self, password: &str) -> bool {
+        let Ok(text) = std::fs::read_to_string(&self.file) else {
+            return false;
+        };
+        let Ok(store) = serde_json::from_str::<AgentStore>(&text) else {
+            return false;
+        };
+        let scratch = crate::wallet::LocalWallet::new();
+        scratch.load(&store.keystore);
+        scratch.unlock(password).is_ok()
+    }
+
+    /// Opens the wallet with `password`, the passphrase of the agent file: the keystore in
+    /// memory, else (on a locked executor) the legacy backup.
+    fn open_wallet(&mut self, password: String) -> Result<(), AnyError> {
         let backend = wallet_backend();
         // An unlocked executor never falls back: the backup's keys would replace keys in
         // memory that the executor may not have saved yet.
@@ -1154,55 +1212,62 @@ impl AgentService {
         {
             result = Ok(());
         }
-        if result.is_ok() {
-            // Best effort: an executor on a read-only or full disk still unlocks, and its keystore
-            // stays in the legacy format until a later save succeeds. No rewrite without a
-            // backup of the legacy file, see `legacy_backup_file`.
-            if self.legacy_keystore {
-                // Synced before the rewrite: after a power loss the backup must hold the
-                // legacy file whenever the agent file holds the new one.
-                match std::fs::copy(&self.file, self.legacy_backup_file())
-                    .and_then(|_| std::fs::File::open(self.legacy_backup_file())?.sync_all())
-                    .map_err(AnyError::from)
-                    .and_then(|_| self.try_save(&password))
-                {
-                    Ok(()) => {
-                        self.legacy_keystore = false;
-                        log::info!("🔑 Rewrote the keystore in the current format.");
-                    }
-                    Err(e) => log::warn!(
-                        "🔑 Could not rewrite the keystore in the current format; it stays in the \
-                         legacy format until the next save: {}",
-                        e
-                    ),
+        result?;
+        // Best effort: an executor on a read-only or full disk still unlocks, and its keystore
+        // stays in the legacy format until a later save succeeds. No rewrite without a
+        // backup of the legacy file, see `legacy_backup_file`.
+        if self.legacy_keystore {
+            // Synced before the rewrite: after a power loss the backup must hold the
+            // legacy file whenever the agent file holds the new one.
+            match std::fs::copy(&self.file, self.legacy_backup_file())
+                .and_then(|_| std::fs::File::open(self.legacy_backup_file())?.sync_all())
+                .map_err(AnyError::from)
+                .and_then(|_| self.try_save(&password))
+            {
+                Ok(()) => {
+                    self.legacy_keystore = false;
+                    log::info!("🔑 Rewrote the keystore in the current format.");
                 }
-            }
-            // The unlocked keystore replaces the keys in memory: resolve names afresh.
-            forget_managed_key_names();
-            warn_users_without_an_agent_key();
-            self.passphrase = Some(password);
-            let key_count = backend.list_key_names().len();
-            log::debug!("🔑 Wallet unlocked. {} key(s) present.", key_count);
-
-            // Ensure the shared signing key exists (may have been created by
-            // another executor; create only if missing).
-            //
-            // Same TOCTOU note as `create_new_keys` above: safe because the
-            // Worker's key-creation endpoint is idempotent by name and
-            // racing executors converge on the same key.
-            let signing_name = crate::config::get_global_config().signing_key_name();
-            if signing_name != crate::wallet::KEY_NAME_MAIN && !backend.key_exists(&signing_name) {
-                backend.generate_keypair(&signing_name).map_err(|e| {
-                    anyhow!(
-                        "Failed to create signing key '{}' during unlock: {}",
-                        signing_name,
-                        e
-                    )
-                })?;
-                log::info!("Created shared signing key '{}'", signing_name);
+                Err(e) => log::warn!(
+                    "🔑 Could not rewrite the keystore in the current format; it stays in the \
+                     legacy format until the next save: {}",
+                    e
+                ),
             }
         }
-        result
+        self.finish_unlock(password)
+    }
+
+    /// What follows an open wallet: `passphrase` (the agent file's) kept for the saves, and
+    /// the shared signing key made if missing.
+    fn finish_unlock(&mut self, passphrase: String) -> Result<(), AnyError> {
+        let backend = wallet_backend();
+        // The unlocked keystore replaces the keys in memory: resolve names afresh.
+        forget_managed_key_names();
+        warn_users_without_an_agent_key();
+        self.passphrase = Some(passphrase);
+        self.locked_by_caller = false;
+        let key_count = backend.list_key_names().len();
+        log::debug!("🔑 Wallet unlocked. {} key(s) present.", key_count);
+
+        // Ensure the shared signing key exists (may have been created by
+        // another executor; create only if missing).
+        //
+        // Same TOCTOU note as `create_new_keys` above: safe because the
+        // Worker's key-creation endpoint is idempotent by name and
+        // racing executors converge on the same key.
+        let signing_name = crate::config::get_global_config().signing_key_name();
+        if signing_name != crate::wallet::KEY_NAME_MAIN && !backend.key_exists(&signing_name) {
+            backend.generate_keypair(&signing_name).map_err(|e| {
+                anyhow!(
+                    "Failed to create signing key '{}' during unlock: {}",
+                    signing_name,
+                    e
+                )
+            })?;
+            log::info!("Created shared signing key '{}'", signing_name);
+        }
+        Ok(())
     }
 
     pub fn lock(&mut self, password: String) {
@@ -1216,6 +1281,7 @@ impl AgentService {
 
         // Clear the stored passphrase after locking
         self.passphrase = None;
+        self.locked_by_caller = true;
     }
 
     pub fn save(&self, password: String) {

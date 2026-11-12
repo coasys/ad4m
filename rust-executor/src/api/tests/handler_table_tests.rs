@@ -146,6 +146,14 @@ pub(crate) fn render_rpc_methods(map: &HandlerMap) -> String {
     out.push_str(&quoted(
         specs.iter().filter(|s| s.long).map(|s| s.name.clone()),
     ));
+    out.push_str("]);\n\n");
+    out.push_str(
+        "/** Calls that open something on the executor that outlives them (a live query): the client cancels one that timed out, as one it aborted. */\n",
+    );
+    out.push_str("export const OPENS_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([\n");
+    out.push_str(&quoted(
+        specs.iter().filter(|s| s.opens).map(|s| s.name.clone()),
+    ));
     out.push_str("]);\n");
     out
 }

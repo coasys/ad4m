@@ -33,7 +33,8 @@ use tokio::sync::OnceCell;
 
 use crate::db::{
     Ad4mDb, Ad4mDbResult, BotActivityRow, BotGrantRow, BotRow, ComputeLogEntry,
-    FlowReplicaStateRow, GrantRow, JoinRow, OperatorRecordRow, OperatorSetBy, PaymentRequest,
+    FlowReplicaStateRow, GrantRow, JoinAccept, JoinCancel, JoinRow, OperatorRecordRow,
+    OperatorSetBy, PaymentRequest,
 };
 use crate::types::{
     AIModelLoadingStatus, AIPromptExamples, AITask, EntanglementProof, Expression, ImportResult,
@@ -286,6 +287,18 @@ macro_rules! ad4m_db_methods {
             fn get_all_perspectives(&self) -> Ad4mDbResult<Vec<PerspectiveHandle>>;
             fn update_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()>;
             fn remove_perspective(&self, uuid: &str) -> Ad4mDbResult<()>;
+            fn destroy_perspective_store(&self, uuid: &str) -> Ad4mDbResult<()>;
+            fn perspective_stores_without_handle(&self) -> Ad4mDbResult<Vec<String>>;
+            fn delete_person_rows(&self, did: &str) -> Ad4mDbResult<usize>;
+            fn reseal_store_values(
+                &self,
+                store: &crate::at_rest::keyring_file::StoreId
+            ) -> Ad4mDbResult<crate::db::sealed::ResealReport>;
+            fn count_store_values_not_under(
+                &self,
+                store: &crate::at_rest::keyring_file::StoreId,
+                version: ad4m_keyring::KeyVersion
+            ) -> Ad4mDbResult<usize>;
             fn add_owner_to_neighbourhood(
                 &self,
                 neighbourhood_url: &str,
@@ -390,11 +403,14 @@ macro_rules! ad4m_db_methods {
             fn set_operator_record_if_empty(&self, scid: &str, set_at: u64, set_by: OperatorSetBy) -> Ad4mDbResult<OperatorRecordRow>;
             fn agent_identity(&self, agent_did: &str) -> Ad4mDbResult<Option<String>>;
             fn set_agent_identity(&self, agent_did: &str, scid: &str, set_at: u64) -> Ad4mDbResult<()>;
-            fn set_agent_identity_and_first_run_operator(&self, agent_did: &str, scid: &str, operator_did: &str, set_at: u64) -> Ad4mDbResult<OperatorRecordRow>;
+            fn set_agent_identity_of_join(&self, agent_did: &str, scid: &str, set_at: u64, offer_id: &str) -> Ad4mDbResult<()>;
+            fn set_agent_identity_and_first_run_operator(&self, agent_did: &str, scid: &str, operator_did: &str, set_at: u64, offer_id: &str) -> Ad4mDbResult<OperatorRecordRow>;
             fn agents_of_identity(&self, scid: &str) -> Ad4mDbResult<Vec<String>>;
             fn local_identities(&self) -> Ad4mDbResult<Vec<String>>;
             fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
+            fn set_join_accept(&self, offer_id: &str, accept: JoinAccept) -> Ad4mDbResult<bool>;
+            fn cancel_join(&self, offer_id: &str, agent_did: &str) -> Ad4mDbResult<JoinCancel>;
 
             // Bots: the bot agents, their grants and their activity log (`db/bots.rs`)
             fn add_bot(&self, bot: &BotRow) -> Ad4mDbResult<()>;

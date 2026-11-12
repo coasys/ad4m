@@ -1,4 +1,4 @@
-use crate::identity::verdict::{InvalidReason, LinkVerdict};
+use crate::identity::verdict::{replaces, InvalidReason, LinkVerdict};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
 use crate::types::LinkStatus;
 use crate::types::{
@@ -40,7 +40,7 @@ pub(crate) const JUDGEMENT_VERSION: u64 = 1;
 /// Whether a stored judgement is older than the rules now in force (the version annotation
 /// missing or lower): it is judged again, and until then a read presents its signer
 /// unclassified.
-fn judgement_stale(version: &str, signature: &str) -> bool {
+pub(crate) fn judgement_stale(version: &str, signature: &str) -> bool {
     !signature.is_empty() && version.parse::<u64>().unwrap_or(0) < JUDGEMENT_VERSION
 }
 const ONT_STATUS: &str = "ad4m://ontology/status";
@@ -582,6 +582,9 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 /// as stored) is the link the store holds, judged anew: its judgement is
 /// rewritten whichever way it moved, so a re-check records a log learned
 /// since (`cantCheck` to `valid`) or a revocation (`valid` to `flagged`).
+/// The one move it does not make is `valid` to `cantCheck`
+/// ([`crate::identity::verdict::replaces`]): [`write_link_quads_proof`]
+/// keeps the stored judgement then.
 ///
 /// One partial write heals rows stored before #1141, which kept no
 /// `wireTarget`: a verified row without one, re-inserted with the same
@@ -801,6 +804,10 @@ fn write_link_quads_proof(
     } else {
         link.check_entered(entered)
     };
+    // A stored `valid` is not replaced by `cantCheck` ([`replaces`]): the stored judgement
+    // (`proofValid`, the verdict, the person) stays as it is, and with it the order above.
+    let stored = counted_before.then_some(LinkVerdict::Valid);
+    let keep_judgement = !replaces(stored.as_ref(), &checked.verdict);
     let incoming_valid = checked.verdict.counts();
     let valid_str = incoming_valid.to_string();
     let verdict_str = checked.verdict.stored();
@@ -827,14 +834,21 @@ fn write_link_quads_proof(
             wire_target.as_deref(),
         )?
     };
+    // Kept: the bot mark and the judgement version stay as stored too. They belong to
+    // the stored judgement, and a stale stored `valid` stays stale, so the re-check
+    // judges it again once the log is known.
     let judgement_version_str = JUDGEMENT_VERSION.to_string();
-    let judgement = [
-        (ONT_PROOF_VALID, Some(valid_str.as_str())),
-        (ONT_LINK_VERDICT, Some(verdict_str.as_str())),
-        (ONT_PERSON, checked.person.as_deref()),
-        (ONT_BY_BOT, checked.by_bot.then_some("true")),
-        (ONT_JUDGEMENT_VERSION, Some(judgement_version_str.as_str())),
-    ];
+    let judgement = if keep_judgement {
+        vec![]
+    } else {
+        vec![
+            (ONT_PROOF_VALID, Some(valid_str.as_str())),
+            (ONT_LINK_VERDICT, Some(verdict_str.as_str())),
+            (ONT_PERSON, checked.person.as_deref()),
+            (ONT_BY_BOT, checked.by_bot.then_some("true")),
+            (ONT_JUDGEMENT_VERSION, Some(judgement_version_str.as_str())),
+        ]
+    };
     match write {
         ProofWrite::Whole => {
             annotations.extend([
@@ -1120,16 +1134,27 @@ impl SparqlStore {
     pub fn new(data_path: Option<&str>) -> Result<Self, Error> {
         let store = match data_path {
             Some(path) => {
+                if !crate::at_rest::stores_may_open(crate::at_rest::gate().map(|g| &**g)) {
+                    return Err(anyhow!(
+                        "{}: a perspective's SPARQL store opens only once the storage is \
+                         unlocked",
+                        crate::at_rest::SEALED
+                    ));
+                }
                 let store_path = std::path::PathBuf::from(path).join("sparql_store");
-                std::fs::create_dir_all(&store_path).map_err(|e| {
-                    anyhow!(
-                        "Failed to create SPARQL store directory {:?}: {}",
-                        store_path,
-                        e
-                    )
-                })?;
+                // 0700, also for a folder an older executor made: RocksDB makes its files
+                // with the process umask, and the folder keeps others out of them.
+                crate::at_rest::files::create_private_dir_all(&store_path)
+                    .and_then(|()| crate::at_rest::files::restrict(&store_path))
+                    .map_err(|e| {
+                        anyhow!(
+                            "Failed to create SPARQL store directory {:?}: {}",
+                            store_path,
+                            e
+                        )
+                    })?;
                 log::info!("Opening persistent SPARQL store at {:?}", store_path);
-                Store::open_with_options(
+                let store = Store::open_with_options(
                     &store_path,
                     StoreOptions::default().with_max_open_files(SPARQL_STORE_MAX_OPEN_FILES),
                 )
@@ -1139,7 +1164,18 @@ impl SparqlStore {
                         store_path,
                         e
                     )
-                })?
+                })?;
+                // Each file 0600, each folder 0700: the ones RocksDB just made and any an
+                // older executor left with the default mode. The executor's private umask
+                // keeps the files RocksDB makes later 0600 too.
+                crate::at_rest::files::restrict_tree(&store_path).map_err(|e| {
+                    anyhow!(
+                        "Failed to make the SPARQL store at {:?} private: {}",
+                        store_path,
+                        e
+                    )
+                })?;
+                store
             }
             None => Store::new()?,
         };
@@ -3873,6 +3909,77 @@ mod tests {
         global_key_map().forget(&log.scid());
     }
 
+    /// The same link written again while its signer's log is not in the key map keeps its
+    /// stored `valid` (and person): `cantCheck` never replaces it. The stored `valid` is the
+    /// order the store knows, so once the log is back with the key revoked after the anchor,
+    /// a third write still counts the link.
+    #[test]
+    fn a_write_while_the_log_is_unknown_keeps_a_stored_valid() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::Signer;
+        let mut log = TestLog::new(113);
+        let map = global_key_map();
+        let publish = |log: &TestLog, trusted: u64| {
+            map.publish(
+                &log.scid(),
+                TrustedLog {
+                    state: log.chain().state().clone(),
+                    trusted,
+                },
+            );
+            map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+        };
+        publish(&log, 0);
+        let person = ad4m_identity_core::did_of(&log.scid());
+        let key = log.device.key();
+        let data = Link {
+            source: "ad4m://post".into(),
+            predicate: Some("we://mention".into()),
+            target: "ad4m://someone".into(),
+        };
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, T1, 0).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp: T1.into(),
+            data,
+            proof: crate::types::ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        let svc = new_service();
+        let judged = |svc: &SparqlStore| {
+            let links = svc.get_all_links().unwrap();
+            assert_eq!(links.len(), 1, "{links:?}");
+            (
+                links[0].verdict.clone(),
+                links[0].proof.valid,
+                links[0].person.clone(),
+            )
+        };
+        let counted = (Some(LinkVerdict::Valid), Some(true), Some(person.clone()));
+        assert!(svc.add_remote_link(&link).unwrap());
+        assert_eq!(judged(&svc), counted);
+
+        // The log leaves the key map: the link alone would judge `cantCheck` now.
+        map.forget(&log.scid());
+        assert_eq!(link.check_entered(None).verdict, LinkVerdict::CantCheck);
+        assert!(svc.add_remote_link(&link).unwrap());
+        assert_eq!(judged(&svc), counted, "the stored valid stays");
+        svc.rejudge_link(&link).unwrap();
+        assert_eq!(judged(&svc), counted, "a re-check write keeps it too");
+
+        // The log comes back with the device revoked at seq 1, after the anchor.
+        log.revoke_d1();
+        publish(&log, 1);
+        assert!(svc.add_remote_link(&link).unwrap());
+        assert_eq!(judged(&svc), counted, "counted before the revocation");
+        map.forget(&log.scid());
+    }
+
     /// A link stating, in the store's bookkeeping vocabulary, that the store
     /// was swept: what a member could sign before the store refused it.
     fn swept_flag(member: &TestSigner) -> LinkExpression {
@@ -4199,6 +4306,68 @@ mod tests {
         {
             let store = SparqlStore::new(Some(path)).unwrap();
             assert!(store.has_data());
+        }
+    }
+
+    /// The store's folder is the owner's only, also one an older executor made open.
+    #[cfg(unix)]
+    #[test]
+    fn the_sparql_store_folder_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let fresh = dir.path().join("fresh");
+        drop(SparqlStore::new(Some(fresh.to_str().unwrap())).unwrap());
+        assert_eq!(mode(&fresh.join("sparql_store")), 0o700);
+        assert_eq!(mode(&fresh), 0o700, "a missing parent is made private too");
+
+        let old = dir.path().join("old").join("sparql_store");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(SparqlStore::new(Some(dir.path().join("old").to_str().unwrap())).unwrap());
+        assert_eq!(mode(&old), 0o700);
+    }
+
+    /// Every file RocksDB makes in a store is 0600 and every folder 0700, under the default
+    /// umask an embedder may run with, and in a store an older executor left open.
+    #[cfg(unix)]
+    #[test]
+    fn every_file_in_a_sparql_store_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        fn walk(path: &std::path::Path, seen: &mut Vec<(std::path::PathBuf, u32)>) {
+            let mode = std::fs::symlink_metadata(path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            seen.push((path.to_path_buf(), mode));
+            if path.is_dir() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    walk(&entry.unwrap().path(), seen);
+                }
+            }
+        }
+        let before = unsafe { libc::umask(0o022) };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let store = SparqlStore::new(Some(path)).unwrap();
+        let signer = TestSigner::generate();
+        store
+            .add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://b"))
+            .unwrap();
+        drop(store);
+        // Opened again, as at the next start, after a file was left open.
+        let current = dir.path().join("sparql_store").join("CURRENT");
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(SparqlStore::new(Some(path)).unwrap());
+        unsafe { libc::umask(before) };
+
+        let mut seen = Vec::new();
+        walk(&dir.path().join("sparql_store"), &mut seen);
+        assert!(seen.len() > 2, "RocksDB made files: {seen:?}");
+        for (path, mode) in seen {
+            let want = if path.is_dir() { 0o700 } else { 0o600 };
+            assert_eq!(mode, want, "{}", path.display());
         }
     }
 

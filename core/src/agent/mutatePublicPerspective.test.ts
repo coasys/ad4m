@@ -1,5 +1,6 @@
 import { Ad4mClient } from '../Ad4mClient';
 import { Link, LinkExpression } from '../links/Links';
+import { AGENT_KIND, AGENT_KIND_BOT, agentKind, isBot } from './AgentKind';
 
 /**
  * `AgentClient.mutatePublicPerspective` against an in-memory executor
@@ -106,5 +107,76 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
     await expect(client.agent.mutatePublicPerspective(mutations())).rejects.toThrow('sign failed');
     expect(executor.perspectives.size).toBe(0);
     client.close();
+  });
+});
+
+describe('AgentClient.setKind', () => {
+  it('says the agent is a bot, keeping the rest of its profile, and reads back as one', async () => {
+    const executor = new Executor();
+    (globalThis as any).WebSocket = makeFakeWebSocket(executor);
+    const client = new Ad4mClient('http://localhost:12000', 'token');
+
+    const agent = await client.agent.setKind(AGENT_KIND_BOT);
+
+    expect(isBot(agent)).toBe(true);
+    expect(agentKind(agent)).toBe(AGENT_KIND_BOT);
+    expect(agent.perspective!.links.slice(0, 2)).toEqual([L1, L2] as unknown as LinkExpression[]);
+    expect(executor.perspectives.size).toBe(0);
+    client.close();
+  });
+
+  it('changes nothing when the agent already says so, and replaces a kind it said before', async () => {
+    const executor = new Executor();
+    executor.profile = {
+      links: [L1, signed({ source: DID, predicate: AGENT_KIND, target: AGENT_KIND_BOT }, 2)],
+    };
+    (globalThis as any).WebSocket = makeFakeWebSocket(executor);
+    const client = new Ad4mClient('http://localhost:12000', 'token');
+    const calls: string[] = [];
+    const original = executor.handle.bind(executor);
+    executor.handle = (type, p) => {
+      calls.push(type);
+      return original(type, p);
+    };
+
+    await client.agent.setKind(AGENT_KIND_BOT);
+    expect(calls).not.toContain('agent.updateProfile');
+
+    const other = await client.agent.setKind('app://other-kind');
+    expect(agentKind(other)).toBe('app://other-kind');
+    expect(other.perspective!.links.filter((l) => l.data.predicate === AGENT_KIND)).toHaveLength(1);
+
+    const none = await client.agent.setKind(null);
+    expect(agentKind(none)).toBeUndefined();
+    expect(none.perspective!.links).toEqual([L1] as unknown as LinkExpression[]);
+    client.close();
+  });
+
+  it('leaves one kind when the profile says two', async () => {
+    const executor = new Executor();
+    executor.profile = {
+      links: [
+        L1,
+        signed({ source: DID, predicate: AGENT_KIND, target: AGENT_KIND_BOT }, 2),
+        signed({ source: DID, predicate: AGENT_KIND, target: 'app://other-kind' }, 3),
+      ],
+    };
+    (globalThis as any).WebSocket = makeFakeWebSocket(executor);
+    const client = new Ad4mClient('http://localhost:12000', 'token');
+
+    const agent = await client.agent.setKind(AGENT_KIND_BOT);
+
+    const kinds = agent.perspective!.links.filter((l) => l.data.predicate === AGENT_KIND);
+    expect(kinds.map((l) => l.data.target)).toEqual([AGENT_KIND_BOT]);
+    client.close();
+  });
+
+  it('reads only the kind an agent says of itself', () => {
+    const someoneElse = {
+      did: DID,
+      perspective: { links: [signed({ source: 'did:test:other', predicate: AGENT_KIND, target: AGENT_KIND_BOT }, 1)] },
+    } as any;
+    expect(isBot(someoneElse)).toBe(false);
+    expect(isBot(undefined)).toBe(false);
   });
 });

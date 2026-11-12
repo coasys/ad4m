@@ -1112,14 +1112,15 @@ pub fn sign_statement(unsigned: UnsignedKeyStatement) -> Result<SignedKeyStateme
     })
 }
 
-/// A verdict change for a key the cache learnt: a key no longer valid ends its grants at once.
+/// A verdict change for a key the cache learnt: a key no longer valid ends the grants bound to
+/// it in that identity at once.
 /// Returns how many active grants ended.
 pub fn on_verdict_change(change: &VerdictChange) -> usize {
     if change.verdict == KeyVerdict::Valid {
         return 0;
     }
     let mut ended = end_revoked_bot(&change.key, change.verdict);
-    ended += match Grants::global().revoke_key(&change.key) {
+    ended += match Grants::global().revoke_key(&did_of(&change.scid), &change.key) {
         Ok(ended) => {
             if ended > 0 {
                 log::info!(
@@ -5135,6 +5136,39 @@ mod tests {
         world.store.stall_for.lock().unwrap().clear();
         end_leftover_key_grants();
         no_operator();
+    }
+
+    // A verdict change names an identity and a key: it ends the grants bound to both, not
+    // a grant bound to the same key under another identity (one more store could log it).
+    #[tokio::test]
+    async fn a_verdict_change_ends_only_the_grants_of_its_identity() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_test_db();
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
+        let user = AgentContext::managed("did:key:z6MkVerdictUser".into());
+        let key = "z6MkSharedDeviceKey";
+        let bound =
+            |id: &str, scid: &str| {
+                Grants::global()
+                    .insert(
+                        LiveGrant::for_test(id, user.clone(), now() + 3600).bound_to(
+                            KeyBinding::new(did_of(scid), key.into(), "d2".into(), 1, now()),
+                        ),
+                    )
+                    .unwrap()
+            };
+        let changed = bound("verdict-changed", "QmVerdictChanged");
+        let other = bound("verdict-other", "QmVerdictOther");
+        let change = VerdictChange {
+            key: key.into(),
+            scid: "QmVerdictChanged".into(),
+            verdict: KeyVerdict::Revoked,
+        };
+        assert_eq!(on_verdict_change(&change), 1, "one grant ends");
+        assert!(changed.is_ended(), "the changed identity's grant ended");
+        assert!(!other.is_ended(), "the other identity's grant holds");
+        end_leftover_key_grants();
     }
 
     // A failed write ending the identity's grants does not spare the agent's: both

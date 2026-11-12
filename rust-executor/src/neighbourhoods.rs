@@ -81,7 +81,7 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
     // Ensure any existing shared links are committed to the link language
     // This is critical for early links created before neighbourhood sharing
     // We need to do this after the neighbourhood is created but before other agents join
-    perspective.ensure_public_links_are_shared().await;
+    perspective.share_links_after_publish().await;
     Ok(neighbourhood_url)
 }
 

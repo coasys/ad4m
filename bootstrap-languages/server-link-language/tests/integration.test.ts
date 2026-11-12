@@ -671,6 +671,7 @@ describe("integration: paged render, then tail", () => {
     assert.equal(store.getSequence(), 5);
     assert.equal(store.getRevision(), server.built.db.getRoomRevision(roomId));
     assert.equal(store.getRenderProgress(), null, "a finished render leaves no cursor");
+    assert.equal(syncModule.render()?.links.length, 27, "the rendered store hashes to the server's revision");
 
     const renders = transport.gets.filter((g) => g.startsWith("/render"));
     assert.equal(renders.length, 3);
@@ -833,6 +834,44 @@ describe("integration: paged render, then tail", () => {
     const local = store.allLinks().links.map((l) => (l.data as { source: string }).source).sort();
     assert.deepEqual(local, activeSources(server, roomId));
     assert.equal(store.getSequence(), 5);
+    assert.equal(syncModule.render()?.links.length, local.length, "the store hashes to the server's revision");
+  });
+
+  it("a restart with a cursor above 0 and a store short of the room renders the room again, then answers render()", async () => {
+    // The staging state: the cursor is at the room's head, the store holds a
+    // part of the room (a build before #1641 moved the cursor to every push).
+    const server = await bootServer();
+    const agentA = RealAgent.create();
+    const roomId = "short-store-room";
+    wireClient(server.url, roomId, agentA);
+    const all = Array.from({ length: 23 }, (_, i) => linkOf(agentA, `room-${i}`));
+    await syncModule.commit({ additions: all, removals: [] });
+    await syncModule.commit({ additions: [linkOf(agentA, "last")], removals: [] });
+
+    const agentB = RealAgent.create();
+    const bStorage = new MemoryStorage();
+    wireClient(server.url, roomId, agentB, bStorage, new RecordingTransport());
+    await syncModule.bootstrap();
+    assert.notEqual(syncModule.render(), null);
+    for (const link of all.slice(0, 20)) store.removeLink(link);
+    assert.equal(syncModule.render(), null, "a short store is not the room");
+
+    const restarted = new RecordingTransport();
+    const { emittedDiffs } = wireClient(server.url, roomId, agentB, bStorage, restarted);
+    syncModule._setPageLimitsForTests(10, 2);
+    syncModule.needRender();
+    await syncModule.bootstrap();
+    await syncModule._awaitRenderRetryForTests();
+
+    assert.deepEqual(restarted.gets.filter((g) => g.startsWith("/render")).length, 3, "24 links in pages of 10");
+    assert.equal(new Set(sourcesOf(emittedDiffs, "additions")).size, 20, "the links the store lacked, each once");
+    const local = store.allLinks().links.map((l) => (l.data as { source: string }).source).sort();
+    assert.deepEqual(local, activeSources(server, roomId));
+    assert.equal(store.getSequence(), 2);
+    assert.equal(syncModule.render()?.links.length, 24);
+
+    await syncModule.catchUp();
+    assert.deepEqual(restarted.gets.filter((g) => g.startsWith("/render")).length, 3, "healed: no further render");
   });
 
   it("catchUp reads a long diff log a page at a time", async () => {
