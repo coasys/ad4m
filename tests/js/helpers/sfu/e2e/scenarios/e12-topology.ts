@@ -4,7 +4,7 @@
  * Four spaces on one executor, two users in each, both calling the way an
  * app does. A space whose creator chose an SFU mode runs on the SFU; one
  * that chose mesh runs peer to peer; one with no policy runs on the SFU,
- * the executor's default. Both users of a space must always
+ * because this executor hosts every member. Both users of a space must always
  * land on the same topology — a split call is the failure this guards.
  */
 
