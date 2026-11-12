@@ -3,15 +3,21 @@
 //! own supervised children on loopback, and registers them as managed endpoints, models and
 //! defaults. The launcher and WE drive it through the same RPCs (`ai.local*`).
 //!
+//! It downloads only when asked: `ai.localInstall` (an app's call, such as the launcher's
+//! setup screen), `ad4m-executor local-ai install`, or the Docker image's `INCLUDE_MODELS`.
+//! No request and no executor start installs anything; a request that needs a model of a
+//! type the executor has none of gets an error that says how to get one. At start the
+//! executor only starts what is installed (`local_ai_autostart`).
+//!
 //! - `data.rs`: the embedded manifest, recommendations and hardware classes; the classifier.
 //! - `hardware.rs`: detection (`ai.localHardware`).
 //! - `plan.rs`: the pure plan (`ai.localPlan`).
 //! - `install.rs`: the store, resumable verified downloads, unpacking.
 //! - `supervisor.rs`: child processes, ports, the restart budget.
 //! - `onnx_runtime.rs`: ONNX Runtime for the speech gate where `ort` loads it at run time
-//!   (macOS), fetched into the store on first use.
+//!   (macOS), fetched into the store by an install that sets up transcription.
 //! - `setup.rs`: install and remove.
-//! - `first_use.rs`: the first use of a missing service, and autostart.
+//! - `autostart.rs`: the start of the installed runtimes at executor start.
 //! - `runtimes.rs`: start, stop and status of the runtimes.
 //! - `health.rs`: the health of managed endpoints, and the GPU check after a start.
 //! - `registration.rs`: model registration and defaults.
@@ -32,7 +38,7 @@ pub mod onnx_runtime;
 pub mod plan;
 pub mod supervisor;
 
-mod first_use;
+mod autostart;
 mod health;
 mod registration;
 mod runtimes;
@@ -55,8 +61,7 @@ use super::AI_SERVICE;
 use super::{endpoints, providers, AIService};
 use crate::secret::Secret;
 
-pub(crate) use self::first_use::autostart_enabled;
-pub use self::first_use::{autostart, ensure_service};
+pub use self::autostart::autostart;
 pub use self::health::managed_health;
 pub(crate) use self::registration::is_managed_endpoint_name;
 pub use self::runtimes::{start, status, stop, stop_children_blocking, stop_on_exit};
@@ -203,7 +208,8 @@ pub struct LocalStatus {
     pub installed: bool,
     pub installing: bool,
     pub storage_dir: String,
-    /// Starts with the executor (`local_ai_autostart`, on unless set off).
+    /// The installed runtimes start with the executor (`local_ai_autostart`, on unless set
+    /// off). Nothing is ever installed at start or on a request: only `ai.localInstall`.
     pub autostart: bool,
     pub runtimes: Vec<RuntimeStatus>,
     pub models: Vec<ModelStatus>,
@@ -358,7 +364,8 @@ async fn plan_at(paths: &LocalPaths) -> Result<LocalPlan> {
 
 /// The plan for this device held to `device` (`None`: the best one detected), against the
 /// store's files; of `services` only when given (an install of some services fits by
-/// them, not by the whole set).
+/// them, not by the whole set). Its sizes count ONNX Runtime where an install with
+/// transcription fetches it (macOS), so what the setup screen shows is all it downloads.
 async fn plan_for(
     paths: &LocalPaths,
     device: Option<Backend>,
@@ -371,13 +378,22 @@ async fn plan_for(
         let manifest = data.manifest.clone();
         tokio::task::spawn_blocking(move || store.installed_digests(&manifest)).await?
     };
-    Ok(plan::plan_services_with_device(
+    let mut plan = plan::plan_services_with_device(
         data,
         &hardware,
         device,
         &|sha| installed.contains(sha),
         services.unwrap_or(&plan::PLANNED_SERVICES),
-    ))
+    );
+    if plan.models.iter().any(|m| m.service == Service::Stt) {
+        if let Some((size, have)) = onnx_runtime::planned(&Store::new(&paths.store)) {
+            plan.total_bytes += size;
+            if !have {
+                plan.download_bytes += size;
+            }
+        }
+    }
+    Ok(plan)
 }
 
 /// What the tests of the modules here share: the lock that runs them one at a time and

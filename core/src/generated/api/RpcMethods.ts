@@ -550,7 +550,6 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.prompt",
   "ai.pullModel",
   "ai.removeEndpoint",
-  "ai.transcriptionOpen",
   "ai.updateEndpoint",
   "language.applyTemplate",
   "language.publish",

@@ -1,6 +1,8 @@
 //! The install and remove flow: `ai.localInstall` (one install at a time, under the install
 //! flag), `install_into` for the CLI and the Docker image, the download of the plan's
-//! runtimes and models with its progress events, and `ai.localRemove`.
+//! runtimes and models (and, on macOS with transcription, ONNX Runtime for the speech gate)
+//! with its progress events, and `ai.localRemove`. These are the only paths that download:
+//! each is a step the user or operator takes.
 
 use anyhow::{bail, Result};
 use std::path::PathBuf;
@@ -10,6 +12,7 @@ use std::time::{Duration, Instant};
 use super::data::{self, Service};
 use super::hardware::Backend;
 use super::install::{self, Store};
+use super::onnx_runtime;
 use super::registration::unregister;
 use super::runtimes::{pid_file, start_at, status, stop_all, stop_running};
 use super::{
@@ -35,7 +38,7 @@ fn publish_progress_now(event: ProgressEvent) {
 }
 
 /// Clears the install flag when the install ends, also on an error or a panic.
-pub(super) struct InstallGuard;
+struct InstallGuard;
 
 impl Drop for InstallGuard {
     fn drop(&mut self) {
@@ -56,22 +59,7 @@ async fn run_install(work: impl std::future::Future<Output = Result<()>>) -> Res
     if INSTALLING.swap(true, Ordering::SeqCst) {
         return Err(LocalAiRefused("A local AI install is running already".into()).into());
     }
-    run_installing(InstallGuard, work).await
-}
-
-/// The install flag, once no install runs: waits for one that does.
-pub(super) async fn take_install_flag() -> InstallGuard {
-    while INSTALLING.swap(true, Ordering::SeqCst) {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    InstallGuard
-}
-
-/// [`run_install`] with the flag taken.
-pub(super) async fn run_installing(
-    guard: InstallGuard,
-    work: impl std::future::Future<Output = Result<()>>,
-) -> Result<LocalStatus> {
+    let guard = InstallGuard;
     let outcome = work.await;
     // Done before the answer: the status it carries says no install runs.
     drop(guard);
@@ -105,7 +93,7 @@ pub(super) async fn run_installing(
     Ok(status().await)
 }
 
-pub(super) async fn install_at(paths: &LocalPaths, params: &InstallParams) -> Result<()> {
+async fn install_at(paths: &LocalPaths, params: &InstallParams) -> Result<()> {
     install_for(
         paths,
         params,
@@ -185,8 +173,17 @@ async fn install_for(
 
     let store = Store::new(&paths.store);
     let client = install::http_client()?;
+    // Transcription streams gate speech with Silero VAD; where ONNX Runtime is loaded at run
+    // time (macOS), the install that sets up transcription fetches it. Nothing else does.
+    let onnx_bytes = plan
+        .models
+        .iter()
+        .any(|m| m.service == Service::Stt)
+        .then(|| onnx_runtime::planned(&store).map(|(size, _)| size))
+        .flatten();
     let total: u64 = plan.runtimes.iter().map(|r| r.size_bytes).sum::<u64>()
-        + plan.models.iter().map(|m| m.size_bytes).sum::<u64>();
+        + plan.models.iter().map(|m| m.size_bytes).sum::<u64>()
+        + onnx_bytes.unwrap_or(0);
     let mut done = 0u64;
 
     let mut selection = Selection {
@@ -242,6 +239,11 @@ async fn install_for(
             path,
             server_flags: model.server_flags.clone(),
         });
+    }
+    if let Some(size) = onnx_bytes {
+        let reporter = Reporter::new("onnxruntime".into(), size, done, total);
+        onnx_runtime::fetch_pinned(&store, &client, &|bytes| reporter.report(bytes)).await?;
+        reporter.flush().await;
     }
     {
         let _file = SELECTION_FILE.lock().unwrap();
@@ -405,25 +407,5 @@ mod tests {
         assert!(!finished.installing, "{finished:?}");
         assert!(failed.unwrap_err().to_string().contains("broke off"));
         assert!(!flag_after_failure);
-    }
-
-    /// A first use while an install runs waits for it and then takes the flag itself: an
-    /// install that begins in between makes it wait again, not fail.
-    #[tokio::test]
-    async fn a_first_use_waits_for_a_running_install_and_then_takes_the_flag() {
-        let _serial = TEST_LOCK.lock().await;
-        INSTALLING.store(true, Ordering::SeqCst);
-        let waiting = tokio::spawn(take_install_flag());
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let waited = !waiting.is_finished();
-        INSTALLING.store(false, Ordering::SeqCst);
-        let guard = tokio::time::timeout(Duration::from_secs(5), waiting).await;
-        let taken = INSTALLING.load(Ordering::SeqCst);
-        drop(guard);
-        let released = !INSTALLING.load(Ordering::SeqCst);
-
-        assert!(waited, "it waits while the install runs");
-        assert!(taken, "then it holds the flag");
-        assert!(released, "and gives it back when done");
     }
 }

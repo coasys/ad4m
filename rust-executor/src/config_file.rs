@@ -245,7 +245,9 @@ pub struct ExecutorConfigFile {
     /// Unset: the user's data directory, `ad4m/local-ai`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_ai_dir: Option<String>,
-    /// Start the installed local AI runtimes with the executor. Unset: true.
+    /// Start the installed local AI runtimes with the executor. Unset: true. It never
+    /// installs or downloads anything: only `ai.localInstall`, `ad4m-executor local-ai
+    /// install` and the Docker image's `INCLUDE_MODELS` do.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_ai_autostart: Option<bool>,
     /// The device local AI runs its models on: `cpu`, `cuda`, `metal`, `vulkan` or `rocm`.

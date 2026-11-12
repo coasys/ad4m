@@ -23,7 +23,9 @@ import {
   localDefaults,
   preselectedChat,
   registerModel,
+  serverInstead,
   serves,
+  toDownload,
 } from "./aiSetup";
 
 type Mode = "Local" | "Server" | "Skip";
@@ -199,8 +201,9 @@ export default function AISetup(props: {
   }, [mode, installing, client]);
 
   const hasLlm = registered.some((r) => r.startsWith("LLM:"));
+  // The local panel looks too: a model server already running is offered instead of a download.
   useEffect(() => {
-    if (mode === "Server" && detected === null) detect();
+    if ((mode === "Server" || mode === "Local") && detected === null) detect();
   }, [mode, detected, detect]);
 
   const localReady = localChatReady(localStatus);
@@ -341,6 +344,13 @@ export default function AISetup(props: {
     chatChoice?.server.baseUrl === server.baseUrl && chatChoice.remoteModel === remoteModel;
 
   const action = plan ? localAction(localStatus, plan, installing) : "install";
+  const instead =
+    action === "install" && !installing
+      ? serverInstead(
+          detected,
+          (localStatus?.runtimes ?? []).flatMap((r) => (r.port ? [r.port] : []))
+        )
+      : null;
 
   return (
     <j-flex direction="column" a="center" gap="500" style={{ width: "100%", maxWidth: 640 }}>
@@ -376,7 +386,7 @@ export default function AISetup(props: {
             <j-box className="box">
               <j-flex direction="column" gap="300">
                 <j-text nomargin color="ui-0">
-                  {describeDevice(hardware)}
+                  Found on this computer: {describeDevice(hardware)}
                 </j-text>
                 <j-text nomargin size="400" color="ui-700">
                   Class {plan.hardwareClass}; the models may use {gb(plan.memoryBudgetBytes)} of memory.
@@ -456,14 +466,41 @@ export default function AISetup(props: {
                     Start local AI
                   </j-button>
                 ) : (
-                  <j-button
-                    variant="primary"
-                    disabled={!plan.fits || installing}
-                    loading={installing}
-                    onClick={installLocal}
-                  >
-                    {plan.downloadBytes > 0 ? `Install (${gb(plan.downloadBytes)})` : "Install"}
-                  </j-button>
+                  <j-flex direction="column" gap="300">
+                    {!installing && plan.fits && (
+                      <j-text nomargin color="ui-0">
+                        {plan.downloadBytes > 0
+                          ? `Local AI would download ${toDownload(plan).join(", ") || "its files"} to this computer: ${gb(plan.downloadBytes)} in total. Nothing is downloaded until you say yes. Download and set it up?`
+                          : "Everything local AI needs is on this computer. Set it up?"}
+                      </j-text>
+                    )}
+                    <j-flex gap="300" wrap>
+                      <j-button
+                        variant="primary"
+                        disabled={!plan.fits || installing}
+                        loading={installing}
+                        onClick={installLocal}
+                      >
+                        {plan.downloadBytes > 0 ? `Yes, download ${gb(plan.downloadBytes)}` : "Yes, set it up"}
+                      </j-button>
+                      {!installing && (
+                        <j-button variant="subtle" onClick={() => setMode("Skip")}>
+                          No, no AI for now
+                        </j-button>
+                      )}
+                    </j-flex>
+                    {instead && (
+                      <j-button
+                        variant="link"
+                        onClick={() => {
+                          setServerMode("Detected");
+                          setMode("Server");
+                        }}
+                      >
+                        Use the {kindLabel(instead.kind)} already running at {instead.baseUrl} instead
+                      </j-button>
+                    )}
+                  </j-flex>
                 )}
               </j-flex>
             </j-box>

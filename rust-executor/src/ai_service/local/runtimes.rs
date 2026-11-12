@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use super::autostart::autostart_enabled;
 use super::data::{Provider, Service};
-use super::first_use::autostart_enabled;
 use super::hardware::Backend;
 use super::health::{
     gpu_check, gpu_check_for, spawn_gpu_check, spawn_health_follower, spawn_pid_follower,

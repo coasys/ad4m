@@ -182,7 +182,9 @@ pub struct Ad4mConfig {
     /// The per-user store of local AI runtimes and models. Unset: `AD4M_LOCAL_AI_DIR`, else
     /// `<data local dir>/ad4m/local-ai` (`~/.local/share/ad4m/local-ai` on Linux).
     pub local_ai_dir: Option<String>,
-    /// Start the installed local AI runtimes with the executor. Unset: yes.
+    /// Start the installed local AI runtimes with the executor. Unset: yes. It never
+    /// installs or downloads anything: only `ai.localInstall`, `ad4m-executor local-ai
+    /// install` and the Docker image's `INCLUDE_MODELS` do.
     pub local_ai_autostart: Option<bool>,
     /// The device local AI plans for. Unset: the best one detected.
     pub local_ai_device: Option<crate::ai_service::local::hardware::Backend>,

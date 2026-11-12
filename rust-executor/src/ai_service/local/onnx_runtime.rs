@@ -5,22 +5,21 @@
 //!
 //! On macOS the pinned build (`libraries.onnxruntime` in `manifest.json`, Microsoft's
 //! release for the ONNX Runtime minor `ort` binds, 1.18) is fetched into the local AI store
-//! like a runtime build, verified by size and sha256, and `ort` is pointed at its library
-//! before the first model is built. `ort` keeps the first library path it resolves for the
-//! life of the process, so nothing touches `ort` before the file is there: a stream that
-//! opens while the library downloads runs without the gate (with a warning) and starts the
-//! download in the background; the next stream has the gate. Only an operator's stream
-//! starts it, and only with `local_ai_autostart` on, as local AI's first-use setup; any
-//! other stream runs without the gate until the library is there. `ORT_DYLIB_PATH`, or a
-//! `libonnxruntime.dylib` beside the executable, still win: `ort` resolves those itself.
+//! like a runtime build, verified by size and sha256, by an explicit install that sets up
+//! transcription (`ai.localInstall`, `ad4m-executor local-ai install`, `INCLUDE_MODELS`;
+//! [`fetch_pinned`]). A stream never downloads it: without the library a stream runs
+//! without the gate, with a warning that says to set up local AI. `ort` is pointed at the
+//! library before the first model is built; it keeps the first library path it resolves for
+//! the life of the process, so nothing touches `ort` before the file is there.
+//! `ORT_DYLIB_PATH`, or a `libonnxruntime.dylib` beside the executable, still win: `ort`
+//! resolves those itself.
 
 use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-use std::thread::JoinHandle;
+use std::sync::OnceLock;
 
 use super::data::Library;
-use super::install::{http_client, Store};
+use super::install::Store;
 
 /// The manifest's and the store's name for it.
 const LIBRARY: &str = "onnxruntime";
@@ -50,19 +49,20 @@ pub fn installed(store: &Store, library: &Library, key: &str) -> Option<PathBuf>
 }
 
 /// Download and unpack build `key` into the store (resuming), unless it is there; the
-/// library file.
+/// library file. `progress` gets the bytes done.
 pub async fn fetch(
     store: &Store,
     client: &reqwest::Client,
     library: &Library,
     key: &str,
+    progress: &(dyn Fn(u64) + Send + Sync),
 ) -> Result<PathBuf> {
     let build = library
         .builds
         .get(key)
         .ok_or_else(|| anyhow!("The manifest has no {LIBRARY} build for {key}"))?;
     let unpacked = store
-        .fetch_build(client, LIBRARY, &library.version, key, build, &|_| {})
+        .fetch_build(client, LIBRARY, &library.version, key, build, progress)
         .await?;
     let path = unpacked.dir.join(&build.binary);
     if !path.is_file() {
@@ -71,91 +71,48 @@ pub async fn fetch(
     Ok(path)
 }
 
-/// The background download of the library: at most one at a time.
-#[derive(Default)]
-pub struct Fetcher {
-    running: Mutex<Option<JoinHandle<()>>>,
+/// The pinned library and this platform's build key, where `ort` loads ONNX Runtime at run
+/// time (macOS) and the manifest pins it; `None` where it is linked in.
+pub(crate) fn pinned() -> Option<(&'static Library, &'static str)> {
+    let key = build_key()?;
+    let library = super::data::embedded()
+        .ok()?
+        .manifest
+        .libraries
+        .get(LIBRARY)?;
+    library.builds.contains_key(key).then_some((library, key))
 }
 
-impl Fetcher {
-    pub const fn new() -> Fetcher {
-        Fetcher {
-            running: Mutex::new(None),
-        }
-    }
-
-    /// The library file when the store holds it. Else its download starts on a thread of
-    /// its own (unless one is running), which outlives the stream that asked, and the
-    /// answer is `None`; a download that failed is tried again by the next call. Without
-    /// `may_fetch`, no download starts.
-    pub fn installed_or_fetch(
-        &self,
-        store: &Store,
-        library: &Library,
-        key: &str,
-        may_fetch: bool,
-    ) -> Option<PathBuf> {
-        if let Some(path) = installed(store, library, key) {
-            return Some(path);
-        }
-        if !may_fetch {
-            return None;
-        }
-        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        if running.as_ref().is_some_and(|h| !h.is_finished()) {
-            return None;
-        }
-        let (store, library, key) = (store.clone(), library.clone(), key.to_string());
-        log::info!(
-            "Downloading ONNX Runtime {} for the speech gate into {}",
-            library.version,
-            store.root.display()
-        );
-        *running = Some(std::thread::spawn(move || {
-            let fetched = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(anyhow::Error::from)
-                .and_then(|rt| {
-                    rt.block_on(async { fetch(&store, &http_client()?, &library, &key).await })
-                });
-            match fetched {
-                Ok(path) => log::info!(
-                    "ONNX Runtime is at {}: streams opened from now on have the speech gate",
-                    path.display()
-                ),
-                Err(e) => log::warn!(
-                    "ONNX Runtime did not download ({e:#}): streams run without the speech \
-                     gate; the next one tries again"
-                ),
-            }
-        }));
-        None
-    }
-
-    /// Wait for the running download, if there is one.
-    pub fn wait(&self) {
-        let handle = self
-            .running
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(handle) = handle {
-            let _ = handle.join();
-        }
-    }
+/// The download size of the pinned build where it is needed, and whether `store` holds it.
+pub(crate) fn planned(store: &Store) -> Option<(u64, bool)> {
+    let (library, key) = pinned()?;
+    Some((
+        library.builds[key].size_bytes,
+        installed(store, library, key).is_some(),
+    ))
 }
 
-static FETCHER: Fetcher = Fetcher::new();
+/// For an explicit install: fetch the pinned build into `store` where it is needed (macOS),
+/// unless it is there. `None` where ONNX Runtime is linked in.
+pub(crate) async fn fetch_pinned(
+    store: &Store,
+    client: &reqwest::Client,
+    progress: &(dyn Fn(u64) + Send + Sync),
+) -> Result<Option<PathBuf>> {
+    let Some((library, key)) = pinned() else {
+        return Ok(None);
+    };
+    fetch(store, client, library, key, progress).await.map(Some)
+}
 
 /// Whether `ort` was pointed at the store's library, and it loaded.
 static POINTED: OnceLock<bool> = OnceLock::new();
 
 /// Whether ONNX Runtime can be loaded now. Where it is linked in, or where `ORT_DYLIB_PATH`
 /// or a library beside the executable provides it: yes. Else (macOS) yes once the store
-/// holds the pinned build and `ort` loaded it; without the build, the answer is no, and
-/// with `may_fetch` its download starts in the background.
-pub fn ready(may_fetch: bool) -> bool {
+/// holds the pinned build (an explicit install put it there) and `ort` loaded it; without
+/// the build, no. It never downloads.
+pub fn ready() -> bool {
     let Some(key) = build_key() else {
         return true;
     };
@@ -186,16 +143,10 @@ pub fn ready(may_fetch: bool) -> bool {
     let Ok(root) = super::store_root(configured) else {
         return false;
     };
-    let store = Store::new(root);
-    match FETCHER.installed_or_fetch(&store, library, key, may_fetch) {
+    match installed(&Store::new(root), library, key) {
         Some(path) => *POINTED.get_or_init(|| point_ort_at(path)),
         None => false,
     }
-}
-
-/// Wait for the library's background download, if one is running.
-pub fn wait_for_download() {
-    FETCHER.wait();
 }
 
 /// `ORT_DYLIB_PATH` names a library, or one lies beside the executable: `ort` loads that.
@@ -238,6 +189,7 @@ fn point_ort_at(_path: PathBuf) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::install::http_client;
     use super::*;
     use sha2::{Digest, Sha256};
 
@@ -300,56 +252,26 @@ mod tests {
     #[test]
     fn only_macos_loads_it_at_run_time() {
         assert_eq!(build_key().is_some(), cfg!(target_os = "macos"));
+        assert_eq!(pinned().is_some(), cfg!(target_os = "macos"));
+        let store = Store::new(tempfile::tempdir().unwrap().path());
+        assert_eq!(planned(&store).is_some(), cfg!(target_os = "macos"));
         if build_key().is_none() {
-            assert!(ready(false), "linked in: always ready");
+            assert!(ready(), "linked in: always ready");
         }
     }
 
-    /// An ask that may not fetch (`local_ai_autostart` off, or a caller other than the
-    /// operator) starts no download and answers no; the stream runs without the gate.
-    #[test]
-    fn an_ask_that_may_not_fetch_downloads_nothing() {
+    /// An explicit install's fetch downloads the build once, verified, and the store then
+    /// holds the library; a second fetch finds it and downloads nothing.
+    #[tokio::test]
+    async fn a_fetch_installs_the_verified_library_once() {
         let archive = tar_gz("ort/lib/libonnxruntime.1.18.1.dylib", b"a dylib");
-        let mut server = mockito::Server::new();
-        let mock = server
-            .mock("GET", "/ort.tgz")
-            .with_body(&archive)
-            .expect(0)
-            .create();
-        let library = library(
-            format!("{}/ort.tgz", server.url()),
-            &archive,
-            &sha(&archive),
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path());
-        let fetcher = Fetcher::new();
-
-        assert_eq!(
-            fetcher.installed_or_fetch(&store, &library, "macos-arm64", false),
-            None
-        );
-        fetcher.wait();
-        assert_eq!(installed(&store, &library, "macos-arm64"), None);
-        assert_eq!(
-            std::fs::read_dir(dir.path()).unwrap().count(),
-            0,
-            "no download"
-        );
-        mock.assert();
-    }
-
-    /// The first ask starts one download and answers no; an ask while it runs starts no
-    /// second; once it is done the store holds the verified library and the ask answers it.
-    #[test]
-    fn the_first_ask_downloads_in_the_background_and_a_later_one_finds_the_library() {
-        let archive = tar_gz("ort/lib/libonnxruntime.1.18.1.dylib", b"a dylib");
-        let mut server = mockito::Server::new();
+        let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/ort.tgz")
             .with_body(&archive)
             .expect(1)
-            .create();
+            .create_async()
+            .await;
         let library = library(
             format!("{}/ort.tgz", server.url()),
             &archive,
@@ -357,22 +279,12 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
-        let fetcher = Fetcher::new();
+        let client = http_client().unwrap();
 
         assert_eq!(installed(&store, &library, "macos-arm64"), None);
-        assert_eq!(
-            fetcher.installed_or_fetch(&store, &library, "macos-arm64", true),
-            None
-        );
-        // Still downloading (no), or done (the library): either way no second request.
-        let meanwhile = fetcher.installed_or_fetch(&store, &library, "macos-arm64", true);
-        fetcher.wait();
-        if let Some(path) = meanwhile {
-            assert_eq!(Some(path), installed(&store, &library, "macos-arm64"));
-        }
-        let path = fetcher
-            .installed_or_fetch(&store, &library, "macos-arm64", true)
-            .expect("installed after the download");
+        let path = fetch(&store, &client, &library, "macos-arm64", &|_| {})
+            .await
+            .unwrap();
         assert_eq!(
             path,
             store
@@ -380,20 +292,27 @@ mod tests {
                 .join("ort/lib/libonnxruntime.1.18.1.dylib")
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"a dylib");
-        mock.assert();
+        assert_eq!(
+            installed(&store, &library, "macos-arm64"),
+            Some(path.clone())
+        );
+        let again = fetch(&store, &client, &library, "macos-arm64", &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(again, path);
+        mock.assert_async().await;
     }
 
-    /// A download whose digest is not the manifest's installs nothing; the next ask tries
-    /// again.
-    #[test]
-    fn a_wrong_digest_installs_nothing_and_the_next_ask_tries_again() {
+    /// A download whose digest is not the manifest's installs nothing.
+    #[tokio::test]
+    async fn a_wrong_digest_installs_nothing() {
         let archive = tar_gz("ort/lib/libonnxruntime.1.18.1.dylib", b"a dylib");
-        let mut server = mockito::Server::new();
-        let mock = server
+        let mut server = mockito::Server::new_async().await;
+        server
             .mock("GET", "/ort.tgz")
             .with_body(&archive)
-            .expect(2)
-            .create();
+            .create_async()
+            .await;
         let library = library(
             format!("{}/ort.tgz", server.url()),
             &archive,
@@ -401,17 +320,17 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
-        let fetcher = Fetcher::new();
-        for _ in 0..2 {
-            assert_eq!(
-                fetcher.installed_or_fetch(&store, &library, "macos-arm64", true),
-                None
-            );
-            fetcher.wait();
-        }
+        assert!(fetch(
+            &store,
+            &http_client().unwrap(),
+            &library,
+            "macos-arm64",
+            &|_| {}
+        )
+        .await
+        .is_err());
         assert_eq!(installed(&store, &library, "macos-arm64"), None);
         assert!(!store.runtime_dir(LIBRARY, "1.18.1", "macos-arm64").exists());
-        mock.assert();
     }
 
     /// An archive without the library the manifest names is an error, not a path.
@@ -431,9 +350,15 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
-        let error = fetch(&store, &http_client().unwrap(), &library, "macos-arm64")
-            .await
-            .unwrap_err();
+        let error = fetch(
+            &store,
+            &http_client().unwrap(),
+            &library,
+            "macos-arm64",
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.to_string().contains("libonnxruntime.1.18.1.dylib"),
             "{error}"

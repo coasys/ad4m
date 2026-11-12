@@ -12,6 +12,8 @@ import {
   localDefaults,
   parseMaxNumCtx,
   preselectedChat,
+  serverInstead,
+  toDownload,
   withMaxNumCtx,
 } from "./aiSetup.ts";
 
@@ -168,7 +170,7 @@ test("the local panel offers start, install, or says local AI runs", () => {
   // Stopped, and the files are in: start.
   const stopped = runtime("llama-server", ["llm"], "stopped");
   assert.equal(localAction(installed([stopped], [chatModel]), all, false), "start");
-  // Only embeddings run (first-use setup): the planned chat model is offered for install,
+  // Only embeddings run (an install for embeddings only): the planned chat model is offered for install,
   // also when its files are downloaded already.
   const embeddingsOnly = installed(
     [runtime("llama-server", ["embeddings"], "running")],
@@ -195,4 +197,36 @@ test("picking local AI makes each registered local model the default of its type
     ["EMBEDDING", "m2"],
     ["TRANSCRIPTION", "m3"],
   ]);
+});
+
+test("the local panel names what an install would download: only what is not here yet", () => {
+  const plan = {
+    models: [
+      { modelId: "qwen3-4b", installed: false },
+      { modelId: "nomic-embed", installed: true },
+      { modelId: "parakeet", installed: false },
+    ],
+    runtimes: [
+      { runtimeId: "llama-server", installed: true },
+      { runtimeId: "nemo-speech", installed: false },
+    ],
+  };
+  assert.deepEqual(toDownload(plan), ["qwen3-4b", "parakeet", "nemo-speech"]);
+  assert.deepEqual(toDownload({ models: [], runtimes: [] }), []);
+});
+
+test("the local panel offers a running model server instead, not local AI's own runtime", () => {
+  const ollamaUp = { ...ollama, capabilities: ["chat", "embeddings"] };
+  const speachesUp = { ...speaches, capabilities: ["transcription"] };
+  const ownLlama = { ...llama, capabilities: ["chat"] };
+  // The server that chats comes first.
+  assert.equal(serverInstead([speachesUp, ollamaUp], []), ollamaUp);
+  // Without one that chats, any other server.
+  assert.equal(serverInstead([speachesUp], []), speachesUp);
+  // A server on a port of local AI's runtimes is local AI itself.
+  assert.equal(serverInstead([ownLlama], [9931]), null);
+  assert.equal(serverInstead([ownLlama, ollamaUp], [9931]), ollamaUp);
+  // Nothing detected, or detection not done yet.
+  assert.equal(serverInstead([], []), null);
+  assert.equal(serverInstead(null, []), null);
 });

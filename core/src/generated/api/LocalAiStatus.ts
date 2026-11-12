@@ -11,6 +11,7 @@ export type LocalAiStatus = {
  */
 installed: boolean, installing: boolean, storageDir: string, 
 /**
- * Starts with the executor (`local_ai_autostart`, on unless set off).
+ * The installed runtimes start with the executor (`local_ai_autostart`, on unless set
+ * off). Nothing is ever installed at start or on a request: only `ai.localInstall`.
  */
 autostart: boolean, runtimes: Array<LocalAiRuntimeStatus>, models: Array<LocalAiModelStatus>, };

@@ -204,7 +204,7 @@ export function localChatReady(status: Pick<LocalAiStatus, "models" | "runtimes"
 /**
  * What the local AI panel offers: `running` when every runtime of the selection runs, `start`
  * when it is installed with its files in, else `install`. A selection without the chat model
- * the plan has (first-use setup installed only embeddings or transcription), or whose chat
+ * the plan has (an earlier install for embeddings or transcription only), or whose chat
  * model is not registered, offers the install, also when the chat model's files are
  * downloaded already: a start would not add it.
  */
@@ -221,4 +221,36 @@ export function localAction(
   const running = status.runtimes.filter((r) => r.phase === "running").length;
   if (running > 0 && running === status.runtimes.length) return "running";
   return plan.downloadBytes === 0 ? "start" : "install";
+}
+
+/**
+ * What an install would download, by name: the planned models and runtimes whose files are not
+ * here yet. The plan's `downloadBytes` is their total (with, on macOS, the speech gate's ONNX
+ * Runtime when the plan has transcription).
+ */
+export function toDownload(plan: {
+  models: Pick<LocalAiPlannedModel, "modelId" | "installed">[];
+  runtimes: { runtimeId: string; installed: boolean }[];
+}): string[] {
+  return [
+    ...plan.models.filter((m) => !m.installed).map((m) => m.modelId),
+    ...plan.runtimes.filter((r) => !r.installed).map((r) => r.runtimeId),
+  ];
+}
+
+/**
+ * The model server already running on this computer that the local panel offers instead of a
+ * download: the first detected one that chats, else the first. A server on the port of one of
+ * local AI's own runtimes (`localPorts`) is local AI itself, not an alternative. `null` when
+ * there is none.
+ */
+export function serverInstead<S extends { baseUrl: string; capabilities: string[] }>(
+  detected: S[] | null,
+  localPorts: number[]
+): S | null {
+  const others = (detected ?? []).filter((s) => {
+    const port = Number(new URL(s.baseUrl).port);
+    return !(port && localPorts.includes(port));
+  });
+  return others.find((s) => s.capabilities.includes("chat")) ?? others[0] ?? null;
 }

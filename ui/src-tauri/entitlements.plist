@@ -30,7 +30,8 @@
 	<true/>
 	<!--
 	  Required: the executor's speech gate loads ONNX Runtime at run time on
-	  macOS, Microsoft's build, downloaded into the local AI store on first use
+	  macOS, Microsoft's build, downloaded into the local AI store by a local AI
+	  install that sets up transcription
 	  (rust-executor/src/ai_service/local/onnx_runtime.rs). Library validation
 	  refuses a library not signed by this app's team, and the gate stays off.
 	-->

@@ -127,10 +127,8 @@ The executor still runs no model in-process: `local/` installs and supervises mo
   that the selection does not name (and so the defaults that named them), then registers
   the selection's models, so a type whose default went gets the new model as its default
   also without `make_default`; it asks a running nemo-speech for its listing up to 5
-  times (1 s apart) before it falls back to the manifest id. `ensure_service` takes the
-  install flag (`take_install_flag`, waiting while an install runs) before it reads the
-  selection, and sets up nothing when a model of the type exists by then. `autostart`
-  waits for `AIService::wait_loaded` (the start's load of the stored models) first: a
+  times (1 s apart) before it falls back to the manifest id. `autostart` (`autostart.rs`)
+  only starts what an install put in place and never downloads; it waits for `AIService::wait_loaded` (the start's load of the stored models) first: a
   load after the registration would put back the clients of the old endpoint settings.
   The health follower probes the endpoint at its start and at each phase change
   (`probe_health`, not the debounced `check_health`); the GPU check of a runtime that is
@@ -161,17 +159,20 @@ The executor still runs no model in-process: `local/` installs and supervises mo
 - RPCs (`api/ai_ws.rs`): `ai.localHardware` / `localPlan` / `localStatus` are
   `Executor(AI_READ)` reads; `ai.localInstall` (long) / `localStart` (long) / `localStop` /
   `localRemove` are `Guard::Operator`. Progress: the `ai-local-progress` event (operator).
-  `ai.transcriptionOpen` is long too: a first use sets up local AI before it answers.
-- Tests of `local/mod.rs` that touch `RUNNING`, `MANAGED_PORTS`, `GPU_CHECKS`, the install
+- Tests of `local/*.rs` that touch `RUNNING`, `MANAGED_PORTS`, `GPU_CHECKS`, the install
   flag or the global service take `TEST_LOCK` first: a plain `cargo test` runs them in
   parallel.
-- First-use setup (`AIService::default_model`: `ai.embed` or `ai.transcriptionOpen` on
-  `"default"` with no model of the type) is the operator's too: it checks
-  `RequestContext::is_operator` before `local::ensure_service`. Any other caller, and the
-  executor's own embeds (`None`), get `LocalAiRefused` "No default <TYPE> model on this
-  executor: ask the operator to set up local AI". `/v1` never sets up (no default: 404).
-  On macOS the ONNX Runtime fetch for the speech gate (`onnx_runtime.rs`) starts only from
-  an operator's stream with `local_ai_autostart` on; other streams run ungated meanwhile.
+- **Nothing downloads unless the user or operator asks.** Local AI installs only through
+  `ai.localInstall` (an app's call: the launcher's setup screen), `ad4m-executor local-ai
+  install` and the Docker image's `INCLUDE_MODELS` (`install_into`). Never add a download
+  to a request path or to executor start. `AIService::default_model` (`ai.embed` or
+  `ai.transcriptionOpen` on `"default"` with no model of the type) answers `LocalAiRefused`:
+  the operator gets "No default <TYPE> model on this executor: set up local AI
+  (ai.localInstall) or register a model on an endpoint"; any other caller, and the
+  executor's own embeds (`None`), "… ask the operator to set up local AI". `/v1` has no
+  default (404). On macOS the install that sets up transcription fetches ONNX Runtime for
+  the speech gate (`onnx_runtime::fetch_pinned`; `plan_for` counts its size); a stream
+  never fetches it and runs ungated without it.
 - Model names live in `manifest.json` and the recommendations, as data (the rule below).
   Updating a pin: new URL, `sizeBytes` and `sha256` (GitHub `digest`, HF `lfs.oid`), and an
   HF URL with a commit, never `main` (a unit test checks).

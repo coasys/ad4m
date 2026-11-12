@@ -179,7 +179,8 @@ pub(super) async fn register(
     // A model a new selection dropped (fewer services, a re-plan): its row goes, and with
     // it a default that named it. Before the models below: a type whose default goes gets
     // the selection's model of that type as its default, also when this start does not make
-    // its models the defaults (a re-plan from `ensure_service`, `ai.localStart`).
+    // its models the defaults (a re-plan installed with `start: false`, then `ai.localStart`
+    // or the start at executor start).
     for row in crate::db_backend::db_backend().get_models()? {
         if row.endpoint_id == endpoint.id && !models.iter().any(|m| m.model_id == row.name) {
             service.remove_model(row.id).await?;
@@ -510,7 +511,7 @@ mod tests {
     }
 
     /// A re-plan that changes the chat model and starts without making its models the
-    /// defaults (`ensure_service`, `ai.localStart`): the old model's row goes, and the new
+    /// defaults (`ai.localStart`, autostart): the old model's row goes, and the new
     /// model becomes the default the old one was. The executor keeps a default chat model.
     #[tokio::test]
     async fn a_replan_keeps_a_default_of_each_type_it_registers() {

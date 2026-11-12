@@ -78,6 +78,13 @@ out to get its default.
 turn multi-user off on a data directory where it was enabled before: the
 executor records multi-user as on in its database and only ever sets it.
 
+`local_ai_autostart` starts the local AI runtimes an install put in place when
+the executor starts. It never downloads or installs anything: local AI is
+installed only by `ai.localInstall` (an app's call, such as the launcher's setup screen),
+`ad4m-executor local-ai install`, or the Docker image's `INCLUDE_MODELS`. A
+request that needs a model of a type the executor has none of fails with an
+error that says how to get one.
+
 Multi-user mode needs an admin credential. Without one, a caller with no
 token on a loopback listener is the operator, who could act as every user:
 `run` refuses `multi_user_config.enabled: true` (and a data directory whose

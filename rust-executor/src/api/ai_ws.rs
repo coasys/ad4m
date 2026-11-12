@@ -408,8 +408,8 @@ fn upstream_failure(e: &anyhow::Error, ctx: &RequestContext) -> WsRpcError {
     if e.downcast_ref::<crate::db::InvalidModel>().is_some()
         || e.downcast_ref::<local::LocalAiRefused>().is_some()
     {
-        // The task's model is not an LLM, or first use needs the operator to set up local
-        // AI: no endpoint was called.
+        // The task's model is not an LLM, or there is no default model of the type (set up
+        // local AI or register one): no endpoint was called.
         return WsRpcError::bad_request(e.to_string());
     }
     let message = e.to_string();
@@ -701,13 +701,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<EmbedRequest, String>("ai.embed", ai_embed)
         .long()
         .guard(Guard::Cap(AI_PROMPT_CAPABILITY.clone()));
-    // The new stream's id. Long: naming `default` on an executor without a transcription
-    // model sets up local AI first, as `ai.embed` does.
+    // The new stream's id.
     map.method::<AiTranscriptionOpenParams, String>(
         "ai.transcriptionOpen",
         open_transcription_stream,
     )
-    .long()
     .guard(Guard::Cap(AI_TRANSCRIBE_CAPABILITY.clone()));
     // Always the string `"true"`.
     map.method::<AiTranscriptionCloseParams, String>(
@@ -1105,10 +1103,11 @@ mod model_view_tests {
 mod upstream_failure_tests {
     use super::*;
 
-    // First use on `default` without the operator (`ai.embed`, `ai.transcriptionOpen`): the
-    // caller can fix it, so it is a bad request, not a server fault.
+    // `default` on an executor without a model of the type (`ai.embed`,
+    // `ai.transcriptionOpen`): the caller can fix it, so it is a bad request, not a server
+    // fault.
     #[test]
-    fn a_first_use_refusal_is_a_bad_request() {
+    fn a_missing_default_refusal_is_a_bad_request() {
         let refused = anyhow::Error::new(local::LocalAiRefused(
             "No default Embedding model on this executor: ask the operator to set up local AI"
                 .into(),

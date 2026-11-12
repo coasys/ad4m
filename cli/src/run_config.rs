@@ -354,7 +354,9 @@ pub struct RunArgs {
     /// Support/ad4m/local-ai` (macOS), `%LOCALAPPDATA%\ad4m\local-ai` (Windows).
     #[arg(long, env = "AD4M_LOCAL_AI_DIR", value_parser = non_empty(StringValueParser::new()))]
     pub local_ai_dir: Option<String>,
-    /// Start the installed local AI runtimes with the executor. Default: true.
+    /// Start the installed local AI runtimes with the executor. Default: true. It never
+    /// installs or downloads anything: install with `ad4m-executor local-ai install` or
+    /// `ai.localInstall`.
     #[arg(
         long,
         action,

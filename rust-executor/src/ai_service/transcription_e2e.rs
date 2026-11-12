@@ -79,7 +79,6 @@ async fn a_streamed_utterance_is_accepted_and_answered() {
             Arc::new(client),
             None,
             "did:key:e2e".into(),
-            true,
         )
         .await;
     let mut text = service

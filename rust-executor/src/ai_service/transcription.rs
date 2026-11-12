@@ -36,19 +36,22 @@ pub(crate) const VAD_MIN_SPEECH_RATIO: f32 = 0.33;
 
 /// The server-side speech gate of a stream: Silero VAD over each fed utterance, its state
 /// carried from one utterance to the next as dev's was. `None` when the model did not load:
-/// on macOS, where ONNX Runtime is loaded at run time, while the first stream's download of
-/// it runs (`local::onnx_runtime`). Every utterance passes then, with a warning at open,
-/// rather than the stream refusing all audio or waiting for the download.
+/// on macOS, where ONNX Runtime is loaded at run time, until an explicit local AI install
+/// put it in the store (`local::onnx_runtime`; a stream never downloads it). Every
+/// utterance passes then, with a warning at open, rather than the stream refusing all audio.
 pub(crate) struct SpeechGate {
     vad: Option<voice_activity_detector::VoiceActivityDetector>,
 }
 
 impl SpeechGate {
-    /// `fetch_onnx_runtime`: a missing ONNX Runtime (macOS) starts its download; else the
-    /// stream runs without the gate until the operator's stream fetched it.
-    pub(crate) fn new(fetch_onnx_runtime: bool) -> Self {
-        if !super::local::onnx_runtime::ready(fetch_onnx_runtime) {
-            log::warn!("Silero VAD has no ONNX Runtime yet: this stream sends all audio");
+    /// Without ONNX Runtime (macOS, before local AI is set up with transcription) the gate
+    /// is open; nothing is downloaded.
+    pub(crate) fn new() -> Self {
+        if !super::local::onnx_runtime::ready() {
+            log::warn!(
+                "Silero VAD has no ONNX Runtime: this stream sends all audio. Set up local AI \
+                 with transcription (ai.localInstall, ad4m-executor local-ai install) to get it"
+            );
             return SpeechGate { vad: None };
         }
         // ort panics, rather than returning an error, on an ONNX Runtime it cannot load:
@@ -382,19 +385,28 @@ mod tests {
     }
 
     // The gate's model loads from the weights compiled in, and scores the recordings as
-    // speech and silence as not. On macOS, with no ONNX Runtime in the store yet, the
-    // first gate is open and starts the download, as a first stream's would; the next one
-    // has the model.
+    // speech and silence as not. On macOS, with no ONNX Runtime in the store yet, the gate
+    // is open and downloads nothing; the test fetches it as an explicit install does, and
+    // the next gate has the model.
     #[test]
     fn the_speech_gate_takes_speech_and_drops_silence_and_short_clicks() {
-        let mut gate = SpeechGate::new(true);
+        let mut gate = SpeechGate::new();
         if gate.vad.is_none() {
             assert!(
                 cfg!(target_os = "macos"),
                 "linked in: the model loads at once"
             );
-            super::super::local::onnx_runtime::wait_for_download();
-            gate = SpeechGate::new(true);
+            let store = super::super::local::install::Store::new(
+                super::super::local::store_root(None).unwrap(),
+            );
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async {
+                    let client = super::super::local::install::http_client()?;
+                    super::super::local::onnx_runtime::fetch_pinned(&store, &client, &|_| {}).await
+                })
+                .unwrap();
+            gate = SpeechGate::new();
         }
         assert!(gate.vad.is_some(), "the model loaded");
         let speech = speech_fixture();
