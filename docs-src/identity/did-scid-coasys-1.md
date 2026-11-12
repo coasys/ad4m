@@ -828,6 +828,15 @@ a new string ends the read of the last one.
   answers 409 `already-joined`. The executor does not tell the store of a cancel: the
   holder's add may still land in the log, listing a device key that never speaks for the
   identity until the holder revokes it.
+- The decision on a claim holds on every path. A repeated `identity.claimOffer` (or ticket)
+  for the same offer keeps the claim as it is: it answers `needsAccept` as the claim stands,
+  a cancelled claim is refused (409 `cancelled`) and the offer named for another identity
+  is refused (409 `offer-conflict`), both before the store is asked. `identity.publish` of
+  the holder's add (or its replay after a 409) binds the main agent only as `joinStatus`
+  would: the add names the offer it spent, and while this executor's claim on that offer is
+  held or cancelled the head is answered but nothing is bound; an accepted first-run claim
+  binds and records `FirstRun` in one write. A key the main agent's own incept lists, and
+  the refresh of an identity it already speaks for, bind as before.
 - The executor never opens the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key
   (always for a post).
