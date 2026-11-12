@@ -3,12 +3,14 @@
  *
  * Covers the whole client surface (`sessionCreate`/`session`/`sessionList`/
  * `sessionUpdate`/`sessionDelete`, `sendMessage`/`cancelTurn`/`sessionMessages`,
- * `onSessionChanged`) plus three user-story scenarios through the session's
+ * `onSessionChanged`) plus four user-story scenarios through the session's
  * MCP tool surface:
  *
  *   - "what are my perspectives?"      → a `list_perspectives` tool call
  *   - "what is in my perspective?"     → tools aimed at `defaultPerspective`
  *   - "add this link / read it back"   → `add_link`, then `query_links`
+ *   - "this perspective only"          → a session scoped to one perspective
+ *     lists only it and is refused on another
  *
  * Tool steps land as `role: "tool"` transcript entries (`content.name`,
  * `content.arguments`, `content.target`, `content.result`), so the scenarios
@@ -409,5 +411,60 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
       ),
       "query_links targeted the perspective the user named",
     ).to.equal(true);
+  });
+
+  // ── a session scoped to one perspective ───────────────────────────────────
+
+  it("a session scoped to one perspective lists and reads only that one", async () => {
+    const inside = await newPerspective(`otter-inside-${Date.now().toString(36)}`);
+    const outside = await newPerspective(`heron-outside-${Date.now().toString(36)}`);
+
+    // The scope a client gives a "this space only" chat: read and write on one
+    // perspective, nothing on any other.
+    const s = await newSession({
+      title: "one perspective only",
+      defaultPerspective: inside.uuid,
+      capabilities: [
+        {
+          with: { domain: "perspective", pointers: [inside.uuid] },
+          can: ["READ", "UPDATE"],
+        },
+      ],
+    });
+
+    // Listing is admitted and narrowed: the scoped session sees its own
+    // perspective, not the other one (before the fix it was refused outright).
+    const listed = await ad4m.ai.sendMessage(
+      s.id,
+      "Use the list_perspectives tool to list my perspectives, then tell me the names you see.",
+    );
+    const { msgs } = await waitForReply(s.id, listed.replyId);
+    const lists = toolSteps(msgs, "list_perspectives");
+    expect(lists.length, "the turn called list_perspectives").to.be.greaterThan(0);
+    expect(lists[0].status, `list_perspectives: ${stepContent(lists[0]).error}`).to.equal("done");
+    // Parsed, not substring-matched: a refusal's text echoes the caller's own
+    // capabilities, which name `inside` too.
+    const handles = JSON.parse(stepContent(lists[0]).result ?? "null");
+    expect(handles, "list_perspectives returned a list").to.be.an("array");
+    const uuids = (handles as { uuid: string }[]).map((h) => h.uuid);
+    expect(uuids, "the scoped perspective is listed").to.include(inside.uuid);
+    expect(uuids, "the other perspective is not listed").to.not.include(outside.uuid);
+
+    // Reading the other perspective, even by its exact uuid, is refused.
+    const probe = await ad4m.ai.sendMessage(
+      s.id,
+      `Use the query_links tool with perspective_id "${outside.uuid}" and no other filters.`,
+    );
+    const { msgs: msgs2 } = await waitForReply(s.id, probe.replyId);
+    const probeSeq = msgs2.find((m) => m.id === probe.messageId)!.seq;
+    const outsideQueries = toolSteps(msgs2, "query_links").filter(
+      (m) => m.seq > probeSeq && stepContent(m).arguments?.perspective_id === outside.uuid,
+    );
+    expect(outsideQueries.length, "the turn tried the other perspective").to.be.greaterThan(0);
+    for (const q of outsideQueries) {
+      expect(q.status, "query_links on the other perspective is refused").to.equal("failed");
+      expect(stepContent(q).error ?? "").to.include("Capability is not matched");
+      expect(stepContent(q).result, "a refused step carries no result").to.be.undefined;
+    }
   });
 });
