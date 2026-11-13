@@ -825,6 +825,15 @@ impl ViaStore {
             .map_err(|e| bad_request(format!("{} ({e})", e.name())))?;
         let chain =
             crate::fold(&events).map_err(|e| bad_request(format!("the log does not fold: {e}")))?;
+        // The folded log's own SCID (self-certifying, from its incept) is the one read: the
+        // head's `scid` label is only the store's word, and a store can put any label on a
+        // genuine log of another identity.
+        if chain.id() != scid {
+            return Err(error(
+                502,
+                "bad-log: the store served the log of another identity than the one read",
+            ));
+        }
         // The signed head must be the folded log's head: otherwise the events are not what
         // the store confirmed (a head of another position, or of a prefix).
         let folded = chain.head();
