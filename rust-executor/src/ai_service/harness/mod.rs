@@ -953,7 +953,22 @@ async fn recover_empty_answer(
                 return Ok(String::new());
             }
         }
-        completion = completions.complete(model_id, messages, Vec::new()).await?;
+        // A nudge is a completion like any other: a transient failure gets
+        // the one retry, a refused retry ends with empty content.
+        completion =
+            match complete_or_retry(completions, model_id, messages, Vec::new(), credit_gate, 0)
+                .await
+            {
+                Ok(completion) => completion,
+                Err(e) if e.downcast_ref::<CreditRefused>().is_some() => {
+                    log::warn!(
+                        "harness: credit gate refused the retry of an empty-reply nudge: {e}. \
+                     Returning empty content."
+                    );
+                    return Ok(String::new());
+                }
+                Err(e) => return Err(e),
+            };
     }
     Ok(completion.content)
 }
@@ -2118,6 +2133,62 @@ mod tests {
         .unwrap();
         assert_eq!(out, "");
         assert_eq!(llm.call_count(), 5, "2 failures, fallback, 2 nudges");
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_on_the_empty_answer_nudge_is_retried() {
+        // Two failed tries, an empty no-tools answer, then the nudge answers
+        // 500 once: the nudge gets the same one retry a round gets.
+        let script = vec![plain_answer(""), plain_answer("recovered")];
+        let llm = Arc::new(ScriptedLLM::new(script).failing_on(&[1, 2, 4]));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("lookup", "")],
+        });
+        let out = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            provider.clone(),
+            llm.clone(),
+            HarnessConfig {
+                max_tool_calls: 4,
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "recovered");
+        assert_eq!(
+            llm.call_count(),
+            5,
+            "2 failures, fallback, failed nudge, retry"
+        );
+
+        // A gate that refuses the nudge's retry ends the run with empty
+        // content and sends nothing more.
+        let llm = Arc::new(ScriptedLLM::new(vec![plain_answer("")]).failing_on(&[1, 2, 4]));
+        let gate = Arc::new(FiniteCreditGate {
+            remaining: std::sync::atomic::AtomicUsize::new(4),
+        });
+        let out = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            provider,
+            llm.clone(),
+            HarnessConfig {
+                max_tool_calls: 4,
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            Some(gate),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "");
+        assert_eq!(llm.call_count(), 4, "the refused retry was not sent");
     }
 
     #[tokio::test]
