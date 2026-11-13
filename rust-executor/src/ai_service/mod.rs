@@ -832,26 +832,28 @@ impl AIService {
             .is_some_and(|endpoint| model.uses_native_tools(&endpoint))
     }
 
-    /// How many tokens an interpretation pass may generate.
+    /// How many tokens an interpretation pass may generate, or `None` for no cap.
     ///
     /// Staging: a 34,700-token interpretation prompt on a 49,152 window let
     /// qwen think until `n_tokens = 49151` (`truncated = 1`) and return an
-    /// empty answer. The cap is the room the window leaves after this prompt,
-    /// so it scales with the model instead of being a fixed constant: a floor
-    /// keeps a prompt that nearly fills the window from getting nothing, and
-    /// a ceiling stops a short prompt on a large window asking the server to
-    /// generate a window's worth of JSON it will not use. The window is the
-    /// endpoint's `max_num_ctx` when the operator set one (the same number the
-    /// context budget is sized from); otherwise the fallback that budget uses
-    /// when the window is unknown. `prompt_tokens` is the chars/4 estimate
-    /// the billing path uses.
-    pub fn interpretation_max_output_tokens(model_id: &str, prompt_tokens: usize) -> u32 {
+    /// empty answer. `think: false` is what stops that; the cap is a second
+    /// guard, the room the window leaves after this prompt, so it scales with
+    /// the model instead of being a fixed constant: a floor keeps a prompt
+    /// that nearly fills the window from getting nothing, and a ceiling stops
+    /// a short prompt on a large window asking the server to generate a
+    /// window's worth of JSON it will not use.
+    ///
+    /// The window is the endpoint's `max_num_ctx`, which is unset by default.
+    /// Without it nothing here knows the window, and a guess (the 16k context
+    /// budget fallback) would cap a 35k-token prompt at the floor and
+    /// truncate the JSON on every retry — so an unknown window sends no cap.
+    /// `prompt_tokens` is the chars/4 estimate the billing path uses.
+    pub fn interpretation_max_output_tokens(model_id: &str, prompt_tokens: usize) -> Option<u32> {
         const MIN_OUTPUT: usize = 512;
         const MAX_OUTPUT: usize = 8_192;
-        let window =
-            Self::model_context_tokens(model_id).unwrap_or(DEFAULT_CONTEXT_BUDGET_BYTES / 4);
+        let window = Self::model_context_tokens(model_id)?;
         let room = window.saturating_sub(prompt_tokens);
-        room.clamp(MIN_OUTPUT, MAX_OUTPUT) as u32
+        Some(room.clamp(MIN_OUTPUT, MAX_OUTPUT) as u32)
     }
 
     /// The context window the model's endpoint is run at (`max_num_ctx` on
@@ -1008,7 +1010,7 @@ impl AIService {
                 .model_id,
         )?;
         let cap = Self::interpretation_max_output_tokens(&model_id, estimate_token_count(&prompt));
-        self.prompt_with(task_id, prompt, None, Some((true, Some(cap))))
+        self.prompt_with(task_id, prompt, None, Some((true, cap)))
             .await
     }
 
@@ -1885,6 +1887,41 @@ mod tests {
                  local AI"
             );
         }
+    }
+
+    // The default endpoint has no `max_num_ctx`. A 16k guess for its window would cap a
+    // 35k-token interpretation prompt at the floor and truncate the JSON on every retry.
+    #[tokio::test]
+    async fn an_interpretation_cap_needs_a_known_window_and_none_is_sent_without_one() {
+        let service = service();
+        let unset = saved_endpoint(EndpointKind::LlamaServer, "http://127.0.0.1:9");
+        let unset_model = service
+            .add_model(model_on(&unset, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        assert_eq!(
+            AIService::interpretation_max_output_tokens(&unset_model, 35_000),
+            None,
+            "an unknown window sends no cap"
+        );
+
+        let mut sized = Endpoint::for_test("sized", EndpointKind::Ollama, "http://127.0.0.1:9", "");
+        sized.max_num_ctx = Some(49_152);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&sized)).unwrap();
+        let sized_model = service
+            .add_model(model_on(&sized, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        // Room after a 35k prompt is 14,152: the ceiling applies.
+        assert_eq!(
+            AIService::interpretation_max_output_tokens(&sized_model, 35_000),
+            Some(8_192)
+        );
+        // A prompt that nearly fills the window still gets the floor.
+        assert_eq!(
+            AIService::interpretation_max_output_tokens(&sized_model, 48_900),
+            Some(512)
+        );
     }
 
     #[tokio::test]

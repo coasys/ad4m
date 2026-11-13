@@ -619,6 +619,10 @@ pub async fn run_with_tools(
                 );
                 return Ok(String::new());
             }
+            // A 4xx answer or a timeout is not retried and not worked around: the same
+            // request gets the same answer, and a hung server would hold the run for
+            // another full timeout per call. Fail as before.
+            Err(e) if !is_transient(&e) => return Err(e),
             Err(e) => {
                 return best_effort_after_upstream_failure(
                     completions.as_ref(),
@@ -908,6 +912,7 @@ async fn complete_or_retry(
         .await
     {
         Ok(completion) => Ok(completion),
+        Err(first) if !is_transient(&first) => Err(first),
         Err(first) => {
             log::warn!(
                 "harness: round {round}: upstream completion failed ({first}); \
@@ -967,6 +972,22 @@ async fn best_effort_after_upstream_failure(
             upstream_status_label(&final_error),
         )),
     }
+}
+
+/// Whether a failed completion is worth sending again: the model server answered 5xx or
+/// 429, or the connection failed outright. A 4xx answer will not change on a resend, and
+/// a timeout means a server that hangs; a resend would only wait out the timeout again.
+fn is_transient(error: &anyhow::Error) -> bool {
+    use crate::ai_service::providers::http::{UpstreamStatus, UpstreamUnreachable};
+    error.chain().any(|cause| {
+        if let Some(answered) = cause.downcast_ref::<UpstreamStatus>() {
+            return answered.status.is_server_error()
+                || answered.status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+        }
+        cause
+            .downcast_ref::<UpstreamUnreachable>()
+            .is_some_and(|unreachable| !unreachable.timed_out)
+    })
 }
 
 /// `HTTP 500` when the error carries an upstream status, else the error's
@@ -1039,6 +1060,8 @@ mod tests {
         script: Mutex<Vec<HarnessCompletion>>,
         calls: Mutex<Vec<(Vec<Value>, Vec<ToolSchema>)>>,
         fail_on_call: Vec<usize>,
+        /// What a failing call answers: an HTTP status, or a timeout when `None`.
+        fail_status: Option<reqwest::StatusCode>,
     }
 
     impl ScriptedLLM {
@@ -1047,7 +1070,20 @@ mod tests {
                 script: Mutex::new(script),
                 calls: Mutex::new(Vec::new()),
                 fail_on_call: Vec::new(),
+                fail_status: Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
             }
+        }
+
+        /// Failing calls answer `status` instead of 500.
+        fn answering(mut self, status: reqwest::StatusCode) -> Self {
+            self.fail_status = Some(status);
+            self
+        }
+
+        /// Failing calls time out instead of answering.
+        fn timing_out(mut self) -> Self {
+            self.fail_status = None;
+            self
         }
 
         /// `calls` are 1-based completion numbers that answer HTTP 500.
@@ -1083,14 +1119,23 @@ mod tests {
                 .push((messages.to_vec(), tools.clone()));
             let n = self.call_count();
             if self.fail_on_call.contains(&n) {
-                return Err(anyhow::anyhow!(
-                    crate::ai_service::providers::http::UpstreamStatus {
-                        url: "http://127.0.0.1:11434/api/chat".into(),
-                        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                        body: "qwen tool call parsing failed: EOF".into(),
-                        retry_after: None,
+                return Err(match self.fail_status {
+                    Some(status) => {
+                        anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+                            url: "http://127.0.0.1:11434/api/chat".into(),
+                            status,
+                            body: "qwen tool call parsing failed: EOF".into(),
+                            retry_after: None,
+                        })
                     }
-                ));
+                    None => {
+                        anyhow::anyhow!(crate::ai_service::providers::http::UpstreamUnreachable {
+                            url: "http://127.0.0.1:11434/api/chat".into(),
+                            timed_out: true,
+                            detail: "operation timed out".into(),
+                        })
+                    }
+                });
             }
             let next = self.script.lock().unwrap().remove(0);
             Ok(next)
@@ -1988,6 +2033,56 @@ mod tests {
             message.contains("HTTP 500"),
             "the error must name the upstream status, got: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_429_is_retried_like_a_5xx() {
+        let llm = Arc::new(
+            ScriptedLLM::new(vec![plain_answer("found")])
+                .failing_on(&[1])
+                .answering(reqwest::StatusCode::TOO_MANY_REQUESTS),
+        );
+        let out = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            Arc::new(EchoProvider { tools: Vec::new() }),
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "found");
+        assert_eq!(llm.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_4xx_or_a_timeout_fails_at_once_without_a_retry_or_a_final_ask() {
+        // The same request gets the same 4xx, and a hung server would hold the run for a
+        // full timeout per call: one call, then the error as before.
+        for llm in [
+            ScriptedLLM::new(Vec::new())
+                .failing_on(&[1, 2, 3])
+                .answering(reqwest::StatusCode::BAD_REQUEST),
+            ScriptedLLM::new(Vec::new())
+                .failing_on(&[1, 2, 3])
+                .timing_out(),
+        ] {
+            let llm = Arc::new(llm);
+            let error = run_with_tools(
+                "m",
+                vec![user_message("find it")],
+                Arc::new(EchoProvider { tools: Vec::new() }),
+                llm.clone(),
+                HarnessConfig::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(llm.call_count(), 1, "not retried: {error}");
+        }
     }
 
     #[tokio::test]

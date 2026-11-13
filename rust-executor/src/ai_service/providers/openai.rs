@@ -94,8 +94,8 @@ impl OpenAiChat {
 /// `chat_template_kwargs.enable_thinking` is llama-server's per-request switch
 /// (it reads the field into the chat template; `-rea off` is the server-wide
 /// one). A strict OpenAI endpoint rejects unknown fields, so only a
-/// llama-server endpoint gets it. `max_tokens` is in the OpenAI spec, so every
-/// kind gets a cap the caller set.
+/// llama-server endpoint gets it. `max_tokens` goes with it: where the thinking
+/// switch cannot be sent, a cap would only be spent on reasoning, so it is not sent.
 fn build_body(request: ChatRequest, stream: bool, kind: EndpointKind) -> Value {
     let mut body = json!({
         "model": request.model,
@@ -138,8 +138,14 @@ fn build_body(request: ChatRequest, stream: bool, kind: EndpointKind) -> Value {
     if request.disable_thinking && kind == EndpointKind::LlamaServer {
         body["chat_template_kwargs"] = json!({ "enable_thinking": false });
     }
+    // A cap without the switch is worse than none: a thinking model on an endpoint that
+    // cannot be told to stop thinking spends the cap on reasoning and answers empty. When
+    // the caller asked for no thinking and this kind cannot do it, the cap stays off too.
+    let thinking_stays_on = request.disable_thinking && kind != EndpointKind::LlamaServer;
     if let Some(max_tokens) = request.max_output_tokens {
-        body["max_tokens"] = json!(max_tokens);
+        if !thinking_stays_on {
+            body["max_tokens"] = json!(max_tokens);
+        }
     }
     body
 }
@@ -675,38 +681,31 @@ mod wire_tests {
         mock.assert_async().await;
     }
 
-    #[tokio::test]
-    async fn a_strict_openai_endpoint_does_not_get_chat_template_kwargs() {
-        // OpenAI rejects unknown fields. The cap (`max_tokens`) is in the
-        // spec; the thinking switch is not, so it stays off this body.
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("POST", "/v1/chat/completions")
-            .match_body(Matcher::PartialJson(json!({ "max_tokens": 512 })))
-            .with_status(200)
-            .with_body(r#"{"choices":[{"message":{"content":"{}"}}]}"#)
-            .create_async()
-            .await;
-
-        let client = OpenAiChat::new("", url(&server.url()), EndpointKind::OpenAi);
-        client
-            .chat(
-                ChatRequest::new("gpt-4o", vec![ChatTurn::user("extract")])
-                    .with_generation(true, Some(512)),
-            )
-            .await
-            .unwrap();
-        mock.assert_async().await;
-        let sent = build_body(
+    #[test]
+    fn a_strict_openai_endpoint_gets_neither_the_thinking_switch_nor_a_cap_that_needs_it() {
+        // OpenAI rejects unknown fields, so `chat_template_kwargs` stays off. A no-thinking
+        // request's cap would then only be spent on a thinking model's reasoning, so
+        // `max_tokens` stays off too. A cap the caller set without asking for no thinking
+        // is the caller's own and is sent.
+        let no_thinking = build_body(
             ChatRequest::new("gpt-4o", vec![ChatTurn::user("extract")])
                 .with_generation(true, Some(512)),
             false,
             EndpointKind::OpenAi,
         );
         assert!(
-            sent.get("chat_template_kwargs").is_none(),
-            "a strict OpenAI endpoint rejects unknown fields: {sent}"
+            no_thinking.get("chat_template_kwargs").is_none(),
+            "{no_thinking}"
         );
+        assert!(no_thinking.get("max_tokens").is_none(), "{no_thinking}");
+
+        let capped_only = build_body(
+            ChatRequest::new("gpt-4o", vec![ChatTurn::user("extract")])
+                .with_generation(false, Some(512)),
+            false,
+            EndpointKind::OpenAi,
+        );
+        assert_eq!(capped_only["max_tokens"], 512, "{capped_only}");
     }
 
     #[tokio::test]
