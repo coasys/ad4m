@@ -94,13 +94,17 @@ fn system_prompt(session: &AiSession) -> String {
 
 /// The transcript a new turn of `session` continues: the last [`HISTORY_MAX_MESSAGES`]
 /// entries, tool calls and their results included, the running assistant row the turn is
-/// writing left out. Capped by [`HISTORY_MAX_BYTES`] too — oldest groups fall off first.
+/// writing left out. Capped by [`HISTORY_MAX_BYTES`] too — oldest groups fall off first,
+/// but never the last user message: that is the question the turn answers, and a chat
+/// template that cannot find it fails the whole request. Each stored tool result is
+/// capped to `tool_result_max_bytes` as well — the row keeps it whole, the model reads
+/// the same capped prefix it was fed when the call ran.
 ///
 /// A turn's rows are in the order `service::send` and the observer write them: the
 /// person's message, the assistant row (the answer lands on it when the turn ends), then
 /// the steps. The model reads them in the order they happened: the message, the calls and
 /// their results, then the answer.
-pub(crate) fn history(messages: Vec<AiSessionMessage>) -> Vec<Value> {
+pub(crate) fn history(messages: Vec<AiSessionMessage>, tool_result_max_bytes: usize) -> Vec<Value> {
     // Group a run of tool steps into the OpenAI shape the loop itself appends: one
     // assistant message carrying `tool_calls`, then one `tool` message per call. A step
     // still `running` (its task died mid-call) answers a synthetic `error: …` result.
@@ -137,7 +141,10 @@ pub(crate) fn history(messages: Vec<AiSessionMessage>) -> Vec<Value> {
                 out.push(json!({
                     "role": "tool",
                     "tool_call_id": format!("call_{}", step.id),
-                    "content": step.tool_result_text(),
+                    "content": crate::ai_service::harness::cap_tool_result(
+                        &step.tool_result_text(),
+                        tool_result_max_bytes,
+                    ),
                 }));
             }
             out.extend(answer.take());
@@ -174,15 +181,30 @@ pub(crate) fn history(messages: Vec<AiSessionMessage>) -> Vec<Value> {
     }
     flush(&mut out, &mut tool_group, &mut answer);
 
-    // Cap by size: drop the oldest entries until the transcript fits.
+    // Cap by size: drop the oldest entries until the transcript fits — but
+    // never the last user message. That is the question the new turn is
+    // answering; a request that loses it comes back from the model server
+    // as `no user query found in messages` (it would drop the oldest
+    // messages itself to fit `num_ctx` — this does it first, on purpose).
+    let mut last_user = out
+        .iter()
+        .rposition(|m| m["role"] == "user")
+        .unwrap_or(out.len().saturating_sub(1));
     while serde_json::to_string(&out).map(|s| s.len()).unwrap_or(0) > HISTORY_MAX_BYTES
-        && out.len() > 1
+        && last_user > 0
     {
         out.remove(0);
+        last_user -= 1;
+        // A dropped assistant tool_calls turn orphans its result messages:
+        // they now lead `out` with no call to answer.
+        while last_user > 0 && out.first().is_some_and(|m| m["role"] == "tool") {
+            out.remove(0);
+            last_user -= 1;
+        }
     }
-    // The cut can fall inside a tool group and leave results whose call went with it. A
-    // `tool` message that answers no call is one a provider refuses the whole request
-    // for: those go too.
+    // The cut can still fall inside a tool group and leave results whose
+    // call went with it. A `tool` message that answers no call is one a
+    // provider refuses the whole request for: those go too.
     let orphans = out.iter().take_while(|m| m["role"] == "tool").count();
     out.drain(..orphans);
     out
@@ -314,6 +336,11 @@ pub(crate) async fn run_turn(
         }
     };
 
+    // One tool result fed to the model is capped to a share of its context
+    // window — a result bigger than the window made the model server drop
+    // the person's question to fit. The transcript rows keep results whole.
+    let tool_result_max_bytes = crate::ai_service::AIService::tool_result_max_bytes(&model_id);
+
     // The transcript before this turn's running row: it is the last row, so the history
     // build's running-row skip drops it.
     let transcript =
@@ -322,7 +349,7 @@ pub(crate) async fn run_turn(
         "role": "system",
         "content": system_prompt(&session),
     })];
-    messages.extend(history(transcript));
+    messages.extend(history(transcript, tool_result_max_bytes));
 
     let refused = Arc::new(AtomicBool::new(false));
     let gate: Arc<dyn CreditGate> = Arc::new(SessionGate {
@@ -344,7 +371,14 @@ pub(crate) async fn run_turn(
         messages,
         provider,
         completions,
-        HarnessConfig::default(),
+        HarnessConfig {
+            tool_result_max_bytes,
+            // A session's reply is the text itself: a silent completion is
+            // a stall (a thinking model that never left its channel), so the
+            // loop nudges the model for the answer before failing the turn.
+            empty_completion_nudges: 2,
+            ..HarnessConfig::default()
+        },
         Some(&observer),
         Some(gate),
     )
@@ -352,6 +386,12 @@ pub(crate) async fn run_turn(
 
     if refused.load(Ordering::SeqCst) {
         anyhow::bail!("the turn was refused before the agent had finished");
+    }
+    // A `done` row that says nothing is worse than an honest failure: the
+    // loop already re-asked for the answer, so the model really ended its
+    // turn without one — record it as the stumble it is, not a blank reply.
+    if text.trim().is_empty() {
+        anyhow::bail!("the model ended its turn without answering");
     }
     Ok(text)
 }
@@ -423,7 +463,7 @@ mod tests {
                 Some(AiTurnStatus::Running),
             ),
         ];
-        let history = history(messages);
+        let history = history(messages, usize::MAX);
         // As it happened: user, assistant(tool_calls), tool result, the answer, user — the
         // running reply is out.
         assert_eq!(history.len(), 5);
@@ -480,7 +520,7 @@ mod tests {
                 Some(AiTurnStatus::Running),
             ),
         ];
-        let history = history(messages);
+        let history = history(messages, usize::MAX);
         assert_eq!(history.len(), 3);
         assert!(history[2]["content"]
             .as_str()
@@ -516,7 +556,7 @@ mod tests {
                 Some(AiTurnStatus::Done),
             ),
         ];
-        let history = history(messages);
+        let history = history(messages, usize::MAX);
         let roles: Vec<&str> = history
             .iter()
             .map(|m| m["role"].as_str().unwrap())
@@ -566,7 +606,7 @@ mod tests {
                 None,
             ),
         ];
-        let history = history(messages);
+        let history = history(messages, usize::MAX);
         let called: Vec<&str> = history
             .iter()
             .filter_map(|m| m.get("tool_calls"))
@@ -583,6 +623,97 @@ mod tests {
                 json!({"role": "assistant", "content": "read"}),
                 json!({"role": "user", "content": "and now?"}),
             ]
+        );
+    }
+
+    // A stored result bigger than the model's share of the window replays
+    // capped — the row keeps it whole; the model reads the same prefix it
+    // was fed when the call ran.
+    #[test]
+    fn a_stored_result_replays_capped_for_the_model() {
+        let messages = vec![
+            row(
+                "u1",
+                1,
+                AiSessionMessageRole::User,
+                user_content("read it"),
+                None,
+            ),
+            row(
+                "a1",
+                2,
+                AiSessionMessageRole::Assistant,
+                assistant_content("done"),
+                Some(AiTurnStatus::Done),
+            ),
+            row(
+                "t1",
+                3,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "describe_perspective", "arguments": {},
+                        "result": "x".repeat(10_000) }),
+                Some(AiTurnStatus::Done),
+            ),
+        ];
+        let history = history(messages, 1_000);
+        let tool = history.iter().find(|m| m["role"] == "tool").unwrap();
+        let fed = tool["content"].as_str().unwrap();
+        assert!(fed.len() < 1_200, "the model reads the cap: {fed:?}");
+        assert!(fed.contains("truncated: 1000 of"));
+    }
+
+    // The size cap drops oldest-first, but the question the new turn answers
+    // never falls: a chat template that finds no user message fails the
+    // whole request — which is the bug this guards. The oversized tail sits
+    // AFTER the question here — the running turn's row is skipped but a step
+    // its task already wrote is not — so an oldest-first drop has to cross
+    // the question to reach it.
+    #[test]
+    fn the_size_cap_never_drops_the_last_user_message() {
+        let messages = vec![
+            row(
+                "u1",
+                1,
+                AiSessionMessageRole::User,
+                user_content("first"),
+                None,
+            ),
+            row(
+                "a1",
+                2,
+                AiSessionMessageRole::Assistant,
+                assistant_content("done"),
+                Some(AiTurnStatus::Done),
+            ),
+            row(
+                "u2",
+                3,
+                AiSessionMessageRole::User,
+                user_content("the question being answered"),
+                None,
+            ),
+            row(
+                "a2",
+                4,
+                AiSessionMessageRole::Assistant,
+                assistant_content(""),
+                Some(AiTurnStatus::Running),
+            ),
+            row(
+                "t1",
+                5,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {},
+                        "result": "x".repeat(HISTORY_MAX_BYTES) }),
+                Some(AiTurnStatus::Done),
+            ),
+        ];
+        let history = history(messages, usize::MAX);
+        assert!(
+            history
+                .iter()
+                .any(|m| m["role"] == "user" && m["content"] == "the question being answered"),
+            "the question the new turn answers fell off: {history:?}"
         );
     }
 }

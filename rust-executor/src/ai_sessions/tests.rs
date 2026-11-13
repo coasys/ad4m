@@ -922,3 +922,49 @@ async fn a_user_without_credits_starts_no_turn() {
         assert_eq!(model.times_asked(), works as usize);
     }
 }
+
+// ── a turn the model ends silent ─────────────────────────────────────────────
+
+/// A completion carrying no text and no tool calls — the model ending its
+/// turn without answering.
+fn silent() -> crate::ai_service::harness::HarnessCompletion {
+    crate::ai_service::harness::HarnessCompletion {
+        content: String::new(),
+        tool_calls: vec![],
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_answer_is_asked_again_and_the_next_one_lands() {
+    setup();
+    let (alice, session) = alice("silent-then-answer");
+    // The script's only entry is the silent completion; the nudge then asks
+    // again and Scripted's exhausted queue answers its "done" default.
+    let (_, reply) = sent_reply(&alice, &session, deps(Scripted::answering(vec![silent()]))).await;
+    assert_eq!(reply.status, Some(Done));
+    assert_eq!(reply.content["text"], "done");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_the_model_ends_silent_is_failed_not_done_and_empty() {
+    setup();
+    let (alice, session) = alice("silent");
+    // Silent through the nudges too (empty_completion_nudges = 2): what was
+    // a `done` row with blank text is now the stumble it is.
+    let (_, reply) = sent_reply(
+        &alice,
+        &session,
+        deps(Scripted::answering(vec![silent(), silent(), silent()])),
+    )
+    .await;
+    assert_eq!(reply.status, Some(Failed));
+    assert!(
+        reply
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("without answering"),
+        "{:?}",
+        reply.error
+    );
+}
