@@ -91,6 +91,28 @@ impl Fixture {
         })
         .unwrap();
         db.add_user(USER, "did:key:alice", "a password").unwrap();
+        db.create_ai_session(&crate::ai_sessions::types::AiSession {
+            id: "ai-session".into(),
+            owner_did: Some("did:key:alice".into()),
+            title: "a private conversation".into(),
+            model: None,
+            default_perspective: Some(perspective.clone()),
+            library_perspective: None,
+            capabilities: vec![],
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        })
+        .unwrap();
+        db.append_ai_message(
+            Some("did:key:alice"),
+            "ai-message",
+            "ai-session",
+            "user",
+            r#"{"text":"a private prompt"}"#,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         drop(db);
 
         let files = vec![
@@ -157,7 +179,29 @@ impl Fixture {
             .expect("the perspective");
         assert_eq!(handle.name.as_deref(), Some("a private name"));
         assert!(db.list_users().unwrap().iter().any(|u| u.username == USER));
+        // The conversation is sealed under alice's store and reads back.
+        let alice = Some("did:key:alice");
+        let session = db
+            .get_ai_session(alice, "ai-session")
+            .unwrap()
+            .expect("the AI session");
+        assert_eq!(session.title, "a private conversation");
+        let message = db
+            .get_ai_message(alice, "ai-message")
+            .unwrap()
+            .expect("the AI message");
+        assert_eq!(message.content["text"], "a private prompt");
         drop(db);
+        let conn = sqlite::open_keyed(&self.paths.database, &key).unwrap();
+        for sql in [
+            "SELECT title FROM ai_sessions",
+            "SELECT default_perspective FROM ai_sessions",
+            "SELECT content FROM ai_messages",
+        ] {
+            let stored: String = conn.query_row(sql, [], |r| r.get(0)).unwrap();
+            assert!(sqlite::is_sealed(&stored), "{sql}: {stored}");
+        }
+        drop(conn);
 
         let owner = KeyOwner::User(USER.into());
         assert!(keys.has_person(&owner).unwrap());
