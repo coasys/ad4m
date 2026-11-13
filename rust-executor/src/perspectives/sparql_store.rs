@@ -175,7 +175,8 @@ impl Watchdog {
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Watchdog {
         let (done, until_done) = std::sync::mpsc::sync_channel::<()>(1);
-        std::thread::Builder::new()
+        let fire_now = stop.clone();
+        let spawned = std::thread::Builder::new()
             .name("ad4m-eval-watchdog".into())
             .spawn(move || {
                 let till = Instant::now() + deadline;
@@ -198,8 +199,14 @@ impl Watchdog {
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     }
                 }
-            })
-            .expect("spawn SPARQL eval watchdog");
+            });
+        if let Err(e) = spawned {
+            // No thread left to watch the deadline. An eval with no deadline is
+            // the pile-up this gate exists to prevent, so refuse it instead.
+            log::error!("SPARQL eval watchdog did not start ({e}); stopping the eval");
+            fire_now.stop.mark(STOP_DEADLINE);
+            fire_now.token.cancel();
+        }
         Watchdog { done }
     }
 }
@@ -211,11 +218,13 @@ impl Drop for Watchdog {
 }
 
 /// The deadline one request-driven evaluation runs under, from the executor
-/// config (`query_deadline_secs`, default 30s).
+/// config (`query_deadline_secs`, default 30s). 0 would fail every query, so
+/// it means the default too.
 pub(crate) fn query_deadline() -> Duration {
     Duration::from_secs(
         crate::config::get_global_config()
             .query_deadline_secs
+            .filter(|secs| *secs > 0)
             .unwrap_or(30),
     )
 }
@@ -223,16 +232,17 @@ pub(crate) fn query_deadline() -> Duration {
 /// The gate one WS query call runs under: the configured deadline, the
 /// request's cancel (`request.cancel` + the connection closing), and one of
 /// the connection's running-query slots. Waiting for the slot is part of the
-/// call, so a `request.cancel` drops it here like anywhere else. Drop the
-/// gate to stop the eval.
+/// call, so a `request.cancel` drops it here like anywhere else. The deadline
+/// starts once the slot is held: time spent queued behind other evals is not
+/// the query's own. Drop the gate to stop the eval.
 pub(crate) async fn query_gate(ctx: &crate::types::domain::RequestContext) -> EvalGate {
-    let mut gate = EvalGate::request(query_deadline(), ctx.cancel_token.clone());
+    let mut permit = None;
     if let Some(slots) = ctx.query_slots.clone() {
         let cancelled = ctx.cancel_token.clone();
         // Waiting for a slot stays cancellable: a `request.cancel` (or the
         // connection closing) ends the wait instead of queueing behind evals
         // that are themselves stopping.
-        let permit = match cancelled {
+        permit = match cancelled {
             Some(token) => {
                 tokio::select! {
                     p = slots.acquire_owned() => p.ok(),
@@ -241,9 +251,12 @@ pub(crate) async fn query_gate(ctx: &crate::types::domain::RequestContext) -> Ev
             }
             None => slots.acquire_owned().await.ok(),
         };
-        if let Some(permit) = permit {
-            gate.hold_slot(permit);
-        }
+    }
+    // A wait the request cancelled leaves no permit; the gate below sees the
+    // fired cancel at once and stops the eval before it reads anything.
+    let mut gate = EvalGate::request(query_deadline(), ctx.cancel_token.clone());
+    if let Some(permit) = permit {
+        gate.hold_slot(permit);
     }
     gate
 }
