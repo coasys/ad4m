@@ -452,6 +452,21 @@ pub trait CompletionSource: Send + Sync {
         messages: &[Value],
         tools: Vec<provider::ToolSchema>,
     ) -> Result<HarnessCompletion>;
+
+    /// Bytes one tool result may occupy in the messages fed back through
+    /// this source before [`cap_tool_result`] cuts it — the share of the
+    /// model's request budget a result can be before the request it joins
+    /// no longer fits the model's window. `run_with_tools` callers size
+    /// [`HarnessConfig::tool_result_max_bytes`] from it.
+    ///
+    /// [`DEFAULT_TOOL_RESULT_MAX_BYTES`] — the AI service's own
+    /// unknown-window answer — for a source that does not know the window,
+    /// so a caller with no model context at hand and one whose window is
+    /// simply unknown cap a result to the same size.
+    async fn tool_result_max_bytes(&self, model_id: &str) -> usize {
+        let _ = model_id;
+        DEFAULT_TOOL_RESULT_MAX_BYTES
+    }
 }
 
 /// Configuration knob wired to `AutoProcessorConfig.max_tool_calls` (v3 §6
@@ -465,8 +480,8 @@ pub trait CompletionSource: Send + Sync {
 pub struct HarnessConfig {
     pub max_tool_calls: u32,
     /// Bytes one tool result may occupy in the messages fed back to the
-    /// model before [`cap_tool_result`] cuts it. An AI session sizes this
-    /// from the model's context window (`AIService::tool_result_max_bytes`);
+    /// model before [`cap_tool_result`] cuts it. Callers size this from the
+    /// model's context window (`CompletionSource::tool_result_max_bytes`);
     /// the default covers callers with no model context at hand.
     pub tool_result_max_bytes: usize,
     /// How often the loop re-asks the model after a completion that came
@@ -1912,16 +1927,19 @@ mod tests {
 
     // ── tool-result capping ──────────────────────────────────────────────
 
-    #[test]
-    fn the_default_result_cap_is_the_unknown_window_fallback() {
+    #[tokio::test]
+    async fn the_default_result_cap_is_the_unknown_window_fallback() {
         // One source of truth: a caller that never learned the model's
         // context window (HarnessConfig's default cap) and a caller whose
         // model's window is simply unknown must cap a result to the same
         // size — the defaults used to disagree (24 KiB vs the formula's
         // 16 KiB).
+        crate::db::Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
         assert_eq!(
             DEFAULT_TOOL_RESULT_MAX_BYTES,
-            crate::ai_service::AIService::tool_result_max_bytes("a-model-nobody-registered"),
+            crate::ai_service::AIService::empty()
+                .tool_result_max_bytes("a-model-nobody-registered")
+                .await,
         );
     }
 

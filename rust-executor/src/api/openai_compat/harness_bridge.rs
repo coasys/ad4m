@@ -59,7 +59,7 @@ impl CompletionSource for OpenAiCompatBridge {
         // render as `no user query found in messages`).
         let messages = &trim_messages_to_budget(
             messages,
-            AIService::context_budget_bytes(model_id),
+            self.service.context_budget_bytes(model_id).await,
             model_id,
         );
 
@@ -105,6 +105,12 @@ impl CompletionSource for OpenAiCompatBridge {
             .await?;
 
         Ok(completion_from_injected_text(result.text, tools_active))
+    }
+
+    /// The model's own answer — the service sizes a result against the same
+    /// resolved window this source trims its requests to.
+    async fn tool_result_max_bytes(&self, model_id: &str) -> usize {
+        self.service.tool_result_max_bytes(model_id).await
     }
 }
 

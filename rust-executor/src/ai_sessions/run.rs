@@ -339,7 +339,7 @@ pub(crate) async fn run_turn(
     // One tool result fed to the model is capped to a share of its context
     // window — a result bigger than the window made the model server drop
     // the person's question to fit. The transcript rows keep results whole.
-    let tool_result_max_bytes = crate::ai_service::AIService::tool_result_max_bytes(&model_id);
+    let tool_result_max_bytes = completions.tool_result_max_bytes(&model_id).await;
 
     // The transcript before this turn's running row: it is the last row, so the history
     // build's running-row skip drops it.

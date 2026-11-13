@@ -589,6 +589,12 @@ impl RemoteChat for OllamaChat {
         true
     }
 
+    /// The `num_ctx` the request goes out at — the same resolution `chat`
+    /// and `chat_stream` make, from the same per-model cache.
+    async fn context_window_tokens(&self, model: &str) -> Option<u32> {
+        Some(self.resolve_num_ctx(model).await)
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
         request.refuse_openai_options("Ollama's native API")?;
         let num_ctx = self.resolve_num_ctx(&request.model).await;

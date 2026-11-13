@@ -333,6 +333,23 @@ pub trait RemoteChat: Send + Sync {
         let _ = tokens.send(reply.text.clone());
         Ok(reply)
     }
+
+    /// The context window in tokens this client puts `model`'s requests out
+    /// at — the value the request itself is sent with, when the client
+    /// resolves one. `None` (the default) means the client keeps no window
+    /// of its own: the endpoint's configured `max_num_ctx`, where set, is
+    /// the only hint there is.
+    ///
+    /// `OllamaChat` answers the `num_ctx` the request is sent with —
+    /// `min(context_length from `/api/show`, the endpoint's cap)`, its own
+    /// 2,048 fallback when the model's metadata cannot be read at all —
+    /// which can sit far under the configured ceiling. A request budget
+    /// sized from that ceiling alone can then exceed the window the model
+    /// actually runs.
+    async fn context_window_tokens(&self, model: &str) -> Option<u32> {
+        let _ = model;
+        None
+    }
 }
 
 #[cfg(test)]

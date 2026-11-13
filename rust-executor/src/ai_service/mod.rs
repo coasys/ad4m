@@ -840,6 +840,26 @@ impl AIService {
             .map(|n| n as usize)
     }
 
+    /// The context window the model's requests are actually run at, in
+    /// tokens: the `num_ctx` its chat client resolves for it — an Ollama
+    /// client's answer from `/api/show`, already capped at the endpoint's
+    /// `max_num_ctx` — when it resolves one, else the endpoint's configured
+    /// ceiling when it has one.
+    ///
+    /// A client can run the model far under the configured ceiling (the
+    /// model's native window is smaller, or its metadata could not be read
+    /// and it fell back to Ollama's 2,048), so the resolved answer is
+    /// asked first: it is the value the request itself is sent with.
+    async fn resolved_context_tokens(&self, model_id: &str) -> Option<usize> {
+        let resolved = Self::replace_model_variables(&model_id.to_string()).ok()?;
+        if let Ok(chat) = self.chat_model(&resolved).await {
+            if let Some(tokens) = chat.client.context_window_tokens(&chat.remote_model).await {
+                return Some(tokens as usize);
+            }
+        }
+        Self::model_context_tokens(model_id)
+    }
+
     /// How many bytes of one outgoing request's message list the model's
     /// context window leaves room for: the window estimated at ~3 bytes of
     /// rendered chat JSON per token, halved — the other half is for the
@@ -855,8 +875,8 @@ impl AIService {
     /// `500 no user query found in messages`; an OpenAI-shaped server just
     /// answers a question it never saw. When the model's window is unknown
     /// the budget falls back to [`DEFAULT_CONTEXT_BUDGET_BYTES`].
-    pub fn context_budget_bytes(model_id: &str) -> usize {
-        match Self::model_context_tokens(model_id) {
+    pub async fn context_budget_bytes(&self, model_id: &str) -> usize {
+        match self.resolved_context_tokens(model_id).await {
             Some(tokens) => tokens * CONTEXT_BYTES_PER_TOKEN / 2,
             None => DEFAULT_CONTEXT_BUDGET_BYTES,
         }
@@ -867,8 +887,8 @@ impl AIService {
     /// clamped so a small window cannot starve a result to uselessness and
     /// a large one cannot unbound it. The full result still lands on the
     /// session's transcript row — this bounds only what the model sees.
-    pub fn tool_result_max_bytes(model_id: &str) -> usize {
-        clamp_tool_result_bytes(Self::context_budget_bytes(model_id) / 4)
+    pub async fn tool_result_max_bytes(&self, model_id: &str) -> usize {
+        clamp_tool_result_bytes(self.context_budget_bytes(model_id).await / 4)
     }
 
     /// Prompt a model with a complete turn list and tool definitions, getting
@@ -1752,6 +1772,123 @@ mod tests {
             .await
             .unwrap();
         second_hits.assert_async().await;
+    }
+
+    // ── the context budget ────────────────────────────────────────────────
+    //
+    // The budget one request's message list is trimmed to follows the
+    // context window the request itself is sent at — for an Ollama model
+    // the `num_ctx` its client resolves from `/api/show`, already capped at
+    // the endpoint's `max_num_ctx` — not the endpoint's configured ceiling
+    // alone. A model whose native window sits under the ceiling, or whose
+    // metadata cannot be read at all, runs at less than it.
+
+    /// A model on an Ollama endpoint whose `/api/show` answers `show_body`
+    /// (or not at all): the service and the model's id.
+    async fn ollama_model_at(upstream: &mockito::ServerGuard) -> (AIService, String) {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, &upstream.url());
+        let model = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        (service, model)
+    }
+
+    #[tokio::test]
+    async fn an_ollama_budget_is_sized_from_the_window_the_model_runs_at() {
+        // A native 4,096-token window under a configured 8,192 ceiling: the
+        // budget is sized from 4,096 — the `num_ctx` the request goes out
+        // with — not from the ceiling it merely respects.
+        let mut upstream = mockito::Server::new_async().await;
+        let show = upstream
+            .mock("POST", "/api/show")
+            .with_body(r#"{"model_info":{"qwen3.context_length":4096}}"#)
+            .create_async()
+            .await;
+        let service = service();
+        let mut endpoint =
+            Endpoint::for_test("upstream", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service.context_budget_bytes(&model).await,
+            4_096 * CONTEXT_BYTES_PER_TOKEN / 2
+        );
+        show.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn an_ollama_budget_without_a_configured_cap_uses_the_native_window() {
+        // No `max_num_ctx` at all used to mean the unknown-window default
+        // (64 KiB), whatever the model actually runs at. The client's
+        // resolved window — 8,192 here — is the real answer.
+        let mut upstream = mockito::Server::new_async().await;
+        upstream
+            .mock("POST", "/api/show")
+            .with_body(r#"{"model_info":{"qwen3.context_length":8192}}"#)
+            .create_async()
+            .await;
+        let (service, model) = ollama_model_at(&upstream).await;
+
+        assert_eq!(
+            service.context_budget_bytes(&model).await,
+            8_192 * CONTEXT_BYTES_PER_TOKEN / 2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ollama_budget_falls_back_to_the_clients_own_num_ctx_fallback() {
+        // `/api/show` refuses: the client sends its own 2,048 `num_ctx`
+        // fallback, so the budget follows it rather than the 64 KiB default
+        // or the endpoint's ceiling.
+        let mut upstream = mockito::Server::new_async().await;
+        upstream
+            .mock("POST", "/api/show")
+            .with_status(404)
+            .create_async()
+            .await;
+        let (service, model) = ollama_model_at(&upstream).await;
+
+        assert_eq!(
+            service.context_budget_bytes(&model).await,
+            2_048 * CONTEXT_BYTES_PER_TOKEN / 2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_ollama_model_keeps_the_ceiling_and_the_unknown_fallback() {
+        // An endpoint that resolves no window of its own keeps the old
+        // answers: the configured `max_num_ctx` when it has one, the 64 KiB
+        // default when the model is unknown entirely.
+        let service = service();
+        let mut capped = Endpoint::for_test(
+            "capped",
+            EndpointKind::LlamaServer,
+            "http://127.0.0.1:9",
+            "",
+        );
+        capped.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&capped)).unwrap();
+        let model = service
+            .add_model(model_on(&capped, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        assert_eq!(
+            service.context_budget_bytes(&model).await,
+            8_192 * CONTEXT_BYTES_PER_TOKEN / 2
+        );
+        assert_eq!(
+            service
+                .context_budget_bytes("a-model-nobody-registered")
+                .await,
+            DEFAULT_CONTEXT_BUDGET_BYTES
+        );
     }
 
     // A stream on the default, on an executor with no transcription model, opens nothing:
