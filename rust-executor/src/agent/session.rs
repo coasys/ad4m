@@ -29,7 +29,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, decode_jwt, is_admin_credential_token_on,
-    require_capability, Capability, ListenerReach, ALL_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
+    require_capability, require_capability_any_pointer, Capability, ListenerReach, ALL_CAPABILITY,
+    TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
 use super::grants::{Grants, LiveGrant};
 use super::{did_for_context, AgentContext, AgentService};
@@ -329,6 +330,12 @@ impl Session {
     /// `Ok` if the session may do `expected`; otherwise the error a refused call reports.
     pub fn require(&self, expected: &Capability) -> Result<(), String> {
         require_capability(&self.caps, expected)
+    }
+
+    /// `Ok` if the session may do `expected` on at least one pointer (`Guard::CapAnyPointer`;
+    /// [`require_capability_any_pointer`]); otherwise the error a refused call reports.
+    pub fn require_any_pointer(&self, expected: &Capability) -> Result<(), String> {
+        require_capability_any_pointer(&self.caps, expected)
     }
 
     /// The one test for "is this the executor's administrator?".
