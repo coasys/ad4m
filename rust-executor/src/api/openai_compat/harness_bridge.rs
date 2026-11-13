@@ -17,7 +17,9 @@
 use super::tool_grammar;
 use super::types::{FunctionDef, ToolDef};
 use crate::ai_service::harness::provider::ToolSchema;
-use crate::ai_service::harness::{CompletionSource, HarnessCompletion, HarnessToolCall};
+use crate::ai_service::harness::{
+    tool_result_truncation_note, CompletionSource, HarnessCompletion, HarnessToolCall,
+};
 use crate::ai_service::providers::{ChatTurn, ToolCall, ToolSpec};
 use crate::ai_service::AIService;
 use anyhow::{anyhow, Result};
@@ -145,8 +147,11 @@ const ELIDED_TOOL_RESULT_STUB: &str = "[elided: this tool result did not fit the
 ///      result messages it orphaned.
 ///   2. Still over with nothing droppable left (the tail after the
 ///      question is heavier than the budget): shrink `tool` results —
-///      the only unbounded entries — oldest-first to a stub, so the turn
-///      keeps its call/result pairing instead of its contents.
+///      the only unbounded entries. Oldest-first, each gets the space the
+///      rest of the request leaves: room for `cap_tool_result`'s note
+///      keeps a truncated prefix of the result — the turn keeps the data
+///      that fits instead of none — and less room than that takes the
+///      elision stub, so the call/result pairing holds either way.
 ///
 /// What trimming cannot fix stays: a question plus system prompt bigger
 /// than the budget goes out over it — mangling the person's own words is
@@ -202,14 +207,83 @@ fn trim_messages_to_budget(messages: &[Value], budget_bytes: usize, model_id: &s
                 break;
             }
             if m["role"] == "tool" {
-                m["content"] = Value::String(ELIDED_TOOL_RESULT_STUB.to_string());
-                let stubbed = m.to_string().len();
-                total = total - *size + stubbed;
-                *size = stubbed;
+                // The space this entry may take for the list to fit. It is
+                // always less than its current size — the loop condition
+                // says the rest of the request alone is not under budget
+                // — but shrinking it can be what brings the total down.
+                let room = budget_bytes.saturating_sub(total - *size);
+                let shrunk = shrink_tool_result(m, room);
+                total = total - *size + shrunk;
+                *size = shrunk;
             }
         }
     }
     out.into_iter().map(|(m, _)| m).collect()
+}
+
+/// Bytes one character takes inside a JSON string body — serde_json writes
+/// `"`, `\` and the control characters that have a short escape as two
+/// bytes, other control characters as `\uXXXX`, and everything else as
+/// UTF-8. The trim budgets serialized bytes, so a cut it makes has to be
+/// measured the same way.
+fn json_escaped_len(s: &str) -> usize {
+    s.chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\u{8}' | '\u{9}' | '\u{a}' | '\u{c}' | '\u{d}' => 2,
+            c if c < '\u{20}' => 6,
+            c => c.len_utf8(),
+        })
+        .sum()
+}
+
+/// The longest prefix of `s` whose JSON-escaped form is at most
+/// `escaped_budget` bytes, as a raw byte length. The cut ends on a char
+/// boundary by construction — escaping is per character.
+fn escaped_prefix_len(s: &str, escaped_budget: usize) -> usize {
+    let mut used = 0;
+    let mut end = 0;
+    for (i, ch) in s.char_indices() {
+        used += match ch {
+            '"' | '\\' | '\u{8}' | '\u{9}' | '\u{a}' | '\u{c}' | '\u{d}' => 2,
+            c if c < '\u{20}' => 6,
+            c => c.len_utf8(),
+        };
+        if used > escaped_budget {
+            break;
+        }
+        end = i + ch.len_utf8();
+    }
+    end
+}
+
+/// Shrink one `tool` message's content until the serialized message is at
+/// most `room` bytes, keeping as much of the result as fits before
+/// [`tool_result_truncation_note`] — the same note `cap_tool_result` cuts
+/// with. When `room` cannot hold even the note the content takes
+/// [`ELIDED_TOOL_RESULT_STUB`] instead: the call's result stays a result
+/// either way, which is what the provider pairs on. Returns the
+/// message's new serialized size.
+fn shrink_tool_result(m: &mut Value, room: usize) -> usize {
+    let envelope = m.to_string().len() - m["content"].to_string().len();
+    // The content goes out as one JSON string: two quotes plus its
+    // escaped bytes. `escaped_room` is what those bytes may take.
+    let escaped_room = room.saturating_sub(envelope + 2);
+    let content = flatten_content_value(&m["content"]);
+    // The note counts against the room — sized for `kept` here bound to
+    // the most it can be, so the reservation never undershoots the note
+    // the cut below actually appends.
+    let note_room = json_escaped_len(&tool_result_truncation_note(escaped_room, content.len()));
+    m["content"] = if escaped_room >= note_room {
+        let kept = escaped_prefix_len(&content, escaped_room - note_room);
+        Value::String(format!(
+            "{}{}",
+            &content[..kept],
+            tool_result_truncation_note(kept, content.len())
+        ))
+    } else {
+        Value::String(ELIDED_TOOL_RESULT_STUB.to_string())
+    };
+    m.to_string().len()
 }
 
 /// Turn the raw text an injected-path model wrote into the completion the
@@ -1470,8 +1544,9 @@ mod injected_path_dispatch_tests {
 
     #[test]
     fn results_after_the_question_are_stubbed_not_dropped() {
-        // The tail is in the pinned region: nothing before the last user to
-        // drop, so the oversized tool result is elided and the call/result
+        // The tail is in the pinned region: nothing before the last user
+        // to drop. The budget leaves no room even for the truncation note,
+        // so the oversized tool result is elided and the call/result
         // pairing kept.
         let messages = vec![
             json!({"role": "user", "content": "read it all"}),
@@ -1482,13 +1557,88 @@ mod injected_path_dispatch_tests {
             }),
             json!({"role": "tool", "tool_call_id": "c1", "content": "x".repeat(20_000)}),
         ];
-        let out = trim_messages_to_budget(&messages, 1_000, "m");
+        let out = trim_messages_to_budget(&messages, 300, "m");
         assert_eq!(out[0]["content"], "read it all");
         let tool = out.iter().find(|m| m["role"] == "tool").unwrap();
         assert!(
             tool["content"].as_str().unwrap().contains("elided"),
             "the result stayed, stubbed: {tool:?}"
         );
+    }
+
+    #[test]
+    fn a_pinned_result_is_truncated_to_the_space_it_leaves_not_stubbed() {
+        // #1728: a 2,048-token window budgets 3,072 bytes of request, and
+        // the result cap leaves only 512 for the rest — but the real
+        // session system prompt alone is bigger than that. A result under
+        // the cap still does not fit beside what the request pins, so the
+        // trim cuts it to the space left, keeping most of it, rather than
+        // eliding it whole.
+        let session = crate::ai_sessions::types::AiSession {
+            id: "s".into(),
+            owner_did: None,
+            title: "t".into(),
+            model: None,
+            default_perspective: None,
+            library_perspective: None,
+            capabilities: vec![],
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        };
+        let prompt = crate::ai_sessions::run::system_prompt(&session);
+        let result = "x".repeat(10 * 1024);
+        let messages = vec![
+            json!({"role": "system", "content": prompt}),
+            json!({"role": "user", "content": "the question being answered"}),
+            json!({
+                "role": "assistant", "content": null,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": "query", "arguments": "{}"}}],
+            }),
+            json!({"role": "tool", "tool_call_id": "c1", "content": result}),
+        ];
+        let budget = 2_048 * 3 / 2;
+        let out = trim_messages_to_budget(&messages, budget, "m");
+        assert!(msg_size(&out) <= budget, "{} bytes", msg_size(&out));
+        assert!(
+            out.iter()
+                .any(|m| m["content"] == "the question being answered"),
+            "the question survived: {out:?}"
+        );
+        let tool = out.iter().find(|m| m["role"] == "tool").unwrap();
+        let fed = tool["content"].as_str().unwrap();
+        assert!(
+            fed.contains("[truncated:"),
+            "a truncated prefix, not the stub: {fed:?}"
+        );
+        assert!(!fed.contains("[elided:"), "{fed:?}");
+        assert!(
+            fed.chars().filter(|c| *c == 'x').count() > 1_000,
+            "the result kept the room it left: {} bytes shown",
+            fed.len()
+        );
+    }
+
+    #[test]
+    fn a_pinned_result_of_quotes_fits_after_its_escaped_size() {
+        // The budget counts serialized bytes, so the cut is measured on
+        // the escaped form: a result of `"` doubles on the wire, and a cut
+        // taken on its raw length would land the message over budget.
+        let result = "\"".repeat(6_000);
+        let messages = vec![
+            json!({"role": "user", "content": "the question being answered"}),
+            json!({
+                "role": "assistant", "content": null,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": "query", "arguments": "{}"}}],
+            }),
+            json!({"role": "tool", "tool_call_id": "c1", "content": result}),
+        ];
+        let budget = 3_072;
+        let out = trim_messages_to_budget(&messages, budget, "m");
+        assert!(msg_size(&out) <= budget, "{} bytes", msg_size(&out));
+        let fed = out[2]["content"].as_str().unwrap();
+        assert!(fed.contains("[truncated:"), "{fed:?}");
     }
 
     #[test]
@@ -1532,7 +1682,8 @@ mod injected_path_dispatch_tests {
                     break;
                 }
                 if out[i]["role"] == "tool" {
-                    out[i]["content"] = Value::String(ELIDED_TOOL_RESULT_STUB.to_string());
+                    let room = budget_bytes.saturating_sub(size(&out) - out[i].to_string().len());
+                    shrink_tool_result(&mut out[i], room);
                 }
             }
         }

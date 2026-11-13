@@ -60,7 +60,10 @@ pub struct TurnDeps {
 }
 
 /// What the model is told at the head of the conversation.
-fn system_prompt(session: &AiSession) -> String {
+///
+/// `pub(crate)` so the request-trim tests in `harness_bridge` size their
+/// budgets against the prompt a session really sends, not a guess at it.
+pub(crate) fn system_prompt(session: &AiSession) -> String {
     let mut prompt = String::from(
         "You are an agent working inside an AD4M executor for the person you are talking \
          to, through the same tools an app would use. Tools that act on a perspective take \

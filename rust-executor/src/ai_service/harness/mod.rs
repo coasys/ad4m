@@ -79,6 +79,17 @@ fn char_boundary_prefix_len(s: &str, max_bytes: usize) -> usize {
     n
 }
 
+/// The note a cut tool result ends on — how much of it the model sees and
+/// how to get the rest. Shared with the request trim
+/// (`api::openai_compat::harness_bridge`), which cuts a result the
+/// pinned request cannot hold to the space it leaves.
+pub(crate) fn tool_result_truncation_note(kept: usize, total_bytes: usize) -> String {
+    format!(
+        "\n[truncated: {kept} of {total_bytes} bytes shown — the result was cut to fit \
+         the model's context; call the tool again with a narrower query for the rest]"
+    )
+}
+
 /// A tool result that fits `max_bytes` comes back whole; a bigger one is
 /// cut on a char boundary and ends on a note telling the model what it
 /// missed and how to get the rest. `max_bytes` counts the note too — the
@@ -95,13 +106,7 @@ pub fn cap_tool_result(result: &str, max_bytes: usize) -> String {
     // the answer outgrows the cap it was sized for. `kept` is never wider
     // than `max_bytes` itself, so a note sized for `max_bytes` is at least
     // as long as the one the cut below actually needs.
-    let note = |kept: usize| {
-        format!(
-            "\n[truncated: {kept} of {} bytes shown — the result was cut to fit \
-             the model's context; call the tool again with a narrower query for the rest]",
-            result.len()
-        )
-    };
+    let note = |kept: usize| tool_result_truncation_note(kept, result.len());
     let room = max_bytes.saturating_sub(note(max_bytes).len());
     if room == 0 {
         // Even the note alone is wider than the cap.
