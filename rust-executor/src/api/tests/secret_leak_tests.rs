@@ -177,6 +177,7 @@ struct Fixture {
     user_email: String,
     perspective: String,
     model_id: String,
+    ai_session: String,
 }
 
 /// Minimal valid parameters for `method`.
@@ -184,6 +185,8 @@ fn params(method: &str, fx: &Fixture) -> Value {
     let uuid = fx.perspective.as_str();
     match method {
         "agent.byDid" | "runtime.friendStatus" => json!({ "did": fx.main_did }),
+        "ai.session" => json!({ "id": fx.ai_session }),
+        "ai.sessionMessages" => json!({ "sessionId": fx.ai_session }),
         "agent.byDIDs" => json!({ "dids": [fx.main_did] }),
         "agent.entanglementProofPreflight" => {
             json!({ "deviceKey": "leak-test-device", "deviceKeyType": "ethereum" })
@@ -374,6 +377,22 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
 
     let main_perspective = perspective(None);
     let user_perspective = perspective(Some(vec![user_did.clone()]));
+    // An AI session of the main agent: the `ai.session`/`ai.sessionMessages` reads name it.
+    let ai_session = id();
+    Ad4mDb::with_global_instance(|db| {
+        db.create_ai_session(&crate::ai_sessions::types::AiSession {
+            id: ai_session.clone(),
+            owner_did: None,
+            title: "leak test".to_string(),
+            model: None,
+            default_perspective: None,
+            library_perspective: None,
+            capabilities: vec![],
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        })
+    })
+    .expect("an AI session");
     let _registered = Registered(vec![main_perspective.clone(), user_perspective.clone()]);
     let map = Arc::new(build_handler_map());
     let webhook_credential = format!("leak-webhook-credential-{}", id());
@@ -484,6 +503,7 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         user_email: user_email.clone(),
         perspective: main_perspective.clone(),
         model_id: model_id.clone(),
+        ai_session,
     };
     let principals = [
         ("operator", operator),
