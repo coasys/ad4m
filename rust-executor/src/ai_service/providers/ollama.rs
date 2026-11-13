@@ -61,6 +61,10 @@ pub struct OllamaChat {
     base: String,
     /// Per-model context window cache.  Populated on first use via `/api/show`.
     model_ctx_cache: Mutex<HashMap<String, u32>>,
+    /// Whether `/api/show` listed `thinking` among the model's capabilities.
+    /// `think: false` is sent only then: some Ollama versions answer 400
+    /// "does not support thinking" for a model whose capabilities omit it.
+    thinking_cache: Mutex<HashMap<String, bool>>,
     /// Ceiling for `num_ctx`, from the model entry's `max_num_ctx` when the
     /// operator set one, else [`DEFAULT_MAX_NUM_CTX`].
     max_num_ctx: u32,
@@ -86,7 +90,48 @@ impl OllamaChat {
             endpoint: format!("{root}/api/chat"),
             base: root.to_string(),
             model_ctx_cache: Mutex::new(HashMap::new()),
+            thinking_cache: Mutex::new(HashMap::new()),
             max_num_ctx: max_num_ctx.unwrap_or(DEFAULT_MAX_NUM_CTX),
+        }
+    }
+
+    /// Whether `model` lists `thinking` in `/api/show` capabilities. Cached
+    /// with the context window. A show that fails is treated as no: sending
+    /// `think` to a model that rejects it fails the completion, while omitting
+    /// it only leaves the model's own default.
+    async fn model_supports_thinking(&self, model: &str) -> bool {
+        if let Some(&cached) = self.thinking_cache.lock().unwrap().get(model) {
+            return cached;
+        }
+        let supports = self.query_model_show(model).await.1;
+        self.thinking_cache
+            .lock()
+            .unwrap()
+            .insert(model.to_string(), supports);
+        supports
+    }
+
+    /// The `/api/chat` body: `think: false` only for a model whose `/api/show`
+    /// lists `thinking`, and `num_predict` only when the caller capped output.
+    async fn request_body(&self, request: &ChatRequest, stream: bool) -> ChatRequestBody {
+        let num_ctx = self.resolve_num_ctx(&request.model).await;
+        let think =
+            if request.disable_thinking && self.model_supports_thinking(&request.model).await {
+                Some(false)
+            } else {
+                None
+            };
+        ChatRequestBody {
+            model: request.model.clone(),
+            messages: request.messages.iter().map(to_wire_message).collect(),
+            tools: request.tools.iter().map(to_wire_tool).collect(),
+            stream,
+            options: ChatOptions {
+                num_ctx,
+                num_predict: request.max_output_tokens,
+            },
+            format: request.json_schema.clone(),
+            think,
         }
     }
 
@@ -125,6 +170,14 @@ impl OllamaChat {
     /// is never exceeded.
     async fn query_model_ctx(&self, model: &str) -> u32 {
         let fallback = FALLBACK_NUM_CTX.min(self.max_num_ctx);
+        self.query_model_show(model).await.0.unwrap_or(fallback)
+    }
+
+    /// One `/api/show`: the model's context window (capped at `max_num_ctx`)
+    /// and whether its capabilities include `thinking`. `None` for the window
+    /// means the caller should use its fallback — a failed show, or a show
+    /// that names no context length.
+    async fn query_model_show(&self, model: &str) -> (Option<u32>, bool) {
         let url = format!("{}/api/show", self.base);
         let response = match self
             .http
@@ -136,16 +189,16 @@ impl OllamaChat {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 log::warn!(
-                    "Ollama /api/show returned {} for {model}; falling back to num_ctx={fallback}",
+                    "Ollama /api/show returned {} for {model}; context window unknown",
                     r.status()
                 );
-                return fallback;
+                return (None, false);
             }
             Err(e) => {
                 log::warn!(
-                    "Could not query Ollama /api/show for {model}: {e}; falling back to num_ctx={fallback}"
+                    "Could not query Ollama /api/show for {model}: {e}; context window unknown"
                 );
-                return fallback;
+                return (None, false);
             }
         };
 
@@ -153,9 +206,14 @@ impl OllamaChat {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("Could not parse /api/show response for {model}: {e}");
-                return fallback;
+                return (None, false);
             }
         };
+
+        let thinking = json
+            .get("capabilities")
+            .and_then(|v| v.as_array())
+            .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some("thinking")));
 
         // model_info contains architecture-specific keys like
         // "qwen3.context_length", "llama.context_length", etc.
@@ -169,7 +227,7 @@ impl OllamaChat {
                         log::info!(
                             "Ollama model {model}: context_length={ctx}, using num_ctx={capped}"
                         );
-                        return capped;
+                        return (Some(capped), thinking);
                     }
                 }
             }
@@ -183,16 +241,14 @@ impl OllamaChat {
                     if let Ok(ctx) = parts[1].parse::<u32>() {
                         let capped = ctx.min(self.max_num_ctx);
                         log::info!("Ollama model {model}: Modelfile num_ctx={ctx}, using {capped}");
-                        return capped;
+                        return (Some(capped), thinking);
                     }
                 }
             }
         }
 
-        log::warn!(
-            "Could not determine context_length for {model}; falling back to num_ctx={fallback}"
-        );
-        fallback
+        log::warn!("Could not determine context_length for {model}");
+        (None, thinking)
     }
 }
 
@@ -434,11 +490,20 @@ struct ChatRequestBody {
     /// (docs/api.md).
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<serde_json::Value>,
+    /// Disable the thinking channel (`ChatRequest::disable_thinking`). Sent
+    /// only when `/api/show` listed `thinking`; omitted otherwise so a model
+    /// that rejects the field is not failed by it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
 }
 
 #[derive(Serialize)]
 struct ChatOptions {
     num_ctx: u32,
+    /// Cap on generated tokens (`ChatRequest::max_output_tokens`). Omitted
+    /// when the caller set none, so Ollama keeps its own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_predict: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -591,15 +656,7 @@ impl RemoteChat for OllamaChat {
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
         request.refuse_openai_options("Ollama's native API")?;
-        let num_ctx = self.resolve_num_ctx(&request.model).await;
-        let body = ChatRequestBody {
-            model: request.model,
-            messages: request.messages.iter().map(to_wire_message).collect(),
-            tools: request.tools.iter().map(to_wire_tool).collect(),
-            stream: false,
-            options: ChatOptions { num_ctx },
-            format: request.json_schema,
-        };
+        let body = self.request_body(&request, false).await;
 
         let response = self
             .http
@@ -610,11 +667,12 @@ impl RemoteChat for OllamaChat {
             .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
         if !response.status().is_success() {
-            return Err(
+            let error: anyhow::Error =
                 super::http::UpstreamStatus::read(response, &self.endpoint, "")
                     .await
-                    .into(),
-            );
+                    .into();
+            super::http::log_upstream_error("Ollama", &error);
+            return Err(error);
         }
 
         let parsed: ChatResponse = super::http::read_json(response)
@@ -651,15 +709,7 @@ impl RemoteChat for OllamaChat {
         use futures::StreamExt;
 
         request.refuse_openai_options("Ollama's native API")?;
-        let num_ctx = self.resolve_num_ctx(&request.model).await;
-        let body = ChatRequestBody {
-            model: request.model,
-            messages: request.messages.iter().map(to_wire_message).collect(),
-            tools: request.tools.iter().map(to_wire_tool).collect(),
-            stream: true,
-            options: ChatOptions { num_ctx },
-            format: request.json_schema,
-        };
+        let body = self.request_body(&request, true).await;
 
         let response = self
             .http
@@ -670,11 +720,12 @@ impl RemoteChat for OllamaChat {
             .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
         if !response.status().is_success() {
-            return Err(
+            let error: anyhow::Error =
                 super::http::UpstreamStatus::read(response, &self.endpoint, "")
                     .await
-                    .into(),
-            );
+                    .into();
+            super::http::log_upstream_error("Ollama", &error);
+            return Err(error);
         }
 
         let mut stream = response.bytes_stream();
@@ -897,8 +948,10 @@ mod tests {
             stream: false,
             options: ChatOptions {
                 num_ctx: DEFAULT_MAX_NUM_CTX,
+                num_predict: None,
             },
             format: None,
+            think: None,
         };
 
         let json = serde_json::to_value(&body).expect("body serialises");
@@ -920,8 +973,10 @@ mod tests {
             stream: false,
             options: ChatOptions {
                 num_ctx: FALLBACK_NUM_CTX,
+                num_predict: None,
             },
             format: None,
+            think: None,
         };
 
         let json = serde_json::to_value(&body).expect("body serialises");
@@ -1027,6 +1082,95 @@ mod wire_tests {
             .await
             .expect("a constrained completion is not refused");
         mock.assert_async().await;
+    }
+
+    /// `/api/show` listing `thinking`, so a no-thinking request may send the field.
+    async fn mock_show_thinking(server: &mut mockito::ServerGuard, ctx_len: u64) -> mockito::Mock {
+        server
+            .mock("POST", "/api/show")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "capabilities": ["completion", "thinking"],
+                    "model_info": { "qwen3.context_length": ctx_len }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_no_thinking_request_sends_think_false_and_num_predict_when_the_model_thinks() {
+        // Interpretation of a thinking model (staging qwen3): without these
+        // the model thinks until the window is full and the answer is empty.
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show_thinking(&mut server, 49152).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .match_body(Matcher::PartialJson(json!({
+                "think": false,
+                "options": { "num_ctx": 49152, "num_predict": 2048 }
+            })))
+            .with_status(200)
+            .with_body(
+                json!({"message": {"role": "assistant", "content": "{}"}, "done": true})
+                    .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
+        client
+            .chat(ChatRequest::new("qwen3.8", turns()).with_generation(true, Some(2048)))
+            .await
+            .expect("a no-thinking completion is accepted");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_no_thinking_request_omits_think_when_the_model_has_no_thinking_capability() {
+        // Some Ollama versions answer 400 "does not support thinking" when
+        // `think` is sent to a model whose capabilities omit it.
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 8192).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            // `think` is asserted absent below, from the body mockito recorded:
+            // its regex engine has no lookahead, and a matcher panic aborts
+            // the test process.
+            .match_body(Matcher::PartialJson(
+                json!({ "options": { "num_predict": 512 } }),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({"message": {"role": "assistant", "content": "{}"}, "done": true})
+                    .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
+        client
+            .chat(ChatRequest::new("llama3.1", turns()).with_generation(true, Some(512)))
+            .await
+            .expect("omitting think does not fail the completion");
+        mock.assert_async().await;
+        let sent = serde_json::to_value(
+            client
+                .request_body(
+                    &ChatRequest::new("llama3.1", turns()).with_generation(true, Some(512)),
+                    false,
+                )
+                .await,
+        )
+        .unwrap();
+        assert!(
+            sent.get("think").is_none(),
+            "think must not be sent to a model without the capability: {sent}"
+        );
+        assert_eq!(sent["options"]["num_predict"], 512);
     }
 
     #[tokio::test]

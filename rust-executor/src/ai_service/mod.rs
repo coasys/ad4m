@@ -238,10 +238,14 @@ impl ChatModel {
         turns: Vec<ChatTurn>,
         tools: Vec<ToolSpec>,
         json_schema: Option<serde_json::Value>,
+        generation: Option<(bool, Option<u32>)>,
     ) -> Result<ChatReply> {
-        let request = ChatRequest::new(self.remote_model.clone(), turns)
+        let mut request = ChatRequest::new(self.remote_model.clone(), turns)
             .with_tools(tools)
             .with_json_schema(json_schema);
+        if let Some((disable_thinking, max_output_tokens)) = generation {
+            request = request.with_generation(disable_thinking, max_output_tokens);
+        }
         let reply = within_endpoint_limits(&self.endpoint, false, self.client.chat(request)).await;
         self.after(reply)
     }
@@ -786,7 +790,7 @@ impl AIService {
             resolved,
             truncate_for_log(&final_prompt)
         );
-        let text = chat.chat(turns, Vec::new(), json_schema).await?.text;
+        let text = chat.chat(turns, Vec::new(), json_schema, None).await?.text;
         let completion_tokens = estimate_token_count(&text);
         log::debug!(
             "🤖 prompt_messages output model={} text={:?}",
@@ -826,6 +830,28 @@ impl AIService {
             .ok()
             .flatten()
             .is_some_and(|endpoint| model.uses_native_tools(&endpoint))
+    }
+
+    /// How many tokens an interpretation pass may generate.
+    ///
+    /// Staging: a 34,700-token interpretation prompt on a 49,152 window let
+    /// qwen think until `n_tokens = 49151` (`truncated = 1`) and return an
+    /// empty answer. The cap is the room the window leaves after this prompt,
+    /// so it scales with the model instead of being a fixed constant: a floor
+    /// keeps a prompt that nearly fills the window from getting nothing, and
+    /// a ceiling stops a short prompt on a large window asking the server to
+    /// generate a window's worth of JSON it will not use. The window is the
+    /// endpoint's `max_num_ctx` when the operator set one (the same number the
+    /// context budget is sized from); otherwise the fallback that budget uses
+    /// when the window is unknown. `prompt_tokens` is the chars/4 estimate
+    /// the billing path uses.
+    pub fn interpretation_max_output_tokens(model_id: &str, prompt_tokens: usize) -> u32 {
+        const MIN_OUTPUT: usize = 512;
+        const MAX_OUTPUT: usize = 8_192;
+        let window =
+            Self::model_context_tokens(model_id).unwrap_or(DEFAULT_CONTEXT_BUDGET_BYTES / 4);
+        let room = window.saturating_sub(prompt_tokens);
+        room.clamp(MIN_OUTPUT, MAX_OUTPUT) as u32
     }
 
     /// The context window the model's endpoint is run at (`max_num_ctx` on
@@ -901,7 +927,7 @@ impl AIService {
             }))
             .sum();
 
-        let reply = chat.chat(turns, tools, None).await?;
+        let reply = chat.chat(turns, tools, None, None).await?;
         let completion_tokens = estimate_reply_tokens(&reply);
 
         log::debug!(
@@ -963,6 +989,40 @@ impl AIService {
         prompt: String,
         bill_to: Option<String>,
     ) -> Result<PromptResult> {
+        self.prompt_with(task_id, prompt, bill_to, None).await
+    }
+
+    /// An interpretation pass: no thinking channel, output capped at the room
+    /// the model's window leaves after the prompt
+    /// ([`Self::interpretation_max_output_tokens`]).
+    pub async fn prompt_interpretation(
+        &self,
+        task_id: String,
+        prompt: String,
+    ) -> Result<PromptResult> {
+        let model_id = Self::replace_model_variables(
+            &crate::db_backend::db_backend()
+                .get_task(task_id.clone())
+                .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
+                .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?
+                .model_id,
+        )?;
+        let cap = Self::interpretation_max_output_tokens(&model_id, estimate_token_count(&prompt));
+        self.prompt_with(task_id, prompt, None, Some((true, Some(cap))))
+            .await
+    }
+
+    /// [`Self::prompt`] with a generation constraint: no thinking channel,
+    /// and a cap on generated tokens. `None` is today's prompt. Interpretation
+    /// uses it — a structured JSON answer has no use for a thinking channel
+    /// that can fill the window and come back empty.
+    pub async fn prompt_with(
+        &self,
+        task_id: String,
+        prompt: String,
+        bill_to: Option<String>,
+        generation: Option<(bool, Option<u32>)>,
+    ) -> Result<PromptResult> {
         let task = crate::db_backend::db_backend()
             .get_task(task_id.clone())
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
@@ -997,7 +1057,7 @@ impl AIService {
         let text_result: Result<String> = async {
             let chat = self.chat_model(&model_id).await?;
             Ok(chat
-                .chat(turns_for_task(&task, prompt), Vec::new(), None)
+                .chat(turns_for_task(&task, prompt), Vec::new(), None, generation)
                 .await?
                 .text)
         }
@@ -2079,7 +2139,7 @@ mod tests {
                 remote_model: "m".into(),
                 endpoint: Arc::new(endpoint),
             };
-            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![], None));
+            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![], None, None));
             for reply in futures::future::join_all(calls).await {
                 assert_eq!(reply.unwrap().text, "ok");
             }

@@ -19,6 +19,12 @@
 //!   return ai_service.prompt_messages(model_id, messages).await
 //! ```
 //!
+//! A round whose model server fails (an upstream 500 from a tool-call parse
+//! the server could not read) is retried once. A second failure stops calling
+//! tools and asks, with none advertised, for the best answer from what was
+//! gathered. Each of those calls is a billed completion: the credit gate is
+//! checked before it.
+//!
 //! This module owns only the loop + the message-append shape. The wire
 //! plumbing (OpenAI tools[] / tool_calls[] on request/response) lives in
 //! `ai_service::prompt_messages_with_tools`; the tool surface lives behind
@@ -513,6 +519,20 @@ pub trait CreditGate: Send + Sync {
     async fn check(&self) -> Result<()>;
 }
 
+/// A credit gate refused a completion. Distinct from an upstream failure so
+/// a refused retry stops the loop instead of being read as the model server
+/// failing again (which would spend a further completion).
+#[derive(Debug)]
+struct CreditRefused(anyhow::Error);
+
+impl std::fmt::Display for CreditRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for CreditRefused {}
+
 /// The interpretation-pass tool-calling loop.
 ///
 /// `initial_messages` is the caller-built prompt — for interpretation, this
@@ -574,9 +594,42 @@ pub async fn run_with_tools(
         let tool_count = tools.len();
         // Clone tools so we can still reference them after `complete` consumes
         // the Vec — needed for content-channel fallback validation below.
-        let completion = completions
-            .complete(model_id, &messages, tools.clone())
-            .await?;
+        // A model server that answers 500 (Ollama does, when its tool-call
+        // parser hits EOF on a call it cannot read) used to fail the whole
+        // run. Retry the round once; a second failure stops calling tools
+        // and asks for the best answer from what was gathered so far.
+        let completion = match complete_or_retry(
+            completions.as_ref(),
+            model_id,
+            &messages,
+            tools.clone(),
+            credit_gate.as_deref(),
+            round,
+        )
+        .await
+        {
+            Ok(completion) => completion,
+            Err(e) if e.downcast_ref::<CreditRefused>().is_some() => {
+                // A refused retry is not an upstream failure: the caller
+                // already holds what the loop produced, and another
+                // completion would spend credits they do not have.
+                log::warn!(
+                    "harness: credit gate refused the retry of round {round}: {e}. \
+                     Halting; caller receives what the buffer holds."
+                );
+                return Ok(String::new());
+            }
+            Err(e) => {
+                return best_effort_after_upstream_failure(
+                    completions.as_ref(),
+                    model_id,
+                    &mut messages,
+                    credit_gate.as_deref(),
+                    &e,
+                )
+                .await;
+            }
+        };
 
         // CI-visible diagnostic for silent-empty passes: shows which tools were
         // on offer, whether the LLM chose to call any, and what it said
@@ -780,9 +833,30 @@ pub async fn run_with_tools(
             config.max_tool_calls
         ),
     }));
-    let mut final_completion = completions
-        .complete(model_id, &messages, Vec::new())
-        .await?;
+    let mut final_completion = match complete_or_retry(
+        completions.as_ref(),
+        model_id,
+        &messages,
+        Vec::new(),
+        credit_gate.as_deref(),
+        round + 1,
+    )
+    .await
+    {
+        Ok(completion) => completion,
+        Err(e) if e.downcast_ref::<CreditRefused>().is_some() => {
+            log::warn!(
+                "harness: credit gate refused the wind-down retry: {e}. \
+                 Returning empty content."
+            );
+            return Ok(String::new());
+        }
+        Err(e) => {
+            // The wind-down call is already tool-free. One retry was enough;
+            // a second failure is the run's error, naming the upstream status.
+            return Err(e);
+        }
+    };
     // The wind-down answer can come back empty the same way a round's
     // completion can — give it the same nudges before returning silence.
     while final_completion.content.trim().is_empty()
@@ -812,6 +886,101 @@ pub async fn run_with_tools(
             .await?;
     }
     Ok(final_completion.content)
+}
+
+/// One completion, retried once when the model server fails.
+///
+/// The retry is a billed completion like any other, so the credit gate is
+/// checked again before it: a caller who ran out between the two calls is
+/// not charged for the second. A gate refusal is returned as that error
+/// rather than as another upstream failure — the caller already produced
+/// whatever the loop holds, and a retry would spend more.
+async fn complete_or_retry(
+    completions: &dyn CompletionSource,
+    model_id: &str,
+    messages: &[Value],
+    tools: Vec<provider::ToolSchema>,
+    credit_gate: Option<&dyn CreditGate>,
+    round: usize,
+) -> Result<HarnessCompletion> {
+    match completions
+        .complete(model_id, messages, tools.clone())
+        .await
+    {
+        Ok(completion) => Ok(completion),
+        Err(first) => {
+            log::warn!(
+                "harness: round {round}: upstream completion failed ({first}); \
+                 retrying the round once"
+            );
+            if let Some(gate) = credit_gate {
+                if let Err(refused) = gate.check().await {
+                    // The retry is a billed completion. A gate that refuses
+                    // it stops the loop here rather than being read as a
+                    // second upstream failure (which would spend a final
+                    // no-tools call the caller cannot pay for).
+                    return Err(CreditRefused(refused).into());
+                }
+            }
+            completions.complete(model_id, messages, tools).await
+        }
+    }
+}
+
+/// The model server failed a round twice. Stop calling tools and ask, once,
+/// for the best answer from what was gathered so far. That call is itself a
+/// billed completion (the credit gate is checked first). If it fails too,
+/// the error names the upstream status so the caller can see why the run
+/// ended — the original failure used to surface with nothing logged.
+async fn best_effort_after_upstream_failure(
+    completions: &dyn CompletionSource,
+    model_id: &str,
+    messages: &mut Vec<Value>,
+    credit_gate: Option<&dyn CreditGate>,
+    upstream: &anyhow::Error,
+) -> Result<String> {
+    let status = upstream_status_label(upstream);
+    log::warn!(
+        "harness: upstream completion failed again ({status}); \
+         asking for the best answer from what was gathered so far, with no tools"
+    );
+    if let Some(gate) = credit_gate {
+        if let Err(e) = gate.check().await {
+            log::warn!(
+                "harness: credit gate refused the no-tools final request \
+                 after an upstream failure: {e}. Returning empty content."
+            );
+            return Ok(String::new());
+        }
+    }
+    messages.push(json!({
+        "role": "system",
+        "content": "The model server failed twice while tools were in use. \
+                    Do not call any more tools. Answer now with the best \
+                    result you can give from what has already been gathered.",
+    }));
+    match completions.complete(model_id, messages, Vec::new()).await {
+        Ok(completion) => Ok(completion.content),
+        Err(final_error) => Err(anyhow::anyhow!(
+            "upstream model server failed ({}); a final request without tools \
+             also failed: {final_error}",
+            upstream_status_label(&final_error),
+        )),
+    }
+}
+
+/// `HTTP 500` when the error carries an upstream status, else the error's
+/// own text. Named so a caller whose run still fails can see the status the
+/// model server answered with.
+fn upstream_status_label(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .find_map(|cause| {
+            cause
+                .downcast_ref::<crate::ai_service::providers::http::UpstreamStatus>()
+                .map(|status| format!("HTTP {}", status.status))
+        })
+        .unwrap_or_else(|| error.to_string())
 }
 
 fn assistant_tool_calls_message(c: &HarnessCompletion) -> Value {
@@ -863,9 +1032,13 @@ mod tests {
     /// Scripted CompletionSource: pop the next canned HarnessCompletion from
     /// a queue each time the loop asks. Records the (messages, tools) it
     /// received on every call so tests can assert the loop-shaping is right.
+    /// `fail_on_call` answers an upstream 500 for those call numbers (1-based)
+    /// instead of popping the script — a model server whose tool-call parser
+    /// gave up.
     struct ScriptedLLM {
         script: Mutex<Vec<HarnessCompletion>>,
         calls: Mutex<Vec<(Vec<Value>, Vec<ToolSchema>)>>,
+        fail_on_call: Vec<usize>,
     }
 
     impl ScriptedLLM {
@@ -873,7 +1046,14 @@ mod tests {
             Self {
                 script: Mutex::new(script),
                 calls: Mutex::new(Vec::new()),
+                fail_on_call: Vec::new(),
             }
+        }
+
+        /// `calls` are 1-based completion numbers that answer HTTP 500.
+        fn failing_on(mut self, calls: &[usize]) -> Self {
+            self.fail_on_call = calls.to_vec();
+            self
         }
 
         fn call_count(&self) -> usize {
@@ -901,6 +1081,17 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((messages.to_vec(), tools.clone()));
+            let n = self.call_count();
+            if self.fail_on_call.contains(&n) {
+                return Err(anyhow::anyhow!(
+                    crate::ai_service::providers::http::UpstreamStatus {
+                        url: "http://127.0.0.1:11434/api/chat".into(),
+                        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                        body: "qwen tool call parsing failed: EOF".into(),
+                        retry_after: None,
+                    }
+                ));
+            }
             let next = self.script.lock().unwrap().remove(0);
             Ok(next)
         }
@@ -1695,6 +1886,138 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[tokio::test]
+    async fn an_upstream_500_retries_the_round_then_degrades_to_a_final_answer() {
+        // Staging 0.13.1: an agent run died when Ollama answered 500 on a
+        // tool-call parse (EOF) and the executor passed that on, ending the
+        // run. The round is retried once; a second 500 asks, with no tools,
+        // for the best answer from what was gathered, and that is what the
+        // caller gets. The script has a tool call ready for a successful
+        // retry that must not be consumed — both tries of the round fail.
+        let script = vec![plain_answer("best effort from what was gathered")];
+        let llm = Arc::new(ScriptedLLM::new(script).failing_on(&[1, 2]));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("lookup", "")],
+        });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            provider,
+            llm.clone(),
+            HarnessConfig {
+                max_tool_calls: 4,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("a repeated upstream 500 degrades to a final answer, it does not fail the run");
+
+        assert_eq!(out, "best effort from what was gathered");
+        assert_eq!(
+            llm.call_count(),
+            3,
+            "the failed round, its retry, the no-tools ask"
+        );
+        assert!(
+            !llm.nth_tools(2).iter().any(|_| true),
+            "the final request advertises no tools"
+        );
+        let last = llm.nth_messages(2);
+        assert!(
+            last.iter()
+                .any(|m| m["content"].as_str().unwrap_or("").contains("failed twice")),
+            "the final request says why tools stopped: {last:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upstream_500_that_clears_on_retry_continues_the_round() {
+        let script = vec![
+            tool_call_turn("c1", "lookup", json!({})),
+            plain_answer("found"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script).failing_on(&[1]));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("lookup", "")],
+        });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            provider,
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "found");
+        assert_eq!(
+            llm.call_count(),
+            3,
+            "failed try, successful retry, final answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_final_request_that_also_fails_names_the_upstream_status() {
+        let llm = Arc::new(ScriptedLLM::new(Vec::new()).failing_on(&[1, 2, 3]));
+        let provider = Arc::new(EchoProvider { tools: Vec::new() });
+
+        let error = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            provider,
+            llm,
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("HTTP 500"),
+            "the error must name the upstream status, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retry_does_not_run_when_the_credit_gate_refuses_it() {
+        // The retry is a billed completion. A gate that allowed the round's
+        // first try and refuses the next must not let that call through.
+        let script = vec![plain_answer("should not be asked")];
+        let llm = Arc::new(ScriptedLLM::new(script).failing_on(&[1]));
+        let provider = Arc::new(EchoProvider { tools: Vec::new() });
+        let gate = Arc::new(FiniteCreditGate {
+            remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            provider,
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            Some(gate),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            out, "",
+            "a refused retry halts, it does not spend another completion"
+        );
+        assert_eq!(llm.call_count(), 1, "the retry was not sent");
     }
 
     #[tokio::test]

@@ -723,7 +723,9 @@ pub async fn run_interpretation_with_strategy_and_model(
 
                 let result = service
                     // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                    .prompt(task_id, prompt, None)
+                    // Structured JSON: a thinking channel only spends the window
+                    // (qwen3 filled 49k of thinking and returned 0 tokens of answer).
+                    .prompt_interpretation(task_id, prompt)
                     .await
                     .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
 
