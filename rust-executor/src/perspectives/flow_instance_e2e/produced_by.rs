@@ -1241,3 +1241,82 @@ async fn a_receipt_the_memo_holds_as_settled_is_not_prepared_again() {
         "a settled receipt's signers are not refreshed again"
     );
 }
+
+/// Lal's P3 on #1597: a receipt the prepare step skips because the memo
+/// answers it keeps that answer for the whole read, even when the fold
+/// evicts it from the bounded LRU before reaching it.
+///
+/// The schedule, on a memo of capacity 1 (full after the first read): the
+/// device-signed receipt R verifies and is the one entry; its signer's head
+/// ages past the window. A new receipt N, signed by another signer and
+/// sorting before R (receipts load in URI order), is planted. The second read
+/// skips R at the prepare step (memoised) and prepares N; the fold verifies N
+/// first and `put`s it, which evicts R; then reaches R.
+///
+/// Red while the prepare step only peeks: R misses, re-verifies with its
+/// signer's head stale and not refreshed, reads `cantCheck`, and its output
+/// drops from the read. Green with the answer held: R answers as the prepare
+/// step saw it, and its signer's log is still not read again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_memoised_receipt_evicted_by_an_earlier_miss_still_answers_for_the_read() {
+    use crate::perspectives::flow_instance::produced::flow_valid_outputs;
+    use crate::perspectives::flow_instance::verify::memo::VerdictMemo;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    f.perspective.receipt_verdict_memo = Arc::new(VerdictMemo::with_capacity(1));
+    let signed = DeviceSigned::new(&mut f, 142, "ad4m://task/memo-evicted").await;
+    plant_receipt(&mut f, &signed.receipt).await;
+    let held_uri = signed.receipt.uri().expect("uri");
+    let flow = f.flow_uri.clone();
+
+    let first = crate::identity::with_test_resolver(
+        signed.resolver.clone(),
+        flow_valid_outputs(&f.perspective, &flow, None),
+    )
+    .await
+    .expect("valid outputs");
+    assert_eq!(first.len(), 1, "the device-signed receipt verifies");
+
+    // N: an honest receipt by another signer whose URI sorts before R's, so
+    // the fold reaches it first.
+    f.seed_task("ad4m://task/evicts-early", "Settled first in the read")
+        .await;
+    let mut early = None;
+    for i in 0..64 {
+        let receipt =
+            fixture_minted_receipt(&f, &format!("evicts-early-{i}"), "ad4m://task/evicts-early")
+                .await;
+        if receipt.uri().expect("uri") < held_uri {
+            early = Some(receipt);
+            break;
+        }
+    }
+    let early = early.expect("a receipt URI sorting before the held one");
+    plant_receipt(&mut f, &early).await;
+
+    signed.age_past_the_window();
+    let reads = signed.store.log_calls.load(Ordering::SeqCst);
+    let second = crate::identity::with_test_resolver(
+        signed.resolver.clone(),
+        flow_valid_outputs(&f.perspective, &flow, None),
+    )
+    .await
+    .expect("valid outputs");
+
+    let ids: Vec<&str> = second.iter().map(|v| v.output.id.as_str()).collect();
+    assert!(
+        ids.contains(&"ad4m://task/evicts-early"),
+        "precondition: the earlier receipt verifies and is memoised, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"ad4m://task/memo-evicted"),
+        "the receipt the prepare step skipped still answers after the earlier one evicted it, got {ids:?}"
+    );
+    assert_eq!(
+        signed.store.log_calls.load(Ordering::SeqCst),
+        reads,
+        "a held receipt's signers are still not refreshed"
+    );
+}

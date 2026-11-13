@@ -16,11 +16,16 @@
 //! (`OperatorSetBy::FirstRun`). Until then the desktop may claim again, for any identity.
 //! A claim that sets no operator record needs no accept. Any claim not yet bound may be
 //! cancelled (`identity.cancelJoin`): it never binds, even if the holder confirms it later.
+//! The decision holds on every path that binds: a repeated claim of the offer keeps it (a
+//! cancelled claim is refused `cancelled`, the offer named for another identity
+//! `offer-conflict`), and `identity.publish` of the holder's add binds the main agent only as
+//! `join_status` would (`IdentityService::bind_agent_if_listed`).
 //!
 //! `claim_for_agent` is the claim itself, for any local agent: `claim_for_main` runs it after
-//! its rules, and `bot.createAgent` runs it for a new bot agent (`crate::bots`), whose offer the
-//! holder opened as a bot offer; a bot's claim needs no accept. Claims for a hosted tenant's
-//! agent are not here yet.
+//! its rules and writes the main agent's join row (`add_join`, which keeps a repeated claim's
+//! decision) just before the store call, and `bot.createAgent` runs it for a new bot agent
+//! (`crate::bots`), whose offer the holder opened as a bot offer; a bot's claim writes no join
+//! row and needs no accept. Claims for a hosted tenant's agent are not here yet.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::did_of;
@@ -35,7 +40,7 @@ use super::service::{
 use super::types::{convert, ClaimOfferResult, JoinAccepted, JoinCancelled, JoinStatus};
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
-use crate::db::{JoinAccept, JoinCancel, JoinRow};
+use crate::db::{JoinAccept, JoinAdded, JoinCancel, JoinRow};
 
 /// The claims of one executor.
 pub struct ClaimService<'a> {
@@ -99,26 +104,43 @@ impl ClaimService<'_> {
             .map_err(first_link_error)?;
         // The row goes in before the store call: when the store commits the claim and its
         // answer is lost, a retry gets `gone` once the add spent the offer, and only this row
-        // lets `joinStatus` follow the offer and record the binding.
-        let needs_accept = first_link == FirstLink::FirstRun;
-        let mut claimed = self
+        // lets `joinStatus` follow the offer and record the binding. A repeated claim of the
+        // offer keeps the row the first one wrote: the decision taken here (accepted,
+        // cancelled) stays, a cancelled claim is not sent again, and the row names one
+        // identity only.
+        let first_run = first_link == FirstLink::FirstRun;
+        let claimed = self
             .claim_for_agent(&main, offer, can_keep_master, hint, || {
-                db(|db| {
+                let added = db(|db| {
                     db.add_join(&JoinRow {
                         offer_id: offer.offer_id.clone(),
                         scid: offer.scid.clone(),
                         claimed_at: now(),
-                        accept: if needs_accept {
+                        accept: if first_run {
                             JoinAccept::Awaiting
                         } else {
                             JoinAccept::NotNeeded
                         },
                     })
-                })
+                })?;
+                match added {
+                    JoinAdded::Added => Ok(first_run),
+                    JoinAdded::Kept(join) => Self::held(&join),
+                    JoinAdded::Cancelled => Err(error(
+                        409,
+                        "cancelled: this executor's claim of the offer is cancelled; it is not made again",
+                    )),
+                    JoinAdded::OtherIdentity(scid) => Err(error(
+                        409,
+                        format!(
+                            "offer-conflict: this executor claimed the offer for {}, not {offer_did}",
+                            did_of(&scid)
+                        ),
+                    )),
+                }
             })
             .await?;
-        claimed.needs_accept = needs_accept;
-        if needs_accept {
+        if claimed.needs_accept {
             log::info!("identity: this desktop executor claimed an offer of {offer_did}; it becomes the operator when the person here accepts (identity.acceptJoin), the holder confirms and the main agent joins");
         }
         Ok(claimed)
@@ -127,15 +149,17 @@ impl ClaimService<'_> {
     /// Claims `offer` with the wallet key of `agent` and that key's `enc` key: the steps every
     /// claim takes, whoever it is for (the main agent, a bot agent). `before_store` runs after
     /// the claim is signed and before the store sees it: the caller records what lets it
-    /// follow the offer when the store's answer is lost. Refuses `no-store-keys`, an offer of
-    /// another store than this executor's (`offer-store`), and a malformed secret.
+    /// follow the offer when the store's answer is lost, may refuse the claim there (nothing
+    /// reaches the store), and answers whether the claim is held for accept (`needs_accept`).
+    /// Refuses `no-store-keys`, an offer of another store than this executor's
+    /// (`offer-store`), and a malformed secret.
     pub async fn claim_for_agent(
         &self,
         agent: &AgentContext,
         offer: &OfferString,
         can_keep_master: bool,
         hint: Option<String>,
-        before_store: impl FnOnce() -> Result<(), WsRpcError>,
+        before_store: impl FnOnce() -> Result<bool, WsRpcError>,
     ) -> Result<ClaimOfferResult, WsRpcError> {
         self.identity.refuse_without_store_keys()?;
         let offer_did = did_of(&offer.scid);
@@ -165,7 +189,7 @@ impl ClaimService<'_> {
         signer.check().map_err(WsRpcError::internal)?;
         let claim: ad4m_ldk::identity::Claim =
             convert(&claim).map_err(|e| WsRpcError::internal(e.to_string()))?;
-        before_store()?;
+        let needs_accept = before_store()?;
         let receipt = self
             .identity
             .backend
@@ -178,7 +202,7 @@ impl ClaimService<'_> {
             offer_id: offer.offer_id.clone(),
             kind: convert(&receipt.kind).map_err(|e| WsRpcError::internal(e.to_string()))?,
             expires: receipt.expires,
-            needs_accept: false,
+            needs_accept,
         })
     }
 
@@ -255,7 +279,7 @@ impl ClaimService<'_> {
     /// Whether `join` waits for `identity.acceptJoin`: a first-run claim not yet accepted. A
     /// row written before the accept column (`not-needed`) is held too while there is no
     /// operator record, as only a first-run claim is made without one.
-    fn held(join: &JoinRow) -> Result<bool, WsRpcError> {
+    pub(super) fn held(join: &JoinRow) -> Result<bool, WsRpcError> {
         Ok(match join.accept {
             JoinAccept::Awaiting => true,
             JoinAccept::NotNeeded => db(|db| db.operator_record())?.is_none(),

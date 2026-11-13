@@ -1,75 +1,24 @@
-import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
-
-export class ModelApi {
-    baseUrl: string;
-    /** Whether the model has a provider key. The executor never returns the key itself. */
-    hasApiKey: boolean;
-    model: string;
-    apiType: String;
-    /** Optional ceiling for the provider's context window (tokens).
-     *  Read by the Ollama provider to bound num_ctx / KV-cache VRAM. */
-    maxNumCtx?: number;
-}
-
-export class TokenizerSource {
-    repo: string;
-    revision: string;
-    fileName: string;
-}
-
-export class LocalModel {
-    fileName: string;
-    tokenizerSource?: TokenizerSource;
-    huggingfaceRepo?: string;
-    revision?: string;
-}
-
-export type ModelType = "LLM" | "EMBEDDING" | "TRANSCRIPTION";
-
-export class Model {
-    id: string;
-    name: string;
-    api?: ModelApi;
-    local?: LocalModel;
-    modelType: ModelType;
-}
-
-export class ModelApiInput {
-    baseUrl: string;
-    /** The provider key. Empty or left out on `addModel`: no key. Left out on
-     *  `updateModel`: the stored key stays, and the update is refused if `baseUrl`
-     *  changes too. Empty on `updateModel`: the stored key is removed. */
-    apiKey?: string;
-    model: string;
-    apiType: string;
-    /** Optional ceiling for the provider's context window (tokens). */
-    maxNumCtx?: number;
-}
-
-export class TokenizerSourceInput {
-    repo: string;
-    revision: string;
-    fileName: string;
-}
-
-export class LocalModelInput {
-    fileName: string;
-    tokenizerSource?: TokenizerSourceInput;
-    huggingfaceRepo?: string;
-    revision?: string;
-}
-
-export class ModelInput {
-    name: string;
-    api?: ModelApiInput;
-    local?: LocalModelInput;
-    modelType: ModelType;
-}
-
-export class VoiceActivityParamsInput {
-    startThreshold?: number;
-    startWindow?: number;
-    endThreshold?: number;
-    endWindow?: number;
-    timeBeforeSpeech?: number;
-}
+// The AI contract is generated from the executor's Rust types (core/src/generated/api).
+// A model is an upstream model on an endpoint: the endpoint owns the URL, the key and the
+// protocol; the model names the endpoint, the id the endpoint knows it by, and its type.
+export type { Model } from "../generated/api/Model";
+export type { ModelInput } from "../generated/api/ModelInput";
+export type { ModelType } from "../generated/api/ModelType";
+export type { ModelStatus } from "../generated/api/ModelStatus";
+export type { ModelState } from "../generated/api/ModelState";
+export type { AiEndpoint } from "../generated/api/AiEndpoint";
+export type { AiEndpointInput } from "../generated/api/AiEndpointInput";
+export type { AiCapability } from "../generated/api/AiCapability";
+export type { EndpointKind } from "../generated/api/EndpointKind";
+export type { EndpointHealth } from "../generated/api/EndpointHealth";
+export type { EndpointState } from "../generated/api/EndpointState";
+export type { DetectedEndpoint } from "../generated/api/DetectedEndpoint";
+export type { DiscoveredModel } from "../generated/api/DiscoveredModel";
+export type { AiDiscoverModelsParams } from "../generated/api/AiDiscoverModelsParams";
+// Local AI (`ai.local*`): the executor's own llama.cpp and nemo-speech runtimes.
+export type { LocalAiHardware } from "../generated/api/LocalAiHardware";
+export type { LocalAiPlan } from "../generated/api/LocalAiPlan";
+export type { LocalAiStatus } from "../generated/api/LocalAiStatus";
+export type { LocalAiProgress } from "../generated/api/LocalAiProgress";
+export type { LocalAiInstallParams } from "../generated/api/LocalAiInstallParams";
+export type { LocalAiRemoveParams } from "../generated/api/LocalAiRemoveParams";

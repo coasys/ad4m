@@ -19,10 +19,6 @@ AWS_LC_SYS_PREBUILT_NASM = "1"
 # cmake. Explicit CMAKE_BUILDER=1 ensures the cmake path is taken directly.
 AWS_LC_SYS_CMAKE_BUILDER = "1"
 
-# CUDA compute capability for candle-kernels (A100 = sm_80).
-# Without this, bindgen_cuda panics when nvidia-smi isn't available.
-CUDA_COMPUTE_CAP = "80"
-
 [net]
 # Use system git instead of cargo's built-in libgit2.
 # Required because coasys/deno.git has heavy chromium submodules

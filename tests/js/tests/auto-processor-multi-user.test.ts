@@ -36,7 +36,7 @@ import {
   gracefulShutdown,
 } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
-import { waitUntil } from "../helpers/index";
+import { addOllamaLlm, waitUntil } from "../helpers/index";
 import { ChildProcess } from "node:child_process";
 import { ConversationSubgroup } from "./model/auto-processor-models";
 
@@ -44,7 +44,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). Without it the
+// Ollama provider requests num_ctx 131072 and Ollama reloads the model out of staging's residency.
+const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
+const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 const ADMIN_CREDENTIAL = "auto-processor-multi-user-admin";
 
 // Same shape as the two-executor test uses: speaker + timestamp come off the
@@ -115,11 +118,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     // LLM lives on the admin side — its default binding is global, so
     // interpretation passes running under a managed user's context still
     // resolve to it.
-    const modelId = await admin.ai.addModel({
-      name: "interpretation-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addOllamaLlm(admin, "interpretation-llm", BASE_URL, MODEL, MAX_NUM_CTX);
     await admin.ai.setDefaultModel("LLM", modelId);
 
     // Two managed users, free-access so billing doesn't gate the LLM call.

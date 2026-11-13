@@ -64,6 +64,8 @@ pub async fn internal_shutdown(headers: HeaderMap) -> Result<Json<serde_json::Va
         // Give the HTTP response time to flush
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
+        // The local AI runtimes are this executor's children: they stop with it.
+        crate::ai_service::local::stop_on_exit().await;
         log::info!("Exiting process after graceful shutdown");
         crate::exit::exit_now(0);
     });
