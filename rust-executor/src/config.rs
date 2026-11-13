@@ -121,11 +121,12 @@ pub struct Ad4mConfig {
     /// Port for MCP HTTP server (default: 3001)
     pub mcp_port: Option<u16>,
     /// Expose the dynamic per-class MCP tools (`{class}_create`,
-    /// `{class}_set_{property}`, `{class}_add_{collection}`, …) over the MCP
-    /// transport, alongside the static `instance_*` tools. Default `false`:
-    /// external MCP clients see only the fixed static tool surface, so the tool
-    /// list stays constant no matter which social DNA is loaded. The in-process
-    /// interpretation/flow harness is unaffected by this flag either way.
+    /// `{class}_set_{property}`, `{class}_add_{collection}`, …) alongside the
+    /// static `instance_*` tools: over the MCP transport and in the tool list
+    /// an AI session's model is offered. Default `false`: agents see only the
+    /// fixed static tool surface, so the tool list stays constant no matter
+    /// which social DNA is loaded. An interpretation pass sets its own flag
+    /// and is unaffected by this one either way.
     pub dynamic_class_tools: Option<bool>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,

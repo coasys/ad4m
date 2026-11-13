@@ -1,6 +1,7 @@
 // Auto-generated from the executor's event table (rust-executor/src/api/events_ws.rs).
 // Do NOT edit manually — regenerate with: pnpm run generate:api-types
 
+import type { AISessionChanged } from "./AISessionChanged";
 import type { AgentStatusChangedEvent } from "./AgentStatusChangedEvent";
 import type { AgentUpdatedEvent } from "./AgentUpdatedEvent";
 import type { AiEndpointStatusEvent } from "./AiEndpointStatusEvent";
@@ -30,6 +31,7 @@ import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
 export interface EventMap {
+  "ai-session-changed": AISessionChanged;
   "agent-status-changed": AgentStatusChangedEvent;
   "agent-updated": AgentUpdatedEvent;
   "apps-changed": Apps;
