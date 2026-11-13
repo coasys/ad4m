@@ -51,18 +51,91 @@ fn truncate_for_event(text: &str) -> String {
     format!("{head}…[truncated for event]")
 }
 
-/// Emit one `ToolCall` / `ToolResult` event on the auto-processor topic
-/// when `ctx` is set. Fire-and-forget; no-op when `ctx` is `None`.
+/// A tool result fed back to the model is capped at this size when the
+/// caller does not size it from the model's context window
+/// (`HarnessConfig::tool_result_max_bytes`). The session transcript keeps
+/// the full result; the cap exists because a result bigger than the
+/// model's context window makes the model server drop the oldest
+/// messages — including the person's question — to fit (Ollama answers
+/// `500 no user query found in messages`).
+///
+/// The value is `AIService::tool_result_max_bytes`'s own unknown-window
+/// fallback, so a caller with no model context at hand and a caller whose
+/// model's window is simply unknown cap a result to the same size.
+pub use crate::ai_service::DEFAULT_TOOL_RESULT_MAX_BYTES;
+
+/// The reply an empty completion gets: the model ended its turn without
+/// answering, and the person is still waiting.
+const EMPTY_COMPLETION_NUDGE: &str = "Your last answer was empty — the person is still \
+     waiting. Answer them now in plain language: what you found, or what you did.";
+
+/// A tool result that fits `max_bytes` comes back whole; a bigger one is
+/// cut on a char boundary and ends on a note telling the model what it
+/// missed and how to get the rest. The full result still reaches whatever
+/// observes the call — this shapes only what the model sees.
+pub fn cap_tool_result(result: &str, max_bytes: usize) -> String {
+    if result.len() <= max_bytes {
+        return result.to_string();
+    }
+    let mut kept = max_bytes;
+    while !result.is_char_boundary(kept) {
+        kept -= 1;
+    }
+    format!(
+        "{}\n[truncated: {kept} of {} bytes shown — the result was cut to fit \
+         the model's context; call the tool again with a narrower query for the rest]",
+        &result[..kept],
+        result.len(),
+    )
+}
+
+/// What the loop tells about each tool call as it makes it: interpretation's live debug events,
+/// an agent reply's steps. Called in order, one call at a time: `tool_called` before the call
+/// runs, then `tool_returned` with what it answered.
+#[async_trait::async_trait]
+pub trait ToolObserver: Send + Sync {
+    /// The model asked for `name` with `arguments`. The call has not run yet.
+    async fn tool_called(&self, name: &str, arguments: &Value);
+    /// The call answered `result`: the tool's text, or `error: …` when it failed.
+    async fn tool_returned(&self, name: &str, arguments: &Value, result: &str);
+}
+
+/// Interpretation's observer: one `ToolCall` / `ToolResult` event each on the auto-processor
+/// topic, the result truncated to a bounded prefix.
+#[async_trait::async_trait]
+impl ToolObserver for events::InterpretationEmitContext {
+    async fn tool_called(&self, name: &str, arguments: &Value) {
+        emit_tool_event(
+            self,
+            events::AutoProcessorStep::ToolCall,
+            name,
+            Some(arguments.to_string()),
+            None,
+        )
+        .await;
+    }
+
+    async fn tool_returned(&self, name: &str, _arguments: &Value, result: &str) {
+        emit_tool_event(
+            self,
+            events::AutoProcessorStep::ToolResult,
+            name,
+            None,
+            Some(truncate_for_event(result)),
+        )
+        .await;
+    }
+}
+
+/// Emit one `ToolCall` / `ToolResult` event on the auto-processor topic.
+/// Fire-and-forget.
 async fn emit_tool_event(
-    ctx: Option<&events::InterpretationEmitContext>,
+    ctx: &events::InterpretationEmitContext,
     step: events::AutoProcessorStep,
     tool_name: &str,
     tool_args_json: Option<String>,
     tool_result: Option<String>,
 ) {
-    let Some(ctx) = ctx else {
-        return;
-    };
     let mut ev = events::AutoProcessorEvent::new(&ctx.perspective_uuid, &ctx.processor_id, step)
         .with_agent_did(&ctx.agent_did)
         .with_items(&ctx.item_ids)
@@ -391,11 +464,31 @@ pub trait CompletionSource: Send + Sync {
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessConfig {
     pub max_tool_calls: u32,
+    /// Bytes one tool result may occupy in the messages fed back to the
+    /// model before [`cap_tool_result`] cuts it. An AI session sizes this
+    /// from the model's context window (`AIService::tool_result_max_bytes`);
+    /// the default covers callers with no model context at hand.
+    pub tool_result_max_bytes: usize,
+    /// How often the loop re-asks the model after a completion that came
+    /// back with no text and no tool calls, the wind-down completion
+    /// included (one extra completion each). A silent model is nudged, not
+    /// trusted: a thinking model's reply that never left its thinking
+    /// channel reads exactly like a stall, and the nudge tells the two
+    /// apart. AI sessions ask for their reply back — the text is the
+    /// answer. Callers that discard the final text keep 0: interpretation's
+    /// normal finish is a model that made its `propose_*` calls and went
+    /// quiet, and `runAgent` answers as the model left it — each nudge is a
+    /// billed completion whose text nobody reads.
+    pub empty_completion_nudges: u32,
 }
 
 impl Default for HarnessConfig {
     fn default() -> Self {
-        Self { max_tool_calls: 20 }
+        Self {
+            max_tool_calls: 20,
+            tool_result_max_bytes: DEFAULT_TOOL_RESULT_MAX_BYTES,
+            empty_completion_nudges: 0,
+        }
     }
 }
 
@@ -428,19 +521,19 @@ pub trait CreditGate: Send + Sync {
 /// the caller's system prompt (design v2 §Q6: "the harness passes tools
 /// verbatim; per-task guidance lives in the caller").
 ///
-/// `emit_ctx` opts into the auto-processor event stream for observability:
-/// when set (typically by an auto-processor pass whose config has
-/// `emit_debug_events: true`), every `ToolCall` + `ToolResult` fires a
-/// `AutoProcessorEvent` on the global topic so a subscribed UI can render
-/// the loop live (which tool was called, with what args, what came back).
-/// `None` skips all telemetry — the fast path stays fast for headless runs.
+/// `observer` is told about every tool call as the loop makes it
+/// ([`ToolObserver`]). Interpretation passes its emit context when an
+/// auto-processor pass has `emit_debug_events: true`, so every `ToolCall` +
+/// `ToolResult` fires an `AutoProcessorEvent` a subscribed UI renders live; an
+/// agent reply passes the writer of its steps. `None` skips all of it — the
+/// fast path stays fast for headless runs.
 pub async fn run_with_tools(
     model_id: &str,
     initial_messages: Vec<Value>,
     provider: Arc<dyn ToolProvider>,
     completions: Arc<dyn CompletionSource>,
     config: HarnessConfig,
-    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    observer: Option<&dyn ToolObserver>,
     credit_gate: Option<Arc<dyn CreditGate>>,
 ) -> Result<String> {
     let mut messages = initial_messages;
@@ -450,6 +543,13 @@ pub async fn run_with_tools(
     // how many propose_* ops the interpretation overlay accepts).
     let mut calls_used: usize = 0;
     let mut round: usize = 0;
+    // A completion that comes back with no text and no tool calls is the
+    // model ending its turn without answering — a thinking model whose
+    // reply never left the thinking channel arrives exactly like this.
+    // Asking for the answer again costs one completion; a model still
+    // silent after the nudges ran out really has nothing to say, and its
+    // empty reply is returned as it came.
+    let mut empty_nudges: u32 = 0;
 
     while calls_used < config.max_tool_calls as usize {
         round += 1;
@@ -495,6 +595,33 @@ pub async fn run_with_tools(
             preview,
             cap = config.max_tool_calls,
         );
+
+        // The completion answered nothing at all — no reply text, no tool
+        // calls. Handled before the content-channel fallback: empty content
+        // can carry no candidate. The turn is not done — the model never
+        // spoke — so nudge it rather than recording an empty reply, but
+        // only so often: `empty_nudges` bounds it across the whole loop.
+        if completion.tool_calls.is_empty() && completion.content.trim().is_empty() {
+            if empty_nudges < config.empty_completion_nudges {
+                empty_nudges += 1;
+                log::warn!(
+                    "harness: round={round}: the completion came back empty \
+                     (no text, no tool calls) — asking for the answer \
+                     (nudge {empty_nudges}/{max})",
+                    max = config.empty_completion_nudges,
+                );
+                messages.push(json!({
+                    "role": "system",
+                    "content": EMPTY_COMPLETION_NUDGE,
+                }));
+                continue;
+            }
+            log::warn!(
+                "harness: the model stayed silent ({empty_nudges} nudges \
+                 spent); returning its empty reply"
+            );
+            return Ok(completion.content);
+        }
 
         // When tool_calls[] is empty, try to recover a tool call from the
         // content channel before giving up on this round. Small local models
@@ -596,18 +723,12 @@ pub async fn run_with_tools(
         };
         messages.push(assistant_tool_calls_message(&effective_completion));
         for tc in &effective_completion.tool_calls {
-            // Emit `ToolCall` before dispatch — a UI subscribed to the
-            // auto-processor event topic renders "LLM asked for <tool>"
-            // live, without waiting for the tool to return. Gated on
-            // `emit_ctx`: the fast headless path pays no telemetry cost.
-            emit_tool_event(
-                emit_ctx,
-                events::AutoProcessorStep::ToolCall,
-                &tc.name,
-                Some(tc.arguments.to_string()),
-                None,
-            )
-            .await;
+            // Told before dispatch, so a UI renders "LLM asked for <tool>"
+            // live, without waiting for the tool to return. The fast
+            // headless path (no observer) pays nothing.
+            if let Some(observer) = observer {
+                observer.tool_called(&tc.name, &tc.arguments).await;
+            }
             let result = if calls_used < config.max_tool_calls as usize {
                 calls_used += 1;
                 match provider.call(&tc.name, tc.arguments.clone()).await {
@@ -620,19 +741,22 @@ pub async fn run_with_tools(
                     config.max_tool_calls
                 )
             };
-            // Emit `ToolResult` after dispatch. Result is truncated to a
-            // bounded prefix so a `_query` returning MBs doesn't inflate
-            // every event — the UI can request the full text separately
-            // if it needs it.
-            emit_tool_event(
-                emit_ctx,
-                events::AutoProcessorStep::ToolResult,
-                &tc.name,
-                None,
-                Some(truncate_for_event(&result)),
-            )
-            .await;
-            messages.push(tool_result_message(&tc.id, &result));
+            // Told after dispatch, with the whole result: interpretation's
+            // events truncate it to a bounded prefix so a `_query` returning
+            // MBs doesn't inflate every event.
+            if let Some(observer) = observer {
+                observer
+                    .tool_returned(&tc.name, &tc.arguments, &result)
+                    .await;
+            }
+            // The observer (and so the session's transcript row) got the
+            // FULL result above; the model is fed at most
+            // `tool_result_max_bytes` of it so one result can never push
+            // the request over the model's context window.
+            messages.push(tool_result_message(
+                &tc.id,
+                &cap_tool_result(&result, config.tool_result_max_bytes),
+            ));
         }
     }
 
@@ -656,9 +780,37 @@ pub async fn run_with_tools(
             config.max_tool_calls
         ),
     }));
-    let final_completion = completions
+    let mut final_completion = completions
         .complete(model_id, &messages, Vec::new())
         .await?;
+    // The wind-down answer can come back empty the same way a round's
+    // completion can — give it the same nudges before returning silence.
+    while final_completion.content.trim().is_empty()
+        && empty_nudges < config.empty_completion_nudges
+    {
+        empty_nudges += 1;
+        log::warn!(
+            "harness: the wind-down completion came back empty — asking for \
+             the answer (nudge {empty_nudges}/{max})",
+            max = config.empty_completion_nudges,
+        );
+        messages.push(json!({
+            "role": "system",
+            "content": EMPTY_COMPLETION_NUDGE,
+        }));
+        if let Some(ref gate) = credit_gate {
+            if let Err(e) = gate.check().await {
+                log::warn!(
+                    "harness: credit gate refused an empty-reply nudge: {e}. \
+                     Returning empty content; buffer holds whatever the loop produced."
+                );
+                return Ok(String::new());
+            }
+        }
+        final_completion = completions
+            .complete(model_id, &messages, Vec::new())
+            .await?;
+    }
     Ok(final_completion.content)
 }
 
@@ -921,7 +1073,10 @@ mod tests {
             vec![user_message("go")],
             provider,
             llm.clone(),
-            HarnessConfig { max_tool_calls: 3 },
+            HarnessConfig {
+                max_tool_calls: 3,
+                ..HarnessConfig::default()
+            },
             None,
             None,
         )
@@ -993,7 +1148,10 @@ mod tests {
             vec![user_message("go")],
             provider.clone(),
             llm.clone(),
-            HarnessConfig { max_tool_calls: 3 },
+            HarnessConfig {
+                max_tool_calls: 3,
+                ..HarnessConfig::default()
+            },
             None,
             None,
         )
@@ -1406,7 +1564,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig::default(),
-            Some(&ctx),
+            Some(&ctx as &dyn ToolObserver),
             None,
         )
         .await
@@ -1567,7 +1725,10 @@ mod tests {
             vec![user_message("go")],
             provider,
             llm.clone(),
-            HarnessConfig { max_tool_calls: 4 },
+            HarnessConfig {
+                max_tool_calls: 4,
+                ..HarnessConfig::default()
+            },
             None,
             Some(gate),
         )
@@ -1606,7 +1767,10 @@ mod tests {
             vec![user_message("go")],
             provider,
             llm.clone(),
-            HarnessConfig { max_tool_calls: 4 },
+            HarnessConfig {
+                max_tool_calls: 4,
+                ..HarnessConfig::default()
+            },
             None,
             None,
         )
@@ -1615,5 +1779,351 @@ mod tests {
 
         assert_eq!(out, "done");
         assert_eq!(llm.call_count(), 3);
+    }
+
+    /// Records every `ToolObserver` callback as (called|returned, name, arguments, result).
+    struct RecordingObserver {
+        seen: Mutex<Vec<(String, String, Value, Option<String>)>>,
+    }
+
+    impl RecordingObserver {
+        fn new() -> Self {
+            Self {
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolObserver for RecordingObserver {
+        async fn tool_called(&self, name: &str, arguments: &Value) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(("called".into(), name.into(), arguments.clone(), None));
+        }
+        async fn tool_returned(&self, name: &str, arguments: &Value, result: &str) {
+            self.seen.lock().unwrap().push((
+                "returned".into(),
+                name.into(),
+                arguments.clone(),
+                Some(result.into()),
+            ));
+        }
+    }
+
+    /// A provider whose "fails" tool errors and whose "ok" tool echoes its args.
+    struct FlakyProvider;
+    #[async_trait::async_trait]
+    impl ToolProvider for FlakyProvider {
+        async fn tools(&self) -> Vec<ToolSchema> {
+            vec![
+                ToolSchema::zero_arg("ok", ""),
+                ToolSchema::zero_arg("fails", ""),
+            ]
+        }
+        async fn call(&self, name: &str, args: Value) -> Result<String> {
+            match name {
+                "fails" => Err(anyhow::anyhow!("no such tool")),
+                _ => Ok(format!("{name}({args})")),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_observer_sees_the_start_and_end_of_every_tool_call() {
+        let script = vec![
+            HarnessCompletion {
+                content: String::new(),
+                tool_calls: vec![
+                    HarnessToolCall {
+                        id: "c1".into(),
+                        name: "ok".into(),
+                        arguments: json!({"x": 1}),
+                    },
+                    HarnessToolCall {
+                        id: "c2".into(),
+                        name: "fails".into(),
+                        arguments: json!({"y": 2}),
+                    },
+                ],
+            },
+            plain_answer("done"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let observer = RecordingObserver::new();
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            Arc::new(FlakyProvider),
+            llm.clone(),
+            HarnessConfig::default(),
+            Some(&observer),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "done");
+        let seen = observer.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                ("called".into(), "ok".into(), json!({"x": 1}), None),
+                (
+                    "returned".into(),
+                    "ok".into(),
+                    json!({"x": 1}),
+                    Some("ok({\"x\":1})".into())
+                ),
+                ("called".into(), "fails".into(), json!({"y": 2}), None),
+                (
+                    "returned".into(),
+                    "fails".into(),
+                    json!({"y": 2}),
+                    Some("error: no such tool".into())
+                ),
+            ],
+            "every call must be reported before it runs and after it answers, failure included"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_observer_keeps_the_same_behaviour() {
+        let script = vec![tool_call_turn("c1", "ok", json!({})), plain_answer("done")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            Arc::new(FlakyProvider),
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "done");
+        assert_eq!(llm.call_count(), 2);
+    }
+
+    // ── tool-result capping ──────────────────────────────────────────────
+
+    #[test]
+    fn the_default_result_cap_is_the_unknown_window_fallback() {
+        // One source of truth: a caller that never learned the model's
+        // context window (HarnessConfig's default cap) and a caller whose
+        // model's window is simply unknown must cap a result to the same
+        // size — the defaults used to disagree (24 KiB vs the formula's
+        // 16 KiB).
+        assert_eq!(
+            DEFAULT_TOOL_RESULT_MAX_BYTES,
+            crate::ai_service::AIService::tool_result_max_bytes("a-model-nobody-registered"),
+        );
+    }
+
+    #[test]
+    fn cap_tool_result_cuts_on_a_char_boundary_and_says_what_it_missed() {
+        // A result that fits comes back whole.
+        assert_eq!(cap_tool_result("small", 100), "small");
+
+        // A bigger one keeps a bounded prefix and ends on the note.
+        let big = "x".repeat(10_000);
+        let capped = cap_tool_result(&big, 1_000);
+        assert!(capped.starts_with(&"x".repeat(1_000)));
+        assert!(capped.contains("truncated: 1000 of 10000 bytes"));
+
+        // The cut lands on a char boundary, not mid-UTF-8.
+        let multibyte = "é".repeat(10); // 20 bytes
+        let capped = cap_tool_result(&multibyte, 5);
+        assert!(capped.starts_with("éé"), "4 bytes kept, not 5: {capped:?}");
+        assert!(capped.contains("truncated: 4 of 20 bytes"));
+    }
+
+    #[tokio::test]
+    async fn a_result_over_the_cap_reaches_the_model_capped_and_the_observer_whole() {
+        // The transcript (whatever observes the call) records the FULL
+        // result; the message the model reads back is the capped prefix —
+        // a result bigger than the context window must never reach it.
+        struct BigProvider;
+        #[async_trait::async_trait]
+        impl ToolProvider for BigProvider {
+            async fn tools(&self) -> Vec<ToolSchema> {
+                vec![ToolSchema::zero_arg("big", "returns a lot")]
+            }
+            async fn call(&self, _name: &str, _args: Value) -> Result<String> {
+                Ok("x".repeat(10_000))
+            }
+        }
+        struct SeenResults(Mutex<Vec<String>>);
+        #[async_trait::async_trait]
+        impl ToolObserver for SeenResults {
+            async fn tool_called(&self, _name: &str, _arguments: &Value) {}
+            async fn tool_returned(&self, _name: &str, _arguments: &Value, result: &str) {
+                self.0.lock().unwrap().push(result.to_string());
+            }
+        }
+
+        let script = vec![tool_call_turn("c1", "big", json!({})), plain_answer("done")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let seen = SeenResults(Mutex::new(Vec::new()));
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            Arc::new(BigProvider),
+            llm.clone(),
+            HarnessConfig {
+                tool_result_max_bytes: 1_000,
+                ..HarnessConfig::default()
+            },
+            Some(&seen),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "done");
+        let fed = llm.nth_messages(1)[2]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            fed.len() < 1_200 && fed.contains("truncated: 1000 of 10000 bytes"),
+            "the model reads the capped prefix: {fed:?}"
+        );
+        assert_eq!(
+            seen.0.lock().unwrap()[0].len(),
+            10_000,
+            "the observer got the full result"
+        );
+    }
+
+    // ── an empty completion is a stall, not an answer ─────────────────────
+
+    #[tokio::test]
+    async fn a_silent_completion_returns_at_once_when_nudges_are_off() {
+        // Callers that discard the final text (interpretation, runAgent)
+        // run with no nudges: the empty reply goes back as it came and
+        // exactly one completion is spent.
+        let script = vec![plain_answer("")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider { tools: vec![] });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("hi")],
+            provider,
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "");
+        assert_eq!(llm.call_count(), 1, "no nudges: one completion spent");
+    }
+
+    #[tokio::test]
+    async fn an_empty_completion_is_asked_again_not_recorded() {
+        // A completion with no text and no tool calls is the model ending
+        // its turn without answering — nudge it rather than return "".
+        let script = vec![plain_answer(""), plain_answer("the real answer")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider { tools: vec![] });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("hi")],
+            provider,
+            llm.clone(),
+            HarnessConfig {
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "the real answer");
+        assert_eq!(llm.call_count(), 2);
+        // The second call was nudged: the last message names the empty reply.
+        let last = llm.nth_messages(1).last().unwrap().clone();
+        assert_eq!(last["role"], "system");
+        assert!(last["content"].as_str().unwrap().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn a_model_silent_through_every_nudge_returns_its_empty_reply() {
+        // Nudges ran out — the empty reply goes back as it came, the caller
+        // decides what silence means. Bound: `empty_completion_nudges` (2)
+        // extra completions on top of the first, no more.
+        let script = vec![plain_answer(""), plain_answer(""), plain_answer("")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider { tools: vec![] });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("hi")],
+            provider,
+            llm.clone(),
+            HarnessConfig {
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "");
+        assert_eq!(llm.call_count(), 3, "first completion plus 2 nudges");
+    }
+
+    #[tokio::test]
+    async fn the_budget_wind_down_asks_an_empty_answer_again_too() {
+        // The forced final answer after the tool budget can also come back
+        // empty; it gets the same nudges.
+        let script = vec![
+            tool_call_turn("1", "t", json!({})),
+            tool_call_turn("2", "t", json!({})),
+            plain_answer(""),
+            plain_answer("finally an answer"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("t", "")],
+        });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            provider,
+            llm.clone(),
+            HarnessConfig {
+                max_tool_calls: 2,
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "finally an answer");
+        assert_eq!(
+            llm.call_count(),
+            4,
+            "2 tool rounds + empty wind-down + nudged answer"
+        );
     }
 }

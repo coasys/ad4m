@@ -1,0 +1,362 @@
+{
+  "schemaVersion": 1,
+  "runId": "8f78d0df",
+  "startedAt": "2026-11-03T04:44:12.615Z",
+  "finishedAt": "2026-11-03T04:45:22.571Z",
+  "hardwareClass": "amd-igpu-uma-128",
+  "fingerprint": {
+    "os": "linux",
+    "osVersion": "Ubuntu 26.04 LTS",
+    "kernel": "7.0.0-38-generic",
+    "arch": "x64",
+    "cpu": {
+      "model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cores": 16,
+      "threads": 32
+    },
+    "memoryBytes": 131891142656,
+    "gpus": [
+      {
+        "vendor": "amd",
+        "name": "Advanced Micro Devices, Inc. [AMD/ATI] Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]",
+        "vramBytes": 536870912,
+        "gttBytes": 65945571328,
+        "unified": true,
+        "pciId": "0000:c2:00.0"
+      }
+    ],
+    "backends": [
+      "cpu",
+      "rocm",
+      "vulkan"
+    ],
+    "gpuBudgetBytes": 66482442240,
+    "drivers": {
+      "rocm": "10.0.0",
+      "amdgpu": "in-kernel 7.0.0-38-generic"
+    },
+    "id": "d9d043fd"
+  },
+  "executor": {
+    "commit": "cf70b3b1b",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "3d1bf4809afcd0a05f94d17fb4b6f50fb7c2b6df"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "whisper-server"
+    ],
+    "services": [
+      "stt"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "whisper-server": {
+      "status": "available",
+      "builds": [
+        "linux-x64-cpu"
+      ],
+      "mode": "spawned",
+      "version": "b5454"
+    }
+  },
+  "cells": [
+    {
+      "provider": "whisper-server",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "modelId": "whisper-base.en-q5_1",
+        "remoteModel": "whisper-base.en-q5_1",
+        "sizeBytes": 59721011,
+        "memoryBytes": 300000000,
+        "license": "MIT",
+        "params": "74M",
+        "source": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en-q5_1.bin"
+      },
+      "runtimeBuild": "linux-x64-cpu",
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--request-path",
+        "/v1/audio",
+        "--inference-path",
+        "/transcriptions",
+        "-t",
+        "8"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.357: \"The full passage like rain in the morning, hearing the sunshine by the evening.\"",
+          "value": 0.357,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.357: \"The full passage like rain in the morning, hearing the sunshine by the evening.\"",
+          "value": 0.357,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 897,
+        "noisyLanguage": "english",
+        "noisyNoHintWer": 0.357,
+        "noisyNoHintText": "The full passage like rain in the morning, hearing the\n sunshine by the evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.304,
+          "min": 0,
+          "max": 0.357,
+          "mean": 0.089
+        },
+        "werMean": 0.089,
+        "streamWerMean": 0.089,
+        "rtf": {
+          "n": 12,
+          "median": 0.112,
+          "p95": 0.165,
+          "min": 0.076,
+          "max": 0.188,
+          "mean": 0.114
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 472.9,
+          "p95": 813.8,
+          "min": 431.1,
+          "max": 928.5,
+          "mean": 533.1
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 515.8,
+          "p95": 615.7,
+          "min": 431,
+          "max": 619.2,
+          "mean": 520.4
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 472.1,
+          "p95": 998.6,
+          "min": 429,
+          "max": 1176.3,
+          "mean": 567.1
+        },
+        "executorOverheadMs": 0.8,
+        "peakRssBytes": 243937280,
+        "peakGpuBytes": 0,
+        "serverReadyMs": 261,
+        "endpointHealth": "UNREACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 300000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 19269
+    },
+    {
+      "provider": "whisper-server",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "modelId": "whisper-small-q5_1",
+        "remoteModel": "whisper-small-q5_1",
+        "sizeBytes": 190085487,
+        "memoryBytes": 500000000,
+        "license": "MIT",
+        "params": "244M",
+        "source": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q5_1.bin"
+      },
+      "runtimeBuild": "linux-x64-cpu",
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--request-path",
+        "/v1/audio",
+        "--inference-path",
+        "/transcriptions",
+        "-t",
+        "8"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.214: \"the forecast said light rain in the moon, clearing to sunshine by evening.\"",
+          "value": 0.214,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.214: \"the forecast said light rain in the moon, clearing to sunshine by evening.\"",
+          "value": 0.214,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 1381,
+        "noisyLanguage": "english",
+        "noisyNoHintWer": 0.214,
+        "noisyNoHintText": "the forecast said light rain in the moon, clearing to\n sunshine by evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.182,
+          "min": 0,
+          "max": 0.214,
+          "mean": 0.054
+        },
+        "werMean": 0.054,
+        "streamWerMean": 0.054,
+        "rtf": {
+          "n": 12,
+          "median": 0.253,
+          "p95": 0.33,
+          "min": 0.191,
+          "max": 0.343,
+          "mean": 0.263
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 1199.4,
+          "p95": 1497,
+          "min": 1001.1,
+          "max": 1575,
+          "mean": 1239.8
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 1240.6,
+          "p95": 1356.9,
+          "min": 1014.8,
+          "max": 1377.3,
+          "mean": 1218.3
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 1081.6,
+          "p95": 1534.7,
+          "min": 1020.8,
+          "max": 1555.2,
+          "mean": 1181.2
+        },
+        "executorOverheadMs": 117.8,
+        "peakRssBytes": 437809152,
+        "peakGpuBytes": 0,
+        "serverReadyMs": 262,
+        "endpointHealth": "UNREACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 500000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 42528
+    }
+  ]
+}

@@ -9,6 +9,11 @@ parameters:
   run-nightly-llm:
     type: boolean
     default: false
+  # The WE branch, tag or full commit the nightly `coasys-spaces` job tests with this commit's
+  # executor and SDK.
+  we-ref:
+    type: string
+    default: dev
 
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
@@ -111,10 +116,12 @@ commands:
           # tests fail with "No space left on device" and then en masse
           # with PoisonError (#1123, 2026-09-25). Skip dirs that a live
           # executor still uses; a concurrent job's dir is younger than 60 min.
+          # WE's live harness (coasys-spaces) makes /tmp/we-live-web-<random> and
+          # removes it when the suite ends; a killed run leaves it.
           name: Clean up stale test executor dirs in /tmp (older than 60 min)
           command: |
-            in_use=$(pgrep -a -f 'ad4m-executor run' | grep -oE '/tmp/ad4m-[0-9a-f]+' | sort -u || true)
-            find /tmp -maxdepth 1 -name 'ad4m-*' -user "$(id -u)" -mmin +60 -print 2>/dev/null \
+            in_use=$(pgrep -a -f 'ad4m-executor run' | grep -oE '/tmp/(ad4m-[0-9a-f]+|we-live-web-[A-Za-z0-9]+)' | sort -u || true)
+            find /tmp -maxdepth 1 \( -name 'ad4m-*' -o -name 'we-live-web-*' \) -user "$(id -u)" -mmin +60 -print 2>/dev/null \
               | grep -vxF -f <(printf '%s\n' $in_use /nonexistent) \
               | xargs -r -d '\n' rm -rf || true
             df -h /tmp | tail -1
@@ -279,6 +286,21 @@ commands:
             ls -l bootstrap-languages/*/build/bundle.js bootstrap-languages/local/dist/docker_seed.json \
                   link-server/dist/index.js .hc-toolchain/bin/
 
+  test_artifacts_dir:
+    description: "Give this job an empty test-artifact directory, test-artifacts/ in the workdir, as $TEST_ARTIFACTS"
+    steps:
+      - run:
+          # Not a shared /tmp dir: the runners on this host share /tmp, so concurrent jobs mixed
+          # each other's mocha.log and logs, and old runs' files were stored again. The workdir
+          # belongs to one runner instance, which runs one job at a time; emptying it here makes
+          # it this job's. store_artifacts takes `path: test-artifacts` (relative to the workdir):
+          # it does not expand environment variables.
+          name: Create an empty test-artifact directory for this job
+          command: |
+            rm -rf test-artifacts
+            mkdir -p test-artifacts
+            echo "export TEST_ARTIFACTS=\"$PWD/test-artifacts\"" >> "$BASH_ENV"
+
   setup_integration_test_environment:
     description: "Setup integration test environment from build's stash (Holochain or local-only bootstrap languages)"
     parameters:
@@ -299,6 +321,7 @@ commands:
     steps:
       - fix_workdir
       - checkout
+      - test_artifacts_dir
       - when:
           condition: << parameters.local >>
           steps:
@@ -380,6 +403,11 @@ jobs:
           # block above against healthy and deliberately broken workdirs (#1325).
           name: Test the fix_workdir step
           command: bash scripts/ci-fix-workdir.test.sh
+      - run:
+          # Fake executor, local git repo, local HTTP server; about a second. The nightly
+          # coasys-spaces job's executor fetch, skip and model check.
+          name: Test coasys-spaces.sh
+          command: bash scripts/coasys-spaces.test.sh
       - build_adam
       - build_integration_inputs
       - run:
@@ -631,6 +659,11 @@ jobs:
           name: JS unit tests
           command: pnpm exec turbo run test --concurrency=1 --filter='!@coasys/rust-ad4m-executor' --filter='!@coasys/ad4m-cli'
           no_output_timeout: 30m
+      - run:
+          # The wind tunnel's pure parts (no model server), including the check that
+          # ai-wind-tunnel/recommendations.json is what the checked-in evidence derives.
+          name: AI wind tunnel unit tests
+          command: cd ./tests/js && pnpm run test-ai-wind-tunnel-unit
 
   # The regular JS integration suite: local bootstrap languages only, no
   # Holochain conductor. Two-executor suites share languages, neighbourhoods
@@ -644,25 +677,25 @@ jobs:
       - run:
           name: Run JS integration tests (local languages, no Holochain)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-local 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-local 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
           when: always
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             shopt -s nullglob
             for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
               agent_id="$(basename "$(dirname "$ad4m_dir")")"
-              mkdir -p "/tmp/test-artifacts/$agent_id"
-              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
             done
-            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+            lsof -i -P -n 2>/dev/null | grep LISTEN > "$TEST_ARTIFACTS/listening-ports.txt" || true
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # SFU and mesh calls end to end through the SDK: managed users on one
@@ -678,13 +711,13 @@ jobs:
       - run:
           name: Run SFU end-to-end tests (local languages, no Holochain)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-sfu-e2e 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-sfu-e2e 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 20m
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # SFU and mesh calls in real Chromium, Firefox and WebKit, mixed, through the
@@ -723,13 +756,13 @@ jobs:
       - run:
           name: Run cross-browser SFU and mesh call tests
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && SFU_BROWSERS_REQUIRED=1 pnpm run test-main-sfu-browsers 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && SFU_BROWSERS_REQUIRED=1 pnpm run test-main-sfu-browsers 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 20m
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # Multi-node suite over the server-link-language: Alice + Bob on local
@@ -749,25 +782,25 @@ jobs:
       - run:
           name: Run multi-node server-link integration tests (Alice + Bob, no Holochain)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-server-link 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-server-link 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
           when: always
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             shopt -s nullglob
             for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
               agent_id="$(basename "$(dirname "$ad4m_dir")")"
-              mkdir -p "/tmp/test-artifacts/$agent_id"
-              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
             done
-            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+            lsof -i -P -n 2>/dev/null | grep LISTEN > "$TEST_ARTIFACTS/listening-ports.txt" || true
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # Identity end to end: a real identity-store and three executors (create, link,
@@ -782,24 +815,24 @@ jobs:
       - run:
           name: Run identity integration tests (identity-store, three executors)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-identity 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-identity 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
           when: always
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             shopt -s nullglob
             for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
               agent_id="$(basename "$(dirname "$ad4m_dir")")"
-              mkdir -p "/tmp/test-artifacts/$agent_id"
-              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
             done
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   # Multi-node suites that need Holochain: links syncing between executors
@@ -812,26 +845,26 @@ jobs:
       - run:
           name: Run multi-node Holochain integration tests (Alice + Bob)
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-multi-node-holochain 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-multi-node-holochain 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
           when: always
           command: |
-            mkdir -p /tmp/test-artifacts
+            mkdir -p "${TEST_ARTIFACTS:?}"
             shopt -s nullglob
             for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
               agent_id="$(basename "$(dirname "$ad4m_dir")")"
-              mkdir -p "/tmp/test-artifacts/$agent_id"
-              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
-              cp -r "$ad4m_dir/holochain" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
+              cp -r "$ad4m_dir/holochain" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
             done
-            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+            lsof -i -P -n 2>/dev/null | grep LISTEN > "$TEST_ARTIFACTS/listening-ports.txt" || true
       - store_artifacts:
           when: always
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: test-logs
 
   integration-tests-multi-user-simple:
@@ -975,12 +1008,96 @@ jobs:
           name: Collect logs on failure
           when: on_fail
           command: |
-            mkdir -p /tmp/test-artifacts
-            cp -r /tmp/ad4m-sfu-test-* /tmp/test-artifacts/ 2>/dev/null || true
+            mkdir -p "${TEST_ARTIFACTS:?}"
+            cp -r /tmp/ad4m-sfu-test-* "$TEST_ARTIFACTS/" 2>/dev/null || true
       - store_artifacts:
           when: on_fail
-          path: /tmp/test-artifacts
+          path: test-artifacts
           destination: sfu-test-logs
+
+  # The Coasys product path in WE, end to end, on this commit: a space, a call, its
+  # transcript, extraction into the social DNA's classes, and the flows on what was found
+  # (WE apps/we-web/tests/live/coasys-spaces/, `test:spaces`). The suite lives in WE because
+  # it drives WE's UI; this job runs it with this commit's executor and SDK, so the client
+  # and the executor are one commit and a failure has one owner. WE comes from the `we-ref`
+  # parameter (default dev). Nightly only, in `nightly-llm-e2e`.
+  #
+  # The shell steps are in scripts/coasys-spaces.sh, which also runs by hand (`all`):
+  # - the executor published on this host for the commit (the `build` job's publish step),
+  #   checked against its manifest; a build only when there is none;
+  # - core and connect built and packed, and WE's ad4m pin (root pnpm.overrides) pointed at
+  #   the two tarballs; WE installs with its own pnpm (its packageManager, pnpm 10);
+  # - we-web built with WE_SEED=seeds/coasys.seed.json, then `test:spaces` in the real tier:
+  #   Whisper in the executor, extraction on the host's Ollama.
+  # It halts green when this ad4m commit and the WE commit `we-ref` names already passed
+  # here: the pipeline fires several times a night, and WE moves on its own, so either repo
+  # moving runs it again. The record is a file on the runner host (no API token).
+  # Playwright's Chromium: the debian13 builds and browsers path of integration-tests-sfu-browsers.
+  coasys-spaces:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian13-x64
+      PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
+      WE_REF: << pipeline.parameters.we-ref >>
+      COASYS_SPACES_TIER: real
+      COASYS_SPACES_LLM_BASE_URL: http://localhost:11434/v1
+      # The model staging and llm-e2e use, which Marvin keeps loaded: one load on the GPU.
+      COASYS_SPACES_LLM_MODEL: qwen3.8-27b-48k
+      # Its own directory, which preflight empties; one coasys-spaces runs at a time (serial
+      # group nightly-llm).
+      COASYS_SPACES_ARTIFACTS: /tmp/coasys-spaces-artifacts
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: Skip if this ad4m commit and this WE commit already passed
+          command: |
+            rc=0
+            bash scripts/coasys-spaces.sh preflight || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+              exit 0
+            fi
+            exit "$rc"
+      - run:
+          # Before any build: a missing model fails in seconds, with what to do.
+          name: Check that Ollama answers and has the model
+          command: bash scripts/coasys-spaces.sh llm-check
+      - run:
+          name: Get the executor for this commit (published, else build)
+          command: bash scripts/coasys-spaces.sh executor
+          no_output_timeout: 30m
+      - run:
+          name: Build and pack core and connect
+          command: bash scripts/coasys-spaces.sh sdk
+          no_output_timeout: 20m
+      - run:
+          name: Clone WE at we-ref and install it with this commit's SDK
+          command: bash scripts/coasys-spaces.sh we
+          no_output_timeout: 20m
+      - run:
+          # Usually a no-op: integration-tests-sfu-browsers installs the same libraries nightly.
+          name: Install Chromium's system libraries
+          command: |
+            sudo apt-get update -qq
+            ./tests/js/scripts/install-browser-deps.sh
+      - run:
+          name: Build we-web with the Coasys seed
+          command: bash scripts/coasys-spaces.sh build-web
+          no_output_timeout: 20m
+      - run:
+          name: Run the coasys-spaces suite (WE test:spaces)
+          command: bash scripts/coasys-spaces.sh test
+          no_output_timeout: 60m
+      - run:
+          name: Record this commit pair as passed
+          command: bash scripts/coasys-spaces.sh record
+      - store_artifacts:
+          when: always
+          path: /tmp/coasys-spaces-artifacts
+          destination: coasys-spaces
 
   integration-tests-cli:
     machine: true
@@ -1062,11 +1179,18 @@ jobs:
             tar -xJf "$dir/shellcheck.tar.xz" -C "$dir"
             # -x follows `source`d files, so a sourced helper is checked too.
             "$dir/shellcheck-v0.10.0/shellcheck" -x deploy/staging/update.sh deploy/staging/test/update.test.sh
+            # The image's AI endpoints from the environment (sourced by docker-entrypoint.sh).
+            "$dir/shellcheck-v0.10.0/shellcheck" -x -s bash docker/ai-env.sh docker/ai-env.test.sh
             rm -rf "$dir"
       - run:
           name: update.sh test
           # Stubbed build and systemd; see the job comment above.
           command: deploy/staging/test/update.test.sh
+      - run:
+          name: docker AI env test
+          # docker/ai-env.sh against a fake executor: the AD4M_AI_* variables register
+          # the endpoints, models and defaults they name, once.
+          command: bash docker/ai-env.test.sh
 
 workflows:
   version: 2
@@ -1115,12 +1239,14 @@ workflows:
 
   # Nightly against `dev`. An API trigger (or a Project Trigger) sets
   # `run-nightly-llm`. In-config cron does not reach this project.
-  # Same resource class (Marvin) so Ollama is local. llm-e2e and the SFU
-  # wind tunnel start together and do not build on each other's result:
-  # an llm-e2e failure must not skip the tunnel, and a tunnel failure must
-  # not skip llm-e2e. Three API triggers fire this pipeline every night on
+  # Same resource class (Marvin) so Ollama is local. llm-e2e, the SFU
+  # wind tunnel and coasys-spaces start together and do not build on each
+  # other's result: an llm-e2e failure must not skip the tunnel, and a tunnel
+  # failure must not skip llm-e2e. Three API triggers fire this pipeline every night on
   # one host. Each job has its own serial group, so a second trigger waits
-  # instead of sharing ports, DIDs and the GPU with the first.
+  # instead of sharing ports, DIDs and the GPU with the first. llm-e2e and
+  # coasys-spaces share one group: both run models on the host's Ollama and
+  # GPU, and together they make extraction timeouts likelier.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -1133,3 +1259,5 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-sfu
       - integration-tests-sfu-browsers:
           serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
+      - coasys-spaces:
+          serial-group: << pipeline.project.slug >>/nightly-llm

@@ -106,6 +106,53 @@ pub fn writable_tool_names() -> Vec<&'static str> {
     SESSION_WRITES.to_vec()
 }
 
+/// Whether the tool called `name` writes — the executor's one answer to "did
+/// this call change something". Both the session's write-tools gate and the
+/// `writes` flag every tool step's transcript row carries read it, so a
+/// client never has to guess from the name.
+///
+/// The sources, in order:
+///
+/// - a name on [`SESSION_READS`] does not write, one on [`SESSION_WRITES`]
+///   does — the session lists are the authority for the perspective-scoped
+///   surface;
+/// - a template tool writes what the bundle's own manifest declares
+///   (`tool_bundles::builtin::tool(..).writes`), covering names the lists
+///   predate;
+/// - any other static tool reads its `side_effects` table row (the rest of
+///   the surface an AI session offers: `list_perspectives` reads,
+///   `add_perspective` writes, and so on);
+/// - a generated per-class tool (only ever offered under
+///   `dynamicClassTools`) is classified by its verb: `create` / `set` /
+///   `add` / `remove` / `delete` write, `query` / `get` / `list` read;
+/// - a name none of those knows **writes** — the safe side, both for a gate
+///   and for a flag a UI trusts.
+pub fn tool_writes(name: &str) -> bool {
+    use crate::ai_service::harness::provider::SideEffect;
+    use crate::mcp::tools::side_effects::{dynamic_tool_side_effect, static_side_effect};
+    if SESSION_READS.contains(&name) {
+        return false;
+    }
+    if SESSION_WRITES.contains(&name) {
+        return true;
+    }
+    if let Some(tool) = crate::tool_bundles::builtin::tool(name) {
+        return tool.writes;
+    }
+    if let Some(effect) = static_side_effect(name) {
+        return effect == SideEffect::Write;
+    }
+    dynamic_tool_side_effect(name).unwrap_or(SideEffect::Write) == SideEffect::Write
+}
+
+/// Whether `name` is on a session's tool surface at all: the perspective-scoped
+/// tools (`SESSION_READS` ∪ `SESSION_WRITES`). A tool may write and still not be
+/// nameable — `add_perspective` writes but acts on no `perspective_id`, so it
+/// stays out.
+fn session_tool(name: &str) -> bool {
+    SESSION_READS.contains(&name) || SESSION_WRITES.contains(&name)
+}
+
 /// Refuse a request before any model is asked: no conversation, a turn of an unknown role, or a
 /// write tool that is not one.
 pub fn check_request(request: &AgentSessionRequest<'_>) -> Result<(), String> {
@@ -129,16 +176,15 @@ pub fn check_request(request: &AgentSessionRequest<'_>) -> Result<(), String> {
     if request.max_tool_calls == 0 {
         return Err("`maxToolCalls` must be greater than 0".into());
     }
-    let writable = writable_tool_names();
     if let Some(bad) = request
         .write_tools
         .iter()
-        .find(|t| !writable.contains(&t.as_str()))
+        .find(|t| !session_tool(t) || !tool_writes(t))
     {
         return Err(format!(
             "{bad:?} is not a tool a session may write with. A session writes only inside its \
              perspective, with: {}",
-            writable.join(", ")
+            writable_tool_names().join(", ")
         ));
     }
     Ok(())
@@ -237,8 +283,8 @@ pub async fn run_agent_session(
             None,
             // No request headers reach the tools, so nothing shows them local.
             crate::agent::capabilities::ListenerReach::Network,
-            // Only the static surface is offered (`session_tools`); the flag gates the MCP
-            // transport, and the harness bridge lists the per-class tools whatever it says.
+            // Only the static surface is offered (`session_tools`); the flag also
+            // gates what the harness bridge lists, which is the same set here.
             false,
         )
         .scoped_to(request.perspective_uuid)
@@ -278,15 +324,17 @@ pub(crate) fn session_tools(
             Value::String(perspective_uuid.to_string()),
         )]),
     ));
-    // Only names on the session lists: a write the caller named that is not one (`check_request`
-    // refuses those first) is never offered either.
+    // Only names on the session surface: a write the caller named that is not
+    // one (`check_request` refuses those first) is never offered either. The
+    // read-or-named-write decision is `tool_writes`'s, the same answer the
+    // transcript's `writes` flag reads.
     let allowed_writes: HashSet<String> = write_tools
         .iter()
-        .filter(|t| SESSION_WRITES.contains(&t.as_str()))
+        .filter(|t| session_tool(t) && tool_writes(t))
         .cloned()
         .collect();
     Arc::new(FilteredProvider::new(bound, move |t: &ToolSchema| {
-        SESSION_READS.contains(&t.name.as_str()) || allowed_writes.contains(&t.name)
+        session_tool(&t.name) && (!tool_writes(&t.name) || allowed_writes.contains(&t.name))
     }))
 }
 
@@ -325,6 +373,14 @@ pub(crate) async fn converse(
         model,
         HarnessConfig {
             max_tool_calls: request.max_tool_calls,
+            // Sized from the model's context window: a runAgent answer can
+            // carry a tool result home; one bigger than the window must not
+            // push the request over it.
+            tool_result_max_bytes: crate::ai_service::AIService::tool_result_max_bytes(model_id),
+            // A silent completion goes back as it came — the nudge's
+            // "the person is still waiting" is a session's framing, not
+            // runAgent's, and it would cost a billed completion either way.
+            empty_completion_nudges: 0,
         },
         None,
         gate,
@@ -416,6 +472,62 @@ mod tests {
                 "{inside}"
             );
         }
+    }
+
+    #[test]
+    fn the_session_lists_agree_with_tool_writes_and_do_not_overlap() {
+        for read in SESSION_READS {
+            assert!(!tool_writes(read), "{read} is a read marked write");
+        }
+        for write in SESSION_WRITES {
+            assert!(tool_writes(write), "{write} is a write marked read");
+        }
+        assert!(
+            SESSION_READS.iter().all(|r| !SESSION_WRITES.contains(r)),
+            "the session lists overlap"
+        );
+    }
+
+    #[test]
+    fn tool_writes_classifies_every_surface_a_step_can_name() {
+        // The rest of the static surface an AI session offers (runAgent
+        // never lists them, but ai.session* turns do store their steps).
+        assert!(!tool_writes("list_perspectives"));
+        assert!(!tool_writes("get_my_did"));
+        assert!(tool_writes("add_perspective"));
+        assert!(tool_writes("set_agent_profile"));
+        // The names We's old prefix guess got wrong: these read.
+        for name in ["flow_state", "flow_actions", "flow_valid_outputs"] {
+            assert!(!tool_writes(name), "{name} is a read marked write");
+        }
+        // Template tools: the bundle's own `writes` declaration —
+        // `template_create` is declared but not offered (NOT_OFFERED).
+        assert!(!tool_writes("template_read"));
+        assert!(tool_writes("template_update"));
+        assert_eq!(
+            tool_writes("template_create"),
+            crate::tool_bundles::builtin::tool("template_create")
+                .map(|t| t.writes)
+                .unwrap_or(true),
+        );
+        // Generated per-class tools (only on offer under dynamicClassTools).
+        for name in ["note_query", "note_list", "note_get", "note_get_items"] {
+            assert!(!tool_writes(name), "{name} is a read marked write");
+        }
+        for name in [
+            "note_create",
+            "note_delete",
+            "note_set_title",
+            "note_add_items",
+            "note_remove_items",
+        ] {
+            assert!(tool_writes(name), "{name} is a write marked read");
+        }
+        // A class whose name collides with the write verbs still reads as its verb says.
+        assert!(!tool_writes("signal_query"));
+        assert!(tool_writes("signal_create"));
+        // Unknown: the safe side.
+        assert!(tool_writes("made_up_tool"));
     }
 
     #[test]
