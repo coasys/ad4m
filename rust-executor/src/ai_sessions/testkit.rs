@@ -30,6 +30,8 @@ pub(super) fn ctx_for(session: Session) -> RequestContext {
         cancel_token: None,
         session: Arc::new(session),
         connection_id: None,
+        peer: None,
+        reason: None,
     }
 }
 
