@@ -126,7 +126,8 @@ fn notification_pool_name(uuid: &str) -> String {
 ///   * any SHACL-vocabulary predicate (`sh://...`) which only
 ///     appears on property-shape triples written by the SHACL
 ///     writer, not on regular application data, or
-///   * an abstract-class marker or alias (#1435).
+///   * an abstract-class marker or alias (#1435), or
+///   * a class's auto-accept rule, which sits on the shape node only.
 ///
 /// Used by `diff_from_link_language` to decide whether to
 /// invalidate the shape cache. The scan is one loop over
@@ -146,11 +147,11 @@ fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
         }
         match predicate {
             "ad4m://has_subject_class" | "ad4m://sdna" | "ad4m://shape" => return true,
-            // The abstract-class marker and aliases (#1435) can sync apart
-            // from the rest of a shape.
-            super::shacl_parser::ABSTRACT_PREDICATE | super::shacl_parser::ALIAS_PREDICATE => {
-                return true
-            }
+            // The abstract-class marker, aliases (#1435) and the auto-accept
+            // rule can sync apart from the rest of a shape.
+            super::shacl_parser::ABSTRACT_PREDICATE
+            | super::shacl_parser::ALIAS_PREDICATE
+            | super::shacl_parser::AUTO_ACCEPT_PREDICATE => return true,
             "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
             _ => {}
         }
@@ -230,6 +231,24 @@ mod inbound_touches_shacl_tests {
             crate::perspectives::shacl_parser::ALIAS_PREDICATE,
             "literal:string:%7B%7D",
         )])));
+    }
+
+    /// A member changing only a class's auto-accept rule sends a diff with
+    /// that one link (added, or removed when the rule is dropped). A cached
+    /// shape that kept the old rule would go on accepting items the class
+    /// now leaves to a person.
+    #[test]
+    fn auto_accept_rule_counts_as_shacl() {
+        let rule = link(
+            "ns://ItemShape",
+            crate::perspectives::shacl_parser::AUTO_ACCEPT_PREDICATE,
+            "literal:string:never",
+        );
+        assert!(inbound_touches_shacl(&diff(vec![rule.clone()])));
+        assert!(inbound_touches_shacl(&DecoratedPerspectiveDiff {
+            additions: vec![],
+            removals: vec![rule],
+        }));
     }
 
     #[test]

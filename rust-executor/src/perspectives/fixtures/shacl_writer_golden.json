@@ -6,6 +6,7 @@
     "target_class": "zoo://Dog",
     "parent_shapes": ["zoo://AnimalShape"],
     "interpretation_hint": "A dog",
+    "auto_accept": "always",
     "constructor_actions": [{ "action": "addLink", "source": "this", "predicate": "zoo://kind", "target": "zoo://dog" }],
     "destructor_actions": [{ "action": "removeLink", "source": "this", "predicate": "zoo://kind", "target": "zoo://dog" }],
     "properties": [
@@ -74,6 +75,7 @@
     {"source": "zoo://DogShape", "predicate": "sh://targetClass", "target": "zoo://Dog"},
     {"source": "zoo://DogShape", "predicate": "sh://node", "target": "zoo://AnimalShape"},
     {"source": "zoo://DogShape", "predicate": "ad4m://interpretation_hint", "target": "literal:string:A dog"},
+    {"source": "zoo://DogShape", "predicate": "ad4m://auto_accept", "target": "literal:string:always"},
     {"source": "zoo://DogShape", "predicate": "ad4m://constructor", "target": "literal:string:[{\"action\":\"addLink\",\"source\":\"this\",\"predicate\":\"zoo://kind\",\"target\":\"zoo://dog\"}]"},
     {"source": "zoo://DogShape", "predicate": "ad4m://destructor", "target": "literal:string:[{\"action\":\"removeLink\",\"source\":\"this\",\"predicate\":\"zoo://kind\",\"target\":\"zoo://dog\"}]"},
     {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.name"},

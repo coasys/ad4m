@@ -1634,6 +1634,7 @@ mod tests {
             name_lower: "note".into(),
             shape_uri: None,
             all_predicates: vec![],
+            auto_accept: None,
             properties: vec![
                 // Typed relation — has sh:class.
                 ShaclProperty {

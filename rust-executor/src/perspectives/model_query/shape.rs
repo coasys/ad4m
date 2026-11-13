@@ -14,8 +14,9 @@
 //! the integration test suite, which builds shapes from JSON fixtures
 //! without going through the SHACL writer.
 
-use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
+use super::types::{AutoAccept, ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
+use crate::perspectives::shacl_parser::AUTO_ACCEPT_PREDICATE;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
@@ -375,12 +376,34 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 .and_then(|r| r["hint"].as_str().map(decode_literal_string_target))
         });
 
+    // The class-level auto-accept rule, also on the shape node. Every stored
+    // value is read, not the first: two members registering the class with
+    // different rules leave two links, and picking one would make the rule
+    // depend on row order.
+    let auto_accept_query = format!(
+        r#"
+        SELECT DISTINCT ?autoAccept WHERE {{
+            <{shape_uri}> <{AUTO_ACCEPT_PREDICATE}> ?autoAccept .
+        }}
+        "#
+    );
+    let auto_accept_values: Vec<String> = store
+        .query(&auto_accept_query)
+        .ok()
+        .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r["autoAccept"].as_str().map(decode_literal_string_target))
+        .collect();
+    let auto_accept = single_auto_accept_rule(class_name, &auto_accept_values);
+
     Ok(ModelShape {
         target_class,
         shape_uri,
         properties,
         include_relations,
         interpretation_hint: class_hint,
+        auto_accept,
     })
 }
 
@@ -461,6 +484,37 @@ fn parse_bool_literal_target(raw: Option<&str>) -> Option<bool> {
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
+    }
+}
+
+/// The one auto-accept rule the stored values agree on, or `None` (read as
+/// `never` by the interpretation tail) when they do not name exactly one.
+///
+/// `None` has three producers, all meaning "a person decides": no value
+/// stored, a value outside the declared set, and several different values.
+/// The last two only arise from raw link writes or sync (the SHACL writer
+/// rejects an unknown value and writes one link); they are logged and never
+/// fail the shape load.
+fn single_auto_accept_rule(class_name: &str, stored: &[String]) -> Option<AutoAccept> {
+    let mut distinct: Vec<&str> = stored.iter().map(String::as_str).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    match distinct.as_slice() {
+        [] => None,
+        [one] => AutoAccept::parse(one).or_else(|| {
+            log::warn!(
+                "SHACL shape for class '{class_name}': unknown auto_accept value \
+                 '{one}', treating it as 'never'"
+            );
+            None
+        }),
+        several => {
+            log::warn!(
+                "SHACL shape for class '{class_name}': conflicting auto_accept values \
+                 {several:?}, treating them as 'never'"
+            );
+            None
+        }
     }
 }
 
@@ -725,6 +779,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         properties,
         include_relations,
         interpretation_hint: None,
+        auto_accept: None,
     })
 }
 

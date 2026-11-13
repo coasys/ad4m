@@ -307,6 +307,14 @@ export class SHACLShape {
    *  on `ModelShape.interpretation_hint` by the Rust model query. */
   interpretationHint?: string;
 
+  /** AD4M-specific: whether inferred instances of this class are accepted
+   *  automatically after an interpretation pass — `"always"`, `"when_placed"`
+   *  (only once a parent relation value exists) or `"never"`. Emitted as one
+   *  `ad4m://auto_accept` link on the shape node and surfaced on
+   *  `ModelShape.auto_accept` by the Rust model query. Absent behaves as
+   *  `"never"`. */
+  autoAccept?: 'always' | 'when_placed' | 'never';
+
   /** AD4M-specific: an abstract class. Querying it reads every concrete class
    *  that has its property names; it is never created. Emitted as one
    *  `ad4m://abstract` link on the shape node. */
@@ -466,6 +474,17 @@ export class SHACLShape {
         source: this.nodeShapeUri,
         predicate: "ad4m://interpretation_hint",
         target: `literal:string:${this.interpretationHint}`
+      });
+    }
+
+    // Class-level auto-accept rule — read by the Rust model query as
+    // `ModelShape.auto_accept`; the interpretation pass auto-accepts
+    // inferred instances of classes that declare `always`/`when_placed`.
+    if (this.autoAccept) {
+      links.push({
+        source: this.nodeShapeUri,
+        predicate: "ad4m://auto_accept",
+        target: `literal:string:${this.autoAccept}`
       });
     }
 
@@ -781,6 +800,9 @@ export class SHACLShape {
     shape.constructor_actions = json(shapeUri, "ad4m://constructor");
     shape.destructor_actions = json(shapeUri, "ad4m://destructor");
     shape.interpretationHint = str(shapeUri, "ad4m://interpretation_hint");
+    const autoAccept = str(shapeUri, "ad4m://auto_accept");
+    if (['always', 'when_placed', 'never'].includes(autoAccept!))
+      shape.autoAccept = autoAccept as SHACLShape['autoAccept'];
     if (bool(shapeUri, "ad4m://abstract")) shape.isAbstract = true;
 
     for (const propLink of links.filter(l => l.source === shapeUri && l.predicate === "sh://property")) {
@@ -850,6 +872,7 @@ export class SHACLShape {
       target_class: this.targetClass,
       parent_shapes: this.parentShapes.length > 0 ? this.parentShapes : undefined,
       interpretation_hint: this.interpretationHint,
+      auto_accept: this.autoAccept,
       abstract: this.isAbstract || undefined,
       properties: this.properties.map(p => ({
         path: p.path,
@@ -958,6 +981,15 @@ export class SHACLShape {
     }
     if (json.interpretation_hint) {
       shape.interpretationHint = json.interpretation_hint;
+    }
+    if (json.auto_accept !== undefined && json.auto_accept !== null) {
+      if (!['always', 'when_placed', 'never'].includes(json.auto_accept)) {
+        throw new Error(
+          `Invalid auto_accept "${json.auto_accept}" on shape ${json.node_shape_uri ?? json.target_class}: ` +
+          `expected one of "always", "when_placed", "never"`
+        );
+      }
+      shape.autoAccept = json.auto_accept;
     }
     if (json.abstract) {
       shape.isAbstract = true;

@@ -21,7 +21,12 @@
 //! The engine overwrites a real value **only when it can prove the LLM owns it**;
 //! otherwise it stages the proposal in the overlay and leaves the real value
 //! untouched:
-//!   * real field unset → the LLM is filling in a fresh value → write it.
+//!   * real field unset and the overlay stages nothing for it → the LLM is
+//!     filling in a fresh value → write it. Real field unset *while* the
+//!     overlay still stages a value for it → the value existed at snapshot
+//!     time and a person deleted it since → leave it unset; the re-proposed
+//!     value is staged as a suggestion only, or the deletion is silently
+//!     undone.
 //!   * base has an overlay and real == last-recorded `inferred/<p>` → the LLM
 //!     wrote it and it's untouched → overwrite *and* bump `inferred/<p>` to match.
 //!   * base has an overlay and real ≠ `inferred/<p>` → a human diverged → **leave
@@ -35,16 +40,21 @@
 //!     the per-pass run node and its provenance metadata.
 //!   * [`gate`] — the §4 human-divergence gate and the graph reads it needs.
 //!   * [`write`] — persisting an overlay (mint-or-bump + `inferred/<p>` links).
+//!   * [`auto_accept`] — the class-level `auto_accept` rule: accepting eligible
+//!     inferred items at the end of a pass through the human path's own
+//!     [`accept_interpretation`].
 //!   * this module — the orchestration ([`apply_with_overlay`]) tying them
 //!     together, plus the shared predicate vocabulary. The generic
 //!     single-valued link upsert (`replace_link`) lives in the `graph` submodule.
 
 mod accept;
+mod auto_accept;
 mod classes;
 mod gate;
 mod write;
 
 pub(crate) use accept::{accept_interpretation, list_overlays, reject_interpretation, OverlayView};
+pub(crate) use auto_accept::{auto_accept_pass, op_classes_of};
 pub use classes::InterpretationRunCursor;
 pub(crate) use classes::{
     ensure_interpretation_overlay_classes, mint_interpretation_run, InterpretationRunMeta,
@@ -66,9 +76,25 @@ use std::collections::BTreeMap;
 /// overlay-carrying (used by `write::overlay_exists` and `model_query`
 /// conformance matching alike).
 pub(super) const OVERLAY_KIND_PRED: &str = "ad4m://interp/kind";
+/// The overlay's pointer at the `InterpretationRun` that last wrote it.
+pub(super) const OVERLAY_RUN_PRED: &str = "ad4m://interp/run";
 /// Parallel-predicate prefix for the LLM's per-property value snapshot: the full
 /// predicate is `ad4m://interp/inferred/<realPredicate>`.
 pub(super) const INFERRED_PREFIX: &str = "ad4m://interp/inferred/";
+
+/// True for a link that is part of the overlay itself (its `kind`/`run`
+/// discriminators or an `inferred/<p>` snapshot) rather than real instance
+/// data. Other `ad4m://interp/*` predicates — e.g. the `auto_accepted`
+/// marker — are deliberately not overlay links: they are records left on the
+/// base after the overlay is gone.
+pub(super) fn is_overlay_link(l: &crate::types::DecoratedLinkExpression) -> bool {
+    match l.data.predicate.as_deref() {
+        Some(p) => {
+            p == OVERLAY_KIND_PRED || p == OVERLAY_RUN_PRED || p.starts_with(INFERRED_PREFIX)
+        }
+        None => false,
+    }
+}
 
 // ---- overlay write plan ----------------------------------------------------
 

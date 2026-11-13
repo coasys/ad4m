@@ -293,6 +293,33 @@ A class with no hint and no identity property still works. It is just harder
 for anyone else to use correctly, which is the whole cost you are trying to
 avoid.
 
+## Letting extracted items through without a person
+
+When an interpreter turns prose into instances of your class, its writes
+wait as pending suggestions until a person accepts them — a new item waits,
+and a proposed change to an item somebody already wrote waits beside it.
+The class-level `auto_accept` key says when the executor may accept a
+suggestion itself, right after the pass that made or touched it:
+
+- `"never"`, also the meaning of a missing key: a person decides every
+  suggestion.
+- `"always"`: every suggestion on an item of the class is accepted.
+- `"when_placed"`: a suggestion is accepted once one of the item's `hasOne`
+  relations points at another item, in the same pass or a later one. Use it
+  for items that only make sense under a parent.
+
+Auto-accept never changes a value that already exists, and never restores a
+field a person deleted from a pending item: such a suggestion stays pending
+for a person. This is not limited to new items — an update on an item a
+person created is accepted too, as long as it only fills fields that were
+empty or repeats the values already there. The rule that counts is the one of the
+class the interpreter named for the item. A later pass that only adds a link
+names no class: the item is then classified by its links, and if it matches
+several classes, every one of them has to allow the accept.
+
+`add_model` rejects any other value, and `describe_perspective` reports the
+rule as `auto_accept`.
+
 ## Naming, namespaces and de-duplication
 
 - The scheme of `target_class` is the namespace: `ns://Post` puts the shape at
