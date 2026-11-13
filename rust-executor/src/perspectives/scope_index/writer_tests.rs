@@ -1,10 +1,10 @@
 //! The index the write paths keep: membership by verified flag links, the
 //! key from the earliest of them, `Under` scopes, counts and support.
 
-use super::compact::{HEAD_WINDOW_MS, THRESHOLD};
+use super::compact::{Compactor, HEAD_WINDOW_MS, PERIOD, THRESHOLD};
 use super::test_support::*;
-use super::writer::{ClassRule, ScopeChange};
-use super::{Readiness, Scope};
+use super::writer::{ClassRule, ScopeChange, ScopeDelta};
+use super::{MemberKey, Readiness, Scope, ScopeId};
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::sparql_store::SparqlStore;
 
@@ -330,4 +330,31 @@ fn many_head_removals_start_one_compaction() {
         .unwrap();
     assert_eq!(compactor.started(), 1);
     assert_eq!(count(&store, &rule.class_scope()), 0);
+}
+
+/// A scope's count of head removals is dropped once its period ends, so the
+/// compactor keeps no count for scopes that stay below the threshold.
+#[test]
+fn a_count_whose_period_ended_is_dropped() {
+    let store = std::sync::Arc::new(oxigraph::store::Store::new().unwrap());
+    let compactor = Compactor::default();
+    let removal = |scope: u8| ScopeDelta {
+        scope: ScopeId([scope; 16]),
+        member: "si://m/1".to_string(),
+        key: MemberKey::new(T0, 0),
+        change: ScopeChange::Removed,
+    };
+    let start = std::time::Instant::now();
+    let deltas: Vec<_> = (1..=10).map(removal).collect();
+    assert!(compactor.note_at(&store, &deltas, T0, start).is_empty());
+    assert_eq!(compactor.tracked(), 10);
+    // Within the period the counts stay.
+    compactor.note_at(&store, &[removal(11)], T0, start + PERIOD / 2);
+    assert_eq!(compactor.tracked(), 11);
+    // After it, only the scopes counted since remain.
+    let later = start + PERIOD + std::time::Duration::from_secs(1);
+    compactor.note_at(&store, &[removal(12)], T0, later);
+    assert_eq!(compactor.tracked(), 2);
+    assert_eq!(compactor.started(), 0);
+    assert_eq!(compactor.running(), 0);
 }

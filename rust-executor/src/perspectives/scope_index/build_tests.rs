@@ -5,11 +5,12 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::{Duration, Instant};
 
-use super::build::{self, BuildMark, BuildProgress, BuildState, BATCH};
+use super::build::{self, BatchLimits, BuildMark, BuildProgress, BuildQueue, BuildState, BATCH};
 use super::test_support::*;
 use super::writer::ClassRule;
 use super::{build_key, Readiness};
 use crate::agent::signatures::TestSigner;
+use crate::perspectives::model_query::shape::parse_shape_from_json;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::LinkExpression;
@@ -302,4 +303,247 @@ fn build_marks_round_trip() {
     let store = SparqlStore::new(None).unwrap();
     store.scope_index_register(&message_shape()).unwrap();
     assert_eq!(build::load_marks(store.raw_store()).unwrap().len(), 1);
+}
+
+/// Limits under which every batch stops after its first member.
+const ONE_MEMBER: BatchLimits = BatchLimits {
+    time: Duration::ZERO,
+    pause: Duration::ZERO,
+};
+
+/// A batch stops at its time bound, its mark names the last member it
+/// checked, and the build that goes on from there equals the incremental
+/// index: in phase 1 (a first build) and in phase 0 (a changed flag).
+#[test]
+fn a_batch_stops_at_its_time_bound_and_the_build_goes_on() {
+    let other = "si://Note";
+    let all = history(17, 200);
+    let store = SparqlStore::new(None).unwrap();
+    write(&store, &all);
+    let (rule, _) = store
+        .scope_index_register(&message_shape())
+        .unwrap()
+        .unwrap();
+    // Phase 0 over an empty class scope, then one member of phase 1.
+    assert_eq!(
+        store
+            .scope_index_build_limited(&rule, Some(2), ONE_MEMBER)
+            .unwrap(),
+        BuildProgress::Paused
+    );
+    let first = all
+        .iter()
+        .filter(|(_, l)| l.data.predicate.as_deref() == Some(TYPE))
+        .map(|(_, l)| l.data.source.clone())
+        .min()
+        .unwrap();
+    assert_eq!(
+        mark(&store, &rule).state,
+        BuildState::Building {
+            phase: 1,
+            cursor: first.into_bytes()
+        }
+    );
+    assert_eq!(
+        store
+            .scope_index_build_limited(&rule, None, ONE_MEMBER)
+            .unwrap(),
+        BuildProgress::Done
+    );
+    assert_consistent(&store);
+    assert_eq!(index_view(&store), index_view(&incremental(&all)));
+
+    // A changed flag: phase 0 goes over the members the class holds.
+    let (second, _) = store
+        .scope_index_register(&shape_with_flag(other))
+        .unwrap()
+        .unwrap();
+    let before = store.scope_reader().count(&rule.class_scope()).unwrap();
+    assert!(before > 2);
+    assert_eq!(
+        store
+            .scope_index_build_limited(&second, Some(1), ONE_MEMBER)
+            .unwrap(),
+        BuildProgress::Paused
+    );
+    let BuildState::Building { phase: 0, cursor } = mark(&store, &second).state else {
+        panic!("one member of phase 0 is checked, and phase 0 goes on");
+    };
+    assert_eq!(cursor.len(), 8, "a member key");
+    assert_eq!(
+        store.scope_reader().count(&second.class_scope()).unwrap(),
+        before - 1,
+        "one member is checked: it is not a Note"
+    );
+    assert_eq!(
+        store
+            .scope_index_build_limited(&second, None, ONE_MEMBER)
+            .unwrap(),
+        BuildProgress::Done
+    );
+    assert_consistent(&store);
+    let fresh = SparqlStore::new(None).unwrap();
+    let (rule, _) = fresh
+        .scope_index_register(&shape_with_flag(other))
+        .unwrap()
+        .unwrap();
+    fresh.scope_index_build_now(&rule).unwrap();
+    write(&fresh, &all);
+    assert_eq!(index_view(&store), index_view(&fresh));
+}
+
+/// A link write waits for at most one batch: with every batch stopped after
+/// its first member, a build of many members leaves the lock to each write.
+#[test]
+fn writes_go_on_while_a_build_runs() {
+    let all = history(19, BATCH);
+    let store = SparqlStore::new(None).unwrap();
+    write(&store, &all);
+    let (rule, _) = store
+        .scope_index_register(&message_shape())
+        .unwrap()
+        .unwrap();
+    let s = TestSigner::generate();
+    let late: Vec<LinkExpression> = (0..20u64)
+        .map(|i| flag_link(&s, &format!("si://late/{i}"), T0 + i))
+        .collect();
+    let builder = {
+        let store = store.clone();
+        let rule = rule.clone();
+        std::thread::spawn(move || {
+            store.scope_index_build_limited(
+                &rule,
+                None,
+                BatchLimits {
+                    time: Duration::ZERO,
+                    pause: build::BATCH_PAUSE,
+                },
+            )
+        })
+    };
+    for link in &late {
+        store.add_link(link).unwrap();
+    }
+    // Every write ended before the build: none waited for the whole build.
+    assert_ne!(
+        store.scope_index_readiness(&rule),
+        Readiness::Ready,
+        "the writes waited for the build"
+    );
+    assert_eq!(builder.join().unwrap().unwrap(), BuildProgress::Done);
+    assert_consistent(&store);
+    let mut everything = all.clone();
+    everything.extend(late.iter().map(|l| (true, l.clone())));
+    assert_eq!(index_view(&store), index_view(&incremental(&everything)));
+}
+
+/// A build that failed starts again at the next `scope_index_ensure`.
+#[test]
+fn a_failed_build_starts_again_at_the_next_ensure() {
+    let all = history(23, 50);
+    let store = SparqlStore::new(None).unwrap();
+    write(&store, &all);
+    let (rule, _) = store
+        .scope_index_register(&message_shape())
+        .unwrap()
+        .unwrap();
+    let set_mark = |value: &[u8]| {
+        let mut tx = store.raw_store().start_transaction().unwrap();
+        tx.aux_put(&build_key(rule.id), value);
+        tx.commit().unwrap();
+    };
+    set_mark(b"not a mark");
+    assert!(
+        store.scope_index_build_now(&rule).is_err(),
+        "the build fails"
+    );
+    assert!(!store.scope_index_build_queued(&rule));
+    set_mark(
+        &BuildMark {
+            rule: rule.clone(),
+            state: BuildState::Building {
+                phase: 0,
+                cursor: Vec::new(),
+            },
+        }
+        .encode(),
+    );
+    assert_eq!(
+        store.scope_index_ensure(&message_shape()).unwrap(),
+        Some(rule.clone())
+    );
+    wait_ready(&store, &rule);
+    assert_eq!(index_view(&store), index_view(&incremental(&all)));
+}
+
+/// `Note`: flag `ad4m://type = si://Note`.
+fn note_shape() -> ModelShape {
+    parse_shape_from_json(
+        &format!(
+            r#"{{
+    "className": "Note",
+    "properties": {{
+        "type": {{"predicate":"{TYPE}","required":true,"flag":true,"initial":"si://Note"}}
+    }},
+    "relations": {{}}
+}}"#
+        ),
+        "Note",
+    )
+    .expect("the test shape parses")
+}
+
+/// One build runs at a time; the others wait in order, a waiting build of a
+/// class is replaced by its newer rule, and the worker stops when the queue
+/// is empty.
+#[test]
+fn builds_wait_in_a_queue() {
+    let message = ClassRule::new("Message", TYPE, MESSAGE);
+    let note = ClassRule::new("Note", TYPE, "si://Note");
+    let note_again = ClassRule::new("Note", TYPE, "si://Note2");
+    let mut queue = BuildQueue::default();
+    assert!(
+        queue.push(message.clone()),
+        "the first build starts a worker"
+    );
+    assert!(!queue.push(note.clone()), "the worker runs it later");
+    assert!(!queue.push(message.clone()), "queued already");
+    assert_eq!(queue.take_next(), Some(message.clone()));
+    assert!(!queue.push(message.clone()), "running already");
+    assert!(!queue.push(note_again.clone()), "replaces the waiting Note");
+    assert!(!queue.contains(&note));
+    assert_eq!(queue.take_next(), Some(note_again.clone()));
+    assert!(!queue.contains(&message), "the earlier build ended");
+    assert_eq!(queue.take_next(), None);
+    assert!(queue.push(note.clone()), "a stopped worker starts again");
+    queue.abandon();
+    assert!(!queue.contains(&note));
+    assert!(queue.push(note), "an abandoned queue starts a worker");
+
+    // Two classes queued in one store both get ready.
+    let s = TestSigner::generate();
+    let store = SparqlStore::new(None).unwrap();
+    for i in 0..20u64 {
+        store
+            .add_link(&flag_link(&s, &format!("si://m/{i}"), T0 + i))
+            .unwrap();
+        store
+            .add_link(&signed(
+                &s,
+                &format!("si://n/{i}"),
+                TYPE,
+                "si://Note",
+                T0 + i,
+            ))
+            .unwrap();
+    }
+    let message = store.scope_index_ensure(&message_shape()).unwrap().unwrap();
+    let note = store.scope_index_ensure(&note_shape()).unwrap().unwrap();
+    wait_ready(&store, &message);
+    wait_ready(&store, &note);
+    assert_eq!(
+        store.scope_reader().count(&message.class_scope()).unwrap(),
+        20
+    );
+    assert_eq!(store.scope_reader().count(&note.class_scope()).unwrap(), 20);
 }

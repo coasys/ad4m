@@ -1284,12 +1284,14 @@ impl SparqlStore {
     /// Index the class of `shape` when it has a flag (see
     /// [`ClassRule::from_shape`]). A class seen for the first time, or with
     /// another flag than before, gets a build in the background; until it
-    /// ends, queries of the class use the SPARQL path. Returns the rule.
+    /// ends, queries of the class use the SPARQL path. A class that is not
+    /// ready and has no build waiting or running (its build failed) gets a
+    /// new one. Returns the rule.
     pub fn scope_index_ensure(&self, shape: &ModelShape) -> Result<Option<ClassRule>, Error> {
-        let Some((rule, new)) = self.scope_index_register(shape)? else {
+        let Some((rule, _)) = self.scope_index_register(shape)? else {
             return Ok(None);
         };
-        if new {
+        if self.scope_index.readiness(&rule) == Readiness::Building {
             self.spawn_scope_build(rule.clone());
         }
         Ok(Some(rule))
@@ -1335,23 +1337,27 @@ impl SparqlStore {
         Ok(Some((rule, true)))
     }
 
-    /// Run `rule`'s build in a background thread, unless one runs already.
+    /// Queue `rule`'s build, unless it waits or runs already. One worker
+    /// thread per store runs the queued builds one after another.
     fn spawn_scope_build(&self, rule: ClassRule) {
-        {
-            let Ok(mut building) = self.scope_index.building.lock() else {
-                return;
-            };
-            if !building.insert(rule.id) {
-                return;
-            }
+        let start_worker = match self.scope_index.builds.lock() {
+            Ok(mut builds) => builds.push(rule),
+            Err(_) => return,
+        };
+        if !start_worker {
+            return;
         }
         let store = Arc::downgrade(&self.store);
         let writer = self.writer.clone();
         let index = self.scope_index.clone();
-        let id = rule.id;
         let spawned = std::thread::Builder::new()
             .name("scope-index-build".into())
-            .spawn(move || {
+            .spawn(move || loop {
+                let next = match index.builds.lock() {
+                    Ok(mut builds) => builds.take_next(),
+                    Err(_) => None,
+                };
+                let Some(rule) = next else { break };
                 loop {
                     let Some(store) = store.upgrade() else { break };
                     // A few batches per hold of the store, so a closed
@@ -1365,15 +1371,46 @@ impl SparqlStore {
                         }
                     }
                 }
-                if let Ok(mut building) = index.building.lock() {
-                    building.remove(&id);
-                }
             });
         if spawned.is_err() {
-            if let Ok(mut building) = self.scope_index.building.lock() {
-                building.remove(&id);
+            if let Ok(mut builds) = self.scope_index.builds.lock() {
+                builds.abandon();
             }
         }
+    }
+
+    /// Whether `rule`'s build waits or runs.
+    #[cfg(test)]
+    pub(crate) fn scope_index_build_queued(&self, rule: &ClassRule) -> bool {
+        self.scope_index
+            .builds
+            .lock()
+            .map(|builds| builds.contains(rule))
+            .unwrap_or(false)
+    }
+
+    /// Run `rule`'s build on this thread with other batch limits.
+    #[cfg(test)]
+    pub(crate) fn scope_index_build_limited(
+        &self,
+        rule: &ClassRule,
+        batches: Option<usize>,
+        limits: build::BatchLimits,
+    ) -> Result<BuildProgress, Error> {
+        build::build_class_with(
+            &self.store,
+            &self.writer,
+            &self.scope_index,
+            rule,
+            batches,
+            limits,
+        )
+    }
+
+    /// Whether this is the first time `rule`'s class is seen with members
+    /// whose flag time is not canonical (see [`ScopeIndex::first_noncanonical`]).
+    pub(crate) fn scope_index_first_noncanonical(&self, rule: &ClassRule) -> bool {
+        self.scope_index.first_noncanonical(rule)
     }
 
     /// Run `rule`'s build to the end on this thread (tests and tools).

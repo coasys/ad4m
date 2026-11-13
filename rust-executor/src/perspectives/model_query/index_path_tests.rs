@@ -394,6 +394,9 @@ async fn a_time_not_in_the_executor_form_goes_to_sparql() {
     assert!(odd.compute_proof_valid(), "the timestamp still verifies");
     world.add(&odd);
     assert!(!world.compare(&q, "noncanonical").await);
+    // The query logged the class once: a later one does not log it again.
+    let rule = world.indexed.scope_index_rule("Message").unwrap();
+    assert!(!world.indexed.scope_index_first_noncanonical(&rule));
     world.remove(&odd);
     assert!(world.compare(&q, "canonical again").await);
 }

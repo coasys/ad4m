@@ -106,7 +106,15 @@ pub(super) fn index_page(
         return Ok(None);
     };
     let reader = store.scope_reader();
-    if reader.noncanonical(&rule.class)? != 0 {
+    let noncanonical = reader.noncanonical(&rule.class)?;
+    if noncanonical != 0 {
+        if store.scope_index_first_noncanonical(&rule) {
+            log::warn!(
+                "Scope index: class '{}' has {noncanonical} member(s) whose flag timestamp is \
+                 not in the executor's form; its queries use the SPARQL path",
+                rule.class
+            );
+        }
         return Ok(None);
     }
     let offset = pagination.offset.unwrap_or(0);

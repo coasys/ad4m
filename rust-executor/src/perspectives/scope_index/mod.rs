@@ -471,8 +471,10 @@ pub enum Readiness {
 /// clone of a [`super::sparql_store::SparqlStore`].
 pub struct ScopeIndex {
     state: RwLock<IndexState>,
-    /// Classes with a build thread running.
-    pub(crate) building: std::sync::Mutex<HashSet<ClassId>>,
+    /// The builds waiting and running: one at a time per store.
+    pub(crate) builds: std::sync::Mutex<build::BuildQueue>,
+    /// Classes whose members with a non-canonical flag time were logged.
+    noncanonical_logged: std::sync::Mutex<HashSet<ClassId>>,
     pub(crate) compactor: Arc<Compactor>,
     /// False when the store has another layout version: then nothing reads or
     /// writes the auxiliary space.
@@ -503,7 +505,8 @@ impl ScopeIndex {
                 );
                 return Ok(ScopeIndex {
                     state: RwLock::new(IndexState::default()),
-                    building: Default::default(),
+                    builds: Default::default(),
+                    noncanonical_logged: Default::default(),
                     compactor: Arc::new(Compactor::default()),
                     enabled: false,
                 });
@@ -523,7 +526,8 @@ impl ScopeIndex {
                 rules: Arc::new(RuleTable::new(rules)),
                 ready,
             }),
-            building: Default::default(),
+            builds: Default::default(),
+            noncanonical_logged: Default::default(),
             compactor: Arc::new(Compactor::default()),
             enabled: true,
         })
@@ -572,6 +576,15 @@ impl ScopeIndex {
                 state.ready.insert(rule.id);
             }
         }
+    }
+
+    /// Whether this is the first time `rule`'s class is seen with members
+    /// whose flag time is not canonical, so the caller logs it once.
+    pub(crate) fn first_noncanonical(&self, rule: &ClassRule) -> bool {
+        self.noncanonical_logged
+            .lock()
+            .map(|mut logged| logged.insert(rule.id))
+            .unwrap_or(false)
     }
 
     /// The classes whose build has not finished, as their marks say.

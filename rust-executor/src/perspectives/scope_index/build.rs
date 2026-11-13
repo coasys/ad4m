@@ -2,10 +2,15 @@
 //! and its rebuild when the class's flag changes.
 //!
 //! A build runs in batches. Each batch holds the store's writer lock, checks
-//! [`BATCH`] members with the same code as every write
+//! at most [`BATCH`] members with the same code as every write
 //! ([`Apply::reconcile_member`]), and writes the class's build mark, all in
-//! one transaction. The mark says where the next batch starts, so a build
-//! that a restart stops goes on from there when the store opens again.
+//! one transaction. A batch also stops after [`BATCH_TIME`], and the build
+//! waits [`BATCH_PAUSE`] without the lock before the next one, so a link
+//! write that waits for the lock gets it between two batches. The mark says
+//! where the next batch starts, so a build that a restart stops goes on from
+//! there when the store opens again.
+//!
+//! A store runs one build at a time ([`BuildQueue`]); the others wait.
 //!
 //! The rule is in the table from the start of the build, so every write
 //! during the build updates the class like any other: the build only has to
@@ -22,13 +27,86 @@
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::{NamedNode, NamedNodeRef, NamedOrBlankNode, TermRef};
 use oxigraph::store::{Store, Transaction};
+use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use super::writer::{class_members_after, Apply, ClassRule};
 use super::{build_key, prefix_end, MemberKey, ScopeIndex, BUILD};
 
 /// Members per batch: one transaction, one hold of the writer lock.
 pub const BATCH: usize = 512;
+/// The longest one batch holds the writer lock. It stops after the member
+/// that passes this time, with fewer than [`BATCH`] members when they are
+/// slow.
+pub const BATCH_TIME: Duration = Duration::from_millis(50);
+/// The wait without the lock after a batch. `std::sync::Mutex` is not fair:
+/// without a wait the build takes the lock again before a waiting writer.
+pub const BATCH_PAUSE: Duration = Duration::from_millis(5);
+
+/// How long a batch may hold the writer lock, and the wait after it.
+#[derive(Clone, Copy, Debug)]
+pub struct BatchLimits {
+    pub time: Duration,
+    pub pause: Duration,
+}
+
+impl Default for BatchLimits {
+    fn default() -> Self {
+        BatchLimits {
+            time: BATCH_TIME,
+            pause: BATCH_PAUSE,
+        }
+    }
+}
+
+/// The builds of one store: one runs, the others wait in order.
+#[derive(Default, Debug)]
+pub struct BuildQueue {
+    waiting: VecDeque<ClassRule>,
+    running: Option<ClassRule>,
+    /// A worker thread takes builds from the queue.
+    worker: bool,
+}
+
+impl BuildQueue {
+    /// Queue `rule`'s build, unless it waits or runs already. A waiting build
+    /// of the same class under another rule is replaced. Returns whether the
+    /// caller must start a worker.
+    pub fn push(&mut self, rule: ClassRule) -> bool {
+        if self.contains(&rule) {
+            return false;
+        }
+        match self.waiting.iter_mut().find(|r| r.id == rule.id) {
+            Some(waiting) => *waiting = rule,
+            None => self.waiting.push_back(rule),
+        }
+        !std::mem::replace(&mut self.worker, true)
+    }
+
+    /// The worker's next build. `None` when the queue is empty: then the
+    /// worker stops, and the next push starts a new one.
+    pub fn take_next(&mut self) -> Option<ClassRule> {
+        self.running = self.waiting.pop_front();
+        if self.running.is_none() {
+            self.worker = false;
+        }
+        self.running.clone()
+    }
+
+    /// The worker could not start: drop the waiting builds.
+    pub fn abandon(&mut self) {
+        self.waiting.clear();
+        self.running = None;
+        self.worker = false;
+    }
+
+    /// Whether `rule`'s build waits or runs.
+    pub fn contains(&self, rule: &ClassRule) -> bool {
+        self.running.as_ref() == Some(rule) || self.waiting.contains(rule)
+    }
+}
+
 const MARK_VERSION: u8 = 1;
 
 /// Where a class's build is.
@@ -189,12 +267,35 @@ pub fn build_class(
     rule: &ClassRule,
     max_batches: Option<usize>,
 ) -> Result<BuildProgress, Error> {
+    build_class_with(
+        store,
+        writer,
+        index,
+        rule,
+        max_batches,
+        BatchLimits::default(),
+    )
+}
+
+/// [`build_class`] with other batch limits.
+pub fn build_class_with(
+    store: &Store,
+    writer: &Mutex<()>,
+    index: &ScopeIndex,
+    rule: &ClassRule,
+    max_batches: Option<usize>,
+    limits: BatchLimits,
+) -> Result<BuildProgress, Error> {
     let mut batches = 0usize;
     // Phase 1's snapshot of flag subjects, taken once per call.
     let mut subjects: Option<Vec<String>> = None;
     loop {
         if max_batches.is_some_and(|max| batches >= max) {
             return Ok(BuildProgress::Paused);
+        }
+        if batches > 0 && !limits.pause.is_zero() {
+            // Without the lock: a waiting writer takes it now.
+            std::thread::sleep(limits.pause);
         }
         let in_phase_one = matches!(
             store
@@ -213,6 +314,7 @@ pub fn build_class(
         let _writer = writer
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let held = Instant::now();
         let mark = match store.aux_get(&build_key(rule.id))? {
             Some(v) => BuildMark::decode(&v)?,
             None => return Ok(BuildProgress::Superseded),
@@ -239,14 +341,21 @@ pub fn build_class(
                 0 => {
                     let after = MemberKey::from_bytes(&cursor);
                     let members = class_members_after(store, rule, after, BATCH)?;
+                    let mut done = 0;
                     for (member, _) in &members {
                         ctx.reconcile_member(rule, member)?;
+                        done += 1;
+                        if held.elapsed() >= limits.time {
+                            break;
+                        }
                     }
-                    match members.last() {
-                        Some((_, key)) if members.len() == BATCH => BuildState::Building {
-                            phase: 0,
-                            cursor: key.to_bytes().to_vec(),
-                        },
+                    match members[..done].last() {
+                        Some((_, key)) if done < members.len() || done == BATCH => {
+                            BuildState::Building {
+                                phase: 0,
+                                cursor: key.to_bytes().to_vec(),
+                            }
+                        }
                         _ => BuildState::Building {
                             phase: 1,
                             cursor: Vec::new(),
@@ -261,15 +370,20 @@ pub fn build_class(
                         all.partition_point(|s| s.as_bytes() <= cursor.as_slice())
                     };
                     let batch = &all[start.min(all.len())..(start + BATCH).min(all.len())];
+                    let mut done = 0;
                     for member in batch {
                         ctx.reconcile_member(rule, member)?;
+                        done += 1;
+                        if held.elapsed() >= limits.time {
+                            break;
+                        }
                     }
-                    if start + BATCH >= all.len() {
+                    if start + done >= all.len() {
                         BuildState::Ready
                     } else {
                         BuildState::Building {
                             phase: 1,
-                            cursor: batch
+                            cursor: batch[..done]
                                 .last()
                                 .map(|s| s.as_bytes().to_vec())
                                 .unwrap_or_default(),
