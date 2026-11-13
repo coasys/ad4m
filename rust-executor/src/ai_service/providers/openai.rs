@@ -144,10 +144,35 @@ fn build_body(request: ChatRequest, stream: bool, kind: EndpointKind) -> Value {
     let thinking_stays_on = request.disable_thinking && kind != EndpointKind::LlamaServer;
     if let Some(max_tokens) = request.max_output_tokens {
         if !thinking_stays_on {
-            body["max_tokens"] = json!(max_tokens);
+            // OpenAI's reasoning models (o-series, gpt-5) reject `max_tokens`
+            // and take `max_completion_tokens`. Other OpenAI-shaped servers
+            // (llama-server, vLLM, clones) keep `max_tokens`.
+            let field =
+                if kind == EndpointKind::OpenAi && takes_max_completion_tokens(&request.model) {
+                    "max_completion_tokens"
+                } else {
+                    "max_tokens"
+                };
+            body[field] = json!(max_tokens);
         }
     }
     body
+}
+
+/// Whether an OpenAI model name is a reasoning model that only accepts
+/// `max_completion_tokens`: the o-series (`o1`, `o3-mini`, `o4-mini`, ...) and
+/// the gpt-5 family. A provider prefix (`openai/o3`) is ignored.
+fn takes_max_completion_tokens(model: &str) -> bool {
+    let name = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    let o_series = name
+        .strip_prefix('o')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit());
+    o_series || name.starts_with("gpt-5")
 }
 
 fn wire_message(turn: &ChatTurn) -> Value {
@@ -706,6 +731,42 @@ mod wire_tests {
             EndpointKind::OpenAi,
         );
         assert_eq!(capped_only["max_tokens"], 512, "{capped_only}");
+    }
+
+    #[test]
+    fn an_openai_reasoning_model_gets_max_completion_tokens_and_others_max_tokens() {
+        let capped = |model: &str, kind| {
+            build_body(
+                ChatRequest::new(model, vec![ChatTurn::user("x")])
+                    .with_generation(false, Some(512)),
+                false,
+                kind,
+            )
+        };
+        for model in [
+            "o3-mini",
+            "o1",
+            "o4-mini",
+            "openai/o3",
+            "gpt-5",
+            "gpt-5-mini",
+        ] {
+            let body = capped(model, EndpointKind::OpenAi);
+            assert_eq!(body["max_completion_tokens"], 512, "{model}: {body}");
+            assert!(body.get("max_tokens").is_none(), "{model}: {body}");
+        }
+        for model in ["gpt-4o", "gpt-4.1", "omni-x"] {
+            let body = capped(model, EndpointKind::OpenAi);
+            assert_eq!(body["max_tokens"], 512, "{model}: {body}");
+            assert!(
+                body.get("max_completion_tokens").is_none(),
+                "{model}: {body}"
+            );
+        }
+        // llama-server keeps max_tokens whatever the model is called.
+        let body = capped("o3-mini", EndpointKind::LlamaServer);
+        assert_eq!(body["max_tokens"], 512, "{body}");
+        assert!(body.get("max_completion_tokens").is_none(), "{body}");
     }
 
     #[tokio::test]
