@@ -1477,4 +1477,80 @@ mod tests {
 
     // Integration tests for full login flow would need the database initialized
     // See tests/js/tests/mcp-auth.test.ts for full integration tests
+
+    /// What one class costs in the tools[] JSON: 16 tools, ~8.3 KB. The #1713
+    /// TS repro registers 100 of these (≈ 1,600 tools, ~837 KB — several times
+    /// a 49152-token context); this pins the per-class weight that number is
+    /// computed from, so a slimmer generator updates the test's class count.
+    #[test]
+    fn generated_class_tools_json_size() {
+        // One class with 8 scalar properties + 1 collection, the shape the
+        // #1713 repro test registers in a loop.
+        let scalars: Vec<ShaclProperty> = (0..8)
+            .map(|i| ShaclProperty {
+                name: format!("property{i}"),
+                is_collection: false,
+                predicate: Some(format!("repro://class/property{i}")),
+                datatype: Some("xsd://string".into()),
+                min_count: None,
+                max_count: Some(1),
+                node_kind: None,
+                getter: None,
+                class: None,
+                resolve_language: None,
+                interpretation_hint: None,
+                local: false,
+            })
+            .collect();
+        let collection = ShaclProperty {
+            name: "members".into(),
+            is_collection: true,
+            predicate: Some("repro://class/member".into()),
+            datatype: None,
+            min_count: None,
+            max_count: None,
+            node_kind: Some("sh://IRI".into()),
+            getter: None,
+            class: None,
+            resolve_language: None,
+            interpretation_hint: None,
+            local: false,
+        };
+        let class = shacl::ShaclClass {
+            name: "ReproClass00".into(),
+            name_lower: "reproclass00".into(),
+            properties: [scalars, vec![collection]].concat(),
+            shape_uri: Some("repro://ReproClass00Shape".into()),
+            all_predicates: vec![],
+        };
+        let tools = Ad4mMcpHandler::class_tools(&class, true);
+        assert_eq!(
+            tools.len(),
+            16,
+            "5 class ops + 8 setters + 3 collection ops"
+        );
+        let bytes: usize = tools
+            .iter()
+            .map(|t| {
+                serde_json::to_string(&json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    }
+                }))
+                .unwrap()
+                .len()
+            })
+            .sum();
+        // The class count the #1713 repro registers times this per-class cost
+        // must clear the model's context several times over. 8.3 KB × 100
+        // classes ≈ 837 KB ≈ ~210,000 tokens at ~4 chars/token, over 4× a
+        // num_ctx of 49152 — the We failure was ~1,500 tools / ~750 KB.
+        assert!(
+            bytes > 8_000,
+            "a repro class's tools[] JSON shrank to {bytes} bytes — the TS repro needs more classes"
+        );
+    }
 }

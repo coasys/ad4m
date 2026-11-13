@@ -113,6 +113,7 @@ pub fn event_specs() -> Vec<EventSpec> {
     use crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent;
     use Topic::*;
     vec![
+        EventSpec::of::<crate::ai_sessions::types::AiSessionChanged>(AiSessionChanged, false),
         EventSpec::of::<AgentStatusChangedEvent>(AgentStatusChanged, false),
         EventSpec::of::<AgentUpdatedEvent>(AgentUpdated, false),
         EventSpec::of::<Apps>(AppsChanged, false),
@@ -249,7 +250,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         Topic::AgentStatusChanged | Topic::AgentUpdated => Some("agent"),
         Topic::ExceptionOccurred => Some("exception"),
         // No `_` arm: a new topic does not compile until someone picks its shape.
-        Topic::AppsChanged
+        Topic::AiSessionChanged
+        | Topic::AppsChanged
         | Topic::HostingUserInfoChanged
         | Topic::PerspectiveAdded
         | Topic::PerspectiveRemoved
@@ -2199,6 +2201,15 @@ mod event_spec_tests {
     #[test]
     fn unscoped_payloads_name_no_perspective() {
         let payloads = [
+            (
+                Topic::AiSessionChanged,
+                serde_json::to_value(crate::ai_sessions::types::AiSessionChanged {
+                    session_id: "s".into(),
+                    kind: "message".into(),
+                    session: None,
+                    message: None,
+                }),
+            ),
             (
                 Topic::AgentStatusChanged,
                 serde_json::to_value(AgentStatus::default()),
