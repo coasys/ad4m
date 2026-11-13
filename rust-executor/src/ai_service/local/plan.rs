@@ -1147,6 +1147,48 @@ mod tests {
         assert_eq!(default_flags(Service::Llm), vec!["--reasoning", "off"]);
     }
 
+    /// A reasoning-budget message with spaces is one server flag, from the recommendation
+    /// JSON through the plan. Joining and splitting on spaces would truncate it.
+    #[test]
+    fn a_spaced_reasoning_budget_message_stays_one_server_flag() {
+        let message = "Thinking budget reached. Now give the final answer.";
+        let mut budgeted = recommendation("big", "llama-server", true);
+        budgeted["serverFlags"] = json!([
+            "-c",
+            "65536",
+            "-np",
+            "1",
+            "--reasoning-budget",
+            "2048",
+            "--reasoning-budget-message",
+            message
+        ]);
+        let mut recommendations = full();
+        recommendations["gpu-12gb"]["llm"] = budgeted;
+        let data = data(recommendations);
+        let plan = plan(&data, &nvidia_12(&data, 32), &nothing_installed);
+        let carried = plan
+            .models
+            .iter()
+            .find(|m| m.service == Service::Llm)
+            .unwrap();
+        assert_eq!(
+            carried
+                .server_flags
+                .iter()
+                .filter(|f| f.as_str() == message)
+                .count(),
+            1
+        );
+        let at = carried
+            .server_flags
+            .iter()
+            .position(|f| f == "--reasoning-budget-message")
+            .unwrap();
+        assert_eq!(carried.server_flags[at + 1], message);
+        assert!(!carried.server_flags[at + 1].contains('"'));
+    }
+
     /// The embedded data on the smoke-test device: a Strix Halo APU, 128 GB, Vulkan. The
     /// wind tunnel measured this class: Qwen3.5 4B on Vulkan, nomic (measured on ROCm, here
     /// on the chat model's Vulkan llama-server), Parakeet v3 on nemo-speech's Vulkan build
