@@ -18,6 +18,22 @@ import type {
     ModelStatus,
     ModelType,
 } from "./AITypes";
+import type { AISession } from "../generated/api/AISession";
+import type { AISessionChanged } from "../generated/api/AISessionChanged";
+import type { AISessionMessage } from "../generated/api/AISessionMessage";
+import type { AISessionSendStarted } from "../generated/api/AISessionSendStarted";
+import type { AISessionUpdateRequest } from "../generated/api/AISessionUpdateRequest";
+import type { Capability } from "../generated/api/Capability";
+
+/** The fields a session's create and update take. A field left out keeps its value on an
+ *  update (and takes the default on a create); a nullable one is cleared with `null`. */
+export interface AISessionInput {
+    title?: string;
+    model?: string | null;
+    defaultPerspective?: string | null;
+    libraryPerspective?: string | null;
+    capabilities?: Capability[];
+}
 
 /** How long `localInstall` waits by default: a first install downloads gigabytes. */
 export const LOCAL_INSTALL_TIMEOUT_MS = 6 * 60 * 60 * 1000
@@ -317,4 +333,66 @@ export class AIClient {
         }
     }
 
+    // ── AI sessions ───────────────────────────────────────────────────────
+    // A conversation with the executor's AI, stored in the executor's database.
+    // The agent works through the MCP tools, inside the session's capabilities.
+
+    /** Creates a session. `capabilities` absent: everything the caller holds. */
+    async sessionCreate(input: AISessionInput = {}): Promise<AISession> {
+        return this.#apiClient.call('ai.sessionCreate', {
+            title: input.title ?? null,
+            model: input.model ?? null,
+            defaultPerspective: input.defaultPerspective ?? null,
+            libraryPerspective: input.libraryPerspective ?? null,
+            capabilities: input.capabilities ?? null,
+        });
+    }
+
+    async sessionList(): Promise<AISession[]> {
+        return this.#apiClient.call('ai.sessionList', {});
+    }
+
+    async session(id: string): Promise<AISession> {
+        return this.#apiClient.call('ai.session', { id });
+    }
+
+    /** A field left out keeps its value; a nullable one (`model`, `defaultPerspective`,
+     *  `libraryPerspective`) is cleared with `null`. Capabilities can only be narrowed
+     *  to what the caller holds. */
+    async sessionUpdate(id: string, update: AISessionInput): Promise<AISession> {
+        // Keys left `undefined` are not sent, so a field stays; `null` clears a nullable one.
+        return this.#apiClient.call('ai.sessionUpdate', { id, ...update } as AISessionUpdateRequest);
+    }
+
+    async sessionDelete(id: string): Promise<boolean> {
+        return this.#apiClient.call('ai.sessionDelete', { id });
+    }
+
+    /** Stores the user's message and starts the turn as a detached task; returns the ids
+     *  of the message and of the `running` reply. Follow it with {@link onSessionChanged}. */
+    async sendMessage(sessionId: string, text: string): Promise<AISessionSendStarted> {
+        return this.#apiClient.call('ai.sessionSend', { sessionId, text });
+    }
+
+    async cancelTurn(sessionId: string): Promise<boolean> {
+        return this.#apiClient.call('ai.sessionCancel', { sessionId });
+    }
+
+    /** The transcript, newest entries last. `before` pages older than a `seq`. */
+    async sessionMessages(
+        sessionId: string,
+        options: { limit?: number; before?: number } = {},
+    ): Promise<AISessionMessage[]> {
+        return this.#apiClient.call('ai.sessionMessages', {
+            sessionId,
+            limit: options.limit ?? null,
+            before: options.before ?? null,
+        });
+    }
+
+    /** `handler` gets every change to a session the caller owns: a new message, a status
+     *  change, each tool step. Returns the unsubscribe function. */
+    onSessionChanged(handler: (event: AISessionChanged) => void): () => void {
+        return this.#apiClient.on('ai-session-changed', handler);
+    }
 }
