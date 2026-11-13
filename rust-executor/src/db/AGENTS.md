@@ -14,6 +14,8 @@ with its own `impl Ad4mDb` block. Child modules can use the private `conn` field
 | `endpoints.rs` | The `ai_endpoints` table (AI model servers: URL, key, protocol, capabilities, health). A model (`models`: `id, name, type, endpoint_id, remote_model, native_tools`) names its endpoint; `add_model` refuses an endpoint that does not exist and gives the endpoint the model type's capability. `ai_service::endpoints` calls them through `db_backend()` |
 | `model_migration.rs` | The one-time move of a `models` table with `api_*` / `local_*` columns: each API model gets the endpoint with its protocol, URL and key (one is created, named by the host), each local model is deleted with one warning line (and its default), the table is rebuilt, `model_status` dropped. An import of an old export goes through the same linking. Runs only inside `Ad4mDb` (startup, import) |
 | `tasks.rs` | Owner-scoped reads of the `tasks` table: `get_task_owner`, `get_tasks_owned_by` |
+| `sealed.rs` | The sealed columns (table in its module doc): `SealedTable` per table (`SEALED_TABLES`), the row sealer (`writer`/`reader`, `readable` to skip a row that does not open), `seal_plain_values` (rows in the clear after the move under SQLCipher or an import), `reseal_store_values` (a store key rotation), `delete_person_rows` (a removed person's rows) |
+| `ai_sessions.rs` | `ai_sessions` and `ai_messages`: AI chat sessions and their transcripts, owner-scoped (`owner_did IS ?`). Sealed under the owner's store: a session's `title`, `default_perspective`, `library_perspective`, `capabilities`; a message's `content` and `error` (its owner is its session's, `sealed::AI_MESSAGE_OWNER`). A content patch merges in Rust (`merge_patch`, RFC 7396), never with SQLite's `json_patch` |
 | `identity.rs` | `operator_record`, `identity_agents`, `identity_joins` (created in `Ad4mDb::new`; its `accept` column, added to an older table on open, holds a claim for `identity.acceptJoin` and marks it cancelled; `add_join` writes a claim's row once and never replaces it, so a repeated claim keeps the decision), read by `identity/`. The operator record functions also take a bare connection for `ad4m-executor init --operator`, which runs before any executor. The key logs and `identity_heads`/`identity_fork_signers` are `identity::cache::KelCache`'s own connection to the same file |
 
 Task CRUD (`add_task`, `get_task`, `get_tasks`, `update_task`, `remove_task`) and every
@@ -48,6 +50,13 @@ never `Ad4mDb` directly: `Ad4mDb::with_global_instance` is `#[cfg(test)]`.
   have it used for every user.
 - `update_task` never writes `agent_did`: a rewrite keeps the owner. Export and import carry
   it, so a restore keeps each task's owner.
+- A column that holds a person's or a perspective's data is sealed (`sealed.rs`): write it
+  through `self.writer(&sealed::TABLE, owner, &[key], None)?.seal(..)`, read it through
+  `self.reader(..)?.open(..)`, and wrap each row of a listing in `sealed::readable`. A new
+  table of such data gets a `SealedTable` in `SEALED_TABLES` (a child table whose owner is its
+  parent's comes before the parent: `delete_person_rows` reads the owner through it). A
+  sealed column is never in a `WHERE`, an `ORDER BY`, an index or SQL that computes on it
+  (`json_patch`, `COALESCE` with a literal): read the row, open, change, seal, write.
 
 ## Do not
 
