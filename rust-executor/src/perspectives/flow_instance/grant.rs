@@ -171,23 +171,26 @@ pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
     })?;
     // As at every receipt read: refresh the carried signers' logs before the
     // fold re-judges them under the live window (see `produced::valid_outputs`).
-    super::produced::prepare_receipt_signers(
+    // The answers the prepare skipped on stay held until the fold is done.
+    let held = super::produced::prepare_receipt_signers(
         &catalogue,
         &receipts,
         perspective.receipt_verdict_memo(),
     )
     .await;
-    Ok(first_produced_at(
+    let first = first_produced_at(
         &catalogue,
         &spec.flow,
         Some(&spec.state),
         &receipts,
         perspective.receipt_verdict_memo(),
-    )
-    .into_iter()
-    .filter(|(output, _)| output.class_name == role_class)
-    .map(|(output, at)| (output.id, at))
-    .collect())
+    );
+    drop(held);
+    Ok(first
+        .into_iter()
+        .filter(|(output, _)| output.class_name == role_class)
+        .map(|(output, at)| (output.id, at))
+        .collect())
 }
 
 #[cfg(test)]

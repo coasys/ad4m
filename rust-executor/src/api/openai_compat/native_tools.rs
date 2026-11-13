@@ -1,7 +1,7 @@
 //! `/v1/chat/completions` for a model whose provider carries tools as data.
 //!
 //! [`super::chat`] renders tools into a `<tools>` system prompt and recovers
-//! calls from the reply text, which is the only option for a local model. A
+//! calls from the reply text, for a model that does not take tools as data. A
 //! provider with native tool calling (see
 //! [`crate::ai_service::providers::api_type_supports_native_tools`]) is handed
 //! the definitions instead and answers with structured calls, through
@@ -17,14 +17,11 @@
 //! full and framed as SSE afterwards — which is also what the injected path
 //! does whenever tools are active, so a client sees no difference in shape.
 //!
-//! `tool_choice: "required"` and a named function are not enforced on this
-//! path. They are not enforced for a remote model on the injected path either:
-//! the decoding constraint that implements them only reaches local models.
-//! `parallel_tool_calls: false` is not passed on either, for the same reason:
-//! it reaches [`super::tool_grammar::build_tool_call_parser`] on the injected
-//! path, and that constraint binds only for [`crate::ai_service::LlmModel::Local`].
-//! Wiring either one through means a provider-level request field, not a change
-//! here.
+//! A forced call (`tool_choice: "required"` or a named function) reaches this path only for
+//! Anthropic, where it is not enforced yet (the Anthropic client does not translate
+//! `tool_choice`). OpenAI and vLLM get it as written through the `/v1` passthrough and
+//! enforce it; every other endpoint makes it on the injected path under a schema the server
+//! decodes against (`chat::constrained_tool_calls`, `passthrough::enforces_tool_choice`).
 
 use std::convert::Infallible;
 
@@ -35,6 +32,7 @@ use uuid::Uuid;
 use super::chat::epoch_seconds;
 use super::errors::OpenAIError;
 use super::harness_bridge::structured_turns;
+use super::model_selector::Resolved;
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionResponse,
     ChatMessage, ChatMessageContent, ChatResponseMessage, FunctionCall, FunctionCallDelta, Role,
@@ -42,23 +40,18 @@ use super::types::{
 };
 use crate::ai_service::providers::{ChatReply, ChatTurn, ChatUsage, ToolSpec};
 use crate::ai_service::AIService;
-use crate::billing::check_compute_credits;
 use crate::types::RequestContext;
 
 /// Answer a tool-carrying chat request through the model's native tool calling.
 pub async fn chat_with_native_tools(
     auth: RequestContext,
     requested_model: String,
-    model_id: String,
+    resolved: &Resolved,
     messages: &[ChatMessage],
     tools: &[ToolDef],
     stream: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(agent_did) = auth.user_did() {
-        check_compute_credits(agent_did)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-    }
-
+    // `chat_completions` checked the credits against the prompt before it came here.
     if let Some(name) = duplicate_tool_name(tools) {
         return Err(OpenAIError::invalid_request(format!(
             "`tools` names `{name}` twice"
@@ -73,9 +66,14 @@ pub async fn chat_with_native_tools(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     // Billing happens inside prompt_with_tools, on success only.
     let reply = service
-        .prompt_with_tools(model_id, turns, specs, auth.user_did().map(str::to_string))
+        .prompt_with_tools(
+            resolved.model.id.clone(),
+            turns,
+            specs,
+            auth.user_did().map(str::to_string),
+        )
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(|e| resolved.failure(e))?;
 
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = epoch_seconds();
@@ -289,8 +287,8 @@ pub(super) fn reply_chunks(
 /// as an object, but `ContentBlock::input` is `#[serde(default)]`, so a block
 /// that arrives without one reads as `Value::Null` and would go out as
 /// `"null"`. Ollama is the weaker guarantee of the two: `extract_tool_calls`
-/// copies `arguments` verbatim out of whatever a local model wrote, and no
-/// grammar constrains it to an object on the way.
+/// copies `arguments` verbatim out of whatever the model wrote, and nothing
+/// constrains it to an object on the way.
 ///
 /// So a value that is not an object goes under `_raw`, as it does coming the
 /// other way in `harness_bridge::to_provider_call`, and for the same reason:
