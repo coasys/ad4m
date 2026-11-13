@@ -217,6 +217,7 @@ test_test_needs_the_suite() {
 # also answers Ollama's /api/version, /api/show (num_ctx $OWN_CTX when set) and /api/create, and
 # writes each create request to $TMP/created.
 serve_models() {
+    rm -f "$TMP/port"
     OLLAMA="${OLLAMA:-}" OWN_CTX="${OWN_CTX:-}" CREATED="$TMP/created" node -e '
       const ids = process.argv.slice(1);
       const s = require("http").createServer((req, res) => {
@@ -253,6 +254,14 @@ test_llm_check() {
     COASYS_SPACES_LLM_MODEL=gemma3:12b bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "llm-check failed with the model served"
     out="$(COASYS_SPACES_LLM_MODEL=gemma3:27b bash "$SCRIPT" llm-check 2>&1)" && fail "llm-check passed without the model"
     grep -qF "ollama pull gemma3:27b" <<<"$out" || fail "a missing model does not say what to pull: $out"
+    kill "$SERVER"
+    wait "$SERVER" 2>/dev/null
+    # Ollama's /v1/models lists an untagged model as `<name>:latest`; the bare name is that model.
+    serve_models "qwen3.8-27b-48k:latest"
+    COASYS_SPACES_LLM_MODEL=qwen3.8-27b-48k bash "$SCRIPT" llm-check >/dev/null 2>&1 ||
+        fail "llm-check failed on a model Ollama lists as :latest"
+    COASYS_SPACES_LLM_MODEL=qwen3.8-27b bash "$SCRIPT" llm-check >/dev/null 2>&1 &&
+        fail "llm-check passed on a name that is only a prefix of a served model"
     kill "$SERVER"
     wait "$SERVER" 2>/dev/null
     out="$(bash "$SCRIPT" llm-check 2>&1)" && fail "llm-check passed with no server"

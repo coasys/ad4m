@@ -361,23 +361,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     tokio::spawn(async move {
         if let Ok(reason) = shutdown_rx.await {
             info!("Shutdown signal received ({reason:?}), cleaning up...");
-
-            // 1. Shut down Holochain conductor gracefully
-            if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await
-            {
-                info!("Shutting down Holochain conductor...");
-                match holochain_service.shutdown().await {
-                    Ok(()) => info!("Holochain conductor shut down cleanly"),
-                    Err(e) => warn!("Error shutting down Holochain conductor: {}", e),
-                }
-            }
-
-            // 2. Remove PID file if it was configured
-            if let Some(ref pid_file) = pid_file {
-                let _ = std::fs::remove_file(pid_file);
-                info!("Removed PID file: {}", pid_file);
-            }
-
+            clean_up_before_exit(pid_file.as_deref()).await;
             info!(
                 "Graceful shutdown complete, exiting with {}.",
                 reason.code()
@@ -683,6 +667,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         );
     }
 
+    // Before the AI service loads, so the models the config file names start with it.
+    if let Some(ai_settings) = &config.ai_settings {
+        ai_service::endpoints::config::apply(ai_settings, |var| std::env::var(var).ok());
+    }
+
     info!("Initializing AI service...");
     AIService::init_global_instance()
         .await
@@ -695,6 +684,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // end the key-bound grants the persisted verdicts refuse — a grant's `agent_speaks`
     // reads the main agent's DID, so the load comes first; the API serves no session yet.
     load_agent_and_end_revoked_key_grants(crate::identity::service().ok().as_deref()).await;
+    // After the agent loads: health events go to the sessions acting as the main agent.
+    ai_service::endpoints::spawn_health_loop();
+    // The installed local AI runtimes, in the background.
+    ai_service::local::autostart();
 
     // Notifications of older executors name their owner by email; move them to DIDs.
     if let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) {
@@ -1029,6 +1022,29 @@ pub(crate) async fn load_agent_and_end_revoked_key_grants(
             crate::agent::grants::Grants::global(),
         )
         .await;
+    }
+}
+
+/// What the executor's graceful shutdown (`SHUTDOWN_TX`, which a signal fires) cleans up before
+/// the process exits. The Holochain conductor and the local AI runtimes stop at once,
+/// not one after the other, so both fit in the deadline a signal leaves the shutdown. `pid_file`
+/// is the one `run` was given: a stop may come before the global config is set.
+pub(crate) async fn clean_up_before_exit(pid_file: Option<&str>) {
+    let holochain = async {
+        if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await {
+            info!("Shutting down Holochain conductor...");
+            match holochain_service.shutdown().await {
+                Ok(()) => info!("Holochain conductor shut down cleanly"),
+                Err(e) => warn!("Error shutting down Holochain conductor: {}", e),
+            }
+        }
+    };
+    // The local AI runtimes are this executor's children: they stop with it.
+    tokio::join!(holochain, ai_service::local::stop_on_exit());
+
+    if let Some(pid_file) = pid_file {
+        let _ = std::fs::remove_file(pid_file);
+        info!("Removed PID file: {}", pid_file);
     }
 }
 
