@@ -119,6 +119,13 @@ impl CompletionSource for OpenAiCompatBridge {
     }
 }
 
+/// What a `tool` result becomes when it cannot be dropped — it sits in the
+/// pinned region — but the list is still over budget: the call keeps its
+/// paired result, only the unbounded contents go; the transcript has them.
+const ELIDED_TOOL_RESULT_STUB: &str = "[elided: this tool result did not fit the model's context \
+                                       — the transcript kept it; call the tool again with a \
+                                       narrower query]";
+
 /// The messages one request may carry, bounded to `budget_bytes` of
 /// serialized JSON. When the list fits it comes back unchanged.
 ///
@@ -145,57 +152,64 @@ impl CompletionSource for OpenAiCompatBridge {
 /// than the budget goes out over it — mangling the person's own words is
 /// worse than letting the server decide.
 fn trim_messages_to_budget(messages: &[Value], budget_bytes: usize, model_id: &str) -> Vec<Value> {
-    fn size(msgs: &[Value]) -> usize {
-        msgs.iter().map(|m| m.to_string().len()).sum()
-    }
+    // Each entry's serialized size rides alongside it: the trim subtracts a
+    // removed or stubbed entry's size from the running `total` instead of
+    // reserializing the whole remaining list after every change (a long
+    // history trimmed many turns went quadratic on the reserialize).
+    let mut out: Vec<(Value, usize)> = messages
+        .iter()
+        .map(|m| (m.clone(), m.to_string().len()))
+        .collect();
+    let mut total: usize = out.iter().map(|(_, size)| size).sum();
 
-    if size(messages) <= budget_bytes {
-        return messages.to_vec();
+    if total <= budget_bytes {
+        return out.into_iter().map(|(m, _)| m).collect();
     }
     log::debug!(
-        "harness_bridge: outgoing message list is {}B, over the {budget_bytes}B \
+        "harness_bridge: outgoing message list is {total}B, over the {budget_bytes}B \
          context budget for {model_id} — trimming oldest entries, keeping the question",
-        size(messages),
     );
 
-    let mut out: Vec<Value> = messages.to_vec();
     // Leading `system` messages are the operator's prompt; the drop loop
     // starts after them.
-    let keep = out.iter().take_while(|m| m["role"] == "system").count();
+    let keep = out
+        .iter()
+        .take_while(|(m, _)| m["role"] == "system")
+        .count();
     // The index the drop loop may not reach: the last user message is the
     // question being answered. A list carrying none trims only to its own
     // first entry.
     let mut last_user = out
         .iter()
-        .rposition(|m| m["role"] == "user")
+        .rposition(|(m, _)| m["role"] == "user")
         .unwrap_or_else(|| out.len().saturating_sub(1));
-    while size(&out) > budget_bytes && last_user > keep {
-        out.remove(keep);
+    while total > budget_bytes && last_user > keep {
+        total -= out.remove(keep).1;
         last_user -= 1;
         // A dropped assistant `tool_calls` turn leaves its results with no
         // call to answer: a `tool` message a provider refuses the request
         // for. They go with it — `tool` entries at the drop point are
         // always orphans here, since whatever answered them was just
         // dropped.
-        while last_user > keep && out.get(keep).is_some_and(|m| m["role"] == "tool") {
-            out.remove(keep);
+        while last_user > keep && out.get(keep).is_some_and(|(m, _)| m["role"] == "tool") {
+            total -= out.remove(keep).1;
             last_user -= 1;
         }
     }
-    if size(&out) > budget_bytes {
-        let stub = "[elided: this tool result did not fit the model's context \
-                    — the transcript kept it; call the tool again with a \
-                    narrower query]";
-        for i in 0..out.len() {
-            if size(&out) <= budget_bytes {
+    if total > budget_bytes {
+        for (m, size) in out.iter_mut() {
+            if total <= budget_bytes {
                 break;
             }
-            if out[i]["role"] == "tool" {
-                out[i]["content"] = Value::String(stub.to_string());
+            if m["role"] == "tool" {
+                m["content"] = Value::String(ELIDED_TOOL_RESULT_STUB.to_string());
+                let stubbed = m.to_string().len();
+                total = total - *size + stubbed;
+                *size = stubbed;
             }
         }
     }
-    out
+    out.into_iter().map(|(m, _)| m).collect()
 }
 
 /// Turn the raw text an injected-path model wrote into the completion the
@@ -1484,6 +1498,106 @@ mod injected_path_dispatch_tests {
         let messages = vec![json!({"role": "user", "content": "x".repeat(9_000)})];
         let out = trim_messages_to_budget(&messages, 1_000, "m");
         assert_eq!(out, messages);
+    }
+
+    /// The pre-optimization trim: identical decisions, but it reserialized
+    /// the whole remaining list for every size check — quadratic on a long
+    /// history. Kept as the oracle the running-total version is held to.
+    fn trim_messages_to_budget_reference(messages: &[Value], budget_bytes: usize) -> Vec<Value> {
+        fn size(msgs: &[Value]) -> usize {
+            msgs.iter().map(|m| m.to_string().len()).sum()
+        }
+
+        if size(messages) <= budget_bytes {
+            return messages.to_vec();
+        }
+
+        let mut out: Vec<Value> = messages.to_vec();
+        let keep = out.iter().take_while(|m| m["role"] == "system").count();
+        let mut last_user = out
+            .iter()
+            .rposition(|m| m["role"] == "user")
+            .unwrap_or_else(|| out.len().saturating_sub(1));
+        while size(&out) > budget_bytes && last_user > keep {
+            out.remove(keep);
+            last_user -= 1;
+            while last_user > keep && out.get(keep).is_some_and(|m| m["role"] == "tool") {
+                out.remove(keep);
+                last_user -= 1;
+            }
+        }
+        if size(&out) > budget_bytes {
+            for i in 0..out.len() {
+                if size(&out) <= budget_bytes {
+                    break;
+                }
+                if out[i]["role"] == "tool" {
+                    out[i]["content"] = Value::String(ELIDED_TOOL_RESULT_STUB.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_running_total_trim_makes_the_same_calls_as_the_rescan() {
+        // Same inputs, same outputs: the bookkeeping change must not move a
+        // single trim decision. The cases walk every phase — untouched,
+        // drop-with-orphan-drain, stub-pass, and the unfixable oversized
+        // question — at budgets that land each phase differently.
+        let call = json!({
+            "role": "assistant", "content": null,
+            "tool_calls": [{"id": "c1", "type": "function",
+                            "function": {"name": "t", "arguments": "{}"}}],
+        });
+        let big_tool = json!({"role": "tool", "tool_call_id": "c1",
+                             "content": "z".repeat(4_000)});
+        let inputs: Vec<Vec<Value>> = vec![
+            // Fits untouched.
+            vec![
+                json!({"role": "system", "content": "sys"}),
+                json!({"role": "user", "content": "hi"}),
+            ],
+            // Drop phase: oldest middle turns go, the question stays.
+            vec![
+                json!({"role": "system", "content": "sys"}),
+                json!({"role": "user", "content": "x".repeat(8_000)}),
+                json!({"role": "assistant", "content": "y".repeat(8_000)}),
+                json!({"role": "user", "content": "the question being answered"}),
+            ],
+            // A dropped call takes its orphaned result with it.
+            vec![
+                json!({"role": "system", "content": "x".repeat(4_000)}),
+                call.clone(),
+                big_tool.clone(),
+                json!({"role": "user", "content": "small question"}),
+            ],
+            // Stub phase: pinned oversized results get elided oldest-first.
+            vec![
+                json!({"role": "user", "content": "read it all"}),
+                call.clone(),
+                big_tool.clone(),
+                call.clone(),
+                big_tool.clone(),
+            ],
+            // No `user` at all: the tail trims only to its own first entry.
+            vec![
+                json!({"role": "system", "content": "sys"}),
+                json!({"role": "assistant", "content": "a".repeat(5_000)}),
+                json!({"role": "assistant", "content": "b".repeat(5_000)}),
+            ],
+            // Unfixable: the question alone overflows.
+            vec![json!({"role": "user", "content": "x".repeat(9_000)})],
+        ];
+        for (i, messages) in inputs.iter().enumerate() {
+            for budget in [300usize, 1_000, 4_000, 64 * 1024] {
+                assert_eq!(
+                    trim_messages_to_budget(messages, budget, "m"),
+                    trim_messages_to_budget_reference(messages, budget),
+                    "input {i} at {budget}B diverged from the reference trim"
+                );
+            }
+        }
     }
 
     // ── the injected tools prompt shares the request budget ────────────────
