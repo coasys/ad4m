@@ -51,6 +51,71 @@ fn truncate_for_event(text: &str) -> String {
     format!("{head}…[truncated for event]")
 }
 
+/// A tool result fed back to the model is capped at this size when the
+/// caller does not size it from the model's context window
+/// (`HarnessConfig::tool_result_max_bytes`). The session transcript keeps
+/// the full result; the cap exists because a result bigger than the
+/// model's context window makes the model server drop the oldest
+/// messages — including the person's question — to fit (Ollama answers
+/// `500 no user query found in messages`).
+///
+/// The value is `AIService::tool_result_max_bytes`'s own unknown-window
+/// fallback, so a caller with no model context at hand and a caller whose
+/// model's window is simply unknown cap a result to the same size.
+pub use crate::ai_service::DEFAULT_TOOL_RESULT_MAX_BYTES;
+
+/// The reply an empty completion gets: the model ended its turn without
+/// answering, and the person is still waiting.
+const EMPTY_COMPLETION_NUDGE: &str = "Your last answer was empty — the person is still \
+     waiting. Answer them now in plain language: what you found, or what you did.";
+
+/// The longest byte prefix of `s` inside `max_bytes`, ending on a char
+/// boundary — `s[..n]` never splits a UTF-8 sequence.
+fn char_boundary_prefix_len(s: &str, max_bytes: usize) -> usize {
+    let mut n = max_bytes.min(s.len());
+    while n > 0 && !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    n
+}
+
+/// The note a cut tool result ends on — how much of it the model sees and
+/// how to get the rest. Shared with the request trim
+/// (`api::openai_compat::harness_bridge`), which cuts a result the
+/// pinned request cannot hold to the space it leaves.
+pub(crate) fn tool_result_truncation_note(kept: usize, total_bytes: usize) -> String {
+    format!(
+        "\n[truncated: {kept} of {total_bytes} bytes shown — the result was cut to fit \
+         the model's context; call the tool again with a narrower query for the rest]"
+    )
+}
+
+/// A tool result that fits `max_bytes` comes back whole; a bigger one is
+/// cut on a char boundary and ends on a note telling the model what it
+/// missed and how to get the rest. `max_bytes` counts the note too — the
+/// answer never outgrows the cap it was sized for — and when it cannot
+/// fit even the note, the cut is all there is room for.
+///
+/// The full result still reaches whatever observes the call — this shapes
+/// only what the model sees.
+pub fn cap_tool_result(result: &str, max_bytes: usize) -> String {
+    if result.len() <= max_bytes {
+        return result.to_string();
+    }
+    // The note counts against `max_bytes`: reserve it before the cut, or
+    // the answer outgrows the cap it was sized for. `kept` is never wider
+    // than `max_bytes` itself, so a note sized for `max_bytes` is at least
+    // as long as the one the cut below actually needs.
+    let note = |kept: usize| tool_result_truncation_note(kept, result.len());
+    let room = max_bytes.saturating_sub(note(max_bytes).len());
+    if room == 0 {
+        // Even the note alone is wider than the cap.
+        return result[..char_boundary_prefix_len(result, max_bytes)].to_string();
+    }
+    let kept = char_boundary_prefix_len(result, room);
+    format!("{}{}", &result[..kept], note(kept))
+}
+
 /// What the loop tells about each tool call as it makes it: interpretation's live debug events,
 /// an agent reply's steps. Called in order, one call at a time: `tool_called` before the call
 /// runs, then `tool_returned` with what it answered.
@@ -414,6 +479,21 @@ pub trait CompletionSource: Send + Sync {
         messages: &[Value],
         tools: Vec<provider::ToolSchema>,
     ) -> Result<HarnessCompletion>;
+
+    /// Bytes one tool result may occupy in the messages fed back through
+    /// this source before [`cap_tool_result`] cuts it — the share of the
+    /// model's request budget a result can be before the request it joins
+    /// no longer fits the model's window. `run_with_tools` callers size
+    /// [`HarnessConfig::tool_result_max_bytes`] from it.
+    ///
+    /// [`DEFAULT_TOOL_RESULT_MAX_BYTES`] — the AI service's own
+    /// unknown-window answer — for a source that does not know the window,
+    /// so a caller with no model context at hand and one whose window is
+    /// simply unknown cap a result to the same size.
+    async fn tool_result_max_bytes(&self, model_id: &str) -> usize {
+        let _ = model_id;
+        DEFAULT_TOOL_RESULT_MAX_BYTES
+    }
 }
 
 /// Configuration knob wired to `AutoProcessorConfig.max_tool_calls` (v3 §6
@@ -426,11 +506,31 @@ pub trait CompletionSource: Send + Sync {
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessConfig {
     pub max_tool_calls: u32,
+    /// Bytes one tool result may occupy in the messages fed back to the
+    /// model before [`cap_tool_result`] cuts it. Callers size this from the
+    /// model's context window (`CompletionSource::tool_result_max_bytes`);
+    /// the default covers callers with no model context at hand.
+    pub tool_result_max_bytes: usize,
+    /// How often the loop re-asks the model after a completion that came
+    /// back with no text and no tool calls, the wind-down completion
+    /// included (one extra completion each). A silent model is nudged, not
+    /// trusted: a thinking model's reply that never left its thinking
+    /// channel reads exactly like a stall, and the nudge tells the two
+    /// apart. AI sessions ask for their reply back — the text is the
+    /// answer. Callers that discard the final text keep 0: interpretation's
+    /// normal finish is a model that made its `propose_*` calls and went
+    /// quiet, and `runAgent` answers as the model left it — each nudge is a
+    /// billed completion whose text nobody reads.
+    pub empty_completion_nudges: u32,
 }
 
 impl Default for HarnessConfig {
     fn default() -> Self {
-        Self { max_tool_calls: 20 }
+        Self {
+            max_tool_calls: 20,
+            tool_result_max_bytes: DEFAULT_TOOL_RESULT_MAX_BYTES,
+            empty_completion_nudges: 0,
+        }
     }
 }
 
@@ -485,6 +585,13 @@ pub async fn run_with_tools(
     // how many propose_* ops the interpretation overlay accepts).
     let mut calls_used: usize = 0;
     let mut round: usize = 0;
+    // A completion that comes back with no text and no tool calls is the
+    // model ending its turn without answering — a thinking model whose
+    // reply never left the thinking channel arrives exactly like this.
+    // Asking for the answer again costs one completion; a model still
+    // silent after the nudges ran out really has nothing to say, and its
+    // empty reply is returned as it came.
+    let mut empty_nudges: u32 = 0;
 
     while calls_used < config.max_tool_calls as usize {
         round += 1;
@@ -530,6 +637,33 @@ pub async fn run_with_tools(
             preview,
             cap = config.max_tool_calls,
         );
+
+        // The completion answered nothing at all — no reply text, no tool
+        // calls. Handled before the content-channel fallback: empty content
+        // can carry no candidate. The turn is not done — the model never
+        // spoke — so nudge it rather than recording an empty reply, but
+        // only so often: `empty_nudges` bounds it across the whole loop.
+        if completion.tool_calls.is_empty() && completion.content.trim().is_empty() {
+            if empty_nudges < config.empty_completion_nudges {
+                empty_nudges += 1;
+                log::warn!(
+                    "harness: round={round}: the completion came back empty \
+                     (no text, no tool calls) — asking for the answer \
+                     (nudge {empty_nudges}/{max})",
+                    max = config.empty_completion_nudges,
+                );
+                messages.push(json!({
+                    "role": "system",
+                    "content": EMPTY_COMPLETION_NUDGE,
+                }));
+                continue;
+            }
+            log::warn!(
+                "harness: the model stayed silent ({empty_nudges} nudges \
+                 spent); returning its empty reply"
+            );
+            return Ok(completion.content);
+        }
 
         // When tool_calls[] is empty, try to recover a tool call from the
         // content channel before giving up on this round. Small local models
@@ -657,7 +791,14 @@ pub async fn run_with_tools(
                     .tool_returned(&tc.name, &tc.arguments, &result)
                     .await;
             }
-            messages.push(tool_result_message(&tc.id, &result));
+            // The observer (and so the session's transcript row) got the
+            // FULL result above; the model is fed at most
+            // `tool_result_max_bytes` of it so one result can never push
+            // the request over the model's context window.
+            messages.push(tool_result_message(
+                &tc.id,
+                &cap_tool_result(&result, config.tool_result_max_bytes),
+            ));
         }
     }
 
@@ -681,9 +822,37 @@ pub async fn run_with_tools(
             config.max_tool_calls
         ),
     }));
-    let final_completion = completions
+    let mut final_completion = completions
         .complete(model_id, &messages, Vec::new())
         .await?;
+    // The wind-down answer can come back empty the same way a round's
+    // completion can — give it the same nudges before returning silence.
+    while final_completion.content.trim().is_empty()
+        && empty_nudges < config.empty_completion_nudges
+    {
+        empty_nudges += 1;
+        log::warn!(
+            "harness: the wind-down completion came back empty — asking for \
+             the answer (nudge {empty_nudges}/{max})",
+            max = config.empty_completion_nudges,
+        );
+        messages.push(json!({
+            "role": "system",
+            "content": EMPTY_COMPLETION_NUDGE,
+        }));
+        if let Some(ref gate) = credit_gate {
+            if let Err(e) = gate.check().await {
+                log::warn!(
+                    "harness: credit gate refused an empty-reply nudge: {e}. \
+                     Returning empty content; buffer holds whatever the loop produced."
+                );
+                return Ok(String::new());
+            }
+        }
+        final_completion = completions
+            .complete(model_id, &messages, Vec::new())
+            .await?;
+    }
     Ok(final_completion.content)
 }
 
@@ -946,7 +1115,10 @@ mod tests {
             vec![user_message("go")],
             provider,
             llm.clone(),
-            HarnessConfig { max_tool_calls: 3 },
+            HarnessConfig {
+                max_tool_calls: 3,
+                ..HarnessConfig::default()
+            },
             None,
             None,
         )
@@ -1018,7 +1190,10 @@ mod tests {
             vec![user_message("go")],
             provider.clone(),
             llm.clone(),
-            HarnessConfig { max_tool_calls: 3 },
+            HarnessConfig {
+                max_tool_calls: 3,
+                ..HarnessConfig::default()
+            },
             None,
             None,
         )
@@ -1592,7 +1767,10 @@ mod tests {
             vec![user_message("go")],
             provider,
             llm.clone(),
-            HarnessConfig { max_tool_calls: 4 },
+            HarnessConfig {
+                max_tool_calls: 4,
+                ..HarnessConfig::default()
+            },
             None,
             Some(gate),
         )
@@ -1631,7 +1809,10 @@ mod tests {
             vec![user_message("go")],
             provider,
             llm.clone(),
-            HarnessConfig { max_tool_calls: 4 },
+            HarnessConfig {
+                max_tool_calls: 4,
+                ..HarnessConfig::default()
+            },
             None,
             None,
         )
@@ -1769,5 +1950,260 @@ mod tests {
 
         assert_eq!(out, "done");
         assert_eq!(llm.call_count(), 2);
+    }
+
+    // ── tool-result capping ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn the_default_result_cap_is_the_unknown_window_fallback() {
+        // One source of truth: a caller that never learned the model's
+        // context window (HarnessConfig's default cap) and a caller whose
+        // model's window is simply unknown must cap a result to the same
+        // size — the defaults used to disagree (24 KiB vs the formula's
+        // 16 KiB).
+        crate::db::Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        assert_eq!(
+            DEFAULT_TOOL_RESULT_MAX_BYTES,
+            crate::ai_service::AIService::empty()
+                .tool_result_max_bytes("a-model-nobody-registered")
+                .await,
+        );
+    }
+
+    #[test]
+    fn cap_tool_result_cuts_on_a_char_boundary_and_says_what_it_missed() {
+        // A result that fits comes back whole.
+        assert_eq!(cap_tool_result("small", 100), "small");
+
+        // A bigger one keeps a bounded prefix and ends on the note — the
+        // note inside the cap, so the answer never outgrows it.
+        let big = "x".repeat(10_000);
+        let capped = cap_tool_result(&big, 1_000);
+        assert!(
+            capped.len() <= 1_000,
+            "note inside the cap: {}",
+            capped.len()
+        );
+        let kept = capped.find("\n[truncated:").expect("the note ends the cut");
+        assert!(capped[..kept].chars().all(|c| c == 'x'));
+        assert!(kept < 1_000, "the note reserved room: {kept}B kept");
+        assert!(capped.contains("of 10000 bytes"));
+
+        // A cap smaller than the note itself gets the prefix that fits —
+        // still on a char boundary, still under the cap.
+        let multibyte = "é".repeat(10); // 20 bytes
+        let capped = cap_tool_result(&multibyte, 5);
+        assert_eq!(capped, "éé", "4 bytes kept, not 5: {capped:?}");
+    }
+
+    #[test]
+    fn a_capped_result_counts_its_notice_against_the_cap() {
+        // Whatever the cap, the answer — data and note together — never
+        // outgrows it.
+        let big = "x".repeat(10_000);
+        for cap in [5_000usize, 1_000, 300, 160] {
+            let out = cap_tool_result(&big, cap);
+            assert!(out.len() <= cap, "cap {cap}: {}B out", out.len());
+            assert!(
+                out.contains("[truncated:"),
+                "cap {cap} still tells what it missed"
+            );
+        }
+
+        // Multi-byte characters at the cut: the kept prefix ends on a char
+        // boundary, never mid-sequence — at caps the note barely fits too.
+        let multibyte = "é".repeat(200); // 400 bytes
+        for cap in [160usize, 150, 141] {
+            let out = cap_tool_result(&multibyte, cap);
+            assert!(out.len() <= cap, "cap {cap}: {}B out", out.len());
+        }
+
+        // A cap smaller than the note alone returns what fits.
+        let out = cap_tool_result(&big, 10);
+        assert_eq!(out, "x".repeat(10));
+    }
+
+    #[tokio::test]
+    async fn a_result_over_the_cap_reaches_the_model_capped_and_the_observer_whole() {
+        // The transcript (whatever observes the call) records the FULL
+        // result; the message the model reads back is the capped prefix —
+        // a result bigger than the context window must never reach it.
+        struct BigProvider;
+        #[async_trait::async_trait]
+        impl ToolProvider for BigProvider {
+            async fn tools(&self) -> Vec<ToolSchema> {
+                vec![ToolSchema::zero_arg("big", "returns a lot")]
+            }
+            async fn call(&self, _name: &str, _args: Value) -> Result<String> {
+                Ok("x".repeat(10_000))
+            }
+        }
+        struct SeenResults(Mutex<Vec<String>>);
+        #[async_trait::async_trait]
+        impl ToolObserver for SeenResults {
+            async fn tool_called(&self, _name: &str, _arguments: &Value) {}
+            async fn tool_returned(&self, _name: &str, _arguments: &Value, result: &str) {
+                self.0.lock().unwrap().push(result.to_string());
+            }
+        }
+
+        let script = vec![tool_call_turn("c1", "big", json!({})), plain_answer("done")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let seen = SeenResults(Mutex::new(Vec::new()));
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            Arc::new(BigProvider),
+            llm.clone(),
+            HarnessConfig {
+                tool_result_max_bytes: 1_000,
+                ..HarnessConfig::default()
+            },
+            Some(&seen),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "done");
+        let fed = llm.nth_messages(1)[2]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            fed.len() <= 1_000 && fed.contains("[truncated:") && fed.contains("of 10000 bytes"),
+            "the model reads the capped prefix, note inside the cap: {fed:?}"
+        );
+        assert_eq!(
+            seen.0.lock().unwrap()[0].len(),
+            10_000,
+            "the observer got the full result"
+        );
+    }
+
+    // ── an empty completion is a stall, not an answer ─────────────────────
+
+    #[tokio::test]
+    async fn a_silent_completion_returns_at_once_when_nudges_are_off() {
+        // Callers that discard the final text (interpretation, runAgent)
+        // run with no nudges: the empty reply goes back as it came and
+        // exactly one completion is spent.
+        let script = vec![plain_answer("")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider { tools: vec![] });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("hi")],
+            provider,
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "");
+        assert_eq!(llm.call_count(), 1, "no nudges: one completion spent");
+    }
+
+    #[tokio::test]
+    async fn an_empty_completion_is_asked_again_not_recorded() {
+        // A completion with no text and no tool calls is the model ending
+        // its turn without answering — nudge it rather than return "".
+        let script = vec![plain_answer(""), plain_answer("the real answer")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider { tools: vec![] });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("hi")],
+            provider,
+            llm.clone(),
+            HarnessConfig {
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "the real answer");
+        assert_eq!(llm.call_count(), 2);
+        // The second call was nudged: the last message names the empty reply.
+        let last = llm.nth_messages(1).last().unwrap().clone();
+        assert_eq!(last["role"], "system");
+        assert!(last["content"].as_str().unwrap().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn a_model_silent_through_every_nudge_returns_its_empty_reply() {
+        // Nudges ran out — the empty reply goes back as it came, the caller
+        // decides what silence means. Bound: `empty_completion_nudges` (2)
+        // extra completions on top of the first, no more.
+        let script = vec![plain_answer(""), plain_answer(""), plain_answer("")];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider { tools: vec![] });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("hi")],
+            provider,
+            llm.clone(),
+            HarnessConfig {
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "");
+        assert_eq!(llm.call_count(), 3, "first completion plus 2 nudges");
+    }
+
+    #[tokio::test]
+    async fn the_budget_wind_down_asks_an_empty_answer_again_too() {
+        // The forced final answer after the tool budget can also come back
+        // empty; it gets the same nudges.
+        let script = vec![
+            tool_call_turn("1", "t", json!({})),
+            tool_call_turn("2", "t", json!({})),
+            plain_answer(""),
+            plain_answer("finally an answer"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("t", "")],
+        });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            provider,
+            llm.clone(),
+            HarnessConfig {
+                max_tool_calls: 2,
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "finally an answer");
+        assert_eq!(
+            llm.call_count(),
+            4,
+            "2 tool rounds + empty wind-down + nudged answer"
+        );
     }
 }
