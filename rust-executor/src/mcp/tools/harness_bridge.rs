@@ -3,10 +3,15 @@
 //! Two `pub(crate)` methods on `Ad4mMcpHandler` that let the LLM harness use
 //! the MCP tool surface without going through the `rmcp` transport:
 //!
-//! * `list_tool_schemas()` — returns every currently-exposed tool (both the
-//!   static `#[tool]` methods registered on `tool_router` AND the dynamic
-//!   per-class SHACL tools generated from the perspective's shape) as
-//!   `Vec<ToolSchema>`, the harness-facing type.
+//! * `list_tool_schemas()` — returns every currently-exposed tool as
+//!   `Vec<ToolSchema>`, the harness-facing type. What is exposed is the
+//!   same list `tools/list` answers ([`Ad4mMcpHandler::exposed_tools`]):
+//!   the static `#[tool]` methods registered on `tool_router`, plus the
+//!   dynamic per-class SHACL tools only when the context's
+//!   `dynamic_class_tools` is on. An interpretation pass runs with it on
+//!   (its `propose_*` flow needs the per-class read tools); an AI session
+//!   follows the operator's `dynamicClassTools` flag, so a chat turn is
+//!   not charged the whole per-class surface every request.
 //! * `call_tool_by_name(name, args)` — dispatches a tool call by name,
 //!   returning the tool's textual result. Bypasses `rmcp`'s `ToolRouter::call`
 //!   because that requires a `RequestContext<RoleServer>` whose `Peer` has a
@@ -20,9 +25,11 @@
 //! attributes the MCP transport reads. Only the DISPATCH is duplicated,
 //! because rmcp's router entrypoint requires a `Peer` we cannot construct.
 //!
-//! The dispatch match below covers the interpretation-pass read subset first
-//! (see [[planning/llm-harness-design-2026-08-21-v3.md]] §1). Additional
-//! tools are one match arm each; extend as harness use cases surface them.
+//! The dispatch match below has one arm per static tool an in-process caller may
+//! use: every tool but the ones that open or widen a session (login, signup, the
+//! capability request, the token mint). What a caller is offered is narrowed further
+//! by its own provider (the interpretation pass and `perspective.runAgent` take a
+//! named subset; an AI session takes all of the static surface).
 //! Any tool not in the match delegates to `handle_dynamic_tool`, which
 //! covers ALL per-class SHACL tools (`Task_query`, `Channel_create`, etc.)
 //! — that path already exists and works without any context.
@@ -35,35 +42,25 @@ use serde_json::Value;
 
 impl Ad4mMcpHandler {
     /// Enumerate every tool this handler exposes, in the shape the harness
-    /// consumes. Merges the router-registered static tools with the dynamic
-    /// per-class SHACL tools. Ordering is stable within a router but not
+    /// consumes. The list is [`Self::exposed_tools`]'s — the same rule
+    /// `tools/list` applies: the router-registered static tools, plus the
+    /// dynamic per-class SHACL tools only while `dynamic_class_tools` is on.
+    /// Ordering is stable within a router but not
     /// across (map iteration order); tests that need determinism should
     /// sort.
     pub(crate) async fn list_tool_schemas(&self) -> Vec<ToolSchema> {
-        let mut out = Vec::new();
-
-        // Static tools — every #[tool]-annotated method registered on the
-        // router. `attr` is the rmcp `Tool` with name / description /
-        // input_schema — convert directly.
-        for tool in self.tool_router.list_all() {
-            out.push(rmcp_tool_to_schema(&tool));
-        }
-
-        // Dynamic tools — per-class SHACL-generated (create/query/list/get/
-        // delete + property setters + collection ops). Already returns
-        // `Vec<Tool>`; convert the same way.
-        for tool in self.generate_dynamic_tools().await {
-            out.push(rmcp_tool_to_schema(&tool));
-        }
-
-        out
+        self.exposed_tools()
+            .await
+            .iter()
+            .map(rmcp_tool_to_schema)
+            .collect()
     }
 
     /// Dispatch a tool call by name. Returns the tool's raw text result
     /// (what the LLM sees as the next `role: "tool"` message content).
     ///
     /// Dispatch strategy:
-    /// 1. If `name` matches one of the interpretation-relevant static tools,
+    /// 1. If `name` matches one of the static tools below,
     ///    deserialize `args` into the tool's `Parameters<T>` and call the
     ///    method directly. The method returns `String` already.
     /// 2. Otherwise, delegate to `handle_dynamic_tool` — that covers every
@@ -72,9 +69,8 @@ impl Ad4mMcpHandler {
     /// 3. If neither matches, error — the harness turns errors into
     ///    `role: "tool"` content prefixed `error:` so the LLM can recover.
     ///
-    /// The static-tool arm covers the read subset needed by the initial
-    /// harness wiring. Additional static tools land here one arm at a time;
-    /// the pattern is mechanical.
+    /// A static tool without an arm answers `Unknown tool`. The tools that open
+    /// or widen a session have none on purpose.
     pub(crate) async fn call_tool_by_name(&self, name: &str, args: Value) -> Result<String> {
         // The static-tool arms below all deserialize into a distinct
         // `Parameters<T>` where T is the argument struct on the
@@ -107,7 +103,10 @@ impl Ad4mMcpHandler {
             "get_documentation" => dispatch_static_tool!(get_documentation),
             // ── perspectives.rs ─────────────────────────────────────────
             "list_perspectives" => dispatch_static_tool!(list_perspectives),
+            "add_perspective" => dispatch_static_tool!(add_perspective),
+            "add_link" => dispatch_static_tool!(add_link),
             "query_links" => dispatch_static_tool!(query_links),
+            "add_model" => dispatch_static_tool!(add_model),
             // ── instances/ ──────────────────────────────────────────────
             // The static class-agnostic surface is on the router, so
             // `list_tool_schemas` advertises it to the harness LLM; these
@@ -129,6 +128,55 @@ impl Ad4mMcpHandler {
             "execute_commands" => dispatch_static_tool!(execute_commands),
             "template_read" => dispatch_static_tool!(template_read),
             "template_update" => dispatch_static_tool!(template_update),
+            // ── flows.rs ────────────────────────────────────────────────
+            "add_flow" => dispatch_static_tool!(add_flow),
+            "get_flows" => dispatch_static_tool!(get_flows),
+            "flow_state" => dispatch_static_tool!(flow_state),
+            "flow_actions" => dispatch_static_tool!(flow_actions),
+            "flow_proposal_accept" => dispatch_static_tool!(flow_proposal_accept),
+            "flow_proposal_reject" => dispatch_static_tool!(flow_proposal_reject),
+            "flow_valid_outputs" => dispatch_static_tool!(flow_valid_outputs),
+            // ── subscriptions.rs ────────────────────────────────────────
+            "generate_waker_query" => dispatch_static_tool!(generate_waker_query),
+            "get_mention_waker_config" => dispatch_static_tool!(get_mention_waker_config),
+            // ── languages.rs ────────────────────────────────────────────
+            "language_meta" => dispatch_static_tool!(language_meta),
+            // ── neighbourhoods.rs ───────────────────────────────────────
+            "list_link_language_templates" => {
+                return Ok(self.list_link_language_templates().await);
+            }
+            "neighbourhood_publish_from_perspective" => {
+                dispatch_static_tool!(neighbourhood_publish_from_perspective)
+            }
+            "neighbourhood_join_from_url" => {
+                dispatch_static_tool!(neighbourhood_join_from_url)
+            }
+            // ── profiles.rs ─────────────────────────────────────────────
+            "get_my_did" => dispatch_static_tool!(get_my_did),
+            "get_agent_profile" => dispatch_static_tool!(get_agent_profile),
+            "set_agent_profile" => dispatch_static_tool!(set_agent_profile),
+            "set_agent_profile_picture" => dispatch_static_tool!(set_agent_profile_picture),
+            "get_agent_public_perspective" => {
+                dispatch_static_tool!(get_agent_public_perspective)
+            }
+            "set_agent_public_perspective" => {
+                dispatch_static_tool!(set_agent_public_perspective)
+            }
+            // ── auth.rs ─────────────────────────────────────────────────
+            // `auth_status` needs an rmcp `RequestContext` nothing in-process can
+            // build; `auth_status_as` resolves the same held session.
+            "auth_status" => {
+                return Ok(self
+                    .auth_status_as(crate::mcp::tools::RequestAuth {
+                        header: None,
+                        reach: None,
+                    })
+                    .await);
+            }
+            // The tools that open or widen a session (`login_email`, `signup`,
+            // `request_login_verification`, `verify_email_code`, `request_capability`,
+            // `generate_jwt`) have no arm: work the executor runs in-process holds the
+            // session it was given and never trades it for another.
             // ── fallback: per-class dynamic tools ───────────────────────
             _ => {
                 // `handle_dynamic_tool` expects the args as a
