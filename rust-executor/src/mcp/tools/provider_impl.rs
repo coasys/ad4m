@@ -39,7 +39,8 @@ impl ToolProvider for Ad4mToolProvider {
         // Re-read on every call — dynamic per-class tools reflect the
         // currently-registered SHACL shape, so a class registration mid-pass
         // is visible on the next loop iteration. `handler.list_tool_schemas`
-        // does the merge (static router + dynamic per-class).
+        // applies the context's `dynamic_class_tools` rule (static router +
+        // per-class tools only while the flag is on).
         self.handler.list_tool_schemas().await
     }
 
