@@ -1,9 +1,9 @@
 // Auto-generated from the executor's event table (rust-executor/src/api/events_ws.rs).
 // Do NOT edit manually — regenerate with: pnpm run generate:api-types
 
-import type { AIModelLoadingStatus } from "./AIModelLoadingStatus";
 import type { AgentStatusChangedEvent } from "./AgentStatusChangedEvent";
 import type { AgentUpdatedEvent } from "./AgentUpdatedEvent";
+import type { AiEndpointStatusEvent } from "./AiEndpointStatusEvent";
 import type { Apps } from "./Apps";
 import type { AutoProcessorEvent } from "./AutoProcessorEvent";
 import type { AutoProcessorNeighbourhoodState } from "./AutoProcessorNeighbourhoodState";
@@ -12,6 +12,8 @@ import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { FlowStateChangedEvent } from "./FlowStateChangedEvent";
 import type { HostingUserInfo } from "./HostingUserInfo";
 import type { IdentityForkEvent } from "./IdentityForkEvent";
+import type { LocalAiProgress } from "./LocalAiProgress";
+import type { ModelStatusEvent } from "./ModelStatusEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
 import type { PerspectiveEvent } from "./PerspectiveEvent";
@@ -44,7 +46,9 @@ export interface EventMap {
   "notification-triggered": NotificationTriggeredEvent;
   "exception-occurred": ExceptionOccurredEvent;
   "transcription-text": TranscriptionTextFilter;
-  "model-loading-status": AIModelLoadingStatus;
+  "model-status": ModelStatusEvent;
+  "ai-endpoint-status": AiEndpointStatusEvent;
+  "ai-local-progress": LocalAiProgress;
   "query-subscription-update": QuerySubscriptionUpdateEvent;
   "auto-processor-event": AutoProcessorEvent;
   "auto-processor-neighbourhood-state": AutoProcessorNeighbourhoodState;
