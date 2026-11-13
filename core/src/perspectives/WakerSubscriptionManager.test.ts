@@ -500,25 +500,44 @@ describe('WakerSubscriptionManager', () => {
    * A QuerySubscriptionProxy stand-in for #1735: the mention query (over Mentioning) answers
    * as `mention` says, each text query (over TextContent) as the next of `text` says, the last
    * one for every attempt after. `hang` never answers the handshake, `open` answers at once with
-   * `result`. Every proxy is kept in `made` with its dispose calls and its `onResult` callback.
+   * `result`, a number answers that many ms after the handshake starts. Every proxy is kept in
+   * `made` with when it was made (`at`), its dispose calls (and when, `disposedAt`) and its
+   * `onResult` callback.
    */
   function slowTextProxyClass(
-    text: ('hang' | 'open')[],
+    text: ('hang' | 'open' | number)[],
     mention: 'hang' | 'open' = 'open',
     textResult?: any,
   ) {
-    const made: { path: string; disposed: any[]; deliver?: (result: any) => Promise<void> }[] = [];
+    const made: {
+      path: string;
+      at: number;
+      disposed: any[];
+      disposedAt?: number;
+      deliver?: (result: any) => Promise<void>;
+    }[] = [];
     let textAttempts = 0;
     const ProxyClass = function (...args: any[]) {
       const path = args[3] === 'ad4m://Mentioning' ? 'mentions' : 'text';
       const behaviour = path === 'mentions' ? mention : text[Math.min(textAttempts++, text.length - 1)];
-      const entry: (typeof made)[number] = { path, disposed: [] };
+      const entry: (typeof made)[number] = { path, at: Date.now(), disposed: [] };
       made.push(entry);
+      let answered: Promise<void> | undefined;
+      const answer = () =>
+        (answered ??=
+          behaviour === 'open'
+            ? Promise.resolve()
+            : behaviour === 'hang'
+              ? new Promise<void>(() => {})
+              : new Promise<void>((resolve) => setTimeout(resolve, behaviour)));
       return {
-        initialized: behaviour === 'open' ? Promise.resolve(true) : new Promise<boolean>(() => {}),
-        subscribe: () => (behaviour === 'open' ? Promise.resolve() : new Promise<void>(() => {})),
-        dispose: (options?: any) => { entry.disposed.push(options); },
-        result: path === 'text' && behaviour === 'open' ? textResult : undefined,
+        get initialized() { return answer().then(() => true); },
+        subscribe: answer,
+        dispose: (options?: any) => {
+          entry.disposed.push(options);
+          entry.disposedAt ??= Date.now();
+        },
+        result: path === 'text' && behaviour !== 'hang' ? textResult : undefined,
         onResult: (cb: (result: any) => Promise<void>) => { entry.deliver = cb; },
       };
     };
@@ -527,12 +546,22 @@ describe('WakerSubscriptionManager', () => {
     return { ProxyClass, made, texts, mentions };
   }
 
-  /** A manager over {@link slowTextProxyClass} with a 1 s handshake budget and 5 s re-attempts. */
-  function slowTextManager(ProxyClass: any) {
+  /**
+   * A manager over {@link slowTextProxyClass} with a 1 s handshake budget and 5 s re-attempts,
+   * restored from `previousSeenMessages` when given. `persisted` holds what it last persisted.
+   */
+  function slowTextManager(ProxyClass: any, previousSeenMessages?: Record<string, string[]>) {
     const wakes: string[][] = [];
     const warnings: string[] = [];
     const infos: string[] = [];
+    const debugs: string[] = [];
+    const persisted: { subs: any[]; seen: Record<string, string[]> } = { subs: [], seen: {} };
     const manager = new WakerSubscriptionManager({
+      previousSeenMessages,
+      onPersist: (subs, seen) => {
+        persisted.subs = subs.map((s) => ({ ...s }));
+        persisted.seen = seen;
+      },
       perspectiveClient: {
         modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
       },
@@ -540,6 +569,7 @@ describe('WakerSubscriptionManager', () => {
         ...noopLogger(),
         info: (msg: string) => { infos.push(msg); },
         warn: (msg: string) => { warnings.push(msg); },
+        debug: (msg: string) => { debugs.push(msg); },
       },
       QuerySubscriptionProxy: ProxyClass,
       debounceMs: 10,
@@ -548,7 +578,7 @@ describe('WakerSubscriptionManager', () => {
       maxRetryPendingMs: 20_000,
       onWake: (_sub, _result, mentions) => { wakes.push(mentions!.map((m) => m.address)); },
     });
-    return { manager, wakes, warnings, infos };
+    return { manager, wakes, warnings, infos, debugs, persisted };
   }
 
   describe('a text query slower than the handshake budget (#1735)', () => {
@@ -649,6 +679,136 @@ describe('WakerSubscriptionManager', () => {
       // Each proxy disposed once, with its opening cancelled: none left behind.
       for (const p of inFlight.made) expect(p.disposed).toEqual([{ cancelOpening: true }]);
       expect(jest.getTimerCount()).toBe(0);
+    });
+
+    /**
+     * Review of #1737 (Lal): restored, with a seen set saved while only the mention query
+     * listened, the text query's opening result was read as news, and every old mention found
+     * only through its text woke the agent at once.
+     */
+    it('reads the text query\'s opening result as history after a restart until it has read it once', async () => {
+      // Saved by a version without `textHistoryRead`: the seen set holds a mention link only.
+      const saved = { ...sub };
+      const proxies = slowTextProxyClass(
+        ['hang', 'open'],
+        'open',
+        result(named('test://m1'), named('test://old1'), named('test://old2')),
+      );
+      const { manager, wakes, persisted } = slowTextManager(proxies.ProxyClass, { [sub.id]: ['test://m1'] });
+
+      const subscribed = manager.subscribe(saved);
+      await jest.advanceTimersByTimeAsync(1000);
+      await subscribed;
+      expect(persisted.subs.map((s) => [s.id, s.textHistoryRead])).toEqual([[sub.id, undefined]]);
+
+      // The re-attempt within 5 s opens; its old matches are history.
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(proxies.texts()).toHaveLength(2);
+      expect(proxies.texts()[1].disposed).toEqual([]);
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(wakes).toEqual([]);
+      expect(persisted.subs.map((s) => [s.id, s.textHistoryRead])).toEqual([[sub.id, true]]);
+      expect([...persisted.seen[sub.id]].sort()).toEqual(['test://m1', 'test://old1', 'test://old2']);
+      // A later match wakes.
+      await proxies.texts()[1].deliver!(result(named('test://old1'), named('test://new')));
+      await jest.advanceTimersByTimeAsync(10);
+      expect(wakes).toEqual([['test://new']]);
+      manager.disposeAll();
+
+      // The next start, from what it persisted: the text query has read its history, so a match
+      // written while the waker was down wakes when the text query opens, here on a re-attempt.
+      const next = slowTextProxyClass(
+        ['hang', 'open'],
+        'open',
+        result(named('test://old1'), named('test://new'), named('test://downtime')),
+      );
+      const restarted = slowTextManager(next.ProxyClass, persisted.seen);
+      const again = restarted.manager.subscribe(persisted.subs[0]);
+      await jest.advanceTimersByTimeAsync(1000);
+      await again;
+      await jest.advanceTimersByTimeAsync(5000 + 10);
+      expect(next.texts()).toHaveLength(2);
+      expect(restarted.wakes).toEqual([['test://downtime']]);
+      restarted.manager.disposeAll();
+    });
+
+    it('gives each text re-attempt twice the handshake budget of the one before, up to maxRetryPendingMs', async () => {
+      // Answers after 1.5 budgets: the first re-attempt (1 s) times out, the second (2 s) opens.
+      const slow = slowTextProxyClass(['hang', 1500]);
+      const first = slowTextManager(slow.ProxyClass);
+      const subscribed = first.manager.subscribe(sub);
+      await jest.advanceTimersByTimeAsync(1000);
+      await subscribed;
+      await jest.advanceTimersByTimeAsync(5000 + 1000 + 10_000 + 2000);
+      expect(slow.texts()).toHaveLength(3);
+      expect(slow.texts()[1].disposed).toEqual([{ cancelOpening: true }]);
+      expect(slow.texts()[2].disposed).toEqual([]);
+      expect(first.infos.some((i) => i.includes('text query opened'))).toBe(true);
+      first.manager.disposeAll();
+
+      // Never answers: the budget doubles up to maxRetryPendingMs (20 s) and stays there.
+      const never = slowTextProxyClass(['hang']);
+      const second = slowTextManager(never.ProxyClass);
+      const again = second.manager.subscribe(sub);
+      await jest.advanceTimersByTimeAsync(1000);
+      await again;
+      await jest.advanceTimersByTimeAsync(400_000);
+      const budgets = second.debugs
+        .map((d) => /text query failed again \(subscribe handshake timed out after (\d+)ms\)/.exec(d)?.[1])
+        .filter((b) => b !== undefined)
+        .map(Number);
+      expect(budgets.slice(0, 8)).toEqual([1000, 2000, 4000, 8000, 16_000, 20_000, 20_000, 20_000]);
+      // One attempt in flight at a time, each given up with its opening cancelled.
+      for (const t of never.texts().slice(0, -1)) expect(t.disposed).toEqual([{ cancelOpening: true }]);
+      second.manager.disposeAll();
+    });
+
+    it('waits twice as long before each text re-attempt, up to maxRetryPendingMs', async () => {
+      // The longest wait each time, so the waits are exact.
+      const random = jest.spyOn(Math, 'random').mockReturnValue(1);
+      try {
+        const never = slowTextProxyClass(['hang']);
+        const { manager } = slowTextManager(never.ProxyClass);
+        const subscribed = manager.subscribe(sub);
+        await jest.advanceTimersByTimeAsync(1000);
+        await subscribed;
+        await jest.advanceTimersByTimeAsync(300_000);
+        const texts = never.texts();
+        // From the moment an attempt is given up on to the start of the next.
+        const waits = texts.slice(1).map((t, i) => t.at - texts[i].disposedAt!);
+        expect(waits.slice(0, 6)).toEqual([5000, 10_000, 20_000, 20_000, 20_000, 20_000]);
+        manager.disposeAll();
+      } finally {
+        random.mockRestore();
+      }
+    });
+
+    it('drops a text re-attempt in flight when the subscription is opened again under its id', async () => {
+      // The first re-attempt answers 0.5 s into its handshake, after the subscription is replaced.
+      const proxies = slowTextProxyClass(['hang', 500, 'hang']);
+      const { manager, infos } = slowTextManager(proxies.ProxyClass);
+      const subscribed = manager.subscribe(sub);
+      await jest.advanceTimersByTimeAsync(1000);
+      await subscribed;
+      while (proxies.texts().length < 2) await jest.advanceTimersByTimeAsync(100);
+      const inFlight = proxies.texts()[1];
+      expect(inFlight.disposed).toEqual([]);
+
+      const resubscribed = manager.subscribe(sub);
+      // Cancelled at once.
+      expect(inFlight.disposed).toEqual([{ cancelOpening: true }]);
+      await jest.advanceTimersByTimeAsync(1000);
+      await resubscribed;
+      // It answered meanwhile, and never joined: nothing listens to it.
+      expect(inFlight.deliver).toBeUndefined();
+      expect(inFlight.disposed).toEqual([{ cancelOpening: true }]);
+      expect(infos.some((i) => i.includes('text query opened'))).toBe(false);
+      expect(manager.getActive().map((s) => s.id)).toEqual([sub.id]);
+
+      manager.disposeAll();
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(jest.getTimerCount()).toBe(0);
+      for (const p of proxies.made) expect(p.disposed).toEqual([{ cancelOpening: true }]);
     });
 
     it('fails the subscription, as before, when the mention query does not open', async () => {
@@ -916,6 +1076,8 @@ describe('WakerSubscriptionManager', () => {
       initial?: any;
       initialMentions?: any[];
       previousSeen?: Record<string, string[]>;
+      /** Whether the restored subscription was saved after its text query read its history. */
+      textHistoryRead?: boolean;
       modelQuery?: (uuid: string, className: string, queryJson: string) => Promise<any>;
     },
   ) {
@@ -943,7 +1105,11 @@ describe('WakerSubscriptionManager', () => {
       onPersist: (_subs, seen) => { persistedSeen.push(seen['mention-harness'] ?? []); },
       previousSeenMessages: opening?.previousSeen,
     } as any);
-    await manager.subscribe({ ...sub, id: 'mention-harness' });
+    await manager.subscribe({
+      ...sub,
+      id: 'mention-harness',
+      ...(opening?.textHistoryRead !== undefined ? { textHistoryRead: opening.textHistoryRead } : {}),
+    });
     const msg = (...ids: string[]) => result(...ids.map(named));
     return {
       manager,
@@ -967,6 +1133,7 @@ describe('WakerSubscriptionManager', () => {
       // The mention query opens first: a record both hold wakes through its mention link.
       initialMentions: [mentionRow('test://posted'), mentionRow('test://old')],
       previousSeen: { 'mention-harness': ['test://old'] },
+      textHistoryRead: true,
     });
     await waitUntil(() => h.wakes.length > 0, 1000);
     h.manager.disposeAll();
@@ -987,6 +1154,46 @@ describe('WakerSubscriptionManager', () => {
     await new Promise((r) => setTimeout(r, 30));
     h.manager.disposeAll();
     expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://new']]);
+  });
+
+  /**
+   * Review of #1737 (CodeRabbit): a result whose parents were still resolving when the
+   * subscription was opened again under its id wrote its seen set over the new one's, and woke.
+   */
+  it('writes nothing and wakes for nothing when the subscription is replaced during a parent lookup', async () => {
+    let lookups = 0;
+    let resolveFirst: (rows: any) => void = () => {};
+    const delivers: Record<string, (result: any) => Promise<void>> = {};
+    const wakes: string[][] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {
+        modelQuery: () =>
+          ++lookups === 1
+            ? new Promise((r) => { resolveFirst = r; })
+            : Promise.resolve({ instances: [], totalCount: 0 }),
+      },
+      logger: noopLogger(),
+      QuerySubscriptionProxy: answeringProxyClass(delivers),
+      debounceMs: 10,
+      retryPendingMs: 60_000,
+      onWake: (_sub, _result, mentions) => { wakes.push(mentions!.map((m) => m.address)); },
+    });
+    const replaced = { ...sub, id: 'mention-replaced' };
+    await manager.subscribe(replaced);
+    const stale = delivers.text(result(named('test://a')));
+    await waitUntil(() => lookups === 1, 1000);
+
+    await manager.subscribe(replaced);
+    resolveFirst({ instances: [], totalCount: 0 });
+    await stale;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(wakes).toEqual([]);
+
+    // The new subscription has not seen it: its own result wakes for it.
+    await delivers.text(result(named('test://a')));
+    await waitUntil(() => wakes.length > 0, 1000);
+    expect(wakes).toEqual([['test://a']]);
+    manager.disposeAll();
   });
 
   /** Review of #1512 (Lal): B was persisted as seen while its parents were still resolving. */

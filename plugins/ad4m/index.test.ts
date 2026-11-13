@@ -2467,6 +2467,33 @@ describe("ad4mPlugin", () => {
     expect(JSON.stringify(result)).toContain("mention links to did:key:zTest and for TestAgent in text");
   });
 
+  it("a saved mention subscription re-derived under its id keeps whether its text query read its history", async () => {
+    const query = JSON.stringify({ where: { OR: [] }, links: ["text"] });
+    const config = {
+      class: "ad4m://TextContent",
+      query,
+      mention_class: "ad4m://Mentioning",
+      mention_query: "{}",
+      terms: ["TestAgent", "did:key:zTest"],
+      names: ["TestAgent"],
+      did: "did:key:zTest",
+      subscription: { id: "mention-persp-uuid-1", perspective: "persp-uuid-1", query },
+    };
+    try {
+      // Not saved: the manager decides, from the text query's opening result.
+      expect((await subscribeToMentions(config)).active.map((s) => s.textHistoryRead)).toEqual([undefined]);
+      // Saved after its text query read its history: a mention found only through its text
+      // while the waker was down still wakes after the restart.
+      parkSubscription(
+        { id: "mention-persp-uuid-1", type: "mention", perspective: "persp-uuid-1", channel: "", query, textHistoryRead: true },
+        {},
+      );
+      expect((await subscribeToMentions(config)).active.map((s) => s.textHistoryRead)).toEqual([true]);
+    } finally {
+      _resetModuleState();
+    }
+  });
+
   it("ad4m_subscribe_to_mentions refuses an older executor's mention query", async () => {
     const older = [
       // An early #1557: SPARQL over we://mention links.
@@ -4871,7 +4898,8 @@ describe("a mention subscription saved by an older executor", () => {
       expect(_parkedSubscriptionsForTests().size).toBe(0);
       await vi.waitFor(() => expect(woken).toEqual([["msg-new"]]));
       const saved = loadWakerState(stateDir);
-      expect(saved.subscriptions.find((s) => s.id === textQuery.id)).toEqual(current);
+      // Saved as re-derived, with the mark that its text query read its history.
+      expect(saved.subscriptions.find((s) => s.id === textQuery.id)).toEqual({ ...current, textHistoryRead: true });
     } finally {
       manager.disposeAll();
       fs.rmSync(stateDir, { recursive: true, force: true });

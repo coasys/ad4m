@@ -44,6 +44,17 @@ export interface WakerSubscription {
   mentionQuery?: string;
   /** The class `mentionQuery` reads: the built-in `ad4m://Mentioning`. */
   mentionClass?: string;
+  /**
+   * Set by the manager, not the caller: whether a mention subscription's text
+   * query has taken its opening result, which the manager records as history.
+   * It persists with the subscription. Until it is set, the text query's
+   * opening result is history even after a restart: the persisted seen set
+   * may hold the mention query's records only (the subscription listened
+   * without its text query, #1735), so the text query's old matches would all
+   * wake at once. A subscription saved without it (an older version) starts
+   * that way too.
+   */
+  textHistoryRead?: boolean;
   neighbourhood?: string;
 }
 
@@ -348,7 +359,8 @@ export interface WakerSubscriptionManagerOptions {
    * without a deadline the subscription ended up neither active nor pending,
    * so the re-attempt cycle never saw it (#1016). Each query of a mention
    * subscription gets its own: one whose mention query opens listens through
-   * it, and re-attempts a text query that did not open on its own (#1735).
+   * it, and re-attempts a text query that did not open on its own (#1735),
+   * with this budget doubled per failed re-attempt, up to `maxRetryPendingMs`.
    */
   subscribeTimeoutMs?: number;
   /** First delay before offering an undelivered mention wake again (default 5000); doubles per
@@ -501,6 +513,15 @@ export class WakerSubscriptionManager {
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
+    // The manager's own copy: it records `textHistoryRead` on it. A re-derived
+    // subscription under the same id keeps what the manager knows of its text
+    // query.
+    const prior =
+      this.activeSubscriptions.get(sub.id) ??
+      this.pendingSubscriptions.get(sub.id) ??
+      this.reopening.get(sub.id)?.sub;
+    sub = { ...sub };
+    if (prior?.textHistoryRead && sub.textHistoryRead === undefined) sub.textHistoryRead = true;
     // Dispose existing subscription with same id if any. Not `dispose()`: a
     // re-attempt must not start the backoff over.
     this.release(sub.id, false);
@@ -553,8 +574,7 @@ export class WakerSubscriptionManager {
     // One deadline per query's handshake: `proxy.subscribe()` and the
     // `initialized` promise it resolves share the budget, so a hang in either
     // surfaces as the same loud-but-recoverable failure a rejection does.
-    const budgetMs = this.subscribeTimeoutMs;
-    const open = async (p: any): Promise<void> => {
+    const open = async (p: any, budgetMs: number): Promise<void> => {
       // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
       // rejects this promise internally when subscribe() fails, and if nobody catches
       // it before the next microtask it crashes the process.
@@ -580,7 +600,7 @@ export class WakerSubscriptionManager {
     // the agent got no wake at all, not even through a mention link. The
     // mention query decides; a text query that fails is re-attempted on its own
     // once the subscription listens.
-    const openings = proxies.map(open);
+    const openings = proxies.map((p) => open(p, this.subscribeTimeoutMs));
     for (const o of openings) o.catch(() => {});
     let textFailure: string | undefined;
     try {
@@ -640,10 +660,13 @@ export class WakerSubscriptionManager {
       this.logger.info(`[waker] ${sub.id}: seeded ${seen.size} seen message(s) from persisted state`);
     }
 
-    // `opening` is the result the subscription holds when it opens (`proxy.result`): `onResult`
-    // only reports later changes, so this is the one chance to see what was written meanwhile.
     // `of`: the query the result is from, for the log (a mention subscription has two).
-    const handleResult = async (result: any, opening = false, of = "") => {
+    // `opening` marks the result the query holds when it opens (`proxy.result`): `onResult`
+    // only reports later changes, so this is the one chance to see what was written meanwhile.
+    // A mention subscription reads it as `"history"` (recorded as seen, no wake) or `"news"`
+    // (wakes on what is not seen yet: written while the waker was down).
+    const handleResult = async (result: any, of: string, opening?: "history" | "news") => {
+      if (this.isStale(sub.id, token)) return;
       this.logger.info(
         `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"}${of} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
@@ -688,8 +711,8 @@ export class WakerSubscriptionManager {
           return;
         }
 
-        if (opening && !restored) {
-          // A new subscription: what it opens on is history, readable on demand, not news.
+        if (opening === "history") {
+          // What it opens on is history, readable on demand, not news.
           this.seenMessages.set(sub.id, currentSeen);
           const done = this.delivered.get(sub.id) ?? new Set<string>();
           for (const address of newMessages) done.add(address);
@@ -716,6 +739,9 @@ export class WakerSubscriptionManager {
           );
           mentions.push({ address: msgAddr, parents, ancestors, ...provenance.get(msgAddr)! });
         }
+        // Released, or replaced under the same id, during the lookups: the state under `sub.id`
+        // is no longer this subscription's, so write nothing and wake for nothing.
+        if (this.isStale(sub.id, token)) return;
 
         this.seenMessages.set(sub.id, currentSeen);
         const pending = this.undelivered.get(sub.id) ?? new Map<string, MentionMessage>();
@@ -744,8 +770,26 @@ export class WakerSubscriptionManager {
         );
       }
     };
+    // Read `p`'s opening result. The mention query's is news only after a restart. The text
+    // query's is news only after a restart and once a text query of this subscription has read
+    // its history (`textHistoryRead`): it may have listened without it, so the seen set may not
+    // hold what the text query finds (#1735).
+    const readOpening = async (p: any, of: string) => {
+      if (p.result === undefined) return;
+      const isText = p !== mentionProxy;
+      const news = restored && (!isText || sub.type !== "mention" || sub.textHistoryRead === true);
+      try {
+        await handleResult(p.result, of, news ? "news" : "history");
+      } catch (e: any) {
+        this.logger.warn(`[waker] ${sub.id}: reading the opening result failed: ${e?.message ?? e}`);
+      }
+      const rows: unknown = sub.className ? p.result?.instances : p.result;
+      if (isText && sub.type === "mention" && Array.isArray(rows) && !this.isStale(sub.id, token)) {
+        sub.textHistoryRead = true;
+      }
+    };
     const listen = (p: any, of: string) => {
-      p.onResult((result: any) => handleResult(result, false, of));
+      p.onResult((result: any) => handleResult(result, of));
       p.onStatus?.((status: any) => this.onReopenStatus(sub, proxies, p, status));
     };
     if (proxies.includes(proxy)) listen(proxy, "");
@@ -763,10 +807,19 @@ export class WakerSubscriptionManager {
       // again would re-seed its seen set from the persisted one, and wake again
       // on mentions delivered since. Each failed attempt doubles the wait, up to
       // `maxRetryPendingMs`, between half and all of it, as `scheduleRetry` does.
+      // The handshake budget doubles per failed attempt too: a scan that takes
+      // longer than `subscribeTimeoutMs` (#1735 measured over 30 s) would
+      // otherwise time out on every attempt. It is capped at `maxRetryPendingMs`
+      // (or the first budget, if longer): with one attempt in flight at a time,
+      // the executor then spends at most about as long on an attempt as the
+      // waker waits between two.
       let ceiling = this.retryPendingMs;
+      let budgetMs = this.subscribeTimeoutMs;
       const retryText = (): number => {
         const delayMs = ceiling / 2 + Math.random() * (ceiling / 2);
         ceiling = Math.min(ceiling * 2, this.maxRetryPendingMs);
+        const attemptBudgetMs = budgetMs;
+        budgetMs = Math.min(budgetMs * 2, Math.max(this.subscribeTimeoutMs, this.maxRetryPendingMs));
         const timer = setTimeout(async () => {
           if (this.textRetries.get(sub.id)?.timer !== timer || this.isStale(sub.id, token)) return;
           const p = textProxy();
@@ -774,7 +827,7 @@ export class WakerSubscriptionManager {
           // `release()` disposed it already when the entry no longer holds it.
           const ours = () => this.textRetries.get(sub.id)?.proxy === p;
           try {
-            await open(p);
+            await open(p, attemptBudgetMs);
           } catch (err: any) {
             if (!ours()) return;
             try { p.dispose({ cancelOpening: true }); } catch {}
@@ -797,16 +850,10 @@ export class WakerSubscriptionManager {
           proxies.push(p);
           listen(p, "");
           this.logger.info(`[waker] ${sub.id}: text query opened; listening through both queries`);
-          // What it opens on is read as any opening result is: history on a new subscription,
-          // news after a restart. The seen set is the mention query's, so a record it already
-          // woke on does not wake again.
-          if (p.result === undefined) return;
-          try {
-            await handleResult(p.result, true, "");
-          } catch (e: any) {
-            this.logger.warn(`[waker] ${sub.id}: reading the opening result failed: ${e?.message ?? e}`);
-          }
-          this.persist();
+          // The seen set is the mention query's, so a record it already woke on does not wake
+          // again.
+          await readOpening(p, "");
+          if (!this.isStale(sub.id, token)) this.persist();
         }, delayMs);
         if (typeof timer.unref === "function") timer.unref();
         this.textRetries.set(sub.id, { timer, proxy: null });
@@ -825,12 +872,7 @@ export class WakerSubscriptionManager {
     // subscription it records the existing ones as history. The mention query's first, so a
     // record both hold wakes through its mention link.
     for (const [p, of] of [[mentionProxy, " (mention query)"], [proxy, ""]] as const) {
-      if (!p || !proxies.includes(p) || p.result === undefined) continue;
-      try {
-        await handleResult(p.result, true, of);
-      } catch (e: any) {
-        this.logger.warn(`[waker] ${sub.id}: reading the opening result failed: ${e?.message ?? e}`);
-      }
+      if (p && proxies.includes(p)) await readOpening(p, of);
     }
     this.persist();
 
