@@ -31,6 +31,7 @@ pub mod wallet;
 
 pub mod agent;
 pub mod ai_service;
+pub mod ai_sessions;
 pub mod billing;
 mod dapp_server;
 pub mod db;
@@ -609,6 +610,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     if let Err(e) = crate::bots::init() {
         error!("bots: {e}; no managed agent's session is served until this is fixed and the executor restarts");
     }
+    // A turn left `running` by the process that just died is interrupted, not still going.
+    ai_sessions::service::startup_sweep();
 
     // The seed names the network's identity store, which the identity module reads below.
     info!("Initializing Runtime service...");

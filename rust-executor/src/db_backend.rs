@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 
+use crate::ai_sessions::types::{AiSession, AiSessionMessage, AiSessionUpdate};
 use crate::db::{
     Ad4mDb, Ad4mDbResult, BotActivityRow, BotGrantRow, BotRow, ComputeLogEntry,
     FlowReplicaStateRow, GrantRow, JoinAccept, JoinAdded, JoinCancel, JoinRow, OperatorRecordRow,
@@ -424,6 +425,67 @@ macro_rules! ad4m_db_methods {
             fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
             fn move_flow_rows(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
             fn clear_joins(&self) -> Ad4mDbResult<usize>;
+            // AI sessions (`ai_sessions/`): a run's state lives in these tables,
+            // never only in memory. Every method scopes by `owner_did` (`None` = the main
+            // agent), so a caller can never reach another agent's session.
+            fn create_ai_session(&self, session: &AiSession) -> Result<(), rusqlite::Error>;
+            fn get_ai_session(
+                &self,
+                owner_did: Option<&str>,
+                id: &str
+            ) -> Result<Option<AiSession>, rusqlite::Error>;
+            fn get_ai_session_any(
+                &self,
+                id: &str
+            ) -> Result<Option<AiSession>, rusqlite::Error>;
+            fn list_ai_sessions(
+                &self,
+                owner_did: Option<&str>
+            ) -> Result<Vec<AiSession>, rusqlite::Error>;
+            fn update_ai_session(
+                &self,
+                owner_did: Option<&str>,
+                id: &str,
+                update: &AiSessionUpdate
+            ) -> Result<bool, rusqlite::Error>;
+            fn delete_ai_session(
+                &self,
+                owner_did: Option<&str>,
+                id: &str
+            ) -> Result<bool, rusqlite::Error>;
+            fn append_ai_message(
+                &self,
+                owner_did: Option<&str>,
+                id: &str,
+                session_id: &str,
+                role: &str,
+                content: &str,
+                status: Option<&str>
+            ) -> Result<Option<AiSessionMessage>, rusqlite::Error>;
+            fn get_ai_message(
+                &self,
+                owner_did: Option<&str>,
+                id: &str
+            ) -> Result<Option<AiSessionMessage>, rusqlite::Error>;
+            fn finish_ai_message(
+                &self,
+                owner_did: Option<&str>,
+                id: &str,
+                status: &str,
+                error: Option<&str>,
+                content_patch: Option<&Value>
+            ) -> Result<bool, rusqlite::Error>;
+            fn list_ai_messages(
+                &self,
+                owner_did: Option<&str>,
+                session_id: &str,
+                limit: u32,
+                before: Option<i64>
+            ) -> Result<Vec<AiSessionMessage>, rusqlite::Error>;
+            fn interrupt_running_ai_messages(
+                &self,
+                session_id: Option<&str>
+            ) -> Result<u64, rusqlite::Error>;
 
             // Expression cache
             fn _add_expression(&self, url: &str, expression: &Expression<Value>) -> Ad4mDbResult<()>;
