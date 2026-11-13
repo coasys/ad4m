@@ -295,6 +295,9 @@ pub struct ChatReply {
     /// What the provider reported about token use. Empty when it reported
     /// nothing.
     pub usage: ChatUsage,
+    /// Why generation stopped, when the provider said. `"length"` means the
+    /// reply was cut at the output cap or the window. Absent when it did not say.
+    pub stop_reason: Option<String>,
 }
 
 /// A remote chat endpoint.

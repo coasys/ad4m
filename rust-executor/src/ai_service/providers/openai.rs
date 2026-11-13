@@ -277,6 +277,10 @@ fn read_reply(json: &Value) -> Result<ChatReply> {
             .to_string(),
         tool_calls,
         usage: json.get("usage").map(usage_of).unwrap_or_default(),
+        stop_reason: json
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -356,6 +360,7 @@ impl StreamState {
     fn into_reply(self) -> ChatReply {
         ChatReply {
             text: self.text,
+            stop_reason: None,
             tool_calls: self
                 .calls
                 .into_values()

@@ -564,10 +564,9 @@ struct ChatResponse {
     message: Option<ResponseMessage>,
     #[serde(default)]
     done: bool,
-    /// Present on the final chunk; not read but kept so the struct
-    /// deserialises the full response without `deny_unknown_fields`.
+    /// Why generation stopped. `"length"` means the reply was cut at
+    /// `num_predict` or the window.
     #[serde(default)]
-    #[allow(dead_code)]
     done_reason: Option<String>,
     #[serde(default)]
     prompt_eval_count: Option<u64>,
@@ -725,6 +724,7 @@ impl RemoteChat for OllamaChat {
                 output_tokens: parsed.eval_count,
                 ..Default::default()
             },
+            stop_reason: parsed.done_reason,
         })
     }
 
@@ -794,6 +794,7 @@ impl RemoteChat for OllamaChat {
                                 text,
                                 tool_calls,
                                 usage,
+                                stop_reason: None,
                             });
                         }
                     }
@@ -817,6 +818,7 @@ impl RemoteChat for OllamaChat {
             text,
             tool_calls,
             usage,
+            stop_reason: None,
         })
     }
 }
