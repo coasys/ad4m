@@ -599,3 +599,76 @@ async fn bench_newest_20_of_100k_under_one_parent() {
         ratio(slow_ids, fast_ids)
     );
 }
+
+/// A world of `n` messages, `Message` indexed and ready, and a pagination of
+/// the newest first.
+fn small_world(n: u64) -> World {
+    let world = World::empty();
+    let s = TestSigner::generate();
+    for i in 0..n {
+        world.add(&flag_link(&s, &format!("si://m/{i}"), T0 + i));
+    }
+    world.index();
+    world
+}
+
+fn newest_first(offset: usize, limit: usize) -> SparqlPagination {
+    SparqlPagination {
+        sort_key: SortKey::Timestamp,
+        direction: OrderDirection::DESC,
+        offset: Some(offset),
+        limit: Some(limit),
+    }
+}
+
+/// A limit as large as `usize` allows neither overflows the window nor
+/// reserves memory for it: the index reads what the scope holds, and a
+/// window past `usize::MAX` goes to SPARQL.
+#[test]
+fn a_huge_limit_reads_what_the_scope_holds() {
+    let world = small_world(5);
+    let q = query(json!({}));
+    let page = index_page(
+        &EvalStop::none(),
+        &world.indexed,
+        &world.shape,
+        &q,
+        &newest_first(0, usize::MAX),
+    )
+    .unwrap()
+    .expect("the index answers");
+    assert_eq!(
+        page.ids,
+        (0..5)
+            .rev()
+            .map(|i| format!("si://m/{i}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(page.total, Some(5));
+    let page = index_page(
+        &EvalStop::none(),
+        &world.indexed,
+        &world.shape,
+        &q,
+        &newest_first(2, usize::MAX),
+    )
+    .unwrap();
+    assert_eq!(page, None, "offset + limit does not fit: SPARQL answers");
+}
+
+/// A query whose stop fired (cancelled, or past its deadline) fails on the
+/// index path as on the SPARQL path, also for a class scope that needs no
+/// SPARQL read.
+#[test]
+fn a_stopped_query_fails_on_the_index_path() {
+    let world = small_world(3);
+    let err = index_page(
+        &EvalStop::cancelled(),
+        &world.indexed,
+        &world.shape,
+        &query(json!({})),
+        &newest_first(0, 2),
+    )
+    .expect_err("a stopped query fails");
+    assert!(err.to_string().contains("query cancelled"), "{err}");
+}

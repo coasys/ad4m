@@ -17,7 +17,10 @@
 //! **The member key** is `(t_ms << 20) | seq` ([`MemberKey`]): `t_ms` is the
 //! time of the member's earliest verified flag link and `seq` is a store-wide
 //! counter, so two members never share a key. Ascending keys are oldest
-//! first; newest first is a reverse scan.
+//! first; newest first is a reverse scan. When a class already has a member
+//! at every `seq` of one millisecond, a new member of that millisecond gets a
+//! key in a near millisecond and counts as noncanonical, so the class is read
+//! from SPARQL while it is a member.
 //!
 //! **One commit.** Every write path of [`super::sparql_store::SparqlStore`]
 //! calls [`writer::RuleTable::apply`] on the transaction that writes the
@@ -86,7 +89,8 @@ pub(crate) const BUILD: u8 = b'B';
 pub(crate) const VERSION: u8 = b'V';
 
 /// The layout this code reads and writes. A store with another version is
-/// not read or written (see [`ScopeIndex::open`]).
+/// not read or written, and its build marks are removed (see
+/// [`ScopeIndex::open`]).
 pub(crate) const LAYOUT_VERSION: u8 = 1;
 pub(crate) const VERSION_KEY: [u8; 2] = [VERSION, 0];
 pub(crate) const SEQ_KEY: [u8; 2] = [VERSION, 1];
@@ -489,7 +493,9 @@ struct IndexState {
 
 impl ScopeIndex {
     /// Open the index of `store`: write the layout version into a new store,
-    /// and load the rule table and readiness from the build marks.
+    /// and load the rule table and readiness from the build marks. A store
+    /// with another layout version gets the index off and loses its build
+    /// marks.
     pub fn open(store: &Store) -> Result<Self, Error> {
         match store.aux_get(&VERSION_KEY)? {
             None => {
@@ -503,6 +509,22 @@ impl ScopeIndex {
                     "Scope index: layout version {v:?} is not {LAYOUT_VERSION}; the index is off \
                      for this store and every query uses the SPARQL path"
                 );
+                // This executor writes links with no index upkeep. Remove
+                // every build mark, so an executor of the stored layout does
+                // not read its index as ready: with no mark, the class is
+                // built again when a shape registers it.
+                let prefix = [BUILD];
+                let marks = store
+                    .aux_scan(&prefix, &prefix_end(&prefix), false)
+                    .map(|item| item.map(|(key, _)| key))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if !marks.is_empty() {
+                    let mut tx = store.start_transaction()?;
+                    for key in &marks {
+                        tx.aux_delete(key);
+                    }
+                    tx.commit()?;
+                }
                 return Ok(ScopeIndex {
                     state: RwLock::new(IndexState::default()),
                     builds: Default::default(),

@@ -358,3 +358,46 @@ fn a_count_whose_period_ended_is_dropped() {
     assert_eq!(compactor.started(), 0);
     assert_eq!(compactor.running(), 0);
 }
+
+/// Every key of one millisecond is taken in the class scope (2^20 members at
+/// one time, as a bulk import with one timestamp can make). A new member at
+/// that millisecond still gets a key, so the write ends, and the class goes to
+/// the SPARQL path while that member is in it.
+#[test]
+fn a_full_millisecond_does_not_stop_the_writer() {
+    use super::{entry_key, SEQ_BITS};
+    let (store, rule) = indexed_store(None);
+    let scope = rule.class_scope();
+    {
+        let mut tx = store.raw_store().start_transaction().unwrap();
+        for seq in 0..(1u64 << SEQ_BITS) {
+            tx.aux_put(
+                &entry_key(scope.id(), MemberKey::new(T0, seq)),
+                format!("si://filler/{seq}").as_bytes(),
+            );
+        }
+        tx.commit().unwrap();
+    }
+    let s = TestSigner::generate();
+    let flag = flag_link(&s, "si://m/new", T0);
+    let (done, result) = std::sync::mpsc::channel();
+    let writer = store.clone();
+    let link = flag.clone();
+    std::thread::spawn(move || {
+        let _ = done.send(writer.add_link(&link).map_err(|e| e.to_string()));
+    });
+    result
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("the write ends")
+        .expect("the write succeeds");
+    let reader = store.scope_reader();
+    assert!(reader.contains(&scope, "si://m/new").unwrap());
+    assert_eq!(
+        reader.noncanonical(&rule.class).unwrap(),
+        1,
+        "its key is not at its time, so the class is not read from the index"
+    );
+    store.remove_link(&flag).unwrap();
+    assert!(!reader.contains(&scope, "si://m/new").unwrap());
+    assert_eq!(reader.noncanonical(&rule.class).unwrap(), 0);
+}

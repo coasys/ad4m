@@ -17,7 +17,7 @@
 //! Applying the same diff twice therefore changes nothing the second time,
 //! and the order links arrive in does not matter.
 
-use deno_core::anyhow::Error;
+use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::{
     GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNodeRef, Term, TermRef, Triple,
 };
@@ -26,7 +26,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::{
     count_key, entry_key, flag_key, member_hash, member_scope_key, noncanonical_scope,
-    parse_timestamp, prefix_end, ClassId, MemberKey, Scope, ScopeId, MEMBER, SEQ_KEY,
+    parse_timestamp, prefix_end, ClassId, MemberKey, Scope, ScopeId, MAX_T_MS, MEMBER, SEQ_BITS,
+    SEQ_KEY,
 };
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::utils::emittable_iri;
@@ -344,10 +345,11 @@ impl<'a, 'tx> Apply<'a, 'tx> {
                 None
             }
             (old, Some((t_ms, noncanonical))) => {
-                let key = match old {
-                    Some(o) if o.key.t_ms() == t_ms.min(super::MAX_T_MS) => o.key,
+                let (key, displaced) = match old {
+                    Some(o) if o.key.t_ms() == t_ms.min(MAX_T_MS) => (o.key, false),
                     _ => self.alloc_key(rule, t_ms)?,
                 };
+                let noncanonical = noncanonical || displaced;
                 let changed = old
                     .as_ref()
                     .is_none_or(|o| o.key != key || o.noncanonical != noncanonical);
@@ -479,16 +481,47 @@ impl<'a, 'tx> Apply<'a, 'tx> {
     /// A new key for a member of `rule`'s class at `t_ms`: the next `seq`, and
     /// the one after while the class scope already has that key (only after
     /// 2^20 members in one millisecond).
-    fn alloc_key(&mut self, rule: &ClassRule, t_ms: u64) -> Result<MemberKey, Error> {
+    ///
+    /// When the class scope holds every key of `t_ms`, the key is the first
+    /// free one in a near millisecond, and the second value is `true`: the
+    /// key is not at the member's time, so the caller marks the member
+    /// noncanonical and the class's queries use the SPARQL path while it is a
+    /// member. Its next reconcile looks for a key at its time again.
+    fn alloc_key(&mut self, rule: &ClassRule, t_ms: u64) -> Result<(MemberKey, bool), Error> {
         let class_scope = rule.class_scope().id();
-        loop {
-            self.tx.aux_merge_add(&SEQ_KEY, 1);
-            let seq = self.tx.aux_count(&SEQ_KEY)? as u64;
-            let key = MemberKey::new(t_ms, seq);
+        let t_ms = t_ms.min(MAX_T_MS);
+        let last = self.tx.aux_count(&SEQ_KEY)? as u64;
+        let mut used: u64 = 0;
+        let mut found = None;
+        // Every `seq` of `t_ms`, then one key in each millisecond near it.
+        let slots = 1u64 << SEQ_BITS;
+        for attempt in 0..2 * slots {
+            let t = if attempt < slots {
+                t_ms
+            } else {
+                let d = attempt - slots + 1;
+                match t_ms.checked_add(d).filter(|t| *t <= MAX_T_MS) {
+                    Some(t) => t,
+                    None => match t_ms.checked_sub(d) {
+                        Some(t) => t,
+                        None => break,
+                    },
+                }
+            };
+            used += 1;
+            let key = MemberKey::new(t, last.wrapping_add(used));
             if self.tx.aux_get(&entry_key(class_scope, key))?.is_none() {
-                return Ok(key);
+                found = Some((key, t != t_ms));
+                break;
             }
         }
+        self.tx.aux_merge_add(&SEQ_KEY, used as i64);
+        found.ok_or_else(|| {
+            anyhow!(
+                "scope index: no free key for a member of '{}' near {t_ms}",
+                rule.class
+            )
+        })
     }
 
     /// Make `member`'s entry in `scope` be `want`: remove it, add it, or move

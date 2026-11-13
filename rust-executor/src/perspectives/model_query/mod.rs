@@ -96,7 +96,7 @@ mod eval_transform;
 mod filtering;
 mod getters;
 mod hydration;
-mod index_path;
+pub(crate) mod index_path;
 #[cfg(test)]
 mod index_path_tests;
 #[cfg(test)]

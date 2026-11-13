@@ -5,8 +5,9 @@
 //! at most [`BATCH`] members with the same code as every write
 //! ([`Apply::reconcile_member`]), and writes the class's build mark, all in
 //! one transaction. A batch also stops after [`BATCH_TIME`], and the build
-//! waits [`BATCH_PAUSE`] without the lock before the next one, so a link
-//! write that waits for the lock gets it between two batches. The mark says
+//! waits [`BATCH_PAUSE`] without the lock before every batch but its first
+//! (the mark says which is the first), so a link write that waits for the
+//! lock gets it between two batches. The mark says
 //! where the next batch starts, so a build that a restart stops goes on from
 //! there when the store opens again.
 //!
@@ -20,7 +21,8 @@
 //! 0. Members the class scope already holds, in key order: under a changed
 //!    flag some of them are no longer members.
 //! 1. Subjects of the flag triple, in IRI order, from a snapshot taken when
-//!    the phase starts.
+//!    the phase starts. A [`BuildRun`] keeps the snapshot across the calls
+//!    of one build.
 //!
 //! The batch that ends phase 1 writes the mark `Ready`.
 
@@ -286,30 +288,76 @@ pub fn build_class_with(
     max_batches: Option<usize>,
     limits: BatchLimits,
 ) -> Result<BuildProgress, Error> {
+    build_class_in(
+        store,
+        writer,
+        index,
+        rule,
+        max_batches,
+        limits,
+        &mut BuildRun::default(),
+    )
+}
+
+/// What one build of a class keeps between calls of [`build_class_in`]:
+/// phase 1's snapshot of flag subjects. A build that runs in calls of a few
+/// batches (the worker's) then scans and sorts the subjects once, not once
+/// per call.
+#[derive(Default, Debug)]
+pub struct BuildRun {
+    subjects: Option<Vec<String>>,
+    scans: usize,
+}
+
+impl BuildRun {
+    /// How many snapshots of flag subjects this build took.
+    pub fn scans(&self) -> usize {
+        self.scans
+    }
+}
+
+/// [`build_class_with`] that keeps phase 1's snapshot in `run`. Pass the same
+/// `run` to every call of one build of `rule`.
+pub fn build_class_in(
+    store: &Store,
+    writer: &Mutex<()>,
+    index: &ScopeIndex,
+    rule: &ClassRule,
+    max_batches: Option<usize>,
+    limits: BatchLimits,
+    run: &mut BuildRun,
+) -> Result<BuildProgress, Error> {
     let mut batches = 0usize;
-    // Phase 1's snapshot of flag subjects, taken once per call.
-    let mut subjects: Option<Vec<String>> = None;
     loop {
         if max_batches.is_some_and(|max| batches >= max) {
             return Ok(BuildProgress::Paused);
         }
-        if batches > 0 && !limits.pause.is_zero() {
-            // Without the lock: a waiting writer takes it now.
+        let (phase, started) = match store
+            .aux_get(&build_key(rule.id))?
+            .map(|v| BuildMark::decode(&v))
+        {
+            Some(Ok(BuildMark {
+                rule: r,
+                state: BuildState::Building { phase, cursor },
+            })) if r == *rule => (Some(phase), phase != 0 || !cursor.is_empty()),
+            _ => (None, false),
+        };
+        if started && !limits.pause.is_zero() {
+            // Before every batch but the first of the build, also the first
+            // of a later call, and without the lock: a waiting writer takes
+            // it now.
             std::thread::sleep(limits.pause);
         }
-        let in_phase_one = matches!(
-            store
-                .aux_get(&build_key(rule.id))?
-                .map(|v| BuildMark::decode(&v)),
-            Some(Ok(BuildMark {
-                state: BuildState::Building { phase: 1, .. },
-                ..
-            }))
-        );
-        if in_phase_one && subjects.is_none() {
+        if phase == Some(0) {
+            // Phase 1 starts again after this phase 0: it takes a new
+            // snapshot.
+            run.subjects = None;
+        }
+        if phase == Some(1) && run.subjects.is_none() {
             // Outside the lock: the scan reads a snapshot, and writes after it
             // update the class themselves.
-            subjects = Some(flag_subjects(store, rule)?);
+            run.subjects = Some(flag_subjects(store, rule)?);
+            run.scans += 1;
         }
         let _writer = writer
             .lock()
@@ -329,7 +377,7 @@ pub fn build_class_with(
             }
             BuildState::Building { phase, cursor } => (phase, cursor),
         };
-        if phase == 1 && subjects.is_none() {
+        if phase == 1 && run.subjects.is_none() {
             // Phase 0 ended under another hold of the lock: take the snapshot
             // outside it.
             continue;
@@ -363,7 +411,7 @@ pub fn build_class_with(
                     }
                 }
                 _ => {
-                    let all = subjects.as_deref().unwrap_or_default();
+                    let all = run.subjects.as_deref().unwrap_or_default();
                     let start = if cursor.is_empty() {
                         0
                     } else {

@@ -1282,12 +1282,19 @@ impl SparqlStore {
     }
 
     /// Index the class of `shape` when it has a flag (see
-    /// [`ClassRule::from_shape`]). A class seen for the first time, or with
-    /// another flag than before, gets a build in the background; until it
-    /// ends, queries of the class use the SPARQL path. A class that is not
-    /// ready and has no build waiting or running (its build failed) gets a
-    /// new one. Returns the rule.
+    /// [`ClassRule::from_shape`]) and the index can answer its queries (see
+    /// [`index_serves`](super::model_query::index_path::index_serves)): a
+    /// shape whose queries always go to SPARQL gets no index to build and keep.
+    /// A class seen for the first time, or with another flag than before, gets
+    /// a build in the background; until it ends, queries of the class use the
+    /// SPARQL path. A class that is not ready and has no build waiting or
+    /// running (its build failed) gets a new one. Returns the rule.
     pub fn scope_index_ensure(&self, shape: &ModelShape) -> Result<Option<ClassRule>, Error> {
+        if !ClassRule::from_shape(shape)
+            .is_some_and(|rule| super::model_query::index_path::index_serves(shape, &rule))
+        {
+            return Ok(None);
+        }
         let Some((rule, _)) = self.scope_index_register(shape)? else {
             return Ok(None);
         };
@@ -1358,11 +1365,21 @@ impl SparqlStore {
                     Err(_) => None,
                 };
                 let Some(rule) = next else { break };
+                // Phase 1's snapshot, kept across the calls of this build.
+                let mut run = build::BuildRun::default();
                 loop {
                     let Some(store) = store.upgrade() else { break };
                     // A few batches per hold of the store, so a closed
                     // perspective's store is not kept open by its build.
-                    match build::build_class(&store, &writer, &index, &rule, Some(16)) {
+                    match build::build_class_in(
+                        &store,
+                        &writer,
+                        &index,
+                        &rule,
+                        Some(16),
+                        build::BatchLimits::default(),
+                        &mut run,
+                    ) {
                         Ok(BuildProgress::Paused) => continue,
                         Ok(_) => break,
                         Err(e) => {
@@ -1404,6 +1421,27 @@ impl SparqlStore {
             rule,
             batches,
             limits,
+        )
+    }
+
+    /// Run at most `batches` batches of `rule`'s build on this thread, with
+    /// `run` kept across calls as the worker keeps it.
+    #[cfg(test)]
+    pub(crate) fn scope_index_build_run(
+        &self,
+        rule: &ClassRule,
+        batches: Option<usize>,
+        limits: build::BatchLimits,
+        run: &mut build::BuildRun,
+    ) -> Result<BuildProgress, Error> {
+        build::build_class_in(
+            &self.store,
+            &self.writer,
+            &self.scope_index,
+            rule,
+            batches,
+            limits,
+            run,
         )
     }
 

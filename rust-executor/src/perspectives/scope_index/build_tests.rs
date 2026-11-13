@@ -547,3 +547,215 @@ fn builds_wait_in_a_queue() {
     );
     assert_eq!(store.scope_reader().count(&note.class_scope()).unwrap(), 20);
 }
+
+/// A shape whose queries always go to SPARQL (its conformance is more than
+/// the flag) gets no rule, no build and no upkeep on writes.
+#[test]
+fn a_shape_the_index_never_serves_is_not_registered() {
+    let store = SparqlStore::new(None).unwrap();
+    let shape = parse_shape_from_json(
+        &format!(
+            r#"{{"className":"Message","properties":{{
+                "type":{{"predicate":"{TYPE}","required":true,"flag":true,"initial":"{MESSAGE}"}},
+                "body":{{"predicate":"si://body","required":true}}
+            }},"relations":{{}}}}"#
+        ),
+        "Message",
+    )
+    .unwrap();
+    let rule = store.scope_index_ensure(&shape).unwrap();
+    assert_eq!(
+        rule, None,
+        "a class whose queries always go to SPARQL should not get an index"
+    );
+    assert_eq!(store.scope_index_rule("Message"), None);
+    assert!(
+        store
+            .scope_index_ensure(&message_shape())
+            .unwrap()
+            .is_some(),
+        "a shape the index serves is registered"
+    );
+}
+
+/// An executor that finds another layout version writes without index upkeep.
+/// It removes the build marks, so an executor of the layout the marks were
+/// written under does not read an index that misses those writes.
+#[test]
+fn writes_made_with_the_index_off_do_not_leave_it_ready() {
+    use super::{Scope, VERSION_KEY};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap().to_string();
+    let s = TestSigner::generate();
+    let set_version = |store: &SparqlStore, v: u8| {
+        let mut tx = store.raw_store().start_transaction().unwrap();
+        tx.aux_put(&VERSION_KEY, &[v]);
+        tx.commit().unwrap();
+    };
+    let rule = {
+        let store = SparqlStore::new(Some(&path)).unwrap();
+        let (rule, _) = store
+            .scope_index_register(&message_shape())
+            .unwrap()
+            .unwrap();
+        store.scope_index_build_now(&rule).unwrap();
+        store.add_link(&flag_link(&s, "si://m/1", T0)).unwrap();
+        set_version(&store, 2); // now written by a newer layout
+        rule
+    };
+    {
+        let store = SparqlStore::new(Some(&path)).unwrap(); // index off, still writes
+        assert_eq!(store.scope_index_readiness(&rule), Readiness::NotIndexed);
+        store.add_link(&flag_link(&s, "si://m/2", T0 + 1)).unwrap();
+        set_version(&store, 1); // back to the layout the marks were written under
+    }
+    let store = SparqlStore::new(Some(&path)).unwrap();
+    let ready = store.scope_index_readiness(&rule) == Readiness::Ready;
+    let page: Vec<String> = store
+        .scope_reader()
+        .page(
+            &Scope::Class {
+                class: rule.class.clone(),
+            },
+            None,
+            10,
+        )
+        .unwrap()
+        .members
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect();
+    assert!(
+        !ready || page.contains(&"si://m/2".to_string()),
+        "the index reports Ready but misses a member written while it was off: {page:?}"
+    );
+    // Registered again, the class is built again and holds both members.
+    let rule = store.scope_index_ensure(&message_shape()).unwrap().unwrap();
+    wait_ready(&store, &rule);
+    assert_eq!(store.scope_reader().count(&rule.class_scope()).unwrap(), 2);
+    assert_consistent(&store);
+}
+
+/// The pause without the lock comes before every batch of a build but the
+/// first, also when the build goes on in a later call (the worker runs a
+/// build in calls of a few batches).
+#[test]
+fn the_pause_comes_before_every_batch_but_the_first() {
+    let s = TestSigner::generate();
+    let store = SparqlStore::new(None).unwrap();
+    for i in 0..3u64 {
+        store
+            .add_link(&flag_link(&s, &format!("si://m/{i}"), T0 + i))
+            .unwrap();
+    }
+    let (rule, _) = store
+        .scope_index_register(&message_shape())
+        .unwrap()
+        .unwrap();
+    let pause = Duration::from_secs(1);
+    let limits = BatchLimits {
+        time: Duration::ZERO,
+        pause,
+    };
+    let start = Instant::now();
+    assert_eq!(
+        store
+            .scope_index_build_limited(&rule, Some(1), limits)
+            .unwrap(),
+        BuildProgress::Paused
+    );
+    assert!(start.elapsed() < pause, "no pause before the first batch");
+    let start = Instant::now();
+    assert_eq!(
+        store
+            .scope_index_build_limited(&rule, Some(1), limits)
+            .unwrap(),
+        BuildProgress::Paused
+    );
+    assert!(
+        start.elapsed() >= pause,
+        "the first batch of a later call pauses too: {:?}",
+        start.elapsed()
+    );
+}
+
+/// A changed flag while the build of the old one runs: the new rule's build
+/// waits behind it and runs when the old one ends as superseded.
+#[test]
+fn a_new_rule_of_a_running_class_runs_after_it() {
+    let old = ClassRule::new("Message", TYPE, MESSAGE);
+    let new = ClassRule::new("Message", TYPE, "si://Message2");
+    let mut queue = BuildQueue::default();
+    assert!(queue.push(old.clone()));
+    assert_eq!(queue.take_next(), Some(old.clone()));
+    assert!(!queue.push(new.clone()), "the running worker takes it");
+    assert!(queue.contains(&new));
+    assert_eq!(
+        queue.take_next(),
+        Some(new.clone()),
+        "the worker runs it after the superseded build"
+    );
+    assert_eq!(queue.take_next(), None);
+
+    let s = TestSigner::generate();
+    let store = SparqlStore::new(None).unwrap();
+    let mut links = Vec::new();
+    for i in 0..(BATCH as u64 * 4) {
+        let id = format!("si://m/{i}");
+        links.push(flag_link(&s, &id, T0 + i));
+        links.push(signed(&s, &id, TYPE, "si://Message2", T0 + i));
+    }
+    store.apply_diff(&[], &links).unwrap();
+    let old = store.scope_index_ensure(&message_shape()).unwrap().unwrap();
+    let new = store
+        .scope_index_ensure(&shape_with_flag("si://Message2"))
+        .unwrap()
+        .unwrap();
+    assert_ne!(old, new);
+    wait_ready(&store, &new);
+    assert_eq!(store.scope_index_readiness(&old), Readiness::NotIndexed);
+    assert_eq!(
+        store.scope_reader().count(&new.class_scope()).unwrap(),
+        BATCH as i64 * 4
+    );
+    assert_consistent(&store);
+}
+
+/// A build that runs in calls of one batch (as the worker runs it in calls of
+/// a few) scans and sorts the flag subjects once for its phase 1, not once
+/// per call.
+#[test]
+fn one_build_takes_one_snapshot_across_its_calls() {
+    let s = TestSigner::generate();
+    let store = SparqlStore::new(None).unwrap();
+    for i in 0..3u64 {
+        store
+            .add_link(&flag_link(&s, &format!("si://m/{i}"), T0 + i))
+            .unwrap();
+    }
+    let (rule, _) = store
+        .scope_index_register(&message_shape())
+        .unwrap()
+        .unwrap();
+    let limits = BatchLimits {
+        time: Duration::ZERO,
+        pause: Duration::ZERO,
+    };
+    let mut run = build::BuildRun::default();
+    let mut calls = 0;
+    loop {
+        calls += 1;
+        match store
+            .scope_index_build_run(&rule, Some(1), limits, &mut run)
+            .unwrap()
+        {
+            BuildProgress::Paused => continue,
+            BuildProgress::Done => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(calls, 4, "phase 0, then one member per call");
+    assert_eq!(run.scans(), 1);
+    assert_eq!(store.scope_index_readiness(&rule), Readiness::Ready);
+    assert_eq!(store.scope_reader().count(&rule.class_scope()).unwrap(), 3);
+}

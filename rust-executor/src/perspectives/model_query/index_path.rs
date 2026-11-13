@@ -76,6 +76,10 @@ pub(super) const MAX_INDEX_OFFSET: usize = 1000;
 /// documentation.
 pub(super) const MAX_TIE_READ: usize = 10_000;
 
+/// The most entries [`read_scope`] reserves room for before it reads: a
+/// larger window grows the list as it reads.
+const MAX_RESERVE: usize = 1024;
+
 /// A page of ids from the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IndexPage {
@@ -99,6 +103,11 @@ pub(super) fn index_page(
     query: &ModelQueryInput,
     pagination: &SparqlPagination,
 ) -> Result<Option<IndexPage>, Error> {
+    // A stop that fired already fails the query, as on the SPARQL path, also
+    // when the page needs no SPARQL read.
+    if let Some(err) = stop.stopped_err("query") {
+        return Err(err);
+    }
     let Some(rule) = indexed_rule(store, shape, query, pagination) else {
         return Ok(None);
     };
@@ -122,12 +131,18 @@ pub(super) fn index_page(
         return Ok(None);
     };
     let newest_first = pagination.direction == OrderDirection::DESC;
-    let need = offset + limit;
+    // A window past `usize::MAX` goes to SPARQL.
+    let Some(need) = offset.checked_add(limit) else {
+        return Ok(None);
+    };
 
     // Every scope's first `need` entries and its boundary millisecond. The
     // same member has the same key in every scope of its class.
     let mut read: HashMap<String, MemberKey> = HashMap::new();
     for scope in &scopes {
+        if let Some(err) = stop.stopped_err("query") {
+            return Err(err);
+        }
         let Some(entries) = read_scope(store, scope, newest_first, need)? else {
             return Ok(None);
         };
@@ -175,7 +190,8 @@ fn read_scope(
     need: usize,
 ) -> Result<Option<Vec<(String, MemberKey)>>, Error> {
     let reader = store.scope_reader();
-    let mut out: Vec<(String, MemberKey)> = Vec::with_capacity(need);
+    // `need` comes from the caller's limit: reserve for a page, not for it.
+    let mut out: Vec<(String, MemberKey)> = Vec::with_capacity(need.min(MAX_RESERVE));
     for item in reader.entries(scope.id(), None, None, newest_first) {
         let (member, key) = item?;
         if out.len() >= need {
@@ -183,7 +199,7 @@ fn read_scope(
             if boundary != Some(key.t_ms()) {
                 break;
             }
-            if out.len() >= need + MAX_TIE_READ {
+            if out.len() >= need.saturating_add(MAX_TIE_READ) {
                 return Ok(None);
             }
         }
@@ -229,7 +245,16 @@ fn indexed_rule(
     {
         return None;
     }
-    (probe_is_flag(shape, &rule) && conformance_is_flag(shape, &rule)).then_some(rule)
+    index_serves(shape, &rule).then_some(rule)
+}
+
+/// Whether the index can answer queries of `shape` under `rule`: the SPARQL
+/// path orders by the flag triple of `rule` (its timestamp probe), and the
+/// shape's conformance is that flag triple alone. A shape that fails this
+/// always goes to SPARQL, so the store does not index it
+/// ([`SparqlStore::scope_index_ensure`]).
+pub(crate) fn index_serves(shape: &ModelShape, rule: &ClassRule) -> bool {
+    probe_is_flag(shape, rule) && conformance_is_flag(shape, rule)
 }
 
 /// Whether `prop` is the flag property of `rule`.
