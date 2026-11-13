@@ -609,9 +609,8 @@ pub async fn run_interpretation_with_strategy_and_model(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
-    // Returns a task already spawned into its LLM worker, so `prompt` can use it
-    // immediately (see `ensure_interpretation_task_for_model`).
-    let task = ensure_interpretation_task_for_model(model_override).await?;
+    // The task row `prompt` reads (see `ensure_interpretation_task_for_model`).
+    let task = ensure_interpretation_task_for_model(model_override)?;
     let interpretation_started = std::time::Instant::now();
     let class_names: Vec<String> = shapes
         .iter()
@@ -1084,7 +1083,7 @@ pub async fn run_interpretation_with_harness_and_model(
     // prompt + few-shots + billing meta come from the same row the operator
     // configured — the harness pass is just a different loop, not a
     // different LLM identity.
-    let task = ensure_interpretation_task_for_model(model_override).await?;
+    let task = ensure_interpretation_task_for_model(model_override)?;
 
     // Same existing-instance snapshot as the single-shot path: goes into the
     // prompt so the LLM has context (and can name existing `id`s in
@@ -1231,7 +1230,16 @@ pub async fn run_interpretation_with_harness_and_model(
         initial_messages,
         provider,
         bridge,
-        HarnessConfig { max_tool_calls },
+        HarnessConfig {
+            max_tool_calls,
+            tool_result_max_bytes: crate::ai_service::AIService::tool_result_max_bytes(
+                &task.model_id,
+            ),
+            // The pass's final text is discarded — a model that made its
+            // propose_* calls and went quiet is a normal finish, and each
+            // nudge would cost a billed completion nobody reads.
+            empty_completion_nudges: 0,
+        },
         emit_ctx.map(|ctx| ctx as &dyn crate::ai_service::harness::ToolObserver),
         credit_gate,
     )
@@ -1336,9 +1344,9 @@ pub(crate) async fn pass_mcp_context(
         // A pass has no request headers, so nothing shows it local: any tokenless
         // fallback inside a pass is anonymous, never the operator.
         crate::agent::capabilities::ListenerReach::Network,
-        // The harness reaches tools through `list_tool_schemas` /
-        // `call_tool_by_name`, which always include the dynamic per-class
-        // tools regardless of this flag (it only gates the MCP transport).
+        // The harness bridge's `list_tool_schemas` includes the dynamic
+        // per-class tools only under this flag, and a pass takes the full
+        // generated surface before `offered_class_tools` narrows it.
         // Set explicitly so the intent is visible at the construction site.
         true,
     )

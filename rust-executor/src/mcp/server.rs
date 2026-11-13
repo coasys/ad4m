@@ -41,13 +41,14 @@ pub struct McpContext {
     pub reach: ListenerReach,
     /// The session this MCP session's token opened.
     pub caller: Caller,
-    /// Whether the dynamic per-class SHACL tools are exposed over this MCP
-    /// transport (listed by `tools/list`, callable by `tools/call`). Off by
-    /// default so external clients see a stable, DNA-independent tool set;
-    /// the generic `instance_*` tools cover the same operations. Only the
-    /// MCP transport reads this — the in-process harness bridge
-    /// (`list_tool_schemas` / `call_tool_by_name`) always includes the
-    /// dynamic tools.
+    /// Whether the dynamic per-class SHACL tools are exposed (listed by
+    /// `tools/list`, callable by `tools/call`, listed by the in-process
+    /// harness bridge's `list_tool_schemas`; `call_tool_by_name` dispatches
+    /// a per-class name either way). Off by default so agents see a stable,
+    /// DNA-independent tool set; the generic `instance_*` tools cover the
+    /// same operations. Each in-process caller sets it for its own surface:
+    /// an AI session passes the operator's flag, an interpretation pass
+    /// sets it on because its `propose_*` flow needs the per-class reads.
     pub dynamic_class_tools: bool,
     /// The one perspective whose classes the dynamic per-class tools list, when set: an
     /// interpretation pass runs on one perspective, so its tool list names no class of any
