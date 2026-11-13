@@ -4,7 +4,7 @@
 mod common;
 
 use ad4m_hash_chain::{canonical_json, hash_bytes};
-use ad4m_identity_core::inbox::{check_payload, Accept, InboxAddress, JOINED_TTL_S};
+use ad4m_identity_core::inbox::{check_payload, pre_address, Accept, InboxAddress, JOINED_TTL_S};
 use ad4m_identity_core::link::OfferKind;
 use ad4m_identity_core::record::{
     self, open_record, verify_receipt, RecordReceipt, RecoveryAttestation, SealedRecord, Writer,
@@ -698,6 +698,60 @@ async fn another_identity_filling_its_room_at_a_pre_join_address_leaves_the_hold
     assert_eq!(list.len(), 3);
     let by = |scid: String| list.iter().filter(|m| m["writer"]["scid"] == scid).count();
     assert_eq!((by(mallory.scid()), by(alice.scid())), (2, 1));
+}
+
+/// Room for pre-join messages is also counted per offer, over every address: the address
+/// depends on the device string's `r` as well as its key, so one offer could otherwise back 2
+/// messages at each of many addresses. An identity's second offer has room of its own.
+#[tokio::test]
+async fn one_offer_holds_at_most_two_pre_join_messages_over_every_address() {
+    let t = TestStore::with_identity_burst(100);
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let desk = Device::new("alice desk");
+    let (offer, s) = bound_offer(&t, &mut alice, &desk).await;
+    let sealed = alice.seal_ticket(&desk, &offer, s);
+    let a = (alice.master_id(), alice.current_master());
+    // The same key with three different `r`: three addresses.
+    let writes: Vec<(String, Value)> = [desk.r(), r_of(1), r_of(2)]
+        .into_iter()
+        .map(|r| {
+            let address = pre_address(&desk.sign_key(), &r).unwrap();
+            let mut b = bind(&alice, &offer.offer.offer_id, &desk);
+            b["r"] = json!(r);
+            (address, json!({"sealed": sealed, "bind": b}))
+        })
+        .collect();
+    assert_ne!(writes[0].0, writes[1].0);
+    assert_ne!(writes[1].0, writes[2].0);
+
+    for (address, write) in &writes[..2] {
+        let reply = put_pre(&t, &alice, address, write, (&a.0, &a.1)).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    }
+    // The third message, at an address the offer has not written yet: the offer's room is full.
+    let (address, write) = &writes[2];
+    let reply = put_pre(&t, &alice, address, write, (&a.0, &a.1)).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        reply.body
+    );
+    assert_eq!(reply.body["scope"], "identity", "{}", reply.body);
+    assert_eq!(t.count("inbox"), 2);
+
+    // A second offer bound to the same key brings 2 more.
+    let (second, s) = bound_offer(&t, &mut alice, &desk).await;
+    let write = json!({"sealed": alice.seal_ticket(&desk, &second, s),
+                       "bind": bind(&alice, &second.offer.offer_id, &desk)});
+    let reply = put_pre(&t, &alice, &desk.pre_address(), &write, (&a.0, &a.1)).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+}
+
+/// A device string's `r` other than the test device's: 16 bytes of base58btc.
+fn r_of(n: u8) -> String {
+    bs58::encode([n; 16]).into_string()
 }
 
 // ----- the private details record -----

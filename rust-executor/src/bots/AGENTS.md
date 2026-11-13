@@ -37,7 +37,10 @@ Rules:
   resubscribes only when its owner calls `resubscribe` — no automatic polling. Revoking the
   key in the owner's log also ends the bot's sessions
   (`identity::key_login::end_revoked_bot`, on the verdict change and on the re-check): a
-  bot's token is not key-bound, so `Grants::revoke_key` does not reach it.
+  bot's token is not key-bound, so `Grants::revoke_key` does not reach it. Only the owner's
+  log speaks for the bot's key: a verdict change names the identity whose log changed, and
+  one from another identity whose log lists the same key ends nothing (the key may still be
+  valid in the owner's). The re-check reads the key in the owner's log only.
 - **A bot's links anchor in its owner's log** (`identity::signer_identity` falls back to the
   bot row's `owner`); the owners' logs are pinned at startup and on `bot.createAgent`. A
   valid link by a bot key carries the owner as `person` and the bot mark `byBot: true`

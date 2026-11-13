@@ -303,7 +303,7 @@ pub async fn create(params: CreateBotParams) -> Result<CreatedBot, WsRpcError> {
     let agent = AgentContext::managed(did.clone());
     let claimed = identity
         .claims()
-        .claim_for_agent(&agent, &offer, false, Some(name.clone()), || Ok(()))
+        .claim_for_agent(&agent, &offer, false, Some(name.clone()), || Ok(false))
         .await;
     let refusal = match &claimed {
         Ok(result) if result.kind == OfferKind::Bot => None,

@@ -21,7 +21,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `unwrapRecordKey`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only. A caller's record request names its identity, so `record`/`recordPut` with one serve an agent bound to no identity yet (a restore from the words); it must be for `/v1/private/{scid}` with the call's method, else 400 before the store |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
 | `person.rs` | the person's profile: `person_record` (the agent record under the `did:scid` and its signed request, by the device key at the trusted head), `IdentityService::publish_person_profile` |
-| `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key; `canKeepMaster` as the caller says, which only the custody channel may: `custody::admit` on the RPC path, the channel itself on the ticket path), `join_status` (the main agent's claims only; `awaiting-accept`, `cancelled`), `accept_join` (`identity.acceptJoin`), `cancel_join` (`identity.cancelJoin`). `claim_for_agent` is the same claim for any agent of this executor (`bot.createAgent` claims a bot offer with a bot's key through it; no accept) |
+| `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key; `canKeepMaster` as the caller says, which only the custody channel may: `custody::admit` on the RPC path, the channel itself on the ticket path; a repeated claim keeps the offer's row: 409 `cancelled`, 409 `offer-conflict`), `join_status` (the main agent's claims only; `awaiting-accept`, `cancelled`), `accept_join` (`identity.acceptJoin`), `cancel_join` (`identity.cancelJoin`). `claim_for_agent` is the claim itself for any agent of this executor: `claim_for_main` runs it after its rules and its join row, `bot.createAgent` claims a bot offer with a bot's key through it (no join row, no accept) |
 | `bot_key.rs` | `IdentityService::bot_key`: a bot's key in its owner's log (`BotKey`: verdict and bot scope at the trusted seq, the log read when older than `BOT_KEY_MAX_AGE`; `BotKeyError::StoreUnavailable` fails closed), read by `bots/` on every call a bot makes in a space |
 | `service.rs` | `IdentityService`: status, log, resetLog, cosignIncept, publish, openOffer, offers, devices, keyOwner (`identity.keyOwner`: the store's key index for a key, `null` when no log lists it; `agent:READ` like the logs); error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity`; the key session contracts (`KeyStatement`, `SignedKeyStatement`, `SessionChallenge`, `KeySessionResult`, `SessionInfo`, ...) |
@@ -29,7 +29,8 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 Rows in `db/identity.rs`, reached through `db_backend()` (`service::db`): `operator_record`, `identity_agents` (agent `did:key` → SCID),
 `identity_joins` (claims to follow; written before the store call, so a claim the store
 committed whose answer was lost is still followed by `joinStatus`, and a refused one reports
-the offer's state).
+the offer's state. Written once per offer: `add_join` inserts only when the offer has no row
+and answers `JoinAdded`, so a repeated claim keeps the first row's identity and decision).
 
 ## Invariants
 
@@ -139,7 +140,7 @@ the offer's state).
   speaks for that person. The state counts at that seq: a key added past it does not speak yet, a revocation past it does not
   count yet. The readers: `key_speaks_for` (so `IdentityService::identity_of`),
   `key_valid_at_anchor` (so `verify_expression`), the `did:key` confirmation in `resolve_key`,
-  `record_agent_if_listed` (binding a local agent to an identity; a bot key binds none) and `main_is_linked`
+  `record_agent_if_listed` / `bind_agent_if_listed` (binding a local agent to an identity; a bot key binds none) and `main_is_linked`
   (`already-linked`). Events past the trusted seq, and every event a foreign `src` served, are
   for resolution display only (`identity.resolve` shows them, `coasys:headTrusted: false`).
   `identity.status`, `identity.log` and `identity.devices` show the cached log as it is.
@@ -206,6 +207,19 @@ the offer's state).
   binding transaction of `Binding::Claim`/`FirstRun` refuses a cancelled claim, while
   `db.cancel_join` refuses (409 `already-joined`) a claim whose agent is already bound, both
   in one transaction, so a cancel and a bind never both win. The store is not told.
+- The decision taken here holds on every path, not only `joinStatus`. A repeated claim of an
+  offer (a retry, a second ticket) never rewrites its row (`add_join` inserts only when absent):
+  a cancelled claim is refused 409 `cancelled` and an offer already claimed for another
+  identity 409 `offer-conflict`, both before the store call; a retry of a held claim still
+  answers `needsAccept: true`, one of an accepted claim `false`. `identity.publish` (and its
+  409 replay) binds with `Binding::Plain`, but `bind_agent_if_listed` turns the main agent's
+  first plain binding into the binding of the claim that listed its key: the add at the key's
+  `added` seq names the offer it spent (the store's claim check holds it to the claim), and a
+  row of this executor for that offer and identity decides. Cancelled or held: no binding
+  (the head is still answered; `joinStatus` binds a held claim once accepted). Accepted:
+  `Binding::FirstRun`, so the operator record lands in the same write. Otherwise
+  `Binding::Claim`. A key listed by an incept, an add of an offer not claimed here and the
+  refresh of a bound agent bind plain as before.
 - With an operator record the main key may speak only for the operator's identity:
   `cosignIncept` for the main agent runs `main_incept_check` and refuses (`first-link`) an
   incept of any other identity, and `publish` of an incept by the main agent runs it again
