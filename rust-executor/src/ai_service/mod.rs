@@ -78,6 +78,13 @@ const DEFAULT_CONTEXT_BUDGET_BYTES: usize = 64 * 1024;
 const TOOL_RESULT_CLAMP_MIN: usize = 4 * 1024;
 const TOOL_RESULT_CLAMP_MAX: usize = 64 * 1024;
 
+/// The room a result cap leaves in the request the result joins: the
+/// `tool` message's own JSON envelope plus the rest of a minimal request —
+/// the system prompt and the question it answers. A cap that reached the
+/// whole budget would let a result through that only fits alone, and the
+/// trim could then only elide it where a truncated copy would have fit.
+const TOOL_RESULT_OVERHEAD_BYTES: usize = 512;
+
 const fn clamp_tool_result_bytes(bytes: usize) -> usize {
     if bytes < TOOL_RESULT_CLAMP_MIN {
         TOOL_RESULT_CLAMP_MIN
@@ -885,10 +892,19 @@ impl AIService {
     /// The largest tool result a `run_with_tools` loop should feed back to
     /// this model, in bytes: a quarter of [`Self::context_budget_bytes`],
     /// clamped so a small window cannot starve a result to uselessness and
-    /// a large one cannot unbound it. The full result still lands on the
-    /// session's transcript row — this bounds only what the model sees.
+    /// a large one cannot unbound it — but never more than the budget
+    /// minus [`TOOL_RESULT_OVERHEAD_BYTES`], so the result still fits in
+    /// the request beside the question it answers. Without that second
+    /// bound the 4 KiB floor exceeded a 2,048-token window's 3,072-byte
+    /// budget: a result between the two went in whole and the trim, with
+    /// nothing else left to drop, could only replace it by the elision
+    /// stub — where a truncated copy would have fit.
+    ///
+    /// The full result still lands on the session's transcript row — this
+    /// bounds only what the model sees.
     pub async fn tool_result_max_bytes(&self, model_id: &str) -> usize {
-        clamp_tool_result_bytes(self.context_budget_bytes(model_id).await / 4)
+        let budget = self.context_budget_bytes(model_id).await;
+        clamp_tool_result_bytes(budget / 4).min(budget.saturating_sub(TOOL_RESULT_OVERHEAD_BYTES))
     }
 
     /// Prompt a model with a complete turn list and tool definitions, getting
@@ -1888,6 +1904,43 @@ mod tests {
                 .context_budget_bytes("a-model-nobody-registered")
                 .await,
             DEFAULT_CONTEXT_BUDGET_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_cap_never_outgrows_the_budget_it_feeds() {
+        // A 2,048-token window budgets 3,072 bytes of request — under the
+        // clamp's 4 KiB floor, which let a 3,200-byte result through whole:
+        // bigger than the request it joins, the trim could only elide it.
+        // The cap stays under the budget minus the message's overhead, so
+        // the result is truncated and keeps most of its data instead.
+        let service = service();
+        let mut small =
+            Endpoint::for_test("small", EndpointKind::LlamaServer, "http://127.0.0.1:9", "");
+        small.max_num_ctx = Some(2_048);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&small)).unwrap();
+        let model = service
+            .add_model(model_on(&small, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+
+        let budget = service.context_budget_bytes(&model).await;
+        assert_eq!(budget, 2_048 * CONTEXT_BYTES_PER_TOKEN / 2);
+        let cap = service.tool_result_max_bytes(&model).await;
+        assert!(
+            cap <= budget - TOOL_RESULT_OVERHEAD_BYTES,
+            "the cap {cap} must leave room in the {budget}B request"
+        );
+
+        let result = "x".repeat(3_200);
+        let fed = harness::cap_tool_result(&result, cap);
+        assert!(
+            fed.contains("[truncated:"),
+            "truncated, not passed whole nor elided: {fed:?}"
+        );
+        assert!(
+            fed.chars().filter(|c| *c == 'x').count() > 1_000,
+            "most of the result's data kept: {fed:?}"
         );
     }
 
