@@ -11,6 +11,7 @@ use clap::builder::{BoolValueParser, PathBufValueParser, StringValueParser, Type
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::value_parser;
+use rust_executor::ai_service::local::hardware::Backend;
 use rust_executor::config_file::{ExecutorConfigFile, ExecutorSecrets, REDACTED};
 use rust_executor::Ad4mConfig;
 use std::path::PathBuf;
@@ -386,6 +387,35 @@ pub struct RunArgs {
         value_parser = non_empty(BoolValueParser::new())
     )]
     pub identity_allow_private_src: Option<bool>,
+    /// The per-user store of local AI runtimes and models. Default:
+    /// `~/.local/share/ad4m/local-ai` (Linux), `~/Library/Application
+    /// Support/ad4m/local-ai` (macOS), `%LOCALAPPDATA%\ad4m\local-ai` (Windows).
+    #[arg(long, env = "AD4M_LOCAL_AI_DIR", value_parser = non_empty(StringValueParser::new()))]
+    pub local_ai_dir: Option<String>,
+    /// Start the installed local AI runtimes with the executor. Default: true. It never
+    /// installs or downloads anything: install with `ad4m-executor local-ai install` or
+    /// `ai.localInstall`.
+    #[arg(
+        long,
+        action,
+        env = "AD4M_LOCAL_AI_AUTOSTART",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub local_ai_autostart: Option<bool>,
+    /// The device local AI runs its models on: cpu, cuda, metal, vulkan or rocm. Default:
+    /// the best one detected.
+    #[arg(
+        long,
+        env = "AD4M_LOCAL_AI_DEVICE",
+        value_parser = non_empty(parse_local_ai_device)
+    )]
+    pub local_ai_device: Option<Backend>,
+}
+
+/// A `local_ai_device` value: the names the config file takes.
+fn parse_local_ai_device(value: &str) -> Result<Backend, String> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(|_| format!("`{value}` is not a device: cpu, cuda, metal, vulkan or rocm"))
 }
 
 /// Only the literal `true` enables the insecure mode; the usual "off"
@@ -447,6 +477,9 @@ impl RunArgs {
                 &self.identity_allow_private_src,
             );
         }
+        overlay(&mut file.local_ai_dir, &self.local_ai_dir);
+        overlay(&mut file.local_ai_autostart, &self.local_ai_autostart);
+        overlay(&mut file.local_ai_device, &self.local_ai_device);
         overlay(
             &mut file.auto_permit_cap_requests,
             &self.auto_permit_cap_requests,
@@ -972,6 +1005,27 @@ pub(crate) mod tests {
             "/b/logs",
             "/c/logs",
         ),
+        (
+            "/local_ai_dir",
+            "AD4M_LOCAL_AI_DIR",
+            "--local-ai-dir",
+            "/store-b",
+            "/store-c",
+        ),
+        (
+            "/local_ai_autostart",
+            "AD4M_LOCAL_AI_AUTOSTART",
+            "--local-ai-autostart",
+            "false",
+            "true",
+        ),
+        (
+            "/local_ai_device",
+            "AD4M_LOCAL_AI_DEVICE",
+            "--local-ai-device",
+            "vulkan",
+            "cpu",
+        ),
     ];
 
     /// For every row of [`OVERRIDABLE`]: the variable alone, the flag alone,
@@ -1015,6 +1069,13 @@ pub(crate) mod tests {
             }),
             log_dir: Some("/a/logs".into()),
             public_origins: Some(vec!["https://a.example".into()]),
+            local_ai_dir: Some("/store-a".into()),
+            local_ai_autostart: Some(true),
+            local_ai_device: Some(Backend::Cuda),
+            // File-only keys with no variable or flag, so unset here.
+            ai_endpoints: None,
+            ai_models: None,
+            ai_defaults: None,
         };
         let file_json = serde_json::to_value(&file).unwrap();
         let config = write_config(&dir, &file_json.to_string());
@@ -1376,7 +1437,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 47, "every flag of run has a variable");
+        assert_eq!(checked, 50, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

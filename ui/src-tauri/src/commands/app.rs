@@ -17,6 +17,8 @@ use tauri_plugin_positioner::{Position, WindowExt};
 
 #[tauri::command]
 pub fn close_application(app_handle: tauri::AppHandle) {
+    // As the tray's Quit: the in-process executor's local AI runtimes would outlive this exit.
+    rust_executor::ai_service::local::stop_children_blocking(std::time::Duration::from_secs(3));
     app_handle.exit(0);
     std::process::exit(0);
 }
