@@ -691,13 +691,17 @@ replayed to a second host. A host checks the store, the method, the path (withou
 `expires` (at most 5 minutes ahead) and that the nonce is new.
 
 **Inbox room.** A host keeps sealed texts of at most 8 KiB. A joined inbox holds at most 16
-messages, each for 30 days. A pre-join address holds at most 2 messages per writing identity,
-each until its offer leaves `open` (at most 5 minutes). The room is counted per identity
+messages, each for 30 days. A pre-join message lives until its offer leaves `open` (at most 5
+minutes). A pre-join address holds at most 2 messages per writing identity, and one offer backs
+at most 2 pre-join messages over every address. The room at an address is counted per identity
 because any identity with an open offer bound to the device key may write there: the holder
 that scanned the device string delivers its ticket while its offer is open, whatever another
-identity that learned the string writes, and the device string need not be kept secret. An
-identity holds at most 5 open offers, so it holds at most 10 pre-join messages (80 KiB) at a
-time over every address; one address holds 2 per identity with an open offer bound to its key.
+identity that learned the string writes, and the device string need not be kept secret. The
+room is counted per offer as well because an offer binds only the device key `sign`, while the
+address also depends on `r`: one offer could otherwise back 2 messages at each of many
+addresses. An identity holds at most 5 open offers, so it holds at most 10 pre-join messages
+(80 KiB) at a time over every address; one address holds 2 per identity with an open offer
+bound to its key.
 
 **The private details record.** `SealedRecord { version, wrapped, recoveryKey?,
 recoveryAttestation?, nonce, ciphertext, signer, sig }`. The record (`PrivateRecord { devices, wordsCheckedAt, pendingRevocations,

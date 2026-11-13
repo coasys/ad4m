@@ -155,16 +155,24 @@ pub struct ConfigKeySpec {
 pub const VALIDATOR_LIMIT: Duration = Duration::from_secs(10);
 
 /// The keys of the config file and their classes. Machine: paths, listening addresses and
-/// ports, the multi-user and TLS settings, and the identity store's address and keys.
+/// ports, the multi-user and TLS settings, the identity store's address and keys, the local AI
+/// store and device, and the AI endpoints (an endpoint names an environment variable whose
+/// value is sent to its URL).
 const BUILT_IN_KEYS: &[(&str, KeyClass)] = &[
+    ("ai_defaults", KeyClass::Restart),
+    ("ai_models", KeyClass::Restart),
     ("auto_permit_cap_requests", KeyClass::Restart),
+    ("local_ai_autostart", KeyClass::Restart),
     ("log_config", KeyClass::Restart),
     ("mcp_enabled", KeyClass::Restart),
     ("mcp_port", KeyClass::Restart),
+    ("ai_endpoints", KeyClass::Machine),
     ("app_data_path", KeyClass::Machine),
     ("hc_admin_port", KeyClass::Machine),
     ("hc_app_port", KeyClass::Machine),
     ("identity", KeyClass::Machine),
+    ("local_ai_device", KeyClass::Machine),
+    ("local_ai_dir", KeyClass::Machine),
     ("localhost", KeyClass::Machine),
     ("log_dir", KeyClass::Machine),
     ("multi_user_config", KeyClass::Machine),
@@ -533,6 +541,9 @@ mod tests {
             "mcp_port",
             "log_config",
             "auto_permit_cap_requests",
+            "ai_models",
+            "ai_defaults",
+            "local_ai_autostart",
         ] {
             assert_eq!(class(key), Some(KeyClass::Restart), "{key}");
         }
@@ -545,6 +556,9 @@ mod tests {
             "log_dir",
             "multi_user_config",
             "public_origins",
+            "ai_endpoints",
+            "local_ai_dir",
+            "local_ai_device",
         ] {
             assert_eq!(class(key), Some(KeyClass::Machine), "{key}");
         }
@@ -570,6 +584,12 @@ mod tests {
             identity: Some(Default::default()),
             log_dir: Some("a".into()),
             public_origins: Some(vec!["https://a.example".into()]),
+            ai_endpoints: Some(Vec::new()),
+            ai_models: Some(Vec::new()),
+            ai_defaults: Some(Default::default()),
+            local_ai_dir: Some("a".into()),
+            local_ai_autostart: Some(true),
+            local_ai_device: Some(crate::ai_service::local::hardware::Backend::Cpu),
         })
         .unwrap();
         for key in file.as_object().unwrap().keys() {
