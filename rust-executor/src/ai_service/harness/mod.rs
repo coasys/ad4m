@@ -630,6 +630,8 @@ pub async fn run_with_tools(
                     &mut messages,
                     credit_gate.as_deref(),
                     &e,
+                    &mut empty_nudges,
+                    config.empty_completion_nudges,
                 )
                 .await;
             }
@@ -837,7 +839,7 @@ pub async fn run_with_tools(
             config.max_tool_calls
         ),
     }));
-    let mut final_completion = match complete_or_retry(
+    let final_completion = match complete_or_retry(
         completions.as_ref(),
         model_id,
         &messages,
@@ -863,20 +865,44 @@ pub async fn run_with_tools(
     };
     // The wind-down answer can come back empty the same way a round's
     // completion can — give it the same nudges before returning silence.
-    while final_completion.content.trim().is_empty()
-        && empty_nudges < config.empty_completion_nudges
-    {
-        empty_nudges += 1;
+    recover_empty_answer(
+        completions.as_ref(),
+        model_id,
+        &mut messages,
+        final_completion,
+        &mut empty_nudges,
+        config.empty_completion_nudges,
+        credit_gate.as_deref(),
+    )
+    .await
+}
+
+/// A tool-free completion's text, asked for again while it comes back empty:
+/// at most `max_nudges` nudges across the whole loop (`empty_nudges` counts
+/// those already spent), the credit gate checked before each one. When the
+/// gate refuses, the text is empty; when the nudges run out, the empty reply
+/// goes back as it came.
+async fn recover_empty_answer(
+    completions: &dyn CompletionSource,
+    model_id: &str,
+    messages: &mut Vec<Value>,
+    mut completion: HarnessCompletion,
+    empty_nudges: &mut u32,
+    max_nudges: u32,
+    credit_gate: Option<&dyn CreditGate>,
+) -> Result<String> {
+    while completion.content.trim().is_empty() && *empty_nudges < max_nudges {
+        *empty_nudges += 1;
         log::warn!(
-            "harness: the wind-down completion came back empty — asking for \
-             the answer (nudge {empty_nudges}/{max})",
-            max = config.empty_completion_nudges,
+            "harness: the final completion came back empty — asking for \
+             the answer (nudge {}/{max_nudges})",
+            *empty_nudges,
         );
         messages.push(json!({
             "role": "system",
             "content": EMPTY_COMPLETION_NUDGE,
         }));
-        if let Some(ref gate) = credit_gate {
+        if let Some(gate) = credit_gate {
             if let Err(e) = gate.check().await {
                 log::warn!(
                     "harness: credit gate refused an empty-reply nudge: {e}. \
@@ -885,11 +911,9 @@ pub async fn run_with_tools(
                 return Ok(String::new());
             }
         }
-        final_completion = completions
-            .complete(model_id, &messages, Vec::new())
-            .await?;
+        completion = completions.complete(model_id, messages, Vec::new()).await?;
     }
-    Ok(final_completion.content)
+    Ok(completion.content)
 }
 
 /// One completion, retried once when the model server fails.
@@ -943,6 +967,8 @@ async fn best_effort_after_upstream_failure(
     messages: &mut Vec<Value>,
     credit_gate: Option<&dyn CreditGate>,
     upstream: &anyhow::Error,
+    empty_nudges: &mut u32,
+    max_nudges: u32,
 ) -> Result<String> {
     let status = upstream_status_label(upstream);
     log::warn!(
@@ -965,7 +991,19 @@ async fn best_effort_after_upstream_failure(
                     result you can give from what has already been gathered.",
     }));
     match completions.complete(model_id, messages, Vec::new()).await {
-        Ok(completion) => Ok(completion.content),
+        // An empty fallback answer gets the same bounded nudges as any other.
+        Ok(completion) => {
+            recover_empty_answer(
+                completions,
+                model_id,
+                messages,
+                completion,
+                empty_nudges,
+                max_nudges,
+                credit_gate,
+            )
+            .await
+        }
         Err(final_error) => Err(anyhow::anyhow!(
             "upstream model server failed ({}); a final request without tools \
              also failed: {final_error}",
@@ -1978,6 +2016,66 @@ mod tests {
                 .any(|m| m["content"].as_str().unwrap_or("").contains("failed twice")),
             "the final request says why tools stopped: {last:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_fallback_after_an_upstream_failure_is_nudged_within_the_bound() {
+        // Two failed tries of a round, then an empty no-tools answer: the
+        // configured empty-answer nudges apply to it, not just to normal
+        // completions.
+        let script = vec![plain_answer(""), plain_answer("answer after a nudge")];
+        let llm = Arc::new(ScriptedLLM::new(script).failing_on(&[1, 2]));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("lookup", "")],
+        });
+        let out = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            provider.clone(),
+            llm.clone(),
+            HarnessConfig {
+                max_tool_calls: 4,
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "answer after a nudge");
+        assert_eq!(
+            llm.call_count(),
+            4,
+            "2 failures, empty fallback, nudged answer"
+        );
+        assert!(
+            llm.nth_tools(3).is_empty(),
+            "the nudge still advertises no tools"
+        );
+
+        // Bounded: silent through every nudge returns the empty reply.
+        let llm = Arc::new(
+            ScriptedLLM::new(vec![plain_answer(""), plain_answer(""), plain_answer("")])
+                .failing_on(&[1, 2]),
+        );
+        let out = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            provider,
+            llm.clone(),
+            HarnessConfig {
+                max_tool_calls: 4,
+                empty_completion_nudges: 2,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "");
+        assert_eq!(llm.call_count(), 5, "2 failures, fallback, 2 nudges");
     }
 
     #[tokio::test]
