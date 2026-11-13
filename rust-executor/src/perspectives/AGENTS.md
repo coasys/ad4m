@@ -11,7 +11,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `mod.rs` | Global registry `PERSPECTIVES` (uuid → `PerspectiveInstance`), `add/update/remove_perspective`, `get_perspective(uuid)`, `all_perspectives()`, link-language signal routing (`handle_*_from_link_language`), telepresence publish, import/export |
 | `perspective_instance.rs` (7.6k) | **The** instance: link CRUD + batches, neighbourhood sync/commit loops, SDNA/SHACL registration, subject create/update/read, `execute_commands`, query subscriptions, notifications, telepresence signals, Prolog facade, auto-processor tick. One `impl`; being split into `perspective_instance/` |
 | `sparql_store.rs` | Per-perspective oxigraph store. Links stored as reified triples. `add_link/remove_link`, `query_links`, `query_arbitrary` (read-only SPARQL from clients), custom SPARQL fns (`parse_literal`, `strip_html`), named-graph → reifier migration |
-| `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram |
+| `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram. `index_path.rs` gives the id phase from `scope_index/` when the query is one the index answers exactly (its module docs list the conditions); `index_path_tests.rs` checks it equals the SPARQL path on random queries |
+| `scope_index/` | Ordered member lists per class and per `(parent, relation)` in the store's auxiliary key space (coasys/oxigraph#1), written in the same transaction as the quads (`SparqlStore::commit_indexed`). `mod.rs`: keys (`E`/`M`/`C`/`F`/`B`/`V`), `ScopeReader`, readiness. `writer.rs`: `RuleTable::apply`. `build.rs`: the resumable first build. `compact.rs`: head-removal tracking. A class is indexed when `PerspectiveShapeResolver::get_shape` loads a shape with a flag |
 | `shacl_parser.rs` | Writer side: SHACL class JSON → links (`parse_shacl_to_links`), flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
 | `sdna.rs`, `shacl_to_prolog.rs` | Prolog fact generation from links/SHACL. Only used when Prolog mode ≠ Disabled |
@@ -94,6 +95,13 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `sparql_store_fd_tests.rs` (Linux, `/proc/self/fd`) pins the option through the OPTIONS
   file, measures a typical store against the budget, and checks the release on drop. Never open a second `SparqlStore` on a path that
   is already open: RocksDB's LOCK refuses it, and `PerspectiveInstance::new` panics.
+- **Scope index writes.** Every store write path ends in `SparqlStore::commit_indexed`, under
+  the writer lock, so the index commits with the quads. `E`/`M`/`F` keys are put only when absent
+  and removed only with `aux_single_delete`; `C`/`B`/`V` keys only with `aux_delete` (a single
+  delete over a key put twice leaves the older value). Membership is a flag link with
+  `proofValid "true"`; a member's key is its earliest valid flag time. Read a class only when
+  `scope_index_readiness` is `Ready`. A store this executor opened has the auxiliary column
+  family: an executor without it cannot open the store.
 
 ## Do / don't
 

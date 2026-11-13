@@ -10,17 +10,22 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
+use super::model_query::types::ModelShape;
+use super::scope_index::build::{self, BuildMark, BuildProgress, BuildState};
+use super::scope_index::writer::{ClassRule, ScopeDelta, VerifiedDiff};
+use super::scope_index::{Readiness, ScopeIndex, ScopeReader};
+
 const ONT_AUTHOR: &str = "ad4m://ontology/author";
-const ONT_TIMESTAMP: &str = "ad4m://ontology/timestamp";
+pub(crate) const ONT_TIMESTAMP: &str = "ad4m://ontology/timestamp";
 const ONT_PROOF_KEY: &str = "ad4m://ontology/proofKey";
 const ONT_PROOF_SIG: &str = "ad4m://ontology/proofSignature";
-const ONT_PROOF_VALID: &str = "ad4m://ontology/proofValid";
+pub(crate) const ONT_PROOF_VALID: &str = "ad4m://ontology/proofValid";
 const ONT_STATUS: &str = "ad4m://ontology/status";
 /// The target exactly as the link was signed, kept only when it differs from
 /// what [`storage_term_to_target_string`] renders for the stored term. See
 /// [`signed_target_annotation`].
 const ONT_WIRE_TARGET: &str = "ad4m://ontology/wireTarget";
-const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+pub(crate) const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 /// The vocabulary of the facts the store writes about each link on its
 /// reifier: author, timestamp, proof, verdict, status, signed target.
 const ONT_PREFIX: &str = "ad4m://ontology/";
@@ -474,6 +479,16 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
     (source_iri, predicate_iri, target_term)
 }
 
+/// The link triples of `links`, for the scope index ([`ScopeIndex`]).
+fn diff_of<'l>(links: impl IntoIterator<Item = &'l LinkExpression>) -> VerifiedDiff {
+    let mut diff = VerifiedDiff::default();
+    for link in links {
+        let (s, p, o) = make_direct_triple(link);
+        diff.push(s, p, o);
+    }
+    diff
+}
+
 /// Which proof annotations an insert may write on `reifier` (#1146), as `tx`
 /// reads the store.
 ///
@@ -875,6 +890,9 @@ pub struct SparqlStore {
     store: Arc<Store>,
     /// Serializes link mutations and clear across every clone of this store.
     writer: Arc<Mutex<()>>,
+    /// The scope index in the store's auxiliary space: ordered member lists
+    /// of model classes, updated in the transaction of every link write.
+    scope_index: Arc<ScopeIndex>,
     /// Test-only: every read query's text, in order, shared across clones, so a test can
     /// assert which store queries a pipeline ran (see [`SparqlStore::queries_run`]).
     #[cfg(test)]
@@ -938,12 +956,187 @@ impl SparqlStore {
             }
             None => Store::new()?,
         };
-        Ok(SparqlStore {
+        let scope_index = Arc::new(ScopeIndex::open(&store)?);
+        let this = SparqlStore {
             store: Arc::new(store),
             writer: Arc::new(Mutex::new(())),
+            scope_index,
             #[cfg(test)]
             query_log: Arc::new(Mutex::new(Vec::new())),
-        })
+        };
+        // Builds a restart interrupted go on from their marks.
+        for rule in this.scope_index.unfinished(&this.store)? {
+            this.spawn_scope_build(rule);
+        }
+        Ok(this)
+    }
+
+    /// Update the scope index for `diff` in `tx` and commit. The caller holds
+    /// the writer lock. After the commit, head removals go to the compactor.
+    fn commit_indexed(
+        &self,
+        mut tx: Transaction<'_>,
+        diff: &VerifiedDiff,
+    ) -> Result<Vec<ScopeDelta>, Error> {
+        let deltas = if self.scope_index.enabled() {
+            self.scope_index.rules().apply(&self.store, &mut tx, diff)?
+        } else {
+            Vec::new()
+        };
+        tx.commit()?;
+        if deltas
+            .iter()
+            .any(|d| d.change == super::scope_index::writer::ScopeChange::Removed)
+        {
+            self.scope_index.compactor.note(&self.store, &deltas);
+        }
+        Ok(deltas)
+    }
+
+    /// Index the class of `shape` when it has a flag (see
+    /// [`ClassRule::from_shape`]). A class seen for the first time, or with
+    /// another flag than before, gets a build in the background; until it
+    /// ends, queries of the class use the SPARQL path. Returns the rule.
+    pub fn scope_index_ensure(&self, shape: &ModelShape) -> Result<Option<ClassRule>, Error> {
+        let Some((rule, new)) = self.scope_index_register(shape)? else {
+            return Ok(None);
+        };
+        if new {
+            self.spawn_scope_build(rule.clone());
+        }
+        Ok(Some(rule))
+    }
+
+    /// Put the rule of `shape` into the index, not ready, with a new build
+    /// mark, unless the index holds that rule already. Returns the rule and
+    /// whether it is new. Starts no build.
+    pub(crate) fn scope_index_register(
+        &self,
+        shape: &ModelShape,
+    ) -> Result<Option<(ClassRule, bool)>, Error> {
+        let Some(rule) = ClassRule::from_shape(shape) else {
+            return Ok(None);
+        };
+        if !self.scope_index.enabled() {
+            return Ok(None);
+        }
+        if self.scope_index.rules().get(rule.id) == Some(&rule) {
+            return Ok(Some((rule, false)));
+        }
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        if self.scope_index.rules().get(rule.id) == Some(&rule) {
+            return Ok(Some((rule, false)));
+        }
+        let mut tx = self.store.start_transaction()?;
+        build::write_mark(
+            &mut tx,
+            &BuildMark {
+                rule: rule.clone(),
+                state: BuildState::Building {
+                    phase: 0,
+                    cursor: Vec::new(),
+                },
+            },
+        );
+        tx.commit()?;
+        // Under the lock: every write from now on indexes the class.
+        self.scope_index.install(rule.clone());
+        Ok(Some((rule, true)))
+    }
+
+    /// Run `rule`'s build in a background thread, unless one runs already.
+    fn spawn_scope_build(&self, rule: ClassRule) {
+        {
+            let Ok(mut building) = self.scope_index.building.lock() else {
+                return;
+            };
+            if !building.insert(rule.id) {
+                return;
+            }
+        }
+        let store = Arc::downgrade(&self.store);
+        let writer = self.writer.clone();
+        let index = self.scope_index.clone();
+        let id = rule.id;
+        let spawned = std::thread::Builder::new()
+            .name("scope-index-build".into())
+            .spawn(move || {
+                loop {
+                    let Some(store) = store.upgrade() else { break };
+                    // A few batches per hold of the store, so a closed
+                    // perspective's store is not kept open by its build.
+                    match build::build_class(&store, &writer, &index, &rule, Some(16)) {
+                        Ok(BuildProgress::Paused) => continue,
+                        Ok(_) => break,
+                        Err(e) => {
+                            log::error!("Scope index: build of {} failed: {e}", rule.class);
+                            break;
+                        }
+                    }
+                }
+                if let Ok(mut building) = index.building.lock() {
+                    building.remove(&id);
+                }
+            });
+        if spawned.is_err() {
+            if let Ok(mut building) = self.scope_index.building.lock() {
+                building.remove(&id);
+            }
+        }
+    }
+
+    /// Run `rule`'s build to the end on this thread (tests and tools).
+    pub fn scope_index_build_now(&self, rule: &ClassRule) -> Result<BuildProgress, Error> {
+        build::build_class(&self.store, &self.writer, &self.scope_index, rule, None)
+    }
+
+    /// Run at most `batches` batches of `rule`'s build on this thread.
+    #[cfg(test)]
+    pub(crate) fn scope_index_build_batches(
+        &self,
+        rule: &ClassRule,
+        batches: usize,
+    ) -> Result<BuildProgress, Error> {
+        build::build_class(
+            &self.store,
+            &self.writer,
+            &self.scope_index,
+            rule,
+            Some(batches),
+        )
+    }
+
+    /// Whether queries of `rule`'s class can read the scope index.
+    pub fn scope_index_readiness(&self, rule: &ClassRule) -> Readiness {
+        self.scope_index.readiness(rule)
+    }
+
+    /// The rule the index holds for `class`, if any.
+    pub fn scope_index_rule(&self, class: &str) -> Option<ClassRule> {
+        self.scope_index
+            .rules()
+            .get(super::scope_index::ClassId::of(class))
+            .cloned()
+    }
+
+    /// A reader of the scope index.
+    pub fn scope_reader(&self) -> ScopeReader<'_> {
+        ScopeReader::new(&self.store)
+    }
+
+    /// The Oxigraph store, for tests that read the auxiliary space.
+    #[cfg(test)]
+    pub(crate) fn raw_store(&self) -> &Store {
+        &self.store
+    }
+
+    /// The compactor of this store's scope index.
+    #[cfg(test)]
+    pub(crate) fn scope_compactor(&self) -> Arc<super::scope_index::compact::Compactor> {
+        self.scope_index.compactor.clone()
     }
 
     /// Returns the number of quads in the store (for diagnostics).
@@ -1002,7 +1195,7 @@ impl SparqlStore {
             return Ok(false);
         }
         write_link_quads(&mut tx, link, status)?;
-        tx.commit()?;
+        self.commit_indexed(tx, &diff_of([link]))?;
         Ok(true)
     }
 
@@ -1046,9 +1239,13 @@ impl SparqlStore {
         link: &LinkExpression,
         predicate: &str,
     ) -> Result<(), Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let reifier_iri = make_reifier_iri(link);
-        let quads: Vec<_> = self
-            .store
+        let mut tx = self.store.start_transaction()?;
+        let quads: Vec<_> = tx
             .quads_for_pattern(
                 Some(reifier_iri.as_ref().into()),
                 Some(NamedNodeRef::new_unchecked(predicate)),
@@ -1060,8 +1257,10 @@ impl SparqlStore {
             return Err(anyhow!("link has no {predicate} annotation"));
         }
         for quad in &quads {
-            self.store.remove(quad)?;
+            tx.remove(quad);
         }
+        // A verdict removed can end a membership.
+        self.commit_indexed(tx, &diff_of([link]))?;
         Ok(())
     }
 
@@ -1088,7 +1287,7 @@ impl SparqlStore {
             return Ok(false);
         }
         remove_link_quads(&mut tx, link)?;
-        tx.commit()?;
+        self.commit_indexed(tx, &diff_of([link]))?;
         Ok(true)
     }
 
@@ -1098,11 +1297,13 @@ impl SparqlStore {
     /// the store before or after the whole diff. An addition without a status
     /// is skipped, as `add_link` refuses it; a link in the store's metadata
     /// vocabulary fails the whole diff, as `add_link` and `remove_link` refuse it.
+    ///
+    /// Returns the scope index entries the diff added or removed.
     pub fn apply_diff(
         &self,
         removals: &[LinkExpression],
         additions: &[LinkExpression],
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<ScopeDelta>, Error> {
         for link in removals.iter().chain(additions) {
             refuse_link_metadata(link)?;
         }
@@ -1126,8 +1327,7 @@ impl SparqlStore {
             };
             write_link_quads(&mut tx, link, status)?;
         }
-        tx.commit()?;
-        Ok(())
+        self.commit_indexed(tx, &diff_of(removals.iter().chain(additions)))
     }
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.
@@ -1864,7 +2064,11 @@ impl SparqlStore {
             .writer
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        // `Store::clear` leaves the auxiliary space as it is: the index is
+        // emptied after it, with every class unready in between.
+        self.scope_index.begin_clear(&self.store)?;
         self.store.clear()?;
+        self.scope_index.clear(&self.store)?;
         Ok(())
     }
 
@@ -1989,7 +2193,15 @@ impl SparqlStore {
         for (link, status) in &restored {
             write_link_quads_proof(&mut tx, link, status, true)?;
         }
-        tx.commit()?;
+        // The removed triples, and the restored links whose verdicts the
+        // removal may have changed.
+        let mut diff = diff_of(restored.iter().map(|(link, _)| link));
+        for (_, triple) in &metadata_links {
+            if let NamedOrBlankNode::NamedNode(s) = &triple.subject {
+                diff.push(s.clone(), triple.predicate.clone(), triple.object.clone());
+            }
+        }
+        self.commit_indexed(tx, &diff)?;
         Ok(metadata_links.len())
     }
 
@@ -2012,7 +2224,7 @@ impl SparqlStore {
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
         write_link_quads(&mut tx, link, link.status.as_ref().unwrap())?;
-        tx.commit()?;
+        self.commit_indexed(tx, &diff_of([link]))?;
         Ok(())
     }
 }

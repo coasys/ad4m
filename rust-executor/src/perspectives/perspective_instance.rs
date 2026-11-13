@@ -760,6 +760,12 @@ impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
             return Ok(shape);
         }
         let shape = load_shape_from_store(self.store, class_name)?;
+        // A class with a flag gets a scope index (built in the background the
+        // first time, or when its flag changed). Its queries read it once it
+        // is ready; until then, or if this fails, they use SPARQL.
+        if let Err(e) = self.store.scope_index_ensure(&shape) {
+            log::warn!("Scope index: could not register class '{class_name}': {e}");
+        }
         let arc = Arc::new(shape);
         self.cache
             .write()
@@ -4377,7 +4383,7 @@ impl PerspectiveInstance {
         // write. On failure nothing was written; fall back to one link at a
         // time.
         match self.sparql_store.apply_diff(&removals, &additions) {
-            Ok(()) => return Ok(effects),
+            Ok(_) => return Ok(effects),
             Err(e) => log::warn!(
                 "Failed to apply link diff to SPARQL store in one transaction, \
                  writing links one by one: {:?}",
