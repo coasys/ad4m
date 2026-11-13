@@ -85,6 +85,22 @@ pub enum JoinCancel {
     AlreadyJoined,
 }
 
+/// What [`Ad4mDb::add_join`] did. A claim's row is written once: a repeated claim of the same
+/// offer (a retry, a second ticket, a remote operator's `identity.claimOffer`) never changes
+/// the identity it names nor the decision taken here (`accept`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoinAdded {
+    /// The first claim of the offer: the row is written.
+    Added,
+    /// The offer is claimed already for the same identity, not cancelled: the row stays as it
+    /// is (answered here), and the claim may be sent to the store again.
+    Kept(JoinRow),
+    /// The claim of the offer is cancelled here: it is never made again.
+    Cancelled,
+    /// The offer is claimed already for another identity (the SCID answered).
+    OtherIdentity(String),
+}
+
 impl JoinAccept {
     fn as_str(self) -> &'static str {
         match self {
@@ -225,6 +241,34 @@ fn set_agent_identity_in(
             "identity_agents is empty right after the insert"
         )),
     }
+}
+
+/// The claim this executor made on `offer_id` in `conn`, if any.
+fn join_in(conn: &Connection, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>> {
+    let row = conn
+        .query_row(
+            "SELECT offer_id, scid, claimed_at, accept FROM identity_joins WHERE offer_id = ?1",
+            params![offer_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(offer_id, scid, claimed_at, accept)| {
+        Ok(JoinRow {
+            offer_id,
+            scid,
+            claimed_at: from_sql(claimed_at),
+            accept: JoinAccept::parse(&accept)
+                .ok_or_else(|| anyhow::anyhow!("identity_joins.accept {accept:?} is unknown"))?,
+        })
+    })
+    .transpose()
 }
 
 /// The local accept of the claim on `offer_id` in `conn`, if there is one.
@@ -385,13 +429,26 @@ impl Ad4mDb {
         Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
     }
 
-    /// Remembers a claim this executor made, so `identity.joinStatus` can follow it.
-    pub fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO identity_joins (offer_id, scid, claimed_at, accept) VALUES (?1, ?2, ?3, ?4)",
-            params![join.offer_id, join.scid, to_sql(join.claimed_at), join.accept.as_str()],
-        )?;
-        Ok(())
+    /// Remembers a claim this executor made, so `identity.joinStatus` can follow it. Writes the
+    /// row only when the offer has none, in one transaction with that read: a repeated claim
+    /// keeps the identity and the decision (`accept`) the first one recorded, so a retry never
+    /// undoes a cancel or an accept.
+    pub fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<JoinAdded> {
+        let tx = self.conn.unchecked_transaction()?;
+        let added = match join_in(&tx, &join.offer_id)? {
+            None => {
+                tx.execute(
+                    "INSERT INTO identity_joins (offer_id, scid, claimed_at, accept) VALUES (?1, ?2, ?3, ?4)",
+                    params![join.offer_id, join.scid, to_sql(join.claimed_at), join.accept.as_str()],
+                )?;
+                JoinAdded::Added
+            }
+            Some(row) if row.scid != join.scid => JoinAdded::OtherIdentity(row.scid),
+            Some(row) if row.accept == JoinAccept::Cancelled => JoinAdded::Cancelled,
+            Some(row) => JoinAdded::Kept(row),
+        };
+        tx.commit()?;
+        Ok(added)
     }
 
     /// Sets the local accept of the claim on `offer_id`; false when there is no such claim or
@@ -431,32 +488,7 @@ impl Ad4mDb {
 
     /// The claim this executor made on `offer_id`, if any.
     pub fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT offer_id, scid, claimed_at, accept FROM identity_joins WHERE offer_id = ?1",
-                params![offer_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        row.map(|(offer_id, scid, claimed_at, accept)| {
-            Ok(JoinRow {
-                offer_id,
-                scid,
-                claimed_at: from_sql(claimed_at),
-                accept: JoinAccept::parse(&accept).ok_or_else(|| {
-                    anyhow::anyhow!("identity_joins.accept {accept:?} is unknown")
-                })?,
-            })
-        })
-        .transpose()
+        join_in(&self.conn, offer_id)
     }
 }
 
@@ -576,6 +608,57 @@ mod tests {
             claimed_at: 1,
             accept: JoinAccept::Accepted,
         }
+    }
+
+    /// A claim's row is written once: a repeat keeps the identity and the decision of the
+    /// first, answers a cancelled claim `Cancelled` and another identity `OtherIdentity`.
+    #[test]
+    fn a_repeated_join_keeps_the_first_row() {
+        let (_dir, db) = db();
+        let first = JoinRow {
+            accept: JoinAccept::Awaiting,
+            ..accepted_join("a")
+        };
+        assert_eq!(db.add_join(&first).unwrap(), JoinAdded::Added);
+        assert!(db.set_join_accept("a", JoinAccept::Accepted).unwrap());
+        let accepted = JoinRow {
+            accept: JoinAccept::Accepted,
+            ..first.clone()
+        };
+        let retry = JoinRow {
+            claimed_at: 9,
+            ..first.clone()
+        };
+        assert_eq!(
+            db.add_join(&retry).unwrap(),
+            JoinAdded::Kept(accepted.clone())
+        );
+        assert_eq!(db.join("a").unwrap(), Some(accepted.clone()));
+
+        let other = JoinRow {
+            scid: "QmB".into(),
+            ..retry.clone()
+        };
+        assert_eq!(
+            db.add_join(&other).unwrap(),
+            JoinAdded::OtherIdentity("QmA".into())
+        );
+        assert_eq!(db.join("a").unwrap(), Some(accepted));
+
+        assert_eq!(
+            db.cancel_join("a", "did:key:z6MkA").unwrap(),
+            JoinCancel::Cancelled
+        );
+        assert_eq!(db.add_join(&retry).unwrap(), JoinAdded::Cancelled);
+        assert_eq!(
+            db.join("a").unwrap().map(|j| j.accept),
+            Some(JoinAccept::Cancelled)
+        );
+        // Another identity is answered first: the row names one identity only.
+        assert_eq!(
+            db.add_join(&other).unwrap(),
+            JoinAdded::OtherIdentity("QmA".into())
+        );
     }
 
     /// The first-run write reads the claim's accept in its own transaction: a claim awaiting

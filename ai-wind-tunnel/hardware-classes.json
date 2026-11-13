@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "description": "Ordered rules: the first whose `match` holds names the machine's class. Memory is in GiB (2^30 bytes), compared with >=. `minMemoryGb` reads system RAM, `minVramGb` the dedicated memory of the GPU that matched `gpuVendor`. `unifiedMemory` is that GPU's flag (an integrated GPU sharing system RAM). `backendAny` needs at least one of the listed backends to be usable. Within a family, `tierGb` orders the classes: a class without a recommendation falls back to the nearest smaller tier of its family, then to the cpu family at the same or a smaller tier.",
+  "rules": [
+    { "class": "apple-silicon-128", "family": "apple-silicon", "tierGb": 128, "match": { "os": "macos", "arch": "arm64", "minMemoryGb": 112 } },
+    { "class": "apple-silicon-64", "family": "apple-silicon", "tierGb": 64, "match": { "os": "macos", "arch": "arm64", "minMemoryGb": 56 } },
+    { "class": "apple-silicon-32", "family": "apple-silicon", "tierGb": 32, "match": { "os": "macos", "arch": "arm64", "minMemoryGb": 28 } },
+    { "class": "apple-silicon-16", "family": "apple-silicon", "tierGb": 16, "match": { "os": "macos", "arch": "arm64", "minMemoryGb": 14 } },
+    { "class": "apple-silicon-8", "family": "apple-silicon", "tierGb": 8, "match": { "os": "macos", "arch": "arm64" } },
+
+    { "class": "nvidia-24gb", "family": "nvidia", "tierGb": 24, "match": { "gpuVendor": "nvidia", "backendAny": ["cuda", "vulkan"], "minVramGb": 22 } },
+    { "class": "nvidia-16gb", "family": "nvidia", "tierGb": 16, "match": { "gpuVendor": "nvidia", "backendAny": ["cuda", "vulkan"], "minVramGb": 14 } },
+    { "class": "nvidia-12gb", "family": "nvidia", "tierGb": 12, "match": { "gpuVendor": "nvidia", "backendAny": ["cuda", "vulkan"], "minVramGb": 11 } },
+    { "class": "nvidia-8gb", "family": "nvidia", "tierGb": 8, "match": { "gpuVendor": "nvidia", "backendAny": ["cuda", "vulkan"], "minVramGb": 7 } },
+
+    { "class": "amd-igpu-uma-128", "family": "amd-igpu-uma", "tierGb": 128, "match": { "gpuVendor": "amd", "unifiedMemory": true, "backendAny": ["rocm", "vulkan"], "minMemoryGb": 112 } },
+    { "class": "amd-igpu-uma-64", "family": "amd-igpu-uma", "tierGb": 64, "match": { "gpuVendor": "amd", "unifiedMemory": true, "backendAny": ["rocm", "vulkan"], "minMemoryGb": 56 } },
+    { "class": "amd-igpu-uma-32", "family": "amd-igpu-uma", "tierGb": 32, "match": { "gpuVendor": "amd", "unifiedMemory": true, "backendAny": ["rocm", "vulkan"], "minMemoryGb": 28 } },
+    { "class": "amd-igpu-uma-16", "family": "amd-igpu-uma", "tierGb": 16, "match": { "gpuVendor": "amd", "unifiedMemory": true, "backendAny": ["rocm", "vulkan"], "minMemoryGb": 14 } },
+
+    { "class": "amd-dgpu-24gb", "family": "amd-dgpu", "tierGb": 24, "match": { "gpuVendor": "amd", "unifiedMemory": false, "backendAny": ["rocm", "vulkan"], "minVramGb": 22 } },
+    { "class": "amd-dgpu-16gb", "family": "amd-dgpu", "tierGb": 16, "match": { "gpuVendor": "amd", "unifiedMemory": false, "backendAny": ["rocm", "vulkan"], "minVramGb": 14 } },
+    { "class": "amd-dgpu-12gb", "family": "amd-dgpu", "tierGb": 12, "match": { "gpuVendor": "amd", "unifiedMemory": false, "backendAny": ["rocm", "vulkan"], "minVramGb": 11 } },
+    { "class": "amd-dgpu-8gb", "family": "amd-dgpu", "tierGb": 8, "match": { "gpuVendor": "amd", "unifiedMemory": false, "backendAny": ["rocm", "vulkan"], "minVramGb": 7 } },
+
+    { "class": "cpu-128gb", "family": "cpu", "tierGb": 128, "match": { "minMemoryGb": 112 } },
+    { "class": "cpu-64gb", "family": "cpu", "tierGb": 64, "match": { "minMemoryGb": 56 } },
+    { "class": "cpu-32gb", "family": "cpu", "tierGb": 32, "match": { "minMemoryGb": 28 } },
+    { "class": "cpu-16gb", "family": "cpu", "tierGb": 16, "match": { "minMemoryGb": 14 } },
+    { "class": "cpu-8gb", "family": "cpu", "tierGb": 8, "match": {} }
+  ]
+}

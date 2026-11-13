@@ -133,7 +133,8 @@ pub(crate) async fn close_refused(mut socket: WebSocket, code: u16, reason: Stri
 }
 
 /// Closes a socket whose token stopped working while it was open.
-pub(crate) async fn close_token_ended(socket: &mut WebSocket) {
+pub(crate) async fn close_token_ended<S: futures::Sink<Message> + Unpin>(socket: &mut S) {
+    use futures::SinkExt;
     let _ = socket.send(Message::Close(Some(token_ended_frame()))).await;
 }
 
@@ -1126,7 +1127,7 @@ mod socket_tests {
         // Events reach a socket over its RPC connection once it watches them; the event
         // stream must end at expiry too, not keep the socket open.
         let watching = &mut sockets[1].1;
-        let watch = json!({ "model-loading-status": null, "perspective-added": null });
+        let watch = json!({ "model-status": null, "perspective-added": null });
         let reply = call_with(watching, "watch", "events.watch", watch).await;
         assert_eq!(reply["result"], true, "{reply}");
 
@@ -1347,7 +1348,7 @@ mod socket_tests {
         let mut admin = connect(addr, ADMIN).await;
         let mut anonymous = connect(addr, "").await;
         // Both sockets watch the event, so only the token gate can keep it from one.
-        let watch = json!({ "model-loading-status": null });
+        let watch = json!({ "model-status": null });
         for ws in [&mut admin, &mut anonymous] {
             let reply = call_with(ws, "watch", "events.watch", watch.clone()).await;
             assert_eq!(reply["result"], true, "{reply}");
@@ -1364,7 +1365,7 @@ mod socket_tests {
             loop {
                 get_global_pubsub().await.publish_event(Event {
                     capability: AGENT_AUTH_CAPABILITY.clone(),
-                    ..Event::new(Topic::AiModelLoadingStatus, Audience::Everyone, &event)
+                    ..Event::new(Topic::AiModelStatus, Audience::Everyone, &event)
                 });
                 if let Ok(Some(Ok(WsMessage::Text(text)))) =
                     tokio::time::timeout(Duration::from_millis(200), admin.next()).await

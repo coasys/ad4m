@@ -26,6 +26,9 @@ use std::sync::Arc;
 /// again a few times before giving up on the whole call.
 pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 
+/// How much of an unparseable model response the debug log shows.
+const RAW_LOG_CHARS: usize = 500;
+
 /// Run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
 /// response as an [`InterpretationOutput`] (instances plus flow proposals). Returns the first successful parse;
 /// the last parse error propagates if every attempt fails. `prompt_fn` is an
@@ -57,6 +60,12 @@ where
             Err(e) => {
                 log::warn!(
                     "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
+                );
+                // The raw output is derived from the transcript: log only its head.
+                log::debug!(
+                    "interpretation: raw response that failed to parse ({} bytes), first {RAW_LOG_CHARS} chars: {}",
+                    raw.len(),
+                    raw.chars().take(RAW_LOG_CHARS).collect::<String>()
                 );
                 last_err = Some(e);
             }
@@ -600,9 +609,8 @@ pub async fn run_interpretation_with_strategy_and_model(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
-    // Returns a task already spawned into its LLM worker, so `prompt` can use it
-    // immediately (see `ensure_interpretation_task_for_model`).
-    let task = ensure_interpretation_task_for_model(model_override).await?;
+    // The task row `prompt` reads (see `ensure_interpretation_task_for_model`).
+    let task = ensure_interpretation_task_for_model(model_override)?;
     let interpretation_started = std::time::Instant::now();
     let class_names: Vec<String> = shapes
         .iter()
@@ -1075,7 +1083,7 @@ pub async fn run_interpretation_with_harness_and_model(
     // prompt + few-shots + billing meta come from the same row the operator
     // configured — the harness pass is just a different loop, not a
     // different LLM identity.
-    let task = ensure_interpretation_task_for_model(model_override).await?;
+    let task = ensure_interpretation_task_for_model(model_override)?;
 
     // Same existing-instance snapshot as the single-shot path: goes into the
     // prompt so the LLM has context (and can name existing `id`s in
