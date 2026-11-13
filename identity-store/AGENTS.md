@@ -61,7 +61,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `DELETE /offers/{scid}/{offerId}` master-signed | `204` · `403 signer`/`store` · `404` |
 | `POST /offers/{scid}/{offerId}/claim` `Claim` | `201`/`200` repeat `{state, kind, expires}` · `403 secret`/`bound`/`cosig` · `404` · `409 key-taken` · `410 {state}` |
 | `GET /offers/{scid}/{offerId}/state?key=&wait=` | `200 {state, seq?}` for the claiming key only · `404` |
-| `PUT /inbox/pre/{a}` `{sealed, bind:{scid, offerId, sign, r}}` + master-signed request | `201 {id, expires}` (expires = the offer's) · `400` · `403 writer` · `413` · `429 identity` (2 messages per writing identity, or the bucket) |
+| `PUT /inbox/pre/{a}` `{sealed, bind:{scid, offerId, sign, r}}` + master-signed request | `201 {id, expires}` (expires = the offer's) · `400` · `403 writer` · `413` · `429 identity` (2 messages per writing identity at the address, 2 per offer over every address, or the bucket) |
 | `GET /inbox/pre/{a}?wait=` `X-Coasys-Inbox` | `200 [InboxMessage]` oldest first · `403 signer`/`store` |
 | `DELETE /inbox/pre/{a}/{id}` `X-Coasys-Inbox` | `204` · `403 signer`/`store` · `404` |
 | `PUT /inbox/{scid}/{keyId}` `{sealed}` + master-signed request | `201 {id, expires}` (30 days) · `400` · `403 writer` · `404` no such key valid at the head without the bot mark · `413` · `429 identity` (16 messages, or the bucket) |

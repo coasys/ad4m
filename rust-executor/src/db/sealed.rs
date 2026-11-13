@@ -841,6 +841,80 @@ mod tests {
         assert_eq!(moved.current_state.as_deref(), Some(SECRET_WORDS[4]));
     }
 
+    /// Every reader of the queue opens the sealed diffs, and skips a row that does not open:
+    /// it stays queued and unsent, and does not count toward a batch's size.
+    #[test]
+    fn every_pending_diff_reader_opens_the_seals_and_skips_a_row_that_does_not_open() {
+        let folder = tempfile::tempdir().unwrap();
+        let keys = keyring(folder.path(), 1);
+        let key = database_key(&keys).unwrap();
+        let path = folder.path().join("ad4m_db.sqlite");
+        let db = Ad4mDb::open(&path, Some((&key, keys.clone()))).unwrap();
+        let perspective = filled(&db);
+        let link = |source: &str| crate::types::LinkExpression {
+            data: crate::types::Link {
+                source: source.into(),
+                target: "target".into(),
+                predicate: None,
+            },
+            proof: Default::default(),
+            author: "did:key:alice".into(),
+            timestamp: "t".into(),
+            status: None,
+        };
+        // `filled` queued one empty diff; three more follow it.
+        for source in ["one", "two", "three"] {
+            db.add_pending_diff(
+                &perspective,
+                &crate::types::PerspectiveDiff {
+                    additions: vec![link(source)],
+                    removals: vec![],
+                },
+            )
+            .unwrap();
+        }
+        let ids: Vec<u64> = db.get_pending_diffs(&perspective, None).unwrap().1;
+        assert_eq!(ids.len(), 4);
+        let stored: String = db
+            .conn
+            .query_row(
+                "SELECT additions FROM perspective_diff WHERE id = ?1",
+                [ids[1]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(stored.starts_with(SEALED_PREFIX), "{stored}");
+        // Row "one"'s sealed additions moved into row "two": bound to another row, they do
+        // not open there.
+        db.conn
+            .execute(
+                "UPDATE perspective_diff SET additions = ?1 WHERE id = ?2",
+                params![stored, ids[2]],
+            )
+            .unwrap();
+        let sources = |diff: &crate::types::PerspectiveDiff| {
+            diff.additions
+                .iter()
+                .map(|l| l.data.source.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let (all, all_ids) = db.get_pending_diffs(&perspective, None).unwrap();
+        assert_eq!(all_ids, vec![ids[0], ids[1], ids[3]]);
+        assert_eq!(sources(&all), vec!["one", "three"]);
+        // A batch of two counts the rows that open.
+        assert_eq!(
+            db.get_pending_diffs(&perspective, Some(2)).unwrap().1,
+            vec![ids[0], ids[1]]
+        );
+        let (_, sized_ids) = db
+            .get_pending_diffs_by_size(&perspective, 1 << 20, Some(3))
+            .unwrap();
+        assert_eq!(sized_ids, vec![ids[0], ids[1], ids[3]]);
+        let among = db.get_pending_diffs_among(&perspective, &ids[1..]).unwrap();
+        assert_eq!(sources(&among), vec!["one", "three"]);
+    }
+
     /// A perspective's store key: made when the perspective is added, wrapped for a person who
     /// joins its neighbourhood, unwrapped for one dropped from its owners, and destroyed after
     /// the perspective is removed, so its sealed values no longer open anywhere.

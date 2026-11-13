@@ -851,6 +851,20 @@ impl KelCache {
             .collect()
     }
 
+    /// The cached event of `scid` at `seq`, if cached.
+    pub async fn stored_event(&self, scid: &str, seq: u64) -> Result<Option<Event>, CacheError> {
+        let entries = self
+            .store
+            .range(KEL_TYPE, &scid.to_string(), seq, 1)
+            .await
+            .map_err(storage)?;
+        entries
+            .first()
+            .map(|e| e.entry::<Event>().map_err(storage))
+            .transpose()
+            .map(|event| event.filter(|e| e.seq == seq))
+    }
+
     /// The last signed head accepted for `scid`.
     pub fn accepted_head(&self, scid: &str) -> Result<Option<SignedHead>, CacheError> {
         let meta = self.meta.lock().map_err(storage)?;

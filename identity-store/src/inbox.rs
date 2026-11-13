@@ -4,9 +4,10 @@
 //! Who may write and read:
 //! - **Pre-join** `pre:<a>`: written by the current master key that opened an `open` offer
 //!   bound to the device string's `sign`, with `pre_address(sign, r) == a` (`403 writer`
-//!   otherwise); at most 2 messages per writing identity, so another identity that learned
-//!   the device string cannot fill the room of the holder that scanned it; each lives until
-//!   the offer's `expires`. Read and
+//!   otherwise); at most 2 messages per writing identity at the address, so another identity
+//!   that learned the device string cannot fill the room of the holder that scanned it, and
+//!   at most 2 per offer over every address, so an identity holds at most 2 × its open offers;
+//!   each lives until the offer's `expires`. Read and
 //!   acknowledged with a pre-join read (`X-Coasys-Inbox`) by `sign` for this store.
 //! - **Joined** `<scid>/<keyId>`: written by the current master key of `scid` (`403 writer`
 //!   otherwise) to a device key valid at the head without the bot mark (`404` otherwise); at
@@ -61,11 +62,37 @@ fn check_room(
     max: usize,
     now: u64,
 ) -> Result<(), ApiError> {
-    let (count, first): (i64, Option<i64>) = conn.query_row(
+    let room = conn.query_row(
         "SELECT COUNT(*), MIN(expires) FROM inbox WHERE address = ?1 AND scid = ?2 AND expires > ?3",
         params![address, scid, to_sql(now)?],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    room_left(room, max, now)
+}
+
+/// `429 {scope:"identity"}` when the offer `offer_id` of `scid` already backs `max` live
+/// pre-join messages, at any address. The pre-join address depends on the device string's `r`
+/// as well as its key, and the offer binds only the key, so without this count one offer would
+/// back `max` messages at each of as many addresses as its writer names. Counted within `scid`,
+/// so another identity's messages never use this offer's room.
+fn check_offer_room(
+    conn: &Connection,
+    scid: &str,
+    offer_id: &str,
+    max: usize,
+    now: u64,
+) -> Result<(), ApiError> {
+    let room = conn.query_row(
+        "SELECT COUNT(*), MIN(expires) FROM inbox WHERE scid = ?1 AND offer_id = ?2 AND expires > ?3",
+        params![scid, offer_id, to_sql(now)?],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    room_left(room, max, now)
+}
+
+/// `429 {scope:"identity"}` when `count` live messages reach `max`; the retry is when the
+/// first of them (`first`, its `expires`) goes.
+fn room_left((count, first): (i64, Option<i64>), max: usize, now: u64) -> Result<(), ApiError> {
     if count as usize >= max {
         let retry = first.map(|e| from_sql(e).saturating_sub(now)).unwrap_or(60);
         return Err(ApiError::rate_limited("identity", retry.max(1)));
@@ -196,6 +223,7 @@ impl Store {
         }
         let text = pre_text(address);
         check_room(&tx, &text, &bind.scid, MAX_PRE_MESSAGES, now)?;
+        check_offer_room(&tx, &bind.scid, &bind.offer_id, MAX_PRE_MESSAGES, now)?;
         limits::take_identity_write(&tx, &self.settings, &bind.scid, now)?;
         let stored = insert(
             &tx,

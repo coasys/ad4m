@@ -247,6 +247,18 @@ pub struct Ad4mConfig {
     /// and on a listener the network reaches (`listens_on_network`: TLS, or `localhost`
     /// off) none at all, so key login is refused.
     pub public_origins: Option<Vec<String>>,
+    /// The config file's `ai_endpoints`, `ai_models` and `ai_defaults`, applied at
+    /// startup (`ai_service::endpoints::config::apply`).
+    pub ai_settings: Option<crate::ai_service::endpoints::config::AiSettings>,
+    /// The per-user store of local AI runtimes and models. Unset: `AD4M_LOCAL_AI_DIR`, else
+    /// `<data local dir>/ad4m/local-ai` (`~/.local/share/ad4m/local-ai` on Linux).
+    pub local_ai_dir: Option<String>,
+    /// Start the installed local AI runtimes with the executor. Unset: yes. It never
+    /// installs or downloads anything: only `ai.localInstall`, `ad4m-executor local-ai
+    /// install` and the Docker image's `INCLUDE_MODELS` do.
+    pub local_ai_autostart: Option<bool>,
+    /// The device local AI plans for. Unset: the best one detected.
+    pub local_ai_device: Option<crate::ai_service::local::hardware::Backend>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -464,6 +476,24 @@ impl Ad4mConfig {
         ] {
             if let Some(value) = json.pointer_mut(pointer) {
                 redact(value);
+            }
+        }
+        // An endpoint URL's user name and password, for a config built in code (a file
+        // with them is refused at parse).
+        if let Some(endpoints) = json
+            .pointer_mut("/aiSettings/endpoints")
+            .and_then(|e| e.as_array_mut())
+        {
+            for url in endpoints.iter_mut().filter_map(|e| e.get_mut("base_url")) {
+                let Some(mut parsed) = url.as_str().and_then(|u| url::Url::parse(u).ok()) else {
+                    continue;
+                };
+                if crate::ai_service::endpoints::has_credentials(&parsed) {
+                    let _ = parsed.set_username("");
+                    let _ = parsed.set_password(None);
+                    let marker = format!("://{}@", crate::config_file::REDACTED);
+                    *url = parsed.as_str().replacen("://", &marker, 1).into();
+                }
             }
         }
         json
@@ -819,6 +849,10 @@ impl Ad4mConfig {
             identity_store_keys: None,
             identity_allow_private_src: None,
             public_origins: None,
+            ai_settings: None,
+            local_ai_dir: None,
+            local_ai_autostart: None,
+            local_ai_device: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,
@@ -1147,6 +1181,39 @@ mod tests {
         assert_eq!(json["adminCredential"], "<redacted>");
         assert_eq!(json["smtpConfig"]["password"], "<redacted>");
         assert!(Ad4mConfig::default().redacted_json()["adminCredential"].is_null());
+    }
+
+    /// `config print` (`redacted_json`) hides the user name and password of an AI
+    /// endpoint URL, and prints a URL without them as it is.
+    #[test]
+    fn redacted_json_hides_ai_endpoint_url_credentials() {
+        let settings: crate::ai_service::endpoints::config::AiSettings =
+            serde_json::from_value(serde_json::json!({
+                "endpoints": [
+                    { "name": "plain", "kind": "OLLAMA", "base_url": "http://127.0.0.1:11434/" },
+                    { "name": "other", "kind": "OPEN_AI", "base_url": "https://api.example/v1" },
+                ],
+                "models": [],
+                "defaults": {},
+            }))
+            .unwrap();
+        let mut config = Ad4mConfig {
+            ai_settings: Some(settings),
+            ..Default::default()
+        };
+        let endpoints = &mut config.ai_settings.as_mut().unwrap().endpoints;
+        endpoints[1].base_url = url::Url::parse("https://alice:hunter2@api.example/v1").unwrap();
+
+        let printed = serde_json::to_string_pretty(&config.redacted_json()).unwrap();
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(!printed.contains("alice"), "{printed}");
+        let endpoints = &config.redacted_json()["aiSettings"]["endpoints"];
+        assert_eq!(endpoints[0]["base_url"], "http://127.0.0.1:11434/");
+        assert_eq!(
+            endpoints[1]["base_url"],
+            "https://<redacted>@api.example/v1"
+        );
+        assert!(!format!("{config:?}").contains("hunter2"));
     }
 
     /// Plain serialisation (`get_json`) never writes the admin credential
