@@ -698,13 +698,17 @@ replayed to a second host. A host checks the store, the method, the path (withou
 `expires` (at most 5 minutes ahead) and that the nonce is new.
 
 **Inbox room.** A host keeps sealed texts of at most 8 KiB. A joined inbox holds at most 16
-messages, each for 30 days. A pre-join address holds at most 2 messages per writing identity,
-each until its offer leaves `open` (at most 5 minutes). The room is counted per identity
+messages, each for 30 days. A pre-join message lives until its offer leaves `open` (at most 5
+minutes). A pre-join address holds at most 2 messages per writing identity, and one offer backs
+at most 2 pre-join messages over every address. The room at an address is counted per identity
 because any identity with an open offer bound to the device key may write there: the holder
 that scanned the device string delivers its ticket while its offer is open, whatever another
-identity that learned the string writes, and the device string need not be kept secret. An
-identity holds at most 5 open offers, so it holds at most 10 pre-join messages (80 KiB) at a
-time over every address; one address holds 2 per identity with an open offer bound to its key.
+identity that learned the string writes, and the device string need not be kept secret. The
+room is counted per offer as well because an offer binds only the device key `sign`, while the
+address also depends on `r`: one offer could otherwise back 2 messages at each of many
+addresses. An identity holds at most 5 open offers, so it holds at most 10 pre-join messages
+(80 KiB) at a time over every address; one address holds 2 per identity with an open offer
+bound to its key.
 
 **The private details record.** `SealedRecord { version, wrapped, recoveryKey?,
 recoveryAttestation?, nonce, ciphertext, signer, sig }`. The record (`PrivateRecord { devices, wordsCheckedAt, pendingRevocations,
@@ -835,7 +839,16 @@ a new string ends the read of the last one.
   answers 409 `already-joined`. The executor does not tell the store of a cancel: the
   holder's add may still land in the log, listing a device key that never speaks for the
   identity until the holder revokes it.
-- The executor never decrypts the private record. It passes the record and request-box calls
+- The decision on a claim holds on every path. A repeated `identity.claimOffer` (or ticket)
+  for the same offer keeps the claim as it is: it answers `needsAccept` as the claim stands,
+  a cancelled claim is refused (409 `cancelled`) and the offer named for another identity
+  is refused (409 `offer-conflict`), both before the store is asked. `identity.publish` of
+  the holder's add (or its replay after a 409) binds the main agent only as `joinStatus`
+  would: the add names the offer it spent, and while this executor's claim on that offer is
+  held or cancelled the head is answered but nothing is bound; an accepted first-run claim
+  binds and records `FirstRun` in one write. A key the main agent's own incept lists, and
+  the refresh of an identity it already speaks for, bind as before.
+- The executor never opens the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key
   (always for a post). For the app on its machine whose device it is (the desktop's custody
   service, which has no `enc` key of its own), the operator there may have it open the record

@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "runId": "63843941",
+  "startedAt": "2026-11-05T02:54:07.597Z",
+  "finishedAt": "2026-11-05T02:54:52.311Z",
+  "hardwareClass": "apple-silicon-32",
+  "fingerprint": {
+    "os": "macos",
+    "osVersion": "macOS 15.7.2",
+    "kernel": "24.6.0",
+    "arch": "arm64",
+    "cpu": {
+      "model": "Apple M4 Pro",
+      "cores": 14,
+      "threads": 14
+    },
+    "memoryBytes": 51539607552,
+    "gpus": [
+      {
+        "vendor": "apple",
+        "name": "Apple M4 Pro",
+        "vramBytes": 0,
+        "unified": true
+      }
+    ],
+    "backends": [
+      "cpu",
+      "metal"
+    ],
+    "gpuBudgetBytes": 38654705664,
+    "drivers": {},
+    "id": "e6916d40"
+  },
+  "executor": {
+    "commit": "unknown",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "b498751fbed495c305aa1e53024f63e1283f2cfe"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "llama-server"
+    ],
+    "services": [
+      "llm",
+      "completion",
+      "embeddings",
+      "stt",
+      "tts"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "llama-server": {
+      "status": "available",
+      "builds": [
+        "macos-arm64-metal"
+      ],
+      "mode": "spawned",
+      "version": "b11669"
+    }
+  },
+  "cells": [
+    {
+      "provider": "llama-server",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "llama-server b11669 has no speech route: it lists no --model-vocoder option and no /tts or /v1/audio/speech path; OuteTTS runs only in the llama-tts CLI",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "llama-server",
+      "service": "embeddings",
+      "status": "pass",
+      "model": {
+        "modelId": "nomic-embed-text-v1.5-q8_0",
+        "remoteModel": "nomic-embed-text-v1.5-q8_0",
+        "sizeBytes": 146146432,
+        "memoryBytes": 800000000,
+        "license": "Apache-2.0",
+        "params": "137M",
+        "source": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/0188c9bf409793f810680a5a431e7b899c46104c/nomic-embed-text-v1.5.Q8_0.gguf"
+      },
+      "runtimeBuild": "macos-arm64-metal",
+      "backend": "metal",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--embeddings"
+      ],
+      "checks": [
+        {
+          "name": "embeds a batch (/v1/embeddings)",
+          "pass": true,
+          "detail": "6 vectors for 6 inputs"
+        },
+        {
+          "name": "embeds queries one at a time",
+          "pass": true,
+          "detail": "6 query vectors"
+        },
+        {
+          "name": "dimension is consistent",
+          "pass": true,
+          "detail": "768 dimensions",
+          "value": 768
+        },
+        {
+          "name": "retrieval ranks the expected passage first",
+          "pass": true,
+          "detail": "6/6 top-1, MRR 1.000",
+          "value": 6,
+          "threshold": 6
+        },
+        {
+          "name": "SDK ai.embed matches /v1",
+          "pass": true,
+          "detail": "768 dims, cosine 1.0000 to the /v1 vector",
+          "value": 1,
+          "threshold": "> 0.99"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 86,
+        "dimension": 768,
+        "mrr": 1,
+        "batchLatencyMs": {
+          "n": 3,
+          "median": 77.094,
+          "p95": 85.145,
+          "min": 76.77,
+          "max": 86.04,
+          "mean": 79.968
+        },
+        "textsPerSec": {
+          "n": 3,
+          "median": 415.1,
+          "p95": 416.7,
+          "min": 371.9,
+          "max": 416.8,
+          "mean": 401.3
+        },
+        "singleLatencyMs": {
+          "n": 3,
+          "median": 7.44,
+          "p95": 7.576,
+          "min": 5.977,
+          "max": 7.591,
+          "mean": 7.003
+        },
+        "directBatchLatencyMs": {
+          "n": 3,
+          "median": 75.17,
+          "p95": 75.398,
+          "min": 74.828,
+          "max": 75.423,
+          "mean": 75.14
+        },
+        "executorOverheadMs": 1.9,
+        "peakRssBytes": 285966336,
+        "peakGpuBytes": null,
+        "serverReadyMs": 13900,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 800000000,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 34552
+    }
+  ]
+}

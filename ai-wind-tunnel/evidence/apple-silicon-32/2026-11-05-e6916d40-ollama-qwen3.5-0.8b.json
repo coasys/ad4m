@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 1,
+  "runId": "2a538a18",
+  "startedAt": "2026-11-05T03:32:58.388Z",
+  "finishedAt": "2026-11-05T03:34:15.462Z",
+  "hardwareClass": "apple-silicon-32",
+  "fingerprint": {
+    "os": "macos",
+    "osVersion": "macOS 15.7.2",
+    "kernel": "24.6.0",
+    "arch": "arm64",
+    "cpu": {
+      "model": "Apple M4 Pro",
+      "cores": 14,
+      "threads": 14
+    },
+    "memoryBytes": 51539607552,
+    "gpus": [
+      {
+        "vendor": "apple",
+        "name": "Apple M4 Pro",
+        "vramBytes": 0,
+        "unified": true
+      }
+    ],
+    "backends": [
+      "cpu",
+      "metal"
+    ],
+    "gpuBudgetBytes": 38654705664,
+    "drivers": {},
+    "id": "e6916d40"
+  },
+  "executor": {
+    "commit": "unknown",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "b498751fbed495c305aa1e53024f63e1283f2cfe"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "ollama"
+    ],
+    "services": [
+      "llm",
+      "completion",
+      "embeddings",
+      "stt",
+      "tts"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "ollama": {
+      "status": "available",
+      "builds": [],
+      "mode": "spawned",
+      "version": "0.33.3"
+    }
+  },
+  "cells": [
+    {
+      "provider": "ollama",
+      "service": "stt",
+      "status": "unsupported",
+      "reason": "Ollama serves no transcription API (/v1/audio/transcriptions)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "ollama",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "Ollama serves no speech API (/v1/audio/speech)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "ollama",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "remoteModel": "qwen3.5:0.8b",
+        "sizeBytes": 1322069043,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://ollama.com/library/qwen3.5",
+        "memoryBytes": 1322069043
+      },
+      "backend": "metal",
+      "endpointKind": "OLLAMA",
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 1166,
+        "ttftMs": {
+          "n": 3,
+          "median": 39.873,
+          "p95": 41.594,
+          "min": 39.649,
+          "max": 41.785,
+          "mean": 40.436
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 111.2,
+          "p95": 111.4,
+          "min": 101.7,
+          "max": 111.4,
+          "mean": 108.1
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 3841.4,
+          "p95": 3843.7,
+          "min": 2798.4,
+          "max": 3843.9,
+          "mean": 3494.6
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 57.464,
+          "p95": 57.734,
+          "min": 55.97,
+          "max": 57.764,
+          "mean": 57.066
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 55.655,
+          "p95": 55.922,
+          "min": 53.532,
+          "max": 55.952,
+          "mean": 55.046
+        },
+        "executorOverheadMs": 1.8,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 111,
+          "p95": 116.1,
+          "min": 105.3,
+          "max": 116.7,
+          "mean": 111
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 104.1,
+          "p95": 104.7,
+          "min": 103.4,
+          "max": 104.7,
+          "mean": 104.1
+        },
+        "peakRssBytes": 66404352,
+        "peakGpuBytes": null,
+        "pullMs": 46039,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 1322069043,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 67818
+    },
+    {
+      "provider": "ollama",
+      "service": "completion",
+      "status": "fail",
+      "reason": "continuation (/v1/completions): \"\"",
+      "model": {
+        "remoteModel": "qwen3.5:0.8b",
+        "sizeBytes": 1322069043,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://ollama.com/library/qwen3.5",
+        "memoryBytes": 1322069043
+      },
+      "backend": "metal",
+      "endpointKind": "OLLAMA",
+      "checks": [
+        {
+          "name": "continuation (/v1/completions)",
+          "pass": false,
+          "detail": "\"\""
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 123,
+        "latencyMs": {
+          "n": 3,
+          "median": 117.1,
+          "p95": 117.7,
+          "min": 106.2,
+          "max": 117.8,
+          "mean": 113.7
+        },
+        "directLatencyMs": {
+          "n": 3,
+          "median": 114.2,
+          "p95": 115.7,
+          "min": 103.9,
+          "max": 115.8,
+          "mean": 111.3
+        },
+        "executorOverheadMs": 2.9,
+        "peakRssBytes": 66453504,
+        "peakGpuBytes": null,
+        "pullMs": 46039,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 1322069043,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 803
+    }
+  ]
+}
