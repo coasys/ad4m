@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod ai_sessions;
 mod bots;
 mod endpoints;
 pub(crate) mod grants;
@@ -696,6 +697,8 @@ impl Ad4mDb {
             "CREATE INDEX IF NOT EXISTS idx_flow_fired_mark_instance
              ON flow_fired_mark(perspective, agent_did, instance)",
         )?;
+
+        ai_sessions::create_ai_session_tables(&conn)?;
 
         let db = Self { conn, rows };
         db.migrate_models_to_endpoints()?;
