@@ -294,7 +294,7 @@
       "sizeBytes": 16564259744,
       "license": "Apache-2.0",
       "params": "27B",
-      "memoryBytes": 20000000000
+      "memoryBytes": 21000000000
     },
     "nomic-embed-text-v1.5-q8_0": {
       "service": "embeddings",
@@ -304,7 +304,7 @@
       "sizeBytes": 146146432,
       "license": "Apache-2.0",
       "params": "137M",
-      "memoryBytes": 400000000
+      "memoryBytes": 500000000
     },
     "whisper-small-q5_1": {
       "service": "stt",
@@ -334,7 +334,7 @@
       "sizeBytes": 713975456,
       "license": "CC-BY-4.0",
       "params": "0.6B",
-      "memoryBytes": 900000000
+      "memoryBytes": 1200000000
     },
     "nemotron-3.5-asr-streaming-0.6b-q8_0": {
       "service": "stt",
@@ -344,7 +344,7 @@
       "sizeBytes": 742090464,
       "license": "OpenMDW-1.1",
       "params": "0.6B",
-      "memoryBytes": 1300000000
+      "memoryBytes": 2200000000
     },
     "parakeet-tdt-0.6b-v3-int8-onnx": {
       "service": "stt",
@@ -388,7 +388,7 @@
       },
       "license": "Apache-2.0",
       "params": "0.6B",
-      "memoryBytes": 2200000000
+      "memoryBytes": 2300000000
     },
     "qwen3-asr-1.7b-q8_0": {
       "service": "stt",
