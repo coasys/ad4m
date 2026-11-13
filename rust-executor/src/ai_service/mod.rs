@@ -372,6 +372,21 @@ fn turns_for_task(task: &AITask, prompt: String) -> Vec<ChatTurn> {
     turns_for(&task.system_prompt, &task.prompt_examples, prompt)
 }
 
+/// Tokens each message adds beyond its text once rendered: role markers and the chat template.
+const MESSAGE_OVERHEAD_TOKENS: usize = 8;
+/// What the template adds once per request (the generation prompt).
+const REQUEST_OVERHEAD_TOKENS: usize = 16;
+
+/// The estimated input tokens of a whole conversation: every turn's text
+/// ([`estimate_token_count`]) plus the per-message and per-request template overhead.
+fn estimate_turns_tokens(turns: &[ChatTurn]) -> usize {
+    REQUEST_OVERHEAD_TOKENS
+        + turns
+            .iter()
+            .map(|turn| estimate_token_count(&turn.content) + MESSAGE_OVERHEAD_TOKENS)
+            .sum::<usize>()
+}
+
 /// A system prompt, its examples as alternating user/assistant turns, then `prompt`.
 fn turns_for(
     system_prompt: &str,
@@ -1019,14 +1034,15 @@ impl AIService {
         task_id: String,
         prompt: String,
     ) -> Result<PromptResult> {
-        let model_id = Self::replace_model_variables(
-            &crate::db_backend::db_backend()
-                .get_task(task_id.clone())
-                .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
-                .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?
-                .model_id,
-        )?;
-        let cap = Self::interpretation_max_output_tokens(&model_id, estimate_token_count(&prompt))?;
+        let task = crate::db_backend::db_backend()
+            .get_task(task_id.clone())
+            .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
+        let model_id = Self::replace_model_variables(&task.model_id)?;
+        // The input is the whole conversation `prompt_with` sends: the task's
+        // system prompt and examples count against the window as much as the prompt.
+        let input_tokens = estimate_turns_tokens(&turns_for_task(&task, prompt.clone()));
+        let cap = Self::interpretation_max_output_tokens(&model_id, input_tokens)?;
         self.prompt_with(task_id, prompt, None, Some((true, cap)))
             .await
     }
@@ -1943,6 +1959,53 @@ mod tests {
         let error = AIService::interpretation_max_output_tokens(&sized_model, 48_900)
             .expect_err("252 tokens of room cannot hold an answer");
         assert!(error.to_string().contains("context budget"), "{error}");
+    }
+
+    // The cap is the room after everything the request carries: a 3,000-token system prompt
+    // and a 1,000-token prompt on an 8,192 window leave under 4,192, not the 7,192 the
+    // prompt alone would leave.
+    #[tokio::test]
+    async fn an_interpretation_cap_counts_the_system_prompt_and_examples() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let cap = body["max_tokens"].as_u64().unwrap_or(u64::MAX);
+                cap <= 8_192 - 4_000
+            })
+            .with_body(r#"{"choices":[{"message":{"content":"{}"}}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint =
+            Endpoint::for_test("sized", EndpointKind::LlamaServer, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".repeat(12_000),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .prompt_interpretation(task.task_id, "p".repeat(4_000))
+            .await
+            .unwrap();
+        completion.assert_async().await;
     }
 
     #[tokio::test]
