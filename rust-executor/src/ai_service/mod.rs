@@ -848,12 +848,29 @@ impl AIService {
     /// budget fallback) would cap a 35k-token prompt at the floor and
     /// truncate the JSON on every retry — so an unknown window sends no cap.
     /// `prompt_tokens` is the chars/4 estimate the billing path uses.
-    pub fn interpretation_max_output_tokens(model_id: &str, prompt_tokens: usize) -> Option<u32> {
+    ///
+    /// The cap never exceeds the room: input plus output over the window is
+    /// refused by servers that validate it, and sending the same request
+    /// again cannot fix that. When the room is under the smallest useful
+    /// answer, that is an error saying so, not a cap raised past the window.
+    pub fn interpretation_max_output_tokens(
+        model_id: &str,
+        prompt_tokens: usize,
+    ) -> Result<Option<u32>> {
         const MIN_OUTPUT: usize = 512;
         const MAX_OUTPUT: usize = 8_192;
-        let window = Self::model_context_tokens(model_id)?;
+        let Some(window) = Self::model_context_tokens(model_id) else {
+            return Ok(None);
+        };
         let room = window.saturating_sub(prompt_tokens);
-        Some(room.clamp(MIN_OUTPUT, MAX_OUTPUT) as u32)
+        if room < MIN_OUTPUT {
+            return Err(anyhow::anyhow!(
+                "context budget: the prompt is about {prompt_tokens} tokens and the model's \
+                 window is {window}, leaving {room}, under the {MIN_OUTPUT} an answer needs. \
+                 Shorten the input or raise the endpoint's max_num_ctx."
+            ));
+        }
+        Ok(Some(room.min(MAX_OUTPUT) as u32))
     }
 
     /// The context window the model's endpoint is run at (`max_num_ctx` on
@@ -1009,7 +1026,7 @@ impl AIService {
                 .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?
                 .model_id,
         )?;
-        let cap = Self::interpretation_max_output_tokens(&model_id, estimate_token_count(&prompt));
+        let cap = Self::interpretation_max_output_tokens(&model_id, estimate_token_count(&prompt))?;
         self.prompt_with(task_id, prompt, None, Some((true, cap)))
             .await
     }
@@ -1900,7 +1917,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            AIService::interpretation_max_output_tokens(&unset_model, 35_000),
+            AIService::interpretation_max_output_tokens(&unset_model, 35_000).unwrap(),
             None,
             "an unknown window sends no cap"
         );
@@ -1914,14 +1931,18 @@ mod tests {
             .unwrap();
         // Room after a 35k prompt is 14,152: the ceiling applies.
         assert_eq!(
-            AIService::interpretation_max_output_tokens(&sized_model, 35_000),
+            AIService::interpretation_max_output_tokens(&sized_model, 35_000).unwrap(),
             Some(8_192)
         );
-        // A prompt that nearly fills the window still gets the floor.
+        // The cap is the room itself down to the smallest useful answer...
         assert_eq!(
-            AIService::interpretation_max_output_tokens(&sized_model, 48_900),
+            AIService::interpretation_max_output_tokens(&sized_model, 48_640).unwrap(),
             Some(512)
         );
+        // ...and below that it is an error, never a cap past the window.
+        let error = AIService::interpretation_max_output_tokens(&sized_model, 48_900)
+            .expect_err("252 tokens of room cannot hold an answer");
+        assert!(error.to_string().contains("context budget"), "{error}");
     }
 
     #[tokio::test]
