@@ -114,7 +114,9 @@ export class IdentityClient {
     /**
      * Claims an offer link for this executor (the operator only). `canKeepMaster` says this
      * device keeps the master key, which only an executor started with `--custody-channel`
-     * may say (403 `no-custody-channel` otherwise).
+     * may say (403 `no-custody-channel` otherwise). Claiming the same offer again keeps the
+     * claim as it is (`needsAccept` as it stands): 409 `cancelled` once cancelled, 409
+     * `offer-conflict` when the offer was claimed for another identity.
      */
     async claimOffer(offer: string, hint?: string, canKeepMaster?: boolean): Promise<ClaimOfferResult> {
         return this.#apiClient.call("identity.claimOffer", { offer, hint, canKeepMaster });

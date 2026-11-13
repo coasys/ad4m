@@ -1,8 +1,8 @@
 //! Tasks whose `model_id` is the `default` variable must follow the
-//! default LLM's worker thread when that thread is replaced.
+//! default LLM when its client is replaced.
 use super::*;
 use crate::db::Ad4mDb;
-use crate::types::{ModelApiInput, ModelApiType, ModelInput, ModelType};
+use crate::types::{EndpointInput, EndpointKind, ModelInput, ModelType};
 
 /// An OpenAI-shaped endpoint that answers every completion with `reply`.
 async fn openai_stub(reply: &str) -> (mockito::ServerGuard, mockito::Mock) {
@@ -32,33 +32,33 @@ async fn openai_stub(reply: &str) -> (mockito::ServerGuard, mockito::Mock) {
     (server, mock)
 }
 
-fn remote_llm(name: &str, base_url: &str, model: &str) -> ModelInput {
+/// An LLM `model` on a new endpoint at `base_url`.
+async fn remote_llm(service: &AIService, name: &str, base_url: &str, model: &str) -> ModelInput {
+    let endpoint = service
+        .add_endpoint(EndpointInput {
+            name: name.to_string(),
+            kind: EndpointKind::Vllm,
+            base_url: url::Url::parse(base_url).unwrap(),
+            api_key: None,
+            capabilities: None,
+            max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
+        })
+        .await
+        .expect("add endpoint");
     ModelInput {
         name: name.to_string(),
         model_type: ModelType::Llm,
-        local: None,
-        api: Some(ModelApiInput {
-            base_url: format!("{base_url}/v1"),
-            api_key: None,
-            model: model.to_string(),
-            api_type: ModelApiType::OpenAi.to_string(),
-            max_num_ctx: None,
-        }),
+        endpoint_id: endpoint.id,
+        remote_model: model.to_string(),
+        native_tools: None,
     }
 }
 
 /// A service without the background `load()`: only what the test adds runs.
 fn bare_service() -> AIService {
-    AIService {
-        embedding_channel: Arc::new(Mutex::new(HashMap::new())),
-        llm_channel: Arc::new(Mutex::new(HashMap::new())),
-        transcription_streams: Arc::new(Mutex::new(HashMap::new())),
-        cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
-        shared_whisper_models: Arc::new(Mutex::new(HashMap::new())),
-        default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(Arc::new(|_| {
-            Box::pin(async { Err(anyhow!("no embedding models in this test")) })
-        }))),
-    }
+    AIService::empty()
 }
 
 async fn default_task(service: &AIService) -> AITask {
@@ -87,10 +87,15 @@ async fn updating_the_default_model_respawns_tasks_on_default() {
     let (server, _mock) = openai_stub("still here").await;
     let service = bare_service();
 
-    let model_id = service
-        .add_model(remote_llm("default-llm", &server.url(), "before"))
-        .await
-        .expect("add model");
+    let before = remote_llm(&service, "default-llm", &server.url(), "before").await;
+    let after = ModelInput {
+        name: before.name.clone(),
+        model_type: ModelType::Llm,
+        endpoint_id: before.endpoint_id.clone(),
+        remote_model: "after".into(),
+        native_tools: None,
+    };
+    let model_id = service.add_model(before).await.expect("add model");
     service
         .set_default_model(ModelType::Llm, model_id.clone())
         .await
@@ -98,22 +103,19 @@ async fn updating_the_default_model_respawns_tasks_on_default() {
     let task = default_task(&service).await;
 
     service
-        .update_model(
-            model_id.clone(),
-            remote_llm("default-llm", &server.url(), "after"),
-        )
+        .update_model(model_id.clone(), after)
         .await
         .expect("update model");
 
     let result = service
         .prompt(task.task_id.clone(), "hello".into(), None)
         .await
-        .expect("a task on `default` is spawned on the restarted worker");
+        .expect("a task on `default` is prompts the updated model");
     assert_eq!(result.text, "still here");
     assert_eq!(result.model_id, model_id);
 }
 
-// Changing the default must move `default` tasks to the new default's worker.
+// Changing the default must move `default` tasks to the new default.
 #[tokio::test]
 async fn setting_a_new_default_moves_tasks_on_default() {
     Ad4mDb::init_global_instance(":memory:").expect("in-memory db");
@@ -122,11 +124,11 @@ async fn setting_a_new_default_moves_tasks_on_default() {
     let service = bare_service();
 
     let first = service
-        .add_model(remote_llm("first", &first_server.url(), "first"))
+        .add_model(remote_llm(&service, "first", &first_server.url(), "first").await)
         .await
         .expect("add first model");
     let second = service
-        .add_model(remote_llm("second", &second_server.url(), "second"))
+        .add_model(remote_llm(&service, "second", &second_server.url(), "second").await)
         .await
         .expect("add second model");
     service
@@ -143,7 +145,7 @@ async fn setting_a_new_default_moves_tasks_on_default() {
     let result = service
         .prompt(task.task_id.clone(), "hello".into(), None)
         .await
-        .expect("a task on `default` is spawned on the new default's worker");
+        .expect("a task on `default` is prompts the new default");
     assert_eq!(result.text, "from second");
     assert_eq!(result.model_id, second);
 }
