@@ -865,8 +865,10 @@ impl AIService {
     /// a short prompt on a large window asking the server to generate a
     /// window's worth of JSON it will not use.
     ///
-    /// The window is the endpoint's `max_num_ctx`, which is unset by default.
-    /// Without it nothing here knows the window, and a guess (the 16k context
+    /// `window` is the one the request runs at ([`Self::resolved_context_tokens`]:
+    /// an Ollama client's resolved `num_ctx`, else the endpoint's `max_num_ctx`,
+    /// which is unset by default), not the endpoint's ceiling alone.
+    /// Without one nothing here knows the window, and a guess (the 16k context
     /// budget fallback) would cap a 35k-token prompt at the floor and
     /// truncate the JSON on every retry — so an unknown window sends no cap.
     /// `prompt_tokens` is the chars/4 estimate the billing path uses.
@@ -876,12 +878,12 @@ impl AIService {
     /// again cannot fix that. When the room is under the smallest useful
     /// answer, that is an error saying so, not a cap raised past the window.
     pub fn interpretation_max_output_tokens(
-        model_id: &str,
+        window: Option<usize>,
         prompt_tokens: usize,
     ) -> Result<Option<u32>> {
         const MIN_OUTPUT: usize = 512;
         const MAX_OUTPUT: usize = 8_192;
-        let Some(window) = Self::model_context_tokens(model_id) else {
+        let Some(window) = window else {
             return Ok(None);
         };
         let room = window.saturating_sub(prompt_tokens);
@@ -1104,7 +1106,8 @@ impl AIService {
         // The input is the whole conversation `prompt_with` sends: the task's
         // system prompt and examples count against the window as much as the prompt.
         let input_tokens = estimate_turns_tokens(&turns_for_task(&task, prompt.clone()));
-        let cap = Self::interpretation_max_output_tokens(&model_id, input_tokens)?;
+        let window = self.resolved_context_tokens(&model_id).await;
+        let cap = Self::interpretation_max_output_tokens(window, input_tokens)?;
         self.prompt_with(task_id, prompt, None, Some((true, cap)))
             .await
     }
@@ -2185,12 +2188,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            AIService::interpretation_max_output_tokens(&unset_model, 35_000).unwrap(),
+            AIService::interpretation_max_output_tokens(
+                service.resolved_context_tokens(&unset_model).await,
+                35_000
+            )
+            .unwrap(),
             None,
             "an unknown window sends no cap"
         );
 
-        let mut sized = Endpoint::for_test("sized", EndpointKind::Ollama, "http://127.0.0.1:9", "");
+        let mut sized =
+            Endpoint::for_test("sized", EndpointKind::LlamaServer, "http://127.0.0.1:8", "");
         sized.max_num_ctx = Some(49_152);
         Ad4mDb::with_global_instance(|db| db.insert_endpoint(&sized)).unwrap();
         let sized_model = service
@@ -2199,17 +2207,28 @@ mod tests {
             .unwrap();
         // Room after a 35k prompt is 14,152: the ceiling applies.
         assert_eq!(
-            AIService::interpretation_max_output_tokens(&sized_model, 35_000).unwrap(),
+            AIService::interpretation_max_output_tokens(
+                service.resolved_context_tokens(&sized_model).await,
+                35_000
+            )
+            .unwrap(),
             Some(8_192)
         );
         // The cap is the room itself down to the smallest useful answer...
         assert_eq!(
-            AIService::interpretation_max_output_tokens(&sized_model, 48_640).unwrap(),
+            AIService::interpretation_max_output_tokens(
+                service.resolved_context_tokens(&sized_model).await,
+                48_640
+            )
+            .unwrap(),
             Some(512)
         );
         // ...and below that it is an error, never a cap past the window.
-        let error = AIService::interpretation_max_output_tokens(&sized_model, 48_900)
-            .expect_err("252 tokens of room cannot hold an answer");
+        let error = AIService::interpretation_max_output_tokens(
+            service.resolved_context_tokens(&sized_model).await,
+            48_900,
+        )
+        .expect_err("252 tokens of room cannot hold an answer");
         assert!(error.to_string().contains("context budget"), "{error}");
     }
 
@@ -2258,6 +2277,57 @@ mod tests {
             .await
             .unwrap();
         completion.assert_async().await;
+    }
+
+    // The cap is budgeted against the window the request runs at: a model whose own window
+    // is 4,096 under a 131,072 ceiling leaves 1,096 tokens after a 3,000-token prompt, not
+    // the 8,192 the ceiling would.
+    #[tokio::test]
+    async fn an_interpretation_cap_is_sized_from_the_resolved_window_not_the_ceiling() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(r#"{"model_info":{"qwen3.context_length":4096}}"#)
+            .create_async()
+            .await;
+        let chat = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let cap = body["options"]["num_predict"].as_u64().unwrap_or(u64::MAX);
+                cap <= 1_096
+            })
+            .with_body(r#"{"message":{"role":"assistant","content":"{}"},"done":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ceiling", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(131_072);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .prompt_interpretation(task.task_id, "p".repeat(12_000))
+            .await
+            .unwrap();
+        chat.assert_async().await;
     }
 
     #[tokio::test]
