@@ -57,17 +57,16 @@ impl CompletionSource for OpenAiCompatBridge {
         // the oldest message in every conversation the harness runs, and
         // the question the request answers goes with it (Ollama fails the
         // render as `no user query found in messages`).
-        let messages = &trim_messages_to_budget(
-            messages,
-            self.service.context_budget_bytes(model_id).await,
-            model_id,
-        );
+        let budget = self.service.context_budget_bytes(model_id).await;
 
         // A provider whose wire format carries tools gets them handed over as
-        // definitions, and answers with structured calls. Everything else
-        // takes the prompt-injection path below, which works against any model
-        // at all — including every local one, which is why it stays.
+        // definitions, and answers with structured calls. The definitions go
+        // out beside the message list, not inside it, so the trim gets the
+        // full budget. Everything else takes the prompt-injection path
+        // below, which works against any model at all — including every
+        // local one, which is why it stays.
         if !tools.is_empty() && AIService::model_supports_native_tools(model_id) {
+            let messages = &trim_messages_to_budget(messages, budget, model_id);
             return self.complete_natively(model_id, messages, tools).await;
         }
 
@@ -78,18 +77,24 @@ impl CompletionSource for OpenAiCompatBridge {
         let tool_defs: Vec<ToolDef> = tools.iter().map(harness_schema_to_tool_def).collect();
         let tools_active = !tool_defs.is_empty();
 
-        // Assemble (role, content) message pairs. When tools are advertised
-        // we prepend the Hermes/Qwen `<tools>` system prompt so the model
-        // knows the surface. Empty `tools` = plain completion (used by the
-        // budget-exhausted final call in the loop).
-        let mut flat: Vec<(String, String)> =
-            Vec::with_capacity(messages.len() + if tools_active { 1 } else { 0 });
+        // When tools are advertised we prepend the Hermes/Qwen `<tools>`
+        // system prompt so the model knows the surface — BEFORE the trim,
+        // as a leading system message: it is part of the message list the
+        // request sends, so its bytes count against the same budget, and
+        // being a `system` it is never the entry the trim drops. Empty
+        // `tools` = plain completion (the budget-exhausted final call).
+        let mut with_tools: Vec<Value> = Vec::with_capacity(messages.len() + 1);
         if tools_active {
-            flat.push((
-                "system".to_string(),
-                tool_grammar::render_tools_system_prompt(&tool_defs),
-            ));
+            with_tools.push(serde_json::json!({
+                "role": "system",
+                "content": tool_grammar::render_tools_system_prompt(&tool_defs),
+            }));
         }
+        with_tools.extend_from_slice(messages);
+        let messages = &trim_messages_to_budget(&with_tools, budget, model_id);
+
+        // Assemble (role, content) message pairs.
+        let mut flat: Vec<(String, String)> = Vec::with_capacity(messages.len());
         for m in messages {
             flat.push(flatten_json_message(m)?);
         }
@@ -1479,5 +1484,86 @@ mod injected_path_dispatch_tests {
         let messages = vec![json!({"role": "user", "content": "x".repeat(9_000)})];
         let out = trim_messages_to_budget(&messages, 1_000, "m");
         assert_eq!(out, messages);
+    }
+
+    // ── the injected tools prompt shares the request budget ────────────────
+
+    /// The rendered `<tools>` system prompt is part of the message list the
+    /// injected path sends, so it counts against the same context budget
+    /// the conversation is trimmed to.
+    #[tokio::test]
+    async fn the_injected_tools_prompt_counts_against_the_request_budget() {
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        let mut upstream = mockito::Server::new_async().await;
+
+        // A 2,048-token window budgets 3,072 bytes of request — most of it
+        // the rendered tool surface below. The history the trim starts
+        // with fits the full budget; it fits the request only with the
+        // middle pair dropped, since the tools prompt takes the rest.
+        let tools = vec![ToolSchema {
+            name: "big_tool".to_string(),
+            description: "x".repeat(1_500),
+            parameters: json!({"type": "object", "properties": {}}),
+            side_effect: SideEffect::Read,
+        }];
+        let tool_defs: Vec<ToolDef> = tools.iter().map(harness_schema_to_tool_def).collect();
+        let expected_system = format!(
+            "{}\nsys",
+            tool_grammar::render_tools_system_prompt(&tool_defs)
+        );
+        let completions = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_body(mockito::Matcher::Json(json!({
+                "model": "m",
+                "messages": [
+                    {"role": "system", "content": expected_system},
+                    {"role": "user", "content": "the question being answered"},
+                ],
+            })))
+            .with_body(r#"{"choices":[{"message":{"content":"done"}}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut endpoint = crate::types::Endpoint::for_test(
+            "upstream",
+            crate::types::EndpointKind::LlamaServer,
+            &upstream.url(),
+            "",
+        );
+        endpoint.max_num_ctx = Some(2_048);
+        crate::db::Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let service = crate::ai_service::AIService::empty();
+        let model_id = service
+            .add_model(crate::types::ModelInput {
+                name: "m".into(),
+                model_type: crate::types::ModelType::Llm,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "m".into(),
+                native_tools: None,
+            })
+            .await
+            .unwrap();
+        let bridge = OpenAiCompatBridge::new(Arc::new(service), None);
+
+        let completion = bridge
+            .complete(
+                &model_id,
+                &[
+                    json!({"role": "system", "content": "sys"}),
+                    json!({"role": "user", "content": "u".repeat(800)}),
+                    json!({"role": "assistant", "content": "a".repeat(800)}),
+                    json!({"role": "user", "content": "the question being answered"}),
+                ],
+                tools,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(completion.content, "done");
+        assert!(completion.tool_calls.is_empty());
+        // The one expected request: [system, user] — the middle pair could
+        // not stay beside the tools prompt, the question never left.
+        completions.assert_async().await;
     }
 }
