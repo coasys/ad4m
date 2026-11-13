@@ -397,11 +397,25 @@ pub(crate) struct Connection {
     /// retried every 30 s) piled up one first-result computation per attempt: ~200 busy
     /// threads on staging (#1595).
     opening: Arc<tokio::sync::Semaphore>,
+    /// Bounds how many query-running calls one connection evaluates at once (#1736):
+    /// `perspective.querySparql`, `perspective.getLinks`, `perspective.modelQuery`,
+    /// `perspective.evaluateGetters`, `perspective.subscribeQuery` and
+    /// `perspective.modelSubscribe`. A call acquires one slot in
+    /// `sparql_store::query_gate`, which hangs the permit on the eval's stop:
+    /// the slot frees only when the blocking evaluation has actually ended,
+    /// not when the call's future ends.
+    queries: Arc<tokio::sync::Semaphore>,
 }
 
 /// How many calls that open a live query one connection runs at once (see
 /// [`Connection::opening`]).
 pub(crate) const MAX_OPENING_LIVE_QUERIES: usize = 8;
+
+/// How many SPARQL evaluations one connection runs at once (see
+/// [`Connection::queries`]): 8, the same bound the opening cap already set —
+/// each Oxigraph eval is a blocking thread, so 8 keeps one connection from
+/// taking every blocking slot the way 83 mention re-checks did on staging.
+pub(crate) const MAX_RUNNING_QUERIES_PER_CONNECTION: usize = 8;
 
 impl Connection {
     /// A connection whose replies and events go to `tx`.
@@ -424,6 +438,9 @@ impl Connection {
             calls: Default::default(),
             closed,
             opening: Arc::new(tokio::sync::Semaphore::new(MAX_OPENING_LIVE_QUERIES)),
+            queries: Arc::new(tokio::sync::Semaphore::new(
+                MAX_RUNNING_QUERIES_PER_CONNECTION,
+            )),
         }
     }
 
@@ -544,6 +561,7 @@ impl Connection {
         };
         let ctx_token = self.closed.child_token();
         let opening = opens_live_query.then(|| self.opening.clone());
+        let queries = self.queries.clone();
         {
             let mut guard = self.inflight.lock().await;
             guard.insert(id.clone(), (drop_token.clone(), ctx_token.clone()));
@@ -588,6 +606,7 @@ impl Connection {
             // so handlers can clone it into long-running operations.
             let mut req_ctx = (*base_ctx).clone();
             req_ctx.cancel_token = Some(ctx_token.clone());
+            req_ctx.query_slots = Some(queries);
             let req_ctx = Arc::new(req_ctx);
 
             // Race the handler against a `request.cancel` or the session

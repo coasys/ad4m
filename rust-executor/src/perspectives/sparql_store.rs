@@ -42,7 +42,10 @@ impl StopInfo {
 /// fired so the eval's error can say — "cancelled", or "the SPARQL deadline
 /// of Ns passed".
 ///
-/// Cheap to clone: every clone shares the one token and the one record.
+/// Cheap to clone: every clone shares the one token and the one record, and
+/// keeps hold of the connection's running-query slot (`permit`), so a slot
+/// frees only when the eval actually ends — a dropped call whose eval is
+/// still stopping still holds it.
 ///
 /// What fires it is an [`EvalGate`]: the deadline, a bridged request cancel
 /// (`request.cancel`, or the connection closing — those tokens are children
@@ -51,6 +54,11 @@ impl StopInfo {
 pub struct EvalStop {
     token: oxigraph::sparql::CancellationToken,
     stop: Arc<StopInfo>,
+    /// The slots the eval holds while it runs — the connection's
+    /// running-query slot, and for a subscribe call the connection's
+    /// live-query-opening slot too. Empty for internal evals (background
+    /// loops, tests).
+    permits: Vec<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl EvalStop {
@@ -63,6 +71,7 @@ impl EvalStop {
                 kind: AtomicU8::new(RUNNING),
                 deadline: Duration::ZERO,
             }),
+            permits: Vec::new(),
         }
     }
 
@@ -123,6 +132,7 @@ impl EvalGate {
                 kind: AtomicU8::new(RUNNING),
                 deadline,
             }),
+            permits: Vec::new(),
         };
         let watchdog = Watchdog::arm(stop.clone(), deadline, cancel);
         EvalGate {
@@ -131,9 +141,16 @@ impl EvalGate {
         }
     }
 
-    /// The stop evals take. Clones share the gate's token and its why-record.
+    /// The stop evals take. Clones share the gate's token, its why-record and
+    /// any held slot.
     pub fn stop(&self) -> EvalStop {
         self.stop.clone()
+    }
+
+    /// Hang one of the connection's slots on the gate: evals under it stay
+    /// covered by the slot until they end.
+    pub fn hold_slot(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
+        self.stop.permits.push(Arc::new(permit));
     }
 }
 
@@ -203,11 +220,32 @@ pub(crate) fn query_deadline() -> Duration {
     )
 }
 
-/// The gate one WS query call runs under: the configured deadline and the
-/// request's cancel (`request.cancel` + the connection closing). Drop the
+/// The gate one WS query call runs under: the configured deadline, the
+/// request's cancel (`request.cancel` + the connection closing), and one of
+/// the connection's running-query slots. Waiting for the slot is part of the
+/// call, so a `request.cancel` drops it here like anywhere else. Drop the
 /// gate to stop the eval.
 pub(crate) async fn query_gate(ctx: &crate::types::domain::RequestContext) -> EvalGate {
-    EvalGate::request(query_deadline(), ctx.cancel_token.clone())
+    let mut gate = EvalGate::request(query_deadline(), ctx.cancel_token.clone());
+    if let Some(slots) = ctx.query_slots.clone() {
+        let cancelled = ctx.cancel_token.clone();
+        // Waiting for a slot stays cancellable: a `request.cancel` (or the
+        // connection closing) ends the wait instead of queueing behind evals
+        // that are themselves stopping.
+        let permit = match cancelled {
+            Some(token) => {
+                tokio::select! {
+                    p = slots.acquire_owned() => p.ok(),
+                    _ = token.cancelled() => None,
+                }
+            }
+            None => slots.acquire_owned().await.ok(),
+        };
+        if let Some(permit) = permit {
+            gate.hold_slot(permit);
+        }
+    }
+    gate
 }
 
 /// The counter the tests use to prove a stopped evaluation actually ended —
@@ -241,6 +279,9 @@ pub(crate) mod eval_count {
     pub(crate) fn reset() {
         RUNNING.store(0, Ordering::Release);
         RUNNING_MAX.store(0, Ordering::Release);
+    }
+    pub(crate) fn running_max() -> usize {
+        RUNNING_MAX.load(Ordering::Acquire)
     }
 }
 

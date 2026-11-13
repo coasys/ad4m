@@ -7,8 +7,8 @@
 //! `query_internal` eval, must return to zero within a second of the stop.
 //!
 //! Covered here: the configured deadline (504 over the wire), `request.cancel`
-//! on `perspective.subscribeQuery` (499), the socket closing, and a dropped
-//! call future (the gate's own drop).
+//! on `perspective.subscribeQuery` (499), the socket closing, a dropped call
+//! future (the gate's own drop), and the per-connection running-query limit.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +23,7 @@ use crate::agent::AgentContext;
 use crate::api::events_ws::build_event_stream;
 use crate::api::tests::support::{admin_ctx, registered_perspective};
 use crate::api::ws_handler::build_handler_map;
-use crate::api::ws_rpc::{serve, Connection};
+use crate::api::ws_rpc::{serve, Connection, MAX_RUNNING_QUERIES_PER_CONNECTION};
 use crate::config::{get_global_config, set_global_config};
 use crate::perspectives::sparql_store::eval_count;
 use crate::types::{Link, LinkStatus};
@@ -277,4 +277,47 @@ async fn dropped_gate_stops_the_evaluation() {
     drop(gate);
     evals_all_ended().await;
     let _ = eval.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_connection_limit_holds_slots_until_evals_end() {
+    let (_registered, uuid) = seeded_perspective(150).await;
+    let mut socket = Socket::open().await;
+    eval_count::reset();
+
+    // More slow queries on one connection than the limit.
+    let n_calls = MAX_RUNNING_QUERIES_PER_CONNECTION + 4;
+    for i in 0..n_calls {
+        socket.send(query_call(&format!("q{i}"), &uuid, SLOW));
+    }
+
+    // The limit holds: never more than MAX evals at once, and all MAX slots
+    // are taken while the queries run.
+    running_to_be(MAX_RUNNING_QUERIES_PER_CONNECTION).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        eval_count::running_max() <= MAX_RUNNING_QUERIES_PER_CONNECTION,
+        "ran {} evals at once, over the limit {}",
+        eval_count::running_max(),
+        MAX_RUNNING_QUERIES_PER_CONNECTION
+    );
+
+    // Cancel them all at once.
+    for i in 0..n_calls {
+        socket.send(json!({
+            "id": format!("c{i}"),
+            "type": "request.cancel",
+            "params": {"targetId": format!("q{i}")}
+        }));
+    }
+    evals_all_ended().await;
+
+    // Slots free as the evals actually end: a new call gets one and answers.
+    socket.send(query_call(
+        "fresh",
+        &uuid,
+        "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1",
+    ));
+    let reply = socket.reply("fresh").await;
+    assert!(reply.get("result").is_some(), "{reply}");
 }
