@@ -152,7 +152,7 @@ fn trim_messages_to_budget(messages: &[Value], budget_bytes: usize, model_id: &s
     if size(messages) <= budget_bytes {
         return messages.to_vec();
     }
-    log::warn!(
+    log::debug!(
         "harness_bridge: outgoing message list is {}B, over the {budget_bytes}B \
          context budget for {model_id} — trimming oldest entries, keeping the question",
         size(messages),
