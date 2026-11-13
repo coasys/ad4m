@@ -14,9 +14,13 @@
 //! | `tasks` | `name`, `system_prompt`, `prompt_examples`, `metadata` | the owner's (`agent_did`) |
 //! | `expression` | `data` | the owner's (`owner`), the executor's for `''` |
 //! | `outbox` | `message`, `recipient` | the owner's (`owner_did`) |
+//! | `ai_messages` | `content`, `error` | the owner's (its session's `owner_did`) |
+//! | `ai_sessions` | `title`, `default_perspective`, `library_perspective`, `capabilities` | the owner's (`owner_did`) |
 //!
 //! An owner DID names a person: a managed user's DID (`users.did`) names that user, any other
 //! DID (and `NULL`) the main agent. A perspective's store is wrapped for each of its owners.
+//! A row without an owner column of its own (`ai_messages`) is its parent row's: its owner is
+//! read through the parent (`AI_MESSAGE_OWNER`).
 //!
 //! A sealed column is never in a `WHERE`, an `ORDER BY` or an index: a lookup by one reads
 //! the rows and compares the opened values. A database opened without keys (unit tests, a
@@ -47,7 +51,8 @@ pub struct ResealReport {
 pub(crate) enum OwnerColumn {
     /// A perspective's uuid: the perspective's store.
     Perspective(&'static str),
-    /// An owner DID: the person's store.
+    /// An owner DID: the person's store. The column, or an SQL expression over the row that
+    /// answers the DID of the parent row that owns it ([`AI_MESSAGE_OWNER`]).
     Person(&'static str),
     /// An owner DID, or `''` for the executor's own rows (the executor's store).
     PersonOrExecutor(&'static str),
@@ -131,8 +136,34 @@ pub(crate) const OUTBOX: SealedTable = SealedTable {
     columns: &["message", "recipient"],
 };
 
-/// Every table with sealed columns.
-pub(crate) const SEALED_TABLES: [&SealedTable; 7] = [
+/// The owner of an `ai_messages` row: its session's `owner_did`.
+pub(crate) const AI_MESSAGE_OWNER: &str =
+    "(SELECT owner_did FROM ai_sessions WHERE ai_sessions.id = ai_messages.session_id)";
+
+/// A transcript entry: what the person, the model and the tools said.
+pub(crate) const AI_MESSAGES: SealedTable = SealedTable {
+    table: "ai_messages",
+    key: &["id"],
+    owner: OwnerColumn::Person(AI_MESSAGE_OWNER),
+    columns: &["content", "error"],
+};
+
+/// An AI session: its title and what it reaches.
+pub(crate) const AI_SESSIONS: SealedTable = SealedTable {
+    table: "ai_sessions",
+    key: &["id"],
+    owner: OwnerColumn::Person("owner_did"),
+    columns: &[
+        "title",
+        "default_perspective",
+        "library_perspective",
+        "capabilities",
+    ],
+};
+
+/// Every table with sealed columns. `ai_messages` comes before `ai_sessions`: its owner is
+/// read through its session, so a person's messages are deleted before the sessions.
+pub(crate) const SEALED_TABLES: [&SealedTable; 9] = [
     &PERSPECTIVE_HANDLE,
     &PERSPECTIVE_DIFF,
     &FLOW_REPLICA_STATE,
@@ -140,6 +171,8 @@ pub(crate) const SEALED_TABLES: [&SealedTable; 7] = [
     &TASKS,
     &EXPRESSION,
     &OUTBOX,
+    &AI_MESSAGES,
+    &AI_SESSIONS,
 ];
 
 /// The parts of a row's key, as bound into its sealed values.
@@ -380,8 +413,9 @@ impl Ad4mDb {
 
     /// Deletes every row sealed under the person store of the managed user whose DID is
     /// `did`: the rows of the tables whose owner column names a person (notifications, tasks,
-    /// expressions, the outbox) that name `did`. Answers how many it deleted. Runs before the
-    /// person's key is destroyed, so the key goes after the rows it protects.
+    /// expressions, the outbox, AI sessions and their messages) that name `did`. Answers how
+    /// many it deleted. Runs before the person's key is destroyed, so the key goes after the
+    /// rows it protects.
     pub(crate) fn delete_person_rows(&self, did: &str) -> Ad4mDbResult<usize> {
         if did.is_empty() {
             return Ok(0);
@@ -672,13 +706,15 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    const SECRET_WORDS: [&str; 6] = [
+    const SECRET_WORDS: [&str; 8] = [
         "secret-perspective-name",
         "neighbourhood://secret-url",
         "secret-description",
         "secret-system-prompt",
         "secret-flow-state",
         "secret-recipient",
+        "secret-ai-session-title",
+        "secret-ai-prompt",
     ];
 
     fn keyring(folder: &Path, byte: u8) -> Arc<DataKeys> {
@@ -752,6 +788,28 @@ mod tests {
         .unwrap();
         db.add_to_outbox(&Default::default(), SECRET_WORDS[5].into())
             .unwrap();
+        db.create_ai_session(&crate::ai_sessions::types::AiSession {
+            id: "ai-session".into(),
+            owner_did: Some("did:key:alice".into()),
+            title: SECRET_WORDS[6].into(),
+            model: None,
+            default_perspective: Some(perspective.clone()),
+            library_perspective: None,
+            capabilities: vec![],
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        })
+        .unwrap();
+        db.append_ai_message(
+            Some("did:key:alice"),
+            "ai-message",
+            "ai-session",
+            "user",
+            &serde_json::json!({ "text": SECRET_WORDS[7] }).to_string(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
         perspective
     }
 
@@ -830,6 +888,21 @@ mod tests {
             serde_json::json!("expression-data")
         );
         assert_eq!(db.get_pending_diffs(&perspective, None).unwrap().1.len(), 1);
+        let alice = Some("did:key:alice");
+        assert_eq!(
+            db.get_ai_session(alice, "ai-session")
+                .unwrap()
+                .unwrap()
+                .title,
+            SECRET_WORDS[6]
+        );
+        assert_eq!(
+            db.get_ai_message(alice, "ai-message")
+                .unwrap()
+                .unwrap()
+                .content["text"],
+            SECRET_WORDS[7]
+        );
 
         // A re-key reseals the flow state for its new row.
         db.move_flow_rows("did:key:alice", "did:key:alice2")
@@ -1020,8 +1093,17 @@ mod tests {
         };
         let before = expressions(&db);
 
-        // Alice's notification and task.
-        assert_eq!(db.delete_person_rows("did:key:alice").unwrap(), 2);
+        // Alice's notification, task, AI session and its message.
+        assert_eq!(db.delete_person_rows("did:key:alice").unwrap(), 4);
+        assert!(db
+            .get_ai_session(Some("did:key:alice"), "ai-session")
+            .unwrap()
+            .is_none());
+        let messages: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM ai_messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(messages, 0);
         assert!(db
             .get_notifications_for_owner("did:key:alice")
             .unwrap()
