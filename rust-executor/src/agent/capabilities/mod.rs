@@ -120,6 +120,59 @@ pub fn capability_matches(capabilities: &[Capability], expected: &Capability) ->
     })
 }
 
+/// Whether any of `capabilities` covers `expected` on at least one pointer: the same domain
+/// and every action, whatever pointers it names (a capability naming none grants nothing).
+/// For the methods that list a kind of resource (`Guard::CapAnyPointer`): a caller that may
+/// read part of the list is admitted and the handler narrows its answer, instead of
+/// refusing everyone without `*`.
+pub fn capability_matches_any_pointer(capabilities: &[Capability], expected: &Capability) -> bool {
+    capabilities.iter().any(|cap| {
+        (cap.with.domain == WILD_CARD || cap.with.domain == expected.with.domain)
+            && !cap.with.pointers.is_empty()
+            && (cap.can.contains(&WILD_CARD.to_string())
+                || expected.can.iter().all(|c| cap.can.contains(c)))
+    })
+}
+
+/// `Ok` if any of `capabilities` covers `expected` on at least one pointer
+/// ([`capability_matches_any_pointer`]); otherwise the error a refused call reports.
+pub fn require_capability_any_pointer(
+    capabilities: &[Capability],
+    expected: &Capability,
+) -> Result<(), String> {
+    if !capability_matches_any_pointer(capabilities, expected) {
+        return Err(format!(
+            "Capability is not matched, you have capabilities: {:?}, expected: {:?}",
+            capabilities, expected
+        ));
+    }
+    Ok(())
+}
+
+/// The pointers of `domain` that `capabilities` grant `action` on: `None` when one names
+/// `*` (every pointer of the domain), else the pointers they name. For the handler of a
+/// `Guard::CapAnyPointer` method, which keeps the listed entries in the set.
+pub fn pointers_covered(
+    capabilities: &[Capability],
+    domain: &str,
+    action: &str,
+) -> Option<std::collections::BTreeSet<String>> {
+    let mut covered = std::collections::BTreeSet::new();
+    for cap in capabilities {
+        let domain_matches = cap.with.domain == WILD_CARD || cap.with.domain == domain;
+        let action_covered =
+            cap.can.contains(&WILD_CARD.to_string()) || cap.can.iter().any(|c| c == action);
+        if !domain_matches || !action_covered {
+            continue;
+        }
+        if cap.with.pointers.iter().any(|p| p == WILD_CARD) {
+            return None;
+        }
+        covered.extend(cap.with.pointers.iter().cloned());
+    }
+    Some(covered)
+}
+
 /// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
 pub(crate) const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
 
@@ -1302,6 +1355,70 @@ mod app_token_tests {
         assert!(caps_within(&reader, &[AGENT_READ_CAPABILITY.clone()]).is_empty());
         let caps = caps_within(&reader, &[ALL_CAPABILITY.clone()]);
         assert_eq!(caps_text(&caps), caps_text(&reader));
+    }
+
+    /// `capability_matches_any_pointer` admits the capability on any pointer it names (what
+    /// `Guard::CapAnyPointer` checks), and `pointers_covered` hands the handler the pointers
+    /// it narrows the list by: `None` for `*`, else the named pointers' union.
+    #[test]
+    fn a_capability_on_any_pointer_covers_a_list_and_names_its_entries() {
+        let expected = || perspective_cap(&[WILD_CARD], &[READ]);
+
+        // One pointer admits; none and another domain refuse.
+        assert!(capability_matches_any_pointer(
+            &[perspective_cap(&["a"], &[READ])],
+            &expected()
+        ));
+        assert!(!capability_matches_any_pointer(
+            &[perspective_cap(&[], &[READ])],
+            &expected()
+        ));
+        assert!(!capability_matches_any_pointer(
+            &[AGENT_READ_CAPABILITY.clone()],
+            &expected()
+        ));
+        // `*` in pointers, in the domain or in `can` admits as `capability_matches` does.
+        assert!(capability_matches_any_pointer(
+            &[perspective_cap(&[WILD_CARD], &[READ])],
+            &expected()
+        ));
+        assert!(capability_matches_any_pointer(
+            &[ALL_CAPABILITY.clone()],
+            &expected()
+        ));
+        // Every action the expected capability names must be held.
+        assert!(!capability_matches_any_pointer(
+            &[perspective_cap(&["a"], &[READ])],
+            &perspective_cap(&[WILD_CARD], &[READ, UPDATE])
+        ));
+
+        // The pointers the caller may read: a set, or every one (`None`) under `*`.
+        let caps = [
+            perspective_cap(&["a"], &[READ]),
+            perspective_cap(&["b"], &[READ, UPDATE]),
+            perspective_cap(&["c"], &[UPDATE]),
+            AGENT_READ_CAPABILITY.clone(),
+        ];
+        assert_eq!(
+            pointers_covered(&caps, PERSPECTIVE, READ),
+            Some(["a".to_string(), "b".to_string()].into())
+        );
+        assert_eq!(
+            pointers_covered(&caps, PERSPECTIVE, UPDATE),
+            Some(["b".to_string(), "c".to_string()].into())
+        );
+        assert_eq!(
+            pointers_covered(&[perspective_cap(&[WILD_CARD], &[READ])], PERSPECTIVE, READ),
+            None
+        );
+        assert_eq!(
+            pointers_covered(&[ALL_CAPABILITY.clone()], PERSPECTIVE, READ),
+            None
+        );
+        assert_eq!(
+            pointers_covered(&[AGENT_READ_CAPABILITY.clone()], PERSPECTIVE, READ),
+            Some(std::collections::BTreeSet::new())
+        );
     }
 
     #[tokio::test]
