@@ -275,6 +275,7 @@ fn an_abstract_class_is_never_a_records_class() {
         ],
     );
     let classes = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
         &store,
         &StoreResolver(&store),
         &["app://r1".to_string(), "app://r2".to_string()],
@@ -303,6 +304,7 @@ fn ids_and_texts(result: &ModelQueryResult) -> Vec<(String, String, String)> {
 async fn run(store: &SparqlStore, resolution: &Resolution, query: &str) -> ModelQueryResult {
     let query: ModelQueryInput = serde_json::from_str(query).unwrap();
     execute_union_query_with_views(
+        &crate::perspectives::sparql_store::EvalStop::none(),
         store,
         &resolution.classes,
         &query,
