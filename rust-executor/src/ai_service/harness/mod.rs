@@ -999,6 +999,15 @@ async fn complete_or_retry(
                 "harness: round {round}: upstream completion failed ({first}); \
                  retrying the round once"
             );
+            // A throttled upstream said when to come back: wait that long
+            // (bounded, so a huge value cannot hold the run) before the retry.
+            if let Some(wait) = retry_after_delay(&first) {
+                log::warn!(
+                    "harness: round {round}: upstream asked for {}s before a retry",
+                    wait.as_secs()
+                );
+                tokio::time::sleep(wait).await;
+            }
             if let Some(gate) = credit_gate {
                 if let Err(refused) = gate.check().await {
                     // The retry is a billed completion. A gate that refuses
@@ -1011,6 +1020,20 @@ async fn complete_or_retry(
             completions.complete(model_id, messages, tools).await
         }
     }
+}
+
+/// The longest a retry waits for an upstream's `Retry-After`.
+const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long the upstream asked to wait (`Retry-After` in seconds, on a 429 or 503),
+/// bounded by [`MAX_RETRY_AFTER`]. An HTTP-date or unparsable value asks for no wait.
+fn retry_after_delay(error: &anyhow::Error) -> Option<std::time::Duration> {
+    use crate::ai_service::providers::http::UpstreamStatus;
+    let answered = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<UpstreamStatus>())?;
+    let seconds: u64 = answered.retry_after.as_deref()?.trim().parse().ok()?;
+    Some(std::time::Duration::from_secs(seconds).min(MAX_RETRY_AFTER))
 }
 
 /// The model server failed a round twice. Stop calling tools and ask, once,
@@ -1157,6 +1180,8 @@ mod tests {
         fail_on_call: Vec<usize>,
         /// What a failing call answers: an HTTP status, or a timeout when `None`.
         fail_status: Option<reqwest::StatusCode>,
+        /// `Retry-After` on a failing call's status.
+        fail_retry_after: Option<String>,
     }
 
     impl ScriptedLLM {
@@ -1166,12 +1191,25 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 fail_on_call: Vec::new(),
                 fail_status: Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+                fail_retry_after: None,
             }
         }
 
         /// Failing calls answer `status` instead of 500.
         fn answering(mut self, status: reqwest::StatusCode) -> Self {
             self.fail_status = Some(status);
+            self
+        }
+
+        /// Failing calls answer a model refusal: a plain error, not an HTTP one.
+        fn refusing_on(mut self, calls: &[usize]) -> Self {
+            self.fail_on_call = calls.to_vec();
+            self.fail_status = Some(reqwest::StatusCode::OK);
+            self
+        }
+
+        fn retry_after(mut self, value: &str) -> Self {
+            self.fail_retry_after = Some(value.into());
             self
         }
 
@@ -1215,12 +1253,15 @@ mod tests {
             let n = self.call_count();
             if self.fail_on_call.contains(&n) {
                 return Err(match self.fail_status {
+                    Some(reqwest::StatusCode::OK) => {
+                        anyhow::anyhow!("the model refused: I cannot help with that")
+                    }
                     Some(status) => {
                         anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
                             url: "http://127.0.0.1:11434/api/chat".into(),
                             status,
                             body: "qwen tool call parsing failed: EOF".into(),
-                            retry_after: None,
+                            retry_after: self.fail_retry_after.clone(),
                         })
                     }
                     None => {
@@ -2136,6 +2177,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_fallback_is_returned_as_it_came_when_nudges_are_off() {
+        // Interpretation runs with no nudges: after two failures an empty no-tools
+        // answer is the answer, with no further completion.
+        let llm = Arc::new(ScriptedLLM::new(vec![plain_answer("")]).failing_on(&[1, 2]));
+        let out = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            Arc::new(EchoProvider { tools: Vec::new() }),
+            llm.clone(),
+            HarnessConfig {
+                empty_completion_nudges: 0,
+                ..HarnessConfig::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "");
+        assert_eq!(llm.call_count(), 3, "2 failures and the fallback, no nudge");
+    }
+
+    #[tokio::test]
     async fn a_transient_failure_on_the_empty_answer_nudge_is_retried() {
         // Two failed tries, an empty no-tools answer, then the nudge answers
         // 500 once: the nudge gets the same one retry a round gets.
@@ -2266,6 +2330,85 @@ mod tests {
         .unwrap();
         assert_eq!(out, "found");
         assert_eq!(llm.call_count(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_429_waits_for_its_retry_after_before_the_retry() {
+        let llm = Arc::new(
+            ScriptedLLM::new(vec![plain_answer("found")])
+                .failing_on(&[1])
+                .answering(reqwest::StatusCode::TOO_MANY_REQUESTS)
+                .retry_after("7"),
+        );
+        let started = tokio::time::Instant::now();
+        let out = run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            Arc::new(EchoProvider { tools: Vec::new() }),
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "found");
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(7));
+
+        // A huge value is bounded, not waited out.
+        let llm = Arc::new(
+            ScriptedLLM::new(vec![plain_answer("found")])
+                .failing_on(&[1])
+                .answering(reqwest::StatusCode::TOO_MANY_REQUESTS)
+                .retry_after("86400"),
+        );
+        let started = tokio::time::Instant::now();
+        run_with_tools(
+            "m",
+            vec![user_message("find it")],
+            Arc::new(EchoProvider { tools: Vec::new() }),
+            llm,
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(started.elapsed(), MAX_RETRY_AFTER);
+    }
+
+    #[tokio::test]
+    async fn auth_and_missing_model_answers_and_refusals_pass_through_unretried() {
+        // 401, 403, 404, 422 and a refusal (a plain error from the provider's reply
+        // reader) are permanent: one call, the error unchanged, no no-tools ask.
+        let mut cases: Vec<ScriptedLLM> = [401u16, 403, 404, 422]
+            .iter()
+            .map(|code| {
+                ScriptedLLM::new(Vec::new())
+                    .failing_on(&[1, 2, 3])
+                    .answering(reqwest::StatusCode::from_u16(*code).unwrap())
+            })
+            .collect();
+        cases.push(ScriptedLLM::new(Vec::new()).refusing_on(&[1, 2, 3]));
+        for llm in cases {
+            let llm = Arc::new(llm);
+            let error = run_with_tools(
+                "m",
+                vec![user_message("find it")],
+                Arc::new(EchoProvider { tools: Vec::new() }),
+                llm.clone(),
+                HarnessConfig::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(llm.call_count(), 1, "not retried: {error}");
+            assert!(
+                !error.to_string().contains("a final request without tools"),
+                "{error}"
+            );
+        }
     }
 
     #[tokio::test]

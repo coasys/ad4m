@@ -2330,6 +2330,51 @@ mod tests {
         chat.assert_async().await;
     }
 
+    // From a stored task to the wire: an interpretation task on an OpenAI reasoning model
+    // sends neither `max_tokens` (which o-series models reject) nor a cap the endpoint
+    // cannot honour with thinking off.
+    #[tokio::test]
+    async fn an_interpretation_on_an_openai_o_series_model_sends_no_max_tokens() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                body.get("max_tokens").is_none()
+            })
+            .with_body(r#"{"choices":[{"message":{"content":"{}"}}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("o", EndpointKind::OpenAi, &upstream.url(), "k");
+        endpoint.max_num_ctx = Some(200_000);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "o3-mini"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .prompt_interpretation(task.task_id, "p".into())
+            .await
+            .unwrap();
+        completion.assert_async().await;
+    }
+
     #[tokio::test]
     async fn a_task_prompts_its_model_on_its_endpoint() {
         let service = service();
