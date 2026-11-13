@@ -10181,3 +10181,48 @@ async fn a_short_page_sliced_per_anchor_keeps_the_stores_count() {
         "the page is short because of the slice, not because the scope ran out"
     );
 }
+
+/// A getter cut off by the call's stop fails the call. Logging and skipping it,
+/// as for a getter that errors on its own, would answer with properties missing,
+/// and a model subscription's re-check would keep that as its baseline.
+#[tokio::test]
+async fn a_stopped_getter_fails_the_call_instead_of_dropping_the_property() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "test://inst-1",
+            "test://is_active",
+            "literal:boolean:true",
+            "2024-01-01T00:00:00Z",
+        ))
+        .unwrap();
+    let shape = parse_shape_from_json(
+        r#"{
+        "className": "TestModel",
+        "properties": {
+            "isActive": {
+                "predicate": "test://is_active",
+                "getter": "ASK WHERE { <Base> <test://is_active> ?x }"
+            },
+            "status": {
+                "predicate": "test://is_active",
+                "getter": "SELECT ?value WHERE { <Base> <test://is_active> ?value }"
+            }
+        },
+        "relations": {}
+    }"#,
+        "TestModel",
+    )
+    .unwrap();
+
+    let result = super::getters::evaluate_getters_batch(
+        &crate::perspectives::sparql_store::EvalStop::cancelled(),
+        &store,
+        &shape,
+        &["test://inst-1".to_string()],
+        None,
+    );
+
+    let err = result.expect_err("a stopped getter must fail the call, not drop the property");
+    assert!(err.to_string().contains("cancelled"), "{err}");
+}

@@ -389,6 +389,11 @@ pub(super) fn evaluate_getters(
                         }
                     }
                 }
+                // A stopped call must fail, not answer with the getters it had not
+                // reached yet missing: a re-check would store that as its baseline.
+                Err(e) if stop.is_stopped() => {
+                    return Err(stop.stopped_err("getter").unwrap_or(e));
+                }
                 Err(e) => {
                     log::warn!("Batched ASK getter failed for '{}': {}", prop.name, e);
                 }
@@ -496,6 +501,11 @@ pub(super) fn evaluate_getters(
                             }
                         }
                     }
+                }
+                // A stopped call must fail, not answer with the getters it had not
+                // reached yet missing: a re-check would store that as its baseline.
+                Err(e) if stop.is_stopped() => {
+                    return Err(stop.stopped_err("getter").unwrap_or(e));
                 }
                 Err(e) => {
                     log::warn!("Batched SELECT getter failed for '{}': {}", prop.name, e);
