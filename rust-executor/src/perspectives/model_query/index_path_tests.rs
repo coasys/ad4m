@@ -25,7 +25,7 @@ use crate::perspectives::scope_index::test_support::{
     channel_link, flag_link, forged, message_shape, signed, IN_CHANNEL, MESSAGE, T0, TYPE,
 };
 use crate::perspectives::scope_index::Readiness;
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkExpression;
 
 /// The flag value of class `Channel`.
@@ -554,7 +554,7 @@ async fn bench_newest_20_of_100k_under_one_parent() {
     let mut samples = Vec::new();
     for n in 0..9 {
         let start = std::time::Instant::now();
-        store.query(&id_sparql).unwrap();
+        store.query(&EvalStop::none(), &id_sparql).unwrap();
         if n >= 2 {
             samples.push(start.elapsed());
         }
@@ -580,7 +580,7 @@ async fn bench_newest_20_of_100k_under_one_parent() {
     let mut samples = Vec::new();
     for n in 0..9 {
         let start = std::time::Instant::now();
-        let page = index_page(store, &world.shape, &q, &pagination)
+        let page = index_page(&EvalStop::none(), store, &world.shape, &q, &pagination)
             .unwrap()
             .expect("the index answers");
         if n >= 2 {

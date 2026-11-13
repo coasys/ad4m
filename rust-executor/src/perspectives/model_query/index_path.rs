@@ -67,7 +67,7 @@ use super::types::{
 use super::utils::{emittable_iri, validate_iri};
 use crate::perspectives::scope_index::writer::ClassRule;
 use crate::perspectives::scope_index::{MemberKey, Readiness, Scope};
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 
 /// The largest `offset` the index serves. See the module documentation.
 pub(super) const MAX_INDEX_OFFSET: usize = 1000;
@@ -93,6 +93,7 @@ pub(super) struct IndexPage {
 /// store applies the window: no per-anchor limit, no walk, no filter after
 /// hydration.
 pub(super) fn index_page(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     query: &ModelQueryInput,
@@ -101,7 +102,7 @@ pub(super) fn index_page(
     let Some(rule) = indexed_rule(store, shape, query, pagination) else {
         return Ok(None);
     };
-    let Some(scopes) = scopes_of(store, &rule, query)? else {
+    let Some(scopes) = scopes_of(stop, store, &rule, query)? else {
         return Ok(None);
     };
     let reader = store.scope_reader();
@@ -267,6 +268,7 @@ fn conformance_is_flag(shape: &ModelShape, rule: &ClassRule) -> bool {
 /// The scopes whose union is the query's parent scope, or `None` when the
 /// parent is not one the index holds.
 fn scopes_of(
+    stop: &EvalStop,
     store: &SparqlStore,
     rule: &ClassRule,
     query: &ModelQueryInput,
@@ -294,7 +296,7 @@ fn scopes_of(
                 if !emittable_iri(&edge.predicate) {
                     return Ok(None);
                 }
-                if holds_through(store, edge, id, LinkGuard::of(query))? {
+                if holds_through(stop, store, edge, id, LinkGuard::of(query))? {
                     scopes.push(rule.under(id, &edge.predicate));
                 }
             }
@@ -310,6 +312,7 @@ fn scopes_of(
 /// so when one child passes it, the edge's children under `id` are exactly the
 /// `Under` scope of its predicate.
 fn holds_through(
+    stop: &EvalStop,
     store: &SparqlStore,
     edge: &ContainmentEdge,
     id: &str,
@@ -322,6 +325,6 @@ fn holds_through(
         "SELECT ?_held WHERE {{ {} }} LIMIT 1",
         edge_patterns(edge, 0, &format!("<{id}>"), "?_held", guard)
     );
-    let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
+    let rows: Vec<Value> = serde_json::from_str(&store.query(stop, &sparql)?)?;
     Ok(!rows.is_empty())
 }

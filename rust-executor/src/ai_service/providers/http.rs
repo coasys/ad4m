@@ -107,6 +107,48 @@ impl std::fmt::Display for UpstreamStatus {
 
 impl std::error::Error for UpstreamStatus {}
 
+/// How much of an upstream error body a log line may carry. The error itself
+/// keeps up to [`MAX_ERROR_BODY_BYTES`]; a log line must stay readable and
+/// must not dump a prompt the server echoed back.
+pub(crate) const LOG_ERROR_EXCERPT: usize = 500;
+
+/// Log a failed model-server call: status (when the server answered) and a
+/// bounded excerpt of the body. `error` has already had its key scrubbed
+/// ([`UpstreamStatus::read`], [`UpstreamUnreachable`]). Called where the
+/// provider call fails, before the error is handed back to the caller — the
+/// executor used to pass a 500 on and log nothing about it.
+pub(crate) fn log_upstream_error(provider: &str, error: &anyhow::Error) {
+    if let Some(answered) = error.downcast_ref::<UpstreamStatus>() {
+        log::error!(
+            "{provider} upstream error: status={} body={}",
+            answered.status,
+            excerpt(&answered.body),
+        );
+        return;
+    }
+    if let Some(unreachable) = error.downcast_ref::<UpstreamUnreachable>() {
+        log::error!(
+            "{provider} upstream unreachable: timed_out={} detail={}",
+            unreachable.timed_out,
+            excerpt(&unreachable.detail),
+        );
+        return;
+    }
+    log::error!("{provider} upstream error: {}", excerpt(&error.to_string()));
+}
+
+fn excerpt(text: &str) -> String {
+    let mut end = LOG_ERROR_EXCERPT.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = text[..end].to_string();
+    if end < text.len() {
+        out.push_str("…");
+    }
+    out
+}
+
 /// An upstream that could not be asked: no connection, or no answer in time. `detail` has
 /// the key scrubbed out.
 #[derive(Debug)]
