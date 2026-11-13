@@ -197,12 +197,12 @@ const DEFAULT_LINK_WRITE: f64 = 0.25;
 /// fire-and-forget deduction that logs on `InsufficientCredits` but
 /// doesn't halt the loop. A pass that ends with zero bases used to be
 /// free regardless of how many completions it burned.
-pub(super) struct WsHarnessCreditGate {
+pub(crate) struct WsHarnessCreditGate {
     agent_did: Option<String>,
 }
 
 impl WsHarnessCreditGate {
-    pub(super) fn new(agent_did: Option<String>) -> Self {
+    pub(crate) fn new(agent_did: Option<String>) -> Self {
         Self { agent_did }
     }
 }
@@ -275,10 +275,18 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
         return Ok(serde_json::to_value(handles)?);
     }
 
+    // The guard admitted the caller for holding perspective READ on some pointer; when that
+    // is narrower than `*` — a session scoped to one perspective — the answer narrows to the
+    // pointers it names. `None` is `*`: every perspective, as before.
+    let readable = pointers_covered(&ctx.session.capabilities(), PERSPECTIVE, READ);
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
         let handle = p.persisted.lock().await.clone();
-        if can_access_perspective_with_did(ctx.user_did(), &handle) {
+        if can_access_perspective_with_did(ctx.user_did(), &handle)
+            && readable
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&handle.uuid))
+        {
             filtered.push(handle);
         }
     }
@@ -2466,12 +2474,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     let query = || Guard::perspective(perspective_query_capability);
     let update = || Guard::perspective(perspective_update_capability);
 
-    // Neither names one perspective: `all` lists the caller's own, `create` makes one that the
-    // caller's user owns (no owner for the operator and apps).
+    // Neither names one perspective: `all` lists the ones the caller may read (a caller
+    // holding READ on some pointers gets only those), `create` makes one that the caller's
+    // user owns (no owner for the operator and apps).
     map.method::<NoParams, Vec<PerspectiveHandle>>("perspective.all", list_perspectives)
         .read()
-        .guard(Guard::Cap(perspective_query_capability(vec![
-            WILD_CARD.to_string()
+        .guard(Guard::CapAnyPointer(perspective_query_capability(vec![
+            WILD_CARD.to_string(),
         ])));
     map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>(
         "perspective.get",

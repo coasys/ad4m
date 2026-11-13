@@ -1,6 +1,14 @@
 // Auto-generated from the executor's WS-RPC HandlerMap (rust-executor/src/api/ws_handler.rs).
 // Do NOT edit manually — regenerate with: pnpm run generate:api-types
 
+import type { AISession } from "./AISession";
+import type { AISessionCancelParams } from "./AISessionCancelParams";
+import type { AISessionCreate } from "./AISessionCreate";
+import type { AISessionMessage } from "./AISessionMessage";
+import type { AISessionMessagesParams } from "./AISessionMessagesParams";
+import type { AISessionSendParams } from "./AISessionSendParams";
+import type { AISessionSendStarted } from "./AISessionSendStarted";
+import type { AISessionUpdateRequest } from "./AISessionUpdateRequest";
 import type { AITask } from "./AITask";
 import type { AcceptJoinParams } from "./AcceptJoinParams";
 import type { AddAgentInfosRequest } from "./AddAgentInfosRequest";
@@ -314,6 +322,14 @@ export interface RpcMethods {
   "ai.removeEndpoint": { params: AiRemoveEndpointParams; result: boolean };
   "ai.removeModel": { params: AiIdParams; result: boolean };
   "ai.removeTask": { params: AiIdParams; result: boolean };
+  "ai.session": { params: AiIdParams; result: AISession };
+  "ai.sessionCancel": { params: AISessionCancelParams; result: boolean };
+  "ai.sessionCreate": { params: AISessionCreate; result: AISession };
+  "ai.sessionDelete": { params: AiIdParams; result: boolean };
+  "ai.sessionList": { params: Record<string, never>; result: Array<AISession> };
+  "ai.sessionMessages": { params: AISessionMessagesParams; result: Array<AISessionMessage> };
+  "ai.sessionSend": { params: AISessionSendParams; result: AISessionSendStarted };
+  "ai.sessionUpdate": { params: AISessionUpdateRequest; result: AISession };
   "ai.setDefaultModel": { params: AiSetDefaultModelParams; result: boolean };
   "ai.tasks": { params: Record<string, never>; result: Array<AITask> };
   "ai.transcriptionClose": { params: AiTranscriptionCloseParams; result: string };
@@ -543,6 +559,9 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.localStatus",
   "ai.modelStatus",
   "ai.models",
+  "ai.session",
+  "ai.sessionList",
+  "ai.sessionMessages",
   "ai.tasks",
   "bot.grant",
   "bot.list",
